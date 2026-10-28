@@ -37,11 +37,34 @@ pub const WHISPER_MODEL_SHA256: &str =
     "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b";
 pub const WHISPER_MODEL_LICENSE: &str = "MIT";
 
+#[cfg(any(test, feature = "test-util"))]
+type InferenceGate = Arc<std::sync::Mutex<Option<(Sender<()>, crossbeam_channel::Receiver<()>)>>>;
+
+/// A transcript job held after audio decode, without loading a model.
+#[cfg(any(test, feature = "test-util"))]
+pub struct TranscriptInferenceHold {
+    arrived: crossbeam_channel::Receiver<()>,
+    _release: Sender<()>,
+}
+#[cfg(any(test, feature = "test-util"))]
+impl TranscriptInferenceHold {
+    /// Wait until the real transcript worker reaches inference.
+    /// # Panics
+    /// Panics if the worker does not arrive within thirty seconds.
+    pub fn wait(&self) {
+        self.arrived
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("transcript reached inference");
+    }
+}
+
 pub(crate) struct TranscriptService {
     jobs: Sender<crate::locator::LocatorJob<TranscriptJob>>,
     states: StatusReporter<TranscriptStatus>,
     cancellations: CancellationRegistry,
     root: PathBuf,
+    #[cfg(any(test, feature = "test-util"))]
+    inference_gate: InferenceGate,
 }
 
 struct TranscriptJob {
@@ -57,6 +80,8 @@ impl TranscriptService {
         let cancellations = CancellationRegistry::default();
         let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
         let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
+        #[cfg(any(test, feature = "test-util"))]
+        let inference_gate = Arc::clone(&worker.inference_gate);
         spawn_worker(
             "kinewright-transcript",
             "transcript",
@@ -80,7 +105,20 @@ impl TranscriptService {
             states,
             cancellations,
             root,
+            #[cfg(any(test, feature = "test-util"))]
+            inference_gate,
         })
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn hold_inference(&self) -> TranscriptInferenceHold {
+        let (arrived, arrival) = crossbeam_channel::bounded(1);
+        let (release, released) = crossbeam_channel::bounded(1);
+        *self.inference_gate.lock().expect("inference gate") = Some((arrived, released));
+        TranscriptInferenceHold {
+            arrived: arrival,
+            _release: release,
+        }
     }
 
     pub(crate) fn request(
@@ -89,6 +127,7 @@ impl TranscriptService {
         language: Option<String>,
         grant: kinewright_core::LegacyMediaGrant,
     ) {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.update(&asset.path, TranscriptStatus::NoSpeech);
             return;
@@ -136,6 +175,10 @@ impl TranscriptService {
         self.states.get_or(path, TranscriptStatus::NotRequested)
     }
 
+    pub(crate) fn cancel_all(&self) {
+        self.cancellations.cancel_all();
+    }
+
     pub(crate) fn cancel(&self, path: &Path) -> bool {
         let cancelled = self.cancellations.cancel(path);
         if cancelled {
@@ -181,6 +224,8 @@ struct TranscriptWorker {
     states: StatusReporter<TranscriptStatus>,
     store: TranscriptStore,
     model: Option<WhisperContext>,
+    #[cfg(any(test, feature = "test-util"))]
+    inference_gate: InferenceGate,
     cancellations: CancellationRegistry,
 }
 
@@ -195,6 +240,8 @@ impl TranscriptWorker {
             data_dir,
             states,
             model: None,
+            #[cfg(any(test, feature = "test-util"))]
+            inference_gate: Arc::default(),
             cancellations,
         }
     }
@@ -229,6 +276,34 @@ impl TranscriptWorker {
             cancelled(cancellation)?;
             self.finish(&asset.path, cached);
             return Ok(());
+        }
+
+        #[cfg(any(test, feature = "test-util"))]
+        {
+            let gate = self.inference_gate.lock().expect("inference gate").take();
+            if let Some((arrived, released)) = gate {
+                let samples = decode_audio_range(
+                    &asset.path,
+                    asset.fps,
+                    TimeCode::ZERO,
+                    asset.duration,
+                    WHISPER_SAMPLE_RATE,
+                    1,
+                    cancellation,
+                )?;
+                assert!(!samples.is_empty(), "held transcript decoded real audio");
+                let _ = arrived.send(());
+                let mut abort = inference_abort(cancellation);
+                loop {
+                    if abort() {
+                        return Err(MediaError::Cancelled);
+                    }
+                    match released.recv_timeout(std::time::Duration::from_millis(5)) {
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        _ => return Err(MediaError::Cancelled),
+                    }
+                }
+            }
         }
 
         if self.model.is_none() {
@@ -286,6 +361,12 @@ impl TranscriptWorker {
     }
 }
 
+fn inference_abort(cancellation: &ExportCancellation) -> Box<dyn FnMut() -> bool> {
+    let cancellation = cancellation.clone();
+    // whisper-rs 0.16's erased trampoline expects a boxed callback value.
+    Box::new(move || cancellation.is_cancelled())
+}
+
 fn run_whisper(
     context: &WhisperContext,
     samples: &[f32],
@@ -306,6 +387,7 @@ fn run_whisper(
         .map_or(4, std::num::NonZeroUsize::get)
         .min(8);
     params.set_n_threads(i32::try_from(threads).unwrap_or(4));
+    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(inference_abort(cancellation));
     params.set_translate(false);
     params.set_language(language);
     params.set_print_special(false);
@@ -315,9 +397,13 @@ fn run_whisper(
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
     params.set_max_len(1);
+    let progress_authority = crate::locator::capture();
     let progress_path = asset.path.clone();
     let progress_cancellation = cancellation.clone();
     params.set_progress_callback_safe(move |progress: i32| {
+        let _authority = progress_authority
+            .as_ref()
+            .map(crate::locator::LocatorAuthority::enter);
         if progress_cancellation.is_cancelled() {
             return;
         }

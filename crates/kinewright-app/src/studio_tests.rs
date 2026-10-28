@@ -713,12 +713,15 @@ fn s3_bound_ab_gpu_identity() {
     let b = Arc::clone(&fixtures.contexts[1]);
     let (mut app, engine, _gpu, ctx, _root) = crate::app::s3a_tests::display_app();
     retire.arm(&engine.engine());
+    // Installing a Studio context revokes the session's legacy grant, so the
+    // transport goes through the engine's controls.
+    let transport = engine.engine().controls();
     app.install_studio_context(Arc::clone(&a)).unwrap();
     wait_frame(&mut app, &ctx, &a.snapshot.descriptor.key, TimeCode::ZERO);
     assert!(app.presenter.using_gpu());
     crate::app::s3a_tests::r71::rendered(&mut app, &ctx);
     app.capture_studio_still(0, &ctx);
-    engine.play(TimeCode::ZERO);
+    transport.play(TimeCode::ZERO);
     let deadline = Instant::now() + Duration::from_secs(10);
     while engine.test_audio_owner_counts()[2] == 0 {
         app.poll_background(&ctx);
@@ -773,7 +776,7 @@ fn s3_bound_ab_gpu_identity() {
         b.snapshot.descriptor.key,
         "C2_GPU_PAINTED"
     );
-    engine.play(TimeCode::ZERO);
+    transport.play(TimeCode::ZERO);
     let deadline = Instant::now() + Duration::from_secs(10);
     while engine.test_audio_owner_counts()[2] < 2 {
         app.poll_background(&ctx);
@@ -781,7 +784,7 @@ fn s3_bound_ab_gpu_identity() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(engine.test_audio_owner_counts()[1], 1, "C2_ONE_AUDIO_OWNER");
-    engine.pause();
+    transport.pause();
     in1_shutdown(&mut app);
 }
 

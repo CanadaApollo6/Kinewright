@@ -19,7 +19,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def run(case, log):
+def run(case, log, lock_held=False):
     args = ["test", "-p", case["package"]]
     if case.get("features"):
         args += ["--features", case["features"]]
@@ -36,7 +36,8 @@ def run(case, log):
         'export XDG_CACHE_HOME="$c1_runtime/cache" XDG_CONFIG_HOME="$c1_runtime/config"\n'
         'mkdir -p "$LOCALAPPDATA/Kinewright/recovery" "$TMPDIR" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"\n'
         "test \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\n"
-        "flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 "
+        + ("" if lock_held else "flock -o /tmp/kinewright-cargo-heavy.lock ")
+        + "env CARGO_BUILD_JOBS=4 "
         "RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo " + shlex.join(args)
     )
     process = subprocess.Popen(
@@ -60,6 +61,7 @@ def main():
     parser.add_argument("--cases", default="scripts/ja1-s3-c2-mutation-cases.json")
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--lock-held", action="store_true", help="Caller holds the shared Cargo lock around the complete campaign")
     parser.add_argument("--evidence", default="docs/reports/ja1-s3/c2-evidence/mutations")
     args = parser.parse_args()
     cases = json.loads((ROOT / args.cases).read_text())
@@ -100,7 +102,7 @@ def main():
             result["mutated_source_sha256"] = {
                 path: digest((ROOT / path).read_bytes()) for path in originals
             }
-            code, red, command = run(case, evidence / f"{case['name']}-red.log.gz")
+            code, red, command = run(case, evidence / f"{case['name']}-red.log.gz", args.lock_held)
             result.update(red_exit=code, command=command)
             result["red_log_sha256"] = digest((evidence / f"{case['name']}-red.log.gz").read_bytes())
             result["red_summary"] = [line for line in red.splitlines() if "test result:" in line]
@@ -110,7 +112,7 @@ def main():
                       and "error[E" not in red)
             for path, original in originals.items():
                 (ROOT / path).write_bytes(original)
-            code, green, _command = run(case, evidence / f"{case['name']}-green.log.gz")
+            code, green, _command = run(case, evidence / f"{case['name']}-green.log.gz", args.lock_held)
             result["green_exit"] = code
             result["green_log_sha256"] = digest((evidence / f"{case['name']}-green.log.gz").read_bytes())
             result["green_summary"] = [line for line in green.splitlines() if "test result:" in line]

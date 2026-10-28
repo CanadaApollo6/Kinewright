@@ -143,6 +143,7 @@ impl DerivedAnalysisService {
         asset: MediaAsset,
         grant: kinewright_core::LegacyMediaGrant,
     ) {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.silence_states
                 .update(&asset.path, SilenceStatus::NoAudio);
@@ -188,6 +189,7 @@ impl DerivedAnalysisService {
         asset: MediaAsset,
         grant: kinewright_core::LegacyMediaGrant,
     ) {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
             self.scene_states.update(&asset.path, SceneStatus::NoVideo);
             return;
@@ -240,6 +242,7 @@ impl DerivedAnalysisService {
         asset: MediaAsset,
         grant: kinewright_core::LegacyMediaGrant,
     ) {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.beat_states.update(&asset.path, BeatStatus::NoAudio);
             return;
@@ -288,6 +291,12 @@ impl DerivedAnalysisService {
 
     pub(crate) fn clear_cache(&self) -> Result<CacheStats, MediaError> {
         clear_cache_root(&self.root)
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        self.silence_cancellations.cancel_all();
+        self.scene_cancellations.cancel_all();
+        self.beat_cancellations.cancel_all();
     }
 
     pub(crate) fn cancel(&self, path: &Path, kind: kinewright_core::AnalysisKind) -> bool {

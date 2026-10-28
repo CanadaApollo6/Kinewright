@@ -5,7 +5,22 @@ use crate::LutLibrary;
 use kinewright_core::{AssetId, Document, MediaError};
 use std::{collections::BTreeMap, sync::Arc};
 
+#[derive(Clone, Debug)]
+pub(crate) struct PlaybackAuthority(Arc<()>);
+impl PartialEq for PlaybackAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for PlaybackAuthority {}
+impl std::hash::Hash for PlaybackAuthority {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&Arc::as_ptr(&self.0), state);
+    }
+}
+
 pub struct PlaybackInputs {
+    pub(crate) authority: PlaybackAuthority,
     pub(crate) document: Arc<Document>,
     pub(crate) sources: BTreeMap<AssetId, CertifiedSource>,
     pub(crate) lut: Arc<LutLibrary>,
@@ -35,12 +50,14 @@ impl PlaybackInputs {
                 "playback namespace changed; owner admission required".into(),
             ));
         }
-        Self::admit(
+        let mut inputs = Self::admit(
             document,
             self.sources.clone(),
             Arc::clone(&self.lut),
             Arc::clone(&self.lifetime),
-        )
+        )?;
+        inputs.authority = self.authority.clone();
+        Ok(inputs)
     }
     /// The project owner supplies manifest-bound sources and resource leases.
     /// The final media boundary checks that every document asset has its exact
@@ -84,6 +101,7 @@ impl PlaybackInputs {
             }
         }
         Ok(Self {
+            authority: PlaybackAuthority(Arc::new(())),
             document,
             sources,
             lut,

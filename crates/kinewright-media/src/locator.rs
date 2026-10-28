@@ -19,6 +19,7 @@ impl<T> LocatorJob<T> {
         process: impl FnOnce(&mut C, T) -> R,
         refused: impl FnOnce(&mut C, T, MediaError) -> R,
     ) -> R {
+        let _authority = LocatorAuthority::enter(&self.grant);
         match LocatorAccess::enter(&self.grant) {
             Ok(_access) => process(context, self.payload),
             Err(error) => refused(context, self.payload, error),
@@ -28,6 +29,22 @@ impl<T> LocatorJob<T> {
 
 thread_local! {
     static AUTHORITY: RefCell<Vec<LegacyMediaGrant>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Metadata is partitioned even when a revoked job reports its refusal.
+pub(crate) struct LocatorAuthority(PhantomData<Rc<()>>);
+impl LocatorAuthority {
+    pub(crate) fn enter(grant: &LegacyMediaGrant) -> Self {
+        AUTHORITY.with(|authority| authority.borrow_mut().push(grant.clone()));
+        Self(PhantomData)
+    }
+}
+impl Drop for LocatorAuthority {
+    fn drop(&mut self) {
+        AUTHORITY.with(|authority| {
+            authority.borrow_mut().pop();
+        });
+    }
 }
 
 /// The guard cannot move to another thread. Native decoder calls and hashing
@@ -86,10 +103,109 @@ pub(crate) fn before_decoder_open() -> Result<(), MediaError> {
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_grant() -> LegacyMediaGrant {
+    static GRANT: std::sync::OnceLock<LegacyMediaGrant> = std::sync::OnceLock::new();
+    GRANT
+        .get_or_init(|| {
+            kinewright_core::MediaSourceOrigin::new_project()
+                .legacy_media()
+                .unwrap()
+        })
+        .clone()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::GeneratedMedia;
     use kinewright_core::{Rational, TimeCode};
+
+    #[test]
+    fn c2_r4_retained_video_conversion_refuses_revoked_authority() {
+        crate::initialize_ffmpeg().unwrap();
+        let source = GeneratedMedia::ffmpeg(
+            "c2-r4-retained-video",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x64:r=30",
+                "-t",
+                "0.5",
+                "-c:v",
+                "mpeg4",
+                "-g",
+                "30",
+            ],
+            "avi",
+        );
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        let scope = LocatorAccess::enter(&grant).unwrap();
+        let mut decoder = crate::decode::VideoDecoder::open_managed_threads(
+            source.path(),
+            Rational::new(30, 1).unwrap(),
+            None,
+            &kinewright_core::ColorContext::sdr_rec709().delivery,
+            None,
+            1,
+            None,
+        )
+        .unwrap();
+        let mut cache = crate::cache::FrameCache::<crate::frame::WorkingFrame>::new(1);
+        decoder
+            .decode_refill((TimeCode::ZERO, TimeCode(5)), (0..5).collect(), &mut cache)
+            .unwrap();
+        assert!(
+            decoder.kept_times().contains(&2),
+            "the witness retains an actual decoded video frame"
+        );
+        let control = decoder
+            .convert_retained::<crate::frame::WorkingFrame>(1)
+            .unwrap()
+            .unwrap();
+        assert!(!control.pixels.is_empty());
+        drop(scope);
+        origin.revoke_legacy_media();
+        assert_eq!(
+            decoder
+                .convert_retained::<crate::frame::WorkingFrame>(2)
+                .unwrap()
+                .unwrap_err(),
+            MediaError::MediaAdmissionRequired,
+            "C2_R4_RETAINED_VIDEO_CONVERSION_REFUSES"
+        );
+    }
+
+    #[test]
+    fn c2_r4_analysis_metadata_and_cancellation_are_authority_partitioned() {
+        use crate::derived_cache::{CancellationRegistry, StatusReporter};
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let path = std::path::Path::new("equal-source.wav");
+        let states = StatusReporter::new();
+        let cancellations = CancellationRegistry::default();
+        let a_scope = LocatorAuthority::enter(&a);
+        states.update(path, "A retained result");
+        let a_job = cancellations.start(path).unwrap();
+        drop(a_scope);
+        let b_scope = LocatorAuthority::enter(&b);
+        assert_eq!(states.get_or(path, "missing"), "missing");
+        let b_job = cancellations.start(path).unwrap();
+        cancellations.cancel_all();
+        assert!(b_job.is_cancelled());
+        assert!(
+            !a_job.is_cancelled(),
+            "B activation cannot cancel A inference"
+        );
+        drop(b_scope);
+        let _a_scope = LocatorAuthority::enter(&a);
+        assert_eq!(states.get_or(path, "missing"), "A retained result");
+    }
 
     #[test]
     fn c2_r3_in_flight_scope_refuses_each_later_locator_open() {

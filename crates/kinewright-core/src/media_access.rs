@@ -4,18 +4,49 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+/// An immutable, process-local identity. Different grants never share it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LegacyMediaIdentity(u64);
+impl std::fmt::Display for LegacyMediaIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A revocable grant issued by a source that has no owned Studio envelope.
 #[derive(Clone, Debug)]
 pub struct LegacyMediaGrant(Arc<LegacyMediaState>);
 
-#[derive(Debug, Default)]
+impl PartialEq for LegacyMediaGrant {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for LegacyMediaGrant {}
+#[derive(Debug)]
 struct LegacyMediaState {
+    identity: u64,
     revoked: AtomicBool,
     active: Mutex<usize>,
     #[cfg(feature = "test-util")]
     hold: Mutex<Option<Arc<WorkHoldState>>>,
     #[cfg(feature = "test-util")]
     opens: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for LegacyMediaState {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            identity: NEXT.fetch_add(1, Ordering::Relaxed),
+            revoked: AtomicBool::new(false),
+            active: Mutex::new(0),
+            #[cfg(feature = "test-util")]
+            hold: Mutex::default(),
+            #[cfg(feature = "test-util")]
+            opens: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
 }
 
 /// An active locator operation. Activation waits for these leases to drain.
@@ -34,6 +65,11 @@ impl Drop for LegacyMediaWork {
 }
 
 impl LegacyMediaGrant {
+    /// Process-local identity for authority-partitioned derived caches.
+    #[must_use]
+    pub fn identity(&self) -> LegacyMediaIdentity {
+        LegacyMediaIdentity(self.0.identity)
+    }
     /// Refuse a request whose source has since become owned.
     /// # Errors
     /// Returns the named media-admission refusal after revocation.

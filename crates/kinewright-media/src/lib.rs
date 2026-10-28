@@ -185,7 +185,7 @@ pub use derived::{
     DerivedAnalysisConfig, SceneDetectionConfig, SilenceDetectionConfig,
 };
 #[cfg(any(test, feature = "test-util"))]
-pub use engine::AgentLaneHold;
+pub use engine::{AgentLaneHold, PreviewDecodeHold};
 pub use engine::{FfmpegMediaEngine, SessionMedia};
 pub use export::{NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS};
 pub use kinewright_core::{
@@ -216,6 +216,8 @@ pub use timeline::{
     TransitionRenderParams, timeline_audio_segments, timeline_source_at, video_layers_at,
     visual_layers_at,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use transcript::TranscriptInferenceHold;
 pub use transcript::{
     WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,
     default_data_dir,

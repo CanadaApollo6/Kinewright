@@ -61,6 +61,7 @@ const ORIENTATION_HEADER_BYTES: u64 = 65_536;
 /// [`ORIENTATION_HEADER_BYTES`] total.
 pub(crate) fn still_file_orientation(path: &Path) -> Option<StillOrientation> {
     use std::io::Read;
+    crate::locator::before_decoder_open().ok()?;
     let mut file = std::fs::File::open(path).ok()?;
     let mut signature = [0_u8; 8];
     let signature_len = file.read(&mut signature).ok()? as u64;

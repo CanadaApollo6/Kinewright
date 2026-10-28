@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -32,21 +32,26 @@ const MAX_WAVEFORM_FILES: usize = 128;
 const MAX_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAGIC: &[u8; 8] = b"ORTH0001";
 
+type VisualJob = crate::locator::LocatorJob<(Job, Sender<VisualAssetResult>)>;
+type VisualInFlight = Arc<Mutex<HashSet<(kinewright_core::LegacyMediaIdentity, JobKey)>>>;
+type VisualReply = (Sender<VisualAssetResult>, Receiver<VisualAssetResult>);
+type VisualAuthorities =
+    HashMap<kinewright_core::LegacyMediaIdentity, (kinewright_core::LegacyMediaGrant, VisualReply)>;
+
 pub(crate) struct VisualAssetService {
-    jobs: Sender<crate::locator::LocatorJob<Job>>,
-    results: Receiver<VisualAssetResult>,
-    in_flight: Arc<Mutex<HashSet<JobKey>>>,
+    jobs: Sender<VisualJob>,
+    results: Mutex<VisualAuthorities>,
+    in_flight: VisualInFlight,
     root: PathBuf,
 }
 
 impl VisualAssetService {
     pub(crate) fn new(data_dir: &Path) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = bounded(JOB_CAPACITY);
-        let (results_tx, results) = bounded(RESULT_CAPACITY);
         let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let worker_in_flight = Arc::clone(&in_flight);
         let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
-        let mut worker = VisualAssetWorker::new(root.clone(), results_tx, worker_in_flight);
+        let mut worker = VisualAssetWorker::new(root.clone(), worker_in_flight);
         spawn_worker(
             "kinewright-visual-assets",
             "visual asset",
@@ -55,7 +60,7 @@ impl VisualAssetService {
         )?;
         Ok(Self {
             jobs,
-            results,
+            results: Mutex::new(HashMap::new()),
             in_flight,
             root,
         })
@@ -106,8 +111,26 @@ impl VisualAssetService {
         )
     }
 
-    pub(crate) fn results(&self) -> Receiver<VisualAssetResult> {
-        self.results.clone()
+    pub(crate) fn results(
+        &self,
+        grant: &kinewright_core::LegacyMediaGrant,
+    ) -> Receiver<VisualAssetResult> {
+        self.result_channel(grant)
+            .map_or_else(crossbeam_channel::never, |(_, receiver)| receiver)
+    }
+    fn result_channel(&self, grant: &kinewright_core::LegacyMediaGrant) -> Option<VisualReply> {
+        let mut results = self.results.lock().ok()?;
+        results.retain(|_, (authority, _)| authority.check().is_ok());
+        if !results.contains_key(&grant.identity()) && results.len() >= 64 {
+            return None;
+        }
+        Some(
+            results
+                .entry(grant.identity())
+                .or_insert_with(|| (grant.clone(), bounded(RESULT_CAPACITY)))
+                .1
+                .clone(),
+        )
     }
 
     pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
@@ -119,7 +142,10 @@ impl VisualAssetService {
     }
 
     fn request(&self, grant: kinewright_core::LegacyMediaGrant, job: Job) -> bool {
-        let key = job.key();
+        let key = (grant.identity(), job.key());
+        let Some((reply, _)) = self.result_channel(&grant) else {
+            return false;
+        };
         let inserted = self
             .in_flight
             .lock()
@@ -129,7 +155,7 @@ impl VisualAssetService {
         }
         if let Ok(()) = self
             .jobs
-            .try_send(crate::locator::LocatorJob::new(grant, job))
+            .try_send(crate::locator::LocatorJob::new(grant, (job, reply)))
         {
             true
         } else {
@@ -202,32 +228,42 @@ enum JobKey {
 
 struct VisualAssetWorker {
     root: PathBuf,
-    results: Sender<VisualAssetResult>,
-    in_flight: Arc<Mutex<HashSet<JobKey>>>,
+    in_flight: VisualInFlight,
     hashes: ContentHashes,
 }
 
 impl VisualAssetWorker {
-    fn new(
-        root: PathBuf,
-        results: Sender<VisualAssetResult>,
-        in_flight: Arc<Mutex<HashSet<JobKey>>>,
-    ) -> Self {
+    fn new(root: PathBuf, in_flight: VisualInFlight) -> Self {
         Self {
             root,
-            results,
             in_flight,
             hashes: ContentHashes,
         }
     }
 
-    fn handle_scoped(&mut self, job: crate::locator::LocatorJob<Job>) -> bool {
+    fn handle_scoped(&mut self, job: VisualJob) -> bool {
         // Release the lease before a bounded result send can block on the UI.
-        let (key, result) = job.run(
+        let (key, result, reply) = job.run(
             self,
-            |worker, job| (job.key(), worker.process(job)),
-            |_, job, error| {
-                let key = job.key();
+            |worker, (job, reply)| {
+                (
+                    (
+                        crate::locator::capture()
+                            .expect("visual job authority")
+                            .identity(),
+                        job.key(),
+                    ),
+                    worker.process(job),
+                    reply,
+                )
+            },
+            |_, (job, reply), error| {
+                let key = (
+                    crate::locator::capture()
+                        .expect("visual job authority")
+                        .identity(),
+                    job.key(),
+                );
                 let result = match job {
                     Job::Waveform {
                         asset,
@@ -256,13 +292,14 @@ impl VisualAssetWorker {
                         message: error.to_string(),
                     },
                 };
-                (key, result)
+                (key, result, reply)
             },
         );
         if let Ok(mut in_flight) = self.in_flight.lock() {
             in_flight.remove(&key);
         }
-        self.results.send(result).is_ok()
+        let _ = reply.send(result);
+        true
     }
 
     fn process(&mut self, job: Job) -> VisualAssetResult {
@@ -546,45 +583,109 @@ mod tests {
     }
 
     #[test]
+    fn c2_r4_equal_visual_jobs_and_results_are_partitioned_by_authority() {
+        let (jobs, jobs_rx) = bounded(4);
+        let service = VisualAssetService {
+            jobs,
+            results: Mutex::default(),
+            in_flight: Arc::default(),
+            root: PathBuf::new(),
+        };
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let request = || Job::Waveform {
+            asset: asset(1),
+            request_generation: 1,
+        };
+        assert!(service.request(a.clone(), request()));
+        assert!(service.request(b.clone(), request()));
+        assert_eq!(
+            jobs_rx.len(),
+            2,
+            "equal sources still run under both requesting authorities"
+        );
+        let a_results = service.results(&a);
+        let b_results = service.results(&b);
+        service
+            .result_channel(&a)
+            .unwrap()
+            .0
+            .send(VisualAssetResult::Failed {
+                asset: AssetId(1),
+                path: PathBuf::from("same.wav"),
+                request_generation: 1,
+                request: VisualRequestKind::Waveform,
+                message: "A result".into(),
+            })
+            .unwrap();
+        assert!(
+            b_results.try_recv().is_err(),
+            "B cannot consume A's retained result"
+        );
+        assert!(
+            matches!(a_results.try_recv().unwrap(), VisualAssetResult::Failed { message, .. } if message == "A result")
+        );
+    }
+
+    #[test]
+    fn c2_r4_a_closed_authority_result_channel_keeps_the_shared_worker_running() {
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        origin.revoke_legacy_media();
+        let (reply, receiver) = bounded(1);
+        drop(receiver);
+        let mut worker = VisualAssetWorker::new(PathBuf::new(), Arc::default());
+        let job = Job::Waveform {
+            asset: asset(1),
+            request_generation: 1,
+        };
+        assert!(
+            worker.handle_scoped(crate::locator::LocatorJob::new(grant, (job, reply))),
+            "one closed project's reply cannot terminate every other project's worker"
+        );
+    }
+
+    #[test]
     fn a_full_job_queue_is_reported_without_leaking_in_flight_keys() {
         let (jobs, _jobs_rx) = bounded(1);
-        let (_results_tx, results) = bounded(1);
         let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let service = VisualAssetService {
             jobs,
-            results,
+            results: Mutex::default(),
             in_flight: Arc::clone(&in_flight),
             root: PathBuf::from("visual-assets/v1"),
         };
 
-        assert!(
-            service.request(
-                kinewright_core::MediaSourceOrigin::new_project()
-                    .legacy_media()
-                    .unwrap(),
-                Job::Waveform {
-                    asset: asset(1),
-                    request_generation: 1,
-                }
-            )
-        );
-        assert!(
-            !service.request(
-                kinewright_core::MediaSourceOrigin::new_project()
-                    .legacy_media()
-                    .unwrap(),
-                Job::Waveform {
-                    asset: asset(2),
-                    request_generation: 1,
-                }
-            )
-        );
+        let grant = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        assert!(service.request(
+            grant.clone(),
+            Job::Waveform {
+                asset: asset(1),
+                request_generation: 1,
+            }
+        ));
+        assert!(!service.request(
+            grant.clone(),
+            Job::Waveform {
+                asset: asset(2),
+                request_generation: 1,
+            }
+        ));
         assert_eq!(in_flight.lock().unwrap().len(), 1);
-        assert!(in_flight.lock().unwrap().contains(&JobKey::Waveform {
-            asset: AssetId(1),
-            path: asset(1).path,
-            request_generation: 1,
-        }));
+        assert!(in_flight.lock().unwrap().contains(&(
+            grant.identity(),
+            JobKey::Waveform {
+                asset: AssetId(1),
+                path: asset(1).path,
+                request_generation: 1,
+            }
+        )));
     }
 
     #[test]

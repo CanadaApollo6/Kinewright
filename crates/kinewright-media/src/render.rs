@@ -148,6 +148,8 @@ pub(crate) struct MatteCoverage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct VideoSourceKey {
+    legacy_authority: Option<kinewright_core::LegacyMediaIdentity>,
+    certified_authority: Option<crate::owned_io::PlaybackAuthority>,
     asset: AssetId,
     /// The path is part of the decoder identity even when two paths currently
     /// point at the same bytes. A relink is a runtime input and must not
@@ -208,6 +210,15 @@ impl From<&ColorDescription> for ColorDescriptionKey {
 }
 
 impl VideoSourceKey {
+    fn with_authority(
+        mut self,
+        inputs: Option<&crate::owned_io::PlaybackInputs>,
+        legacy: Option<&kinewright_core::LegacyMediaGrant>,
+    ) -> Self {
+        self.legacy_authority = legacy.map(kinewright_core::LegacyMediaGrant::identity);
+        self.certified_authority = inputs.map(|inputs| inputs.authority.clone());
+        self
+    }
     /// The asset this key reads (a test's witness).
     #[cfg(test)]
     pub(crate) const fn asset(&self) -> AssetId {
@@ -224,6 +235,8 @@ impl VideoSourceKey {
         max_width: Option<u32>,
     ) -> Self {
         Self {
+            legacy_authority: None,
+            certified_authority: None,
             asset,
             path: path.to_path_buf(),
             fingerprint: fingerprint.into(),
@@ -257,7 +270,12 @@ enum Video<'a> {
     Supplied(&'a SuppliedFrames),
 }
 
-fn source_key(asset: &kinewright_core::MediaAsset, scale: RenderScale) -> VideoSourceKey {
+fn source_key(
+    asset: &kinewright_core::MediaAsset,
+    scale: RenderScale,
+    inputs: Option<&crate::owned_io::PlaybackInputs>,
+    legacy: Option<&kinewright_core::LegacyMediaGrant>,
+) -> VideoSourceKey {
     let description = &asset.color_description;
     let assumption = d65_assumption(description);
     let (fingerprint, max_width) = (&asset.source_fingerprint, scale.max_width());
@@ -271,6 +289,7 @@ fn source_key(asset: &kinewright_core::MediaAsset, scale: RenderScale) -> VideoS
         assumption,
         max_width,
     )
+    .with_authority(inputs, legacy)
 }
 
 fn no_frame(asset: AssetId, at: TimeCode) -> MediaError {
@@ -319,6 +338,19 @@ pub(crate) struct SourceSpec {
 }
 
 impl SourceSpec {
+    pub(crate) fn check_authority(&self) -> Result<(), MediaError> {
+        self.legacy_media
+            .as_ref()
+            .map_or(Ok(()), kinewright_core::LegacyMediaGrant::check)
+    }
+    pub(crate) fn reader_work(
+        &self,
+    ) -> Result<Option<kinewright_core::LegacyMediaWork>, MediaError> {
+        self.legacy_media
+            .as_ref()
+            .map(kinewright_core::LegacyMediaGrant::begin)
+            .transpose()
+    }
     /// Open with `threads` frame threads; errors as the renderer's open.
     /// Amendment R43 (RS-1, note 1): a reader's open. A set `stop` flag
     /// cancels it before the file opens, interrupts its IO (and every later
@@ -406,6 +438,7 @@ impl SourceSpec {
         paused: bool,
         (refill, discard): (Option<Refill>, Option<(i64, i64)>),
     ) -> Result<WorkingFrame, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         decoder.check_certified()?;
         if let Some(keep) = discard {
             decoder.discard_kept_outside(keep);
@@ -472,9 +505,11 @@ pub(crate) type FrameSizes = crate::sched::SourceMemory<VideoSourceKey, ((u32, u
 pub(crate) fn document_source_keys(
     document: &Document,
     scale: RenderScale,
+    inputs: Option<&crate::owned_io::PlaybackInputs>,
+    legacy: Option<&kinewright_core::LegacyMediaGrant>,
 ) -> HashSet<VideoSourceKey> {
     (document.media_pool.iter())
-        .map(|asset| source_key(asset, scale))
+        .map(|asset| source_key(asset, scale, inputs, legacy))
         .collect()
 }
 
@@ -504,9 +539,7 @@ pub(crate) fn reader_demand(
         horizon,
         sizes,
         None,
-        kinewright_core::MediaSourceOrigin::new_project()
-            .legacy_media()
-            .as_ref(),
+        Some(&crate::locator::fixture_grant()),
     )
 }
 
@@ -559,7 +592,7 @@ pub(crate) fn reader_demand_with_inputs(
             let Some(asset) = document.asset(video.source.asset) else {
                 continue;
             };
-            let key = source_key(asset, scale);
+            let key = source_key(asset, scale, inputs, legacy_media);
             let max_width = key.max_width;
             if unmeasured.contains(&key) {
                 continue;
@@ -763,14 +796,40 @@ impl FrameRenderer {
     #[cfg(test)]
     pub(crate) fn legacy_preview_fixture(gpu: GpuContext) -> Self {
         let mut renderer = Self::new_preview(gpu);
-        renderer.set_legacy_media(kinewright_core::MediaSourceOrigin::new_project().legacy_media());
+        renderer.set_legacy_media(Some(crate::locator::fixture_grant()));
         renderer
     }
     #[cfg(test)]
     pub(crate) fn legacy_fixture(gpu: GpuContext) -> Self {
         let mut renderer = Self::new(gpu);
-        renderer.set_legacy_media(kinewright_core::MediaSourceOrigin::new_project().legacy_media());
+        renderer.set_legacy_media(Some(crate::locator::fixture_grant()));
         renderer
+    }
+    pub(crate) fn legacy_grant(&self) -> Option<&kinewright_core::LegacyMediaGrant> {
+        self.legacy_media.as_ref()
+    }
+    /// The authority this renderer serves, to restore after a borrowed render.
+    pub(crate) fn authority(
+        &self,
+    ) -> (
+        Option<Arc<crate::owned_io::PlaybackInputs>>,
+        Option<kinewright_core::LegacyMediaGrant>,
+    ) {
+        (self.inputs.clone(), self.legacy_media.clone())
+    }
+    pub(crate) fn restore_authority(
+        &mut self,
+        (inputs, legacy): (
+            Option<Arc<crate::owned_io::PlaybackInputs>>,
+            Option<kinewright_core::LegacyMediaGrant>,
+        ),
+    ) {
+        if inputs.is_some() {
+            self.set_inputs(inputs);
+        } else {
+            self.set_inputs(None);
+            self.set_legacy_media(legacy);
+        }
     }
     pub(crate) fn set_legacy_media(&mut self, grant: Option<kinewright_core::LegacyMediaGrant>) {
         if grant.is_some() {
@@ -1253,6 +1312,7 @@ impl FrameRenderer {
         scale: RenderScale,
         video: Video<'_>,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         validate_managed_context(document)?;
         // MO2 R8 (review-1 B1): every render root refuses an invalid
         // document defensively, disabled clips included, before resolving.
@@ -1273,6 +1333,12 @@ impl FrameRenderer {
                             layer.source.asset
                         ))
                     })?;
+                    let key = source_key(
+                        asset,
+                        scale,
+                        self.inputs.as_deref(),
+                        self.legacy_media.as_ref(),
+                    );
                     let frame = match video {
                         Video::Decode(strategy) => self.decode_video_frame(
                             asset.id,
@@ -1288,16 +1354,15 @@ impl FrameRenderer {
                         )?,
                         Video::Supplied(frames) => {
                             let at = layer.source.source_at;
-                            let key = (source_key(asset, scale), at.0);
                             frames
-                                .get(&key)
+                                .get(&(key.clone(), at.0))
                                 .cloned()
                                 .unwrap_or_else(|| Err(no_frame(asset.id, at)))?
                         }
                     };
                     decoded_layers.push(DecodedLayer {
                         identity: Some((
-                            ResidentContent::Video(Arc::new(source_key(asset, scale))),
+                            ResidentContent::Video(Arc::new(key)),
                             layer.source.source_at,
                         )),
                         clip: layer.source.clip,
@@ -1422,7 +1487,8 @@ impl FrameRenderer {
             description,
             assumption,
             scale.max_width(),
-        );
+        )
+        .with_authority(self.inputs.as_deref(), self.legacy_media.as_ref());
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.video_sources.entry(key.clone())
         {
@@ -1547,7 +1613,12 @@ impl FrameRenderer {
                         let Some(asset) = document.asset(layer.source.asset) else {
                             continue;
                         };
-                        let key = source_key(asset, scale);
+                        let key = source_key(
+                            asset,
+                            scale,
+                            self.inputs.as_deref(),
+                            self.legacy_media.as_ref(),
+                        );
                         let points = demand.sources.entry(key).or_default();
                         points.push(layer.source.source_at);
                     }

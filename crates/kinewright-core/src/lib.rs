@@ -225,7 +225,7 @@ pub use journal::JournalCommand;
 mod media_access;
 #[cfg(feature = "test-util")]
 pub use media_access::LegacyMediaWorkHold;
-pub use media_access::{LegacyMediaGrant, LegacyMediaWork, MediaSourceOrigin};
+pub use media_access::{LegacyMediaGrant, LegacyMediaIdentity, LegacyMediaWork, MediaSourceOrigin};
 mod refused_media;
 pub use refused_media::RefusedMedia;
 

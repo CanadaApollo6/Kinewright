@@ -3730,6 +3730,7 @@ impl AudioMixSource {
     }
 
     fn add_samples(&mut self, destination: &mut [f32]) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if self.finished {
             return Ok(());
         }
@@ -3787,6 +3788,7 @@ fn needs_seek_preroll(document: &Document, project_from: TimeCode) -> bool {
 }
 
 struct AudioMixer {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     sources: Vec<AudioMixSource>,
     output_channels: usize,
     cursor_sample: u64,
@@ -3903,6 +3905,7 @@ impl AudioMixer {
         ))
         .unwrap_or(0);
         let mut mixer = Self {
+            legacy_media: crate::locator::capture(),
             processor: AudioMixProcessor::new(
                 document,
                 output_rate,
@@ -4032,6 +4035,7 @@ impl AudioMixer {
         &mut self,
         maximum_sample_frames: usize,
     ) -> Result<Option<Vec<f32>>, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if self.cursor_sample >= self.end_sample {
             return Ok(None);
         }
@@ -4335,6 +4339,7 @@ impl AudioDiagnostics {
 }
 
 pub(crate) struct AudioRuntime {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     output: AudioOutput,
     producer: Producer<f32>,
     mixer: AudioMixer,
@@ -4438,6 +4443,7 @@ impl AudioRuntime {
             .saturating_div(1_000)
             .max(1);
         Ok(Self {
+            legacy_media: crate::locator::capture(),
             output,
             producer,
             mixer,
@@ -4528,6 +4534,7 @@ impl AudioRuntime {
     /// AU1 §5.3: top the ring up to the live target, metering as it goes
     /// (AU3 §3.9).
     pub(crate) fn fill(&mut self, meter: &mut LiveLoudnessMeter) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         self.exhausted |= !fill_ring(
             &mut self.producer,
             &mut self.pending,
@@ -4610,19 +4617,21 @@ where
     T: cpal::SizedSample + cpal::Sample + cpal::FromSample<f32>,
 {
     let callback_channels = usize::from(channels).max(1);
+    let authority = crate::locator::capture();
     device
         .build_output_stream(
             *config,
             move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
                 let stamp = info.timestamp();
                 diagnostics.record_latency(stamp.playback.duration_since(stamp.callback));
-                render_output(
+                render_authorized_output(
                     &mut consumer,
                     output,
                     callback_channels,
                     &position,
                     monitor_gain_tenth_db.load(Ordering::Relaxed),
                     &diagnostics,
+                    authority.as_ref(),
                 );
             },
             move |_error| {
@@ -4655,6 +4664,34 @@ pub(crate) mod simulated;
 /// in the programme or after its end by the sample this callback consumed
 /// through (`position` is written only here and before the stream exists),
 /// never by a flag the producer set: atomics only, no lock or allocation.
+fn render_authorized_output<T>(
+    consumer: &mut Consumer<f32>,
+    output: &mut [T],
+    channels: usize,
+    position: &AtomicU64,
+    monitor_gain_tenth_db: i32,
+    diagnostics: &AudioDiagnostics,
+    authority: Option<&kinewright_core::LegacyMediaGrant>,
+) -> usize
+where
+    T: cpal::Sample + cpal::FromSample<f32>,
+{
+    if authority.is_some_and(|grant| grant.check().is_err()) {
+        for sample in output.iter_mut() {
+            *sample = T::from_sample(0.0);
+        }
+        return output.len();
+    }
+    render_output(
+        consumer,
+        output,
+        channels,
+        position,
+        monitor_gain_tenth_db,
+        diagnostics,
+    )
+}
+
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
@@ -4820,23 +4857,23 @@ impl AudioDecoder {
             if self.finished || self.eof_sent {
                 return Ok(None);
             }
-            let next = self
-                .input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), packet));
-            if let Some((stream_index, packet)) = next {
-                if stream_index != self.stream_index {
-                    continue;
+            let mut packet = ffmpeg::Packet::empty();
+            match packet.read(&mut self.input) {
+                Ok(()) => {
+                    if packet.stream() != self.stream_index {
+                        continue;
+                    }
+                    self.decoder
+                        .send_packet(&packet)
+                        .map_err(|error| media_error(&self.path, "audio decode failed", error))?;
                 }
-                self.decoder
-                    .send_packet(&packet)
-                    .map_err(|error| media_error(&self.path, "audio decode failed", error))?;
-            } else {
-                self.decoder.send_eof().map_err(|error| {
-                    media_error(&self.path, "audio decoder flush failed", error)
-                })?;
-                self.eof_sent = true;
+                Err(ffmpeg::Error::Eof) => {
+                    self.decoder.send_eof().map_err(|error| {
+                        media_error(&self.path, "audio decoder flush failed", error)
+                    })?;
+                    self.eof_sent = true;
+                }
+                Err(_) => {}
             }
         }
     }
@@ -4986,6 +5023,77 @@ mod tests {
     use crate::test_support::{GeneratedMedia, pseudo_random_amplitude, rms, tone, wav_f32};
 
     use super::*;
+
+    #[test]
+    fn c2_r4_retained_pcm_mixer_and_output_ring_keep_their_authority() {
+        crate::initialize_ffmpeg().unwrap();
+        let source =
+            GeneratedMedia::from_bytes("c2-r4-pcm", "wav", &wav_f32(&vec![0.25; 4800], 48_000, 2));
+        let document = one_clip_document(source.path(), Rational::new(30, 1).unwrap(), 1);
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        let scope = crate::locator::LocatorAccess::enter(&grant).unwrap();
+        let mut mixer =
+            AudioMixer::open_with_inputs(&document, TimeCode::ZERO, 48_000, 2, None, None).unwrap();
+        assert!(mixer.next_chunk_limited(1).unwrap().is_some());
+        assert!(
+            mixer
+                .sources
+                .iter()
+                .any(|source| source.pending.len() > source.pending_index),
+            "decoded PCM remains cached"
+        );
+        let (mut producer, mut consumer) = RingBuffer::new(8);
+        producer.push(0.25).unwrap();
+        producer.push(0.5).unwrap();
+        let position = AtomicU64::new(0);
+        let diagnostics = AudioDiagnostics::default();
+        let mut output = [0.0_f32; 2];
+        assert_eq!(
+            render_authorized_output(
+                &mut consumer,
+                &mut output,
+                2,
+                &position,
+                0,
+                &diagnostics,
+                Some(&grant)
+            ),
+            0
+        );
+        assert_eq!(output, [0.25, 0.5]);
+        producer.push(0.75).unwrap();
+        producer.push(1.0).unwrap();
+        drop(scope);
+        origin.revoke_legacy_media();
+        assert_eq!(
+            mixer.next_chunk_limited(1).unwrap_err(),
+            MediaError::MediaAdmissionRequired
+        );
+        assert_eq!(
+            mixer.sources[0].add_samples(&mut [0.0; 2]).unwrap_err(),
+            MediaError::MediaAdmissionRequired
+        );
+        assert_eq!(
+            render_authorized_output(
+                &mut consumer,
+                &mut output,
+                2,
+                &position,
+                0,
+                &diagnostics,
+                Some(&grant)
+            ),
+            2
+        );
+        assert_eq!(output, [0.0, 0.0]);
+        assert_eq!(
+            position.load(Ordering::Acquire),
+            1,
+            "revoked ring did not advance"
+        );
+        assert_eq!(consumer.slots(), 2, "revoked ring samples were not served");
+    }
 
     fn audio_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {

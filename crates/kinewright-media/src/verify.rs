@@ -237,6 +237,7 @@ fn read_plane_codes(
 /// normal path, so the defect cannot come back unnoticed.
 fn verification_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
     crate::quiet_ffmpeg_log();
+    crate::locator::before_decoder_open()?;
     ffmpeg::format::input(path).map_err(|error| {
         MediaError::Backend(format!(
             "could not open delivery output {} for verification: {error}",

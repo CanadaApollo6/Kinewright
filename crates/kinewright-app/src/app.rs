@@ -962,6 +962,7 @@ impl KinewrightApp {
         match result {
             Ok(attachment) => {
                 let grant = self.focused().source_admission.legacy_media();
+                self.focused().analysis().cancel_all_analysis();
                 self.focused().source_admission.revoke_legacy_media();
                 self.presenter.suspend();
                 self.playback.pause();
@@ -3204,7 +3205,8 @@ impl KinewrightApp {
         // dedup key collapses the repeats correctly (`IN1b` §5.1 rule 14).
         // `media_incomplete`, because the project is open and usable — only
         // its timeline pictures are missing.
-        for (asset, error) in self.visual_cache.poll(ctx) {
+        let analysis = self.focused().analysis();
+        for (asset, error) in self.visual_cache.poll_scoped(ctx, &*analysis) {
             self.note_label(
                 LabelIncident::MediaIncomplete,
                 IncidentSubject::Asset(asset),
@@ -7906,7 +7908,8 @@ pub(crate) mod in1_tests {
     fn in1b_n_visual_cache_failures_open_n_asset_incidents() {
         let (_fixture, mut app) = in1b_app();
         let (results_tx, results_rx) = crossbeam_channel::unbounded();
-        app.visual_cache = crate::visual_cache::VisualCache::new(results_rx);
+        app.visual_cache =
+            crate::visual_cache::VisualCache::new(results_rx).bound_to(&*app.focused().analysis());
         for (asset, name) in [
             (kinewright_core::AssetId(1), "one.mov"),
             (kinewright_core::AssetId(2), "two.mov"),
@@ -17898,3 +17901,7 @@ mod c2_fix2_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "app/c2_fix3_tests.rs"]
 mod c2_fix3_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "app/c2_fix4_tests.rs"]
+mod c2_fix4_tests;

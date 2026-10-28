@@ -77,6 +77,24 @@ impl AgentLaneHold {
     }
 }
 
+/// A real preview-reader decode held before it enters the source authority.
+#[cfg(any(test, feature = "test-util"))]
+pub struct PreviewDecodeHold {
+    arrived: Receiver<()>,
+    _release: Sender<()>,
+}
+#[cfg(any(test, feature = "test-util"))]
+impl PreviewDecodeHold {
+    /// Wait until the reader reaches the selected uncached frame.
+    /// # Panics
+    /// Panics if the reader does not arrive within thirty seconds.
+    pub fn wait(&self) {
+        self.arrived
+            .recv_timeout(Duration::from_secs(30))
+            .expect("preview reader reached barrier");
+    }
+}
+
 /// AU3 §5.3: the delivery audio measurement lane. Every loudness figure this
 /// engine publishes is measured at 48 kHz stereo, whatever the file carries.
 const AUDIO_MEASUREMENT_RATE: u32 = 48_000;
@@ -452,6 +470,7 @@ impl SessionMedia {
     fn refuse_document(&self) {
         let mut coalesced = self.coalesced();
         coalesced.bound_document = None;
+        coalesced.bound_authority = None;
         coalesced.certified_scene = None;
         let issued = coalesced.control();
         drop(coalesced);
@@ -478,8 +497,16 @@ impl SessionMedia {
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade)
                 .is_some_and(|bound| Arc::ptr_eq(&bound, &document))
-                && coalesced.bound_certified
-                    == matches!(self.authority, MediaAuthority::Certified(_))
+                && coalesced.bound_authority
+                    == match &self.authority {
+                        MediaAuthority::Legacy(grant) => {
+                            Some(SceneAuthority::Legacy(grant.identity()))
+                        }
+                        MediaAuthority::Certified(inputs) => {
+                            Some(SceneAuthority::Certified(inputs.authority.clone()))
+                        }
+                        _ => None,
+                    }
         };
         if !current {
             self.set_document(document);
@@ -519,6 +546,33 @@ impl SessionMedia {
             }
         }
     }
+    fn metadata_authority(&self) -> Option<crate::locator::LocatorAuthority> {
+        match &self.authority {
+            MediaAuthority::Legacy(grant) => Some(crate::locator::LocatorAuthority::enter(grant)),
+            _ => None,
+        }
+    }
+
+    /// Observe refused background jobs without admitting new locator work.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_background_statuses(&self, path: &Path) -> (TranscriptStatus, SceneStatus) {
+        let _authority = self.metadata_authority();
+        self.engine.test_background_statuses(path)
+    }
+
+    /// Register verified metadata under this session's authority.
+    /// # Errors
+    /// Returns an admission refusal or invalid transcript error.
+    pub fn register_transcript(
+        &self,
+        asset: &MediaAsset,
+        transcript: AssetTranscript,
+    ) -> Result<(), MediaError> {
+        let _access = self.locator_access()?;
+        self.engine.register_transcript(asset, transcript)
+    }
+
     fn legacy_grant(&self) -> Result<kinewright_core::LegacyMediaGrant, MediaError> {
         match &self.authority {
             MediaAuthority::Legacy(grant) => {
@@ -624,6 +678,7 @@ impl FfmpegMediaEngine {
     pub(crate) fn refuse_unscoped(&self) {
         let mut coalesced = self.coalesced();
         coalesced.bound_document = None;
+        coalesced.bound_authority = None;
         coalesced.certified_scene = None;
         let issued = coalesced.control();
         drop(coalesced);
@@ -1064,7 +1119,7 @@ impl FfmpegMediaEngine {
         let mut coalesced = self.coalesced();
         self.clock.set_fps(inputs.document.fps);
         coalesced.bound_document = Some(Arc::downgrade(&inputs.document));
-        coalesced.bound_certified = true;
+        coalesced.bound_authority = Some(SceneAuthority::Certified(inputs.authority.clone()));
         coalesced.certified_scene = Some(Arc::clone(&inputs));
         let issued = coalesced.control();
         let stamp = issued.stamp;
@@ -1197,6 +1252,30 @@ impl FfmpegMediaEngine {
         result
     }
 
+    /// Hold a preview decode immediately before the reader uses its captured source.
+    /// # Panics
+    /// Panics if a fixture poisons the gate lock.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_hold_preview_decode(&self, at: TimeCode) -> PreviewDecodeHold {
+        let (arrived, arrival) = bounded(1);
+        let (release, released) = bounded(1);
+        *self.lane.decode_hold.lock().expect("decode gate") = Some((at.0, arrived, released));
+        PreviewDecodeHold {
+            arrived: arrival,
+            _release: release,
+        }
+    }
+
+    /// Hold a transcript worker after real audio decode, in place of model inference.
+    /// # Panics
+    /// Panics if a fixture poisons the gate lock.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_hold_transcript_inference(&self) -> crate::transcript::TranscriptInferenceHold {
+        self.transcripts.hold_inference()
+    }
+
     /// Observe worker completion without the session API's entry refusal.
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
@@ -1304,7 +1383,7 @@ impl FfmpegMediaEngine {
     ) {
         let mut coalesced = self.coalesced();
         coalesced.bound_document = Some(Arc::downgrade(&inputs.document));
-        coalesced.bound_certified = true;
+        coalesced.bound_authority = Some(SceneAuthority::Certified(inputs.authority.clone()));
         coalesced.certified_scene = Some(Arc::clone(&inputs));
         drop(coalesced);
         let _ = self
@@ -1323,7 +1402,7 @@ impl FfmpegMediaEngine {
         {
             let mut coalesced = self.coalesced();
             coalesced.bound_document = Some(Arc::downgrade(&doc));
-            coalesced.bound_certified = false;
+            coalesced.bound_authority = Some(SceneAuthority::Legacy(grant.identity()));
             coalesced.certified_scene = None;
         }
         if let Ok(mut export_document) = self.export_document.write() {
@@ -1405,11 +1484,17 @@ struct Request {
 
 /// PF1 R-1: the stamp source and the coalesced seek/frame slots, one leaf
 /// lock (H-4) replacing today's atomics.
+#[derive(Clone, PartialEq, Eq)]
+enum SceneAuthority {
+    Legacy(kinewright_core::LegacyMediaIdentity),
+    Certified(crate::owned_io::PlaybackAuthority),
+}
+
 #[derive(Default)]
 struct Coalesced {
     certified_scene: Option<Arc<crate::owned_io::PlaybackInputs>>,
     bound_document: Option<std::sync::Weak<Document>>,
-    bound_certified: bool,
+    bound_authority: Option<SceneAuthority>,
     /// The newest stamp issued.
     latest: FrameStamp,
     /// Stamped controls issued.
@@ -1456,7 +1541,9 @@ impl Coalesced {
     ) -> Control {
         clock.set_fps(doc.fps);
         self.bound_document = Some(Arc::downgrade(&doc));
-        self.bound_certified = false;
+        self.bound_authority = grant
+            .as_ref()
+            .map(|grant| SceneAuthority::Legacy(grant.identity()));
         self.certified_scene = None;
         let issued = self.control();
         #[cfg(test)]
@@ -1746,6 +1833,7 @@ impl Analysis for SessionMedia {
     }
 
     fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus {
+        let _authority = self.metadata_authority();
         if let Err(error) = self.legacy_grant() {
             return TranscriptStatus::Failed(error.to_string());
         }
@@ -1769,6 +1857,7 @@ impl Analysis for SessionMedia {
     }
 
     fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus {
+        let _authority = self.metadata_authority();
         if let Err(error) = self.legacy_grant() {
             return SilenceStatus::Failed(error.to_string());
         }
@@ -1794,6 +1883,7 @@ impl Analysis for SessionMedia {
     }
 
     fn scene_status(&self, asset: &MediaAsset) -> SceneStatus {
+        let _authority = self.metadata_authority();
         if let Err(error) = self.legacy_grant() {
             return SceneStatus::Failed(error.to_string());
         }
@@ -1912,6 +2002,7 @@ impl Analysis for SessionMedia {
     }
 
     fn beat_status(&self, asset: &MediaAsset) -> BeatStatus {
+        let _authority = self.metadata_authority();
         if let Err(error) = self.legacy_grant() {
             return BeatStatus::Failed(error.to_string());
         }
@@ -1929,10 +2020,18 @@ impl Analysis for SessionMedia {
             .timeline_beats(document, range, minimum_strength_basis_points)
     }
 
+    fn cancel_all_analysis(&self) {
+        let Some(_authority) = self.metadata_authority() else {
+            return;
+        };
+        self.transcripts.cancel_all();
+        self.derived_analysis.cancel_all();
+    }
+
     fn cancel_analysis(&self, asset: &MediaAsset, kind: AnalysisKind) -> bool {
-        if self.legacy_grant().is_err() {
+        let Some(_authority) = self.metadata_authority() else {
             return false;
-        }
+        };
         if kind == AnalysisKind::Transcript {
             self.transcripts.cancel(&asset.path)
         } else {
@@ -2181,7 +2280,16 @@ impl Analysis for SessionMedia {
     }
 
     fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
-        self.visual_assets.results()
+        match &self.authority {
+            MediaAuthority::Legacy(grant) if grant.check().is_ok() => {
+                self.visual_assets.results(grant)
+            }
+            _ => crossbeam_channel::never(),
+        }
+    }
+
+    fn visual_cache_identity(&self) -> Option<kinewright_core::LegacyMediaIdentity> {
+        self.legacy_grant().ok().map(|grant| grant.identity())
     }
 
     fn cache_inventory(&self) -> MediaCacheInventory {
@@ -2913,6 +3021,13 @@ impl Worker {
             }
             Control::LutLatticesPublished => self.rebind_lut_library(),
             Control::UpdateCertifiedAudio(kind, inputs) => {
+                if self
+                    .inputs
+                    .as_ref()
+                    .is_none_or(|old| old.authority != inputs.authority)
+                {
+                    self.pause();
+                }
                 self.legacy_media = None;
                 self.inputs = Some(Arc::clone(&inputs));
                 self.update_audio(kind, Arc::clone(&inputs.document));
@@ -2922,18 +3037,11 @@ impl Worker {
                     self.fail(error);
                     return;
                 }
-                if self.inputs.is_none() {
-                    self.legacy_media = Some(grant);
+                if self.inputs.is_some() || self.legacy_media.as_ref() != Some(&grant) {
+                    self.pause();
                 }
-                if let Some(inputs) = &self.inputs {
-                    match inputs.with_document(Arc::clone(&doc)) {
-                        Ok(inputs) => self.inputs = Some(Arc::new(inputs)),
-                        Err(error) => {
-                            self.fail(error);
-                            return;
-                        }
-                    }
-                }
+                self.inputs = None;
+                self.legacy_media = Some(grant);
                 self.update_audio(kind, doc);
             }
             Control::Play(from, issued) => {
@@ -3677,6 +3785,30 @@ mod tests {
         sha256::{sha256_bytes, source_fingerprint},
         test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
+
+    #[test]
+    fn c2_r4_same_document_arc_rebinds_the_requesting_authority() {
+        let engine = Arc::new(FfmpegMediaEngine::new_with_gpu(fallback_gpu().context()).unwrap());
+        let document = Arc::new(Document::default());
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let a_media = engine.legacy_media(a.clone(), Arc::clone(&document));
+        let b_media = engine.legacy_media(b.clone(), Arc::clone(&document));
+        a_media.set_document(Arc::clone(&document));
+        let before = engine.coalesced().controls;
+        b_media.request_frame(TimeCode::ZERO);
+        let state = engine.coalesced();
+        assert_eq!(
+            state.controls,
+            before + 1,
+            "the same Arc cannot preserve A's scene for B"
+        );
+        assert!(state.bound_authority == Some(SceneAuthority::Legacy(b.identity())));
+    }
 
     fn fixture_grant() -> Option<kinewright_core::LegacyMediaGrant> {
         kinewright_core::MediaSourceOrigin::new_project().legacy_media()
@@ -6730,6 +6862,10 @@ mod tests {
     /// then shaping from the same `Arc<Document>`. A `Both` batch that fails
     /// the latency guard re-cues once and does not then apply half of itself.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One scenario checks a control and both fallback paths under the same authority"
+    )]
     fn one_update_audio_control_carries_both_live_audio_halves() {
         use kinewright_core::{AudioBus, AudioBusId, ParamValue};
 
@@ -6790,6 +6926,8 @@ mod tests {
             Arc::new(document)
         };
 
+        let grant = fixture_grant().unwrap();
+        worker.legacy_media = Some(grant.clone());
         worker.document = document(10, 0);
         worker.playing = true;
         worker.clock.set_fps(worker.document.fps);
@@ -6800,14 +6938,14 @@ mod tests {
             .send(Control::UpdateAudio(
                 LiveAudioChange::Both,
                 Arc::clone(&both),
-                fixture_grant().unwrap(),
+                grant.clone(),
             ))
             .unwrap();
-        let drained = control_rx.try_iter().collect::<Vec<_>>();
-        assert_eq!(drained.len(), 1, "a Both batch is one control");
-        for control in drained {
-            worker.handle_control(control);
-        }
+        worker.handle_control(control_rx.try_recv().expect("one Both batch control"));
+        assert!(
+            control_rx.try_recv().is_err(),
+            "a Both batch is one control"
+        );
         assert_eq!(worker.document.audio_mix, both.audio_mix);
         assert_eq!(
             worker.clock.position(),
@@ -6820,7 +6958,7 @@ mod tests {
         worker.handle_control(Control::UpdateAudio(
             LiveAudioChange::Both,
             Arc::clone(&deeper),
-            fixture_grant().unwrap(),
+            grant.clone(),
         ));
         assert_eq!(worker.clock.position(), TimeCode(10));
         assert!(!worker.playing, "the fallback pauses the transport");
@@ -6833,7 +6971,7 @@ mod tests {
         worker.handle_control(Control::UpdateAudio(
             LiveAudioChange::None,
             Arc::clone(&plain),
-            fixture_grant().unwrap(),
+            grant.clone(),
         ));
         assert_eq!(worker.clock.position(), TimeCode(7));
         assert!(!worker.playing);

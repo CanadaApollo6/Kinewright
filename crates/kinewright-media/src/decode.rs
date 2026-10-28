@@ -1283,6 +1283,9 @@ fn unfragmented_mov(path: &Path) -> bool {
         };
         (size >= header && size <= end - at).then_some((size, kind, header))
     }
+    if crate::locator::before_decoder_open().is_err() {
+        return false;
+    }
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
@@ -2451,6 +2454,13 @@ impl VideoDecoder {
         &mut self,
         at: i64,
     ) -> Option<Result<T, MediaError>> {
+        let _access = match crate::locator::enter_retained(self.legacy_media.as_ref()) {
+            Ok(access) => access,
+            Err(error) => return Some(Err(error)),
+        };
+        if let Err(error) = self.check_certified() {
+            return Some(Err(error));
+        }
         let kept = self.retained.take(at)?;
         #[cfg(test)]
         {
@@ -2612,6 +2622,7 @@ impl VideoDecoder {
         shadow.seek(timestamp, ..timestamp).ok()?;
         // One read per turn (Amendment R43): an error ends the lookup.
         let anchor = loop {
+            crate::locator::check().ok()?;
             let mut packet = ffmpeg::Packet::empty();
             packet.read(shadow).ok()?;
             if packet.stream() == self.stream_index {
@@ -2668,6 +2679,7 @@ impl VideoDecoder {
         }
 
         loop {
+            crate::locator::check()?;
             // Amendment R43 (RS-1): checked first, so no frame is taken
             // after a read the reader's interrupt ended.
             if self.stopped() {

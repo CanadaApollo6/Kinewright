@@ -33,6 +33,7 @@ pub type CursorReservation = dyn Fn(u64) -> Result<LifetimeGuard, String> + Send
 
 #[path = "certified_playback.rs"]
 mod playback;
+pub(crate) use playback::PlaybackAuthority;
 pub use playback::PlaybackInputs;
 #[path = "owned_io_memo.rs"]
 mod memo;
@@ -84,6 +85,7 @@ impl DecodeInput {
             .map_err(media_io_error)
     }
     pub(crate) fn check(&mut self) -> Result<(), kinewright_core::MediaError> {
+        crate::locator::check()?;
         if let Self::Certified(input) = self {
             input.check().map_err(media_io_error)?;
         }

@@ -43,11 +43,25 @@ where
         })
 }
 
-/// Derived-data state keyed by the asset's PATH, never its id: asset ids are
-/// per-document, so with several projects open the same id can name
-/// different files. Content identity is what derived data belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MediaPath {
+    authority: Option<kinewright_core::LegacyMediaIdentity>,
+    path: PathBuf,
+}
+impl MediaPath {
+    fn current(path: &Path) -> Self {
+        Self {
+            authority: crate::locator::capture()
+                .as_ref()
+                .map(kinewright_core::LegacyMediaGrant::identity),
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+/// Analysis metadata belongs to the requesting authority and source path.
 pub(crate) struct StatusReporter<S> {
-    states: Arc<RwLock<HashMap<PathBuf, S>>>,
+    states: Arc<RwLock<HashMap<MediaPath, S>>>,
 }
 
 impl<S> Clone for StatusReporter<S> {
@@ -67,13 +81,22 @@ impl<S> StatusReporter<S> {
 
     pub(crate) fn update(&self, path: &Path, status: S) {
         if let Ok(mut states) = self.states.write() {
-            states.insert(path.to_path_buf(), status);
+            let key = MediaPath::current(path);
+            if states.len() >= 4096
+                && !states.contains_key(&key)
+                && let Some(oldest) = states.keys().next().cloned()
+            {
+                states.remove(&oldest);
+            }
+            states.insert(key, status);
         }
     }
 
     pub(crate) fn should_queue(&self, path: &Path, blocks_queue: impl FnOnce(&S) -> bool) -> bool {
         self.states.read().map_or(true, |states| {
-            states.get(path).is_none_or(|status| !blocks_queue(status))
+            states
+                .get(&MediaPath::current(path))
+                .is_none_or(|status| !blocks_queue(status))
         })
     }
 }
@@ -83,7 +106,7 @@ impl<S: Clone> StatusReporter<S> {
         self.states
             .read()
             .ok()
-            .and_then(|states| states.get(path).cloned())
+            .and_then(|states| states.get(&MediaPath::current(path)).cloned())
             .unwrap_or(default)
     }
 }
@@ -91,37 +114,52 @@ impl<S: Clone> StatusReporter<S> {
 /// Cooperative cancellation tokens for one analysis family, keyed by media path.
 #[derive(Clone, Default)]
 pub(crate) struct CancellationRegistry {
-    active: Arc<Mutex<HashMap<PathBuf, ExportCancellation>>>,
+    active: Arc<Mutex<HashMap<MediaPath, ExportCancellation>>>,
 }
 
 impl CancellationRegistry {
     /// Start one job unless the same asset is already queued or running.
     pub(crate) fn start(&self, path: &Path) -> Option<ExportCancellation> {
         let mut active = self.active.lock().ok()?;
-        if active.contains_key(path) {
+        if active.contains_key(&MediaPath::current(path)) {
             return None;
         }
         let cancellation = ExportCancellation::default();
-        active.insert(path.to_path_buf(), cancellation.clone());
+        active.insert(MediaPath::current(path), cancellation.clone());
         Some(cancellation)
     }
 
     pub(crate) fn cancel(&self, path: &Path) -> bool {
         self.active.lock().is_ok_and(|active| {
-            active.get(path).is_some_and(|cancellation| {
-                cancellation.cancel();
-                true
-            })
+            active
+                .get(&MediaPath::current(path))
+                .is_some_and(|cancellation| {
+                    cancellation.cancel();
+                    true
+                })
         })
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        let authority = crate::locator::capture()
+            .as_ref()
+            .map(kinewright_core::LegacyMediaGrant::identity);
+        if let Ok(active) = self.active.lock() {
+            for (key, cancellation) in active.iter() {
+                if key.authority == authority {
+                    cancellation.cancel();
+                }
+            }
+        }
     }
 
     pub(crate) fn finish(&self, path: &Path, cancellation: &ExportCancellation) {
         if let Ok(mut active) = self.active.lock()
             && active
-                .get(path)
+                .get(&MediaPath::current(path))
                 .is_some_and(|current| current == cancellation)
         {
-            active.remove(path);
+            active.remove(&MediaPath::current(path));
         }
     }
 }

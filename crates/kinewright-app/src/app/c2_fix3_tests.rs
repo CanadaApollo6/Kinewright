@@ -81,6 +81,7 @@ mod tests {
         document.media_pool.push(asset.clone());
         let (mut app, engine) = in1_harness_with_engine(document, fixture.shared());
         let grant = app.focused().legacy_media().unwrap();
+        let retained = engine.legacy_media(grant.clone(), Arc::clone(&app.focused().document));
         let hold = grant.hold_work();
         let analysis = app.focused().analysis();
         let results = analysis.visual_asset_results();
@@ -95,7 +96,7 @@ mod tests {
         let visual = results.recv_timeout(Duration::from_secs(30)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         let statuses = loop {
-            let statuses = engine.test_background_statuses(&asset.path);
+            let statuses = retained.test_background_statuses(&asset.path);
             if matches!(
                 statuses.0,
                 TranscriptStatus::Failed(_)

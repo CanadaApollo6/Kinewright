@@ -49,6 +49,8 @@ use crate::{
 pub(crate) const AGENT_QUEUE_LIMIT: usize = 8;
 /// A playback hold re-reads the clock this often while it waits.
 const HOLD_POLL: Duration = Duration::from_millis(1);
+/// Revocation has no wakeup, so idle readers and permit waiters poll for it.
+const AUTHORITY_POLL: Duration = Duration::from_millis(50);
 
 /// Amendment R43 (RS-1): the longest a new document's first frame (or an
 /// agent's cache clear) waits for retired readers to close their files.
@@ -335,6 +337,9 @@ impl DecodeRecord {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+type DecodeGate = (i64, Sender<()>, Receiver<()>);
+
 /// The worker/preview hand-off: one leaf lock and the `ready` condvar.
 pub(crate) struct Lane {
     state: Mutex<LaneState>,
@@ -357,6 +362,8 @@ pub(crate) struct Lane {
     /// sender is gone.
     #[cfg(test)]
     pub(crate) hold_at: Mutex<Option<(i64, Receiver<()>)>>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) decode_hold: Mutex<Option<DecodeGate>>,
     /// Amendment R53's ordering witness: signal the next applied reader
     /// plan's target and transport version, after releasing `Sched`.
     #[cfg(test)]
@@ -453,6 +460,8 @@ impl Lane {
             gate: Mutex::default(),
             #[cfg(test)]
             hold_at: Mutex::default(),
+            #[cfg(any(test, feature = "test-util"))]
+            decode_hold: Mutex::default(),
             #[cfg(test)]
             plan_posted: Mutex::default(),
             #[cfg(test)]
@@ -526,18 +535,23 @@ impl Lane {
 
     /// H-5 `PermitWait`: queue for `want` permits and wait at the FIFO; `None`
     /// once the request is cancelled or the lane stops.
-    fn acquire(&self, id: u64, want: usize) -> Option<usize> {
+    fn acquire(&self, id: u64, want: usize, source: Option<&SourceSpec>) -> Option<usize> {
         let mut book = self.book();
         book.enqueue(id, want);
         let granted = loop {
+            if source.is_some_and(|source| source.check_authority().is_err()) {
+                book.cancel(id);
+                break None;
+            }
             match book.poll(id) {
                 Poll::Granted(granted) => break Some(granted),
                 Poll::Cancelled => break None,
                 Poll::Wait => {
                     book = self
                         .permits_cv
-                        .wait(book)
-                        .unwrap_or_else(PoisonError::into_inner);
+                        .wait_timeout(book, AUTHORITY_POLL)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
                     #[cfg(test)]
                     {
                         let hook = self.woke.lock().expect("woke").clone();
@@ -917,22 +931,71 @@ thread_local! {
     pub(crate) static FAIL_READER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+struct ReaderThread {
+    thread: Option<JoinHandle<()>>,
+    work: Option<kinewright_core::LegacyMediaWork>,
+}
+impl ReaderThread {
+    fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    fn join(mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.work.take();
+    }
+}
+struct JoinBeforeRelease(ReaderThread);
+impl Drop for JoinBeforeRelease {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.thread.take() {
+            let _ = thread.join();
+        }
+        self.0.work.take();
+    }
+}
+impl Drop for ReaderThread {
+    fn drop(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        if thread.is_finished() {
+            let _ = thread.join();
+        } else {
+            // A detached reader still fences activation until its thread is joined.
+            let joined = JoinBeforeRelease(Self {
+                thread: Some(thread),
+                work: self.work.take(),
+            });
+            let _ = thread::Builder::new()
+                .name("kinewright-reader-retire".into())
+                .spawn(move || drop(joined));
+        }
+    }
+}
+
 /// H-1: start reader `id`. E-2: a spawn failure is prefixed `decode-reader:`.
 fn spawn_reader(
     lane: &Arc<Lane>,
     (id, spec): (u64, SourceSpec),
     stop: &Arc<AtomicBool>,
-) -> Result<JoinHandle<()>, MediaError> {
+) -> Result<ReaderThread, MediaError> {
     #[cfg(test)]
     if FAIL_READER_SPAWN.with(std::cell::Cell::take) {
         return Err(MediaError::Backend(
             "decode-reader: spawn failed: injected".to_owned(),
         ));
     }
+    let work = spec.reader_work()?;
     let (lane, stop) = (Arc::clone(lane), Arc::clone(stop));
     let spawned = thread::Builder::new().name(format!("kinewright-decode-{id}"));
     spawned
         .spawn(move || read(&lane, id, &spec, &stop))
+        .map(|thread| ReaderThread {
+            thread: Some(thread),
+            work,
+        })
         .map_err(|error| MediaError::Backend(format!("decode-reader: spawn failed: {error}")))
 }
 
@@ -952,6 +1015,10 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     let mut state = lane.lock();
     loop {
         let now = lane.now();
+        if let Err(error) = spec.check_authority() {
+            state.readers.fail_start(id, &error);
+            break;
+        }
         let shutdown = state.shutdown;
         match state.readers.next(id, now, shutdown) {
             Next::Retire => {
@@ -967,7 +1034,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             Next::Wait { until } => {
                 #[cfg(test)]
                 crate::pf1_clock::waits(id);
-                state = state.wait_timeout(&lane.work, until.saturating_sub(now));
+                state =
+                    state.wait_timeout(&lane.work, until.saturating_sub(now).min(AUTHORITY_POLL));
             }
             // H-5: permits before a decoder exists (X-5), outside `Sched`.
             Next::Open { want } => {
@@ -976,7 +1044,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 lane.work.notify_all();
                 #[cfg(test)]
                 lane.notify(); // a test waiting for `PermitWait`
-                let granted = lane.acquire(id, want);
+                let granted = lane.acquire(id, want, Some(spec));
                 threads = granted.unwrap_or(0);
                 state = lane.lock();
                 state.readers.granted(id, granted, lane.now());
@@ -1019,6 +1087,14 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
                 lane.before_decode(id, at);
+                #[cfg(any(test, feature = "test-util"))]
+                {
+                    let gate = lane.decode_hold.lock().expect("decode gate").clone();
+                    if let Some((_, arrived, release)) = gate.filter(|(time, _, _)| *time == at) {
+                        let _ = arrived.try_send(());
+                        let _ = release.recv();
+                    }
+                }
                 #[cfg(test)]
                 if let Some(d13) = &lane.d13 {
                     d13.boundary(Some(at));
@@ -1289,6 +1365,7 @@ enum Image {
     Gpu(crate::DisplayFrame),
 }
 struct Rendered {
+    scene: Scene,
     at: TimeCode,
     stamp: FrameStamp,
     image: Image,
@@ -1328,7 +1405,7 @@ pub(crate) struct Preview {
     published: Option<(u64, i64)>,
     /// H-1: this preview's reader threads by id, joined when it goes
     /// (Amendment R47: within `RETIRE_DEADLINE`).
-    readers: Vec<(u64, JoinHandle<()>)>,
+    readers: Vec<(u64, ReaderThread)>,
     /// H-2/K-2: each reader's stop flag (a packet boundary): set for all
     /// when the preview goes, for one to stop its lookahead decode.
     stops: HashMap<u64, Arc<AtomicBool>>,
@@ -1387,7 +1464,7 @@ impl Drop for Preview {
             (self.readers.drain(..)).partition(|(id, _)| alive(&state, *id));
         drop(state);
         for (_, reader) in exited {
-            let _ = reader.join();
+            reader.join();
         }
         if !stuck.is_empty() {
             let detached = stuck.len() as u64;
@@ -1456,7 +1533,10 @@ impl Preview {
     /// back to back while no transport job is runnable.
     pub(crate) fn execute(&mut self, work: Work) {
         match work {
-            Work::Maintenance => self.renderer.maintain(),
+            Work::Maintenance => {
+                self.readers.retain(|(_, reader)| !reader.is_finished());
+                self.renderer.maintain();
+            }
             Work::Agent(job) => {
                 let playing = self.playback_running();
                 if playing {
@@ -1574,7 +1654,17 @@ impl Preview {
                 }
                 None if !wait => break None,
                 None => {
-                    if let Some(deadline) = self.renderer.maintenance_deadline() {
+                    let deadline = self.renderer.maintenance_deadline();
+                    if !self.readers.is_empty() {
+                        let due;
+                        (state, due) =
+                            Self::prune_readers((&self.lane, &mut self.readers), state, deadline);
+                        if due {
+                            break Some(Work::Maintenance);
+                        }
+                        continue;
+                    }
+                    if let Some(deadline) = deadline {
                         state = state.wait_timeout(
                             &self.lane.ready,
                             deadline.saturating_duration_since(Instant::now()),
@@ -1589,6 +1679,26 @@ impl Preview {
         // H-4: cancelled jobs' reply senders drop after unlock, unanswered.
         drop((discarded, superseded_jobs));
         work
+    }
+
+    /// A revoked reader exits by itself; drop its lease once it has. Returns
+    /// whether the renderer's maintenance deadline has passed.
+    fn prune_readers<'a>(
+        (lane, readers): (&Lane, &mut Vec<(u64, ReaderThread)>),
+        state: Sched<'a>,
+        deadline: Option<Instant>,
+    ) -> (Sched<'a>, bool) {
+        let poll = deadline.map_or(AUTHORITY_POLL, |deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(AUTHORITY_POLL)
+        });
+        let state = state.wait_timeout(&lane.ready, poll);
+        readers.retain(|(_, reader)| !reader.is_finished());
+        (
+            state,
+            deadline.is_some_and(|deadline| deadline <= Instant::now()),
+        )
     }
 
     fn bind(&mut self, generation: Option<u64>, lut: &Arc<LutLibrary>) {
@@ -1844,7 +1954,7 @@ impl Preview {
         let keep = if sealed {
             std::collections::HashSet::new()
         } else {
-            document_source_keys(document, scale)
+            document_source_keys(document, scale, None, self.renderer.legacy_grant())
         };
         self.sizes.retain(|key| keep.contains(key));
         let (retired, posted) = {
@@ -2279,6 +2389,13 @@ impl Preview {
     }
 
     fn publish(&self, frame: Rendered) {
+        let _access = match crate::locator::enter_retained(frame.scene.legacy_media.as_ref()) {
+            Ok(access) => access,
+            Err(error) => {
+                self.fail(frame.stamp, error);
+                return;
+            }
+        };
         match frame.image {
             Image::Cpu(texture) => send_latest(
                 &self.frames_tx,
@@ -2320,6 +2437,7 @@ impl Preview {
         };
         match self.render_transport(&job.scene, at, &wait) {
             Ok(Some(texture)) => self.publish(Rendered {
+                scene: job.scene.clone(),
                 at,
                 stamp: job.stamp,
                 image: texture,
@@ -2415,6 +2533,7 @@ impl Preview {
             }
         };
         let frame = Rendered {
+            scene: job.scene.clone(),
             at,
             stamp: job.stamp,
             image: texture,
@@ -2477,6 +2596,9 @@ impl Preview {
                 max_width,
                 reply,
             } => {
+                // A paused wait suspended for this job resumes under its own
+                // authority: its demand's source keys carry that authority.
+                let resumed = self.renderer.authority();
                 self.renderer.set_inputs(inputs);
                 self.renderer.set_legacy_media(legacy_media);
                 self.bind(None, &lut);
@@ -2491,6 +2613,7 @@ impl Preview {
                         pixels: (*frame.rgba).clone(),
                     });
                 self.settle_titles();
+                self.renderer.restore_authority(resumed);
                 #[cfg(test)]
                 let result = if self.faults.fail_render.swap(false, Ordering::AcqRel) {
                     Err(MediaError::Backend(
@@ -2658,7 +2781,7 @@ pub(crate) mod tests {
         let lut = Arc::default();
         let scene = Scene {
             inputs: None,
-            legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
+            legacy_media: Some(crate::locator::fixture_grant()),
             document: Arc::clone(document),
             lut,
             generation: 1,
@@ -4771,7 +4894,7 @@ pub(crate) mod tests {
         *lane.woke.lock().expect("woke") = Some(barrier);
         let acquire = |id| {
             let (lane, (granted, grant)) = (Arc::clone(&lane), bounded(1));
-            thread::spawn(move || granted.send(lane.acquire(id, 1)));
+            thread::spawn(move || granted.send(lane.acquire(id, 1, None)));
             grant
         };
         let b = acquire(1);
