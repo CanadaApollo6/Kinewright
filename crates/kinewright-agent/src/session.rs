@@ -418,14 +418,35 @@ pub trait SessionObserver {
     fn poll_runtime_response(&mut self) -> Option<kinewright_core::RuntimeResponseControl> {
         None
     }
+    fn on_runtime_binding(&mut self, _binding: Option<&kinewright_core::RuntimeRequestBinding>) {}
+    fn supports_live_attention(&self) -> bool {
+        false
+    }
+    fn on_runtime_response_result(
+        &mut self,
+        _request: &kinewright_core::RuntimeRequest,
+        _outcome: LiveResponseOutcome,
+    ) {
+    }
 
     /// The owner records a question answer before returning it to the live adapter.
     fn on_runtime_request(
         &mut self,
-        _request: &kinewright_core::RuntimeRequest,
+        request: &kinewright_core::RuntimeRequest,
     ) -> kinewright_core::RuntimeResponse {
-        kinewright_core::RuntimeResponse::Unsupported
+        if request.kind() == kinewright_core::RuntimeRequestKind::Question {
+            kinewright_core::RuntimeResponse::Unsupported
+        } else {
+            kinewright_core::RuntimeResponse::H3AttentionUnavailable
+        }
     }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveResponseOutcome {
+    Consumed,
+    Unknown,
+    Revoked,
+    Expired,
 }
 
 /// An observer that watches nothing and stops for nothing.
@@ -538,6 +559,7 @@ pub fn pump_session(
             break;
         }
         if policy == ConfirmationPolicy::Studio {
+            observer.on_runtime_binding(session.runtime_request_binding().as_ref());
             for _ in 0..64 {
                 let request = match session.poll_runtime_request() {
                     Ok(Some(request)) => request,
@@ -557,12 +579,22 @@ pub fn pump_session(
                 let response =
                     if session.runtime_request_binding().as_ref() != Some(request.binding()) {
                         kinewright_core::RuntimeResponse::Expired
-                    } else if request.kind() != kinewright_core::RuntimeRequestKind::Question {
+                    } else if request.kind() != kinewright_core::RuntimeRequestKind::Question
+                        && !observer.supports_live_attention()
+                    {
                         kinewright_core::RuntimeResponse::H3AttentionUnavailable
                     } else {
                         observer.on_runtime_request(&request)
                     };
                 if response == kinewright_core::RuntimeResponse::Pending {
+                    continue;
+                }
+                if matches!(
+                    response,
+                    kinewright_core::RuntimeResponse::ApprovalDecision(_)
+                        | kinewright_core::RuntimeResponse::SecretReference(_)
+                ) {
+                    observer.on_confirmation_error("consent_requires_host_control".into());
                     continue;
                 }
                 if let Err(error) = response.validate(&request) {
@@ -574,6 +606,7 @@ pub fn pump_session(
                 {
                     observer.on_confirmation_error(error.to_string());
                 }
+                observer.on_runtime_response_result(&request, LiveResponseOutcome::Consumed);
             }
         }
         if policy == ConfirmationPolicy::Studio {
@@ -582,6 +615,16 @@ pub fn pump_session(
                     break;
                 };
                 let request = control.request();
+                if !control.authority_live() {
+                    observer.on_runtime_response_result(request, LiveResponseOutcome::Revoked);
+                    continue;
+                }
+                if request.kind() != kinewright_core::RuntimeRequestKind::Question
+                    && !observer.supports_live_attention()
+                {
+                    observer.on_confirmation_error("h3_attention_unavailable".into());
+                    continue;
+                }
                 if !responses.contains(request) {
                     observer.on_confirmation_error("runtime_response_not_pending".into());
                     continue;
@@ -590,12 +633,19 @@ pub fn pump_session(
                     observer.on_confirmation_error(error.to_string());
                     continue;
                 }
-                if responses.take(request, session.runtime_request_binding().as_ref())
-                    && let Err(error) =
-                        session.respond_runtime_request(request, control.response().clone())
+                let outcome = if responses.take(request, session.runtime_request_binding().as_ref())
                 {
-                    observer.on_confirmation_error(error.to_string());
-                }
+                    match session.respond_runtime_request(request, control.response().clone()) {
+                        Ok(()) => LiveResponseOutcome::Consumed,
+                        Err(error) => {
+                            observer.on_confirmation_error(error.to_string());
+                            LiveResponseOutcome::Unknown
+                        }
+                    }
+                } else {
+                    LiveResponseOutcome::Expired
+                };
+                observer.on_runtime_response_result(request, outcome);
             }
             responses.expire_stale(session.runtime_request_binding().as_ref());
         }

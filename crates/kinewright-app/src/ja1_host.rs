@@ -30,6 +30,10 @@ enum SwitchState {
 }
 
 pub(super) struct HostAttachment {
+    issuer: Option<kinewright_agent::writer_host::HostIssuer>,
+    hook_inflight: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
+    hook_reply: Option<HostReply>,
+    continuation_detached: bool,
     installed_switch: Option<(
         kinewright_project::bundle_switch::SwitchAttachment,
         super::PreparedView,
@@ -277,7 +281,7 @@ impl HostAttachment {
                 .expect("GUI source service")
                 .bootstrap(),
         };
-        let launched = HostClient::launch(
+        let launched = HostClient::launch_with_issuer(
             executable,
             HostConfig {
                 project,
@@ -300,7 +304,7 @@ impl HostAttachment {
                 },
             },
         );
-        let (client, mut child) = match launched {
+        let (client, mut child, issuer) = match launched {
             Ok(launched) => launched,
             Err(error) => {
                 if let Err(cause) =
@@ -346,6 +350,10 @@ impl HostAttachment {
             None
         };
         Ok(Self {
+            issuer: Some(issuer),
+            hook_inflight: None,
+            hook_reply: None,
+            continuation_detached: false,
             unknown_operation: unknown,
             switch_state: SwitchState::Complete,
             next_operation: if unknown { 2 } else { 1 },
@@ -407,6 +415,10 @@ impl HostAttachment {
         }
         Ok(Self {
             unknown_operation: false,
+            issuer: None,
+            hook_inflight: None,
+            hook_reply: None,
+            continuation_detached: false,
             switch_state: SwitchState::Complete,
             next_operation: 1,
             pending_operation: None,
@@ -920,6 +932,28 @@ impl HostAttachment {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<Option<HostReply>, BundleError> {
+        if self
+            .hook_inflight
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            let reply = self
+                .hook_inflight
+                .take()
+                .expect("finished hook request")
+                .join()
+                .map_err(|_| BundleError::HistoryChanged)?
+                .map_err(host_error)?;
+            if reply.error.is_none() && reply.detached.is_some() {
+                self.continuation_detached = true;
+                self.heartbeat = None;
+            }
+            self.hook_reply = Some(reply.clone());
+            return Ok(Some(reply));
+        }
+        if self.continuation_detached {
+            return Ok(None);
+        }
         if self.recovery.is_some() {
             return self.poll_manual_recovery(owner);
         }
@@ -996,14 +1030,43 @@ impl HostAttachment {
             .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self) -> bool {
+        if self.continuation_detached {
+            self.source_server = None;
+            if let Some(mut child) = self.child.take() {
+                // The retained host outlives this view; reap its eventual exit.
+                drop(std::thread::spawn(move || {
+                    let _ = child.wait();
+                }));
+            }
+            return true;
+        }
+        if self.status.continuation_runs > 0 {
+            if self.hook_inflight.is_none()
+                && self
+                    .hook_reply
+                    .as_ref()
+                    .is_none_or(|reply| reply.detached.is_none())
+            {
+                let _ = self.request_hook(HostCommand::DetachForContinuation);
+            }
+            return false;
+        }
         // Explicit originating Close, as distinct from closing/dropping a chat client.
         if !self
             .child
             .as_mut()
             .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
         {
-            let _ = self.client.request(HostCommand::Shutdown);
+            match self.client.request(HostCommand::Shutdown) {
+                Ok(reply) if reply.error.is_none() => {}
+                Ok(reply) => {
+                    self.status = reply.status.clone();
+                    self.hook_reply = Some(reply);
+                    return false;
+                }
+                Err(_) => return false,
+            }
         }
         self.source_server = None;
         if let Some(child) = &mut self.child {
@@ -1022,6 +1085,40 @@ impl HostAttachment {
                 }
             }
         }
+        true
+    }
+
+    pub(super) fn request_hook(&mut self, command: HostCommand) -> Result<(), BundleError> {
+        if self.hook_inflight.is_some()
+            || self.unknown_operation
+            || self.recovery.is_some()
+            || self.manual_inflight.is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let client = self.client.clone();
+        self.hook_reply = None;
+        self.heartbeat = None;
+        self.last_heartbeat = Instant::now();
+        self.hook_inflight = Some(std::thread::spawn(move || client.request(command)));
+        Ok(())
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 consumes the sequenced run and attention reply without a second event loop"
+    )]
+    pub(super) fn take_hook_reply(&mut self) -> Option<HostReply> {
+        self.hook_reply.take()
+    }
+    pub(super) fn continuation_pending(&self) -> bool {
+        self.status.continuation_runs > 0 && !self.continuation_detached
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 keeps this private capability outside the closing project and uses it for reattach"
+    )]
+    pub(super) fn continuation_issuer(&self) -> Option<kinewright_agent::writer_host::HostIssuer> {
+        self.issuer.clone()
     }
 
     #[allow(clippy::too_many_lines)]

@@ -1,0 +1,10 @@
+{
+  "head": "ed23d49aa6e7d2b1dadc3aff6676ce48d37ef74e",
+  "method": "git archive HEAD into an owned target fixture; selected parent UI tests use their unchanged tracked sources",
+  "sha256": {
+    "crates/kinewright-app/src/app.rs": "4821c93ee01a364cd9cee0906bc6d789685d253de22b9dab05a40c35b258eea2",
+    "crates/kinewright-app/src/app/in1_tests/c0_studio_owned.rs": "1499ef0321b420c3469d49f2ec00956eff45e2863c0d675466f85796a055d6d6",
+    "crates/kinewright-app/src/ja1_attachment_tests.rs": "470e98f842620c61f5139d4f7e02377092cf663b0fd7f91ad32f5f7b4dd51afa",
+    "Cargo.lock": "a049eba4cdd06d46623c38f5fa3075622bdae49279ec043f251a737f03d4b30b"
+  }
+}

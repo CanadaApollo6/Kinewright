@@ -638,8 +638,8 @@ pub enum OrchestrationPayload {
     Result(Box<TaskResult>),
     Usage(UsageRecord),
     // S4 C5
-    Accounting(Box<kinewright_project::orchestration_accounting::AccountingRecord>),
-    AccountingArchive(Box<kinewright_project::orchestration_accounting::AccountingArchive>),
+    Accounting(Box<super::orchestration_accounting::AccountingRecord>),
+    AccountingArchive(Box<super::orchestration_accounting::AccountingArchive>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

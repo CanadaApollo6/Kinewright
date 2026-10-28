@@ -31,7 +31,12 @@ pub(super) fn command_client(command: &HostCommand) -> Option<&str> {
 pub(super) fn connector_command(command: &HostCommand) -> bool {
     matches!(
         command,
-        HostCommand::Metadata { .. }
+        HostCommand::IssueMetadataIssuer { .. }
+            | HostCommand::DispatchOrchestration { .. }
+            | HostCommand::ObserveRun { .. }
+            | HostCommand::ResolveAttention { .. }
+            | HostCommand::DetachForContinuation
+            | HostCommand::Metadata { .. }
             | HostCommand::ListVersions
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadFeedback { .. }

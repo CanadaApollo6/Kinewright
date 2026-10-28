@@ -110,6 +110,9 @@ impl Drop for ReplyDropProxy {
 }
 
 impl HostAttachment {
+    pub(in crate::ja1_attachment) fn take_child_for_test(&mut self) -> std::process::Child {
+        self.child.take().expect("owned fixture host")
+    }
     pub(in crate::ja1_attachment) fn manual_identity_for_test(&self) -> String {
         self.manual_client.clone()
     }

@@ -865,7 +865,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                 admit!(crate::studio_records::FeedbackBatch);
             }
             RecordKind::RunIndex => {
-                admit!(crate::studio_records::RunIndex);
+                admit!(crate::orchestration_commit::RegisteredRunIndex);
             }
             RecordKind::RunSnapshot => {
                 admit!(crate::studio_records::RunSnapshotRecord);
@@ -1420,6 +1420,88 @@ pub(super) fn validate_studio_records(
         None
     };
     if let Some(index) = &runs {
+        let receipts = root
+            .receipt_index_ref
+            .as_ref()
+            .map(|reference| {
+                read_record::<crate::receipts::ReceiptLedger>(
+                    namespace,
+                    reference,
+                    usage,
+                    &mut BTreeSet::new(),
+                    limits,
+                )
+            })
+            .transpose()?;
+        let mut seen_commands = BTreeSet::new();
+        for (id, cuts) in &index.orchestration {
+            let mut previous = None;
+            for cut in cuts {
+                if cut.receipt.envelope.project != root.project_id
+                    && !root
+                        .origin_project_ids
+                        .contains(&cut.receipt.envelope.project)
+                {
+                    return Err(BundleError::Identity("orchestration origin project".into()));
+                }
+                let snapshot = load!(
+                    crate::orchestration_records::OrchestrationRecord,
+                    &cut.snapshot
+                );
+                let segment = load!(
+                    crate::orchestration_records::OrchestrationRecord,
+                    &cut.segment
+                );
+                let update = cut.validate_cut(id, &snapshot, &segment, previous)?;
+                let command = cut.metadata_envelope.receipt_envelope(
+                    &crate::studio_records::MetadataUpdate {
+                        expected_root_generation: update.envelope().expected_generation,
+                        change: crate::studio_records::MetadataChange::OrchestrationUpdate {
+                            transition: Box::new(update),
+                            consume_batch: cut.consumed_batch.clone(),
+                        },
+                    },
+                )?;
+                let receipt = receipts
+                    .as_ref()
+                    .and_then(|ledger| {
+                        ledger
+                            .detailed
+                            .iter()
+                            .chain(&ledger.retired)
+                            .find(|receipt| receipt.id == command.id)
+                    })
+                    .ok_or_else(|| {
+                        BundleError::Corrupt("orchestration cut has no owner receipt".into())
+                    })?;
+                if !seen_commands.insert(command.id.clone())
+                    || receipt.generation != cut.receipt.generation
+                    || receipt.generation > root.generation
+                    || receipt.digest != command.digest()?
+                {
+                    return Err(BundleError::Corrupt(
+                        "orchestration durable receipt binding".into(),
+                    ));
+                }
+                if let Some(batch) = &cut.consumed_batch {
+                    let feedback_ref = root.feedback_index_ref.as_ref().ok_or_else(|| {
+                        BundleError::Corrupt("orchestration feedback index missing".into())
+                    })?;
+                    let feedback = load!(FeedbackIndex, feedback_ref);
+                    if feedback
+                        .batches
+                        .get(batch)
+                        .and_then(|batch| batch.consumed_by.as_ref())
+                        .is_none_or(|run| run.0 != id.0)
+                    {
+                        return Err(BundleError::Corrupt(
+                            "orchestration atomic feedback consumption".into(),
+                        ));
+                    }
+                }
+                previous = Some(cut);
+            }
+        }
         for run in index.runs.values() {
             macro_rules! run_records {
                 ($refs:expr, $ty:ty, $field:ident) => {
@@ -1499,8 +1581,10 @@ pub(super) fn validate_studio_records(
                 ));
             }
             if submitted.consumed_by.as_ref().is_some_and(|id| {
-                runs.as_ref()
-                    .is_none_or(|index| !index.runs.contains_key(id))
+                runs.as_ref().is_none_or(|index| {
+                    !index.runs.contains_key(id)
+                        && !index.orchestration.keys().any(|run| run.0 == id.0)
+                })
             }) {
                 return Err(BundleError::Corrupt("batch consumption run binding".into()));
             }

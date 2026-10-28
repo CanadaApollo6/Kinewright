@@ -173,6 +173,20 @@ pub struct RecoveryBarrier {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    IssueMetadataIssuer {
+        issuer: Option<kinewright_project::receipts::IssuerId>,
+    },
+    DispatchOrchestration {
+        request: Box<super::ScopedOrchestrationRequest>,
+    },
+    ObserveRun {
+        run: kinewright_project::orchestration_records::RunId,
+        after_sequence: u64,
+    },
+    ResolveAttention {
+        response: super::LiveAttentionResponse,
+    },
+    DetachForContinuation,
     Metadata {
         envelope: kinewright_project::studio_records::MetadataEnvelope,
         update: kinewright_project::studio_records::MetadataUpdate,
@@ -445,6 +459,8 @@ pub enum HostChoiceKind {
     reason = "Independent wire observations and explicit consent flags reflect the existing authoritative owner states"
 )]
 pub struct HostStatus {
+    #[serde(default)]
+    pub continuation_runs: usize,
     pub choice: Option<HostChoiceKind>,
     pub rescue_trim_required: bool,
     pub rescue_trim_accepted: bool,
@@ -499,6 +515,13 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub metadata_issuer: Option<super::MetadataIssuer>,
+    pub orchestration: Option<kinewright_project::orchestration_commit::OrchestrationReceipt>,
+    pub run_view: Option<super::RunViewPage>,
+    pub attention_outcome: Option<super::AttentionOutcome>,
+    pub detached: Option<super::DetachOutcome>,
+    #[serde(default)]
+    pub attention: Vec<super::AttentionPrompt>,
     pub metadata: Option<kinewright_project::receipts::CommandReceipt>,
     pub revise_result: Option<kinewright_project::studio_records::ReviseResult>,
     #[serde(default)]

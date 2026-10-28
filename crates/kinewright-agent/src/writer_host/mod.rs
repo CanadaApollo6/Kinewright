@@ -1,11 +1,21 @@
 //! Product-owned, serialized named-project IO and authenticated UI-free sessions.
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
+mod attention;
+#[cfg(test)]
+mod hooks_tests;
+mod issuer;
+pub use issuer::HostIssuer;
 mod auth;
+mod continuation;
 mod manual;
+mod orchestration;
 mod owned_media;
 mod protocol;
 mod recovery;
 mod switch;
+pub use attention::{
+    AttentionAnswer, AttentionOutcome, AttentionPrompt, HostRunObserver, LiveAttentionResponse,
+};
 pub use auth::HostAuth;
 use auth::PinnedPath;
 use axum::{
@@ -15,6 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+pub use continuation::{DetachOutcome, HostOwnedInputClosure};
 use kinewright_core::{AgentDriver, AgentEvent, AttachmentState, Core, Document, SessionConfig};
 use kinewright_project::{
     bundle::{BundleError, BundleSaveReport},
@@ -28,6 +39,7 @@ use kinewright_project::{
     },
     storage_budget::StorageLimits,
 };
+pub use orchestration::{MetadataIssuer, RunViewPage, ScopedOrchestrationRequest};
 pub use protocol::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -222,10 +234,18 @@ impl HostClient {
     }
     /// Bootstrap is sent through a pipe; the child prints only public discovery.
     pub fn launch(executable: &Path, config: HostConfig) -> Result<(Self, Child), HostError> {
+        Self::launch_with_issuer(executable, config).map(|(client, child, _issuer)| (client, child))
+    }
+    pub fn launch_with_issuer(
+        executable: &Path,
+        config: HostConfig,
+    ) -> Result<(Self, Child, HostIssuer), HostError> {
         let auth = HostAuth::generate()?;
+        let issuer = HostAuth::generate()?;
         let bootstrap = serde_json::to_vec(&HostLaunch {
             config: config.clone(),
             auth: auth.clone(),
+            issuer: Some(issuer.clone()),
         })?;
         let mut child = Command::new(executable)
             .arg("host")
@@ -297,7 +317,14 @@ impl HostClient {
         }
         // Killing and reaping closes both pipes, so even a timed-out writer/reader retires.
         let _ = reader.join();
-        client.map(|client| (client, child))
+        client.and_then(|client| {
+            let issuer = HostIssuer::new(
+                client.endpoint().clone(),
+                issuer,
+                client.bootstrap.roots.clone(),
+            )?;
+            Ok((client, child, issuer))
+        })
     }
     /// One JSON-RPC line in, one response line out. Notifications have no stdout reply.
     pub fn proxy_stdio(
@@ -337,6 +364,8 @@ impl HostClient {
 pub struct HostLaunch {
     pub config: HostConfig,
     pub auth: HostAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<HostAuth>,
 }
 
 struct ServerThread {
@@ -363,6 +392,13 @@ impl WriterHost {
         Self::start_with_auth(config, HostAuth::generate()?)
     }
     pub fn start_with_auth(config: HostConfig, auth: HostAuth) -> Result<Self, HostError> {
+        Self::start_with_issuer(config, auth, None)
+    }
+    pub fn start_with_issuer(
+        config: HostConfig,
+        auth: HostAuth,
+        issuer: Option<HostAuth>,
+    ) -> Result<Self, HostError> {
         let mut owner = HostCommandOwner::open(config.clone())?;
         owner.register_attachment(
             auth.clone(),
@@ -381,6 +417,7 @@ impl WriterHost {
         };
         let stop = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(HttpState {
+            issuer,
             stop: Arc::clone(&stop),
             bootstrap: HostBootstrap {
                 endpoint: endpoint.clone(),
@@ -391,6 +428,7 @@ impl WriterHost {
             ingress: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let router = axum::Router::new()
+            .route("/issuer", post(issuer::issuer_request))
             .route("/host", post(host_request))
             .route("/mcp", post(mcp_request))
             .with_state(state);
@@ -505,6 +543,7 @@ fn serve(
     })
 }
 struct HttpState {
+    issuer: Option<HostAuth>,
     stop: Arc<tokio::sync::Notify>,
     bootstrap: HostBootstrap,
     owner: Arc<Mutex<HostCommandOwner>>,
@@ -1047,6 +1086,7 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    hooks: orchestration::Hooks,
     attachments: Vec<auth::Attachment>,
     next_attachment_id: u64,
     #[cfg(test)]
@@ -1197,6 +1237,7 @@ impl HostCommandOwner {
             owner.freeze_manual_barrier()?;
         }
         let mut host = Self {
+            hooks: orchestration::Hooks::default(),
             attachments: Vec::new(),
             next_attachment_id: 1,
             #[cfg(test)]
@@ -1487,6 +1528,17 @@ impl HostCommandOwner {
             self.dispatches += 1;
         }
         match command {
+            HostCommand::IssueMetadataIssuer { .. }
+            | HostCommand::DispatchOrchestration { .. }
+            | HostCommand::ObserveRun { .. }
+            | HostCommand::ResolveAttention { .. }
+            | HostCommand::DetachForContinuation => {
+                return Err(HostRefusal::new(
+                    "attachment_refused",
+                    "resolved attachment required for hook dispatch",
+                )
+                .into());
+            }
             HostCommand::Metadata { envelope, update } => {
                 use kinewright_project::{
                     receipts::ReceiptLookup,
@@ -1497,7 +1549,8 @@ impl HostCommandOwner {
                     MetadataChange::SaveFeedback(_)
                     | MetadataChange::SaveVoice(_)
                     | MetadataChange::SubmitBatch { .. } => MetadataScope::Feedback,
-                    MetadataChange::Orchestration { .. } => {
+                    MetadataChange::Orchestration { .. }
+                    | MetadataChange::OrchestrationUpdate { .. } => {
                         return Err(HostRefusal::new(
                             "unsupported_command",
                             "orchestration dispatch belongs to H3",
@@ -2046,6 +2099,13 @@ impl HostCommandOwner {
                 reply.session = Some(self.session_status(session)?);
             }
             HostCommand::Shutdown => {
+                if self.hooks.runs.values().any(|run| run.continuable) {
+                    return Err(HostRefusal::new(
+                        "continuation_required",
+                        "detach the GUI or Stop and settle the run before closing its source",
+                    )
+                    .into());
+                }
                 for session in self.sessions.values_mut() {
                     session.stop();
                 }
@@ -2151,6 +2211,12 @@ impl HostCommandOwner {
     }
     fn status(&self) -> HostStatus {
         let mut status = HostStatus {
+            continuation_runs: self
+                .hooks
+                .runs
+                .values()
+                .filter(|run| run.continuable)
+                .count(),
             retention_proven: self.retention_proven,
             message: self.message.clone(),
             admitted_roots: self.admitted_roots(),
@@ -2234,6 +2300,9 @@ impl HostCommandOwner {
 }
 impl Drop for HostCommandOwner {
     fn drop(&mut self) {
+        for attachment in &self.attachments {
+            attachment.alive.store(false, Ordering::Release);
+        }
         for session in self.sessions.values_mut() {
             session.stop();
         }

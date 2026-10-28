@@ -172,11 +172,25 @@ record!(
 record!(
     RunIndex,
     RunIndex,
-    |v: &RunIndex| v.runs.values().flat_map(RunRecord::references).collect(),
+    |v: &RunIndex| {
+        let mut refs: Vec<_> = v.runs.values().flat_map(RunRecord::references).collect();
+        refs.extend(
+            v.orchestration
+                .values()
+                .flatten()
+                .flat_map(crate::orchestration_commit::PublishedRunCut::references),
+        );
+        refs
+    },
     |v: &RunIndex, l: &StorageLimits| {
         schema(v.version)?;
-        if v.runs.len() as u64 > l.versions {
+        if (v.runs.len() + v.orchestration.len()) as u64 > l.versions {
             return Err(BundleError::Capacity("run index entries"));
+        }
+        for cuts in v.orchestration.values() {
+            if cuts.is_empty() || cuts.len() as u64 > l.receipts {
+                return Err(BundleError::Capacity("orchestration cuts"));
+            }
         }
         for (id, run) in &v.runs {
             if id != &run.run_id || id != &run.projection.run_id {
@@ -322,7 +336,7 @@ pub(crate) struct ValidatedMetadataUpdate {
     pub(crate) versions: Option<ObjectRef>,
     pub(crate) feedback: Option<ObjectRef>,
     pub(crate) runs: Option<ObjectRef>,
-    seals: Vec<SealedObject>,
+    pub(crate) seals: Vec<SealedObject>,
 }
 impl ValidatedMetadataUpdate {
     pub(crate) fn apply(&self, root: &mut StudioRoot) {
@@ -548,6 +562,7 @@ impl ProjectBundle {
                 | (
                     MetadataScope::Orchestration,
                     MetadataChange::Orchestration { .. }
+                        | MetadataChange::OrchestrationUpdate { .. }
                 )
         );
         if !allowed || envelope.project_id != self.project_id {
@@ -630,6 +645,20 @@ impl ProjectBundle {
         let _update_charge = charge_value(&self.store, update)?;
         let mut feedback = (*original_feedback).clone();
         let result = match &update.change {
+            MetadataChange::OrchestrationUpdate {
+                transition,
+                consume_batch,
+            } => {
+                let (sealed, index_ref) = self.stage_orchestration_update(
+                    envelope,
+                    transition,
+                    consume_batch.as_ref(),
+                    &mut feedback,
+                )?;
+                pending.seals.extend(sealed);
+                pending.runs = Some(index_ref);
+                MetadataResult::Orchestration(vec![RunId(transition.projection().run.0.clone())])
+            }
             MetadataChange::PublishSnapshot(p) => {
                 let original_versions = self.version_index()?;
                 let _version_charge = charge_value(&self.store, &*original_versions)?;
@@ -895,6 +924,12 @@ pub(crate) fn add_required_apis(
 impl ProjectBundle {
     /// Issuer publication uses the durable checkpoint and cannot save pending manual edits.
     pub fn issue_metadata_issuer(&mut self) -> Result<crate::receipts::IssuerId, BundleError> {
+        self.issue_metadata_issuer_bound(None)
+    }
+    pub(crate) fn issue_metadata_issuer_bound(
+        &mut self,
+        subject: Option<String>,
+    ) -> Result<crate::receipts::IssuerId, BundleError> {
         if self.unsettled || self.pending_command.is_some() || self.pending_metadata.is_some() {
             return Err(BundleError::Unsettled);
         }
@@ -908,6 +943,7 @@ impl ProjectBundle {
                 next_sequence: 1,
                 reconciled_high_water: 0,
                 retired: false,
+                metadata_subject: subject,
             },
         );
         if let Err(error) = BundleCommit::publish_maintenance(self) {
@@ -939,6 +975,37 @@ impl crate::editing_session::Ja1EditingSession {
     }
     pub fn issue_metadata_issuer(&mut self) -> Result<crate::receipts::IssuerId, BundleError> {
         self.active_bundle_mut()?.issue_metadata_issuer()
+    }
+    pub fn issue_metadata_issuer_for(
+        &mut self,
+        subject: &str,
+    ) -> Result<crate::receipts::IssuerId, BundleError> {
+        if subject.is_empty() || subject.len() > 512 {
+            return Err(BundleError::Capacity("metadata subject"));
+        }
+        self.active_bundle_mut()?
+            .issue_metadata_issuer_bound(Some(subject.to_owned()))
+    }
+    pub fn metadata_issuer_subject(
+        &self,
+        issuer: &crate::receipts::IssuerId,
+    ) -> Result<Option<String>, BundleError> {
+        Ok(self
+            .active_bundle()?
+            .issuers
+            .get(issuer)
+            .and_then(|state| state.metadata_subject.clone()))
+    }
+    pub fn metadata_issuer_sequence(
+        &self,
+        issuer: &crate::receipts::IssuerId,
+    ) -> Result<u64, BundleError> {
+        self.active_bundle()?
+            .issuers
+            .get(issuer)
+            .filter(|state| !state.retired)
+            .map(|state| state.next_sequence)
+            .ok_or_else(|| BundleError::Identity("metadata issuer retired or absent".into()))
     }
     pub fn metadata_envelope(
         &self,
@@ -1238,6 +1305,29 @@ impl crate::editing_session::Ja1EditingSession {
 }
 
 impl FrozenContext {
+    /// Check retained native descriptors, failure latches and one verified chunk
+    /// before releasing an originating attachment. Later chunks remain verified
+    /// by the existing cursor on demand; this is not a new full-media scan.
+    pub fn verify_retained_inputs(&self) -> Result<(), BundleError> {
+        for lease in &self.certified_input_leases {
+            let source = lease.certified_source()?.playback_source();
+            let mut cursor = source
+                .cursor(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )))
+                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+            if cursor
+                .read(&mut [0])
+                .map_err(|error| BundleError::Corrupt(error.to_string()))?
+                != 1
+            {
+                return Err(BundleError::Corrupt(
+                    "retained certified input is empty".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn reserve_frame(
         &self,
         bytes: u64,

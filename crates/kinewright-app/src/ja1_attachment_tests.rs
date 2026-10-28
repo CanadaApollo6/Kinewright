@@ -2873,8 +2873,8 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
             .unwrap(),
         Event::DocumentChanged { .. }
     ));
-    drop(proxy);
     assert!(app.close());
+    drop(proxy);
 }
 
 #[cfg(target_os = "linux")]
@@ -3216,3 +3216,5 @@ fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
     assert!(app.close());
     drop(proxy);
 }
+
+include!("ja1_hooks_tests.rs");

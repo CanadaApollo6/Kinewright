@@ -1,0 +1,543 @@
+[
+  {
+    "name": "h1-registry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h1_registered_cut_ack_and_reopen",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H1_DURABLE_CUT",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery.rs",
+        "admit!(crate::orchestration_commit::RegisteredRunIndex);",
+        "admit!(crate::studio_records::RunIndex);"
+      ]
+    ]
+  },
+  {
+    "name": "h1-before-ack",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h1_registered_cut_ack_and_reopen",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H1_DURABLE_CUT",
+    "changes": [
+      [
+        "crates/kinewright-project/src/orchestration_store.rs",
+        "    let result = owner.metadata_command(&metadata, MetadataScope::Orchestration, &update)?;",
+        "    if true { return Ok(expected); }\n    let result = owner.metadata_command(&metadata, MetadataScope::Orchestration, &update)?;"
+      ]
+    ]
+  },
+  {
+    "name": "h1-batch-atomic",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h1_run_and_feedback_publish_atomically_and_reopen",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H1_ATOMIC_ACK",
+    "changes": [
+      [
+        "crates/kinewright-project/src/orchestration_store.rs",
+        "            submitted.consumed_by = Some(legacy_run);",
+        "            // mutation: omit feedback consumption"
+      ]
+    ]
+  },
+  {
+    "name": "h1-original-only",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h1_unknown_publication_retries_only_original_envelope",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H1_UNKNOWN_ORIGINAL_ONLY",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "            if !matches!(pending, PendingPublication::Wire(original, actor) if &**original == request && *actor == self.attachments[index].id)",
+        "            if false && !matches!(pending, PendingPublication::Wire(original, actor) if &**original == request && *actor == self.attachments[index].id)"
+      ]
+    ]
+  },
+  {
+    "name": "h3-viewer-start",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_viewer_start_refused",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_VIEWER_START",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "            AttachmentRole::Viewer => {\n                return Err(HostRefusal::new(\n                    \"role_refused\",\n                    \"Viewer cannot start or control runs\",\n                )\n                .into());\n            }\n",
+        "            AttachmentRole::Viewer => {},\n"
+      ]
+    ]
+  },
+  {
+    "name": "h3-viewer-control",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_viewer_control_refused",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_VIEWER_CONTROL",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "            AttachmentRole::Viewer => {\n                return Err(HostRefusal::new(\n                    \"role_refused\",\n                    \"Viewer cannot start or control runs\",\n                )\n                .into());\n            }\n",
+        "            AttachmentRole::Viewer => {},\n"
+      ]
+    ]
+  },
+  {
+    "name": "h3-issuer-refresh-subject",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_metadata_subject_refused_before_publish_and_replay",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_METADATA_SUBJECT",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "            self.require_metadata_issuer(index, &issuer)?;",
+        "            // mutation: refresh another subject issuer"
+      ]
+    ]
+  },
+  {
+    "name": "h3-dispatch-subject",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_metadata_subject_refused_before_publish_and_replay",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_METADATA_REPLAY_SUBJECT",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "        self.require_metadata_issuer(index, &request.envelope.id.issuer)?;",
+        "        // mutation: spend another subject issuer"
+      ]
+    ]
+  },
+  {
+    "name": "h3-metadata-subject",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_metadata_subject_ordinary_command_refused_before_replay",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H3_METADATA_ORDINARY_SUBJECT",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                self.require_metadata_issuer(index, &envelope.id.issuer)?;",
+        "                // mutation: replay or publish another subject metadata"
+      ]
+    ]
+  },
+  {
+    "name": "h3-producer-endpoint",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_producer_scope_refused_and_live_control",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_PRODUCER_SCOPE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "            || request.envelope.authority.endpoint != scope.endpoint\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h3-producer-expiry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_producer_expiry_refused_before_replay",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_PRODUCER_EXPIRY",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "if scope.expired() || scope.owner_epoch != self.owner()?.store()?.owner_epoch() ",
+        "if false && (scope.expired() || scope.owner_epoch != self.owner()?.store()?.owner_epoch())\n        "
+      ]
+    ]
+  },
+  {
+    "name": "h3-producer-start",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_producer_cannot_start_or_mint_scope",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_PRODUCER_START",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "            AttachmentRole::Producer => self.authorize_producer(index, request)?,",
+        "            AttachmentRole::Producer => {},"
+      ]
+    ]
+  },
+  {
+    "name": "h3-producer-narrowing",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_producer_cannot_start_or_mint_scope",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H3_PRODUCER_NARROWING",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "                    && scope_contains(&scope.scope, &assignment.brief.scope)\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h3-viewer-approval",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_viewer_approval_refused",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_VIEWER_APPROVAL",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "if attachment.role != AttachmentRole::Editor || !attachment.person_facing ",
+        "if false && (attachment.role != AttachmentRole::Editor || !attachment.person_facing)\n        "
+      ]
+    ]
+  },
+  {
+    "name": "h3-producer-approval",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_producer_approval_refused",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_PRODUCER_APPROVAL",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "if attachment.role != AttachmentRole::Editor || !attachment.person_facing ",
+        "if false && (attachment.role != AttachmentRole::Editor || !attachment.person_facing)\n        "
+      ]
+    ]
+  },
+  {
+    "name": "h3-person-holder",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_editor_role_alone_is_not_consent",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_EDITOR_NOT_HOLDER",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "if attachment.role != AttachmentRole::Editor || !attachment.person_facing {",
+        "if attachment.role != AttachmentRole::Editor {"
+      ]
+    ]
+  },
+  {
+    "name": "h3-fresh-turn",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_live_attention_refused_after_turn_changes",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_FRESH_LIVE_REQUEST",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "            || !projection.tasks.iter().any(|task| {\n                task.id.0.as_str() == binding.task\n                    && !task.progress.expired\n                    && task.progress.turn.as_ref().is_some_and(|turn| {\n                        crate::orchestration::requests::live_turn(&projection, turn).is_ok()\n                            && turn.session.as_str() == binding.session\n                            && turn.ordinal == binding.turn\n                            && turn.owner_epoch == binding.owner_epoch\n                            && turn.attempt.0.as_str() == binding.attempt\n                    })\n            })",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h3-attention-record",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_attention_record_requires_actual_host_request",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_RECORDED_ATTENTION_LIVE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "                    && pending.reference(run) == attention.request_ref\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h3-response-kind",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_secret_response_requires_matching_live_kind",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_SECRET_KIND",
+    "changes": [
+      [
+        "crates/kinewright-core/src/agent.rs",
+        "        if matches!(self, Self::ApprovalDecision(_)) && request.kind != RuntimeRequestKind::Approval\n            || matches!(self, Self::SecretReference(_))\n                && request.kind != RuntimeRequestKind::Secret",
+        "        if false && (matches!(self, Self::ApprovalDecision(_)) && request.kind != RuntimeRequestKind::Approval\n            || matches!(self, Self::SecretReference(_))\n                && request.kind != RuntimeRequestKind::Secret)"
+      ]
+    ]
+  },
+  {
+    "name": "h3-consent-once",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_unknown_callback_never_reopens_consumed_consent",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_CONSENT_ONCE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "        if state\n            .consumed\n            .get(&(self.run.clone(), request.id().to_owned()))\n            == Some(request.binding())\n        {\n            return RuntimeResponse::Pending;\n        }\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h3-revoked-holder",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_queued_consent_is_revoked_with_its_holder",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_REVOKED_HOLDER",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/session.rs",
+        "                if !control.authority_live() {",
+        "                if false && !control.authority_live() {"
+      ]
+    ]
+  },
+  {
+    "name": "h3-recovery-metadata",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_recovery_freeze_blocks_metadata_and_hook_writes",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H3_RECOVERY_METADATA",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "            && (!manual::connector_command(&command)\n                || matches!(command, HostCommand::Metadata { .. }))",
+        "            && !manual::connector_command(&command)"
+      ]
+    ]
+  },
+  {
+    "name": "h3-recovery-hook",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_recovery_freeze_blocks_metadata_and_hook_writes",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H3_RECOVERY_HOOK",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "                if self.recovering || self.switch_frozen {",
+        "                if false && (self.recovering || self.switch_frozen) {"
+      ]
+    ]
+  },
+  {
+    "name": "h3-pause-endpoint",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_controls_pause_and_revoke_task_endpoints",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H3_PAUSE_TASK_ENDPOINT",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/orchestration/tasks.rs",
+        "            || self.0.paused.load(Ordering::SeqCst)\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h3-stop-endpoint",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_controls_pause_and_revoke_task_endpoints",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H3_STOP_TASK_ENDPOINT",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/orchestration.rs",
+        "                {\n                    endpoint.revoke();\n                }\n                endpoint.set_paused(",
+        "                {\n                    // mutation: leave stopped endpoint live\n                }\n                endpoint.set_paused("
+      ]
+    ]
+  },
+  {
+    "name": "h4-ready",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_refuses_without_independently_retained_inputs",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_READY_REFUSED",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/continuation.rs",
+        "        if retained_runs.is_empty() {\n            return Err(\n                HostRefusal::new(\"continuation_refused\", \"no independently retained run\").into(),\n            );\n        }\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h4-role",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_non_editor_detach_refused",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_DEPARTING_EDITOR",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/continuation.rs",
+        "        if self.attachments[index].role != AttachmentRole::Editor\n            || self.recovering",
+        "        if self.recovering"
+      ]
+    ]
+  },
+  {
+    "name": "h4-producer-ready",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_expired_retained_producer_refuses_detach",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_PRODUCER_READINESS",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/continuation.rs",
+        ".is_none_or(ProducerScope::expired)",
+        ".is_none_or(|_scope| false)"
+      ]
+    ]
+  },
+  {
+    "name": "h4-shutdown",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_detach_preserves_run_producer_and_reattaches",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_SHUTDOWN_LIVE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "                if self.hooks.runs.values().any(|run| run.continuable) {",
+        "                if false && self.hooks.runs.values().any(|run| run.continuable) {"
+      ]
+    ]
+  },
+  {
+    "name": "h4-gui-revoked",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_detach_preserves_run_producer_and_reattaches",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_GUI_REVOKED",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            super::HostCommand::Detach | super::HostCommand::DetachForContinuation",
+        "            super::HostCommand::Detach"
+      ]
+    ]
+  },
+  {
+    "name": "h4-private-issuer",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_private_issuer_refuses_viewer_and_role_spoofing",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_ISSUER_PRIVATE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/issuer.rs",
+        "if !state\n        .issuer\n        .as_ref()\n        .is_some_and(|issuer| issuer.accepts(credential))\n    ",
+        "if false && (!state\n        .issuer\n        .as_ref()\n        .is_some_and(|issuer| issuer.accepts(credential)))\n        "
+      ]
+    ]
+  },
+  {
+    "name": "h4-fixed-role",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_private_issuer_refuses_viewer_and_role_spoofing",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_ISSUER_FIXED_ROLE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/issuer.rs",
+        "#[serde(deny_unknown_fields)]\nstruct Reattach {}",
+        "struct Reattach {}"
+      ]
+    ]
+  },
+  {
+    "name": "h4-one-editor",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_detach_preserves_run_producer_and_reattaches",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_tests.rs",
+    "red_text": "H4_ONE_EDITOR",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "        if role == super::AttachmentRole::Editor\n",
+        "        if false && role == super::AttachmentRole::Editor\n"
+      ]
+    ]
+  },
+  {
+    "name": "h4-app-close",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "witness": "ja1_attachment::tests::h4_app_close_waits_for_detach_and_keeps_host_run",
+    "witness_source": "crates/kinewright-app/src/ja1_hooks_tests.rs",
+    "red_text": "H4_APP_WAIT_FOR_DETACH",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "            if !host.close() {",
+        "            if false && !host.close() {"
+      ]
+    ],
+    "target": "kinewright-app"
+  },
+  {
+    "name": "h3-delegate-consent",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_delegate_cannot_forge_live_consent",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_attention_tests.rs",
+    "red_text": "H3_DELEGATE_CONSENT",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/attention.rs",
+        "                .filter(|control| control.request().kind() == RuntimeRequestKind::Question)",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "h4-certified-input",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h4_damaged_input_refuses_before_source_release",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_store_tests.rs",
+    "red_text": "H4_CERTIFIED_INPUT_READY",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/continuation.rs",
+        "            run.inputs.ready()?;",
+        "            // mutation: release GUI without checking retained input readiness"
+      ]
+    ]
+  }
+]

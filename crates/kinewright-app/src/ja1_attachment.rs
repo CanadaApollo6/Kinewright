@@ -981,11 +981,6 @@ impl Ja1Attachment {
     }
 
     pub fn close(&mut self) -> bool {
-        self.originating_context
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.retention_lost = true;
-        self.frozen = true;
-        let _ = self.owner.host_lost();
         if let Some(host) = &mut self.host {
             if host.recovery_running() {
                 let _ = host.poll(&mut self.owner);
@@ -994,8 +989,16 @@ impl Ja1Attachment {
                     return false;
                 }
             }
-            host.close();
+            if !host.close() {
+                self.message = "The host is checking continuation readiness. This attachment and its source stay here until detach is confirmed.".into();
+                return false;
+            }
         }
+        self.originating_context
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.retention_lost = true;
+        self.frozen = true;
+        let _ = self.owner.host_lost();
         match self.owner.close_originating_source() {
             Ok(true) => true,
             Ok(false) => {
@@ -1009,6 +1012,37 @@ impl Ja1Attachment {
                 false
             }
         }
+    }
+    pub(crate) fn continuation_pending(&self) -> bool {
+        self.host
+            .as_ref()
+            .is_some_and(host::HostAttachment::continuation_pending)
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 wires these controls into Studio; the hook uses the existing completed-work poll"
+    )]
+    pub(crate) fn request_orchestration(
+        &mut self,
+        command: kinewright_agent::writer_host::HostCommand,
+    ) -> Result<(), BundleError> {
+        self.host
+            .as_mut()
+            .ok_or(BundleError::HistoryChanged)?
+            .request_hook(command)
+    }
+    #[allow(dead_code, reason = "C6 consumes run, issuer and attention replies")]
+    pub(crate) fn take_orchestration_reply(
+        &mut self,
+    ) -> Option<kinewright_agent::writer_host::HostReply> {
+        self.host.as_mut()?.take_hook_reply()
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 owns the continuation UI and retains the issuer before the project view is dropped"
+    )]
+    pub(crate) fn continuation_issuer(&self) -> Option<kinewright_agent::writer_host::HostIssuer> {
+        self.host.as_ref()?.continuation_issuer()
     }
 
     #[allow(clippy::too_many_lines)]

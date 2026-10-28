@@ -98,8 +98,8 @@ pub use server::{
 };
 pub use session::{
     BudgetKind, CANCELLED_BY_OWNER, ConfirmationPolicy, INVESTIGATOR_CONFIRMATION_REFUSAL,
-    PromptPoll, QuietObserver, SessionCost, SessionCounters, SessionFlow, SessionLimits,
-    SessionObserver, SessionStop, SharedCounters, StopReason, StudioPromptQueue,
+    LiveResponseOutcome, PromptPoll, QuietObserver, SessionCost, SessionCounters, SessionFlow,
+    SessionLimits, SessionObserver, SessionStop, SharedCounters, StopReason, StudioPromptQueue,
     StudioPromptSender, StudioResponseQueue, StudioResponseSender, pump_session,
     studio_prompt_queue, studio_response_queue,
 };

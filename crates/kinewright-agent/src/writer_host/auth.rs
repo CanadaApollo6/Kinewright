@@ -77,6 +77,9 @@ impl ReadPin {
 }
 
 pub(super) struct Attachment {
+    pub alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub producer_scope: Option<super::orchestration::ProducerScope>,
+    pub person_facing: bool,
     pub id: AttachmentId,
     pub auth: HostAuth,
     pub incarnation: String,
@@ -91,6 +94,12 @@ pub(super) struct Attachment {
     pub bootstrap: bool,
     pub read_pins: Vec<ReadPin>,
 }
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        self.alive
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 impl Attachment {
     #[expect(
@@ -100,6 +109,10 @@ impl Attachment {
     pub fn permits(&self, command: &super::HostCommand) -> bool {
         use super::{AttachmentRole, HostCommand};
         match command {
+            HostCommand::IssueMetadataIssuer { .. } | HostCommand::ObserveRun { .. } => true,
+            HostCommand::DispatchOrchestration { .. }
+            | HostCommand::ResolveAttention { .. }
+            | HostCommand::DetachForContinuation => true,
             HostCommand::Metadata { update, .. } => match &update.change {
                 kinewright_project::studio_records::MetadataChange::PublishSnapshot(_) => {
                     self.role == AttachmentRole::Producer
@@ -109,7 +122,10 @@ impl Attachment {
                 | kinewright_project::studio_records::MetadataChange::SubmitBatch { .. } => {
                     matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
                 }
-                kinewright_project::studio_records::MetadataChange::Orchestration { .. } => false,
+                kinewright_project::studio_records::MetadataChange::Orchestration { .. }
+                | kinewright_project::studio_records::MetadataChange::OrchestrationUpdate {
+                    ..
+                } => false,
             },
             HostCommand::ListVersions
             | HostCommand::ReadSnapshot { .. }
@@ -187,6 +203,9 @@ impl super::HostCommandOwner {
         let id = AttachmentId(self.next_attachment_id);
         self.next_attachment_id = next;
         self.attachments.push(Attachment {
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            producer_scope: None,
+            person_facing: bootstrap && matches!(self.config.origin, super::HostOrigin::Gui { .. }),
             id,
             auth,
             incarnation: self.instance.clone(),
@@ -328,6 +347,10 @@ impl super::HostCommandOwner {
                     }
                 }
             }
+            if let super::HostCommand::Metadata { envelope, .. } = &request.command {
+                self.require_metadata_issuer(index, &envelope.id.issuer)?;
+            }
+            self.check_producer_attachment(index, &request.command)?;
             let roots = request.roots.canonicalize()?;
             let mut command_roots = grant.roots.clone();
             if grant.bootstrap
@@ -413,10 +436,15 @@ impl super::HostCommandOwner {
                 };
             }
         };
-        let detach = matches!(request.command, super::HostCommand::Detach);
+        let detach = matches!(
+            request.command,
+            super::HostCommand::Detach | super::HostCommand::DetachForContinuation
+        );
         let admit = matches!(request.command, super::HostCommand::AdmitDestination { .. });
         let operation = request.operation;
-        let reply = if detach {
+        let reply = if super::orchestration::is_hook(&request.command) {
+            self.execute_hook(index, request.command, &roots)
+        } else if detach {
             super::HostReply::default()
         } else {
             self.execute_operation(request.command, roots, request.editor.as_deref(), operation)
@@ -470,6 +498,7 @@ impl super::HostCommandOwner {
                             reply.saved.is_some() || reply.switch_result.is_some()
                         });
                 let removed = self.attachments.remove(index);
+                self.revoke_task_endpoints(removed.producer_scope.as_ref());
                 if let Some(owner) = &mut self.foreground_owner
                     && owner.attachment == Some(removed.id)
                 {

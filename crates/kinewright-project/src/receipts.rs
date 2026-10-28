@@ -271,6 +271,8 @@ pub struct IssuerState {
     pub next_sequence: u64,
     pub reconciled_high_water: u64,
     pub retired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_subject: Option<String>,
 }
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -431,6 +433,13 @@ impl BundleRecord for BTreeMap<IssuerId, IssuerState> {
         }
         for (id, state) in self {
             id.validate()?;
+            if state
+                .metadata_subject
+                .as_ref()
+                .is_some_and(|subject| subject.is_empty() || subject.len() > 512)
+            {
+                return Err(BundleError::Capacity("metadata issuer subject"));
+            }
             if state.next_sequence == 0 || state.reconciled_high_water >= state.next_sequence {
                 return Err(BundleError::Corrupt("issuer sequence/high water".into()));
             }
@@ -479,6 +488,7 @@ impl ProjectBundle {
                 next_sequence: first_sequence,
                 reconciled_high_water: first_sequence - 1,
                 retired: false,
+                metadata_subject: None,
             },
         );
         let result = if let Some(cut) = cut {

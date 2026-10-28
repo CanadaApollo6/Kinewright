@@ -390,7 +390,7 @@ pub(super) fn validate(
                 control!(crate::studio_records::FeedbackBatch);
             }
             RecordKind::RunIndex => {
-                control!(crate::studio_records::RunIndex);
+                control!(crate::orchestration_commit::RegisteredRunIndex);
             }
             RecordKind::RunSnapshot => {
                 control!(crate::studio_records::RunSnapshotRecord);

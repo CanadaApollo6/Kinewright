@@ -1,0 +1,36 @@
+{
+  "name": "h3-response-kind",
+  "witness": "writer_host::hooks_tests::tests::h3_secret_response_requires_matching_live_kind",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-core/src/agent.rs",
+      "        if matches!(self, Self::ApprovalDecision(_)) && request.kind != RuntimeRequestKind::Approval\n            || matches!(self, Self::SecretReference(_))\n                && request.kind != RuntimeRequestKind::Secret",
+      "        if false && (matches!(self, Self::ApprovalDecision(_)) && request.kind != RuntimeRequestKind::Approval\n            || matches!(self, Self::SecretReference(_))\n                && request.kind != RuntimeRequestKind::Secret)"
+    ]
+  ],
+  "expected_red": {
+    "text": "H3_SECRET_KIND",
+    "location": null
+  },
+  "baseline_manifest_sha256": "04bfeae939c2030791f7291fb3b258ce9623b5d4a57e8a360ba6e6887243d7cc",
+  "witness_sha256": "68bbc2cfc05242c3f421c455052bab97339bdf820498d2a2497ef7046645f234",
+  "source_sha256": {
+    "crates/kinewright-core/src/agent.rs": "84e1417c3403eed0aaf4cb7319dba07139a0f42727a04f62c6420339ae85ffa4"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-core/src/agent.rs": "ecb37809a514a0609dfee780fc00ddda7d2a79f39569753c3b85dc2d4f9b8355"
+  },
+  "red_exit": 101,
+  "command": "set -e\npython3() { command nice -n 19 python3 -I \"$@\"; }\nexport -f python3\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-hooks/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::hooks_tests::tests::h3_secret_response_requires_matching_live_kind -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "3117ac7bb77359095626bbe9de1371975d74d6ce92e92e03eed4a9c51e7ca542",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 790 filtered out; finished in 1.38s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "91c1088853a7fe72de3d845b6b465a29b3834ec50c209d304ee6f616468ec35e",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 790 filtered out; finished in 1.50s"
+  ],
+  "restored": true
+}

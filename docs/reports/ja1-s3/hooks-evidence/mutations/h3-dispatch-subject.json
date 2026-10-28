@@ -1,0 +1,36 @@
+{
+  "name": "h3-dispatch-subject",
+  "witness": "writer_host::hooks_tests::tests::h3_metadata_subject_refused_before_publish_and_replay",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/orchestration.rs",
+      "        self.require_metadata_issuer(index, &request.envelope.id.issuer)?;",
+      "        // mutation: spend another subject issuer"
+    ]
+  ],
+  "expected_red": {
+    "text": "H3_METADATA_REPLAY_SUBJECT",
+    "location": null
+  },
+  "baseline_manifest_sha256": "04bfeae939c2030791f7291fb3b258ce9623b5d4a57e8a360ba6e6887243d7cc",
+  "witness_sha256": "b9e071e00dd7ba31345f77be5932edd59fcdbff39961e07b4990c0f01a95f2ad",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/orchestration.rs": "b946262d0d01f956fa84c6a99b83f79a4f019d8d25979feedfdd278adc691a9d"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/orchestration.rs": "f89287ee8277f74d7f2727ae5457c20dab6b8702a8a026916db98ca66cd4c225"
+  },
+  "red_exit": 101,
+  "command": "set -e\npython3() { command nice -n 19 python3 -I \"$@\"; }\nexport -f python3\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-hooks/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::hooks_tests::tests::h3_metadata_subject_refused_before_publish_and_replay -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "006a91ebbaa89b2dcae9d3febb3ff875dfa7ba9249aefbaa8503e4638d170032",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 790 filtered out; finished in 0.74s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "dabeb1800e1d8a97a6bb3d68ccf8cd820de6dfacb537c4eda98994758156b22d",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 790 filtered out; finished in 0.95s"
+  ],
+  "restored": true
+}

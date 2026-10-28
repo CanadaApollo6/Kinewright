@@ -583,12 +583,18 @@ pub struct RunRecord {
 pub struct RunIndex {
     pub version: u32,
     pub runs: BTreeMap<RunId, RunRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub orchestration: BTreeMap<
+        crate::orchestration_records::RunId,
+        Vec<crate::orchestration_commit::PublishedRunCut>,
+    >,
 }
 impl Default for RunIndex {
     fn default() -> Self {
         Self {
             version: 1,
             runs: BTreeMap::new(),
+            orchestration: BTreeMap::new(),
         }
     }
 }
@@ -759,6 +765,11 @@ pub enum MetadataChange {
     Orchestration {
         runs: Vec<RunRecord>,
         consume_batch: Option<(FeedbackBatchId, RunId)>,
+    },
+    #[serde(skip_deserializing)]
+    OrchestrationUpdate {
+        transition: Box<crate::orchestration_commit::ValidatedRunUpdate>,
+        consume_batch: Option<FeedbackBatchId>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

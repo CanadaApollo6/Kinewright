@@ -1142,6 +1142,14 @@ mod tests {
             manifest_ref: sealed.reference.clone(),
             entry: first,
         };
+        let damaged_reference = OwnedInputRef {
+            manifest_ref: sealed.reference.clone(),
+            entry: second.clone(),
+        };
+        let certified_before_damage = owner
+            .store()
+            .certify_media_input(&damaged_reference)
+            .unwrap();
         let root = owner.store().resolved_root().unwrap();
         let assets = root.with_file_name(format!(
             "{}.kinewright-assets",
@@ -1161,24 +1169,26 @@ mod tests {
             .read_input_manifest(&sealed.reference)
             .expect("C0_TYPED_MANIFEST_READ_DOES_NOT_PROBE");
         assert_eq!(typed.entries.len(), 2);
+        // C2's public certificate admission verifies the full digest with cursor scratch.
+        // Only structural manifest access is required to work with the decoder budget full.
+        drop(all_decoder_bytes);
         let source = owner
             .store()
             .certify_media_input(&reference)
-            .expect("C0_CERTIFICATE_USES_COMPLETE_IDENTITY_MEMO");
-        drop(all_decoder_bytes);
+            .expect("C2_SELECTED_CERTIFICATE_AFTER_VERIFICATION_SCRATCH_RELEASE");
         let mut decoder = source
             .open_audio(Arc::new(AtomicBool::new(false)))
             .expect("C0_UNRELATED_DAMAGE_DOES_NOT_BLOCK_SELECTED_CERTIFICATE");
         assert!(decoder.next_frame().unwrap().is_some());
-        let damaged = owner
-            .store()
-            .certify_media_input(&OwnedInputRef {
-                manifest_ref: sealed.reference.clone(),
-                entry: second,
-            })
-            .unwrap();
         assert!(
-            damaged
+            matches!(
+                owner.store().certify_media_input(&damaged_reference),
+                Err(BundleError::Corrupt(reason)) if reason.contains("digest differs")
+            ),
+            "C2_DAMAGED_CERTIFICATE_REFUSED_AT_ADMISSION"
+        );
+        assert!(
+            certified_before_damage
                 .open_audio(Arc::new(AtomicBool::new(false)))
                 .is_err(),
             "C0_MEMO_DOES_NOT_BYPASS_ACTUAL_USE_CHUNK_CHECKS"

@@ -525,6 +525,26 @@ impl McpServer {
         project: &str,
         roots: crate::writer_host::SessionRoots,
     ) -> Result<Self, crate::writer_host::HostError> {
+        Self::start_host_endpoint(core, playback, analysis, project, roots, None)
+    }
+    pub(crate) fn start_task_isolated(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        project: &str,
+        roots: crate::writer_host::SessionRoots,
+        endpoint: crate::orchestration::tasks::TaskEndpoint,
+    ) -> Result<Self, crate::writer_host::HostError> {
+        Self::start_host_endpoint(core, playback, analysis, project, roots, Some(endpoint))
+    }
+    fn start_host_endpoint(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        project: &str,
+        roots: crate::writer_host::SessionRoots,
+        task: Option<crate::orchestration::tasks::TaskEndpoint>,
+    ) -> Result<Self, crate::writer_host::HostError> {
         use crate::writer_host::{HOST_PROTOCOL, HostAuth, HostBootstrap, HostEndpoint};
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
         let address = listener.local_addr()?;
@@ -553,6 +573,9 @@ impl McpServer {
             Arc::clone(&incidents),
         );
         handler.host_scoped = true;
+        if let Some(endpoint) = task {
+            handler = handler.with_task_endpoint(endpoint);
+        }
         let tool_surface_metrics =
             ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools().map_err(|_| {
                 crate::writer_host::HostError::Protocol("MCP tool schema unavailable".into())

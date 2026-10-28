@@ -1,0 +1,528 @@
+{
+  "diagnosis": "Parent fixture shared a target directory and left stale Core metadata in one feature variant. Completed Core/Project targets used different, current Core metadata; only the uncompleted Agent/doc-test compilations selected the stale variant.",
+  "completed_targets_verified": [
+    {
+      "crate": "core",
+      "target": "kinewright_core-4104a126b1129ec2",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "au1_core-725c8d9c594fa3f6",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "au2_core-d5113eb972525d64",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "au3_core-1d92e509f8a8dccd",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "au4_core-0374469a099d3d75",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "au5_core-14ffe1ca0657b6d0",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "au6_core-df9ee49fca68036d",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc1_conformance-20d33d8c665c7b69",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc3_core-54cafd736ff8aad4",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc4_core-bb7052822eb182cd",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc5_core-162cde574bb764aa",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc5_core_proof-e3c15882d76f1c19",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc6_core-3f773af6fb59833d",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc7_core-049df5eb31cfc507",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "cc8_s1_kernel-a0a877d1ad03e863",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "contracts-961961dbd9ceaea1",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "ja_s1_history-38f90e06f87e3660",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "mo2_core-21b7aaff15e800a9",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "core",
+      "target": "stills_core-2d8fca58ea78f3b1",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        },
+        {
+          "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+          "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "kinewright_project-6f1e1e4bcc0f6af1",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s1_copy-cfdf4c98dd8f8cb3",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s1_receipts-8a9ea4d270db1f9a",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s1_storage-31468c3f9bf952d3",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_rescue-8f1e998c670b8f47",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_rescue_record-14ab41e0c24a6c7e",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_save-9e03d6b23dbecee3",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_save_cost-6d1b947eaec12de9",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_source_boundary-7c9558b91baf2f19",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_switch-6ef62c20c8d70a51",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s2_writer-14049114a5ad72a0",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s3_owned_inputs-2e4c5aa3937e95a0",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s3_read_only_inputs-c5943951a13c858b",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s3_store-32e953da68b99238",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s4_candidate-0be7d30543bc44ab",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    },
+    {
+      "crate": "project",
+      "target": "ja_s4_store-0f54617b05679017",
+      "core": [
+        {
+          "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+          "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+          "has_hooks": true
+        }
+      ]
+    }
+  ],
+  "core_variants": {
+    "11099388973271473846": {
+      "artifact": "target/debug/deps/libkinewright_core-c529e694ea32d524.rmeta",
+      "metadata_sha256": "0f7997c42e58bfa395a1775ab569da62b5039e124b5c0dd11f88dbdfa9101129",
+      "has_hooks": false
+    },
+    "3483296671959583312": {
+      "artifact": "target/debug/deps/libkinewright_core-0bf487149fb990f2.rmeta",
+      "metadata_sha256": "4c89d615bd8501666523f2c2efe8f66eab2badf951eda954d270b2c6ec367f06",
+      "has_hooks": false
+    },
+    "11803453312945715774": {
+      "artifact": "target/debug/deps/libkinewright_core-57e8325518da9d2a.rmeta",
+      "metadata_sha256": "1448145cb901171d9eefb7b33486a4f7fab6be93fb2d6cb18d41fbfbad346132",
+      "has_hooks": false
+    },
+    "3463729654641380628": {
+      "artifact": "target/debug/deps/libkinewright_core-089bf341efac9ffa.rmeta",
+      "metadata_sha256": "56e43d03555aacd29f593e17ff9166fef9be51e57c47ebb1161e6243a9b6d93f",
+      "has_hooks": true
+    },
+    "2163624918277031938": {
+      "artifact": "target/debug/deps/libkinewright_core-6fe5d6f9be65f6be.rmeta",
+      "metadata_sha256": "198f81c4b677aa1ad5be7795773cb9250dcec02d923c1b8595f42bb2e994eaac",
+      "has_hooks": true
+    },
+    "16270434639704578477": {
+      "artifact": "target/debug/deps/libkinewright_core-e85864a9543ed921.rmeta",
+      "metadata_sha256": "56faf6fdc276f15e0e1516f78a7b1ee7b708d8ece621378222da9dddcd79325e",
+      "has_hooks": true
+    },
+    "10709192625529522829": {
+      "artifact": "target/debug/deps/libkinewright_core-ae281d1495ecbac7.rmeta",
+      "metadata_sha256": "a97df816a029243920e6269b2dc3aa3f717d7243938051bfeaf22ce5d1bd331a",
+      "has_hooks": false
+    }
+  },
+  "source_manifest_sha256": "04bfeae939c2030791f7291fb3b258ce9623b5d4a57e8a360ba6e6887243d7cc",
+  "current_core_source_sha256": "84e1417c3403eed0aaf4cb7319dba07139a0f42727a04f62c6420339ae85ffa4",
+  "root_cause": "The stale Cargo binary dep-info referenced target-relative paths inside the parent-source fixture; touching current source did not invalidate those paths.",
+  "repair": "Moved the completed parent-source fixture to parent-source-sealed, making the stale dependency paths absent; future parent checks use an isolated parent-target directory.",
+  "failed_compilation_log": {
+    "file": "cache-stale-doc-tests.log.gz",
+    "sha256": "fe328d34b72e2d19d474d5c8090f80aa1062645931505b87e8baba58db693a82",
+    "classification": "setup failure; no test or mutation credit"
+  },
+  "repaired_core_metadata_sha256": "6b1b3ed0e646550703f1e7b935c3671754ecb3880b5a7a2485abd159243e5621",
+  "doc_tests_exit": 0
+}

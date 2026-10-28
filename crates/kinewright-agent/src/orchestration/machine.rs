@@ -218,6 +218,17 @@ pub fn prepare(
     envelope: &OrchestrationEnvelope,
     previous_segment: Option<super::bundle_records::ObjectRef>,
 ) -> Result<ValidatedRunUpdate, Refusal> {
+    prepare_with_attention(state, project, generation, envelope, previous_segment, None)
+}
+#[allow(clippy::too_many_lines, reason = "single envelope-to-cut transition")]
+pub(crate) fn prepare_with_attention(
+    state: Option<&RunProjection>,
+    project: &super::bundle_records::ProjectId,
+    generation: u64,
+    envelope: &OrchestrationEnvelope,
+    previous_segment: Option<super::bundle_records::ObjectRef>,
+    attention: Option<&super::requests::LiveAttentionAdmission>,
+) -> Result<ValidatedRunUpdate, Refusal> {
     envelope.validate()?;
     if let Some(state) = state {
         validate_projection(state)?;
@@ -327,7 +338,7 @@ pub fn prepare(
         }
         Transition::Lifecycle => {
             if !super::tasks::apply_lifecycle(&mut next, envelope)?
-                && !super::requests::apply(&mut next, envelope)?
+                && !super::requests::apply_authorized(&mut next, envelope, attention)?
                 && !super::mailbox::apply(&mut next, envelope)?
             {
                 return Err(Refusal::Unsupported);

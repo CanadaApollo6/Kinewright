@@ -765,6 +765,14 @@ impl ProjectSession {
             .ja1
             .as_mut()
             .is_none_or(crate::ja1_attachment::Ja1Attachment::close);
+        if !source_closed
+            && self
+                .ja1
+                .as_ref()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::continuation_pending)
+        {
+            return false;
+        }
         // Cloned before the investigator borrow: `incidents` now resolves
         // through the sidecar deref, which borrows the whole session.
         let incidents = std::sync::Arc::clone(&self.incidents);

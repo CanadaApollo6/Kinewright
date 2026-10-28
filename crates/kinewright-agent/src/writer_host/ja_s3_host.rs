@@ -226,11 +226,15 @@ fn refused(host: &WriterHost, client: &HostClient, command: HostCommand, marker:
     }
 }
 
-fn metadata(host: &WriterHost, change: MetadataChange) -> HostCommand {
+fn metadata(host: &WriterHost, client: &HostClient, change: MetadataChange) -> HostCommand {
     let owner = host.owner.upgrade().unwrap();
     let mut host = owner.lock().unwrap();
+    let index = host
+        .resolve_attachment(Some(&client.bootstrap.auth.bearer()))
+        .unwrap();
+    let subject = host.metadata_subject(index);
     let owner = host.owner_mut().unwrap();
-    let issuer = owner.issue_metadata_issuer().unwrap();
+    let issuer = owner.issue_metadata_issuer_for(&subject).unwrap();
     let envelope = owner
         .metadata_envelope(CommandId {
             issuer,
@@ -247,7 +251,7 @@ fn metadata(host: &WriterHost, change: MetadataChange) -> HostCommand {
     }
 }
 
-fn publish_command(host: &WriterHost) -> HostCommand {
+fn publish_command(host: &WriterHost, producer: &HostClient) -> HostCommand {
     let (reference, checkpoint) = host
         .owner
         .upgrade()
@@ -260,6 +264,7 @@ fn publish_command(host: &WriterHost) -> HostCommand {
         .unwrap();
     metadata(
         host,
+        producer,
         MetadataChange::PublishSnapshot(PublishSnapshot {
             version: VersionId::fresh().unwrap(),
             expected_head: checkpoint.head_id,
@@ -308,7 +313,7 @@ fn feedback_controls(
     producer: &HostClient,
     refs: &[ObjectRef],
 ) {
-    let reply = accepted(producer.request(publish_command(host)).unwrap());
+    let reply = accepted(producer.request(publish_command(host, producer)).unwrap());
     let ReceiptResult::Metadata {
         result: MetadataResult::Snapshot(key),
     } = reply.metadata.unwrap().result
@@ -317,7 +322,7 @@ fn feedback_controls(
     };
     for route in 0..3 {
         let revision = feedback_revision(key.clone(), refs);
-        let command = metadata(host, MetadataChange::SaveFeedback(revision.clone()));
+        let command = metadata(host, viewer, MetadataChange::SaveFeedback(revision.clone()));
         let reply = accepted(match route {
             0 => direct(host, viewer, command),
             1 => viewer.request(command).unwrap(),
@@ -448,7 +453,7 @@ fn viewer_attempts(
     for (command, marker) in &commands {
         refused(host, viewer, command.clone(), marker);
     }
-    let publish = publish_command(host);
+    let publish = publish_command(host, producer);
     refused(host, viewer, publish.clone(), "C1_SNAPSHOT_ROLE");
     let original = accepted(producer.request(publish.clone()).unwrap());
     let replay = accepted(mcp(producer, publish.clone()).unwrap());
@@ -503,7 +508,7 @@ fn s3_viewer_capabilities() {
         "C1_PRODUCER_MANUAL_ROLE",
     );
 
-    let published = accepted(producer.request(publish_command(&host)).unwrap());
+    let published = accepted(producer.request(publish_command(&host, &producer)).unwrap());
     let ReceiptResult::Metadata {
         result: MetadataResult::Snapshot(key),
     } = published.metadata.as_ref().unwrap().result.clone()
@@ -534,7 +539,11 @@ fn s3_viewer_capabilities() {
     let saved = accepted(
         mcp(
             &viewer,
-            metadata(&host, MetadataChange::SaveFeedback(revision.clone())),
+            metadata(
+                &host,
+                &viewer,
+                MetadataChange::SaveFeedback(revision.clone()),
+            ),
         )
         .unwrap(),
     );
@@ -555,6 +564,7 @@ fn s3_viewer_capabilities() {
     let batch_id = FeedbackBatchId::fresh().unwrap();
     let mut submit = metadata(
         &host,
+        &viewer,
         MetadataChange::SubmitBatch {
             batch: FeedbackBatch {
                 batch_id: batch_id.clone(),
@@ -624,7 +634,7 @@ fn s3_viewer_capabilities() {
     for (command, marker) in released_commands {
         refused(&host, &viewer, command, marker);
     }
-    recovery_metadata_refused(&host, &producer, &publish_command(&host));
+    recovery_metadata_refused(&host, &producer, &publish_command(&host, &producer));
     let replay = published.metadata.as_ref().unwrap();
     assert!(matches!(replay.result, ReceiptResult::Metadata { .. }));
     accepted(
@@ -818,7 +828,7 @@ fn s3_viewer_snapshot_replay() {
             host.roots.clone(),
         )
         .unwrap();
-    let command = publish_command(&host);
+    let command = publish_command(&host, &producer);
     let original = accepted(producer.request(command.clone()).unwrap());
     let repeated = accepted(mcp(&producer, command.clone()).unwrap());
     assert_eq!(original.metadata, repeated.metadata);
@@ -2254,7 +2264,7 @@ fn metadata_feedback_reference(
     let reply = accepted(direct(
         host,
         viewer,
-        metadata(host, MetadataChange::SaveFeedback(revision)),
+        metadata(host, viewer, MetadataChange::SaveFeedback(revision)),
     ));
     let ReceiptResult::Metadata {
         result: MetadataResult::Feedback(reference),
@@ -2278,7 +2288,7 @@ fn s3_followup_repeated_reads_dedupe_reference_pins_at_capacity() {
             host.roots.clone(),
         )
         .unwrap();
-    let published = accepted(direct(&host, &producer, publish_command(&host)));
+    let published = accepted(direct(&host, &producer, publish_command(&host, &producer)));
     let command_id = published.metadata.as_ref().unwrap().id.clone();
     let ReceiptResult::Metadata {
         result: MetadataResult::Snapshot(key),
@@ -2291,6 +2301,7 @@ fn s3_followup_repeated_reads_dedupe_reference_pins_at_capacity() {
     let batch = FeedbackBatchId::fresh().unwrap();
     let mut submit = metadata(
         &host,
+        &viewer,
         MetadataChange::SubmitBatch {
             batch: FeedbackBatch {
                 batch_id: batch.clone(),
@@ -2428,7 +2439,7 @@ fn s3_metadata_write_refused_during_recovery() {
             host.roots.clone(),
         )
         .unwrap();
-    let command = publish_command(&host);
+    let command = publish_command(&host, &producer);
     host.owner.upgrade().unwrap().lock().unwrap().recovering = true;
     recovery_metadata_refused(&host, &producer, &command);
     accepted(producer.request(HostCommand::ReadHistory).unwrap());

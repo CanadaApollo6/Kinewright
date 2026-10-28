@@ -721,6 +721,7 @@ pub(super) mod linux {
             serde_json::to_writer(
                 &mut stdin,
                 &kinewright_agent::writer_host::HostLaunch {
+                    issuer: None,
                     config: configuration.clone(),
                     auth: auth.clone(),
                 },

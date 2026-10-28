@@ -1,0 +1,20 @@
+{
+  "head": "ed23d49aa6e7d2b1dadc3aff6676ce48d37ef74e",
+  "command": "cargo test -p kinewright-app --bin kinewright-app -- --test-threads=1 --nocapture app::in1_tests::c0_studio_owned app::in2b_tests",
+  "exit": 101,
+  "summaries": [
+    "test result: FAILED. 42 passed; 10 failed; 0 ignored; 0 measured; 850 filtered out; finished in 37.16s"
+  ],
+  "failures": [
+    "app::in1_tests::c0_studio_owned::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+    "app::in1_tests::c0_studio_owned::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+    "app::in2b_tests::f1_save_as_occupied_preserve_and_replace_pairs",
+    "app::in2b_tests::f1_second_save_pairs_and_reopen_finds_no_bak",
+    "app::in2b_tests::in2b_failed_save_restores_the_close_flush_baseline",
+    "app::in2b_tests::in2b_opening_an_already_open_path_focuses_it",
+    "app::in2b_tests::in2b_recovery_seeds_saved_digest_from_the_file_on_disk",
+    "app::in2b_tests::in2b_recovery_without_a_sidecar_seeds_from_the_disk_file",
+    "app::in2b_tests::in2b_refuse_suspension_blocks_sidecar_writes_not_project_save",
+    "app::in2b_tests::in2b_restore_does_not_clear_a_refuse_suspension"
+  ]
+}

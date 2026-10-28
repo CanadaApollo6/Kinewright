@@ -765,6 +765,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
             private_pipe,
             "{}",
             serde_json::to_string(&HostLaunch {
+                issuer: None,
                 config: configuration,
                 auth: auth.clone()
             })

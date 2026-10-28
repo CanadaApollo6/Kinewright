@@ -40,6 +40,7 @@ struct Ingress {
     gate: Mutex<()>,
     closed: AtomicBool,
     revoked: AtomicBool,
+    paused: AtomicBool,
     authority: RuntimeTaskAuthority,
     actor: kinewright_core::ActorIdentity,
     policy: TaskPolicy,
@@ -59,6 +60,7 @@ impl TaskEndpoint {
             gate: Mutex::new(()),
             closed: AtomicBool::new(false),
             revoked: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             policy,
             authority,
             actor: core.actor_identity(),
@@ -76,11 +78,20 @@ impl TaskEndpoint {
     pub fn revoke(&self) {
         self.0.revoked.store(true, Ordering::SeqCst);
     }
+    pub(crate) fn set_paused(&self, paused: bool) {
+        self.0.paused.store(paused, Ordering::SeqCst);
+    }
+    pub(crate) fn matches_brief(&self, brief: &TaskBrief) -> bool {
+        self.0.policy.scope == brief.scope && self.0.policy.role == brief.role
+    }
     pub(crate) fn matches_core(&self, core: &Core) -> bool {
         self.0.actor == core.actor_identity()
     }
     pub(crate) fn check_live(&self) -> Result<(), String> {
-        if self.0.revoked.load(Ordering::SeqCst) || Instant::now() >= self.0.authority.expires_at {
+        if self.0.revoked.load(Ordering::SeqCst)
+            || self.0.paused.load(Ordering::SeqCst)
+            || Instant::now() >= self.0.authority.expires_at
+        {
             return Err("task_authority_expired".into());
         }
         Ok(())
