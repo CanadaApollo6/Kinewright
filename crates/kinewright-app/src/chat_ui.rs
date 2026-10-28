@@ -923,7 +923,7 @@ impl KinewrightApp {
         message: String,
     ) {
         // C8 foreground snapshots are Save operations. C9 supplies unsaved manual streaming.
-        if self.projects[project_index].is_dirty() {
+        if self.projects[project_index].edit_dirty() {
             self.status = "Save your current edit before starting this host agent session.".into();
             return;
         }

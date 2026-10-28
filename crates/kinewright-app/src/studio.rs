@@ -443,6 +443,8 @@ impl KinewrightApp {
     }
     #[allow(clippy::too_many_lines, reason = "one immediate-mode layout pass")]
     pub(crate) fn studio_layout(&mut self, ui: &mut egui::Ui) {
+        // Kept notes come back, and their unconfirmed commands retry, before any input.
+        self.feedback_frame();
         if !ui.ctx().egui_wants_keyboard_input() {
             for (index, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3]
                 .into_iter()
@@ -463,6 +465,13 @@ impl KinewrightApp {
                 self.focused_mut().studio.tab = Tab::Notes;
                 let id = egui::Id::new(("studio-composer-input", self.focused().id));
                 ui.ctx().memory_mut(|memory| memory.request_focus(id));
+            }
+            // New note on the picture shown now. Alt+N stays with the composer.
+            if ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::M))
+            {
+                let _ = self.new_feedback_note();
             }
         }
         egui::CentralPanel::default()

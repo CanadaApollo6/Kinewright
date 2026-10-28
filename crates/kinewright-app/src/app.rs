@@ -2210,7 +2210,13 @@ impl KinewrightApp {
         self.status = format!("Closed {name}");
     }
 
-    fn request_exit(&mut self, ctx: &egui::Context) {
+    /// Whether an exit waits for the person's choice about unsaved work.
+    #[cfg(test)]
+    pub(crate) fn exit_waits_for_choice(&self) -> bool {
+        matches!(self.pending_project_action, Some(ProjectAction::Exit(_)))
+    }
+
+    pub(crate) fn request_exit(&mut self, ctx: &egui::Context) {
         if self
             .projects
             .iter()

@@ -540,9 +540,16 @@ impl ProjectSession {
         analysis.request_beat_detection(asset);
     }
 
+    /// Whether closing now would leave unsaved work: an edit (see
+    /// [`Self::edit_dirty`]), or Studio notes the person typed or drew that are not
+    /// saved yet (S3 C3 fix 1).
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.edit_dirty() || self.studio.feedback.unsaved()
+    }
+
     /// Whether the project differs from the last save: the live document
     /// differs structurally, or the investigator mutes changed since the save.
-    pub(crate) fn is_dirty(&self) -> bool {
+    pub(crate) fn edit_dirty(&self) -> bool {
         if self.ja1_job.is_some() || self.ja1_activation.is_some() {
             return true;
         }
@@ -780,10 +787,19 @@ impl ProjectSession {
     }
 
     pub(crate) fn ja1_close_warning(&self) -> String {
-        self.ja1
+        let mut text = self
+            .ja1
             .as_ref()
             .map(crate::ja1_attachment::Ja1Attachment::close_text)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let notes = self.studio.feedback.close_text();
+        if !notes.is_empty() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&notes);
+        }
+        text
     }
     pub(crate) fn install_ja1_view(&mut self) {
         let Some(ja1) = &mut self.ja1 else {
@@ -809,6 +825,10 @@ impl ProjectSession {
     }
 
     pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
+        // S3 C3 fix 1: what the person typed or drew is kept before closing.
+        if self.studio.feedback.changed {
+            let _ = self.studio.feedback.persist();
+        }
         let source_closed = self
             .ja1
             .as_mut()

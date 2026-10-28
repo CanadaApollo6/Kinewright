@@ -785,6 +785,11 @@ impl ProjectBundle {
                 std::str::from_utf8(&text).map_err(|e| BundleError::Corrupt(e.to_string()))?;
                 let strokes = self.store.read_evidence(&revision.strokes_ref)?;
                 crate::receipts::validate_strokes(&strokes, self.store.limits().comment_points)?;
+                // The proof must exist and stay within the bound its admission enforces.
+                if revision.frame_proof_ref.byte_length > crate::studio_records::FRAME_PROOF_BYTES {
+                    return Err(BundleError::Capacity("frame proof bytes"));
+                }
+                self.store.read_evidence(&revision.frame_proof_ref)?;
                 if let Some(voice) = &revision.voice_ref
                     && feedback
                         .notes
@@ -1094,6 +1099,10 @@ impl crate::editing_session::Ja1EditingSession {
     }
     pub fn metadata_generation(&self) -> Result<u64, BundleError> {
         Ok(self.active_bundle()?.generation)
+    }
+    /// The branch manual edits are accepted on (S3 C3 fix 1).
+    pub fn manual_branch_id(&self) -> Result<crate::bundle_records::BranchId, BundleError> {
+        Ok(self.active_bundle()?.manual_branch_id().clone())
     }
     pub fn reconcile_metadata(&mut self) -> Result<(), BundleError> {
         self.active_bundle_mut()?.reconcile_metadata()

@@ -6,7 +6,7 @@ use eframe::egui::{self, Pos2, Rect, Vec2};
 use kinewright_core::{ClipId, Document, FrameTexture, HistorySnapshot, TimeCode, TrackKind};
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
-    bundle_records::{BranchCheckpoint, ObjectRef},
+    bundle_records::{BranchCheckpoint, BranchId, ObjectRef},
     editing_session::Ja1EditingSession,
     receipts::{CommandId, IssuerId, ReceiptLookup, ReceiptResult},
     storage_budget::StorageLimits,
@@ -15,11 +15,16 @@ use kinewright_project::{
         CommentId, FeedbackAnchor, FeedbackBatch, FeedbackBatchId, FeedbackEvidenceKind,
         FeedbackIndex, FeedbackRevision, FeedbackTarget, FrameRate, MetadataChange,
         MetadataEnvelope, MetadataResult, MetadataScope, MetadataUpdate, Orientation,
-        ReviseRequest, SnapshotDescriptor, SnapshotKey,
+        ReviseRequest, SnapshotDescriptor, SnapshotKey, VoiceRef,
     },
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    io::Write as _,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// The picture as laid out: its rectangle after letterboxing and scaling.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,24 +98,31 @@ fn points(strokes: &[Stroke]) -> usize {
     strokes.iter().map(Vec::len).sum()
 }
 
-/// The manual history position a picture of the current edit shows: its exact
-/// document at its exact journal position. Only a published snapshot of this
-/// exact cut acknowledges it; a later head never does, even with equal content.
+/// The manual history a picture of the current edit shows: its branch, the digest
+/// of its whole history (baseline, every batch and the undo/redo cursor), and its
+/// document at its journal position. Only a published snapshot of this exact
+/// history on this branch acknowledges it. A later head, another branch, or another
+/// history with equal content and length never does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AcceptedCut {
+    pub(crate) branch: BranchId,
+    pub(crate) history_sha256: String,
     pub(crate) document_hash: String,
     pub(crate) batches: u64,
 }
 impl AcceptedCut {
-    pub(crate) fn of(history: &HistorySnapshot) -> Result<Self, String> {
-        let document = serde_json::to_vec(&*history.document).map_err(|e| e.to_string())?;
+    pub(crate) fn of(branch: &BranchId, history: &HistorySnapshot) -> Result<Self, String> {
+        let document = serde_json::to_vec(&*history.document).map_err(text)?;
+        let whole = serde_json::to_vec(history).map_err(text)?;
         Ok(Self {
+            branch: branch.clone(),
+            history_sha256: kinewright_media::sha256_bytes(&whole),
             document_hash: kinewright_media::sha256_bytes(&document),
             batches: history.floor_offset + history.batches.len() as u64,
         })
     }
-    /// A later head never acknowledges an earlier cut.
+    /// Only the same branch and history acknowledge a cut.
     pub(crate) fn acknowledged_by(&self, published: &Self) -> bool {
         self == published
     }
@@ -193,7 +205,8 @@ pub(crate) struct View<'a> {
 
 /// A clip under the mark. Overlap, blur and alpha never imply ownership: the person
 /// chooses one, or the target stays unresolved.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Layer {
     pub(crate) clip: ClipId,
     pub(crate) label: String,
@@ -225,35 +238,56 @@ pub(crate) fn layers_at(document: &Document, frame: TimeCode) -> Vec<Layer> {
     layers
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a session holds a handful of drafts; both variants are full evidence"
+)]
 pub(crate) enum Origin {
     /// A new comment on the bound picture. A mark on the current edit names its
     /// snapshot only once that exact cut is published.
     Captured {
         proof: FrameProof,
+        /// Settled into `proof.pixels` before the draft is kept on disk.
+        #[serde(skip)]
         readback: Option<Readback>,
         snapshot: Option<SnapshotKey>,
         layers: Vec<Layer>,
         layer: Option<usize>,
     },
-    /// A later revision keeps its comment's original anchor and frame proof.
+    /// A later revision keeps its comment's original anchor, frame proof, strokes
+    /// and voice evidence unless the person changes them.
     Revises {
         anchor: FeedbackAnchor,
         frame_proof_ref: ObjectRef,
+        strokes_ref: ObjectRef,
+        /// The original strokes as drawn, to tell whether the person changed them.
+        strokes: Vec<Stroke>,
+        voice_ref: Option<VoiceRef>,
+        transcript_revision: Option<ObjectRef>,
     },
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PendingWrite {
     pub(crate) envelope: MetadataEnvelope,
     pub(crate) update: MetadataUpdate,
     /// Why the last reply did not settle, if it did not.
     pub(crate) unknown: Option<String>,
+    #[serde(skip)]
     _pins: Vec<StorePin>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub(crate) enum DraftState {
     Editing,
     Refused(String),
     /// The original command, retried exactly until its outcome is known.
     Pending(Box<PendingWrite>),
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Draft {
     pub(crate) comment: CommentId,
     pub(crate) origin: Origin,
@@ -264,6 +298,23 @@ pub(crate) struct Draft {
 impl Draft {
     pub(crate) fn pending(&self) -> bool {
         matches!(self.state, DraftState::Pending(_))
+    }
+    /// Whether the person has typed or drawn anything, or a write is in flight.
+    pub(crate) fn holds_work(&self) -> bool {
+        !matches!(self.state, DraftState::Editing)
+            || !self.text.trim().is_empty()
+            || self.strokes.iter().any(|stroke| !stroke.is_empty())
+            || matches!(self.origin, Origin::Revises { .. })
+    }
+    /// Fold a finished pixel digest into the proof, so the kept draft carries it.
+    fn settle_readback(&mut self) {
+        if let Origin::Captured {
+            proof, readback, ..
+        } = &mut self.origin
+            && let Some(readback) = readback.take()
+        {
+            proof.pixels = readback.finish().ok();
+        }
     }
     /// Why the draft cannot be saved yet, if it cannot.
     pub(crate) fn waiting(&self) -> Option<&'static str> {
@@ -417,7 +468,10 @@ fn published_cuts(
             let history = store
                 .read_record::<HistorySnapshot>(&checkpoint.history_ref)
                 .map_err(text)?;
-            Ok((descriptor.key, AcceptedCut::of(&history)?))
+            Ok((
+                descriptor.key,
+                AcceptedCut::of(&checkpoint.branch_id, &history)?,
+            ))
         })
         .collect()
 }
@@ -664,14 +718,37 @@ impl FeedbackPort for HostFeedback<'_> {
     }
 }
 
-/// A saved comment's newest revision, as the Notes list shows it.
+/// A saved comment's revision, as the Notes list shows it.
 #[derive(Clone, Debug)]
 pub(crate) struct SavedNote {
     pub(crate) comment: CommentId,
     pub(crate) reference: ObjectRef,
     pub(crate) revision: FeedbackRevision,
     pub(crate) text: String,
+    pub(crate) strokes: Vec<Stroke>,
 }
+/// Strokes evidence as drawn: nested strokes, or the flat single-stroke form.
+fn parse_strokes(bytes: &[u8]) -> Vec<Stroke> {
+    serde_json::from_slice::<Vec<Stroke>>(bytes)
+        .or_else(|_| serde_json::from_slice::<Stroke>(bytes).map(|flat| vec![flat]))
+        .unwrap_or_default()
+}
+fn saved_note(
+    port: &dyn FeedbackPort,
+    comment: &CommentId,
+    reference: &ObjectRef,
+) -> Result<SavedNote, String> {
+    let revision = port.revision(reference)?;
+    Ok(SavedNote {
+        comment: comment.clone(),
+        reference: reference.clone(),
+        text: String::from_utf8_lossy(&port.evidence(&revision.original_text_ref)?).into_owned(),
+        strokes: parse_strokes(&port.evidence(&revision.strokes_ref)?),
+        revision,
+    })
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Submission {
     pub(crate) batch: FeedbackBatch,
     pub(crate) write: PendingWrite,
@@ -688,21 +765,94 @@ pub(crate) enum Outcome {
     Unknown(String),
 }
 
+/// What a project's feedback keeps on this computer between sessions: unsaved
+/// drafts, every in-flight command exactly as sent, and the Revise cut selection.
+#[derive(Serialize)]
+struct KeptRef<'a> {
+    version: u32,
+    drafts: &'a [Draft],
+    selection: &'a [ObjectRef],
+    submission: Option<&'a Submission>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Kept {
+    version: u32,
+    drafts: Vec<Draft>,
+    selection: Vec<ObjectRef>,
+    submission: Option<Submission>,
+}
+const KEPT_VERSION: u32 = 1;
+const RESTARTED: &str = "Kinewright closed before this outcome was known";
+
+/// Where a saved project's feedback drafts are kept: beside the recovery
+/// journals, named like them from the project's path.
+pub(crate) fn drafts_path(project: &Path) -> PathBuf {
+    let identity =
+        kinewright_project::canonical_project_identity(project).unwrap_or(project.to_path_buf());
+    let stem = project
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    kinewright_project::default_recovery_directory()
+        .with_file_name("feedback")
+        .join(format!(
+            "{stem}-{:016x}.json",
+            kinewright_project::fnv1a_64(identity.as_os_str().as_encoded_bytes())
+        ))
+}
+/// Write `bytes` to `path` so that a crash leaves the old or the new file, never a torn one.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let directory = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(directory)?;
+    let partial = path.with_extension("json.partial");
+    {
+        let mut file = std::fs::File::create(&partial)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&partial, path)?;
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
 /// Studio feedback state for one project session.
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent flags: drawing mode, loaded, kept state changed, resume pending"
+)]
 pub(crate) struct Feedback {
     pub(crate) drafts: Vec<Draft>,
     pub(crate) active: Option<CommentId>,
     pub(crate) drawing: bool,
+    /// The stroke being drawn: its draft and the bound frame it started on.
+    /// Points over any other picture end it.
+    pub(crate) gesture: Option<(CommentId, u64)>,
     issuer: Option<IssuerId>,
     /// The Revise cut selection: exact saved revisions, possibly across versions.
     pub(crate) selection: Vec<ObjectRef>,
+    /// Selected revisions that are no longer their comment's newest.
+    pub(crate) older: BTreeMap<ObjectRef, SavedNote>,
     pub(crate) submission: Option<Submission>,
     pub(crate) saved: Vec<SavedNote>,
     pub(crate) batches: Vec<FeedbackBatchId>,
     pub(crate) message: Option<String>,
     pub(crate) loaded: bool,
     pub(crate) scene: Option<String>,
+    /// The file this project's drafts are kept in, once restored from it.
+    pub(crate) durable: Option<PathBuf>,
+    /// The project path `durable` was derived from, even if restoring failed.
+    pub(crate) durable_for: Option<PathBuf>,
+    /// Why the drafts could not be kept on disk, if they could not.
+    pub(crate) durable_error: Option<String>,
+    /// Kept state changed since it was last written.
+    pub(crate) changed: bool,
+    /// Restored commands wait for an exact retry.
+    pub(crate) resume: bool,
+    /// The draft whose text field takes focus next.
+    pub(crate) focus: Option<CommentId>,
 }
 impl Feedback {
     pub(crate) fn draft_mut(&mut self, comment: &CommentId) -> Option<&mut Draft> {
@@ -710,7 +860,153 @@ impl Feedback {
             .iter_mut()
             .find(|draft| &draft.comment == comment)
     }
-    /// Start a revision of a saved comment. It keeps the original anchor and proof.
+    /// Feedback that closing now would leave outside the project.
+    pub(crate) fn unsaved(&self) -> bool {
+        self.submission.is_some() || self.drafts.iter().any(Draft::holds_work)
+    }
+    /// The close and quit warning for unsaved feedback, or empty.
+    pub(crate) fn close_text(&self) -> String {
+        if !self.unsaved() {
+            return String::new();
+        }
+        let drafts = self
+            .drafts
+            .iter()
+            .filter(|draft| draft.holds_work())
+            .count();
+        let notes = match drafts {
+            0 => String::new(),
+            1 => "1 note is not saved".to_owned(),
+            n => format!("{n} notes are not saved"),
+        };
+        let what = match (notes.is_empty(), self.submission.is_some()) {
+            (false, true) => format!("{notes}, and a Revise cut request is not confirmed."),
+            (false, false) => format!("{notes}."),
+            _ => "A Revise cut request is not confirmed.".to_owned(),
+        };
+        match (&self.durable, &self.durable_error) {
+            (Some(_), None) => format!(
+                "{what} They are kept on this computer: reopening this project shows them again and retries any unconfirmed request exactly. Save them in Notes to add them to the project."
+            ),
+            (_, Some(why)) => {
+                format!(
+                    "{what} They could not be kept on this computer ({why}). Closing discards them."
+                )
+            }
+            (None, None) => format!("{what} Closing discards them."),
+        }
+    }
+    /// Write the kept state now. Settles pixel digests first, so the kept proofs carry them.
+    pub(crate) fn persist(&mut self) -> Result<(), String> {
+        let Some(path) = self.durable.clone() else {
+            self.changed = false;
+            return Ok(());
+        };
+        self.drafts.iter_mut().for_each(Draft::settle_readback);
+        let result =
+            if self.drafts.is_empty() && self.selection.is_empty() && self.submission.is_none() {
+                match std::fs::remove_file(&path) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => Ok(()),
+                }
+            } else {
+                serde_json::to_vec(&KeptRef {
+                    version: KEPT_VERSION,
+                    drafts: &self.drafts,
+                    selection: &self.selection,
+                    submission: self.submission.as_ref(),
+                })
+                .map_err(std::io::Error::other)
+                .and_then(|bytes| write_atomically(&path, &bytes))
+            };
+        match result {
+            Ok(()) => {
+                self.changed = false;
+                self.durable_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                let why = error.to_string();
+                self.durable_error = Some(why.clone());
+                Err(why)
+            }
+        }
+    }
+    /// Bring back drafts, in-flight commands and the selection kept at `path`, and
+    /// keep this project's feedback there from now on. A file that cannot be read
+    /// is left untouched and nothing new is written over it.
+    pub(crate) fn restore(&mut self, path: PathBuf) -> Result<(), String> {
+        let kept = match std::fs::read(&path) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<Kept>(&bytes)
+                    .map_err(text)
+                    .and_then(|kept| {
+                        (kept.version == KEPT_VERSION)
+                            .then_some(kept)
+                            .ok_or_else(|| "unknown drafts version".to_owned())
+                    })
+                    .inspect_err(|why| self.durable_error = Some(why.clone()))?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                self.durable_error = Some(error.to_string());
+                return Err(error.to_string());
+            }
+        };
+        self.durable = Some(path);
+        self.durable_error = None;
+        let Some(kept) = kept else {
+            self.changed |= self.unsaved();
+            return Ok(());
+        };
+        for mut draft in kept.drafts {
+            if self.drafts.iter().any(|d| d.comment == draft.comment) {
+                continue;
+            }
+            if let DraftState::Pending(pending) = &mut draft.state {
+                pending.unknown.get_or_insert_with(|| RESTARTED.to_owned());
+            }
+            self.drafts.push(draft);
+        }
+        for reference in kept.selection {
+            if !self.selection.contains(&reference) {
+                self.selection.push(reference);
+            }
+        }
+        if self.submission.is_none()
+            && let Some(mut submission) = kept.submission
+        {
+            submission
+                .write
+                .unknown
+                .get_or_insert_with(|| RESTARTED.to_owned());
+            self.submission = Some(submission);
+        }
+        self.resume = self.submission.is_some() || self.drafts.iter().any(Draft::pending);
+        self.changed = true;
+        Ok(())
+    }
+    /// Retry every restored command exactly: saves first, then the batch.
+    pub(crate) fn resume(&mut self, port: &mut dyn FeedbackPort) {
+        self.resume = false;
+        let pending = self
+            .drafts
+            .iter()
+            .filter(|draft| draft.pending())
+            .map(|draft| draft.comment.clone())
+            .collect::<Vec<_>>();
+        for comment in &pending {
+            self.save(port, comment);
+        }
+        if self.submission.is_some() {
+            self.submit(port);
+        }
+        if let Err(why) = self.refresh(&*port) {
+            self.message = Some(why);
+        }
+    }
+    /// Start a revision of a saved comment from all of its evidence. Each field is
+    /// kept unless the person changes it.
     pub(crate) fn revise(&mut self, note: &SavedNote) {
         if self
             .drafts
@@ -725,12 +1021,18 @@ impl Feedback {
             origin: Origin::Revises {
                 anchor: note.revision.anchor.clone(),
                 frame_proof_ref: note.revision.frame_proof_ref.clone(),
+                strokes_ref: note.revision.strokes_ref.clone(),
+                strokes: note.strokes.clone(),
+                voice_ref: note.revision.voice_ref.clone(),
+                transcript_revision: note.revision.transcript_revision.clone(),
             },
             text: note.text.clone(),
-            strokes: Vec::new(),
+            strokes: note.strokes.clone(),
             state: DraftState::Editing,
         });
         self.active = Some(note.comment.clone());
+        self.focus = Some(note.comment.clone());
+        self.changed = true;
     }
     /// Name each current-edit mark's snapshot once its own cut is published.
     pub(crate) fn promote(&mut self, published: &[(SnapshotKey, AcceptedCut)]) {
@@ -749,6 +1051,7 @@ impl Feedback {
                     .find(|(_, published)| cut.acknowledged_by(published))
             {
                 *snapshot = Some(key.clone());
+                self.changed = true;
             }
         }
     }
@@ -760,24 +1063,53 @@ impl Feedback {
             let Some(reference) = revisions.last() else {
                 continue;
             };
-            let revision = port.revision(reference)?;
-            let text =
-                String::from_utf8_lossy(&port.evidence(&revision.original_text_ref)?).into_owned();
-            saved.push(SavedNote {
-                comment: comment.clone(),
-                reference: reference.clone(),
-                revision,
-                text,
-            });
+            saved.push(saved_note(port, comment, reference)?);
         }
         saved.sort_by_key(|note| std::cmp::Reverse(note.revision.anchor.frame));
+        let mut older = BTreeMap::new();
+        for reference in &self.selection {
+            if saved.iter().any(|note| &note.reference == reference) {
+                continue;
+            }
+            if let Some((comment, _)) = index
+                .revisions
+                .iter()
+                .find(|(_, revisions)| revisions.contains(reference))
+            {
+                older.insert(reference.clone(), saved_note(port, comment, reference)?);
+            }
+        }
         self.saved = saved;
+        self.older = older;
         self.batches = index.batches.keys().cloned().collect();
         if self.drafts.iter().any(|draft| draft.waiting().is_some()) {
             self.promote(&port.published()?);
         }
         self.loaded = true;
         Ok(())
+    }
+    /// The Revise cut selection as the person sees it: each exact revision, and
+    /// the newest revision of its comment when that is a different one.
+    pub(crate) fn selection_rows(&self) -> Vec<(ObjectRef, Option<&SavedNote>, Option<ObjectRef>)> {
+        self.selection
+            .iter()
+            .map(|reference| {
+                let note = self
+                    .saved
+                    .iter()
+                    .find(|note| &note.reference == reference)
+                    .or_else(|| self.older.get(reference));
+                let newer = note.and_then(|note| {
+                    self.saved
+                        .iter()
+                        .find(|latest| {
+                            latest.comment == note.comment && &latest.reference != reference
+                        })
+                        .map(|latest| latest.reference.clone())
+                });
+                (reference.clone(), note, newer)
+            })
+            .collect()
     }
     /// Save one draft as an immutable revision. Only a durable receipt that the
     /// index retains clears it; refusal or an unknown outcome keeps it.
@@ -791,7 +1123,17 @@ impl Feedback {
             )),
             Outcome::Submitted(_) => None,
         };
+        self.keep();
         outcome
+    }
+    /// Write the kept state, and say so if it could not be written.
+    fn keep(&mut self) {
+        self.changed = true;
+        if let Err(why) = self.persist() {
+            self.message = Some(format!(
+                "Notes could not be kept on this computer ({why}). Closing discards unsaved notes."
+            ));
+        }
     }
     fn save_inner(&mut self, port: &mut dyn FeedbackPort, comment: &CommentId) -> Outcome {
         let comments = self
@@ -806,9 +1148,7 @@ impl Feedback {
         else {
             return Outcome::Refused("This draft is gone.".into());
         };
-        let reply = if let DraftState::Pending(pending) = &draft.state {
-            port.metadata(&pending.envelope, &pending.update)
-        } else {
+        if !draft.pending() {
             let write = match prepare(port, &mut self.issuer, draft, comments) {
                 Ok(write) => write,
                 Err(outcome) => {
@@ -818,11 +1158,27 @@ impl Feedback {
                     return outcome;
                 }
             };
-            let reply = port.metadata(&write.envelope, &write.update);
             draft.state = DraftState::Pending(Box::new(write));
-            reply
+            // The exact command is kept before it is sent: a restart retries it,
+            // never a rebuilt one that could save the note twice.
+            if let Err(why) = self.persist() {
+                if let Some(draft) = self.draft_mut(comment) {
+                    draft.state = DraftState::Editing;
+                }
+                return Outcome::Refused(format!(
+                    "Not sent: this note could not be kept on this computer first ({why})."
+                ));
+            }
+        }
+        let Some(Draft {
+            state: DraftState::Pending(pending),
+            ..
+        }) = self.draft_mut(comment)
+        else {
+            return Outcome::Refused("This draft is gone.".into());
         };
-        match reply {
+        let (envelope, update) = (pending.envelope.clone(), pending.update.clone());
+        match port.metadata(&envelope, &update) {
             Reply::Durable(MetadataResult::Feedback(reference))
                 if port.index().is_ok_and(|index| {
                     index
@@ -871,6 +1227,19 @@ impl Feedback {
         } else {
             self.selection.push(reference.clone());
         }
+        self.changed = true;
+    }
+    /// Put `newer` where `older` was in the selection, once.
+    pub(crate) fn replace(&mut self, older: &ObjectRef, newer: &ObjectRef) {
+        let Some(index) = self.selection.iter().position(|r| r == older) else {
+            return;
+        };
+        if self.selection.contains(newer) {
+            self.selection.remove(index);
+        } else {
+            self.selection[index] = newer.clone();
+        }
+        self.changed = true;
     }
     /// Load a submitted batch's exact revisions into the selection. The batch itself
     /// stays immutable; submitting again creates a new batch.
@@ -880,7 +1249,8 @@ impl Feedback {
         batch: &FeedbackBatchId,
     ) -> Result<(), String> {
         self.selection = port.batch(batch)?.revision_refs;
-        Ok(())
+        self.changed = true;
+        self.refresh(port)
     }
     /// Durably create one immutable batch of the selected exact revisions. An unknown
     /// outcome retries the original batch, whatever the selection became since.
@@ -894,6 +1264,7 @@ impl Feedback {
             )),
             Outcome::Saved(_) => None,
         };
+        self.keep();
         outcome
     }
     fn submit_inner(&mut self, port: &mut dyn FeedbackPort) -> Outcome {
@@ -937,12 +1308,24 @@ impl Feedback {
                     _pins: Vec::new(),
                 },
             });
+            // Kept before it is sent, so a restart resends this exact batch.
+            if let Err(why) = self.persist() {
+                self.submission = None;
+                return Outcome::Refused(format!(
+                    "Not sent: this request could not be kept on this computer first ({why})."
+                ));
+            }
         }
         let Some(submission) = &mut self.submission else {
             return Outcome::Refused("No batch is pending.".into());
         };
         match port.metadata(&submission.write.envelope, &submission.write.update) {
-            Reply::Durable(MetadataResult::Batch(id)) if id == submission.batch.batch_id => {
+            Reply::Durable(MetadataResult::Batch(id))
+                if id == submission.batch.batch_id
+                    && port
+                        .index()
+                        .is_ok_and(|index| index.batches.contains_key(&id)) =>
+            {
                 let submitted = submission.batch.revision_refs.clone();
                 self.submission = None;
                 self.selection
@@ -951,15 +1334,25 @@ impl Feedback {
                 Outcome::Submitted(id)
             }
             Reply::Durable(_) => {
-                submission.write.unknown = Some("unexpected batch receipt".into());
-                Outcome::Unknown("unexpected batch receipt".into())
+                let why = "The batch receipt is not visible in the index yet.".to_owned();
+                submission.write.unknown = Some(why.clone());
+                Outcome::Unknown(why)
             }
             Reply::Unknown(why) => {
                 submission.write.unknown = Some(why.clone());
                 Outcome::Unknown(why)
             }
             Reply::Refused(why) => {
+                // Definitely not written: the exact revisions go back into the
+                // selection, ahead of anything chosen since.
+                let mut kept = submission.batch.revision_refs.clone();
                 self.submission = None;
+                for reference in self.selection.drain(..) {
+                    if !kept.contains(&reference) {
+                        kept.push(reference);
+                    }
+                }
+                self.selection = kept;
                 Outcome::Refused(why)
             }
         }
@@ -968,6 +1361,10 @@ impl Feedback {
 
 /// Seal a draft's evidence and build its exact command. Ingress caps refuse with
 /// the draft intact.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ingress path: caps, evidence admission, then the exact command"
+)]
 fn prepare(
     port: &mut dyn FeedbackPort,
     issuer: &mut Option<IssuerId>,
@@ -998,7 +1395,16 @@ fn prepare(
     if let Some(why) = draft.waiting() {
         return Err(Outcome::Waiting(why.into()));
     }
-    let strokes = strokes_bytes(&draft.strokes).map_err(Outcome::Refused)?;
+    draft.settle_readback();
+    // A revision keeps its original strokes evidence unless the person changed them.
+    let redrawn = match &draft.origin {
+        Origin::Revises { strokes, .. } => *strokes != draft.strokes,
+        Origin::Captured { .. } => true,
+    };
+    let strokes = redrawn
+        .then(|| strokes_bytes(&draft.strokes))
+        .transpose()
+        .map_err(Outcome::Refused)?;
     let mut pins = Vec::new();
     let mut admit = |kind, bytes: &[u8]| {
         let (reference, pin) = port.admit(kind, bytes).map_err(Outcome::Refused)?;
@@ -1006,23 +1412,33 @@ fn prepare(
         Ok::<_, Outcome>(reference)
     };
     let original_text_ref = admit(FeedbackEvidenceKind::Text, draft.text.as_bytes())?;
-    let strokes_ref = admit(FeedbackEvidenceKind::Strokes, &strokes)?;
-    let (anchor, frame_proof_ref) = match &mut draft.origin {
+    let drawn = strokes
+        .map(|bytes| admit(FeedbackEvidenceKind::Strokes, &bytes))
+        .transpose()?;
+    let (anchor, frame_proof_ref, strokes_ref, voice_ref, transcript_revision) = match &draft.origin
+    {
         Origin::Revises {
             anchor,
             frame_proof_ref,
-        } => (anchor.clone(), frame_proof_ref.clone()),
+            strokes_ref,
+            voice_ref,
+            transcript_revision,
+            ..
+        } => (
+            anchor.clone(),
+            frame_proof_ref.clone(),
+            drawn.unwrap_or_else(|| strokes_ref.clone()),
+            voice_ref.clone(),
+            transcript_revision.clone(),
+        ),
         Origin::Captured {
             proof,
-            readback,
             snapshot,
             layers,
             layer,
+            ..
         } => {
-            if let Some(readback) = readback.take() {
-                proof.pixels = Some(readback.finish().map_err(Outcome::Refused)?);
-            }
-            let bytes = serde_json::to_vec(&*proof).map_err(|e| Outcome::Refused(e.to_string()))?;
+            let bytes = serde_json::to_vec(proof).map_err(|e| Outcome::Refused(e.to_string()))?;
             let reference = admit(FeedbackEvidenceKind::FrameProof, &bytes)?;
             let snapshot = snapshot
                 .clone()
@@ -1045,6 +1461,9 @@ fn prepare(
                     script_beat_id: None,
                 },
                 reference,
+                drawn.ok_or_else(|| Outcome::Refused("The drawing was not sealed.".into()))?,
+                None,
+                None,
             )
         }
     };
@@ -1058,8 +1477,8 @@ fn prepare(
         original_text_ref,
         strokes_ref,
         frame_proof_ref,
-        voice_ref: None,
-        transcript_revision: None,
+        voice_ref,
+        transcript_revision,
     };
     let (envelope, generation) = port.envelope(issuer).map_err(Outcome::Refused)?;
     Ok(PendingWrite {
@@ -1077,10 +1496,12 @@ enum NoteAction {
     Save(CommentId),
     Discard(CommentId),
     Toggle(ObjectRef),
+    Replace(ObjectRef, ObjectRef),
     Revise(Box<SavedNote>),
     Reopen(FeedbackBatchId),
     Submit,
     FirstSave,
+    NewNote,
 }
 
 impl KinewrightApp {
@@ -1110,6 +1531,41 @@ impl KinewrightApp {
             Ok(act(feedback, &mut attachment.owner))
         }
     }
+    /// Once per Studio frame: bring back this project's kept drafts, retry their
+    /// in-flight commands exactly, and keep what changed.
+    pub(crate) fn feedback_frame(&mut self) {
+        let path = self
+            .focused()
+            .ja1
+            .as_ref()
+            .and_then(crate::ja1_attachment::Ja1Attachment::project_path);
+        let feedback = &mut self.focused_mut().studio.feedback;
+        if let Some(path) = path
+            && feedback.durable_for.as_ref() != Some(&path)
+        {
+            // A first save or Save As keeps the drafts under the new path; the
+            // old file stays with the old project.
+            feedback.durable = None;
+            feedback.durable_for = Some(path.clone());
+            if let Err(why) = feedback.restore(drafts_path(&path)) {
+                feedback.message = Some(format!(
+                    "Kept notes could not be read ({why}). They are left as they were."
+                ));
+            }
+        }
+        if feedback.resume {
+            let resumed = self.with_feedback(|feedback, port| feedback.resume(port));
+            if let Err(why) = resumed {
+                let feedback = &mut self.focused_mut().studio.feedback;
+                feedback.resume = false;
+                feedback.message = Some(why);
+            }
+        }
+        let feedback = &mut self.focused_mut().studio.feedback;
+        if feedback.changed && feedback.gesture.is_none() {
+            feedback.keep();
+        }
+    }
     /// Start a draft on the bound picture: its version or exact current-edit cut,
     /// its frame and its pixels, whatever the selection or playhead requests next.
     pub(crate) fn capture_feedback(&mut self) -> Result<CommentId, String> {
@@ -1117,17 +1573,20 @@ impl KinewrightApp {
         let session = self.focused();
         let studio = &session.studio;
         let history;
-        let manual = match (&cell.context, &studio.manual_inputs) {
-            (None, Some(inputs))
+        let manual = match (&cell.context, &studio.manual_inputs, &session.ja1) {
+            (None, Some(inputs), Some(attachment))
                 if !cell.stale
                     && self
                         .presenter
                         .context_epoch()
                         .is_some_and(|epoch| cell.stamp.epoch >= epoch) =>
             {
+                let branch = attachment.owner.manual_branch_id().map_err(text)?;
                 history = session.core.export_history().map_err(text)?;
-                (*history.document == *inputs.document())
-                    .then(|| AcceptedCut::of(&history))
+                // Every change before the export has its event queued by now. An
+                // unprocessed one means the picture may not show this history yet.
+                (session.core_events.is_empty() && *history.document == *inputs.document())
+                    .then(|| AcceptedCut::of(&branch, &history))
                     .transpose()?
                     .map(|cut| (cut, inputs.document()))
             }
@@ -1160,7 +1619,99 @@ impl KinewrightApp {
         let feedback = &mut self.focused_mut().studio.feedback;
         feedback.drafts.push(draft);
         feedback.active = Some(comment.clone());
+        feedback.changed = true;
         Ok(comment)
+    }
+    /// New note: a typed draft on the bound picture, with its text field focused.
+    pub(crate) fn new_feedback_note(&mut self) -> Result<CommentId, String> {
+        self.focused_mut().studio.tab = crate::studio::Tab::Notes;
+        let comment = self.capture_feedback();
+        let feedback = &mut self.focused_mut().studio.feedback;
+        match &comment {
+            Ok(comment) => feedback.focus = Some(comment.clone()),
+            Err(why) => feedback.message = Some(why.clone()),
+        }
+        comment
+    }
+    /// A stroke starts on the bound picture: the active draft if it was captured
+    /// from this same picture, otherwise a new capture. A failed capture starts no
+    /// stroke, so later points go nowhere.
+    pub(crate) fn feedback_stroke_start(&mut self) {
+        self.focused_mut().studio.feedback.gesture = None;
+        let current = self.presenter.bound().map(|cell| cell.frame_id);
+        let reuse = {
+            let feedback = &self.focused().studio.feedback;
+            feedback
+                .active
+                .as_ref()
+                .and_then(|active| {
+                    feedback.drafts.iter().find(|draft| {
+                        &draft.comment == active
+                            && !draft.pending()
+                            && matches!(&draft.origin, Origin::Captured { proof, .. } if Some(proof.bound.frame_id) == current)
+                    })
+                })
+                .map(|draft| draft.comment.clone())
+        };
+        let comment = match reuse {
+            Some(comment) => Ok(comment),
+            None => self.capture_feedback(),
+        };
+        let feedback = &mut self.focused_mut().studio.feedback;
+        match comment {
+            Ok(comment) => {
+                if let Some(draft) = feedback.draft_mut(&comment)
+                    && let Origin::Captured { proof, .. } = &draft.origin
+                {
+                    let frame = proof.bound.frame_id;
+                    draft.strokes.push(Vec::new());
+                    feedback.gesture = Some((comment.clone(), frame));
+                }
+                feedback.active = Some(comment);
+                feedback.changed = true;
+            }
+            Err(why) => feedback.message = Some(why),
+        }
+        self.focused_mut().studio.tab = crate::studio::Tab::Notes;
+    }
+    /// Admit one point of the stroke in progress, only while the presenter still
+    /// shows the picture the stroke started on. Returns whether it was admitted.
+    pub(crate) fn feedback_stroke_point(&mut self, point: [f32; 2]) -> bool {
+        let shown = self.presenter.bound().map(|cell| cell.frame_id);
+        let limit = StorageLimits::default().comment_points;
+        let feedback = &mut self.focused_mut().studio.feedback;
+        let Some((comment, frame)) = feedback.gesture.clone() else {
+            return false;
+        };
+        let Some(draft) = feedback
+            .draft_mut(&comment)
+            .filter(|draft| shown == Some(frame) && !draft.pending())
+        else {
+            feedback.gesture = None;
+            feedback.changed = true;
+            feedback.message = Some(
+                "The picture changed, so this stroke ends here. Pause playback to draw.".into(),
+            );
+            return false;
+        };
+        if (points(&draft.strokes) as u64) >= limit {
+            feedback.message = Some(format!(
+                "This drawing reached {limit} points. Save it or start another note."
+            ));
+            return false;
+        }
+        if let Some(stroke) = draft.strokes.last_mut()
+            && stroke.last() != Some(&point)
+        {
+            stroke.push(point);
+        }
+        true
+    }
+    pub(crate) fn feedback_stroke_end(&mut self) {
+        let feedback = &mut self.focused_mut().studio.feedback;
+        if feedback.gesture.take().is_some() {
+            feedback.changed = true;
+        }
     }
     fn feedback_message(&mut self, result: Result<Outcome, String>) {
         if let Err(why) = result {
@@ -1168,7 +1719,6 @@ impl KinewrightApp {
         }
     }
     /// Draw on the displayed image and paint the active draft's strokes.
-    #[allow(clippy::too_many_lines, reason = "one immediate-mode overlay")]
     pub(crate) fn feedback_overlay(&mut self, ui: &mut egui::Ui, area: Rect, texture: Vec2) {
         #[allow(
             clippy::cast_possible_truncation,
@@ -1197,58 +1747,20 @@ impl KinewrightApp {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
             if response.drag_started() {
-                let current = bound.as_ref().map(|cell| cell.frame_id);
-                let reuse = {
-                    let feedback = &self.focused().studio.feedback;
-                    feedback.active.as_ref().and_then(|active| {
-                        feedback.drafts.iter().find(|draft| {
-                            &draft.comment == active
-                                && !draft.pending()
-                                && matches!(&draft.origin, Origin::Captured { proof, .. } if Some(proof.bound.frame_id) == current)
-                        })
-                    })
-                    .map(|draft| draft.comment.clone())
-                };
-                let comment = match reuse {
-                    Some(comment) => Ok(comment),
-                    None => self.capture_feedback(),
-                };
-                match comment {
-                    Ok(comment) => {
-                        let feedback = &mut self.focused_mut().studio.feedback;
-                        if let Some(draft) = feedback.draft_mut(&comment) {
-                            draft.strokes.push(Vec::new());
-                        }
-                        feedback.active = Some(comment);
-                    }
-                    Err(why) => self.focused_mut().studio.feedback.message = Some(why),
-                }
-                self.focused_mut().studio.tab = crate::studio::Tab::Notes;
+                self.feedback_stroke_start();
             }
             if response.dragged()
                 && let Some(point) = response
                     .interact_pointer_pos()
                     .and_then(|at| image.normalise(at))
             {
-                let limit = StorageLimits::default().comment_points;
-                let feedback = &mut self.focused_mut().studio.feedback;
-                if let Some(comment) = feedback.active.clone()
-                    && let Some(draft) = feedback.draft_mut(&comment)
-                    && !draft.strokes.is_empty()
-                {
-                    if (points(&draft.strokes) as u64) < limit {
-                        if let Some(stroke) = draft.strokes.last_mut()
-                            && stroke.last() != Some(&point)
-                        {
-                            stroke.push(point);
-                        }
-                    } else {
-                        feedback.message = Some(format!(
-                            "This drawing reached {limit} points. Save it or start another note."
-                        ));
-                    }
-                }
+                self.feedback_stroke_point(point);
             }
+            if response.drag_stopped() {
+                self.feedback_stroke_end();
+            }
+        } else {
+            self.feedback_stroke_end();
         }
         let feedback = &self.focused().studio.feedback;
         let Some(draft) = feedback.active.as_ref().and_then(|active| {
@@ -1281,9 +1793,14 @@ impl KinewrightApp {
             }
         }
     }
-    /// `KINEWRIGHT_SCREENSHOT_STUDIO_SCENE`: a draft being drawn, or the Revise cut selector.
+    /// `KINEWRIGHT_SCREENSHOT_STUDIO_SCENE`: a draft being drawn, a new typed note,
+    /// or the Revise cut selector.
     fn stage_feedback_scene(&mut self, scene: &str) {
         self.focused_mut().studio.tab = crate::studio::Tab::Notes;
+        if scene == "new-note" {
+            let _ = self.new_feedback_note();
+            return;
+        }
         let Ok(comment) = self.capture_feedback() else {
             return;
         };
@@ -1318,6 +1835,16 @@ impl KinewrightApp {
             let _ = self.with_feedback(|feedback, port| feedback.save(port, &second));
         }
         self.feedback_message(saved);
+        // Select the first note's revision, then revise it: the selector shows the
+        // older selected revision with its replace and remove controls.
+        let first = self
+            .focused()
+            .studio
+            .feedback
+            .saved
+            .iter()
+            .find(|note| note.comment == comment)
+            .cloned();
         let feedback = &mut self.focused_mut().studio.feedback;
         feedback.drawing = false;
         feedback.selection = feedback
@@ -1325,7 +1852,17 @@ impl KinewrightApp {
             .iter()
             .map(|note| note.reference.clone())
             .collect();
-        feedback.message = None;
+        if let Some(first) = first {
+            feedback.revise(&first);
+            if let Some(draft) = feedback.draft_mut(&comment) {
+                draft.text = "Hold this shot two beats longer.".into();
+            }
+            let _ = self.with_feedback(|feedback, port| {
+                feedback.save(port, &comment);
+                feedback.refresh(&*port)
+            });
+        }
+        self.focused_mut().studio.feedback.message = None;
     }
     /// The Notes tab: drafts, private saved notes, the Revise cut selection and batches.
     #[allow(clippy::too_many_lines, reason = "one immediate-mode panel")]
@@ -1338,37 +1875,84 @@ impl KinewrightApp {
                 self.focused_mut().studio.feedback.message = Some(why);
             }
         }
+        let mut action = None;
         ui.horizontal(|ui| {
             ui.label("Notes · newest first");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("Refresh").clicked() {
                     self.focused_mut().studio.feedback.loaded = false;
                 }
+                if ui
+                    .small_button("New note")
+                    .on_hover_text("Type a note on the picture shown now (Alt+M)")
+                    .clicked()
+                {
+                    action = Some(NoteAction::NewNote);
+                }
             });
         });
         if let Some(message) = &self.focused().studio.feedback.message {
             ui.colored_label(po0::TEXT_2, message);
         }
-        let mut action = None;
         let fps = self.program_document().fps;
-        let footer = 40.0;
+        let pending = self.focused().studio.feedback.submission.is_some();
+        let selected = self.focused().studio.feedback.selection.len();
+        let unsaved = self
+            .focused()
+            .ja1
+            .as_ref()
+            .is_some_and(|attachment| attachment.project_path().is_none());
+        let footer = |ui: &mut egui::Ui, action: &mut Option<NoteAction>| {
+            let label = if pending {
+                "Retry Revise cut".to_owned()
+            } else {
+                format!("Revise cut · {selected} selected")
+            };
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(pending || selected > 0, egui::Button::new(label))
+                    .clicked()
+                {
+                    *action = Some(NoteAction::Submit);
+                }
+                if unsaved && ui.button("Save project…").clicked() {
+                    *action = Some(NoteAction::FirstSave);
+                }
+            });
+        };
+        // A short panel scrolls its footer with the notes, so a draft card is never
+        // hidden behind it.
+        let footer_height = 40.0;
+        let compact = ui.available_height() < 4.0 * footer_height + 100.0;
         egui::ScrollArea::vertical()
             .id_salt("studio-notes")
             .auto_shrink([false, false])
-            .max_height((ui.available_height() - footer).max(60.0))
+            .max_height(if compact {
+                ui.available_height()
+            } else {
+                (ui.available_height() - footer_height).max(60.0)
+            })
             .show(ui, |ui| {
+                let feedback = &mut self.focused_mut().studio.feedback;
+                let rows = feedback
+                    .selection_rows()
+                    .into_iter()
+                    .map(|(reference, note, newer)| (reference, note.cloned(), newer))
+                    .collect::<Vec<_>>();
                 let Feedback {
                     drafts,
                     saved,
                     selection,
                     batches,
                     active,
+                    focus,
+                    changed,
                     ..
-                } = &mut self.focused_mut().studio.feedback;
+                } = feedback;
                 if drafts.is_empty() && saved.is_empty() {
                     ui.colored_label(
                         po0::TEXT_3,
-                        "Draw on the picture or edit a saved note. Notes stay private until Revise cut.",
+                        "Draw on the picture, or press New note to type one. Notes stay private until Revise cut.",
                     );
                 }
                 for draft in drafts.iter_mut().rev() {
@@ -1393,31 +1977,40 @@ impl KinewrightApp {
                         let edit = ui.add_enabled(
                             !pending,
                             egui::TextEdit::multiline(&mut draft.text)
+                                .id(egui::Id::new(("studio-note-text", draft.comment.as_str())))
                                 .desired_rows(2)
                                 .desired_width(f32::INFINITY)
                                 .hint_text("What should change here?"),
                         );
+                        if focus.as_ref() == Some(&draft.comment) {
+                            edit.request_focus();
+                            edit.scroll_to_me(Some(egui::Align::Center));
+                            *focus = None;
+                        }
                         if edit.gained_focus() {
                             *active = Some(draft.comment.clone());
                         }
-                        if let Origin::Captured { layers, layer, .. } = &mut draft.origin
-                            && !layers.is_empty()
-                            && !pending
-                        {
-                            let chosen = layer
-                                .and_then(|index| layers.get(index))
-                                .map_or("Applies to · not chosen", |layer| layer.label.as_str())
-                                .to_owned();
-                            egui::ComboBox::from_id_salt(("studio-note-layer", draft.comment.as_str()))
-                                .selected_text(chosen)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(layer, None, "Not chosen");
-                                    for (index, choice) in layers.iter().enumerate() {
-                                        ui.selectable_value(layer, Some(index), &choice.label);
-                                    }
-                                });
-                        }
-                        ui.horizontal(|ui| {
+                        *changed |= edit.changed();
+                        ui.horizontal_wrapped(|ui| {
+                            if let Origin::Captured { layers, layer, .. } = &mut draft.origin
+                                && !layers.is_empty()
+                                && !pending
+                            {
+                                let before = *layer;
+                                let chosen = layer
+                                    .and_then(|index| layers.get(index))
+                                    .map_or("Applies to · not chosen", |layer| layer.label.as_str())
+                                    .to_owned();
+                                egui::ComboBox::from_id_salt(("studio-note-layer", draft.comment.as_str()))
+                                    .selected_text(chosen)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(layer, None, "Not chosen");
+                                        for (index, choice) in layers.iter().enumerate() {
+                                            ui.selectable_value(layer, Some(index), &choice.label);
+                                        }
+                                    });
+                                *changed |= before != *layer;
+                            }
                             let label = if pending { "Retry" } else { "Save note" };
                             if ui
                                 .add_enabled(draft.waiting().is_none(), egui::Button::new(label))
@@ -1435,24 +2028,27 @@ impl KinewrightApp {
                     ui.add_space(8.0);
                     ui.label("Saved · private until Revise cut");
                 }
+                let short = |text: &str| {
+                    let line = text.lines().next().unwrap_or("Drawing");
+                    if line.chars().count() > 28 {
+                        format!("{}…", line.chars().take(27).collect::<String>())
+                    } else {
+                        line.to_owned()
+                    }
+                };
                 for note in saved.iter() {
                     ui.horizontal(|ui| {
                         let mut chosen = selection.contains(&note.reference);
-                        let line = note.text.lines().next().unwrap_or("Drawing");
-                        let first = if line.chars().count() > 28 {
-                            format!("{}…", line.chars().take(27).collect::<String>())
-                        } else {
-                            line.to_owned()
-                        };
                         if ui
                             .checkbox(
                                 &mut chosen,
                                 format!(
-                                    "{} · {first}",
+                                    "{} · {}",
                                     crate::timeline_ui::format_timecode(
                                         TimeCode(note.revision.anchor.frame),
                                         fps
-                                    )
+                                    ),
+                                    short(&note.text)
                                 ),
                             )
                             .on_hover_text(format!(
@@ -1469,6 +2065,38 @@ impl KinewrightApp {
                         }
                     });
                 }
+                if !rows.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label("Revise cut will send exactly these revisions");
+                }
+                for (reference, note, newer) in rows {
+                    ui.horizontal_wrapped(|ui| {
+                        let label = note.as_ref().map_or_else(
+                            || "A saved revision".to_owned(),
+                            |note| {
+                                format!(
+                                    "{} · {} · revision {}{}",
+                                    crate::timeline_ui::format_timecode(
+                                        TimeCode(note.revision.anchor.frame),
+                                        fps
+                                    ),
+                                    short(&note.text),
+                                    note.revision.revision,
+                                    if newer.is_some() { " (older)" } else { "" }
+                                )
+                            },
+                        );
+                        ui.colored_label(po0::TEXT_2, label);
+                        if let Some(newer) = newer
+                            && ui.small_button("Use newest").clicked()
+                        {
+                            action = Some(NoteAction::Replace(reference.clone(), newer));
+                        }
+                        if ui.small_button("Remove").clicked() {
+                            action = Some(NoteAction::Toggle(reference.clone()));
+                        }
+                    });
+                }
                 if !batches.is_empty() {
                     ui.add_space(8.0);
                     ui.label("Revise cut requests");
@@ -1481,33 +2109,14 @@ impl KinewrightApp {
                         }
                     });
                 }
+                if compact {
+                    ui.add_space(4.0);
+                    footer(ui, &mut action);
+                }
             });
-        let feedback = &self.focused().studio.feedback;
-        let pending = feedback.submission.is_some();
-        let label = if pending {
-            "Retry Revise cut".to_owned()
-        } else {
-            format!("Revise cut · {} selected", feedback.selection.len())
-        };
-        let unsaved = self
-            .focused()
-            .ja1
-            .as_ref()
-            .is_some_and(|attachment| attachment.project_path().is_none());
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    pending || !feedback.selection.is_empty(),
-                    egui::Button::new(label),
-                )
-                .clicked()
-            {
-                action = Some(NoteAction::Submit);
-            }
-            if unsaved && ui.button("Save project…").clicked() {
-                action = Some(NoteAction::FirstSave);
-            }
-        });
+        if !compact {
+            footer(ui, &mut action);
+        }
         match action {
             Some(NoteAction::Save(comment)) => {
                 let result = self.with_feedback(|feedback, port| feedback.save(port, &comment));
@@ -1518,9 +2127,13 @@ impl KinewrightApp {
                 feedback
                     .drafts
                     .retain(|draft| draft.comment != comment || draft.pending());
+                feedback.changed = true;
             }
             Some(NoteAction::Toggle(reference)) => {
                 self.focused_mut().studio.feedback.toggle(&reference);
+            }
+            Some(NoteAction::Replace(older, newer)) => {
+                self.focused_mut().studio.feedback.replace(&older, &newer);
             }
             Some(NoteAction::Revise(note)) => self.focused_mut().studio.feedback.revise(&note),
             Some(NoteAction::Reopen(batch)) => {
@@ -1538,7 +2151,14 @@ impl KinewrightApp {
             Some(NoteAction::FirstSave) => {
                 self.save_project(false);
             }
+            Some(NoteAction::NewNote) => {
+                let _ = self.new_feedback_note();
+            }
             None => {}
+        }
+        let feedback = &mut self.focused_mut().studio.feedback;
+        if feedback.changed && feedback.gesture.is_none() {
+            feedback.keep();
         }
     }
 }
