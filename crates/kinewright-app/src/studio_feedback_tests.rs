@@ -160,9 +160,22 @@ fn new_project(
     (temp, path, bundle, core, inputs)
 }
 
-fn check_manual_cut() {
-    let (_temp, _path, mut bundle, core, inputs) = new_project("c3-manual-cut");
+/// Feedback kept for `bundle`'s project in a per-test state folder.
+fn kept_by(temp: &TempDirectory, bundle: &ProjectBundle) -> Feedback {
     let mut feedback = Feedback::default();
+    feedback
+        .open(Ok(bundle.project_id().clone()), Ok(temp.path("state")))
+        .unwrap();
+    feedback
+}
+fn kept_file(temp: &TempDirectory, bundle: &ProjectBundle) -> std::path::PathBuf {
+    temp.path("state")
+        .join(format!("{}.json", bundle.project_id().as_str()))
+}
+
+fn check_manual_cut() {
+    let (temp, _path, mut bundle, core, inputs) = new_project("c3-manual-cut");
+    let mut feedback = kept_by(&temp, &bundle);
     // No established edit: nothing to anchor, so no draft.
     assert!(
         capture(&View {
@@ -326,6 +339,13 @@ fn s3_displayed_packet_and_letterbox() {
     app.frames = engine.controls().frames();
     app.media_events = engine.controls().events();
     attach(&mut app, fixtures.owners.remove(0));
+    let state = TempDirectory::new_in(&workspace_target_dir(), "c3f2-app-state");
+    app.focused_mut().studio.feedback.directory_override = Some(state.path("state"));
+    app.feedback_frame();
+    assert!(
+        matches!(app.focused().studio.feedback.keeping, Keeping::Kept { .. }),
+        "C3F2_KEPT_BY_IDENTITY"
+    );
     app.install_studio_context(Arc::clone(&a)).unwrap();
     let ctx = egui::Context::default();
     wait_frame(&mut app, &ctx, &a_key, TimeCode::ZERO);
@@ -622,7 +642,10 @@ fn check_one_frame_per_stroke(
         "C3F_CLOSE_WARNS: unsaved notes are unsaved work"
     );
     app.feedback_frame();
-    let kept = app.focused().studio.feedback.durable.clone().unwrap();
+    let Keeping::Kept { path: kept, .. } = &app.focused().studio.feedback.keeping else {
+        panic!("C3F_DRAFT_KEPT: kept by identity");
+    };
+    let kept = kept.clone();
     let bytes = std::fs::read_to_string(&kept).unwrap();
     assert!(bytes.contains(typed), "C3F_DRAFT_KEPT");
     let warning = app.focused().ja1_close_warning();
@@ -635,7 +658,56 @@ fn check_one_frame_per_stroke(
         app.exit_waits_for_choice(),
         "C3F_CLOSE_WARNS: exit asks first"
     );
+    check_restored_draft_needs_capture(app, ctx, &note);
     std::fs::remove_file(&kept).unwrap();
+}
+
+/// Fix 2 invariant 4: frame IDs restart with each launch. A draft restored from
+/// the kept file, whose proof names the very frame ID a different picture has
+/// now, is never drawn on: the stroke captures that picture afresh.
+fn check_restored_draft_needs_capture(
+    app: &mut KinewrightApp,
+    ctx: &egui::Context,
+    note: &CommentId,
+) {
+    let directory = app.focused().studio.feedback.directory_override.clone();
+    // A restart: this run's feedback is gone, the kept file is read back.
+    app.focused_mut().studio.feedback = Feedback {
+        directory_override: directory,
+        ..Feedback::default()
+    };
+    app.feedback_frame();
+    let before = strokes_of(app, note);
+    app.seek_to(TimeCode(2));
+    let now = settle(app, ctx, "C3F2_OTHER_PICTURE", |cell| {
+        cell.at == TimeCode(2)
+    });
+    let feedback = &mut app.focused_mut().studio.feedback;
+    let restored = feedback
+        .draft_mut(note)
+        .expect("C3F2_RESTORED: the note is back");
+    assert!(!restored.live, "C3F2_RESTORED_NOT_LIVE");
+    let Origin::Captured { proof, .. } = &mut restored.origin else {
+        panic!("C3F2_RESTORED");
+    };
+    assert_ne!(proof.frame, now.at.0, "a different picture");
+    // The new run numbers this other picture with the restored proof's ID.
+    proof.bound.frame_id = now.frame_id;
+    feedback.active = Some(note.clone());
+    feedback.drawing = true;
+    app.feedback_stroke_start();
+    let gesture = app.focused().studio.feedback.gesture.clone();
+    assert!(
+        gesture.as_ref().is_some_and(|(comment, _)| comment != note),
+        "C3F2_NO_STROKE_ON_OLD_PROOF: {gesture:?}"
+    );
+    assert!(app.feedback_stroke_point([0.7, 0.7]));
+    app.feedback_stroke_end();
+    assert_eq!(
+        strokes_of(app, note),
+        before,
+        "C3F2_NO_STROKE_ON_OLD_PROOF: the restored draft is unchanged"
+    );
 }
 
 /// A port whose replies can be lost before or after the owner commits.
@@ -652,6 +724,8 @@ struct Lossy<'a> {
     /// The kept drafts file, read at each dispatch: what a crash then would leave.
     crash_at_dispatch: Option<std::path::PathBuf>,
     seen: Vec<Option<Vec<u8>>>,
+    /// Commands that reached this port.
+    calls: usize,
 }
 impl<'a> Lossy<'a> {
     fn new(inner: &'a mut dyn FeedbackPort) -> Self {
@@ -663,6 +737,7 @@ impl<'a> Lossy<'a> {
             forget_batches: false,
             crash_at_dispatch: None,
             seen: Vec::new(),
+            calls: 0,
         }
     }
 }
@@ -681,6 +756,7 @@ impl FeedbackPort for Lossy<'_> {
         self.inner.envelope(issuer)
     }
     fn metadata(&mut self, envelope: &MetadataEnvelope, update: &MetadataUpdate) -> Reply {
+        self.calls += 1;
         if let Some(path) = &self.crash_at_dispatch {
             self.seen.push(std::fs::read(path).ok());
         }
@@ -751,9 +827,9 @@ fn draft_kept(feedback: &Feedback, id: &CommentId, text: &str, marker: &str) {
 
 #[test]
 fn s3_batch_revision_and_lost_reply() {
-    let (_temp, path, mut bundle, core, inputs) = new_project("c3-batches");
+    let (temp, path, mut bundle, core, inputs) = new_project("c3-batches");
     let branch = bundle.manual_branch_id().clone();
-    let mut feedback = Feedback::default();
+    let mut feedback = kept_by(&temp, &bundle);
     // Version A, then version B: notes on both make a mixed-version batch.
     let mut x = capture_cut(&core, &branch, 1, 3);
     let x_id = x.comment.clone();
@@ -922,6 +998,7 @@ fn s3_batch_revision_and_lost_reply() {
             text: "X3 bad proof".into(),
             strokes: Vec::new(),
             state: DraftState::Editing,
+            live: false,
         });
         let outcome = feedback.save(&mut bundle, &x_id);
         assert!(
@@ -1050,7 +1127,12 @@ fn restart(
     std::fs::write(kept, image).unwrap();
     let bundle = LoadedBundle::read(path).unwrap().into_writer().unwrap();
     let mut feedback = Feedback::default();
-    feedback.restore(kept.to_path_buf()).unwrap();
+    feedback
+        .open(
+            Ok(bundle.project_id().clone()),
+            Ok(kept.parent().unwrap().to_path_buf()),
+        )
+        .unwrap();
     (bundle, feedback)
 }
 fn pending_command(feedback: &Feedback, id: &CommentId) -> MetadataUpdate {
@@ -1072,9 +1154,8 @@ fn pending_command(feedback: &Feedback, id: &CommentId) -> MetadataUpdate {
 fn s3_fix1_restart_retries_original() {
     let (temp, path, mut bundle, core, _inputs) = new_project("c3f-restart");
     let branch = bundle.manual_branch_id().clone();
-    let kept = temp.path("kept-drafts.json");
-    let mut feedback = Feedback::default();
-    feedback.restore(kept.clone()).unwrap();
+    let kept = kept_file(&temp, &bundle);
+    let mut feedback = kept_by(&temp, &bundle);
     let ids = [
         (1, "X typed"),
         (2, "Y typed"),
@@ -1206,4 +1287,315 @@ fn s3_fix1_restart_retries_original() {
         "C3F_DRAFT_KEPT"
     );
     eprintln!("C3F before-commit restart: W saved {w_saved}, batch landed {landed}");
+}
+
+/// A saved project with typed draft X, and Y's save committed with its reply
+/// lost: the kept file as a crash at Y's dispatch left it, Y's exact command,
+/// and Y's one committed revision.
+#[allow(clippy::type_complexity, reason = "one fixture, named at the call")]
+fn lost_y_save(
+    temp: &TempDirectory,
+    bundle: &mut ProjectBundle,
+    core: &Core,
+) -> (
+    CommentId,
+    CommentId,
+    Vec<u8>,
+    MetadataUpdate,
+    Vec<ObjectRef>,
+) {
+    let branch = bundle.manual_branch_id().clone();
+    let kept = kept_file(temp, bundle);
+    let mut feedback = kept_by(temp, bundle);
+    let [x_id, y_id] = [(1, "X typed, kept"), (2, "Y1 sent")].map(|(frame, text)| {
+        let mut draft = capture_cut(core, &branch, frame, frame.cast_signed());
+        draft.text = text.into();
+        draft.strokes = vec![vec![[0.25, 0.5], [0.5, 0.75]]];
+        let id = draft.comment.clone();
+        feedback.drafts.push(draft);
+        id
+    });
+    publish(bundle);
+    feedback.refresh(&*bundle).unwrap();
+    let mut lossy = Lossy::new(&mut *bundle);
+    lossy.after = 1;
+    lossy.crash_at_dispatch = Some(kept);
+    assert!(matches!(
+        feedback.save(&mut lossy, &y_id),
+        Outcome::Unknown(_)
+    ));
+    let image = crash_image(&mut lossy, "C3F2_KEPT_BEFORE_SEND");
+    drop(lossy);
+    let command = pending_command(&feedback, &y_id);
+    let committed = bundle.feedback_index().unwrap().revisions[&y_id].clone();
+    assert_eq!(committed.len(), 1);
+    (x_id, y_id, image, command, committed)
+}
+
+/// Fix 2 invariant 1: kept notes follow the project's durable identity. A
+/// renamed and moved project gets its draft and exact pending command back; a
+/// different project at the old path sees none of it, and a file naming another
+/// project is set aside whole, never merged.
+#[test]
+fn s3_fix2_recovery_follows_identity() {
+    let (temp, path, mut bundle, core, _inputs) = new_project("c3f2-identity");
+    let project = bundle.project_id().clone();
+    let (x_id, y_id, image, command, committed) = lost_y_save(&temp, &mut bundle, &core);
+    drop(bundle);
+
+    // Rename and move the project, both of its parts, then reopen it there.
+    let moved = temp.path("elsewhere/renamed.kinewright");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::rename(
+        path.with_extension("kinewright-assets"),
+        moved.with_extension("kinewright-assets"),
+    )
+    .unwrap();
+    let kept = temp
+        .path("state")
+        .join(format!("{}.json", project.as_str()));
+    let (mut bundle, mut feedback) = restart(&moved, &kept, &image);
+    assert_eq!(bundle.project_id(), &project, "C3F2_SAME_IDENTITY");
+    draft_kept(&feedback, &x_id, "X typed, kept", "C3F2_MOVED_DRAFT");
+    assert_eq!(
+        pending_command(&feedback, &y_id),
+        command,
+        "C3F2_MOVED_PENDING: the exact command"
+    );
+    assert!(feedback.resume, "C3F2_MOVED_RESUMES");
+    feedback.resume(&mut bundle);
+    assert_eq!(
+        bundle.feedback_index().unwrap().revisions[&y_id],
+        committed,
+        "C3F2_MOVED_RETRY_EXACT: one revision, the original"
+    );
+    assert!(!feedback.drafts.iter().any(|draft| draft.comment == y_id));
+    assert!(
+        feedback
+            .drafts
+            .iter()
+            .any(|draft| draft.comment == x_id && draft.text == "X typed, kept"),
+        "C3F2_MOVED_DRAFT: still a draft after the retry"
+    );
+    drop(feedback);
+    drop(bundle);
+    let ours = std::fs::read(&kept).unwrap();
+
+    // A different project at the old path: none of them.
+    let other = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    assert_ne!(other.project_id(), &project);
+    let feedback = kept_by(&temp, &other);
+    assert!(
+        feedback.drafts.is_empty()
+            && feedback.submission.is_none()
+            && feedback.detached.is_empty()
+            && !feedback.resume,
+        "C3F2_OTHER_PROJECT_SEES_NONE"
+    );
+    drop(feedback);
+    assert_eq!(std::fs::read(&kept).unwrap(), ours, "C3F2_OURS_UNTOUCHED");
+
+    // Even a file under the other project's name that names this project is
+    // not merged: it is set aside intact.
+    let theirs = kept_file(&temp, &other);
+    std::fs::write(&theirs, &ours).unwrap();
+    let feedback = kept_by(&temp, &other);
+    assert!(
+        feedback.drafts.is_empty() && !feedback.resume,
+        "C3F2_MISMATCH_NOT_MERGED"
+    );
+    let aside = std::fs::read_dir(temp.path("state"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{}.json.other-", other.project_id().as_str()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(aside.len(), 1, "C3F2_MISMATCH_SET_ASIDE {aside:?}");
+    assert_eq!(
+        std::fs::read(&aside[0]).unwrap(),
+        ours,
+        "C3F2_MISMATCH_INTACT"
+    );
+
+    // With LOCALAPPDATA unset, the real location is per-user state, never temp.
+    let temp_dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    match kinewright_project::feedback_state_directory() {
+        Ok(directory) => {
+            assert!(
+                !directory.starts_with(&temp_dir),
+                "C3F2_NEVER_TEMP {directory:?}"
+            );
+            if std::env::var_os("LOCALAPPDATA").is_none() {
+                assert!(
+                    directory.ends_with("kinewright/feedback"),
+                    "C3F2_USER_STATE {directory:?}"
+                );
+            }
+            eprintln!("C3F2 state folder: {}", directory.display());
+        }
+        Err(why) => eprintln!("C3F2 state folder refused: {why}"),
+    }
+}
+
+/// Fix 2 invariant 2: kept notes that cannot be read refuse every send. Nothing
+/// reaches the owner, the file is left byte for byte, and the draft stays.
+#[test]
+fn s3_fix2_unreadable_kept_refuses() {
+    let (temp, _path, mut bundle, core, _inputs) = new_project("c3f2-unreadable");
+    let branch = bundle.manual_branch_id().clone();
+    let kept = kept_file(&temp, &bundle);
+    std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    let garbage = b"{\"version\":2,\"project\":".to_vec();
+    std::fs::write(&kept, &garbage).unwrap();
+    let mut feedback = Feedback::default();
+    let opened = feedback.open(Ok(bundle.project_id().clone()), Ok(temp.path("state")));
+    assert!(opened.is_err(), "C3F2_UNREADABLE_NAMED");
+    assert!(matches!(feedback.keeping, Keeping::Failed { .. }));
+    let mut draft = capture_cut(&core, &branch, 1, 1);
+    draft.text = "typed while the kept file is broken".into();
+    let id = draft.comment.clone();
+    feedback.drafts.push(draft);
+    publish(&mut bundle);
+    feedback.refresh(&bundle).unwrap();
+    let before = (*bundle.feedback_index().unwrap()).clone();
+    let mut counting = Lossy::new(&mut bundle);
+    let outcome = feedback.save(&mut counting, &id);
+    let calls = counting.calls;
+    drop(counting);
+    assert!(
+        matches!(&outcome, Outcome::Refused(why) if why.contains("cannot be read")),
+        "C3F2_UNREADABLE_REFUSES: {outcome:?}"
+    );
+    assert_eq!(calls, 0, "C3F2_NOTHING_REACHES_THE_OWNER");
+    assert_eq!(*bundle.feedback_index().unwrap(), before);
+    draft_kept(
+        &feedback,
+        &id,
+        "typed while the kept file is broken",
+        "C3F2_DRAFT_STAYS",
+    );
+    assert!(feedback.close_text().contains("Closing discards them"));
+    feedback.changed = true;
+    let _ = feedback.persist();
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        garbage,
+        "C3F2_FILE_UNCHANGED"
+    );
+
+    // A file this user cannot read at all: the same refusal.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::remove_file(&kept).unwrap();
+        std::fs::write(&kept, b"{}").unwrap();
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&kept).is_err() {
+            let mut feedback = Feedback::default();
+            assert!(
+                feedback
+                    .open(Ok(bundle.project_id().clone()), Ok(temp.path("state")))
+                    .is_err()
+            );
+            assert!(matches!(
+                feedback.retain_for_dispatch(),
+                Err(why) if why.contains("cannot be read")
+            ));
+        } else {
+            eprintln!("C3F2: running as a user who reads mode 000 files; leg skipped");
+        }
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// Fix 2 invariant 3: the kept draft is edited after its save was sent and the
+/// reply lost. After a restart the old receipt settles the old command, and the
+/// edited text survives as a draft of its own. The same holds for a batch.
+#[test]
+fn s3_fix2_edited_draft_survives_old_receipt() {
+    let (temp, path, mut bundle, core, _inputs) = new_project("c3f2-edited");
+    let (x_id, y_id, image, _command, committed) = lost_y_save(&temp, &mut bundle, &core);
+    let kept = kept_file(&temp, &bundle);
+    drop(bundle);
+    let mut value: serde_json::Value = serde_json::from_slice(&image).unwrap();
+    let edited = "Y2 edited in the kept file after the send";
+    for draft in value["drafts"].as_array_mut().unwrap() {
+        if draft["comment"] == serde_json::json!(y_id) {
+            draft["text"] = serde_json::json!(edited);
+        }
+    }
+    let (mut bundle, mut feedback) = restart(&path, &kept, &serde_json::to_vec(&value).unwrap());
+    let restored = feedback
+        .drafts
+        .iter()
+        .find(|draft| draft.comment == y_id)
+        .expect("C3F2_EDITED_KEPT");
+    assert!(
+        !restored.pending() && restored.text == edited,
+        "C3F2_EDITED_IS_A_DRAFT"
+    );
+    assert_eq!(feedback.detached.len(), 1, "C3F2_COMMAND_DETACHED");
+    feedback.resume(&mut bundle);
+    assert_eq!(
+        bundle.feedback_index().unwrap().revisions[&y_id],
+        committed,
+        "C3F2_OLD_RECEIPT_SETTLES: the old command, once"
+    );
+    assert!(feedback.detached.is_empty(), "C3F2_OLD_RECEIPT_SETTLES");
+    draft_kept(&feedback, &y_id, edited, "C3F2_EDITED_SURVIVES");
+    let y2 = saved_ref(feedback.save(&mut bundle, &y_id), "C3F2_EDITED_SAVES");
+    assert_eq!(
+        bundle.feedback_index().unwrap().revisions[&y_id],
+        vec![committed[0].clone(), y2],
+        "C3F2_EDITED_IS_THE_NEXT_REVISION"
+    );
+
+    // A submit of Y1 whose reply is lost; the kept batch is edited to name X's
+    // revision as well. The command's batch is what is retried, and the edited
+    // batch's notes stay selected.
+    let x1 = saved_ref(feedback.save(&mut bundle, &x_id), "C3F2_SAVE_X");
+    feedback.toggle(&committed[0]);
+    let mut lossy = Lossy::new(&mut bundle);
+    lossy.after = 1;
+    lossy.crash_at_dispatch = Some(kept.clone());
+    assert!(matches!(feedback.submit(&mut lossy), Outcome::Unknown(_)));
+    let image = crash_image(&mut lossy, "C3F2_SUBMIT_KEPT");
+    drop(lossy);
+    let sent = feedback.submission.as_ref().unwrap().batch.clone();
+    drop(feedback);
+    drop(bundle);
+    let mut value: serde_json::Value = serde_json::from_slice(&image).unwrap();
+    value["submission"]["batch"]["revision_refs"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(&x1).unwrap());
+    let (mut bundle, mut feedback) = restart(&path, &kept, &serde_json::to_vec(&value).unwrap());
+    assert_eq!(
+        feedback.submission.as_ref().map(|s| s.batch.clone()),
+        Some(sent.clone()),
+        "C3F2_BATCH_IS_THE_COMMAND'S"
+    );
+    assert!(feedback.selection.contains(&x1), "C3F2_EDITED_BATCH_KEPT");
+    feedback.resume(&mut bundle);
+    let index = bundle.feedback_index().unwrap();
+    assert_eq!(
+        index.batches.keys().cloned().collect::<Vec<_>>(),
+        vec![sent.batch_id.clone()],
+        "C3F2_BATCH_ONCE"
+    );
+    assert_eq!(
+        bundle
+            .read_submitted_batch(&sent.batch_id)
+            .unwrap()
+            .batch
+            .revision_refs,
+        vec![committed[0].clone()]
+    );
+    assert_eq!(feedback.selection, vec![x1], "C3F2_EDITED_BATCH_KEPT");
 }

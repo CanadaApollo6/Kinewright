@@ -1104,6 +1104,12 @@ impl crate::editing_session::Ja1EditingSession {
     pub fn manual_branch_id(&self) -> Result<crate::bundle_records::BranchId, BundleError> {
         Ok(self.active_bundle()?.manual_branch_id().clone())
     }
+    /// The project's durable identity, which feedback recovery is keyed by
+    /// and checked against (S3 C3 fix 2). A copy made by Save As gets a new
+    /// one; a rename or move keeps it.
+    pub fn project_id(&self) -> Result<crate::bundle_records::ProjectId, BundleError> {
+        Ok(self.active_bundle()?.project_id().clone())
+    }
     pub fn reconcile_metadata(&mut self) -> Result<(), BundleError> {
         self.active_bundle_mut()?.reconcile_metadata()
     }

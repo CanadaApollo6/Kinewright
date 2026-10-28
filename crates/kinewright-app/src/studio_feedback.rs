@@ -6,7 +6,7 @@ use eframe::egui::{self, Pos2, Rect, Vec2};
 use kinewright_core::{ClipId, Document, FrameTexture, HistorySnapshot, TimeCode, TrackKind};
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
-    bundle_records::{BranchCheckpoint, BranchId, ObjectRef},
+    bundle_records::{BranchCheckpoint, BranchId, ObjectRef, ProjectId},
     editing_session::Ja1EditingSession,
     receipts::{CommandId, IssuerId, ReceiptLookup, ReceiptResult},
     storage_budget::StorageLimits,
@@ -294,6 +294,11 @@ pub(crate) struct Draft {
     pub(crate) text: String,
     pub(crate) strokes: Vec<Stroke>,
     pub(crate) state: DraftState,
+    /// Captured in this run from the picture the presenter bound. Frame IDs
+    /// restart with each launch, so a restored draft is never drawn on or
+    /// painted over by frame-ID match: a new stroke captures afresh.
+    #[serde(skip)]
+    pub(crate) live: bool,
 }
 impl Draft {
     pub(crate) fn pending(&self) -> bool {
@@ -401,6 +406,7 @@ pub(crate) fn capture(view: &View<'_>) -> Result<Draft, String> {
         text: String::new(),
         strokes: Vec::new(),
         state: DraftState::Editing,
+        live: true,
     })
 }
 
@@ -766,48 +772,82 @@ pub(crate) enum Outcome {
 }
 
 /// What a project's feedback keeps on this computer between sessions: unsaved
-/// drafts, every in-flight command exactly as sent, and the Revise cut selection.
+/// drafts, every in-flight command exactly as sent, and the Revise cut
+/// selection. The file names and carries the project's durable identity, and
+/// nothing in it is merged or retried for any other project (S3 C3 fix 2).
 #[derive(Serialize)]
 struct KeptRef<'a> {
     version: u32,
+    project: &'a ProjectId,
     drafts: &'a [Draft],
     selection: &'a [ObjectRef],
     submission: Option<&'a Submission>,
+    detached: &'a [Detached],
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Kept {
     version: u32,
+    project: ProjectId,
     drafts: Vec<Draft>,
     selection: Vec<ObjectRef>,
     submission: Option<Submission>,
+    detached: Vec<Detached>,
 }
-const KEPT_VERSION: u32 = 1;
+const KEPT_VERSION: u32 = 2;
 const RESTARTED: &str = "Kinewright closed before this outcome was known";
 
-/// Where a saved project's feedback drafts are kept: beside the recovery
-/// journals, named like them from the project's path.
-pub(crate) fn drafts_path(project: &Path) -> PathBuf {
-    let identity =
-        kinewright_project::canonical_project_identity(project).unwrap_or(project.to_path_buf());
-    let stem = project
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    kinewright_project::default_recovery_directory()
-        .with_file_name("feedback")
-        .join(format!(
-            "{stem}-{:016x}.json",
-            kinewright_project::fnv1a_64(identity.as_os_str().as_encoded_bytes())
-        ))
+/// A sent command whose draft no longer matches it. It is retried exactly until
+/// its outcome is known, and its draft stays a separate draft whatever the
+/// receipt says.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Detached {
+    pub(crate) comment: Option<CommentId>,
+    pub(crate) write: PendingWrite,
 }
-/// Write `bytes` to `path` so that a crash leaves the old or the new file, never a torn one.
+
+/// Where this project's feedback is kept between sessions.
+#[derive(Default)]
+pub(crate) enum Keeping {
+    /// The project has never been saved: closing discards notes.
+    #[default]
+    Unsaved,
+    /// Kept in per-user state, in the file named by the project's identity.
+    Kept { project: ProjectId, path: PathBuf },
+    /// The project is saved, but its kept state cannot be read or has no
+    /// persistent place. Nothing is sent and nothing is written over it.
+    Failed {
+        project: Option<ProjectId>,
+        why: String,
+    },
+}
+impl Keeping {
+    pub(crate) fn project(&self) -> Option<&ProjectId> {
+        match self {
+            Self::Unsaved => None,
+            Self::Kept { project, .. } => Some(project),
+            Self::Failed { project, .. } => project.as_ref(),
+        }
+    }
+}
+
+/// Write `bytes` to `path` so that a crash leaves the old or the new file,
+/// never a torn one. The folder and the file are private to this user.
 fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let directory = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(directory)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(directory)?;
     let partial = path.with_extension("json.partial");
     {
-        let mut file = std::fs::File::create(&partial)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&partial)?;
         file.write_all(bytes)?;
         file.sync_all()?;
     }
@@ -815,6 +855,97 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     std::fs::File::open(directory)?.sync_all()?;
     Ok(())
+}
+
+/// The anchor a captured draft's save names, once its snapshot is known.
+fn captured_anchor(
+    proof: &FrameProof,
+    snapshot: Option<&SnapshotKey>,
+    layers: &[Layer],
+    layer: Option<usize>,
+) -> Option<FeedbackAnchor> {
+    Some(FeedbackAnchor {
+        snapshot: snapshot?.clone(),
+        frame: proof.frame,
+        fps: proof.fps.clone(),
+        raster_size: proof.raster,
+        orientation: proof.orientation.clone(),
+        target: layer
+            .and_then(|index| layers.get(index))
+            .map(|layer| FeedbackTarget {
+                local_clip_id: layer.clip,
+                occurrence_id: None,
+                local_frame: None,
+            }),
+        source_ref: None,
+        script_beat_id: None,
+    })
+}
+
+/// Whether `write` is exactly the save this draft's content sends: its comment,
+/// the save kind, the text and stroke digests, and every evidence reference.
+/// A kept file edited after the send fails this, so an old receipt never
+/// clears content it did not carry.
+fn command_matches(draft: &Draft, write: &PendingWrite) -> bool {
+    let MetadataChange::SaveFeedback(revision) = &write.update.change else {
+        return false;
+    };
+    let same = |reference: &ObjectRef, bytes: &[u8]| {
+        reference.byte_length == bytes.len() as u64
+            && reference.sha256 == kinewright_media::sha256_bytes(bytes)
+    };
+    let drawn = |reference: &ObjectRef| {
+        strokes_bytes(&draft.strokes).is_ok_and(|bytes| same(reference, &bytes))
+    };
+    if revision.comment_id != draft.comment
+        || !same(&revision.original_text_ref, draft.text.as_bytes())
+    {
+        return false;
+    }
+    match &draft.origin {
+        Origin::Revises {
+            anchor,
+            frame_proof_ref,
+            strokes_ref,
+            strokes,
+            voice_ref,
+            transcript_revision,
+        } => {
+            (if *strokes == draft.strokes {
+                revision.strokes_ref == *strokes_ref
+            } else {
+                drawn(&revision.strokes_ref)
+            }) && revision.anchor == *anchor
+                && revision.frame_proof_ref == *frame_proof_ref
+                && revision.voice_ref == *voice_ref
+                && revision.transcript_revision == *transcript_revision
+        }
+        Origin::Captured {
+            proof,
+            snapshot,
+            layers,
+            layer,
+            ..
+        } => {
+            drawn(&revision.strokes_ref)
+                && serde_json::to_vec(proof)
+                    .is_ok_and(|bytes| same(&revision.frame_proof_ref, &bytes))
+                && captured_anchor(proof, snapshot.as_ref(), layers, *layer)
+                    .is_some_and(|anchor| anchor == revision.anchor)
+                && revision.voice_ref.is_none()
+                && revision.transcript_revision.is_none()
+        }
+    }
+}
+/// Whether a kept submission's batch is the batch its command sends.
+fn submission_matches(submission: &Submission) -> bool {
+    matches!(
+        &submission.write.update.change,
+        MetadataChange::SubmitBatch { batch, request }
+            if *batch == submission.batch
+                && request.batch_id == batch.batch_id
+                && request.command_id == submission.write.envelope.id
+    )
 }
 
 /// Studio feedback state for one project session.
@@ -830,29 +961,33 @@ pub(crate) struct Feedback {
     /// The stroke being drawn: its draft and the bound frame it started on.
     /// Points over any other picture end it.
     pub(crate) gesture: Option<(CommentId, u64)>,
+    /// Issued by this project's owner; reset when the project identity changes.
     issuer: Option<IssuerId>,
     /// The Revise cut selection: exact saved revisions, possibly across versions.
     pub(crate) selection: Vec<ObjectRef>,
     /// Selected revisions that are no longer their comment's newest.
     pub(crate) older: BTreeMap<ObjectRef, SavedNote>,
     pub(crate) submission: Option<Submission>,
+    /// Sent commands that no longer match their drafts, retried to settle.
+    pub(crate) detached: Vec<Detached>,
     pub(crate) saved: Vec<SavedNote>,
     pub(crate) batches: Vec<FeedbackBatchId>,
     pub(crate) message: Option<String>,
     pub(crate) loaded: bool,
     pub(crate) scene: Option<String>,
-    /// The file this project's drafts are kept in, once restored from it.
-    pub(crate) durable: Option<PathBuf>,
-    /// The project path `durable` was derived from, even if restoring failed.
-    pub(crate) durable_for: Option<PathBuf>,
-    /// Why the drafts could not be kept on disk, if they could not.
-    pub(crate) durable_error: Option<String>,
+    /// Where this project's feedback is kept between sessions.
+    pub(crate) keeping: Keeping,
+    /// Why the last write of the kept state failed, if it did.
+    pub(crate) persist_error: Option<String>,
     /// Kept state changed since it was last written.
     pub(crate) changed: bool,
     /// Restored commands wait for an exact retry.
     pub(crate) resume: bool,
     /// The draft whose text field takes focus next.
     pub(crate) focus: Option<CommentId>,
+    /// The per-user state folder, replaced in tests.
+    #[cfg(test)]
+    pub(crate) directory_override: Option<PathBuf>,
 }
 impl Feedback {
     pub(crate) fn draft_mut(&mut self, comment: &CommentId) -> Option<&mut Draft> {
@@ -862,7 +997,9 @@ impl Feedback {
     }
     /// Feedback that closing now would leave outside the project.
     pub(crate) fn unsaved(&self) -> bool {
-        self.submission.is_some() || self.drafts.iter().any(Draft::holds_work)
+        self.submission.is_some()
+            || !self.detached.is_empty()
+            || self.drafts.iter().any(Draft::holds_work)
     }
     /// The close and quit warning for unsaved feedback, or empty.
     pub(crate) fn close_text(&self) -> String {
@@ -882,89 +1019,247 @@ impl Feedback {
         let what = match (notes.is_empty(), self.submission.is_some()) {
             (false, true) => format!("{notes}, and a Revise cut request is not confirmed."),
             (false, false) => format!("{notes}."),
-            _ => "A Revise cut request is not confirmed.".to_owned(),
+            (true, true) => "A Revise cut request is not confirmed.".to_owned(),
+            (true, false) => "An earlier note send is not confirmed.".to_owned(),
         };
-        match (&self.durable, &self.durable_error) {
-            (Some(_), None) => format!(
+        match (&self.keeping, &self.persist_error) {
+            (Keeping::Kept { .. }, None) => format!(
                 "{what} They are kept on this computer: reopening this project shows them again and retries any unconfirmed request exactly. Save them in Notes to add them to the project."
             ),
-            (_, Some(why)) => {
+            (Keeping::Kept { .. }, Some(why)) | (Keeping::Failed { why, .. }, _) => {
                 format!(
                     "{what} They could not be kept on this computer ({why}). Closing discards them."
                 )
             }
-            (None, None) => format!("{what} Closing discards them."),
+            (Keeping::Unsaved, _) => format!("{what} Closing discards them."),
         }
     }
-    /// Write the kept state now. Settles pixel digests first, so the kept proofs carry them.
+    /// The per-user folder kept state goes in, or why there is none.
+    #[cfg_attr(
+        not(test),
+        allow(clippy::unused_self, reason = "tests replace the folder through self")
+    )]
+    fn state_directory(&self) -> Result<PathBuf, String> {
+        #[cfg(test)]
+        if let Some(directory) = &self.directory_override {
+            return Ok(directory.clone());
+        }
+        kinewright_project::feedback_state_directory()
+    }
+    /// Write the kept state now. Settles pixel digests first, so the kept proofs
+    /// carry them. An unsaved project keeps nothing; a failed one writes nothing.
     pub(crate) fn persist(&mut self) -> Result<(), String> {
-        let Some(path) = self.durable.clone() else {
-            self.changed = false;
-            return Ok(());
+        let (project, path) = match &self.keeping {
+            Keeping::Unsaved => {
+                self.changed = false;
+                return Ok(());
+            }
+            Keeping::Failed { why, .. } => return Err(why.clone()),
+            Keeping::Kept { project, path } => (project.clone(), path.clone()),
         };
         self.drafts.iter_mut().for_each(Draft::settle_readback);
-        let result =
-            if self.drafts.is_empty() && self.selection.is_empty() && self.submission.is_none() {
-                match std::fs::remove_file(&path) {
-                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-                    _ => Ok(()),
-                }
-            } else {
-                serde_json::to_vec(&KeptRef {
-                    version: KEPT_VERSION,
-                    drafts: &self.drafts,
-                    selection: &self.selection,
-                    submission: self.submission.as_ref(),
-                })
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| write_atomically(&path, &bytes))
-            };
+        let result = if self.drafts.is_empty()
+            && self.selection.is_empty()
+            && self.submission.is_none()
+            && self.detached.is_empty()
+        {
+            match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            }
+        } else {
+            serde_json::to_vec(&KeptRef {
+                version: KEPT_VERSION,
+                project: &project,
+                drafts: &self.drafts,
+                selection: &self.selection,
+                submission: self.submission.as_ref(),
+                detached: &self.detached,
+            })
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| write_atomically(&path, &bytes))
+        };
         match result {
             Ok(()) => {
                 self.changed = false;
-                self.durable_error = None;
+                self.persist_error = None;
                 Ok(())
             }
             Err(error) => {
                 let why = error.to_string();
-                self.durable_error = Some(why.clone());
+                self.persist_error = Some(why.clone());
                 Err(why)
             }
         }
     }
-    /// Bring back drafts, in-flight commands and the selection kept at `path`, and
-    /// keep this project's feedback there from now on. A file that cannot be read
-    /// is left untouched and nothing new is written over it.
-    pub(crate) fn restore(&mut self, path: PathBuf) -> Result<(), String> {
+    /// The exact command about to be sent is durably kept, or why it is not.
+    /// Only a durable file for this project counts: an unsaved project or one
+    /// whose kept state failed to load refuses the send.
+    fn retain_for_dispatch(&mut self) -> Result<(), String> {
+        match &self.keeping {
+            Keeping::Unsaved => Err("the project is not saved yet".to_owned()),
+            Keeping::Failed { why, .. } => Err(why.clone()),
+            Keeping::Kept { .. } => self.persist(),
+        }
+    }
+    /// Keep feedback for `project` from now on, and bring back what was kept for
+    /// it. Leaving a kept project first writes its state, which stays in its own
+    /// file with its in-flight commands; unsent drafts and the selection come
+    /// along (a first save or Save As). A file that cannot be read is left
+    /// untouched, and a file naming another project is set aside intact.
+    pub(crate) fn open(
+        &mut self,
+        project: Result<ProjectId, String>,
+        directory: Result<PathBuf, String>,
+    ) -> Result<(), String> {
+        if matches!(self.keeping, Keeping::Kept { .. }) {
+            let left = self.persist();
+            self.leave(left.is_ok());
+        }
+        self.issuer = None;
+        self.saved.clear();
+        self.older.clear();
+        self.batches.clear();
+        self.loaded = false;
+        self.persist_error = None;
+        self.gesture = None;
+        let project = match project {
+            Ok(project) => project,
+            Err(why) => {
+                let why = format!("this project's identity cannot be read ({why})");
+                self.keeping = Keeping::Failed {
+                    project: None,
+                    why: why.clone(),
+                };
+                return Err(why);
+            }
+        };
+        let fail = |feedback: &mut Self, why: String| {
+            feedback.keeping = Keeping::Failed {
+                project: Some(project.clone()),
+                why: why.clone(),
+            };
+            Err(why)
+        };
+        let directory = match directory {
+            Ok(directory) => directory,
+            Err(why) => return fail(self, format!("no persistent place for notes: {why}")),
+        };
+        let path = directory.join(format!("{}.json", project.as_str()));
         let kept = match std::fs::read(&path) {
-            Ok(bytes) => Some(
-                serde_json::from_slice::<Kept>(&bytes)
-                    .map_err(text)
-                    .and_then(|kept| {
-                        (kept.version == KEPT_VERSION)
-                            .then_some(kept)
-                            .ok_or_else(|| "unknown drafts version".to_owned())
-                    })
-                    .inspect_err(|why| self.durable_error = Some(why.clone()))?,
-            ),
+            Ok(bytes) => match serde_json::from_slice::<Kept>(&bytes) {
+                Ok(kept) if kept.version == KEPT_VERSION => Some(kept),
+                Ok(_) => return fail(self, "kept notes have an unknown version".to_owned()),
+                Err(error) => return fail(self, format!("kept notes cannot be read: {error}")),
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                self.durable_error = Some(error.to_string());
-                return Err(error.to_string());
+            Err(error) => return fail(self, format!("kept notes cannot be read: {error}")),
+        };
+        let kept = match kept {
+            Some(kept) if kept.project != project => {
+                // Not this project's: keep it whole, beside, and start fresh.
+                let aside = path.with_extension(format!(
+                    "json.other-{}-{}",
+                    kept.project.as_str(),
+                    std::process::id()
+                ));
+                if let Err(error) = std::fs::rename(&path, &aside) {
+                    return fail(
+                        self,
+                        format!("kept notes name another project and cannot be set aside: {error}"),
+                    );
+                }
+                None
             }
+            kept => kept,
         };
-        self.durable = Some(path);
-        self.durable_error = None;
-        let Some(kept) = kept else {
-            self.changed |= self.unsaved();
-            return Ok(());
+        self.keeping = Keeping::Kept {
+            project: project.clone(),
+            path,
         };
+        self.changed |= self.unsaved();
+        if let Some(kept) = kept {
+            self.merge(&project, kept);
+        }
+        Ok(())
+    }
+    /// Leave a kept project: what is in flight stays in its file when that was
+    /// written, and only unsent drafts and the selection carry on. When it could
+    /// not be written, nothing is dropped: every draft carries as unsent, and an
+    /// unconfirmed batch's notes go back into the selection.
+    fn leave(&mut self, written: bool) {
+        if written {
+            self.drafts.retain(|draft| !draft.pending());
+            self.submission = None;
+            self.detached.clear();
+        } else {
+            for draft in &mut self.drafts {
+                if draft.pending() {
+                    draft.state = DraftState::Editing;
+                }
+            }
+            if let Some(submission) = self.submission.take() {
+                for reference in submission.batch.revision_refs {
+                    if !self.selection.contains(&reference) {
+                        self.selection.push(reference);
+                    }
+                }
+            }
+            self.detached.clear();
+            self.message = Some(
+                "The previous project's unconfirmed sends could not be kept; their notes are here as drafts."
+                    .into(),
+            );
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| !self.drafts.iter().any(|draft| &draft.comment == active))
+        {
+            self.active = None;
+        }
+    }
+    /// Merge this project's kept state. A restored command is retried only
+    /// when it is this project's and still exactly its draft's; otherwise its
+    /// draft becomes a separate unsent draft and the command settles alone.
+    fn merge(&mut self, project: &ProjectId, kept: Kept) {
+        let ours = |write: &PendingWrite| write.envelope.project_id == *project;
         for mut draft in kept.drafts {
-            if self.drafts.iter().any(|d| d.comment == draft.comment) {
-                continue;
-            }
             if let DraftState::Pending(pending) = &mut draft.state {
                 pending.unknown.get_or_insert_with(|| RESTARTED.to_owned());
+            }
+            let pending = std::mem::replace(&mut draft.state, DraftState::Editing);
+            match pending {
+                DraftState::Pending(write) if ours(&write) && command_matches(&draft, &write) => {
+                    draft.state = DraftState::Pending(write);
+                }
+                DraftState::Pending(write) => {
+                    if ours(&write) {
+                        self.detached.push(Detached {
+                            comment: Some(draft.comment.clone()),
+                            write: *write,
+                        });
+                    }
+                }
+                state => draft.state = state,
+            }
+            if let Some(index) = self.drafts.iter().position(|d| d.comment == draft.comment) {
+                // The same comment is already open here. Identical content is
+                // one draft; different content is kept as two, and the one that
+                // carries a command keeps the comment.
+                let open = &mut self.drafts[index];
+                let identical = open.text == draft.text && open.strokes == draft.strokes;
+                if draft.pending() {
+                    if identical {
+                        self.drafts.remove(index);
+                    } else if let Ok(fresh) = CommentId::fresh() {
+                        open.comment = fresh;
+                    }
+                } else if identical || !draft.holds_work() {
+                    continue;
+                } else if let Ok(fresh) = CommentId::fresh() {
+                    draft.comment = fresh;
+                }
             }
             self.drafts.push(draft);
         }
@@ -973,22 +1268,83 @@ impl Feedback {
                 self.selection.push(reference);
             }
         }
-        if self.submission.is_none()
-            && let Some(mut submission) = kept.submission
-        {
+        for mut detached in kept.detached {
+            if ours(&detached.write) {
+                detached
+                    .write
+                    .unknown
+                    .get_or_insert_with(|| RESTARTED.to_owned());
+                self.detached.push(detached);
+            }
+        }
+        if let Some(mut submission) = kept.submission.filter(|s| ours(&s.write)) {
             submission
                 .write
                 .unknown
                 .get_or_insert_with(|| RESTARTED.to_owned());
-            self.submission = Some(submission);
+            let sent = match &submission.write.update.change {
+                MetadataChange::SubmitBatch { batch, request }
+                    if request.batch_id == batch.batch_id
+                        && request.command_id == submission.write.envelope.id =>
+                {
+                    Some(batch.clone())
+                }
+                _ => None,
+            };
+            if !submission_matches(&submission) {
+                // The kept batch differs from the command: the command is what
+                // was sent, and the kept batch's notes go back into the selection.
+                for reference in &submission.batch.revision_refs {
+                    if !self.selection.contains(reference) {
+                        self.selection.push(reference.clone());
+                    }
+                }
+            }
+            match sent {
+                Some(batch) if self.submission.is_none() => {
+                    submission.batch = batch;
+                    self.submission = Some(submission);
+                }
+                _ => self.detached.push(Detached {
+                    comment: None,
+                    write: submission.write,
+                }),
+            }
         }
-        self.resume = self.submission.is_some() || self.drafts.iter().any(Draft::pending);
+        self.resume = self.submission.is_some()
+            || !self.detached.is_empty()
+            || self.drafts.iter().any(Draft::pending);
         self.changed = true;
-        Ok(())
     }
-    /// Retry every restored command exactly: saves first, then the batch.
+    /// Retry the detached commands `which` selects, exactly. A durable or
+    /// refused reply settles one; its draft, if any, stays as it is. Returns
+    /// whether none of them is still unknown.
+    fn settle_detached(
+        &mut self,
+        port: &mut dyn FeedbackPort,
+        which: impl Fn(&Detached) -> bool,
+    ) -> bool {
+        let mut settled = true;
+        for mut detached in std::mem::take(&mut self.detached) {
+            if !which(&detached) {
+                self.detached.push(detached);
+                continue;
+            }
+            self.changed = true;
+            if let Reply::Unknown(why) =
+                port.metadata(&detached.write.envelope, &detached.write.update)
+            {
+                detached.write.unknown = Some(why);
+                self.detached.push(detached);
+                settled = false;
+            }
+        }
+        settled
+    }
+    /// Retry every restored command exactly: detached ones, saves, then the batch.
     pub(crate) fn resume(&mut self, port: &mut dyn FeedbackPort) {
         self.resume = false;
+        self.settle_detached(port, |_| true);
         let pending = self
             .drafts
             .iter()
@@ -1004,6 +1360,7 @@ impl Feedback {
         if let Err(why) = self.refresh(&*port) {
             self.message = Some(why);
         }
+        self.keep();
     }
     /// Start a revision of a saved comment from all of its evidence. Each field is
     /// kept unless the person changes it.
@@ -1029,6 +1386,7 @@ impl Feedback {
             text: note.text.clone(),
             strokes: note.strokes.clone(),
             state: DraftState::Editing,
+            live: false,
         });
         self.active = Some(note.comment.clone());
         self.focus = Some(note.comment.clone());
@@ -1129,7 +1487,10 @@ impl Feedback {
     /// Write the kept state, and say so if it could not be written.
     fn keep(&mut self) {
         self.changed = true;
-        if let Err(why) = self.persist() {
+        if matches!(self.keeping, Keeping::Failed { .. }) {
+            // Nothing is written over unreadable kept notes; open said why.
+            self.changed = false;
+        } else if let Err(why) = self.persist() {
             self.message = Some(format!(
                 "Notes could not be kept on this computer ({why}). Closing discards unsaved notes."
             ));
@@ -1141,14 +1502,30 @@ impl Feedback {
             .iter()
             .filter(|note| &note.comment != comment)
             .count();
-        let Some(draft) = self
+        let Some(pending) = self
             .drafts
-            .iter_mut()
+            .iter()
             .find(|draft| &draft.comment == comment)
+            .map(Draft::pending)
         else {
             return Outcome::Refused("This draft is gone.".into());
         };
-        if !draft.pending() {
+        if !pending {
+            // An earlier send of this comment that no longer matches its draft
+            // settles first, so the two never race for the same revision.
+            if !self.settle_detached(port, |detached| detached.comment.as_ref() == Some(comment)) {
+                return Outcome::Unknown(
+                    "An earlier send of this note is not confirmed yet. Retry checks it first."
+                        .into(),
+                );
+            }
+            let Some(draft) = self
+                .drafts
+                .iter_mut()
+                .find(|draft| &draft.comment == comment)
+            else {
+                return Outcome::Refused("This draft is gone.".into());
+            };
             let write = match prepare(port, &mut self.issuer, draft, comments) {
                 Ok(write) => write,
                 Err(outcome) => {
@@ -1161,7 +1538,7 @@ impl Feedback {
             draft.state = DraftState::Pending(Box::new(write));
             // The exact command is kept before it is sent: a restart retries it,
             // never a rebuilt one that could save the note twice.
-            if let Err(why) = self.persist() {
+            if let Err(why) = self.retain_for_dispatch() {
                 if let Some(draft) = self.draft_mut(comment) {
                     draft.state = DraftState::Editing;
                 }
@@ -1272,6 +1649,12 @@ impl Feedback {
             if self.selection.is_empty() {
                 return Outcome::Refused("Choose saved notes for Revise cut first.".into());
             }
+            if !self.settle_detached(port, |detached| detached.comment.is_none()) {
+                return Outcome::Unknown(
+                    "An earlier Revise cut request is not confirmed yet. Retry checks it first."
+                        .into(),
+                );
+            }
             let (envelope, generation) = match port.envelope(&mut self.issuer) {
                 Ok(issued) => issued,
                 Err(why) => return Outcome::Refused(why),
@@ -1309,7 +1692,7 @@ impl Feedback {
                 },
             });
             // Kept before it is sent, so a restart resends this exact batch.
-            if let Err(why) = self.persist() {
+            if let Err(why) = self.retain_for_dispatch() {
                 self.submission = None;
                 return Outcome::Refused(format!(
                     "Not sent: this request could not be kept on this computer first ({why})."
@@ -1440,26 +1823,10 @@ fn prepare(
         } => {
             let bytes = serde_json::to_vec(proof).map_err(|e| Outcome::Refused(e.to_string()))?;
             let reference = admit(FeedbackEvidenceKind::FrameProof, &bytes)?;
-            let snapshot = snapshot
-                .clone()
-                .ok_or_else(|| Outcome::Waiting("This mark has no published version.".into()))?;
             (
-                FeedbackAnchor {
-                    snapshot,
-                    frame: proof.frame,
-                    fps: proof.fps.clone(),
-                    raster_size: proof.raster,
-                    orientation: proof.orientation.clone(),
-                    target: layer
-                        .and_then(|index| layers.get(index))
-                        .map(|layer| FeedbackTarget {
-                            local_clip_id: layer.clip,
-                            occurrence_id: None,
-                            local_frame: None,
-                        }),
-                    source_ref: None,
-                    script_beat_id: None,
-                },
+                captured_anchor(proof, snapshot.as_ref(), layers, *layer).ok_or_else(|| {
+                    Outcome::Waiting("This mark has no published version.".into())
+                })?,
                 reference,
                 drawn.ok_or_else(|| Outcome::Refused("The drawing was not sealed.".into()))?,
                 None,
@@ -1534,22 +1901,25 @@ impl KinewrightApp {
     /// Once per Studio frame: bring back this project's kept drafts, retry their
     /// in-flight commands exactly, and keep what changed.
     pub(crate) fn feedback_frame(&mut self) {
-        let path = self
+        // Kept notes follow the project's durable identity, not its path: a
+        // rename or move finds them, and Save As (a new identity) starts its own.
+        let identity = self
             .focused()
             .ja1
             .as_ref()
-            .and_then(crate::ja1_attachment::Ja1Attachment::project_path);
+            .filter(|attachment| attachment.project_path().is_some())
+            .map(|attachment| attachment.owner.project_id().map_err(text));
         let feedback = &mut self.focused_mut().studio.feedback;
-        if let Some(path) = path
-            && feedback.durable_for.as_ref() != Some(&path)
-        {
-            // A first save or Save As keeps the drafts under the new path; the
-            // old file stays with the old project.
-            feedback.durable = None;
-            feedback.durable_for = Some(path.clone());
-            if let Err(why) = feedback.restore(drafts_path(&path)) {
+        let reopen = match (&identity, &feedback.keeping) {
+            (None, _) | (Some(Err(_)), Keeping::Failed { project: None, .. }) => false,
+            (Some(Ok(project)), keeping) => keeping.project() != Some(project),
+            (Some(Err(_)), _) => true,
+        };
+        if let Some(identity) = identity.filter(|_| reopen) {
+            let directory = feedback.state_directory();
+            if let Err(why) = feedback.open(identity, directory) {
                 feedback.message = Some(format!(
-                    "Kept notes could not be read ({why}). They are left as they were."
+                    "Notes are not sent until they can be kept on this computer ({why}). Kept notes are left as they were."
                 ));
             }
         }
@@ -1647,6 +2017,7 @@ impl KinewrightApp {
                 .and_then(|active| {
                     feedback.drafts.iter().find(|draft| {
                         &draft.comment == active
+                            && draft.live
                             && !draft.pending()
                             && matches!(&draft.origin, Origin::Captured { proof, .. } if Some(proof.bound.frame_id) == current)
                     })
@@ -1774,7 +2145,7 @@ impl KinewrightApp {
         let Origin::Captured { proof, .. } = &draft.origin else {
             return;
         };
-        if bound.is_none_or(|cell| cell.frame_id != proof.bound.frame_id) {
+        if !draft.live || bound.is_none_or(|cell| cell.frame_id != proof.bound.frame_id) {
             return;
         }
         let painter = ui.painter_at(image.rect);
