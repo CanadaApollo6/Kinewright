@@ -323,6 +323,31 @@ struct Issued {
     index: u64,
 }
 
+enum ThumbnailScene {
+    Document(Arc<Document>),
+    Certified(Arc<crate::owned_io::PlaybackInputs>),
+}
+
+impl ThumbnailScene {
+    fn bind(
+        document: Arc<Document>,
+        inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+    ) -> Result<Self, MediaError> {
+        let Some(inputs) = inputs else {
+            return Ok(Self::Document(document));
+        };
+        if inputs.document == document {
+            return Ok(Self::Certified(inputs));
+        }
+        // An explicit document cannot authorize a different input namespace.
+        // Its owner must supply that scene through thumbnail_for_inputs.
+        inputs
+            .with_document(document)
+            .map(|inputs| Self::Certified(Arc::new(inputs)))
+            .map_err(|_| MediaError::NotImplemented)
+    }
+}
+
 enum Control {
     #[cfg(any(test, feature = "test-util"))]
     InspectApplied {
@@ -353,7 +378,7 @@ enum Control {
     ResetLoudness,
     /// PF1 R-4: the agent lane's jobs; the worker only resolves and pushes.
     Thumbnail {
-        document: Option<Arc<Document>>,
+        scene: Option<ThumbnailScene>,
         at: TimeCode,
         max_width: u32,
         reply: Sender<Result<RgbaImage, MediaError>>,
@@ -782,11 +807,33 @@ impl FfmpegMediaEngine {
     ) -> FrameStamp {
         let mut coalesced = self.coalesced();
         self.clock.set_fps(inputs.document.fps);
+        coalesced.thumbnail_inputs = Some(Arc::clone(&inputs));
         let issued = coalesced.control();
         let stamp = issued.stamp;
         drop(coalesced);
         self.send_issued(Control::SetCertified(inputs, issued));
         stamp
+    }
+
+    /// Render a retained scene through its own admitted inputs, independently
+    /// of the current playback scene. The request retains the input leases
+    /// through the control queue, agent queue, and rendering completion.
+    ///
+    /// # Errors
+    /// Returns the input verification, decoding, or agent-lane refusal.
+    pub fn thumbnail_for_inputs(
+        &self,
+        inputs: Arc<crate::owned_io::PlaybackInputs>,
+        at: TimeCode,
+        max_width: u32,
+    ) -> Result<RgbaImage, MediaError> {
+        self.agent_request(|reply, cancel| Control::Thumbnail {
+            scene: Some(ThumbnailScene::Certified(inputs)),
+            at,
+            max_width,
+            reply,
+            cancel,
+        })
     }
 
     /// Publish one project's verified CC4 lattices for preview, proof, and
@@ -1065,12 +1112,14 @@ struct Request {
 
 /// PF1 R-1: the stamp source and the coalesced seek/frame slots, one leaf
 /// lock (H-4) replacing today's atomics.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Coalesced {
     /// The newest stamp issued.
     latest: FrameStamp,
     /// Stamped controls issued.
     controls: u64,
+    /// Issued admission, captured before a document thumbnail can queue.
+    thumbnail_inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
     seek: Option<Request>,
     frame: Option<Request>,
     /// PF1 V-2 (review B F1): bumped by the worker's terminal stop before it
@@ -1107,6 +1156,7 @@ impl Coalesced {
 
     fn set_document(&mut self, doc: Arc<Document>, clock: &SharedClock) -> Control {
         clock.set_fps(doc.fps);
+        self.thumbnail_inputs = None;
         let issued = self.control();
         #[cfg(test)]
         self.log
@@ -1498,7 +1548,7 @@ impl Analysis for FfmpegMediaEngine {
 
     fn thumbnail_at(&self, at: TimeCode, max_width: u32) -> Result<RgbaImage, MediaError> {
         self.agent_request(|reply, cancel| Control::Thumbnail {
-            document: None,
+            scene: None,
             at,
             max_width,
             reply,
@@ -1506,14 +1556,19 @@ impl Analysis for FfmpegMediaEngine {
         })
     }
 
+    /// In a certified scene, editorial changes reuse the admitted namespace.
+    /// Different media or LUT assets require `thumbnail_for_inputs`; without
+    /// that capability this operation returns `MediaError::NotImplemented`.
     fn thumbnail_for_document(
         &self,
         document: Arc<Document>,
         at: TimeCode,
         max_width: u32,
     ) -> Result<RgbaImage, MediaError> {
+        let inputs = self.coalesced().thumbnail_inputs.clone();
+        let scene = ThumbnailScene::bind(document, inputs)?;
         self.agent_request(|reply, cancel| Control::Thumbnail {
-            document: Some(document),
+            scene: Some(scene),
             at,
             max_width,
             reply,
@@ -2467,18 +2522,31 @@ impl Worker {
             }
             Control::ResetLoudness => self.reset_loudness(),
             Control::Thumbnail {
-                document,
+                scene,
                 at,
                 max_width,
                 reply,
                 cancel,
             } => {
-                let document = document.unwrap_or_else(|| Arc::clone(&self.document));
-                let inputs = self
-                    .inputs
-                    .as_ref()
-                    .filter(|inputs| inputs.document == document)
-                    .cloned();
+                let scene = match scene {
+                    Some(ThumbnailScene::Certified(inputs)) => {
+                        Ok(ThumbnailScene::Certified(inputs))
+                    }
+                    Some(ThumbnailScene::Document(document)) => {
+                        ThumbnailScene::bind(document, self.inputs.clone())
+                    }
+                    None => ThumbnailScene::bind(Arc::clone(&self.document), self.inputs.clone()),
+                };
+                let (document, inputs) = match scene {
+                    Ok(ThumbnailScene::Document(document)) => (document, None),
+                    Ok(ThumbnailScene::Certified(inputs)) => {
+                        (Arc::clone(&inputs.document), Some(inputs))
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
                 let lut = inputs.as_ref().map_or_else(
                     || self.bound_lut_library(&document),
                     |inputs| Arc::clone(&inputs.lut),

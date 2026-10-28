@@ -1344,9 +1344,31 @@ impl KinewrightApp {
             document: Arc::clone(&document),
         };
         let analysis = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.lut_publisher);
+        let project = &self.projects[project_index];
+        let owned = project.ja1.is_some()
+            || project.ja1_job.is_some()
+            || project.studio.manual_inputs.is_some();
+        let inputs = project
+            .studio
+            .manual_inputs
+            .as_ref()
+            .ok_or(kinewright_core::MediaError::NotImplemented)
+            .and_then(|inputs| {
+                inputs
+                    .with_document(Arc::clone(&document))
+                    .map(Arc::new)
+                    .map_err(|_| kinewright_core::MediaError::NotImplemented)
+            });
         self.off_ui(
             ctx,
-            move || analysis.thumbnail_for_document(document, at, 1_280),
+            move || {
+                if owned {
+                    media.thumbnail_for_inputs(inputs?, at, 1_280)
+                } else {
+                    analysis.thumbnail_for_document(document, at, 1_280)
+                }
+            },
             move |app, ctx, result| {
                 if let Some(target) = app.branch_review_target(&request) {
                     app.show_branch_frame(ctx, target, at, result);
@@ -3438,6 +3460,94 @@ mod tests {
         reply(&mut app, &ctx);
         assert!(app.texture.is_none(), "another project's viewer");
         assert_eq!(reviewed(&app, ids[1]), 2);
+        in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn s3_an_owned_branch_frame_uses_its_own_certified_inputs() {
+        use crate::app::in1_tests::{in1_harness_with_engine, in1_shutdown};
+        use kinewright_media::{
+            FfmpegMediaEngine, GpuContext,
+            test_support::{TempDirectory, workspace_target_dir},
+        };
+        use kinewright_project::bundle::LoadedBundle;
+
+        struct Retire(Option<crossbeam_channel::Receiver<()>>);
+        impl Drop for Retire {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let result = done.recv_timeout(Duration::from_secs(30));
+                    if !std::thread::panicking() {
+                        assert_eq!(
+                            result,
+                            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+                        );
+                    }
+                }
+            }
+        }
+
+        let root = TempDirectory::new_in(&workspace_target_dir(), "c2-branch-thumbnail");
+        let [fixture, replacement] =
+            kinewright_project::c0_fixtures::build_c0_fixture_pair(root.root()).unwrap();
+        let mut document = (*fixture.history.document).clone();
+        document.media_pool[0].path = root.path("external.mkv");
+        let document = Arc::new(document);
+        let loaded = LoadedBundle::read(&fixture.path).unwrap();
+        let inputs_ref = loaded
+            .manual_checkpoint()
+            .unwrap()
+            .input_manifest_ref
+            .clone();
+        let bundle = loaded.into_writer().unwrap();
+        let inputs = bundle
+            .store()
+            .manual_playback_inputs(Arc::clone(&document), &inputs_ref)
+            .unwrap();
+        let blue = replacement
+            .path
+            .with_extension("kinewright-assets")
+            .join("studio/objects")
+            .join(&replacement.media.entry.object.sha256);
+        std::fs::copy(blue, &document.media_pool[0].path).unwrap();
+        let mut retired = Retire(None);
+        let gpu = GpuContext::headless(true).unwrap();
+        let media = Arc::new(
+            FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, root.path("engine")).unwrap(),
+        );
+        retired.0 = Some(media.teardown_observer());
+        let (mut app, engine) = in1_harness_with_engine((*document).clone(), media);
+        app.projects[0].studio.manual_inputs = Some(inputs);
+        engine.set_document(Arc::new(Document::default()));
+        engine.test_applied_scene().unwrap();
+        let context = egui::Context::default();
+        let document = app.projects[0].threads[0]
+            .branch
+            .compare()
+            .unwrap()
+            .document;
+        app.review_agent_branch(&context, 0, 0, document);
+        let reply = app
+            .ui_replies
+            .1
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        reply(&mut app, &context);
+        let texture = app.texture.as_ref().expect("C2_BRANCH_INPUT_HANDOFF").id();
+        let output = context.run_ui(egui::RawInput::default(), |_| {});
+        let (_, upload) = output
+            .textures_delta
+            .set
+            .iter()
+            .find(|(id, _)| *id == texture)
+            .unwrap();
+        let egui::ImageData::Color(image) = &upload.image;
+        let pixel =
+            image.pixels[(image.size[1] / 2) * image.size[0] + image.size[0] / 2].to_array();
+        assert!(
+            pixel[0] > 200 && pixel[1] < 30 && pixel[2] < 30 && pixel[3] == 255,
+            "C2_BRANCH_CERTIFIED_PIXELS: {pixel:?}"
+        );
         in1_shutdown(&mut app);
     }
 }

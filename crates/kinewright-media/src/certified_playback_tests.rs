@@ -13,6 +13,164 @@ fn fixture_interpretation(
     color_description
 }
 
+fn thumbnail_inputs(path: &Path, locator: &Path, source: CertifiedSource) -> Arc<PlaybackInputs> {
+    let mut asset = crate::decode::probe_path(path, kinewright_core::AssetId(1)).unwrap();
+    asset.color_description = fixture_interpretation(&asset.color_description);
+    asset.path = locator.to_owned();
+    Arc::new(
+        PlaybackInputs::admit(
+            Arc::new(crate::test_support::single_clip_document(asset)),
+            [(kinewright_core::AssetId(1), source)].into(),
+            Arc::new(crate::LutLibrary::default()),
+            Arc::new(()),
+        )
+        .unwrap(),
+    )
+}
+
+fn assert_red_thumbnail(image: &kinewright_core::RgbaImage) {
+    let offset = ((image.height / 2 * image.width + image.width / 2) * 4) as usize;
+    let pixel = &image.pixels[offset..offset + 4];
+    assert!(
+        pixel[0] > 200 && pixel[1] < 30 && pixel[2] < 30 && pixel[3] == 255,
+        "C2_THUMBNAIL_CERTIFIED_PIXELS: {pixel:?}"
+    );
+}
+
+struct ThumbnailEngine(Option<Arc<crate::engine::FfmpegMediaEngine>>);
+
+impl std::ops::Deref for ThumbnailEngine {
+    type Target = Arc<crate::engine::FfmpegMediaEngine>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl Drop for ThumbnailEngine {
+    fn drop(&mut self) {
+        let engine = self.0.take().unwrap();
+        let finished = engine.finished();
+        drop(engine);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(10)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "thumbnail engine shuts down"
+        );
+    }
+}
+
+fn thumbnail_engine(root: &TempDirectory) -> ThumbnailEngine {
+    let gpu = crate::gpu_test_support::fixture_gpu_or_skip().expect("thumbnail witness GPU");
+    ThumbnailEngine(Some(Arc::new(
+        crate::engine::FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, root.path("engine"))
+            .unwrap(),
+    )))
+}
+
+#[test]
+fn s3_thumbnail_document_mismatch_refuses_locator_fallback() {
+    use kinewright_core::{Analysis, MediaError};
+
+    let (root_a, path_a, source_a) = media_fixture("red");
+    let (_root_b, path_b, source_b) = media_fixture("blue");
+    let locator = root_a.path("external.avi");
+    fs::copy(&path_a, &locator).unwrap();
+    let inputs_a = thumbnail_inputs(&path_a, &locator, source_a);
+    let inputs_b = thumbnail_inputs(&path_b, &path_b, source_b);
+    let engine = thumbnail_engine(&root_a);
+    engine.set_certified_document(Arc::clone(&inputs_a));
+    engine.test_applied_scene().unwrap();
+    engine.set_certified_document(inputs_b);
+    engine.test_applied_scene().unwrap();
+    fs::copy(&path_b, &locator).unwrap();
+
+    let result = engine.thumbnail_for_document(Arc::clone(&inputs_a.document), TimeCode::ZERO, 32);
+    assert!(
+        matches!(result, Err(MediaError::NotImplemented)),
+        "C2_THUMBNAIL_MISMATCH_REFUSAL: {:?}",
+        result.as_ref().map(|image| &image.pixels[..4])
+    );
+    let image = engine
+        .thumbnail_for_inputs(inputs_a, TimeCode::ZERO, 32)
+        .expect("C2_THUMBNAIL_CAPABILITY_HANDOFF");
+    assert_red_thumbnail(&image);
+}
+
+#[test]
+fn s3_thumbnail_document_only_edit_keeps_certified_inputs() {
+    use kinewright_core::Analysis;
+
+    let (root, path, certified) = media_fixture("red");
+    let (_replacement_root, replacement, _) = media_fixture("blue");
+    let locator = root.path("external.avi");
+    fs::copy(&path, &locator).unwrap();
+    let inputs = thumbnail_inputs(&path, &locator, certified);
+    let mut edited = inputs.document.as_ref().clone();
+    edited.duration.0 -= 1;
+    edited.tracks[0].clips[0].source_range.end = edited.duration;
+    let engine = thumbnail_engine(&root);
+    engine.set_certified_document(inputs);
+    engine.test_applied_scene().unwrap();
+    fs::copy(replacement, locator).unwrap();
+
+    let image = engine
+        .thumbnail_for_document(Arc::new(edited), TimeCode::ZERO, 32)
+        .unwrap();
+    assert_red_thumbnail(&image);
+}
+
+#[test]
+fn s3_thumbnail_capability_survives_queued_scene_change() {
+    use kinewright_core::Playback;
+
+    let (root, path, certified) = media_fixture("red");
+    let (_replacement_root, replacement, _) = media_fixture("blue");
+    let locator = root.path("external.avi");
+    fs::copy(&replacement, &locator).unwrap();
+    let inputs = thumbnail_inputs(&path, &locator, certified);
+    let retained = Arc::downgrade(&inputs);
+    let engine = thumbnail_engine(&root);
+    let hold = engine.hold_agent_lane();
+    let caller_engine = Arc::clone(&engine);
+    let caller =
+        thread::spawn(move || caller_engine.thumbnail_for_inputs(inputs, TimeCode::ZERO, 32));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while engine.s4_lane().waiting().0 == 0 && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    let queued = engine.s4_lane().waiting().0 == 1;
+    engine.set_document(Arc::new(kinewright_core::Document::default()));
+    engine.test_applied_scene().unwrap();
+    let pinned = retained.upgrade().is_some();
+    drop(hold);
+    let result = caller.join().unwrap();
+    assert!(queued, "C2_THUMBNAIL_QUEUED");
+    assert!(pinned, "C2_THUMBNAIL_LEASE_RETAINED");
+    assert_red_thumbnail(&result.expect("C2_THUMBNAIL_CAPABILITY_HANDOFF"));
+    drop(engine);
+    assert!(retained.upgrade().is_none(), "C2_THUMBNAIL_LEASE_RELEASED");
+}
+
+#[test]
+fn s3_thumbnail_damaged_capability_refuses_valid_external_locator() {
+    let (root, path, certified) = media_fixture("red");
+    let (_replacement_root, replacement, _) = media_fixture("blue");
+    let locator = root.path("external.avi");
+    fs::copy(replacement, &locator).unwrap();
+    let length = certified.identity().source_length;
+    let inputs = thumbnail_inputs(&path, &locator, certified);
+    let writer = OpenOptions::new().write(true).open(path).unwrap();
+    writer.set_len(length + 1).unwrap();
+    let engine = thumbnail_engine(&root);
+    assert!(
+        engine
+            .thumbnail_for_inputs(inputs, TimeCode::ZERO, 32)
+            .is_err(),
+        "C2_THUMBNAIL_DAMAGED_INPUT_REFUSAL"
+    );
+}
+
 #[test]
 fn s3_pf1_certified_seek_and_reopen_refuse_tampering() {
     let (root, path, source) = media_fixture("red");
