@@ -884,7 +884,7 @@ impl KinewrightApp {
         &mut self.projects[self.focused_project]
     }
     fn ja1_destination_change(&mut self) -> bool {
-        let error = if self.focused().ja1_job.is_some() {
+        let error = if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             Some("A save or selection is in progress. Wait for its outcome before changing destination.".to_owned())
         } else {
             self.focused()
@@ -905,7 +905,7 @@ impl KinewrightApp {
         reason = "one activation boundary stages the local owner and authenticated host together"
     )]
     pub(crate) fn enable_ja1(&mut self) {
-        if self.focused().ja1_job.is_some() {
+        if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             return;
         }
         let was_legacy = !self.focused().source_admission.is_studio();
@@ -961,39 +961,11 @@ impl KinewrightApp {
         })();
         match result {
             Ok(attachment) => {
-                let session = self.focused_mut();
-                session.source_admission.revoke_legacy_media();
-                session.recovery.stop_for_studio();
-                session.sidecar.sidecar_suspended = true;
-                session.ja1 = Some(attachment);
-                session.install_ja1_view();
+                let grant = self.focused().source_admission.legacy_media();
+                self.focused().source_admission.revoke_legacy_media();
                 self.presenter.suspend();
                 self.playback.pause();
                 self.playing = false;
-                self.focused_mut().studio.manual_inputs = None;
-                let mut root_paths = Vec::new();
-                if let Some(home) =
-                    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-                {
-                    root_paths.push(PathBuf::from(home));
-                }
-                if let Ok(cwd) = std::env::current_dir() {
-                    root_paths.push(cwd);
-                }
-                if let Some(parent) = self
-                    .focused()
-                    .project_path
-                    .as_deref()
-                    .and_then(Path::parent)
-                {
-                    root_paths.push(parent.to_path_buf());
-                }
-                root_paths.sort();
-                root_paths.dedup();
-                let roots = kinewright_agent::writer_host::SessionRoots {
-                    read: root_paths.clone(),
-                    write: root_paths,
-                };
                 let session = self.focused_mut();
                 // Retire local execution before granting the host named write authority.
                 for thread in &mut session.threads {
@@ -1012,10 +984,12 @@ impl KinewrightApp {
                         server.shutdown();
                     }
                 }
-                let project = format!("gui-{}-{:?}", session.id, session.core.actor_identity());
-                let attachment = session.ja1.as_mut().expect("installed Studio source owner");
-                let _ = attachment.launch_host(project, roots);
-                self.status = attachment.message.clone();
+                if let Some(grant) = grant.filter(|grant| !grant.is_quiescent()) {
+                    self.focused_mut().ja1_activation = Some((grant, attachment));
+                    self.status = "Studio is waiting for legacy media work to stop.".into();
+                } else {
+                    self.finish_ja1_activation(self.focused_project, attachment);
+                }
             }
             Err(error) => {
                 if was_legacy {
@@ -1029,6 +1003,54 @@ impl KinewrightApp {
                 }
                 self.status = error;
             }
+        }
+    }
+    fn finish_ja1_activation(
+        &mut self,
+        index: usize,
+        attachment: crate::ja1_attachment::Ja1Attachment,
+    ) {
+        let session = &mut self.projects[index];
+        session.source_admission.revoke_legacy_media();
+        session.recovery.stop_for_studio();
+        session.sidecar.sidecar_suspended = true;
+        session.ja1 = Some(attachment);
+        session.install_ja1_view();
+        if index == self.focused_project {
+            self.presenter.suspend();
+            self.playback.pause();
+            self.playing = false;
+        }
+        self.projects[index].studio.manual_inputs = None;
+        let mut root_paths = Vec::new();
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            root_paths.push(PathBuf::from(home));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            root_paths.push(cwd);
+        }
+        if let Some(parent) = self
+            .projects
+            .get(index)
+            .expect("activation session")
+            .project_path
+            .as_deref()
+            .and_then(Path::parent)
+        {
+            root_paths.push(parent.to_path_buf());
+        }
+        root_paths.sort();
+        root_paths.dedup();
+        let roots = kinewright_agent::writer_host::SessionRoots {
+            read: root_paths.clone(),
+            write: root_paths,
+        };
+        let session = &mut self.projects[index];
+        let project = format!("gui-{}-{:?}", session.id, session.core.actor_identity());
+        let attachment = session.ja1.as_mut().expect("installed Studio source owner");
+        let _ = attachment.launch_host(project, roots);
+        if index == self.focused_project {
+            self.status = attachment.message.clone();
         }
     }
     pub(crate) fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
@@ -1060,6 +1082,32 @@ impl KinewrightApp {
         reason = "one attachment job completion transition"
     )]
     fn poll_ja1(&mut self, ctx: &egui::Context) {
+        let ready: Vec<_> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| {
+                session
+                    .ja1_activation
+                    .as_ref()
+                    .is_some_and(|(grant, _)| grant.is_quiescent())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in ready {
+            let (_, attachment) = self.projects[index]
+                .ja1_activation
+                .take()
+                .expect("ready activation");
+            self.finish_ja1_activation(index, attachment);
+        }
+        if self
+            .projects
+            .iter()
+            .any(|session| session.ja1_activation.is_some())
+        {
+            ctx.request_repaint_after(Duration::from_millis(20));
+        }
         let focused = self.focused_project;
         let mut changed = false;
         for (index, session) in self.projects.iter_mut().enumerate() {
@@ -1358,7 +1406,10 @@ impl KinewrightApp {
         &mut self,
         path: &Path,
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
-        if self.focused().ja1.is_some() || self.focused().ja1_job.is_some() {
+        if self.focused().ja1.is_some()
+            || self.focused().ja1_job.is_some()
+            || self.focused().ja1_activation.is_some()
+        {
             let notice = self.focused().ja1.as_ref().and_then(|j| j.destination_change().err()).map_or_else(|| "Use the Studio lifecycle save action; a document-only write cannot replace this project.".into(), |e| e.to_string());
             return Err(ProjectSaveError::UnsupportedBundle { notice });
         }
@@ -1604,7 +1655,7 @@ impl KinewrightApp {
                 "Choose Current edit or Edit a copy before saving a working branch.".into();
             return false;
         }
-        if self.focused().ja1_job.is_some() {
+        if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             self.status = "Saving or selection is still in progress; editing is read-only.".into();
             return false;
         }
@@ -2100,7 +2151,7 @@ impl KinewrightApp {
             return;
         }
         let id = self.projects[index].id;
-        if self.projects[index].ja1_job.is_some() {
+        if self.projects[index].ja1_job.is_some() || self.projects[index].ja1_activation.is_some() {
             self.status =
                 "Wait for this save or selection before closing the editing context.".into();
             return;
@@ -2159,7 +2210,11 @@ impl KinewrightApp {
     }
 
     fn request_exit(&mut self, ctx: &egui::Context) {
-        if self.projects.iter().any(|p| p.ja1_job.is_some()) {
+        if self
+            .projects
+            .iter()
+            .any(|p| p.ja1_job.is_some() || p.ja1_activation.is_some())
+        {
             self.status = "Wait for the current Studio operation before closing.".into();
             return;
         }
@@ -17839,3 +17894,7 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "app/c2_fix2_tests.rs"]
 mod c2_fix2_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "app/c2_fix3_tests.rs"]
+mod c2_fix3_tests;

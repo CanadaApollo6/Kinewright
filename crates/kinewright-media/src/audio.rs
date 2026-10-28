@@ -3684,6 +3684,7 @@ fn smooth_gain(
 }
 
 struct AudioMixSource {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     track: TrackId,
     /// AU4 §3.8 rule 73: the clip this segment came from, so a live shaping
     /// update can match the segment layout before rebuilding in place.
@@ -3716,6 +3717,7 @@ impl AudioMixSource {
             self.finished = true;
             return Ok(());
         }
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         self.decoder = Some(AudioDecoder::open_with_source(
             &self.path,
             self.output_rate,
@@ -3873,6 +3875,7 @@ impl AudioMixer {
                 .clip_duration(clip)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
             sources.push(AudioMixSource {
+                legacy_media: crate::locator::capture(),
                 track: segment.track,
                 clip: segment.clip,
                 path: asset.path.clone(),
@@ -4688,6 +4691,7 @@ where
 }
 
 pub(crate) struct AudioDecoder {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     path: PathBuf,
     decoder: ffmpeg::decoder::Audio,
     resampler: Option<ffmpeg::software::resampling::Context>,
@@ -4751,6 +4755,7 @@ impl AudioDecoder {
                 |error| media_error(path, "could not read audio codec parameters", error),
             )?
         };
+        crate::locator::check()?;
         let decoder = context
             .decoder()
             .audio()
@@ -4765,6 +4770,7 @@ impl AudioDecoder {
             .seek(target_us, ..target_us)
             .map_err(|error| media_error(path, "audio seek failed", error))?;
         Ok(Self {
+            legacy_media: crate::locator::capture(),
             path: path.to_path_buf(),
             input,
             decoder,
@@ -4800,6 +4806,7 @@ impl AudioDecoder {
         self.receive_frame()
     }
     pub(crate) fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         loop {
             self.input.check()?;
             if self.finished {

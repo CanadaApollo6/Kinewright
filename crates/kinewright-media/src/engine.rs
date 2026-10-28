@@ -532,6 +532,10 @@ impl SessionMedia {
         }
     }
 
+    fn locator_access(&self) -> Result<crate::locator::LocatorAccess, MediaError> {
+        crate::locator::LocatorAccess::enter(&self.legacy_grant()?)
+    }
+
     fn inputs_for(
         &self,
         document: Arc<Document>,
@@ -1193,6 +1197,16 @@ impl FfmpegMediaEngine {
         result
     }
 
+    /// Observe worker completion without the session API's entry refusal.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_background_statuses(&self, path: &Path) -> (TranscriptStatus, SceneStatus) {
+        (
+            self.transcripts.status(path),
+            self.derived_analysis.scene_status(path),
+        )
+    }
+
     /// Test support (review B F2): occupy the preview thread with an agent
     /// job until the returned hold drops, so later agent requests wait.
     ///
@@ -1688,7 +1702,7 @@ impl Playback for SessionMedia {
 
 impl Analysis for SessionMedia {
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         let id = AssetId(self.next_asset_id.fetch_add(1, Ordering::Relaxed));
         probe_path(path, id)
     }
@@ -1706,21 +1720,29 @@ impl Analysis for SessionMedia {
                 reason: (!verified).then(|| MediaError::MediaAdmissionRequired.to_string()),
             };
         }
+        let Ok(_access) = self.locator_access() else {
+            return MediaAvailabilityStatus {
+                kind: MediaAvailabilityKind::Unreadable,
+                observed_fingerprint: None,
+                reason: Some(MediaError::MediaAdmissionRequired.to_string()),
+            };
+        };
         media_availability(asset)
     }
 
     fn request_transcription(&self, asset: MediaAsset) {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return;
-        }
-        self.transcripts.request(asset, None);
+        };
+        self.transcripts.request(asset, None, grant);
     }
 
     fn request_transcription_with_language(&self, asset: MediaAsset, language: Option<&str>) {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return;
-        }
-        self.transcripts.request(asset, language.map(str::to_owned));
+        };
+        self.transcripts
+            .request(asset, language.map(str::to_owned), grant);
     }
 
     fn transcript_status(&self, asset: &MediaAsset) -> TranscriptStatus {
@@ -1735,15 +1757,15 @@ impl Analysis for SessionMedia {
         document: &Document,
         range: Option<std::ops::Range<TimeCode>>,
     ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         self.transcripts.timeline_words(document, range)
     }
 
     fn request_silence_detection(&self, asset: MediaAsset) {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return;
-        }
-        self.derived_analysis.request_silences(asset);
+        };
+        self.derived_analysis.request_silences(asset, grant);
     }
 
     fn silence_status(&self, asset: &MediaAsset) -> SilenceStatus {
@@ -1759,16 +1781,16 @@ impl Analysis for SessionMedia {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_source_frames: TimeCode,
     ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         self.derived_analysis
             .timeline_silences(document, range, minimum_source_frames)
     }
 
     fn request_scene_detection(&self, asset: MediaAsset) {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return;
-        }
-        self.derived_analysis.request_scenes(asset);
+        };
+        self.derived_analysis.request_scenes(asset, grant);
     }
 
     fn scene_status(&self, asset: &MediaAsset) -> SceneStatus {
@@ -1784,13 +1806,13 @@ impl Analysis for SessionMedia {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_confidence_basis_points: u16,
     ) -> Result<Vec<TimelineSceneChange>, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         self.derived_analysis
             .timeline_scenes(document, range, minimum_confidence_basis_points)
     }
 
     fn asset_loudness(&self, asset: &MediaAsset) -> Result<AudioLoudness, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         let samples = decode_audio_range(
             &asset.path,
             asset.fps,
@@ -1804,7 +1826,7 @@ impl Analysis for SessionMedia {
     }
 
     fn timeline_loudness(&self, document: &Document) -> Result<AudioLoudness, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         let settings = ExportSettings {
             fps: document.fps,
             resolution: document.resolution,
@@ -1825,7 +1847,7 @@ impl Analysis for SessionMedia {
         document: &Document,
         request: &MixLevelRequest,
     ) -> Result<MixLevelReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::export::measure_mix_levels(document, request)
     }
 
@@ -1835,7 +1857,7 @@ impl Analysis for SessionMedia {
         document: &Document,
         request: &MixSpectrumRequest,
     ) -> Result<MixSpectrumReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::export::measure_mix_spectrum(document, request)
     }
 
@@ -1846,7 +1868,7 @@ impl Analysis for SessionMedia {
         document: &Document,
         request: &AudioQcRequest,
     ) -> Result<AudioQcReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::export::measure_audio_qc(document, request)
     }
 
@@ -1857,7 +1879,7 @@ impl Analysis for SessionMedia {
         document: &Document,
         request: &MixNoiseProfileRequest,
     ) -> Result<NoiseProfileReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::export::measure_mix_noise_profile(document, request)
     }
 
@@ -1867,7 +1889,7 @@ impl Analysis for SessionMedia {
         document: &Document,
         request: &MixWindowRequest,
     ) -> Result<MixWindowLevelReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::export::measure_mix_window_levels(document, request)
     }
 
@@ -1878,15 +1900,15 @@ impl Analysis for SessionMedia {
         document: &Document,
         request: &AudioRepairRequest,
     ) -> Result<AudioRepairReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::export::measure_audio_repair(document, request)
     }
 
     fn request_beat_detection(&self, asset: MediaAsset) {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return;
-        }
-        self.derived_analysis.request_beats(asset);
+        };
+        self.derived_analysis.request_beats(asset, grant);
     }
 
     fn beat_status(&self, asset: &MediaAsset) -> BeatStatus {
@@ -1902,7 +1924,7 @@ impl Analysis for SessionMedia {
         range: Option<std::ops::Range<TimeCode>>,
         minimum_strength_basis_points: u16,
     ) -> Result<Vec<TimelineBeat>, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         self.derived_analysis
             .timeline_beats(document, range, minimum_strength_basis_points)
     }
@@ -2082,7 +2104,7 @@ impl Analysis for SessionMedia {
         settings: &ExportSettings,
         request: DeliveryVerificationRequest,
     ) -> Result<DeliveryVerification, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         crate::verify::verify_delivery_output(
             &self.gpu,
             crate::export::LegacyRenderContext {
@@ -2101,7 +2123,7 @@ impl Analysis for SessionMedia {
         path: &Path,
         target: Option<LoudnessTarget>,
     ) -> Result<DeliveryAudioVerification, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         let asset = probe_path(path, AssetId(0))?;
         if asset.kind == MediaKind::Video {
             return Err(MediaError::Backend(format!(
@@ -2137,11 +2159,11 @@ impl Analysis for SessionMedia {
     }
 
     fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return false;
-        }
+        };
         self.visual_assets
-            .request_waveform(asset, request_generation)
+            .request_waveform(asset, request_generation, grant)
     }
 
     fn request_thumbnail(
@@ -2151,11 +2173,11 @@ impl Analysis for SessionMedia {
         max_width: u32,
         request_generation: u64,
     ) -> bool {
-        if self.legacy_grant().is_err() {
+        let Ok(grant) = self.legacy_grant() else {
             return false;
-        }
+        };
         self.visual_assets
-            .request_thumbnail(asset, source_at, max_width, request_generation)
+            .request_thumbnail(asset, source_at, max_width, request_generation, grant)
     }
 
     fn visual_asset_results(&self) -> Receiver<VisualAssetResult> {
@@ -2335,7 +2357,7 @@ impl Export for SessionMedia {
         settings: ExportSettings,
         progress: ProgressSink,
     ) -> Result<(), MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         let document = self
             .document
             .read()
@@ -2380,7 +2402,7 @@ impl Export for SessionMedia {
         settings: ExportSettings,
         progress: ProgressSink,
     ) -> Result<ExportReport, MediaError> {
-        self.legacy_grant()?;
+        let _access = self.locator_access()?;
         let library = self.document_lut_library(&document)?;
         self.decoders.scope(|| {
             crate::export::export_document_with_luts(
@@ -3522,6 +3544,7 @@ impl Worker {
         project_at: TimeCode,
         mix_meters: Arc<MixMeters>,
     ) -> Result<AudioRuntime, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         AudioRuntime::open(
             &self.document,
             project_at,
