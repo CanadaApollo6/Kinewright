@@ -1,0 +1,15 @@
+{
+  "case": "completion-contention",
+  "source": "crates/kinewright-project/src/voice_store.rs",
+  "test": "s3_voice_fix3_contention_keeps_completed_asr",
+  "marker": "S3_VOICE_COMPLETION_RETAINED_ON_CONTENTION",
+  "original_sha256": "9cb41067ea29028c0e64f745e429aa307a215d4ab12923116d6a0bd1c8e2dc71",
+  "mutated_sha256": "d42b04ee2ce1c7a0a7578daae02f43f8a9a0848e021b9f0c74e717904094cece",
+  "red_exit": 101,
+  "red_log_sha256": "12a1fefce27fa3d9f50738baab42d44a9e6366c00452f2979de149e6f33a60f4",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "cea2080ef354d20c32db1e6e053822b8f8f8c685bdca7bd8e31d4e188c8b1d8a",
+  "runtime_green": true
+}

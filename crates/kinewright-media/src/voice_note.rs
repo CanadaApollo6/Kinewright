@@ -101,6 +101,10 @@ impl<K> VoiceJob<K> {
     pub fn key(&self) -> &K {
         &self.key
     }
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !self.completed && !self.cancellation.is_cancelled()
+    }
 }
 impl<P: PartialEq, N: PartialEq, J: PartialEq> VoiceJob<VoiceJobKey<P, N, J>> {
     /// Completion and the live note state must still match the original job.

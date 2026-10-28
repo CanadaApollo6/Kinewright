@@ -1,0 +1,83 @@
+{
+  "parent_commit": "06ad2b18247658d299899b7961c674facddcce58",
+  "fresh_parent_cargo": "NOT RUN. All final-source Linux full-suite commands passed. Parent archives are independently source/hash checked; no archived result is presented as fresh execution.",
+  "verified_parent_source_blobs": {
+    "crates/kinewright-app/src/recording.rs": "5c0dbf6ca831b169fce37f15a9c831d31eacb2c982fdff1fc18d728d2affc020",
+    "crates/kinewright-project/src/voice_store.rs": "ac083b138900bb10495066abb048a730b7febfb242597163cd64ad45c1072eb6",
+    "crates/kinewright-project/src/bundle.rs": "54803bb4cc45c4e3f9a896a9ddb71f75390cea8750792a1318edfa5b09da3332",
+    "crates/kinewright-project/src/lib.rs": "03e9270b7773d7caaef258c0b63217cd3c992da8ed7f90473ff339ca1d1de9b6",
+    "crates/kinewright-media/src/voice_note.rs": "92e4b554bb4ddf2cce47094931d5b77530e4c8a957905e12c7f0b61f26d7e410",
+    "crates/kinewright-media/src/transcript.rs": "0b7525a9c3d9dcb6a4942a6cad65b42ad19feccd9fa079e2e85868589ef34937",
+    "docs/reports/ja1-s3/b-evidence/c5/mutations.py": "b26aab563634cf1de261ec0e9d63833c43d46783bd19373ac273179542979183",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/mutations.py": "263d80dc2f14712a8623b09dd179bba4d8178c723a06ff8d2289db2b6fc08ec4",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/gate.sh": "e7d1e31c07939f8c64c3be9bc1e44999621de5573aca0211dfea3e7cdcb2e80d",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/repro.py": "490c7a2c92bbce7ef81be14c2a42177534e2c36ad877e35866f6305be1374a72",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/summarize.py": "dc0cf99bbf2d03cc55710d4901e3cbd48a4c47c9eae8f5677b9c81c747fe8102"
+  },
+  "archived_parent_gates": {
+    "app": {
+      "log": "docs/reports/ja1-s3/b-evidence/c5-fix2/app.log.gz",
+      "sha256": "3024e98a64c20212336d8694e554910c33a3b8351b2604b6f51107f13d080f56",
+      "exit": 0,
+      "summaries": [
+        "test result: ok. 905 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 369.78s"
+      ],
+      "old_witness_line": "test recording::feedback_capture::tests::s3_voice_fix2_owner_slot_blocks_competing_handle ... ok"
+    },
+    "build": {
+      "log": "docs/reports/ja1-s3/b-evidence/c5-fix2/build.log.gz",
+      "sha256": "6adf246bebefe851711db60988a9d340ca6fb4bf33550405f2e6c2e7cf1235f2",
+      "exit": 0,
+      "summaries": []
+    },
+    "clippy": {
+      "log": "docs/reports/ja1-s3/b-evidence/c5-fix2/clippy.log.gz",
+      "sha256": "bcd73984d4a8ec341b485e8a384e76b487fae1bd0a37fdbd729a9a3a905de003",
+      "exit": 0,
+      "summaries": []
+    },
+    "fmt": {
+      "log": "docs/reports/ja1-s3/b-evidence/c5-fix2/fmt.log.gz",
+      "sha256": "c3cce5cbbea29732bc455b551e8ef9e5d92f3c5e1780a62bbdda4ffd9144d007",
+      "exit": 0,
+      "summaries": []
+    },
+    "windows": {
+      "log": "docs/reports/ja1-s3/b-evidence/c5-fix2/windows.log.gz",
+      "sha256": "92baa4b65f5d84d1814d9681861c90a84af4449c0a76fc4c108e45768dc0968a",
+      "exit": 101,
+      "summaries": []
+    }
+  },
+  "development_diagnostics": [
+    {
+      "lane": "repro-before",
+      "result": "Two new tests failed in setup: publishing a snapshot did not change expected_head. This is a witness setup mistake, not mutation credit. Tests were not in parent."
+    },
+    {
+      "lane": "repro",
+      "result": "Expected runtime red before production edits: competing original and stale choice reach their named invariant assertions using parent production source with the two new witness bodies."
+    },
+    {
+      "lane": "check",
+      "result": "Introduced type mismatch in adapted assert_eq; absent in parent. Archived parent build passed."
+    },
+    {
+      "lane": "clippy-initial",
+      "result": "Three introduced style diagnostics; absent in parent. Archived parent Clippy passed."
+    },
+    {
+      "lane": "recording",
+      "result": "Updated old witness used generation + 1, but fresh issuer creation also publishes. This assertion is not in parent; the parent version of the witness passed, as verified above. Replaced the added assertion with a no-publication-after-settlement check; final full App passed."
+    }
+  ],
+  "windows_failure_comparison": {
+    "current_exit": 101,
+    "same_primary_diagnostic_in_parent_archive": "error: unknown type name 'pthread_rwlock_t'",
+    "cargo_lock_identical_to_parent": true,
+    "fresh_parent_windows_check": "NOT RUN",
+    "current_log_sha256": "def9917179bc0ac5d0d944f75b513fe62e128c94dbcc38d1ffbbf8c1a15f9a4b",
+    "parent_archive_log_sha256": "92baa4b65f5d84d1814d9681861c90a84af4449c0a76fc4c108e45768dc0968a",
+    "credit": "native dependency blocker; no touched-crate Windows Rust/runtime credit"
+  }
+}

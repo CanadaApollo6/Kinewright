@@ -19,7 +19,22 @@ use std::{
 };
 
 pub type JobKey = VoiceJobKey<ProjectId, NoteId, JobId>;
-pub(crate) type VoiceSlots = Mutex<BTreeMap<NoteId, Arc<Mutex<VoiceNoteState>>>>;
+pub(crate) type VoiceSlots = Mutex<BTreeMap<NoteId, Arc<Mutex<VoiceNoteSlot>>>>;
+
+/// Raw metadata notes need no capture log. A capture view initializes its state lazily.
+pub(crate) struct VoiceNoteSlot {
+    note: NoteId,
+    state: Option<VoiceNoteState>,
+}
+/// Unforgeable outside this module; borrowed only while the note slot is locked.
+pub(crate) struct VoicePublication<'a> {
+    note: &'a NoteId,
+}
+impl<'a> VoicePublication<'a> {
+    pub(crate) fn note(self) -> &'a NoteId {
+        self.note
+    }
+}
 
 #[derive(Clone)]
 pub struct PendingVoiceWrite {
@@ -31,10 +46,12 @@ enum NoteWrite {
     Exact {
         pending: Box<PendingVoiceWrite>,
         pin: Arc<StorePin>,
+        expected_choice: Option<ObjectRef>,
     },
     Refused {
         voice: Box<VoiceRef>,
         pin: Arc<StorePin>,
+        expected_choice: Option<ObjectRef>,
     },
 }
 pub(crate) struct VoiceNoteState {
@@ -81,6 +98,15 @@ pub fn save_voice(
     voice: &VoiceRef,
     pending: &mut Option<PendingVoiceWrite>,
 ) -> Result<VoiceRef, BundleError> {
+    save_voice_with(owner, envelope, voice, pending, None)
+}
+fn save_voice_with(
+    owner: &mut ProjectBundle,
+    envelope: &MetadataEnvelope,
+    voice: &VoiceRef,
+    pending: &mut Option<PendingVoiceWrite>,
+    publication: Option<VoicePublication<'_>>,
+) -> Result<VoiceRef, BundleError> {
     if let Some(original) = pending {
         if &original.envelope != envelope
             || original.update.change != MetadataChange::SaveVoice(voice.clone())
@@ -102,11 +128,19 @@ pub fn save_voice(
     let original = pending
         .as_ref()
         .ok_or(BundleError::HistoryBarrierInvariant)?;
-    let lookup = owner.metadata_command(
-        &original.envelope,
-        MetadataScope::Feedback,
-        &original.update,
-    )?;
+    let lookup = match publication {
+        Some(publication) => owner.voice_metadata_command(
+            &original.envelope,
+            MetadataScope::Feedback,
+            &original.update,
+            publication,
+        ),
+        None => owner.metadata_command(
+            &original.envelope,
+            MetadataScope::Feedback,
+            &original.update,
+        ),
+    }?;
     let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) = lookup else {
         return Err(BundleError::Unsettled);
     };
@@ -145,7 +179,11 @@ impl VoiceNoteState {
                 };
                 (pending.envelope, voice)
             }
-            NoteWrite::Refused { voice: wanted, .. } => {
+            NoteWrite::Refused {
+                voice: wanted,
+                expected_choice,
+                ..
+            } => {
                 let mut voice = owner
                     .feedback_index()?
                     .notes
@@ -156,6 +194,11 @@ impl VoiceNoteState {
                     || voice.playhead_log_ref != self.voice.playhead_log_ref
                     || voice.duration_micros != self.voice.duration_micros
                 {
+                    return Err(BundleError::HistoryChanged);
+                }
+                if voice.chosen_transcript_revision != expected_choice {
+                    self.pending_write = None;
+                    self.voice = voice;
                     return Err(BundleError::HistoryChanged);
                 }
                 voice.chosen_transcript_revision = wanted.chosen_transcript_revision;
@@ -221,6 +264,9 @@ impl VoiceNoteState {
         transcript_revision: u64,
     ) -> Result<JobKey, BundleError> {
         if self.pending_write.is_some() || self.pending_asr.is_some() {
+            return Err(BundleError::Unsettled);
+        }
+        if self.job.as_ref().is_some_and(VoiceJob::is_active) {
             return Err(BundleError::Unsettled);
         }
         if owner.project_id() != &self.project
@@ -302,7 +348,7 @@ impl VoiceNoteState {
         envelope: &MetadataEnvelope,
         key: &JobKey,
         current: &JobKey,
-        transcript: VoiceTranscript,
+        completion: &mut Option<VoiceTranscript>,
     ) -> Result<bool, BundleError> {
         if self.pending_write.is_some() || self.pending_asr.is_some() {
             return Err(BundleError::Unsettled);
@@ -310,6 +356,7 @@ impl VoiceNoteState {
         if owner.project_id() != &self.project || owner.store().owner_epoch() != self.owner_epoch {
             return Ok(false);
         }
+        let transcript = completion.as_ref().ok_or(BundleError::HistoryChanged)?;
         transcript
             .validate(self.voice.duration_micros)
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -325,7 +372,7 @@ impl VoiceNoteState {
         let Some(transcript) = self
             .job
             .as_mut()
-            .and_then(|job| job.accept(key, current, transcript))
+            .and_then(|job| job.accept(key, current, completion.take()?))
         else {
             return Ok(false);
         };
@@ -435,7 +482,7 @@ impl VoiceNoteState {
 
 /// A view of one note's owner-held slot. Dropping views does not retire pending evidence.
 pub struct VoiceNoteHandle {
-    state: Weak<Mutex<VoiceNoteState>>,
+    state: Weak<Mutex<VoiceNoteSlot>>,
 }
 pub struct VoiceNoteSnapshot {
     pub anchor: FeedbackAnchor,
@@ -443,20 +490,35 @@ pub struct VoiceNoteSnapshot {
     pub complete: bool,
     pub capture_error: Option<String>,
 }
-fn lock(state: &Mutex<VoiceNoteState>) -> Result<MutexGuard<'_, VoiceNoteState>, BundleError> {
+fn lock(state: &Mutex<VoiceNoteSlot>) -> Result<MutexGuard<'_, VoiceNoteSlot>, BundleError> {
     state.try_lock().map_err(|error| match error {
         std::sync::TryLockError::WouldBlock => BundleError::Unsettled,
         std::sync::TryLockError::Poisoned(_) => BundleError::HistoryBarrierInvariant,
     })
 }
 impl ProjectBundle {
-    pub fn voice_note(&self, note: &NoteId) -> Result<VoiceNoteHandle, BundleError> {
+    fn voice_slot(&self, note: &NoteId) -> Result<Arc<Mutex<VoiceNoteSlot>>, BundleError> {
         let mut slots = self
             .voice_slots
             .try_lock()
             .map_err(|_| BundleError::Unsettled)?;
-        if let Some(state) = slots.get(note) {
-            let mut live = lock(state)?;
+        if let Some(slot) = slots.get(note) {
+            return Ok(Arc::clone(slot));
+        }
+        if slots.len() as u64 >= self.store.limits().comments {
+            return Err(BundleError::Capacity("voice note slots"));
+        }
+        let slot = Arc::new(Mutex::new(VoiceNoteSlot {
+            note: note.clone(),
+            state: None,
+        }));
+        slots.insert(note.clone(), Arc::clone(&slot));
+        Ok(slot)
+    }
+    pub fn voice_note(&self, note: &NoteId) -> Result<VoiceNoteHandle, BundleError> {
+        let slot = self.voice_slot(note)?;
+        let mut locked = lock(&slot)?;
+        if let Some(live) = &mut locked.state {
             if live.pending_write.is_none() && live.pending_asr.is_none() {
                 live.voice = self
                     .feedback_index()?
@@ -465,18 +527,11 @@ impl ProjectBundle {
                     .cloned()
                     .ok_or(BundleError::HistoryChanged)?;
             }
-            drop(live);
-            return Ok(VoiceNoteHandle {
-                state: Arc::downgrade(state),
-            });
+        } else {
+            locked.state = Some(VoiceNoteState::reopen(self, note)?);
         }
-        if slots.len() as u64 >= self.store.limits().comments {
-            return Err(BundleError::Capacity("voice note slots"));
-        }
-        let state = Arc::new(Mutex::new(VoiceNoteState::reopen(self, note)?));
-        slots.insert(note.clone(), Arc::clone(&state));
         Ok(VoiceNoteHandle {
-            state: Arc::downgrade(&state),
+            state: Arc::downgrade(&slot),
         })
     }
     /// Try every slot. A failed derived ASR may be discarded with this owner; audio/log remain rooted.
@@ -490,13 +545,59 @@ impl ProjectBundle {
             .collect();
         let mut first_error = None;
         for state in slots {
-            let result = lock(&state).and_then(|mut state| state.retry_pending(self));
+            let result = lock(&state).and_then(|mut slot| {
+                slot.state
+                    .as_mut()
+                    .map_or(Ok(false), |state| state.retry_pending(self))
+            });
             if let Err(error) = result {
                 first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)
     }
+}
+/// Public metadata (also `WriterHost`) and capture acknowledgment enter the same slot as views.
+pub(crate) fn metadata_command(
+    owner: &mut ProjectBundle,
+    envelope: &MetadataEnvelope,
+    scope: MetadataScope,
+    update: &MetadataUpdate,
+) -> Result<ReceiptLookup, BundleError> {
+    let MetadataChange::SaveVoice(voice) = &update.change else {
+        return Err(BundleError::HistoryBarrierInvariant);
+    };
+    let slot = owner.voice_slot(&voice.note_id)?;
+    let mut slot = lock(&slot)?;
+    if slot.state.as_ref().is_some_and(|state| {
+        state.pending_asr.is_some() || matches!(state.pending_write, Some(NoteWrite::Exact { .. }))
+    }) {
+        return Err(BundleError::Unsettled);
+    }
+    let result = owner.voice_metadata_command(
+        envelope,
+        scope,
+        update,
+        VoicePublication { note: &slot.note },
+    );
+    if result.is_ok()
+        && let Some(state) = &mut slot.state
+    {
+        // A refused choice keeps its old expectation until retry detects the conflict.
+        if state.pending_write.is_none() {
+            let current = owner
+                .feedback_index()?
+                .notes
+                .get(&voice.note_id)
+                .cloned()
+                .ok_or(BundleError::HistoryChanged)?;
+            if state.voice != current {
+                state.cancel();
+                state.voice = current;
+            }
+        }
+    }
+    result
 }
 impl Drop for ProjectBundle {
     fn drop(&mut self) {
@@ -509,8 +610,8 @@ impl VoiceNoteHandle {
         action: impl FnOnce(&mut VoiceNoteState) -> Result<T, BundleError>,
     ) -> Result<T, BundleError> {
         let state = self.state.upgrade().ok_or(BundleError::HistoryChanged)?;
-        let mut state = lock(&state)?;
-        action(&mut state)
+        let mut slot = lock(&state)?;
+        action(slot.state.as_mut().ok_or(BundleError::HistoryChanged)?)
     }
     pub fn snapshot(&self) -> Result<VoiceNoteSnapshot, BundleError> {
         self.with_state(|state| {
@@ -570,15 +671,28 @@ impl VoiceNoteHandle {
             state.choose_transcript(owner, envelope, reference)
         })
     }
+    /// The caller retains `completion` on contention; it is taken only inside the locked slot.
     pub fn accept_asr(
         &self,
         owner: &mut ProjectBundle,
         envelope: &MetadataEnvelope,
         key: &JobKey,
         current: &JobKey,
-        transcript: VoiceTranscript,
+        completion: &mut Option<VoiceTranscript>,
     ) -> Result<bool, BundleError> {
-        self.with_state(|state| state.accept_asr(owner, envelope, key, current, transcript))
+        self.with_state(|state| state.accept_asr(owner, envelope, key, current, completion))
+    }
+    #[cfg(feature = "test-util")]
+    pub fn hold_slot_probe(
+        &self,
+        entered: &std::sync::Barrier,
+        release: &std::sync::Barrier,
+    ) -> Result<(), BundleError> {
+        self.with_state(|_| {
+            entered.wait();
+            release.wait();
+            Ok(())
+        })
     }
     #[cfg(feature = "test-util")]
     pub fn retry_asr_with_envelope_probe(
@@ -611,6 +725,7 @@ impl VoiceNoteHandle {
             }
             state.pending_write = Some(NoteWrite::Exact {
                 pin: pin_chosen_text(owner, voice)?,
+                expected_choice: state.voice.chosen_transcript_revision.clone(),
                 pending: Box::new(pending),
             });
             Ok(())
@@ -624,15 +739,41 @@ impl VoiceNoteState {
         envelope: &MetadataEnvelope,
         voice: &VoiceRef,
     ) -> Result<VoiceRef, BundleError> {
-        let (mut pending, pin) = match &self.pending_write {
-            Some(NoteWrite::Exact { pending, pin }) => (Some((**pending).clone()), Arc::clone(pin)),
-            Some(NoteWrite::Refused { pin, .. }) => (None, Arc::clone(pin)),
-            None => (None, pin_chosen_text(owner, voice)?),
+        let (mut pending, pin, expected_choice) = match &self.pending_write {
+            Some(NoteWrite::Exact {
+                pending,
+                pin,
+                expected_choice,
+            }) => (
+                Some((**pending).clone()),
+                Arc::clone(pin),
+                expected_choice.clone(),
+            ),
+            Some(NoteWrite::Refused {
+                pin,
+                expected_choice,
+                ..
+            }) => (None, Arc::clone(pin), expected_choice.clone()),
+            None => (
+                None,
+                pin_chosen_text(owner, voice)?,
+                self.voice.chosen_transcript_revision.clone(),
+            ),
         };
-        let result = save_voice(owner, envelope, voice, &mut pending);
+        // Already inside this slot: the capability avoids re-locking through the public router.
+        let result = save_voice_with(
+            owner,
+            envelope,
+            voice,
+            &mut pending,
+            Some(VoicePublication {
+                note: &self.voice.note_id,
+            }),
+        );
         self.pending_write = pending.map(|pending| NoteWrite::Exact {
             pending: Box::new(pending),
             pin: Arc::clone(&pin),
+            expected_choice: expected_choice.clone(),
         });
         if result
             .as_ref()
@@ -641,6 +782,7 @@ impl VoiceNoteState {
             self.pending_write = Some(NoteWrite::Refused {
                 voice: Box::new(voice.clone()),
                 pin,
+                expected_choice,
             });
         }
         result

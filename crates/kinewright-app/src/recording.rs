@@ -1551,9 +1551,9 @@ pub(crate) mod feedback_capture {
             &mut self,
             owner: &mut ProjectBundle,
         ) -> Result<bool, BundleError> {
-            let result = self.note.retry_pending(owner)?;
+            let result = self.note.retry_pending(owner);
             self.refresh()?;
-            Ok(result)
+            result
         }
         pub(crate) fn remark_voice(
             &self,
@@ -1604,11 +1604,11 @@ pub(crate) mod feedback_capture {
             envelope: &MetadataEnvelope,
             key: &JobKey,
             current: &JobKey,
-            transcript: VoiceTranscript,
+            completion: &mut Option<VoiceTranscript>,
         ) -> Result<bool, BundleError> {
             let accepted = self
                 .note
-                .accept_asr(owner, envelope, key, current, transcript)?;
+                .accept_asr(owner, envelope, key, current, completion)?;
             self.refresh()?;
             Ok(accepted)
         }
@@ -1870,6 +1870,184 @@ pub(crate) mod feedback_capture {
                 .save_branch(&owner.manual_branch_id().clone(), core)
                 .unwrap();
         }
+        fn advance_voice_head(owner: &mut ProjectBundle) {
+            let history = owner.branch_history(owner.manual_branch_id()).unwrap();
+            let core = kinewright_core::Core::spawn((*history.document).clone()).unwrap();
+            core.restore_history((*history).clone()).unwrap();
+            move_for_asr(owner, &core, 1);
+        }
+        #[test]
+        fn s3_voice_fix3_contention_keeps_completed_asr() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-accept-contention");
+            let (mut owner, anchor) = setup(root.root());
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let note = a.voice.note_id.clone();
+            let blocker = owner.voice_note(&note).unwrap();
+            let key = a.start_job(&owner, 0).unwrap();
+            let (reference, bytes) = original_asr(&a, &key);
+            let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let worker = {
+                let entered = entered.clone();
+                let release = release.clone();
+                std::thread::spawn(move || blocker.hold_slot_probe(&entered, &release))
+            };
+            entered.wait();
+            let mut completion = Some(asr());
+            let e = envelope(&mut owner);
+            let result = a.accept_asr(&mut owner, &e, &key, &key, &mut completion);
+            release.wait();
+            worker.join().unwrap().unwrap();
+            assert!(matches!(result, Err(BundleError::Unsettled)));
+            assert_eq!(
+                completion.as_ref(),
+                Some(&asr()),
+                "S3_VOICE_COMPLETION_RETAINED_ON_CONTENTION"
+            );
+            assert!(
+                a.accept_asr(&mut owner, &e, &key, &key, &mut completion)
+                    .unwrap()
+            );
+            assert!(completion.is_none());
+            owner.collect_after_ack().unwrap();
+            drop(a);
+            drop(owner);
+            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            let b = SavedAudio::reopen(&owner, &note).unwrap();
+            assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
+            assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
+        }
+        #[test]
+        fn s3_voice_fix3_active_job_excludes_second_handle() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-active-job");
+            let (mut owner, anchor) = setup(root.root());
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let mut b = SavedAudio::reopen(&owner, &a.voice.note_id).unwrap();
+            let key = a.start_job(&owner, 0).unwrap();
+            assert!(matches!(
+                b.start_job(&owner, 1),
+                Err(BundleError::Unsettled)
+            ));
+            let e = envelope(&mut owner);
+            assert!(
+                a.accept_asr(
+                    &mut owner,
+                    &e,
+                    &key,
+                    &key,
+                    &mut Some(VoiceTranscript::AwaitingModel)
+                )
+                .unwrap()
+            );
+            b.start_job(&owner, 1).expect("finished job is restartable");
+            b.cancel();
+            a.start_job(&owner, 2)
+                .expect("cancelled job is restartable");
+        }
+        #[test]
+        fn s3_voice_fix3_direct_original_cannot_bypass_pending() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-direct-original");
+            let (mut owner, anchor) = setup(root.root());
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let note = a.voice.note_id.clone();
+            let key = a.start_job(&owner, 0).unwrap();
+            let (reference, bytes) = original_asr(&a, &key);
+            let stale = envelope(&mut owner);
+            advance_voice_head(&mut owner);
+            assert!(matches!(
+                a.accept_asr(&mut owner, &stale, &key, &key, &mut Some(asr())),
+                Err(BundleError::HistoryChanged)
+            ));
+            let competing = evidence(&mut owner, b"different original Y", &[]).unwrap();
+            let mut voice = a.voice.clone();
+            voice.original_asr_ref = Some(competing.reference.clone());
+            let e = envelope(&mut owner);
+            let update = MetadataUpdate {
+                expected_root_generation: owner.root().unwrap().generation,
+                change: MetadataChange::SaveVoice(voice),
+            };
+            assert!(
+                matches!(
+                    owner.metadata_command(&e, MetadataScope::Feedback, &update),
+                    Err(BundleError::Unsettled)
+                ),
+                "S3_VOICE_SLOT_ONLY_PUBLISHER"
+            );
+            drop(competing);
+            drop(a);
+            owner.collect_after_ack().unwrap();
+            assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
+            let mut b = SavedAudio::reopen(&owner, &note).unwrap();
+            assert!(b.retry_pending(&mut owner).unwrap());
+            owner.collect_after_ack().unwrap();
+            drop(b);
+            drop(owner);
+            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            let b = SavedAudio::reopen(&owner, &note).unwrap();
+            assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
+            assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
+        }
+        #[test]
+        fn s3_voice_fix3_choice_retry_preserves_newer_choice() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-choice-cas");
+            let (mut owner, anchor) = setup(root.root());
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let note = a.voice.note_id.clone();
+            let x = evidence(&mut owner, b"refused X", &[]).unwrap();
+            let x_ref = x.reference.clone();
+            let stale = envelope(&mut owner);
+            advance_voice_head(&mut owner);
+            assert!(matches!(
+                a.choose_transcript(&mut owner, &stale, x_ref.clone()),
+                Err(BundleError::HistoryChanged)
+            ));
+            drop(x);
+            let y = evidence(&mut owner, b"new durable Y", &[]).unwrap();
+            let y_ref = y.reference.clone();
+            let mut voice = owner.feedback_index().unwrap().notes[&note].clone();
+            voice.chosen_transcript_revision = Some(y_ref.clone());
+            metadata(
+                &mut owner,
+                MetadataScope::Feedback,
+                MetadataChange::SaveVoice(voice),
+            );
+            drop(y);
+            assert!(
+                matches!(
+                    a.retry_pending(&mut owner),
+                    Err(BundleError::HistoryChanged)
+                ),
+                "S3_VOICE_CHOICE_RETRY_CAS"
+            );
+            assert!(!a.retry_pending(&mut owner).unwrap());
+            owner.collect_after_ack().unwrap();
+            assert!(
+                owner.store().read_evidence(&x_ref).is_err(),
+                "stale X pin released"
+            );
+            assert_eq!(
+                owner.feedback_index().unwrap().notes[&note].chosen_transcript_revision,
+                Some(y_ref.clone())
+            );
+            drop(a);
+            drop(owner);
+            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            let b = SavedAudio::reopen(&owner, &note).unwrap();
+            assert_eq!(b.voice.chosen_transcript_revision, Some(y_ref.clone()));
+            assert_eq!(
+                &*owner.store().read_evidence(&y_ref).unwrap(),
+                b"new durable Y"
+            );
+        }
         #[test]
         fn s3_voice_fix2_any_handle_retries_refused_choice() {
             let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-choice-slot");
@@ -1954,7 +2132,7 @@ pub(crate) mod feedback_capture {
                 )
                 .unwrap();
             assert!(matches!(
-                a.accept_asr(&mut owner, &stale, &key, &key, asr()),
+                a.accept_asr(&mut owner, &stale, &key, &key, &mut Some(asr())),
                 Err(BundleError::Capacity(_))
             ));
             assert!(
@@ -1967,7 +2145,7 @@ pub(crate) mod feedback_capture {
                 Err(BundleError::Unsettled)
             ));
             assert!(matches!(
-                b.accept_asr(&mut owner, &e, &key, &key, asr()),
+                b.accept_asr(&mut owner, &e, &key, &key, &mut Some(asr())),
                 Err(BundleError::Unsettled)
             ));
             drop(pressure);
@@ -2000,25 +2178,30 @@ pub(crate) mod feedback_capture {
             ));
             let mut published = owner.feedback_index().unwrap().notes[&note].clone();
             published.original_asr_ref = Some(reference.clone());
-            metadata(
-                &mut owner,
-                MetadataScope::Feedback,
-                MetadataChange::SaveVoice(published),
-            );
+            let e = envelope(&mut owner);
+            let update = MetadataUpdate {
+                expected_root_generation: owner.root().unwrap().generation,
+                change: MetadataChange::SaveVoice(published),
+            };
+            assert!(matches!(
+                owner.metadata_command(&e, MetadataScope::Feedback, &update),
+                Err(BundleError::Unsettled)
+            ));
             owner.collect_after_ack().unwrap();
             assert!(matches!(
                 b.start_job(&owner, 1),
                 Err(BundleError::Unsettled)
             ));
-            let generation = owner.root().unwrap().generation;
             assert!(
                 b.retry_pending(&mut owner).unwrap(),
                 "S3_VOICE_OWNER_SLOT_ANY_VIEW_SETTLES"
             );
+            let generation = owner.root().unwrap().generation;
+            assert!(!b.retry_pending(&mut owner).unwrap());
             assert_eq!(
                 owner.root().unwrap().generation,
                 generation,
-                "S3_VOICE_ALREADY_PUBLISHED_SETTLES_WITHOUT_REPUBLICATION"
+                "S3_VOICE_SETTLED_RETRY_DOES_NOT_PUBLISH"
             );
             owner.collect_after_ack().unwrap();
             assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
@@ -2063,7 +2246,7 @@ pub(crate) mod feedback_capture {
             .unwrap();
             move_for_asr(&mut owner, &core, 1);
             assert!(matches!(
-                a.accept_asr(&mut owner, &stale, &key, &key, asr()),
+                a.accept_asr(&mut owner, &stale, &key, &key, &mut Some(asr())),
                 Err(BundleError::HistoryChanged)
             ));
             drop(core);
@@ -2118,7 +2301,7 @@ pub(crate) mod feedback_capture {
                 )
                 .unwrap();
             assert!(matches!(
-                a.accept_asr(&mut owner, &e, &key, &key, asr()),
+                a.accept_asr(&mut owner, &e, &key, &key, &mut Some(asr())),
                 Err(BundleError::Capacity(_))
             ));
             assert!(matches!(
@@ -2146,7 +2329,10 @@ pub(crate) mod feedback_capture {
                 .start_job(&owner, 1)
                 .expect("S3_VOICE_FAILED_DROP_IS_TRANSCRIBABLE");
             let e = envelope(&mut owner);
-            assert!(a.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap());
+            assert!(
+                a.accept_asr(&mut owner, &e, &key, &key, &mut Some(asr()))
+                    .unwrap()
+            );
             let chosen = evidence(&mut owner, b"edit after failed teardown", &[]).unwrap();
             let e = envelope(&mut owner);
             a.choose_transcript(&mut owner, &e, chosen.reference.clone())
@@ -2199,7 +2385,9 @@ pub(crate) mod feedback_capture {
             );
             let e = envelope(&mut owner);
             assert!(
-                fresh.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap(),
+                fresh
+                    .accept_asr(&mut owner, &e, &key, &key, &mut Some(asr()))
+                    .unwrap(),
                 "S3_VOICE_INVALID_CHOICE_KEEPS_JOB"
             );
         }
@@ -2244,7 +2432,7 @@ pub(crate) mod feedback_capture {
                 }
                 assert!(
                     matches!(
-                        saved.accept_asr(&mut owner, &e, &key, &key, asr()),
+                        saved.accept_asr(&mut owner, &e, &key, &key, &mut Some(asr())),
                         Err(BundleError::Capacity(_))
                     ),
                     "S3_VOICE_ASR_ADMISSION_REFUSED"
@@ -2313,7 +2501,7 @@ pub(crate) mod feedback_capture {
             .unwrap();
             move_for_asr(&mut owner, &core, 1);
             assert!(matches!(
-                saved.accept_asr(&mut owner, &stale, &key, &key, asr()),
+                saved.accept_asr(&mut owner, &stale, &key, &key, &mut Some(asr())),
                 Err(BundleError::HistoryChanged)
             ));
             move_for_asr(&mut owner, &core, 2);
@@ -2370,7 +2558,11 @@ pub(crate) mod feedback_capture {
             let before = saved.voice.clone();
             let e = envelope(&mut owner);
             let generation = owner.root().unwrap().generation;
-            assert!(saved.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap());
+            assert!(
+                saved
+                    .accept_asr(&mut owner, &e, &key, &key, &mut Some(asr()))
+                    .unwrap()
+            );
             let accepted = saved.voice.clone();
             saved.voice = before;
             saved
@@ -2567,14 +2759,24 @@ pub(crate) mod feedback_capture {
             let e = envelope(&mut owner);
             assert!(
                 saved
-                    .accept_asr(&mut owner, &e, &key, &key, VoiceTranscript::AwaitingModel)
+                    .accept_asr(
+                        &mut owner,
+                        &e,
+                        &key,
+                        &key,
+                        &mut Some(VoiceTranscript::AwaitingModel)
+                    )
                     .unwrap()
             );
             let key = saved.start_job(&owner, 1).unwrap();
             let e = envelope(&mut owner);
             let original_voice = saved.voice.clone();
             let original_generation = owner.root().unwrap().generation;
-            assert!(saved.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap());
+            assert!(
+                saved
+                    .accept_asr(&mut owner, &e, &key, &key, &mut Some(asr()))
+                    .unwrap()
+            );
             let accepted_voice = saved.voice.clone();
             saved
                 .note
@@ -2715,7 +2917,7 @@ pub(crate) mod feedback_capture {
                         &e,
                         &key,
                         &key,
-                        VoiceTranscript::Ready(words.clone())
+                        &mut Some(VoiceTranscript::Ready(words.clone()))
                     )
                     .unwrap()
             );
@@ -2801,7 +3003,7 @@ pub(crate) mod feedback_capture {
             let e = envelope(&mut owner);
             assert!(
                 !second
-                    .accept_asr(&mut owner, &e, &first_key, &second_key, asr())
+                    .accept_asr(&mut owner, &e, &first_key, &second_key, &mut Some(asr()))
                     .unwrap(),
                 "S3_VOICE_LATE_OTHER_NOTE"
             );
@@ -2813,7 +3015,7 @@ pub(crate) mod feedback_capture {
             let e = envelope(&mut owner);
             assert!(
                 first
-                    .accept_asr(&mut owner, &e, &first_key, &first_key, asr())
+                    .accept_asr(&mut owner, &e, &first_key, &first_key, &mut Some(asr()))
                     .unwrap()
             );
             assert_eq!(first.anchor, anchor);
@@ -2831,7 +3033,13 @@ pub(crate) mod feedback_capture {
             let before = std::fs::read(&copy_path).unwrap();
             assert!(
                 !second
-                    .accept_asr(&mut copy_owner, &e, &second_key, &second_key, asr())
+                    .accept_asr(
+                        &mut copy_owner,
+                        &e,
+                        &second_key,
+                        &second_key,
+                        &mut Some(asr())
+                    )
                     .unwrap(),
                 "S3_VOICE_SOURCE_JOB_CANNOT_TARGET_COPY"
             );
@@ -2843,7 +3051,7 @@ pub(crate) mod feedback_capture {
             let e = envelope(&mut copy_owner);
             assert!(
                 copied_note
-                    .accept_asr(&mut copy_owner, &e, &copy_key, &copy_key, asr())
+                    .accept_asr(&mut copy_owner, &e, &copy_key, &copy_key, &mut Some(asr()))
                     .unwrap()
             );
             assert!(
@@ -2855,7 +3063,7 @@ pub(crate) mod feedback_capture {
             let e = envelope(&mut owner);
             assert!(
                 !second
-                    .accept_asr(&mut owner, &e, &second_key, &second_key, asr())
+                    .accept_asr(&mut owner, &e, &second_key, &second_key, &mut Some(asr()))
                     .unwrap()
             );
             assert_eq!(
@@ -2871,7 +3079,7 @@ pub(crate) mod feedback_capture {
             let e = envelope(&mut owner);
             assert!(
                 !second
-                    .accept_asr(&mut owner, &e, &fresh, &edited_key, asr())
+                    .accept_asr(&mut owner, &e, &fresh, &edited_key, &mut Some(asr()))
                     .unwrap(),
                 "S3_VOICE_STALE_EDIT_REVISION"
             );
@@ -2957,8 +3165,9 @@ pub(crate) mod feedback_capture {
                 );
                 std::thread::sleep(Duration::from_millis(10));
             };
-            let transcript = completed.result.unwrap();
-            let VoiceTranscript::Ready(words) = &transcript else {
+            let mut completion = Some(completed.result.unwrap());
+            let transcript = completion.as_ref().unwrap();
+            let VoiceTranscript::Ready(words) = transcript else {
                 panic!("real speech must produce editable text")
             };
             let original_words = words.clone();
@@ -2974,11 +3183,19 @@ pub(crate) mod feedback_capture {
                 "real inference did not recognize the spoken request"
             );
             let e = envelope(&mut owner);
-            assert!(
-                saved
-                    .accept_asr(&mut owner, &e, &key, &key, transcript)
-                    .unwrap()
-            );
+            loop {
+                match saved.accept_asr(&mut owner, &e, &key, &key, &mut completion) {
+                    Ok(accepted) => {
+                        assert!(accepted);
+                        break;
+                    }
+                    Err(BundleError::Unsettled) if completion.is_some() => {
+                        assert!(Instant::now() < deadline, "completion contention timed out");
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("completion publication: {error}"),
+                }
+            }
             let original_ref = saved.voice.original_asr_ref.clone().unwrap();
             let original: kinewright_media::voice_note::OriginalVoiceAsr<
                 ProjectId,
