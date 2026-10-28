@@ -1,6 +1,6 @@
 # PO0: Kinewright's design language
 
-Status: proposal, rev 2.2, 2026-10-27. Nothing here binds until Riel approves the mockup
+Status: proposal, rev 2.3, 2026-10-28 (probe outcome: §3 settle table, §6 spring bar and outcome, §7 step 0). Nothing here binds until Riel approves the mockup
 (`.review/po/mockup-studio-art.html`). On approval, this document replaces the "Cut Room"
 direction and the token sections of `docs/DESIGN.md`. The component rules in
 `DESIGN.md` (timeline, mixer, inspector and the others) stay. Only their token names
@@ -607,7 +607,20 @@ Rules:
   for opacity, and springs for geometry.
 - Exits are shorter than entrances, at about 70%.
 - Settle threshold: within 0.25 pt and under 1 pt/s, snap to the target and stop
-  requesting repaints.
+  requesting repaints. This absolute threshold, not the 0.1% settle time above, ends a
+  live spring, so the repaint window grows with travel. Measured by the PO0 probe
+  (`docs/reports/po0/probe.md`) at 60 Hz, from rest:
+
+  | Travel | 32 pt | 64 pt | 160 pt | 336 pt |
+  | --- | ---: | ---: | ---: | ---: |
+  | `spring` (ζ 0.85) | 333 ms | 517 ms | 567 ms | 600 ms |
+  | `spring-panel` (ζ 1) | 483 ms | 533 ms | 583 ms | 633 ms |
+
+  The motion is visually done at the 99% point (249 ms and 370 ms). The time after
+  that is sub-point creep. A 520 ms hard snap was measured as an alternative. It leaves
+  0.32 pt and 5.1 pt/s, which shows as a one-pixel edge step in a frame-by-frame
+  capture. The physics stays as specified. Riel's five-minute look decides whether
+  the snap is ever wanted.
 - Everything runs on time, not frames: a slow frame skips ahead and never stretches
   the animation.
 
@@ -783,7 +796,7 @@ the Windows VM (WARP).
 | Light, glass and grain (NVIDIA) | Together ≤ 0.3 ms GPU at 1440p. Downsample ≤ 0.5 ms per update on the worker. No visible banding in the glow on a near-black frame, to Riel's eye |
 | Light, glass and grain (lavapipe, WARP) | Together ≤ 2 ms per frame |
 | Filmstrip | Visible strip filled ≤ 1 s paused and ≤ 3 s during playback. PF1 G1 unchanged during the fill. Atlas ≤ 16 MB |
-| Springs | Same frame bars as above. Repaint window ≤ 520 ms per move, and zero repaints after settle |
+| Springs | Same frame bars as above. Repaint window ≤ the settle time for the move's travel (§3 rules table) + 1 frame, and zero repaints after settle. Rev 2.2's flat 520 ms cap was wrong for travel over about 64 pt |
 | lavapipe, 60 Hz | A correctness lane. Transitions end on time (they are time-based). Interval p99 ≤ 33 ms. A press is visible on the next frame |
 | Windows VM, WARP | Interval p99 ≤ 33 ms. Dropped frames ≤ 5%. It records whether Mica composites with the wgpu swapchain |
 | Linux NVIDIA, Wayland | It records whether the surface offers a transparent alpha mode |
@@ -818,8 +831,27 @@ What would justify revisiting the toolkit:
 These would not justify it: having no backdrop blur, having no CSS-style transitions,
 having no soft-light blend, or a Mica failure on Windows (the fallback is opaque).
 
+**Probe outcome (2026-10-28, `docs/reports/po0/probe.md`).** The probe met none of the
+toolkit conditions, so egui stays. Two drops are taken:
+- **Drop 3.** Light is frozen during playback. It updates on a version switch and while
+  paused, and the glow stays. The worker's downsample took up to 1.18 ms per update
+  (bar 0.5 ms). Together, the light, glass and grain took up to 0.56 ms on the GPU
+  (bar 0.3 ms).
+- **Drop 5, in full.** The story lane uses plain beat blocks with one thumbnail at each
+  beat's start. A cold strip fill took up to 14 s paused (bar 1 s), and during
+  playback 92–95% of frames were late.
+
+Drops 2, 4 and 6 are not triggered. The generic 60 Hz frame and CPU bars failed on both
+lanes. Those runs carried load from leaked startup CLI checks, and the effects-off
+control failed too, so the failures are not attributed to motion. A clean baseline is
+the first step of the rollout (§7). The 120 Hz, WARP and Mica lanes were not run. Riel's
+five-minute look is still owed.
+
 ## 7. Rollout order, once the probe passes
 
+0. **A clean baseline.** Fix the leaked startup CLI checks first. Then rerun the probe's
+   frame, CPU and PF1 G1 bars with effects off and on, on a matched baseline, at 60 Hz
+   and, if Riel sets a monitor to it, 120 Hz.
 1. **Tokens, type and the motion layer.** Rewrite `theme.rs` and the token sections of
    `DESIGN.md` together: colours, Inter opsz and wght, the `Inter Tabular` build step,
    radii, depth, the near-white playhead and blue selection. Land `motion.rs`. The whole app restyles with
