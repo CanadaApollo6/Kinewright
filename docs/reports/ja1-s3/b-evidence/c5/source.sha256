@@ -1,0 +1,5 @@
+88c9043b480b8476e797aecc5b4bfbb200a8aad49e29469d5660d6371ca79890  crates/kinewright-app/src/recording.rs
+81b2a19676c4ea2fa39a2bf37acec0663b6a70e12814f9d309d5bf725ace67dc  crates/kinewright-media/src/voice_note.rs
+0b7525a9c3d9dcb6a4942a6cad65b42ad19feccd9fa079e2e85868589ef34937  crates/kinewright-media/src/transcript.rs
+7ba3de665680360df0745ae631018cb8998991447ff38860448104ab33180420  crates/kinewright-media/src/lib.rs
+b26aab563634cf1de261ec0e9d63833c43d46783bd19373ac273179542979183  docs/reports/ja1-s3/b-evidence/c5/mutations.py

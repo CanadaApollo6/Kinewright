@@ -1,0 +1,185 @@
+{
+  "base_commit": "ef4526eeb5c34f615abdddcf055bd1f30f48cb4f",
+  "failure_comparison_commit": "c7224d8b4795e6534c020471cf326e8a5a92a853",
+  "source_and_fixture_generator_sha256": {
+    "crates/kinewright-app/src/recording.rs": "5c0dbf6ca831b169fce37f15a9c831d31eacb2c982fdff1fc18d728d2affc020",
+    "crates/kinewright-project/src/voice_store.rs": "ac083b138900bb10495066abb048a730b7febfb242597163cd64ad45c1072eb6",
+    "crates/kinewright-project/src/bundle.rs": "54803bb4cc45c4e3f9a896a9ddb71f75390cea8750792a1318edfa5b09da3332",
+    "crates/kinewright-project/src/lib.rs": "03e9270b7773d7caaef258c0b63217cd3c992da8ed7f90473ff339ca1d1de9b6",
+    "crates/kinewright-media/src/voice_note.rs": "92e4b554bb4ddf2cce47094931d5b77530e4c8a957905e12c7f0b61f26d7e410",
+    "crates/kinewright-media/src/transcript.rs": "0b7525a9c3d9dcb6a4942a6cad65b42ad19feccd9fa079e2e85868589ef34937",
+    "docs/reports/ja1-s3/b-evidence/c5/mutations.py": "b26aab563634cf1de261ec0e9d63833c43d46783bd19373ac273179542979183",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/mutations.py": "263d80dc2f14712a8623b09dd179bba4d8178c723a06ff8d2289db2b6fc08ec4",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/gate.sh": "e7d1e31c07939f8c64c3be9bc1e44999621de5573aca0211dfea3e7cdcb2e80d",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/repro.py": "490c7a2c92bbce7ef81be14c2a42177534e2c36ad877e35866f6305be1374a72",
+    "docs/reports/ja1-s3/b-evidence/c5-fix2/summarize.py": "dc0cf99bbf2d03cc55710d4901e3cbd48a4c47c9eae8f5677b9c81c747fe8102"
+  },
+  "gates": {
+    "app": {
+      "command": "test -p kinewright-app -- --nocapture",
+      "exit": 0,
+      "log": "app.log.gz",
+      "log_sha256": "3024e98a64c20212336d8694e554910c33a3b8351b2604b6f51107f13d080f56",
+      "raw_summaries": [
+        "test result: ok. 905 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 369.78s"
+      ],
+      "failed_tests": [],
+      "not_run_messages": [
+        "NOT RUN s3_real_commentary_control: pinned Whisper small is absent from /home/riels/.t3/worktrees/Kinewright/t3-0fe63804/target/s3-b-runtime/localappdata/Kinewright/models/whisper/ggml-small.bin",
+        "NOT RUN s3_real_spoken_note_control: pinned Whisper small is absent from /home/riels/.t3/worktrees/Kinewright/t3-0fe63804/target/s3-b-runtime/localappdata/Kinewright/models/whisper/ggml-small.bin"
+      ]
+    },
+    "media": {
+      "command": "test -p kinewright-media --lib -- --test-threads=1 --nocapture",
+      "exit": 0,
+      "log": "media.log.gz",
+      "log_sha256": "6dd2b48bfe846c8746d211984b1fe9c8ece1487694d93b1e0bc820a991fdba8a",
+      "raw_summaries": [
+        "test result: ok. 1166 passed; 0 failed; 65 ignored; 0 measured; 0 filtered out; finished in 1399.07s"
+      ],
+      "failed_tests": [],
+      "not_run_messages": []
+    },
+    "project": {
+      "command": "test -p kinewright-project -- --nocapture",
+      "exit": 0,
+      "log": "project.log.gz",
+      "log_sha256": "c06c7dde261472299689e646bc2b6f909651cf7fecaebcaee98eeac83f0bf02d",
+      "raw_summaries": [
+        "test result: ok. 159 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 171.54s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "failed_tests": [],
+      "not_run_messages": []
+    },
+    "project-test-util": {
+      "command": "test -p kinewright-project --features test-util -- --nocapture",
+      "exit": 0,
+      "log": "project-test-util.log.gz",
+      "log_sha256": "75a05fb255375e17de9b3286d33d975c9622a79eff71beb25d7c9b33a9ceb012",
+      "raw_summaries": [
+        "test result: ok. 159 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 99.78s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.36s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.05s",
+        "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 103.91s",
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.10s",
+        "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 170.95s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 60.19s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.32s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.68s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.15s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.52s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.04s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.77s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.21s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.27s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "failed_tests": [],
+      "not_run_messages": []
+    },
+    "build": {
+      "command": "build --workspace",
+      "exit": 0,
+      "log": "build.log.gz",
+      "log_sha256": "6adf246bebefe851711db60988a9d340ca6fb4bf33550405f2e6c2e7cf1235f2",
+      "raw_summaries": [],
+      "failed_tests": [],
+      "not_run_messages": []
+    },
+    "clippy": {
+      "command": "clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "log": "clippy.log.gz",
+      "log_sha256": "bcd73984d4a8ec341b485e8a384e76b487fae1bd0a37fdbd729a9a3a905de003",
+      "raw_summaries": [],
+      "failed_tests": [],
+      "not_run_messages": []
+    },
+    "fmt": {
+      "command": "fmt -- --check",
+      "exit": 0,
+      "log": "fmt.log.gz",
+      "log_sha256": "c3cce5cbbea29732bc455b551e8ef9e5d92f3c5e1780a62bbdda4ffd9144d007",
+      "raw_summaries": [],
+      "failed_tests": [],
+      "not_run_messages": []
+    },
+    "windows": {
+      "command": "check -p kinewright-project -p kinewright-app --target x86_64-pc-windows-msvc",
+      "exit": 101,
+      "log": "windows.log.gz",
+      "log_sha256": "92baa4b65f5d84d1814d9681861c90a84af4449c0a76fc4c108e45768dc0968a",
+      "raw_summaries": [],
+      "failed_tests": [],
+      "not_run_messages": []
+    }
+  },
+  "full_suite_failure_comparisons": [
+    {
+      "test": "project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite",
+      "same_failure_at_c7224d8b": true,
+      "cause": "The cached sealed predecessor identity names an absent source checkout. Both head and clean full c722 source report the identical OS2 prerequisite error.",
+      "comparison_source_clean": true,
+      "runs": [
+        {
+          "label": "project-initial",
+          "command": "test -p kinewright-project -- --nocapture",
+          "exit": 101,
+          "log": "project-initial.log.gz",
+          "log_sha256": "7b365426fdbbf08c724507107e1e5be8ec867cafcdd678aaadc76a21ef76a575"
+        },
+        {
+          "label": "c722-project-old-reader",
+          "command": "test --manifest-path target/fix2-c722/Cargo.toml -p kinewright-project --lib project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite -- --exact --nocapture",
+          "exit": 101,
+          "log": "c722-project-old-reader.log.gz",
+          "log_sha256": "810b6f7946a8f04bd08535baed7160a018caaaff8f668b886cbb2327fb6966b8"
+        }
+      ]
+    }
+  ],
+  "mutation_count": 16,
+  "new_pairs": 2,
+  "prior_pairs_rerun": 14,
+  "mutation_details": "mutations/summary.json",
+  "all_sources_exactly_restored": true,
+  "lint": "slow-test manifest and markers agree: 117 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 60 allowlist entries well-formed; 27 equipped-session skip sites counted",
+  "manifest_selftest_log": "slow-selftest.log",
+  "owner_teardown_boundary": "Normal teardown tries every slot. A failed settle or crash may discard unpublished derived ASR. Acknowledged audio/log remain durable, and a note without a committed original ASR must reopen transcribable and editable. No durable pending-ASR recovery storage was added.",
+  "diagnostic_repro": "repro-c722-handle uses c722 App handle code plus one witness, against current dependencies with the new owner slots unused. It is a mechanism reproducer, not a full baseline-tree gate or a credited mutation pair.",
+  "not_run": [
+    "full workspace aggregate, slow tier and forced ignores",
+    "Media integration targets and doctests (requested Media gate is full serial lib)",
+    "native Windows Rust compilation/runtime beyond aws-lc-sys prerequisites",
+    "real Whisper/model-installed spoken note and commentary controls; no model downloads",
+    "actual microphone, presenter-displayed frame and recorded-audio clock integration",
+    "native model/workspace and capture-staging resource accounting/cleanup",
+    "C6/shared-host streamed ingress, private range enforcement, incomplete-status UI and G11 App closure",
+    "persisted remark split/merge/re-anchor/delete, collection/reopen and post-edit mutation",
+    "native filesystem unknown-outcome fault injection (committed lost reply is emulated)",
+    "actual process-crash pending-ASR recovery control (failed normal teardown is exercised)",
+    "live S4 specialist and equipped GPU/provider/media-pack lanes",
+    "hosted CI",
+    "laptop offload (probe timeout124; Tailscale authentication required)",
+    "independent review rounds (excluded for this implementation worker)"
+  ]
+}

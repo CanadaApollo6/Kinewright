@@ -1,0 +1,124 @@
+{
+  "base_commit": "c7224d8b4795e6534c020471cf326e8a5a92a853",
+  "source_and_fixture_generator_sha256": {
+    "crates/kinewright-app/src/recording.rs": "2c1134a23c075415da3bcbfc892de8ff41d709feebd827e4c1c7e8300a93e1fa",
+    "crates/kinewright-media/src/voice_note.rs": "92e4b554bb4ddf2cce47094931d5b77530e4c8a957905e12c7f0b61f26d7e410",
+    "crates/kinewright-project/src/feedback_mapping.rs": "0f0ac0dbd8bf7e7c4aad8320a6c032224bf0544906b28962230ed91c168558cf",
+    "crates/kinewright-project/tests/ja_s3_lineage.rs": "cc6924ef4ed4400771e6a69830917b1179308dd6c3d815e6d953e4e799bd83d8",
+    "crates/kinewright-media/src/transcript.rs": "0b7525a9c3d9dcb6a4942a6cad65b42ad19feccd9fa079e2e85868589ef34937",
+    "docs/reports/ja1-s3/b-evidence/c5/mutations.py": "b26aab563634cf1de261ec0e9d63833c43d46783bd19373ac273179542979183",
+    "docs/reports/ja1-s3/b-evidence/c5-fix1/mutations.py": "3094b497f9fc160e986f60faedeb10e884708fdcc9bbafa3c0112917e62c18fa",
+    "docs/reports/ja1-s3/b-evidence/c5-fix1/gate.sh": "e7d1e31c07939f8c64c3be9bc1e44999621de5573aca0211dfea3e7cdcb2e80d"
+  },
+  "gates": {
+    "recording-bound-final": {
+      "command": "test -p kinewright-app --bin kinewright-app recording:: -- --nocapture",
+      "exit": 0,
+      "raw_summaries": [
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 885 filtered out; finished in 19.07s"
+      ],
+      "log": "recording-bound-final.log.gz",
+      "not_run_messages": [
+        "NOT RUN s3_real_commentary_control: pinned Whisper small is absent from /home/riels/.t3/worktrees/Kinewright/t3-0fe63804/target/s3-b-runtime/localappdata/Kinewright/models/whisper/ggml-small.bin",
+        "NOT RUN s3_real_spoken_note_control: pinned Whisper small is absent from /home/riels/.t3/worktrees/Kinewright/t3-0fe63804/target/s3-b-runtime/localappdata/Kinewright/models/whisper/ggml-small.bin"
+      ]
+    },
+    "voice-bound-final": {
+      "command": "test -p kinewright-media --lib voice_note::tests:: -- --nocapture",
+      "exit": 0,
+      "raw_summaries": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1226 filtered out; finished in 0.00s"
+      ],
+      "log": "voice-bound-final.log.gz",
+      "not_run_messages": []
+    },
+    "transcript": {
+      "command": "test -p kinewright-media --lib transcript::tests:: -- --nocapture",
+      "exit": 0,
+      "raw_summaries": [
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1222 filtered out; finished in 0.02s"
+      ],
+      "log": "transcript.log.gz",
+      "not_run_messages": []
+    },
+    "lineage-accepted": {
+      "command": "test -p kinewright-project --features test-util --test ja_s3_lineage -- --nocapture",
+      "exit": 0,
+      "raw_summaries": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.20s"
+      ],
+      "log": "lineage-accepted.log.gz",
+      "not_run_messages": []
+    },
+    "incomplete-accepted": {
+      "command": "test -p kinewright-project --lib feedback_mapping::tests:: -- --nocapture",
+      "exit": 0,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 160 filtered out; finished in 0.00s"
+      ],
+      "log": "incomplete-accepted.log.gz",
+      "not_run_messages": []
+    },
+    "clippy-bound-final": {
+      "command": "clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "raw_summaries": [],
+      "log": "clippy-bound-final.log.gz",
+      "not_run_messages": []
+    },
+    "build-bound-final": {
+      "command": "build --workspace",
+      "exit": 0,
+      "raw_summaries": [],
+      "log": "build-bound-final.log.gz",
+      "not_run_messages": []
+    },
+    "fmt-bound-final": {
+      "command": "fmt -- --check",
+      "exit": 0,
+      "raw_summaries": [],
+      "log": "fmt-bound-final.log.gz",
+      "not_run_messages": []
+    },
+    "windows": {
+      "command": "check --target x86_64-pc-windows-msvc -p kinewright-project -p kinewright-media -p kinewright-app",
+      "exit": 101,
+      "raw_summaries": [],
+      "log": "windows.log.gz",
+      "not_run_messages": []
+    }
+  },
+  "mutation_count": 14,
+  "new_pairs": 4,
+  "c5_pairs_rerun": 10,
+  "mutation_details": "mutations/summary.json",
+  "all_sources_exactly_restored": true,
+  "lint": "slow-test manifest and markers agree: 117 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 60 allowlist entries well-formed; 27 equipped-session skip sites counted",
+  "selftest": "42 passed; raw slow-selftest.log retains the existing ResourceWarning",
+  "repro_and_diagnostic_scope": {
+    "repro-majors*.log.gz": "Initial fixture/API diagnostics, no mutation credit. Stale choice reached its intended assertion. Decoded pressure initially failed at index reading, not blob admission.",
+    "repro-asr-collection.log.gz": "Valid collection-loss reproducer: missing original ASR declaration after another save and collect_after_ack.",
+    "repro-admission-edit.log.gz": "Valid interaction reproducer: eligible ASR was dropped after admission failure followed by newer chosen text. Validated and unvalidated states are now separate.",
+    "focused-app.log.gz": "Earlier pressure/index and live editor-pin fixture issues; corrected before final acceptance.",
+    "lineage*.log.gz": "Earlier removal-proof predicate was over-conservative; the accepted existing recreation/sibling/removal controls and new reverse-split fixture pass.",
+    "clippy*.log.gz": "Early style diagnostics corrected; clippy-bound-final is the accepted gate."
+  },
+  "unknown_reply_control": "Emulated lost reply after actual committed metadata; later head change and exact replay do not add a publication. Native filesystem unknown faults NOT RUN.",
+  "capture_status": "Persisted in version-2 note log evidence; incomplete valid WAV retained. Version-1 status is explicitly unknown. Frozen VoiceRef unchanged.",
+  "not_run": [
+    "full touched-crate and workspace aggregates (binding fix gate specifies focused targets)",
+    "slow tier and forced ignores",
+    "previous Media readback aggregate failure not revalidated or resolved",
+    "native Windows Rust compilation/runtime beyond aws-lc-sys prerequisites",
+    "real Whisper/model-installed spoken note and commentary controls; no model downloads",
+    "actual microphone, presenter-displayed frame and recorded-audio clock integration",
+    "native model/workspace and capture-staging resource accounting/cleanup",
+    "C6/shared-host streamed ingress, private range enforcement and G11 App closure",
+    "persisted remark split/merge/re-anchor/delete, collection/reopen and post-edit mutation (Astra4 to C6)",
+    "native filesystem unknown-outcome fault injection",
+    "live S4 specialist and equipped GPU/provider/media-pack lanes",
+    "hosted CI",
+    "laptop offload (probe timeout124; Tailscale authentication required)",
+    "independent review rounds (excluded by brief)"
+  ]
+}

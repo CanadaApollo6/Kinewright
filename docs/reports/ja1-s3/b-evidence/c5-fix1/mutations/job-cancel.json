@@ -1,0 +1,23 @@
+{
+  "case": "job-cancel",
+  "source": "crates/kinewright-media/src/voice_note.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-media",
+    "--lib",
+    "voice_note::tests::s3_voice_job_identity",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "92e4b554bb4ddf2cce47094931d5b77530e4c8a957905e12c7f0b61f26d7e410",
+  "mutated_sha256": "d163cce092d379c7487b3c332af9bdccab3b55bf1a6f1c93035c2f26a77feb15",
+  "red_exit": 101,
+  "red_log_sha256": "ea3c094b711de7a5d98716d6c4cff44ece266a5cbce5bb94bf7bdb3ebf57c0df",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "7e7fd68e843296ed688d83a410f30d415ccf70f7093d3b3a547ed59c408a332a",
+  "runtime_green": true
+}

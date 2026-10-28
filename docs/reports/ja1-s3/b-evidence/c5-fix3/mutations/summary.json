@@ -1,0 +1,47 @@
+[
+  {
+    "case": "slot-only-publisher",
+    "source": "crates/kinewright-project/src/studio_store.rs",
+    "test": "s3_voice_fix3_direct_original_cannot_bypass_pending",
+    "marker": "S3_VOICE_SLOT_ONLY_PUBLISHER",
+    "original_sha256": "d6cdb93eefeba67dcb95af32c35c490deabdd52628950386fb2b022aab1bfe57",
+    "mutated_sha256": "dad717d5e37ba434492cc05540a14e54d23ccbdd99da4793bc7c940c4298db96",
+    "red_exit": 101,
+    "red_log_sha256": "00eea0556c21f035c0a508c64a4724e11a277c67f8947b5707657171c9641a62",
+    "runtime_red": true,
+    "restored_exactly": true,
+    "green_exit": 0,
+    "green_log_sha256": "0bf3cf25afd90227fc6e2682d307c68ff3ececacbb1eb996ccb8963e878c3257",
+    "runtime_green": true
+  },
+  {
+    "case": "choice-cas",
+    "source": "crates/kinewright-project/src/voice_store.rs",
+    "test": "s3_voice_fix3_choice_retry_preserves_newer_choice",
+    "marker": "S3_VOICE_CHOICE_RETRY_CAS",
+    "original_sha256": "9cb41067ea29028c0e64f745e429aa307a215d4ab12923116d6a0bd1c8e2dc71",
+    "mutated_sha256": "9a484c23726b862d39a402638573e39560d917fa8793901c15d8dd6364aeb821",
+    "red_exit": 101,
+    "red_log_sha256": "479956d72e7bf552b78dcbb9ac64c308469ffcfcd79e97ec58054eca68db8948",
+    "runtime_red": true,
+    "restored_exactly": true,
+    "green_exit": 0,
+    "green_log_sha256": "69cf86e2cd4a87760af3d42035ea61839126ff6ae55e88acc21f32e68c14d8c2",
+    "runtime_green": true
+  },
+  {
+    "case": "completion-contention",
+    "source": "crates/kinewright-project/src/voice_store.rs",
+    "test": "s3_voice_fix3_contention_keeps_completed_asr",
+    "marker": "S3_VOICE_COMPLETION_RETAINED_ON_CONTENTION",
+    "original_sha256": "9cb41067ea29028c0e64f745e429aa307a215d4ab12923116d6a0bd1c8e2dc71",
+    "mutated_sha256": "d42b04ee2ce1c7a0a7578daae02f43f8a9a0848e021b9f0c74e717904094cece",
+    "red_exit": 101,
+    "red_log_sha256": "12a1fefce27fa3d9f50738baab42d44a9e6366c00452f2979de149e6f33a60f4",
+    "runtime_red": true,
+    "restored_exactly": true,
+    "green_exit": 0,
+    "green_log_sha256": "cea2080ef354d20c32db1e6e053822b8f8f8c685bdca7bd8e31d4e188c8b1d8a",
+    "runtime_green": true
+  }
+]

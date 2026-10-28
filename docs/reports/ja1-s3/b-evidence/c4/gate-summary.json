@@ -1,0 +1,237 @@
+{
+  "base": "7f73f9c8",
+  "project_targets": {
+    "lib": {
+      "status": "ok",
+      "passed": 158,
+      "failed": 0,
+      "ignored": 2,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 158 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 107.69s"
+    },
+    "ja_s1_copy": {
+      "status": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.18s"
+    },
+    "ja_s1_receipts": {
+      "status": "ok",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 60.35s"
+    },
+    "ja_s1_storage": {
+      "status": "ok",
+      "passed": 86,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 194.62s"
+    },
+    "ja_s2_rescue": {
+      "status": "ok",
+      "passed": 35,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.27s"
+    },
+    "ja_s2_rescue_record": {
+      "status": "ok",
+      "passed": 33,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 274.49s"
+    },
+    "ja_s2_save": {
+      "status": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 109.36s"
+    },
+    "ja_s2_save_cost": {
+      "status": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.78s"
+    },
+    "ja_s2_source_boundary": {
+      "status": "ok",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.08s"
+    },
+    "ja_s2_switch": {
+      "status": "ok",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.21s"
+    },
+    "ja_s2_writer": {
+      "status": "ok",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-final.log.gz",
+      "raw": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s"
+    },
+    "ja_s3_lineage": {
+      "status": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log": "witness-accepted.log.gz",
+      "raw": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.37s"
+    },
+    "ja_s3_owned_inputs": {
+      "status": "ok",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-remaining.log.gz",
+      "raw": "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.98s"
+    },
+    "ja_s3_read_only_inputs": {
+      "status": "ok",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-remaining.log.gz",
+      "raw": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.31s"
+    },
+    "ja_s3_store": {
+      "status": "ok",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-remaining.log.gz",
+      "raw": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.82s"
+    },
+    "ja_s4_candidate": {
+      "status": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-remaining.log.gz",
+      "raw": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.17s"
+    },
+    "ja_s4_store": {
+      "status": "ok",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-remaining.log.gz",
+      "raw": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    },
+    "doctests": {
+      "status": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "log": "project-docs.log.gz",
+      "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    }
+  },
+  "project_total": {
+    "passed": 413,
+    "failed": 0,
+    "ignored": 2
+  },
+  "project_coverage": "All lib/integration/doctest targets. Only ja_s3_lineage fixture arguments changed after the retained full run; that entire target was rerun and all remaining targets were completed. Shared production source unchanged.",
+  "media_results": [
+    {
+      "passed": 1161,
+      "ignored": 65,
+      "raw": "test result: ok. 1161 passed; 0 failed; 65 ignored; 0 measured; 0 filtered out; finished in 478.60s"
+    },
+    {
+      "passed": 4,
+      "ignored": 2,
+      "raw": "test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 30.17s"
+    },
+    {
+      "passed": 10,
+      "ignored": 0,
+      "raw": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s"
+    },
+    {
+      "passed": 14,
+      "ignored": 3,
+      "raw": "test result: ok. 14 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 1.57s"
+    },
+    {
+      "passed": 3,
+      "ignored": 0,
+      "raw": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "passed": 0,
+      "ignored": 0,
+      "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    }
+  ],
+  "media_total": {
+    "passed": 1192,
+    "ignored": 70
+  },
+  "gates": {
+    "build": {
+      "exit": 0,
+      "log": "build-final-head.log.gz"
+    },
+    "clippy": {
+      "exit": 0,
+      "log": "clippy-accepted.log.gz"
+    },
+    "fmt": {
+      "exit": 0,
+      "log": "fmt-accepted.log.gz"
+    },
+    "witness": {
+      "exit": 0,
+      "log": "witness-accepted.log.gz"
+    },
+    "presenter": {
+      "exit": 0,
+      "log": "presenter.log.gz"
+    },
+    "m31": {
+      "exit": 0,
+      "log": "m31-equipped.log.gz"
+    },
+    "windows": {
+      "exit": 101,
+      "log": "windows.log.gz"
+    }
+  },
+  "windows": "BLOCKED before touched Rust compilation by Linux-host MSVC/native aws-lc-sys prerequisites",
+  "diagnostics": [
+    "initial missing sealed older-reader prerequisite",
+    "initial mixed-rate fixture expectations corrected",
+    "new replacement fixture rejected unknown primaries before mapping; replaced with C0 established AV/colour settings"
+  ],
+  "mutations": "NOT REQUIRED: C4 is read-only mapping under plan section 5",
+  "not_run": [
+    "native Windows runtime and compilation beyond native prerequisites",
+    "full workspace test aggregate",
+    "slow tier and forced ignores",
+    "equipped/live-provider/model/media-pack controls including optional early-return tests",
+    "Studio/C6 UI and live S4 specialist wiring",
+    "independent review rounds (brief forbids)",
+    "hosted CI and push (brief forbids)"
+  ]
+}

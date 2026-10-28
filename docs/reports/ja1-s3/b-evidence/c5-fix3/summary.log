@@ -1,0 +1,10 @@
+app exit 0 {'passed': 909, 'failed': 0, 'ignored': 6}
+project exit 0 {'passed': 177, 'failed': 0, 'ignored': 2}
+project-test-util exit 0 {'passed': 415, 'failed': 0, 'ignored': 2}
+media exit 0 {'passed': 1166, 'failed': 0, 'ignored': 65}
+build exit 0 {}
+clippy exit 0 {}
+fmt exit 0 {}
+windows exit 101 {}
+workspace-fast exit 0 {'passed': 4362, 'failed': 0, 'ignored': 142}
+runtime red/restored-green pairs: 3

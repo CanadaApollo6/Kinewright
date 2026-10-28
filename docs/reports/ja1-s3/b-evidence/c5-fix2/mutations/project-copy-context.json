@@ -1,0 +1,24 @@
+{
+  "case": "project-copy-context",
+  "source": "crates/kinewright-project/src/voice_store.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_job_identity",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "ac083b138900bb10495066abb048a730b7febfb242597163cd64ad45c1072eb6",
+  "mutated_sha256": "26fc2bf40d360b42f130ab1210206e7d2aa0d84b2b0eb6eda69cb6ba29f596ee",
+  "red_exit": 101,
+  "red_log_sha256": "42897f6520caf441f2261c2ce4209d971f15652075812600da0e3d3a647d18d9",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "1d2a566aead2e39b146315bd7bad5b87882162f595b767a38220d32b3037b5ae",
+  "runtime_green": true
+}

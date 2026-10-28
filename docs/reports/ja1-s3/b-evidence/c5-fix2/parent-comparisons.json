@@ -1,0 +1,24 @@
+[
+  {
+    "test": "project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite",
+    "same_failure_at_c7224d8b": true,
+    "cause": "The cached sealed predecessor identity names an absent source checkout. Both head and clean full c722 source report the identical OS2 prerequisite error.",
+    "comparison_source_clean": true,
+    "runs": [
+      {
+        "label": "project-initial",
+        "command": "test -p kinewright-project -- --nocapture",
+        "exit": 101,
+        "log": "project-initial.log.gz",
+        "log_sha256": "7b365426fdbbf08c724507107e1e5be8ec867cafcdd678aaadc76a21ef76a575"
+      },
+      {
+        "label": "c722-project-old-reader",
+        "command": "test --manifest-path target/fix2-c722/Cargo.toml -p kinewright-project --lib project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite -- --exact --nocapture",
+        "exit": 101,
+        "log": "c722-project-old-reader.log.gz",
+        "log_sha256": "810b6f7946a8f04bd08535baed7160a018caaaff8f668b886cbb2327fb6966b8"
+      }
+    ]
+  }
+]

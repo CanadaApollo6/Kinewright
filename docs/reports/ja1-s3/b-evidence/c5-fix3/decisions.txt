@@ -1,0 +1,8 @@
+Premise checked before implementation: every SaveVoice write uses VoiceNoteHandle. Counterexample: ProjectBundle::metadata_command and WriterHost dispatch publish around retained state. Two runtime witnesses added before the fix test competing original Y and stale choice X after durable Y.
+Implementation: public SaveVoice dispatch routes to a bounded owner-held slot, including WriterHost without changing Agent. A private voice publication capability allows the already-locked slot to call the private metadata implementation. Raw notes have passive slots until capture state is requested.
+CAS: retain the originally expected choice across exact/definitely-refused writes. A newer durable choice clears the stale pending write and its pin and returns HistoryChanged.
+Contention: both Project and App acceptance borrow a mutable completion carrier. No take occurs until the slot is acquired and its pending guards pass. The real-control caller retains and retries the same carrier.
+Scope: keep the previously agreed failed-teardown boundary. No durable pending-ASR storage. No Worker A source or Agent source changed.
+Diagnostics: repro-before failed at setup because a snapshot did not change the manual head; not credited. Repro uses a real Core save and reaches both intended failure markers at parent source.
+Diagnostics: initial check found one accidentally adapted assert_eq argument, fixed locally. Initial Clippy found three new-code style issues, fixed locally.
+Diagnostics: the older same-original direct-publication witness was updated for the new refusal contract. Its initial exact-generation assertion forgot that creating a fresh issuer also publishes; replaced with the behavioral no-publication-after-settlement check.

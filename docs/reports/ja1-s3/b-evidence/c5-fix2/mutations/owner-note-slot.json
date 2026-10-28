@@ -1,0 +1,24 @@
+{
+  "case": "owner-note-slot",
+  "source": "crates/kinewright-project/src/voice_store.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_fix2_owner_slot_blocks_competing_handle",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "ac083b138900bb10495066abb048a730b7febfb242597163cd64ad45c1072eb6",
+  "mutated_sha256": "25d4628f7bb5219bcb7370a590ec519132f6606a04f8d87f68557c14ca3caeda",
+  "red_exit": 101,
+  "red_log_sha256": "8246cdd748d55edbdb2271ad75820f1f1e30170fb4802fdf971fbde978ff727a",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "bc502dc98c1dec0a824e3d2f29dc1dc22ac5172da0921d3fb7be70de6ca21e8d",
+  "runtime_green": true
+}

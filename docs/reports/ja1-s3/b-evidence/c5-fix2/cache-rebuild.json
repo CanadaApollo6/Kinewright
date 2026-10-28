@@ -1,0 +1,7 @@
+{
+  "cause": "Baseline comparison reused the head target directory and left baseline Media artifacts without capture_status. Rust source hashes remained unchanged.",
+  "action": "Removed only this worktree target/debug/.fingerprint/kinewright-* cache directories to force a current-workspace rebuild.",
+  "count": 167,
+  "c7224d8b": "The clean c722 comparison compiled successfully and reached its runtime prerequisite failure. The current voice_store module does not exist at c722.",
+  "future_comparisons": "Use a separate CARGO_TARGET_DIR for baseline source trees."
+}

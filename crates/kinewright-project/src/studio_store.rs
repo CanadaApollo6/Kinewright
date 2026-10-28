@@ -551,6 +551,33 @@ impl ProjectBundle {
         scope: MetadataScope,
         update: &MetadataUpdate,
     ) -> Result<ReceiptLookup, BundleError> {
+        if matches!(update.change, MetadataChange::SaveVoice(_)) {
+            return crate::voice_store::metadata_command(self, envelope, scope, update);
+        }
+        self.metadata_command_inner(envelope, scope, update)
+    }
+    /// Only the locked note slot can authorize a voice publication, including `WriterHost` writes.
+    pub(crate) fn voice_metadata_command(
+        &mut self,
+        envelope: &MetadataEnvelope,
+        scope: MetadataScope,
+        update: &MetadataUpdate,
+        publication: crate::voice_store::VoicePublication<'_>,
+    ) -> Result<ReceiptLookup, BundleError> {
+        let MetadataChange::SaveVoice(voice) = &update.change else {
+            return Err(BundleError::HistoryBarrierInvariant);
+        };
+        if publication.note() != &voice.note_id {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        self.metadata_command_inner(envelope, scope, update)
+    }
+    fn metadata_command_inner(
+        &mut self,
+        envelope: &MetadataEnvelope,
+        scope: MetadataScope,
+        update: &MetadataUpdate,
+    ) -> Result<ReceiptLookup, BundleError> {
         let allowed = matches!(
             (scope, &update.change),
             (
