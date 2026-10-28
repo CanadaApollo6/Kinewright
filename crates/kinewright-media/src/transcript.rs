@@ -780,6 +780,109 @@ pub fn default_data_dir() -> PathBuf {
     )
 }
 
+/// Bounded, CPU-only note inference. Missing models are never downloaded here.
+pub(crate) fn transcribe_voice_wav(
+    data_dir: &Path,
+    content_sha256: &str,
+    audio: &[u8],
+    cancellation: &ExportCancellation,
+) -> Result<crate::voice_note::VoiceTranscript, MediaError> {
+    use crate::voice_note::{VoiceTranscript, VoiceWord};
+    cancelled(cancellation)?;
+    let (samples, duration) = crate::voice_note::voice_pcm(audio)?;
+    if samples.iter().all(|sample| sample.abs() < 0.001) {
+        return Ok(VoiceTranscript::NoSpeech);
+    }
+    let store = TranscriptStore::new(cache_root(data_dir, "voice-transcripts", CACHE_VERSION));
+    let fps = Rational::new(1_000_000, 1).map_err(|e| MediaError::Backend(e.to_string()))?;
+    let cached = store
+        .load(content_sha256, AssetId(0))?
+        .filter(|value| value.source_fps == fps);
+    let transcript = if let Some(cached) = cached {
+        cached
+    } else {
+        let path = data_dir
+            .join("models")
+            .join("whisper")
+            .join(WHISPER_MODEL_NAME);
+        if !path.is_file() || sha256_file(&path)? != WHISPER_MODEL_SHA256 {
+            return Ok(VoiceTranscript::AwaitingModel);
+        }
+        cancelled(cancellation)?;
+        let mut parameters = WhisperContextParameters::default();
+        parameters.use_gpu(false);
+        let context = WhisperContext::new_with_params(path.to_string_lossy().as_ref(), parameters)
+            .map_err(|e| MediaError::Backend(format!("could not load CPU Whisper small: {e}")))?;
+        let mut state = context
+            .create_state()
+            .map_err(|e| MediaError::Backend(e.to_string()))?;
+        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: -1.0,
+        });
+        params.set_n_threads(4);
+        params.set_language(Some("en"));
+        params.set_translate(false);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_token_timestamps(true);
+        params.set_split_on_word(true);
+        params.set_max_len(1);
+        cancelled(cancellation)?;
+        state
+            .full(params, &samples)
+            .map_err(|e| MediaError::Backend(format!("voice inference failed: {e}")))?;
+        cancelled(cancellation)?;
+        AssetTranscript {
+            asset: AssetId(0),
+            content_sha256: content_sha256.into(),
+            source_fps: fps,
+            words: extract_words(
+                &state.as_iter().collect::<Vec<_>>(),
+                fps,
+                TimeCode(i64::try_from(duration).map_err(|e| MediaError::Backend(e.to_string()))?),
+            )?,
+        }
+    };
+    cancelled(cancellation)?;
+    let words: Vec<_> = transcript
+        .words
+        .iter()
+        .map(|word| {
+            Ok(VoiceWord {
+                text: word.text.clone(),
+                start_micros: u64::try_from(word.source_start.0)
+                    .map_err(|e| MediaError::Backend(e.to_string()))?,
+                end_micros: u64::try_from(word.source_end.0)
+                    .map_err(|e| MediaError::Backend(e.to_string()))?,
+            })
+        })
+        .collect::<Result<_, MediaError>>()?;
+    if words.len() > 4096
+        || words.iter().map(|w| w.text.len()).sum::<usize>()
+            > crate::voice_note::MAX_VOICE_TEXT_BYTES
+        || words
+            .iter()
+            .any(|w| w.start_micros >= w.end_micros || w.end_micros > duration)
+        || words
+            .windows(2)
+            .any(|w| w[0].end_micros > w[1].start_micros)
+    {
+        return Err(MediaError::Backend(
+            "Whisper returned invalid voice timing or text bounds".into(),
+        ));
+    }
+    store.save(&transcript)?;
+    cancelled(cancellation)?;
+    Ok(if words.is_empty() {
+        VoiceTranscript::NoSpeech
+    } else {
+        VoiceTranscript::Ready(words)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use kinewright_core::{Clip, ClipContent, ClipId, Track, TrackId, TrackKind};

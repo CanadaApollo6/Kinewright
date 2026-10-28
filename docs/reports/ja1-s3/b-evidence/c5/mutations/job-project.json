@@ -1,0 +1,21 @@
+{
+  "case": "job-project",
+  "source": "crates/kinewright-media/src/voice_note.rs",
+  "original_sha256": "81b2a19676c4ea2fa39a2bf37acec0663b6a70e12814f9d309d5bf725ace67dc",
+  "mutated_sha256": "6b53e7001616167f9dcbd31d0771a551ab9acfaee118b388a72fc1122958b1e3",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-media",
+    "--lib",
+    "voice_note::tests::s3_voice_job_identity",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "red_exit": 101,
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "runtime_green": true
+}

@@ -41,7 +41,9 @@ mod stats;
 mod timeline;
 mod title;
 mod transcript;
+// JA-1 S3 C5
 mod verify;
+pub mod voice_note;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
