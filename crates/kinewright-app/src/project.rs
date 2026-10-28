@@ -8,11 +8,13 @@ use std::{
 };
 
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, Export, IncidentId, IncidentLog,
+    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, IncidentId, IncidentLog,
     IncidentState, IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus,
-    MarkerId, MediaKind, Operation, Playback, RunningInvestigation, TimeCode, TimelineRevision,
-    TrackId, TrackKind,
+    MarkerId, MediaKind, Operation, RunningInvestigation, TimeCode, TimelineRevision, TrackId,
+    TrackKind,
 };
+#[cfg(test)]
+use kinewright_core::{Export, Playback};
 use kinewright_media::{LutLibrary, LutStore};
 use kinewright_project::{
     FlushOutcome, RefuseRename, SidecarMode, SidecarSession, SidecarWriter, derive_lut_store,
@@ -115,6 +117,7 @@ pub(crate) struct ProjectSession {
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
+    media_backend: crate::media_access::MediaBackend,
     pub(crate) studio: crate::studio::Studio,
     pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
     pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
@@ -339,9 +342,7 @@ impl ProjectSession {
         document: Document,
         source_admission: kinewright_project::bundle::BundleWriteAdmission,
         project_path: Option<PathBuf>,
-        playback: &Arc<dyn Playback>,
-        analysis: &Arc<dyn Analysis>,
-        exporter: &Arc<dyn Export>,
+        media_backend: crate::media_access::MediaBackend,
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
         format_version: u32,
@@ -414,7 +415,7 @@ impl ProjectSession {
         // present is one.
         let (loaded_ids, loaded_open_ids, subject_missing) =
             capture_loaded_sets(&incidents, &document);
-        let session = Self {
+        let mut session = Self {
             id,
             name,
             core,
@@ -423,6 +424,7 @@ impl ProjectSession {
             revision: TimelineRevision::default(),
             project_path,
             source_admission,
+            media_backend,
             studio: crate::studio::Studio::default(),
             ja1: None,
             ja1_job: None,
@@ -448,18 +450,7 @@ impl ProjectSession {
             saved_document: None,
             dirty_cache: RefCell::new(None),
             recovery,
-            threads: vec![AgentThread::new(
-                "Thread 1",
-                agent_harness,
-                chat,
-                TimelineRevision::default(),
-                &document,
-                playback,
-                analysis,
-                exporter,
-                &agent_project_path,
-                &incidents,
-            )?],
+            threads: Vec::new(),
             active_thread: 0,
             next_thread_number: 2,
             pending_timeline_adds: Vec::new(),
@@ -490,8 +481,58 @@ impl ProjectSession {
                     .unwrap_or_default(),
             )),
         };
+        let ports = session.media();
+        session.threads.push(AgentThread::new(
+            "Thread 1",
+            agent_harness,
+            chat,
+            TimelineRevision::default(),
+            &document,
+            &ports.playback,
+            &ports.analysis,
+            &ports.exporter,
+            &agent_project_path,
+            &incidents,
+        )?);
         session.publish_project_path_to_agents();
         Ok(session)
+    }
+
+    pub(crate) fn is_owned(&self) -> bool {
+        self.source_admission.is_studio()
+            || self.ja1.is_some()
+            || self.ja1_job.is_some()
+            || self.studio.manual_inputs.is_some()
+            || self.studio.selection.is_some()
+    }
+
+    pub(crate) fn legacy_media(&self) -> Option<kinewright_core::LegacyMediaGrant> {
+        if self.is_owned() {
+            self.source_admission.revoke_legacy_media();
+            None
+        } else {
+            self.source_admission.legacy_media()
+        }
+    }
+
+    pub(crate) fn media(&self) -> crate::media_access::MediaPorts {
+        self.media_backend.scoped(
+            Arc::clone(&self.document),
+            self.legacy_media(),
+            self.studio.manual_inputs.clone(),
+        )
+    }
+
+    pub(crate) fn analysis(&self) -> Arc<dyn Analysis> {
+        self.media().analysis
+    }
+
+    pub(crate) fn request_asset_analysis(&self, asset: kinewright_core::MediaAsset) {
+        let analysis = self.analysis();
+        analysis.request_transcription(asset.clone());
+        analysis.request_silence_detection(asset.clone());
+        analysis.request_scene_detection(asset.clone());
+        analysis.request_beat_detection(asset);
     }
 
     /// Whether the project differs from the last save: the live document
@@ -742,6 +783,7 @@ impl ProjectSession {
         let Some(ja1) = &mut self.ja1 else {
             return;
         };
+        self.source_admission.revoke_legacy_media();
         if let Some(view) = ja1.view.take() {
             if self.core.actor_identity() != view.core.actor_identity() {
                 self.retired_agent_threads
@@ -1943,9 +1985,11 @@ mod tests {
             document,
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Stub {
+                playback: Arc::clone(&playback),
+                analysis: Arc::clone(&analysis),
+                exporter: Arc::clone(&exporter),
+            },
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
@@ -2155,9 +2199,11 @@ mod tests {
             Document::default(),
             crate::app::fixture_source_admission((Some(path.to_path_buf())).as_deref()),
             Some(path.to_path_buf()),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Stub {
+                playback: Arc::clone(&playback),
+                analysis: Arc::clone(&analysis),
+                exporter: Arc::clone(&exporter),
+            },
             &SidecarMode::Load {
                 project_digest: project_digest_of(path),
             },
@@ -2816,9 +2862,11 @@ mod tests {
             Document::default(),
             crate::app::fixture_source_admission((Some(project.clone())).as_deref()),
             Some(project.clone()),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Stub {
+                playback: Arc::clone(&playback),
+                analysis: Arc::clone(&analysis),
+                exporter: Arc::clone(&exporter),
+            },
             &SidecarMode::Load {
                 project_digest: digest.clone(),
             },

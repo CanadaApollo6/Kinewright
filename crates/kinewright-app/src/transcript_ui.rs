@@ -133,10 +133,10 @@ impl KinewrightApp {
             asset.fps.numerator(),
             asset.fps.denominator()
         ));
-        let status = self.analysis.transcript_status(&asset);
+        let status = self.focused().analysis().transcript_status(&asset);
         match status {
             TranscriptStatus::NotRequested => {
-                self.analysis.request_transcription(asset);
+                self.focused().analysis().request_transcription(asset);
                 ui.label("Transcription queued…");
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
             }
@@ -181,7 +181,7 @@ impl KinewrightApp {
             TranscriptStatus::Cancelled => {
                 ui.label("Transcription cancelled.");
                 if ui.button("Retry").clicked() {
-                    self.analysis.request_transcription(asset);
+                    self.focused().analysis().request_transcription(asset);
                 }
             }
             TranscriptStatus::Failed(error) => {
@@ -190,12 +190,13 @@ impl KinewrightApp {
                     format!("Transcription failed: {error}"),
                 );
                 if ui.button("Retry").clicked() {
-                    self.analysis.request_transcription(asset);
+                    self.focused().analysis().request_transcription(asset);
                 }
             }
             TranscriptStatus::Ready(transcript) => {
                 let mapped = self
-                    .analysis
+                    .focused()
+                    .analysis()
                     .timeline_transcript(&self.focused().document, None)
                     .unwrap_or_default();
                 let selected_clip = self.focused().selected_clip;
@@ -241,7 +242,8 @@ impl KinewrightApp {
             self.focused_mut().transcript_selection = None;
         }
         let words = crate::transcript_edit::dedup_linked_timeline_words(
-            self.analysis
+            self.focused()
+                .analysis()
                 .timeline_transcript(&self.focused().document, None)
                 .unwrap_or_default(),
         );
@@ -251,7 +253,12 @@ impl KinewrightApp {
             .document
             .media_pool
             .iter()
-            .map(|asset| (asset.clone(), self.analysis.transcript_status(asset)))
+            .map(|asset| {
+                (
+                    asset.clone(),
+                    self.focused().analysis().transcript_status(asset),
+                )
+            })
             .collect::<Vec<_>>();
         if words.is_empty() {
             self.focused_mut().transcript_selection = None;
@@ -272,7 +279,9 @@ impl KinewrightApp {
             } else {
                 for (asset, status) in statuses {
                     if status == TranscriptStatus::NotRequested {
-                        self.analysis.request_transcription(asset.clone());
+                        self.focused()
+                            .analysis()
+                            .request_transcription(asset.clone());
                     }
                 }
                 ui.label("Transcript is not ready yet.");
@@ -433,7 +442,7 @@ impl KinewrightApp {
         let Some(asset) = self.selected_transcript_asset().cloned() else {
             return;
         };
-        let status = self.analysis.transcript_status(&asset);
+        let status = self.focused().analysis().transcript_status(&asset);
         self.note_transcript_failure(asset.id, &status);
     }
 

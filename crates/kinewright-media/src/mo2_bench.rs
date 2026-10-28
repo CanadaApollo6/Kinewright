@@ -26,7 +26,7 @@ pub(crate) fn run(gpu: &GpuContext, document: &Document, delay: Duration, reside
         max_width: PREVIEW_MAX_WIDTH,
     };
     let dims = scale.output_resolution(document.resolution);
-    let mut renderer = FrameRenderer::new(gpu.clone());
+    let mut renderer = FrameRenderer::legacy_fixture(gpu.clone());
     if resident {
         renderer.set_cache_budget(1 << 30);
     }

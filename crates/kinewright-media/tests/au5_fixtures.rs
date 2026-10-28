@@ -16,6 +16,7 @@
 //! value. There is no `cfg`-conditioned tolerance anywhere in this file, and
 //! there must never be one.
 
+use kinewright_media::SessionMedia;
 use std::sync::Arc;
 
 use kinewright_core::{
@@ -297,7 +298,7 @@ fn denoise_with_profile(id: u64, reduction: i64, bands: &[i32; 31]) -> Effect {
     }
 }
 
-fn engine() -> FfmpegMediaEngine {
+fn engine() -> kinewright_media::SessionMedia {
     kinewright_media::initialize_ffmpeg().expect("FFmpeg initializes");
     test_support::test_engine("KINEWRIGHT_AU5_DATA_DIR")
 }
@@ -308,7 +309,7 @@ fn engine() -> FfmpegMediaEngine {
 /// the mean of the windows' **powers**, so a fluctuating gate's residual is
 /// weighted the way an RMS is rather than the way a mean of decibels would be.
 fn mean_level_db(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     document: &Document,
     range: std::ops::Range<i64>,
 ) -> f64 {
@@ -336,7 +337,7 @@ fn mean_level_db(
 
 /// One third-octave band's level over one project range, in dB.
 fn band_level_db(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     document: &Document,
     range: std::ops::Range<i64>,
     band: usize,
@@ -359,7 +360,7 @@ fn band_level_db(
 const SILENCE_FLOOR_DB: f64 = -120.0;
 
 fn learn_profile(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     document: &Document,
     range: std::ops::Range<i64>,
 ) -> [i32; 31] {
@@ -768,7 +769,7 @@ fn sixty_hertz_cascade() -> Effect {
     )
 }
 
-fn repair_at(engine: &FfmpegMediaEngine, document: &Document) -> AudioRepairReport {
+fn repair_at(engine: &kinewright_media::SessionMedia, document: &Document) -> AudioRepairReport {
     engine
         .audio_repair(
             document,

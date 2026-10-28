@@ -1720,6 +1720,8 @@ impl IncidentObservation {
             | MediaError::MatteCoverage(_)
             | MediaError::Scope(_)
             | MediaError::Store { .. }
+            | MediaError::MediaAdmissionRequired
+            | MediaError::OwnedMediaOperationUnavailable
             | MediaError::NotImplemented
             | MediaError::Cancelled
             | MediaError::MixSpectrumRangeTooShort { .. }

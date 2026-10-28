@@ -23,7 +23,7 @@ fn full() -> (RenderScale, DecodeStrategy) {
 /// corrections leave the f16 range refuses typed on every path (including an
 /// actual export), also when an opaque layer covers it afterwards.
 fn review1_r10_normal_adjustment_storage_must_refuse_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context.clone());
+    let mut r = FrameRenderer::legacy_fixture(context.clone());
     let boosts = (1..=4)
         .map(|id| primary(id, &[("exposure_milli_stops", 5_000)]))
         .collect();
@@ -97,7 +97,7 @@ fn review1_r10_nan_extrema_must_refuse_on(context: GpuContext) {
 /// Review-1 B1: a valid Darken solid whose extreme wheels overflow f32 to
 /// +inf before the blend refuses on every path.
 fn review1_r10_valid_darken_overflow_must_refuse_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let extreme = effect(
         2,
         "color_wheels",
@@ -135,7 +135,7 @@ fn review2_nonfinite_inputs_and_normal_adjustment_on(context: GpuContext) {
             accepted.push(format!("{mode:?}({s})"));
         }
     }
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let boost = (1..=4)
         .map(|id| primary(id, &[("exposure_milli_stops", 5_000)]))
         .collect();
@@ -605,7 +605,7 @@ fn review2_exact_pixel_centre_coverage_on(context: GpuContext) {
 /// resolution, `params_for`, `push_at` or twin blend/sampling) over every
 /// frame of every geometric transition, 1×/4× scale, Normal/Screen.
 fn review1_all_geometric_frames_independent_oracle_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let base = gpu(&mut r, &document(quartered()), 0).unwrap();
     for kind in ["push", "slide", "wipe"] {
         for (edge, sign, axis) in [
@@ -700,7 +700,7 @@ fn review1_all_geometric_frames_independent_oracle_on(context: GpuContext) {
 /// Multiply; an exact order swap (double-then-square = 0.25 vs
 /// square-then-double = 0.125) and exact upper-track invariance.
 fn review1_adjustment_mask_and_exact_order_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let plate = || solid(1, GREY, BlendMode::Normal, vec![]);
     for strength in [0, 50, 100] {
         let mask = [
@@ -795,7 +795,7 @@ fn curve(points: &[(i64, i64)], hold: bool) -> AutomationCurve {
 /// Review-1 (G9): clip-local value and enable keys on solids and
 /// adjustments, including keys outside the clip, equal the static result.
 fn review1_generated_keep_outside_enable_keys_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     for adjust in [false, true] {
         let fx = vec![
             primary(1, &[("exposure_milli_stops", 1_000)]),
@@ -846,7 +846,7 @@ fn review1_generated_keep_outside_enable_keys_on(context: GpuContext) {
 /// Review-1: every renderer root and the twin refuse an invalid document
 /// (a disabled adjustment with an unsupported transition) identically.
 fn review1_validate_all_renderer_roots_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let mut doc = document(vec![adjustment(1, BlendMode::Normal, vec![])]);
     let clip = &mut doc.tracks[0].clips[0];
     clip.enabled = false;
@@ -895,7 +895,7 @@ fn review1_public_matte_adjustment_qualifier_keeps_below_on(context: GpuContext)
     );
     let plate = solid(1, GREY, BlendMode::Normal, vec![]);
     let doc = document(vec![plate, adjustment(2, BlendMode::Normal, vec![look])]);
-    let mut renderer = FrameRenderer::new(context);
+    let mut renderer = FrameRenderer::legacy_fixture(context);
     let (scale, seek) = full();
     let reference = renderer
         .render_matte(
@@ -914,6 +914,7 @@ fn review1_public_matte_adjustment_qualifier_keeps_below_on(context: GpuContext)
     );
     let proof = engine
         .unwrap()
+        .into_legacy_fixture()
         .matte_proof_for_document(Arc::new(doc), TimeCode(0), ClipId(2), EffectId(1))
         .unwrap();
     let values: Vec<u8> = proof.coverage.pixels.chunks(4).map(|p| p[0]).collect();
@@ -929,7 +930,9 @@ fn review1_public_matte_shorter_clip_remains_valid_on(context: GpuContext) {
     use kinewright_core::Analysis;
     let directory = crate::test_support::TempDirectory::new("mo2-b1-shorter-matte");
     let data = directory.path("data");
-    let engine = crate::FfmpegMediaEngine::new_with_gpu_and_data_dir(context, data).unwrap();
+    let engine = crate::FfmpegMediaEngine::new_with_gpu_and_data_dir(context, data)
+        .unwrap()
+        .into_legacy_fixture();
     let look = effect(
         1,
         "color_wheels",
@@ -955,7 +958,7 @@ fn review1_public_matte_shorter_clip_remains_valid_on(context: GpuContext) {
 /// identity and a channel-swapping lattice) on an adjustment and a solid.
 fn review1_twin_covers_supported_legacy_cube_on(context: GpuContext) {
     let directory = crate::test_support::TempDirectory::new("mo2-b1-legacy-cube");
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let lattices = [
         (
             "identity.cube",
@@ -1002,7 +1005,7 @@ fn review1_twin_covers_supported_legacy_cube_on(context: GpuContext) {
 /// corrections leave the f16 range refuses typed on every path, also when an
 /// opaque layer covers it afterwards.
 fn rereview_me7_valid_normal_solid_overflow_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let boosts = (1..=4)
         .map(|id| primary(id, &[("exposure_milli_stops", 5_000)]))
         .collect();
@@ -1100,7 +1103,7 @@ fn rereview_me9_envelope_refuses_unproved_stacks() {
 /// Re-review S2 (N17.4, ME12): the 60% `Screen` over ORANGE whose exact
 /// value lies just above an f16 midpoint, without a LUT (see the cube probe).
 fn rereview_g7_sixty_percent_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let top = solid(2, BLUE, BlendMode::Screen, vec![opacity(2, 60)]);
     let doc = document(vec![solid(1, ORANGE, BlendMode::Normal, vec![]), top]);
     matched(&mut r, &doc, 0, "G7 60% without a LUT");
@@ -1165,7 +1168,7 @@ fn rereview_cube_domains_and_last_lattice_on(context: GpuContext) {
     std::fs::write(&domain, format!("LUT_3D_SIZE 2\n{bounds}{lattice}")).unwrap();
     std::fs::write(&first, format!("LUT_3D_SIZE 2\n{}", "1 0 0\n".repeat(8))).unwrap();
     std::fs::write(&last, format!("LUT_3D_SIZE 2\n{}", "0 0 1\n".repeat(8))).unwrap();
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let cases = [
         ("domain", vec![cube_effect(1, &domain, 100)]),
         (
@@ -1193,7 +1196,8 @@ fn rereview_projection_enabled_curve_on(context: GpuContext) {
     let directory = crate::test_support::TempDirectory::new("rereview-projection-curve");
     let engine =
         crate::FfmpegMediaEngine::new_with_gpu_and_data_dir(context, directory.path("data"))
-            .unwrap();
+            .unwrap()
+            .into_legacy_fixture();
     let look = effect(
         1,
         "color_wheels",

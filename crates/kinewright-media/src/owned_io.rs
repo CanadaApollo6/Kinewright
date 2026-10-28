@@ -7,7 +7,7 @@ use std::{
     fs::File,
     io::{self, SeekFrom},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -34,6 +34,9 @@ pub type CursorReservation = dyn Fn(u64) -> Result<LifetimeGuard, String> + Send
 #[path = "certified_playback.rs"]
 mod playback;
 pub use playback::PlaybackInputs;
+#[path = "owned_io_memo.rs"]
+mod memo;
+pub use memo::SourceAdmissionMemo;
 
 /// The existing PF1 decoders use the same format interface for legacy media
 /// and descriptor-only Studio media. The latter retains its AVIO and ledger.
@@ -192,6 +195,7 @@ pub struct CertifiedIdentity {
 
 struct Source {
     file: File,
+    verified_identity: OnceLock<memo::FileIdentity>,
     failure: Mutex<Option<OwnedIoError>>,
     identity: CertifiedIdentity,
     chunks: Arc<[[u8; 32]]>,
@@ -262,6 +266,7 @@ impl CertifiedSource {
                 "complete source digest".into(),
             ));
         }
+        memo::mark_verified(&source)?;
         Ok(source)
     }
 
@@ -292,6 +297,7 @@ impl CertifiedSource {
         Ok(Self(
             Arc::new(Source {
                 file,
+                verified_identity: OnceLock::new(),
                 failure: Mutex::new(None),
                 identity: CertifiedIdentity {
                     source_sha256,

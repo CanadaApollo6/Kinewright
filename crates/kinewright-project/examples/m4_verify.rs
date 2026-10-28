@@ -40,7 +40,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     generate_source(&ffmpeg, &red_path, "red", 440)?;
     generate_source(&ffmpeg, &blue_path, "blue", 660)?;
 
-    let engine = FfmpegMediaEngine::new()?;
+    let backend = Arc::new(FfmpegMediaEngine::new()?);
+    let engine = backend.legacy_media(
+        kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap(),
+        Arc::new(Document::default()),
+    );
     let red = engine.probe(&red_path)?;
     let blue = engine.probe(&blue_path)?;
     let mut document = Document {
@@ -153,7 +159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     engine.play(TimeCode::ZERO);
-    let playback = wait_for_playback(&engine, &events, TimeCode(8));
+    let playback = wait_for_playback(engine.as_ref(), &events, TimeCode(8));
     engine.pause();
     match playback {
         Ok(()) => println!(

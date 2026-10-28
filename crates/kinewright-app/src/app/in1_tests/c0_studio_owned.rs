@@ -23,9 +23,9 @@ struct StudioOwnedColour {
 fn studio_owned_colour() -> StudioOwnedColour {
     use crate::ja1_attachment::{Action, Ja1Attachment};
     use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
-    let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+    let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
     let (fixture, probed) = in1_untagged(&probe_engine);
-    let error = in1_playback_error(&probe_engine, &probed);
+    let error = in1_playback_error(&probe_engine.engine(), &probed);
     let temp = TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
         "c0-studio-colour",
@@ -64,7 +64,11 @@ fn studio_owned_colour() -> StudioOwnedColour {
     let asset = owned_asset.id;
     app.projects[0].ja1 = Some(attachment);
     in1_poll_production_until(&mut app, |app| {
-        app.projects[0].document.asset(asset).is_some()
+        let project = &app.projects[0];
+        project.document.asset(asset).is_some()
+            && project.ja1_job.is_none()
+            && project.ja1.is_some()
+            && project.studio.manual_inputs.is_some()
     });
     let saved = core.export_history().unwrap();
     let mut observation = IncidentObservation::from_media_error(

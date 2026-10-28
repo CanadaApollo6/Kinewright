@@ -224,7 +224,7 @@ pub(crate) struct AdmissionData {
     source: Option<PathBuf>,
     bytes: Vec<u8>,
     version: u32,
-    studio_key: bool,
+    media_origin: kinewright_core::MediaSourceOrigin,
     pub(crate) file: Option<ProjectFile>,
     pub(crate) inventory: SupportInventory,
     refusal: Option<String>,
@@ -266,7 +266,7 @@ impl BundleWriteAdmission {
                 source: None,
                 bytes: vec![],
                 version: 1,
-                studio_key: false,
+                media_origin: kinewright_core::MediaSourceOrigin::new_project(),
                 file: None,
                 inventory: SupportInventory::default(),
                 refusal: None,
@@ -369,10 +369,11 @@ impl BundleWriteAdmission {
         let mut raw: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let version = kinewright_core::project_format_version(&bytes);
+        let media_origin = kinewright_core::MediaSourceOrigin::inspect(&raw);
         let object = raw
             .as_object_mut()
             .ok_or_else(|| BundleError::Corrupt("root is not an object".into()))?;
-        let studio_key = object.contains_key("studio");
+        let studio_key = media_origin.is_owned();
         object.remove("format_version");
         let studio_raw = object.remove("studio");
         let mut inventory = SupportInventory::default();
@@ -429,7 +430,7 @@ impl BundleWriteAdmission {
                 source,
                 bytes,
                 version,
-                studio_key,
+                media_origin,
                 file,
                 inventory,
                 refusal,
@@ -448,7 +449,14 @@ impl BundleWriteAdmission {
     }
     #[must_use]
     pub fn is_studio(&self) -> bool {
-        self.data.studio_key
+        self.data.media_origin.is_owned()
+    }
+    #[must_use]
+    pub fn legacy_media(&self) -> Option<kinewright_core::LegacyMediaGrant> {
+        self.data.media_origin.legacy_media()
+    }
+    pub fn revoke_legacy_media(&self) {
+        self.data.media_origin.revoke_legacy_media();
     }
     #[must_use]
     pub fn raw_bytes(&self) -> &[u8] {

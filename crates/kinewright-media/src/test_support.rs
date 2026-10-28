@@ -182,12 +182,13 @@ impl Drop for SpeechClip {
 /// # Panics
 ///
 /// Panics if the media engine cannot initialize.
-pub fn test_engine(data_dir_env: &str) -> FfmpegMediaEngine {
+pub fn test_engine(data_dir_env: &str) -> crate::SessionMedia {
     std::env::var_os(data_dir_env).map_or_else(
-        || FfmpegMediaEngine::new().expect("media engine should start"),
+        || FfmpegMediaEngine::legacy_fixture().expect("media engine should start"),
         |path| {
             FfmpegMediaEngine::new_with_data_dir(PathBuf::from(path))
                 .expect("media engine should start")
+                .into_legacy_fixture()
         },
     )
 }

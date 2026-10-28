@@ -3332,7 +3332,8 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
     let blocked_document = simple_document(blocked_asset.clone(), (32, 16));
 
     let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("media engine should start for unsupported proof gate");
+        .expect("media engine should start for unsupported proof gate")
+        .into_legacy_fixture();
     let proof_error = match engine
         .monitor_proof_for_document(Arc::new(blocked_document.clone()), TimeCode::ZERO)
     {
@@ -3581,11 +3582,12 @@ fn cc1_full_raster_monitor_proof_has_same_render_semantics_as_monitor_preview() 
     document.validate().expect("proof document");
     let gpu = fallback_gpu();
     let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("media engine should start on the fixture adapter");
+        .expect("media engine should start on the fixture adapter")
+        .into_legacy_fixture();
     let proof = engine
         .monitor_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
         .expect("full-raster monitor proof");
-    let mut full_renderer = crate::render::FrameRenderer::new(gpu.context());
+    let mut full_renderer = crate::render::FrameRenderer::legacy_fixture(gpu.context());
     let full_render = full_renderer
         .render(
             &document,
@@ -3822,13 +3824,14 @@ fn cc1_h264_yuv420p_delivery_is_measured_separately_from_gpu_gate() {
         .expect("delivery primary document should validate");
     let gpu = fallback_gpu();
     let proof_engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("production media engine should start for delivery proof");
+        .expect("production media engine should start for delivery proof")
+        .into_legacy_fixture();
     let proof = proof_engine
         .monitor_proof_for_document(Arc::new(document.clone()), TimeCode::ZERO)
         .expect("production full-raster delivery proof");
     assert!(proof.metadata.full_resolution);
     gpu.assert_proof_provenance(&proof.metadata);
-    let mut direct_renderer = crate::render::FrameRenderer::new(gpu.context());
+    let mut direct_renderer = crate::render::FrameRenderer::legacy_fixture(gpu.context());
     let direct_proof = direct_renderer
         .render(
             &document,
@@ -4043,7 +4046,7 @@ fn cc1_managed_cache_memory_bound_is_measured_in_working_bytes() {
     let duration = asset.duration.0;
     let document = simple_document(asset, (1280, 720));
     let gpu = fallback_gpu();
-    let mut renderer = crate::render::FrameRenderer::new(gpu.context());
+    let mut renderer = crate::render::FrameRenderer::legacy_fixture(gpu.context());
     let cache_budget = renderer.cache_budget_bytes();
     let frame_count = duration.clamp(32, 60);
     let started = Instant::now();

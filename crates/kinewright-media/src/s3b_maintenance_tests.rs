@@ -145,7 +145,8 @@ fn s3b_maintenance_engine_before_session_drains_pending_maps() {
     }));
     let engine =
         FfmpegMediaEngine::new_for_harness(gpu, temp.root().into(), None, faults, Arc::default())
-            .unwrap();
+            .unwrap()
+            .into_legacy_fixture();
     kinewright_core::Analysis::cache_inventory(&engine);
     let map = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let mut session = engine.enable_display(crate::display::tests::config());

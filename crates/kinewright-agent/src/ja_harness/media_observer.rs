@@ -26,7 +26,7 @@ pub struct MediaObserver {
     preview: Option<Vec<u8>>,
 }
 
-fn receive(engine: &kinewright_media::FfmpegMediaEngine, at: i64) -> Result<PreviewFrame, String> {
+fn receive(engine: &kinewright_media::SessionMedia, at: i64) -> Result<PreviewFrame, String> {
     let frames = engine.frames();
     while frames.try_recv().is_ok() {}
     engine.request_frame(TimeCode(at));
@@ -125,7 +125,8 @@ impl MediaObserver {
                 let decoder = kinewright_media::FfmpegMediaEngine::new_with_data_dir(
                     baseline.root.join(format!("decode-cache-{}", action.id)),
                 )
-                .map_err(|e| format!("decode prerequisite NOT RUN: {e}"))?;
+                .map_err(|e| format!("decode prerequisite NOT RUN: {e}"))?
+                .into_legacy_fixture();
                 let finished = decoder.teardown_observer();
                 let result = (|| {
                     let asset = decoder.probe(&path).map_err(|e| e.to_string())?;

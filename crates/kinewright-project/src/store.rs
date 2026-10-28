@@ -88,6 +88,11 @@ struct WeakCacheEntry<T> {
     _charge: StorageReservation,
 }
 
+struct MediaAdmission {
+    binding: kinewright_media::owned_io::SourceAdmissionMemo,
+    _charge: StorageReservation,
+}
+
 struct StoreInner {
     namespace: Mutex<ProjectNamespace>,
     verified_memo: Mutex<crate::bundle_recovery::VerifiedIdentityMemo>,
@@ -95,7 +100,7 @@ struct StoreInner {
         Mutex<BTreeMap<ObjectRef, WeakCacheEntry<crate::owned_media::CertifiedChunkTable>>>,
     resources:
         Mutex<BTreeMap<ObjectRef, WeakCacheEntry<crate::certified_resources::ResourceBytes>>>,
-    media_admissions: Mutex<BTreeMap<(ObjectRef, ObjectRef, String), StorageReservation>>,
+    media_admissions: Mutex<BTreeMap<(ObjectRef, ObjectRef, String), MediaAdmission>>,
     ledger: Mutex<Ledger>,
     usage: Arc<Mutex<StorageUsage>>,
     limits: StorageLimits,
@@ -1323,24 +1328,34 @@ impl ProjectStore {
         &self,
         entry: &crate::owned_inputs::OwnedInputEntry,
     ) -> Result<bool, BundleError> {
+        Ok(self.media_admission_memo(entry)?.is_some())
+    }
+
+    pub(crate) fn media_admission_memo(
+        &self,
+        entry: &crate::owned_inputs::OwnedInputEntry,
+    ) -> Result<Option<kinewright_media::owned_io::SourceAdmissionMemo>, BundleError> {
         let memo = self
             .inner
             .media_admissions
             .lock()
             .map_err(|_| BundleError::Capacity("media admission memo poisoned"))?;
-        Ok(memo.contains_key(&(
-            entry.object.clone(),
-            entry.chunk_table_ref()?.clone(),
-            entry
-                .profile
-                .clone()
-                .ok_or_else(|| BundleError::Corrupt("missing media interpretation".into()))?,
-        )))
+        Ok(memo
+            .get(&(
+                entry.object.clone(),
+                entry.chunk_table_ref()?.clone(),
+                entry
+                    .profile
+                    .clone()
+                    .ok_or_else(|| BundleError::Corrupt("missing media interpretation".into()))?,
+            ))
+            .map(|admission| admission.binding.clone()))
     }
 
     pub(crate) fn remember_media_admission(
         &self,
         entry: &crate::owned_inputs::OwnedInputEntry,
+        binding: kinewright_media::owned_io::SourceAdmissionMemo,
     ) -> Result<(), BundleError> {
         let mut memo = self
             .inner
@@ -1368,7 +1383,13 @@ impl ProjectStore {
         if memo.len() as u64 >= self.limits().objects {
             memo.pop_first();
         }
-        memo.insert(key, self.reserve_copy_read(0, charge, 0, false, true)?);
+        memo.insert(
+            key,
+            MediaAdmission {
+                binding,
+                _charge: self.reserve_copy_read(0, charge, 0, false, true)?,
+            },
+        );
         Ok(())
     }
 

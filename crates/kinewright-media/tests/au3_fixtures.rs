@@ -14,6 +14,7 @@
 //! `cfg`-conditioned tolerance anywhere in this file, and there must never be
 //! one; a per-OS *note* on a constant's doc comment is the escape hatch.
 
+use kinewright_media::SessionMedia;
 use std::{path::Path, sync::Arc};
 
 use kinewright_core::{
@@ -170,7 +171,7 @@ fn no_limiting_audio() -> String {
     calibration_tone("0.1")
 }
 
-fn lane_document(engine: &FfmpegMediaEngine, media: &GeneratedMedia) -> Arc<Document> {
+fn lane_document(engine: &kinewright_media::SessionMedia, media: &GeneratedMedia) -> Arc<Document> {
     let asset = engine
         .probe(media.path())
         .expect("the generated fixture must probe");
@@ -280,7 +281,7 @@ struct Lane {
 /// Export one programme through the production engine and verify the file it
 /// wrote, exactly as a job would.
 fn run_lane(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     directory: &TempDirectory,
     id: &'static str,
     profile: DeliveryProfile,
@@ -436,7 +437,8 @@ fn assert_hot_lane(lane: &Lane) {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets() {
-    let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
+    let engine =
+        FfmpegMediaEngine::legacy_fixture().expect("the production media engine should start");
     let directory = TempDirectory::new("au3-fixtures");
 
     let hot_noise = run_lane(
@@ -609,7 +611,8 @@ fn assert_encode_identical(left: &[u8], right: &[u8], claim: &str) {
 /// stream, and that is what is compared.
 #[test]
 fn au3_an_export_that_does_not_normalize_is_byte_identical() {
-    let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
+    let engine =
+        FfmpegMediaEngine::legacy_fixture().expect("the production media engine should start");
     let directory = TempDirectory::new("au3-off");
     let media = lane_media("byte-identical", &no_limiting_audio());
     let document = lane_document(&engine, &media);
@@ -684,7 +687,8 @@ fn aac_programme(label: &str, audio: &str) -> GeneratedMedia {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn au3_delivery_audio_verification_measures_the_written_file() {
-    let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
+    let engine =
+        FfmpegMediaEngine::legacy_fixture().expect("the production media engine should start");
 
     let tone = aac_programme("au3-verify-tone", &calibration_tone("0.1"));
     let measured = engine
@@ -790,7 +794,8 @@ fn au3_delivery_audio_verification_measures_the_written_file() {
 /// the file it measures.
 #[test]
 fn au3_delivery_audio_verification_never_touches_the_file() {
-    let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
+    let engine =
+        FfmpegMediaEngine::legacy_fixture().expect("the production media engine should start");
     let tone = aac_programme("au3-verify-readonly", &calibration_tone("0.1"));
     let before = std::fs::read(tone.path()).expect("the fixture is readable");
     let _ = engine

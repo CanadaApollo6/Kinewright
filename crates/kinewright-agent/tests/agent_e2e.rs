@@ -21,7 +21,7 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
         return;
     }
 
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -92,7 +92,7 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
         return;
     }
 
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -168,7 +168,7 @@ fn codex_edits_an_isolated_branch_then_one_merge_publishes_it() {
         return;
     }
 
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let live = Core::spawn(original.clone()).unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
@@ -252,7 +252,7 @@ fn codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch() {
         return;
     }
 
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let live = Core::spawn(original.clone()).unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
@@ -338,7 +338,7 @@ fn codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch() {
         return;
     }
 
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let live = Core::spawn(original.clone()).unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
@@ -447,7 +447,7 @@ fn cursor_splits_then_deletes_via_the_live_mcp_server() {
     }
 
     eprintln!("CURSOR TEST: building fixture and MCP server");
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();

@@ -1112,7 +1112,7 @@ impl KinewrightApp {
         }
         self.status = format!("Importing {}…", path.display());
         let session_id = self.focused().id;
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.probe_tx.clone();
         std::thread::Builder::new()
             .name("kinewright-recording-probe".to_owned())

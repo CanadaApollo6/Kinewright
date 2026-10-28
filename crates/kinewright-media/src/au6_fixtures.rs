@@ -171,12 +171,12 @@ fn print_ceiling(term: &str, observed: i64, allowed: i64) {
     );
 }
 
-fn engine() -> MutexGuard<'static, FfmpegMediaEngine> {
-    static ENGINE: OnceLock<Mutex<FfmpegMediaEngine>> = OnceLock::new();
+fn engine() -> MutexGuard<'static, crate::SessionMedia> {
+    static ENGINE: OnceLock<Mutex<crate::SessionMedia>> = OnceLock::new();
     ENGINE
         .get_or_init(|| {
             initialize_ffmpeg().expect("FFmpeg must initialize for AU6 media fixtures");
-            Mutex::new(FfmpegMediaEngine::new().expect("the shared AU6 engine starts"))
+            Mutex::new(FfmpegMediaEngine::legacy_fixture().expect("the shared AU6 engine starts"))
         })
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -590,7 +590,7 @@ fn scene(scenario: Au6Scenario) -> &'static Au6Scene {
     }
 }
 
-fn wait_for_silence(engine: &FfmpegMediaEngine, asset: &MediaAsset) {
+fn wait_for_silence(engine: &crate::SessionMedia, asset: &MediaAsset) {
     engine.request_silence_detection(asset.clone());
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {

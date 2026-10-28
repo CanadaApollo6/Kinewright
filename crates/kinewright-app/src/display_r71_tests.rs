@@ -137,7 +137,7 @@ fn rendered_image(
 
 fn route_candidate(
     app: &mut KinewrightApp,
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     gpu_route: bool,
     color: [u8; 3],
     at: i64,

@@ -571,7 +571,7 @@ impl ProjectStore {
         let (source, table) = self.admit_measured_media(reader, length)?;
         let sealed_table = self.admit_record(&table)?;
         let certificate =
-            self.certify_media_parts(&source.reference, &sealed_table.reference, None)?;
+            self.certify_media_parts(&source.reference, &sealed_table.reference, None, None)?;
         let cancel = Arc::new(AtomicBool::new(false));
         let probe = certificate.probe(Arc::clone(&cancel)).map_err(io_error)?;
         let probed_color = probe.color_description.clone();
@@ -640,7 +640,7 @@ impl ProjectStore {
             origin: None,
             profile: Some(profile),
         };
-        self.remember_media_admission(&entry)?;
+        self.remember_media_admission(&entry, certificate.admission_memo().map_err(io_error)?)?;
         Ok((asset, entry, vec![source, sealed_table]))
     }
     pub fn certify_media_input(
@@ -665,12 +665,21 @@ impl ProjectStore {
         context: Option<&ObjectRef>,
     ) -> Result<CertifiedMediaInput, BundleError> {
         let interpretation = entry.media_interpretation()?;
-        let source = self.certify_media_parts(&entry.object, entry.chunk_table_ref()?, context)?;
-        if self.media_admission_verified(entry)? {
+        let memo = self.media_admission_memo(entry)?;
+        let source = self.certify_media_parts(
+            &entry.object,
+            entry.chunk_table_ref()?,
+            context,
+            memo.as_ref(),
+        )?;
+        if memo.is_some() {
             return CertifiedMediaInput::from_admitted_source(source, interpretation);
         }
         let certificate = CertifiedMediaInput::from_verified_source(source, interpretation)?;
-        self.remember_media_admission(entry)?;
+        self.remember_media_admission(
+            entry,
+            certificate.source.admission_memo().map_err(io_error)?,
+        )?;
         Ok(certificate)
     }
     fn certify_media_parts(
@@ -678,6 +687,7 @@ impl ProjectStore {
         source: &ObjectRef,
         table_ref: &ObjectRef,
         context: Option<&ObjectRef>,
+        memo: Option<&kinewright_media::owned_io::SourceAdmissionMemo>,
     ) -> Result<CertifiedSource, BundleError> {
         let table = self.shared_chunk_table(table_ref)?;
         table.table.validate_binding(source, self.limits())?;
@@ -685,6 +695,16 @@ impl ProjectStore {
         let mut roots = vec![source.clone(), table_ref.clone()];
         roots.extend(context.cloned());
         let pin = self.pin(&roots)?;
+        if let Some(memo) = memo {
+            return memo
+                .reissue(
+                    file,
+                    Arc::clone(&table.chunks),
+                    Arc::new((pin, table)),
+                    self.decoder_reserver(),
+                )
+                .map_err(io_error);
+        }
         CertifiedSource::verify(
             file,
             parse_digest(&source.sha256)?,
@@ -1050,7 +1070,7 @@ mod tests {
         assert!(
             owner
                 .store()
-                .certify_media_parts(&blob.reference, &hashed.reference, None)
+                .certify_media_parts(&blob.reference, &hashed.reference, None, None)
                 .is_err(),
             "C0_CONFLICTING_TABLE_BINDING_REFUSED"
         );
@@ -1142,14 +1162,6 @@ mod tests {
             manifest_ref: sealed.reference.clone(),
             entry: first,
         };
-        let damaged_reference = OwnedInputRef {
-            manifest_ref: sealed.reference.clone(),
-            entry: second.clone(),
-        };
-        let certified_before_damage = owner
-            .store()
-            .certify_media_input(&damaged_reference)
-            .unwrap();
         let root = owner.store().resolved_root().unwrap();
         let assets = root.with_file_name(format!(
             "{}.kinewright-assets",
@@ -1169,26 +1181,24 @@ mod tests {
             .read_input_manifest(&sealed.reference)
             .expect("C0_TYPED_MANIFEST_READ_DOES_NOT_PROBE");
         assert_eq!(typed.entries.len(), 2);
-        // C2's public certificate admission verifies the full digest with cursor scratch.
-        // Only structural manifest access is required to work with the decoder budget full.
-        drop(all_decoder_bytes);
         let source = owner
             .store()
             .certify_media_input(&reference)
-            .expect("C2_SELECTED_CERTIFICATE_AFTER_VERIFICATION_SCRATCH_RELEASE");
+            .expect("C0_CERTIFICATE_USES_COMPLETE_IDENTITY_MEMO");
+        drop(all_decoder_bytes);
         let mut decoder = source
             .open_audio(Arc::new(AtomicBool::new(false)))
             .expect("C0_UNRELATED_DAMAGE_DOES_NOT_BLOCK_SELECTED_CERTIFICATE");
         assert!(decoder.next_frame().unwrap().is_some());
+        let damaged = owner
+            .store()
+            .certify_media_input(&OwnedInputRef {
+                manifest_ref: sealed.reference.clone(),
+                entry: second,
+            })
+            .unwrap();
         assert!(
-            matches!(
-                owner.store().certify_media_input(&damaged_reference),
-                Err(BundleError::Corrupt(reason)) if reason.contains("digest differs")
-            ),
-            "C2_DAMAGED_CERTIFICATE_REFUSED_AT_ADMISSION"
-        );
-        assert!(
-            certified_before_damage
+            damaged
                 .open_audio(Arc::new(AtomicBool::new(false)))
                 .is_err(),
             "C0_MEMO_DOES_NOT_BYPASS_ACTUAL_USE_CHUNK_CHECKS"

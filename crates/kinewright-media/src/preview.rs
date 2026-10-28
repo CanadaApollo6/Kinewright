@@ -194,6 +194,7 @@ impl CachedFrame for Pinned {
 #[derive(Clone)]
 pub(crate) struct Scene {
     pub(crate) inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+    pub(crate) legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     pub(crate) document: Arc<Document>,
     pub(crate) lut: Arc<LutLibrary>,
     /// Bumped by every `set_document`: the preview clears its caches.
@@ -218,6 +219,7 @@ pub(crate) struct TransportJob {
 pub(crate) enum AgentWork {
     Thumbnail {
         inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+        legacy_media: Option<kinewright_core::LegacyMediaGrant>,
         document: Arc<Document>,
         lut: Arc<LutLibrary>,
         at: TimeCode,
@@ -1611,6 +1613,15 @@ impl Preview {
         wait: &FrameWait,
     ) -> Result<Option<Image>, Halt> {
         self.renderer.set_inputs(scene.inputs.clone());
+        self.renderer.set_legacy_media(scene.legacy_media.clone());
+        if scene.inputs.is_none() && !scene.document.media_pool.is_empty() {
+            scene
+                .legacy_media
+                .as_ref()
+                .ok_or(Halt::Failed(MediaError::MediaAdmissionRequired))?
+                .check()
+                .map_err(Halt::Failed)?;
+        }
         let document = &*scene.document;
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
@@ -1654,6 +1665,7 @@ impl Preview {
             horizon,
             &mut self.sizes,
             scene.inputs.as_deref(),
+            scene.legacy_media.as_ref(),
         );
         let demand = demand.map_err(Halt::Failed)?;
         // Bound first: a new generation's cleared titles are not resident
@@ -2458,6 +2470,7 @@ impl Preview {
         match work {
             AgentWork::Thumbnail {
                 inputs,
+                legacy_media,
                 document,
                 lut,
                 at,
@@ -2465,6 +2478,7 @@ impl Preview {
                 reply,
             } => {
                 self.renderer.set_inputs(inputs);
+                self.renderer.set_legacy_media(legacy_media);
                 self.bind(None, &lut);
                 let scale = RenderScale::Proxy { max_width };
                 let resolution = scale.output_resolution(document.resolution);
@@ -2635,7 +2649,7 @@ pub(crate) mod tests {
         clock: Arc<SharedClock>,
     ) -> (Preview, Receiver<PreviewFrame>) {
         let (frames_tx, frames_rx) = bounded(2);
-        let renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let preview = Preview::new(lane, renderer, clock, (frames_tx, frames_rx.clone()));
         (preview, frames_rx)
     }
@@ -2644,6 +2658,7 @@ pub(crate) mod tests {
         let lut = Arc::default();
         let scene = Scene {
             inputs: None,
+            legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
             document: Arc::clone(document),
             lut,
             generation: 1,
@@ -2701,6 +2716,7 @@ pub(crate) mod tests {
             AgentJob {
                 work: AgentWork::Thumbnail {
                     inputs: None,
+                    legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                     document,
                     lut: Arc::default(),
                     at: TimeCode::ZERO,
@@ -2761,6 +2777,7 @@ pub(crate) mod tests {
             AgentJob {
                 work: AgentWork::Thumbnail {
                     inputs: None,
+                    legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                     document: Arc::clone(&document),
                     lut: Arc::default(),
                     at: TimeCode(1),
@@ -2775,7 +2792,9 @@ pub(crate) mod tests {
         assert_eq!((thumbnail.width, thumbnail.height), (64, 64));
         let temp = TempDirectory::new("pf1-g1-routing");
         let gpu = fallback_gpu().context();
-        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into())
+            .unwrap()
+            .into_legacy_fixture();
         let proof = engine.monitor_proof_for_document(document, TimeCode(1));
         assert_eq!(proof.expect("a proof").image.width, 64);
         assert_eq!(live_table_frames(), before + 2, "thumbnail and proof: f32");
@@ -3292,7 +3311,7 @@ pub(crate) mod tests {
     fn scheduled_frames_match_the_synchronous_renderer() {
         let (document, _workload) = cut_document();
         let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
@@ -3349,7 +3368,7 @@ pub(crate) mod tests {
         let document = Arc::new(workload.0.clone());
         let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
         preview.lane.freeze_reader_clock();
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
@@ -3524,7 +3543,7 @@ pub(crate) mod tests {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         // A step: `Some(at)` a paused job, `None` an agent thumbnail at 35.
         // 59 (source 36) opens; 40 (17) is 19 below, beyond B = 16: it
         // seeks alone; 39 refills [7, 16]; 38 hits. With the agent: 40
@@ -3542,6 +3561,8 @@ pub(crate) mod tests {
                     let (reply, response) = bounded(1);
                     let work = AgentWork::Thumbnail {
                         inputs: None,
+                        legacy_media: kinewright_core::MediaSourceOrigin::new_project()
+                            .legacy_media(),
                         document: Arc::clone(&document),
                         lut: Arc::default(),
                         at: TimeCode(35),
@@ -4590,7 +4611,7 @@ pub(crate) mod tests {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         reference.set_lut_library(Arc::clone(&lut));
         let mut synchronous = |document: &Document, at: i64| {
             let strategy = DecodeStrategy::Seek;
@@ -4940,7 +4961,7 @@ pub(crate) mod tests {
         };
         let resolution = scale.output_resolution(a.resolution);
         let reference = |library: &Arc<LutLibrary>| {
-            let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+            let mut renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
             renderer.set_lut_library(Arc::clone(library));
             let frame =
                 renderer.render_live(&a, TimeCode(0), resolution, scale, DecodeStrategy::Seek);
@@ -4963,6 +4984,7 @@ pub(crate) mod tests {
         let thumbnail = AgentJob {
             work: AgentWork::Thumbnail {
                 inputs: None,
+                legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                 document: Arc::clone(&b),
                 lut: Arc::clone(&b_lut),
                 at: TimeCode(0),
@@ -5172,7 +5194,7 @@ pub(crate) mod tests {
             .values()
             .map(|(spec, _)| spec.frame_bytes)
             .max();
-        let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let frame = renderer.render_live(
             document,
             TimeCode(at),
@@ -6307,6 +6329,7 @@ pub(crate) mod tests {
             let (reply, response) = bounded(1);
             let work = AgentWork::Thumbnail {
                 inputs: None,
+                legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                 document: Arc::clone(&document),
                 lut: Arc::default(),
                 at: TimeCode(5),

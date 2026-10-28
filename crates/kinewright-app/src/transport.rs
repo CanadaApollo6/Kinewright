@@ -11,7 +11,7 @@ use crate::{
 impl KinewrightApp {
     fn program_playback_ready(&self) -> bool {
         !(self.focused().studio.failure.is_some()
-            || ((self.focused().ja1.is_some() || self.focused().ja1_job.is_some())
+            || (self.focused().is_owned()
                 && self.focused().studio.selection.is_none()
                 && self.focused().studio.manual_inputs.is_none()))
     }
