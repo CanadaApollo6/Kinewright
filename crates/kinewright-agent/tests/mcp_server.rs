@@ -11241,8 +11241,9 @@ fn r28_solo_peak_resources_and_elapsed() {
     use kinewright_agent::{SoloArgs, preview_solo};
     let gpu = kinewright_media::GpuContext::headless(true).unwrap();
     let data = kinewright_media::test_support::TempDirectory::new("mo2-r28-solo");
-    let engine =
-        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), data.path("data")).unwrap();
+    let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), data.path("data"))
+        .unwrap()
+        .into_legacy_fixture();
     let source = "testsrc2=size=1920x1080:rate=30";
     let mut arguments = vec!["-f", "lavfi", "-i", source, "-frames:v", "60"];
     arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);

@@ -122,6 +122,9 @@ fn studio_owned_colour_finish(mut fixture: StudioOwnedColour, incident: Incident
 fn c0_studio_owned_auto_colour_fix_is_not_sent_unstaged() {
     let mut fixture = studio_owned_colour();
     let app = &mut fixture.app;
+    // Let transcript polling observe the installed owned asset first. On CI
+    // this Explain incident can already arrive during the import polls.
+    app.poll_background(&egui::Context::default());
     app.pending_observations.push(fixture.observation.clone());
     app.route_incidents();
     let incident = {
@@ -129,8 +132,18 @@ fn c0_studio_owned_auto_colour_fix_is_not_sent_unstaged() {
         let log = handle
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let incident = log.all().next().expect("the router opened the incident");
-        assert_eq!(incident.class, PolicyClass::AutoApply);
+        let incident = log
+            .all()
+            .find(|incident| {
+                incident.code == fixture.observation.code
+                    && incident.subject == fixture.observation.subject
+            })
+            .expect("the router opened the owned asset's colour incident");
+        assert_eq!(
+            incident.class,
+            PolicyClass::AutoApply,
+            "incident: {incident:?}"
+        );
         incident.id
     };
     assert_eq!(
