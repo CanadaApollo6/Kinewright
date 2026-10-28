@@ -191,6 +191,14 @@ pub enum HostCommand {
         envelope: kinewright_project::studio_records::MetadataEnvelope,
         update: kinewright_project::studio_records::MetadataUpdate,
     },
+    /// S3 C3: seal one bounded typed/drawn feedback evidence object for a later
+    /// `SaveFeedback`. The attachment keeps its pin until detach.
+    AdmitFeedbackEvidence {
+        kind: kinewright_project::studio_records::FeedbackEvidenceKind,
+        bytes: Vec<u8>,
+    },
+    /// S3 C3: the person's private feedback index (saved revisions and batches).
+    ListFeedback,
     ListVersions,
     ReadSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
@@ -530,6 +538,8 @@ pub struct HostReply {
     pub versions: Vec<kinewright_project::studio_records::SnapshotKey>,
     pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
     pub feedback: Option<kinewright_project::studio_records::FeedbackRevision>,
+    pub feedback_evidence: Option<ObjectRef>,
+    pub feedback_index: Option<kinewright_project::studio_records::FeedbackIndex>,
     pub submitted_batch: Option<kinewright_project::studio_records::FeedbackBatch>,
     #[serde(default)]
     pub unsaved_inputs_refreshed: bool,

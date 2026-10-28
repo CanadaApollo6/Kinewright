@@ -2473,3 +2473,154 @@ fn recovery_metadata_refused(host: &WriterHost, producer: &HostClient, command: 
         assert_eq!(stable(), before, "C2_RECOVERY_METADATA_NO_EFFECT");
     }
 }
+
+#[test]
+fn s3_feedback_adapter_is_private_until_batch() {
+    let (_temp, host, _refs) = fixture();
+    let roots = host.roots.clone();
+    let viewer = host
+        .attach(
+            "person-viewer".into(),
+            AttachmentRole::Viewer,
+            roots.clone(),
+        )
+        .unwrap();
+    let producer = host
+        .attach("candidate-producer".into(), AttachmentRole::Producer, roots)
+        .unwrap();
+    let published = accepted(producer.request(publish_command(&host, &producer)).unwrap());
+    let placeholder = published.metadata.as_ref().unwrap().id.clone();
+    let ReceiptResult::Metadata {
+        result: MetadataResult::Snapshot(key),
+    } = published.metadata.unwrap().result
+    else {
+        panic!("snapshot receipt");
+    };
+    let admit = |kind, bytes: &[u8]| {
+        accepted(
+            viewer
+                .request(HostCommand::AdmitFeedbackEvidence {
+                    kind,
+                    bytes: bytes.to_vec(),
+                })
+                .unwrap(),
+        )
+        .feedback_evidence
+        .unwrap()
+    };
+    let refs = [
+        admit(FeedbackEvidenceKind::Text, b"lift the shadows"),
+        admit(FeedbackEvidenceKind::Strokes, b"[[[0.5,0.5]]]"),
+        admit(FeedbackEvidenceKind::FrameProof, b"{\"proof\":1}"),
+    ];
+    // Ingress caps refuse before anything is sealed.
+    for (kind, bytes, marker) in [
+        (
+            FeedbackEvidenceKind::Text,
+            vec![b'x'; (16 << 10) + 1],
+            "C3_TEXT_CAP",
+        ),
+        (
+            FeedbackEvidenceKind::Strokes,
+            serde_json::to_vec(&vec![[0.5, 0.5]; 513]).unwrap(),
+            "C3_POINT_CAP",
+        ),
+    ] {
+        let root = state(&host)["root"].clone();
+        let reply = viewer
+            .request(HostCommand::AdmitFeedbackEvidence { kind, bytes })
+            .unwrap();
+        assert!(
+            reply.error.is_some() && reply.feedback_evidence.is_none(),
+            "{marker}"
+        );
+        assert_eq!(state(&host)["root"], root, "{marker}: nothing written");
+    }
+    for command in [
+        HostCommand::AdmitFeedbackEvidence {
+            kind: FeedbackEvidenceKind::Text,
+            bytes: b"agent note".to_vec(),
+        },
+        HostCommand::ListFeedback,
+    ] {
+        refused(&host, &producer, command, "C3_PRODUCER_FEEDBACK_ROLE");
+    }
+    let revision = feedback_revision(key.clone(), &refs);
+    let saved = accepted(
+        viewer
+            .request(metadata(
+                &host,
+                &viewer,
+                MetadataChange::SaveFeedback(revision),
+            ))
+            .unwrap(),
+    );
+    let ReceiptResult::Metadata {
+        result: MetadataResult::Feedback(reference),
+    } = saved.metadata.unwrap().result
+    else {
+        panic!("feedback receipt");
+    };
+    let index = accepted(viewer.request(HostCommand::ListFeedback).unwrap())
+        .feedback_index
+        .unwrap();
+    assert!(
+        index
+            .revisions
+            .values()
+            .any(|refs| refs.contains(&reference))
+            && index.batches.is_empty(),
+        "C3_PRIVATE_INDEX"
+    );
+    let batch_id = FeedbackBatchId::fresh().unwrap();
+    let early = producer
+        .request(HostCommand::ReadSubmittedBatch {
+            batch: batch_id.clone(),
+        })
+        .unwrap();
+    assert!(
+        early.error.is_some() && early.submitted_batch.is_none(),
+        "C3_NO_EARLY_BATCH"
+    );
+    let mut submit = metadata(
+        &host,
+        &viewer,
+        MetadataChange::SubmitBatch {
+            batch: FeedbackBatch {
+                batch_id: batch_id.clone(),
+                revision_refs: vec![reference.clone()],
+            },
+            request: ReviseRequest {
+                command_id: placeholder,
+                batch_id: batch_id.clone(),
+                expected_candidate_head: key.head.clone(),
+            },
+        },
+    );
+    if let HostCommand::Metadata {
+        envelope,
+        update:
+            MetadataUpdate {
+                change: MetadataChange::SubmitBatch { request, .. },
+                ..
+            },
+    } = &mut submit
+    {
+        request.command_id = envelope.id.clone();
+    }
+    let submitted = accepted(viewer.request(submit).unwrap());
+    assert!(
+        matches!(submitted.revise_result, Some(ReviseResult::Waiting { .. })),
+        "C3_WAITING_FOR_A_RUN"
+    );
+    let read = accepted(
+        producer
+            .request(HostCommand::ReadSubmittedBatch { batch: batch_id })
+            .unwrap(),
+    );
+    assert_eq!(
+        read.submitted_batch.unwrap().revision_refs,
+        vec![reference],
+        "C3_BATCH_VISIBLE_AFTER_SUBMIT"
+    );
+}

@@ -3611,6 +3611,7 @@ impl KinewrightApp {
         }
         self.presenter.clear();
         self.focused_mut().studio.cpu_frame = None;
+        self.focused_mut().studio.cpu_frame_id = None;
         self.pending_resume = None;
     }
 
@@ -3683,6 +3684,8 @@ impl KinewrightApp {
         if let Some((frame, image)) = self.presenter.finalize(now, prepare) {
             let at = frame.at;
             self.focused_mut().studio.cpu_frame = Some(frame.texture);
+            self.focused_mut().studio.cpu_frame_id =
+                self.presenter.bound().map(|cell| cell.frame_id);
             // Keep the native id and its Bound lease through a laid-out GPU paint.
             // The next GPU rebind retires it under the normal root-epoch fence.
             if let Some(texture) = &mut self.texture {

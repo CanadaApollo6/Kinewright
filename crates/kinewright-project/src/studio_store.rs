@@ -525,6 +525,43 @@ impl ProjectBundle {
             _charges: charges,
         })
     }
+    /// Seal one typed/drawn feedback evidence object under its kind's ingress bound.
+    /// The returned pin keeps it until the revision that names it is published.
+    pub fn admit_feedback_evidence(
+        &mut self,
+        kind: crate::studio_records::FeedbackEvidenceKind,
+        bytes: &[u8],
+    ) -> Result<SealedObject, BundleError> {
+        use crate::studio_records::{FRAME_PROOF_BYTES, FeedbackEvidenceKind};
+        let limits = self.store.limits();
+        match kind {
+            FeedbackEvidenceKind::Text => {
+                if bytes.len() as u64 > limits.comment_text_bytes {
+                    return Err(BundleError::Capacity("comment text bytes"));
+                }
+                std::str::from_utf8(bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            }
+            FeedbackEvidenceKind::Strokes => {
+                if bytes.len() as u64 > limits.command_bytes {
+                    return Err(BundleError::Capacity("comment stroke bytes"));
+                }
+                crate::receipts::validate_strokes(bytes, limits.comment_points)?;
+            }
+            FeedbackEvidenceKind::FrameProof => {
+                if bytes.len() as u64 > FRAME_PROOF_BYTES {
+                    return Err(BundleError::Capacity("frame proof bytes"));
+                }
+                serde_json::from_slice::<serde::de::IgnoredAny>(bytes)
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            }
+        }
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::OwnedEvidence,
+        };
+        self.store_mut()?.admit_blob(&mut &*bytes, &reference, &[])
+    }
     pub fn admit_orchestration_record<T: BundleRecord>(
         &mut self,
         record: &T,
@@ -981,6 +1018,26 @@ impl ProjectBundle {
         }
         Ok(id)
     }
+    pub fn metadata_issuer_sequence(
+        &self,
+        issuer: &crate::receipts::IssuerId,
+    ) -> Result<u64, BundleError> {
+        self.issuers
+            .get(issuer)
+            .filter(|state| !state.retired)
+            .map(|state| state.next_sequence)
+            .ok_or_else(|| BundleError::Identity("metadata issuer retired or absent".into()))
+    }
+    #[must_use]
+    pub fn metadata_envelope(&self, id: crate::receipts::CommandId) -> MetadataEnvelope {
+        MetadataEnvelope {
+            id,
+            project_id: self.project_id.clone(),
+            target_branch: self.manual_branch_id.clone(),
+            owner_epoch: self.store.owner_epoch(),
+            expected_head: self.manual_head().cloned(),
+        }
+    }
     pub fn reconcile_metadata(&mut self) -> Result<(), BundleError> {
         self.reconcile_destination(None)?;
         self.pending_metadata = None;
@@ -1027,25 +1084,13 @@ impl crate::editing_session::Ja1EditingSession {
         &self,
         issuer: &crate::receipts::IssuerId,
     ) -> Result<u64, BundleError> {
-        self.active_bundle()?
-            .issuers
-            .get(issuer)
-            .filter(|state| !state.retired)
-            .map(|state| state.next_sequence)
-            .ok_or_else(|| BundleError::Identity("metadata issuer retired or absent".into()))
+        self.active_bundle()?.metadata_issuer_sequence(issuer)
     }
     pub fn metadata_envelope(
         &self,
         id: crate::receipts::CommandId,
     ) -> Result<MetadataEnvelope, BundleError> {
-        let bundle = self.active_bundle()?;
-        Ok(MetadataEnvelope {
-            id,
-            project_id: bundle.project_id.clone(),
-            target_branch: bundle.manual_branch_id.clone(),
-            owner_epoch: bundle.store.owner_epoch(),
-            expected_head: bundle.manual_head().cloned(),
-        })
+        Ok(self.active_bundle()?.metadata_envelope(id))
     }
     pub fn metadata_generation(&self) -> Result<u64, BundleError> {
         Ok(self.active_bundle()?.generation)
@@ -1055,6 +1100,17 @@ impl crate::editing_session::Ja1EditingSession {
     }
     pub fn read_snapshot(&self, key: &SnapshotKey) -> Result<PinnedSnapshot, BundleError> {
         self.active_bundle()?.read_snapshot(key)
+    }
+    pub fn admit_feedback_evidence(
+        &mut self,
+        kind: crate::studio_records::FeedbackEvidenceKind,
+        bytes: &[u8],
+    ) -> Result<SealedObject, BundleError> {
+        self.active_bundle_mut()?
+            .admit_feedback_evidence(kind, bytes)
+    }
+    pub fn feedback_index(&self) -> Result<StorageReservation<FeedbackIndex>, BundleError> {
+        self.active_bundle()?.feedback_index()
     }
     pub fn read_feedback(&self, reference: &ObjectRef) -> Result<PinnedFeedback, BundleError> {
         self.active_bundle()?.read_feedback(reference)

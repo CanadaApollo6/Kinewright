@@ -127,10 +127,15 @@ impl Attachment {
                     ..
                 } => false,
             },
+            HostCommand::AdmitFeedbackEvidence { .. } => {
+                matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+            }
             HostCommand::ListVersions
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadSubmittedBatch { .. } => true,
-            HostCommand::ReadFeedback { .. } => self.role != AttachmentRole::Producer,
+            HostCommand::ReadFeedback { .. } | HostCommand::ListFeedback => {
+                self.role != AttachmentRole::Producer
+            }
             HostCommand::Attach
             | HostCommand::Status
             | HostCommand::ReadHistory
@@ -390,6 +395,21 @@ impl super::HostCommandOwner {
                             pin: pinned.pin,
                         })
                     }
+                    super::HostCommand::AdmitFeedbackEvidence { bytes, .. } => {
+                        let sha256 = kinewright_media::sha256_bytes(bytes);
+                        if !grant
+                            .read_pins
+                            .iter()
+                            .any(|pin| pin.roots.len() == 1 && pin.roots[0].sha256 == sha256)
+                        {
+                            return Err(HostRefusal::new(
+                                "attachment_capacity",
+                                "64 distinct pinned reads per attachment maximum",
+                            )
+                            .into());
+                        }
+                        None
+                    }
                     _ => None,
                 };
                 if let Some(read_roots) = read_roots
@@ -443,6 +463,19 @@ impl super::HostCommandOwner {
         );
         let admit = matches!(request.command, super::HostCommand::AdmitDestination { .. });
         let operation = request.operation;
+        // A published revision's evidence is durable through the feedback index; its
+        // admission pin is released so it does not occupy the attachment's slots.
+        let published_evidence = match &request.command {
+            super::HostCommand::Metadata { update, .. } => match &update.change {
+                kinewright_project::studio_records::MetadataChange::SaveFeedback(revision) => vec![
+                    revision.original_text_ref.clone(),
+                    revision.strokes_ref.clone(),
+                    revision.frame_proof_ref.clone(),
+                ],
+                _ => vec![],
+            },
+            _ => vec![],
+        };
         let reply = if super::orchestration::is_hook(&request.command) {
             self.execute_hook(index, request.command, &roots)
         } else if detach {
@@ -457,6 +490,11 @@ impl super::HostCommandOwner {
                 .any(|held| held.same_reference(&pin))
         {
             self.attachments[index].read_pins.push(pin);
+        }
+        if reply.error.is_none() && reply.metadata.is_some() && !published_evidence.is_empty() {
+            self.attachments[index].read_pins.retain(|pin| {
+                !(pin.roots.len() == 1 && published_evidence.contains(&pin.roots[0]))
+            });
         }
         if reply.error.is_none() {
             if let Some(lease) = &reply.manual_lease {

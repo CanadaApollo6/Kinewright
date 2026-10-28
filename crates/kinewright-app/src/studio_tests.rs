@@ -17,7 +17,7 @@ use kinewright_project::{
 };
 use std::time::{Duration, Instant};
 
-fn publish(bundle: &mut ProjectBundle) -> SnapshotKey {
+pub(crate) fn publish(bundle: &mut ProjectBundle) -> SnapshotKey {
     let envelope = MetadataEnvelope {
         id: CommandId {
             issuer: bundle.issue_metadata_issuer().unwrap(),
@@ -55,12 +55,12 @@ fn publish(bundle: &mut ProjectBundle) -> SnapshotKey {
     };
     key
 }
-struct Fixtures {
-    root: TempDirectory,
-    owners: Vec<Ja1EditingSession>,
-    contexts: Vec<Arc<FrozenContext>>,
+pub(crate) struct Fixtures {
+    pub(crate) root: TempDirectory,
+    pub(crate) owners: Vec<Ja1EditingSession>,
+    pub(crate) contexts: Vec<Arc<FrozenContext>>,
 }
-fn fixtures() -> Fixtures {
+pub(crate) fn fixtures() -> Fixtures {
     let root = TempDirectory::new_in(&workspace_target_dir(), "c2-frozen");
     let pair = kinewright_project::c0_fixtures::build_c2_fixture_pair(root.root()).unwrap();
     let media_bytes = pair
@@ -172,12 +172,17 @@ fn fixtures() -> Fixtures {
         contexts,
     }
 }
-fn attach(app: &mut KinewrightApp, owner: Ja1EditingSession) {
+pub(crate) fn attach(app: &mut KinewrightApp, owner: Ja1EditingSession) {
     app.projects[0].recovery.stop_for_studio();
     app.projects[0].ja1 = Some(crate::ja1_attachment::Ja1Attachment::new(owner).unwrap());
     app.projects[0].install_ja1_view();
 }
-fn wait_frame(app: &mut KinewrightApp, context: &egui::Context, key: &SnapshotKey, at: TimeCode) {
+pub(crate) fn wait_frame(
+    app: &mut KinewrightApp,
+    context: &egui::Context,
+    key: &SnapshotKey,
+    at: TimeCode,
+) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         app.poll_background(context);
@@ -832,6 +837,8 @@ fn s3_failed_edit_copy_keeps_frozen_selection() {
     in1_shutdown(&mut app);
 }
 
+pub(crate) use tests::Retire;
+
 #[allow(
     clippy::module_inception,
     reason = "test boundary excludes teardown waits from production source scans"
@@ -843,16 +850,16 @@ mod tests {
         time::{Duration, Instant},
     };
     #[derive(Default)]
-    pub(super) struct Retire {
+    pub(crate) struct Retire {
         done: Option<crossbeam_channel::Receiver<()>>,
         gpu: Option<kinewright_media::GpuContext>,
     }
     impl Retire {
-        pub(super) fn arm(&mut self, engine: &Arc<kinewright_media::FfmpegMediaEngine>) {
+        pub(crate) fn arm(&mut self, engine: &Arc<kinewright_media::FfmpegMediaEngine>) {
             self.done = Some(engine.teardown_observer());
             self.gpu = Some(engine.test_gpu());
         }
-        pub(super) fn wait(&mut self) {
+        pub(crate) fn wait(&mut self) {
             if let Some(done) = self.done.take() {
                 let retired = !matches!(
                     done.recv_timeout(Duration::from_secs(30)),

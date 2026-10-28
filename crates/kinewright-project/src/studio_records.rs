@@ -173,6 +173,19 @@ impl FeedbackRevision {
         refs
     }
 }
+/// The opaque evidence a typed or drawn revision names. Each kind has its own ingress bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackEvidenceKind {
+    /// UTF-8 text, at most `comment_text_bytes`.
+    Text,
+    /// Strokes JSON, at most `comment_points` points.
+    Strokes,
+    /// The displayed-frame proof, at most `FRAME_PROOF_BYTES`.
+    FrameProof,
+}
+/// Proofs name the displayed identity and a pixel digest, never the pixels themselves.
+pub const FRAME_PROOF_BYTES: u64 = 16 << 10;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackBatch {

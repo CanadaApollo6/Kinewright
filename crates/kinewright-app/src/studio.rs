@@ -69,11 +69,14 @@ pub(crate) struct Studio {
     pub(crate) position: TimeCode,
     pub(crate) failure: Option<String>,
     pub(crate) cpu_frame: Option<kinewright_core::FrameTexture>,
+    /// The presenter frame id of `cpu_frame`, so a proof hashes only the bound image.
+    pub(crate) cpu_frame_id: Option<u64>,
+    pub(crate) feedback: crate::studio_feedback::Feedback,
     pub(crate) manual_inputs: Option<Arc<kinewright_media::owned_io::PlaybackInputs>>,
     manual_scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
     versions: Vec<SnapshotKey>,
     versions_open: bool,
-    tab: Tab,
+    pub(crate) tab: Tab,
     draft_snapshot: Option<SnapshotKey>,
     stills: [Option<Still>; 2],
     following: bool,
@@ -85,7 +88,7 @@ pub(crate) struct Studio {
 
 /// PO0 rev 2.2 tokens that the current theme can express (§2): colour, radii,
 /// spacing and type. Glass, frame light, grain and springs stay in the PO0 rollout.
-mod po0 {
+pub(crate) mod po0 {
     use eframe::egui::Color32;
 
     const fn white(alpha: u8) -> Color32 {
@@ -94,38 +97,38 @@ mod po0 {
     const fn ink(alpha: u8) -> Color32 {
         Color32::from_rgba_unmultiplied_const(0xEB, 0xEB, 0xF5, alpha)
     }
-    pub(super) const BASE: Color32 = Color32::from_rgb(0x0B, 0x0B, 0x0D);
-    pub(super) const WELL: Color32 = Color32::from_rgb(0x13, 0x13, 0x16);
-    pub(super) const RAIL: Color32 = Color32::from_rgb(0x18, 0x18, 0x1C);
-    pub(super) const COMPOSER: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x20);
+    pub(crate) const BASE: Color32 = Color32::from_rgb(0x0B, 0x0B, 0x0D);
+    pub(crate) const WELL: Color32 = Color32::from_rgb(0x13, 0x13, 0x16);
+    pub(crate) const RAIL: Color32 = Color32::from_rgb(0x18, 0x18, 0x1C);
+    pub(crate) const COMPOSER: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x20);
     /// The recessed track behind segmented controls and the time chip.
-    pub(super) const TRACK: Color32 = Color32::from_black_alpha(71);
-    pub(super) const FILL: Color32 = white(17);
-    pub(super) const FILL_2: Color32 = white(26);
-    pub(super) const FILL_3: Color32 = white(41);
-    pub(super) const LINE: Color32 = white(18);
-    pub(super) const SHEEN: Color32 = white(20);
-    pub(super) const TEXT: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
-    pub(super) const TEXT_2: Color32 = ink(163);
-    pub(super) const TEXT_3: Color32 = ink(133);
-    pub(super) const TEXT_OFF: Color32 = ink(71);
+    pub(crate) const TRACK: Color32 = Color32::from_black_alpha(71);
+    pub(crate) const FILL: Color32 = white(17);
+    pub(crate) const FILL_2: Color32 = white(26);
+    pub(crate) const FILL_3: Color32 = white(41);
+    pub(crate) const LINE: Color32 = white(18);
+    pub(crate) const SHEEN: Color32 = white(20);
+    pub(crate) const TEXT: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
+    pub(crate) const TEXT_2: Color32 = ink(163);
+    pub(crate) const TEXT_3: Color32 = ink(133);
+    pub(crate) const TEXT_OFF: Color32 = ink(71);
     /// `you`: the person's ink, and the send arrow.
-    pub(super) const YOU: Color32 = Color32::from_rgb(0x0A, 0x84, 0xFF);
+    pub(crate) const YOU: Color32 = Color32::from_rgb(0x0A, 0x84, 0xFF);
     /// The active-chip treatment: `you` at 26% with a 60% ring.
-    pub(super) const YOU_TINT: Color32 =
+    pub(crate) const YOU_TINT: Color32 =
         Color32::from_rgba_unmultiplied_const(0x0A, 0x84, 0xFF, 66);
-    pub(super) const YOU_RING: Color32 =
+    pub(crate) const YOU_RING: Color32 =
         Color32::from_rgba_unmultiplied_const(0x0A, 0x84, 0xFF, 153);
     /// `accent-fill`: fills that carry white text.
-    pub(super) const ACCENT_FILL: Color32 = Color32::from_rgb(0x00, 0x71, 0xE3);
-    pub(super) const ACCENT_FILL_HOVER: Color32 = Color32::from_rgb(0x00, 0x68, 0xD1);
-    pub(super) const WARNING: Color32 = Color32::from_rgb(0xE7, 0xB2, 0x4F);
-    pub(super) const DANGER: Color32 = Color32::from_rgb(0xF2, 0x6B, 0x73);
+    pub(crate) const ACCENT_FILL: Color32 = Color32::from_rgb(0x00, 0x71, 0xE3);
+    pub(crate) const ACCENT_FILL_HOVER: Color32 = Color32::from_rgb(0x00, 0x68, 0xD1);
+    pub(crate) const WARNING: Color32 = Color32::from_rgb(0xE7, 0xB2, 0x4F);
+    pub(crate) const DANGER: Color32 = Color32::from_rgb(0xF2, 0x6B, 0x73);
     /// Neutral clip bodies: no role hues and no thumbnails until the PO0 rollout.
-    pub(super) const CLIP: Color32 = Color32::from_rgb(0x24, 0x24, 0x29);
-    pub(super) const CLIP_CURRENT: Color32 = Color32::from_rgb(0x2E, 0x2E, 0x34);
-    pub(super) const CLIP_AUDIO: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x20);
-    pub(super) const CLIP_LABEL: Color32 =
+    pub(crate) const CLIP: Color32 = Color32::from_rgb(0x24, 0x24, 0x29);
+    pub(crate) const CLIP_CURRENT: Color32 = Color32::from_rgb(0x2E, 0x2E, 0x34);
+    pub(crate) const CLIP_AUDIO: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x20);
+    pub(crate) const CLIP_LABEL: Color32 =
         Color32::from_rgba_unmultiplied_const(0xFF, 0xFF, 0xFF, 235);
 }
 const RAIL_WIDTH: f32 = 336.0;
@@ -240,7 +243,7 @@ impl Layout {
 fn at(ui: &mut egui::Ui, id: &'static str, rect: Rect, f: impl FnOnce(&mut egui::Ui)) {
     ui.scope_builder(egui::UiBuilder::new().id_salt(id).max_rect(rect), f);
 }
-fn fit(rect: Rect, size: Vec2) -> Rect {
+pub(crate) fn fit(rect: Rect, size: Vec2) -> Rect {
     let scale = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
     Rect::from_center_size(rect.center(), size * scale)
 }
@@ -267,6 +270,8 @@ impl KinewrightApp {
         attachment.panel_open = false;
         attachment.view = None;
         self.focused_mut().ja1 = Some(attachment);
+        self.focused_mut().studio.feedback.scene =
+            std::env::var("KINEWRIGHT_SCREENSHOT_STUDIO_SCENE").ok();
         self.focused_mut().studio.versions = versions;
         self.focused_mut().studio.mode = Mode::Studio;
         self.install_studio_context(context)
@@ -686,7 +691,7 @@ impl KinewrightApp {
             }
         }
     }
-    fn studio_picture(&self, ui: &mut egui::Ui) {
+    fn studio_picture(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         // depth-picture: two shadows and a hairline, all outside the frame.
         for (y, blur, alpha) in [(28, 70, 140), (6, 18, 89)] {
@@ -719,6 +724,7 @@ impl KinewrightApp {
             self.presenter
                 .marker(epoch, self.paint_clock())
                 .add_to(ui.painter(), image);
+            self.feedback_overlay(ui, rect, size);
         } else {
             ui.painter().text(
                 rect.center(),
@@ -888,7 +894,7 @@ impl KinewrightApp {
             );
         }
     }
-    /// Draw and Point stay inert until C3 and C6; the neutral surround works.
+    /// Point stays inert until C6; Draw starts a note on the bound picture (C3).
     fn plate_tools(&mut self, ui: &mut egui::Ui) {
         let neutral = self.focused().studio.neutral;
         if round_button(
@@ -917,15 +923,24 @@ impl KinewrightApp {
             Round::Quiet,
             false,
         );
-        round_button(
+        let drawing = self.focused().studio.feedback.drawing;
+        if round_button(
             ui,
             Icon::Draw,
             "Draw",
-            "Draw on the frame · not available yet",
+            "Draw on the frame",
             32.0,
-            Round::Quiet,
-            false,
-        );
+            if drawing {
+                Round::Selected
+            } else {
+                Round::Quiet
+            },
+            true,
+        )
+        .clicked()
+        {
+            self.focused_mut().studio.feedback.drawing = !drawing;
+        }
     }
     /// The A/B/C segmented pill, with the A/B tools in a menu at its end.
     fn version_pill(&mut self, ui: &mut egui::Ui) {
@@ -1082,14 +1097,13 @@ impl KinewrightApp {
     }
     fn studio_rail_content(&mut self, ui: &mut egui::Ui) {
         if self.focused().studio.tab == Tab::Notes {
-            ui.label("Notes · newest first");
             if let Some(snapshot) = &self.focused().studio.draft_snapshot {
                 ui.small(format!("Draft on {}", snapshot.version.as_str()));
+                if !self.active_thread().input.is_empty() {
+                    ui.label(&self.active_thread().input);
+                }
             }
-            if !self.active_thread().input.is_empty() {
-                ui.label(&self.active_thread().input);
-            }
-            ui.colored_label(po0::TEXT_3, "No saved notes yet");
+            self.studio_notes(ui);
             return;
         }
         let count = self.active_thread().chat.len();
@@ -1857,4 +1871,4 @@ fn time_chip(
 
 #[cfg(test)]
 #[path = "studio_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -37,6 +37,8 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
             | HostCommand::ResolveAttention { .. }
             | HostCommand::DetachForContinuation
             | HostCommand::Metadata { .. }
+            | HostCommand::AdmitFeedbackEvidence { .. }
+            | HostCommand::ListFeedback
             | HostCommand::ListVersions
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadFeedback { .. }

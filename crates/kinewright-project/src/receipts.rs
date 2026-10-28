@@ -792,8 +792,18 @@ pub(crate) fn stage_comment(
     })
 }
 
+/// Strokes are bounded opaque point pairs: either a flat list (S1 observer comments) or
+/// a list of strokes, each a nonempty list of pairs (S3 drawn feedback).
 pub(crate) fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleError> {
     use serde::de::{Error, SeqAccess, Visitor};
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Element {
+        Point(
+            #[allow(dead_code, reason = "parsed only to bound the pair")] [serde_json::Number; 2],
+        ),
+        Stroke(Vec<[serde_json::Number; 2]>),
+    }
     struct Points<'a> {
         limit: u64,
         overflow: &'a std::cell::Cell<bool>,
@@ -801,15 +811,18 @@ pub(crate) fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleErr
     impl<'de> Visitor<'de> for Points<'_> {
         type Value = ();
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("bounded opaque point pairs")
+            f.write_str("bounded opaque point pairs or strokes")
         }
         fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
             let mut count = 0_u64;
-            while sequence
-                .next_element::<[serde_json::Number; 2]>()?
-                .is_some()
-            {
-                count += 1;
+            while let Some(element) = sequence.next_element::<Element>()? {
+                count += match element {
+                    Element::Point(_) => 1,
+                    Element::Stroke(points) if points.is_empty() => {
+                        return Err(A::Error::custom("empty stroke"));
+                    }
+                    Element::Stroke(points) => points.len() as u64,
+                };
                 if count > self.limit {
                     self.overflow.set(true);
                     return Err(A::Error::custom("comment point capacity"));

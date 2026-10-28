@@ -160,6 +160,11 @@ impl Presenter {
             .filter(|(start, _)| *start <= epoch)
             .and_then(|(_, value)| value.clone())
     }
+    /// The epoch the current context starts at: a cell from an older epoch
+    /// shows a picture the current context does not describe.
+    pub(crate) fn context_epoch(&self) -> Option<u64> {
+        self.contexts.as_ref().map(|(epoch, _)| *epoch)
+    }
     pub(crate) fn bound(&self) -> Option<DisplayCell> {
         read(&self.cell)
     }

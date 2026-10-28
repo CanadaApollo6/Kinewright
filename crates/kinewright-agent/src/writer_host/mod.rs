@@ -1358,6 +1358,7 @@ impl HostCommandOwner {
             let write = !matches!(
                 command,
                 HostCommand::ListVersions
+                    | HostCommand::ListFeedback
                     | HostCommand::ReadSnapshot { .. }
                     | HostCommand::ReadFeedback { .. }
                     | HostCommand::ReadSubmittedBatch { .. }
@@ -1508,7 +1509,10 @@ impl HostCommandOwner {
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
         if self.recovering
             && (!manual::connector_command(&command)
-                || matches!(command, HostCommand::Metadata { .. }))
+                || matches!(
+                    command,
+                    HostCommand::Metadata { .. } | HostCommand::AdmitFeedbackEvidence { .. }
+                ))
             && !matches!(
                 command,
                 HostCommand::BeginRecovery { .. }
@@ -1577,6 +1581,17 @@ impl HostCommandOwner {
                         reason: "Feedback is saved. No scheduler is attached.".into(),
                     });
                 }
+            }
+            HostCommand::AdmitFeedbackEvidence { kind, bytes } => {
+                let sealed = self.owner_mut()?.admit_feedback_evidence(kind, &bytes)?;
+                reply.feedback_evidence = Some(sealed.reference.clone());
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: vec![sealed.reference.clone()],
+                    pin: sealed.into_pin(),
+                });
+            }
+            HostCommand::ListFeedback => {
+                reply.feedback_index = Some((*self.owner()?.feedback_index()?).clone());
             }
             HostCommand::ListVersions => {
                 reply.versions = self.owner()?.studio_versions()?;
