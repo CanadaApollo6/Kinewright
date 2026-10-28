@@ -742,6 +742,7 @@ impl LoadedBundle {
             pending_command: None,
             pending_result: None,
             pending_metadata: None,
+            voice_slots: std::sync::Mutex::default(),
             last_collection_error: None,
             pending_save: None,
             pending_copy_source: None,
@@ -797,6 +798,7 @@ pub struct ProjectBundle {
     pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
     pub(crate) pending_metadata: Option<crate::studio_store::ValidatedMetadataUpdate>,
+    pub(crate) voice_slots: crate::voice_store::VoiceSlots,
 }
 pub(crate) struct PendingSave {
     pub(crate) core: Core,
@@ -1015,6 +1017,7 @@ impl ProjectBundle {
                 pending_command: None,
                 pending_result: None,
                 pending_metadata: None,
+                voice_slots: std::sync::Mutex::default(),
                 last_collection_error: None,
                 pending_save: None,
                 pending_copy_source: None,

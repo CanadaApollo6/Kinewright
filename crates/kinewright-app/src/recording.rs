@@ -1199,17 +1199,14 @@ fn hide_console_window(_command: &mut Command) {}
 #[allow(dead_code, reason = "Worker A connects the C5 backend to Studio in C6")]
 pub(crate) mod feedback_capture {
     use super::{Arc, Duration, Instant, PathBuf, start_feedback_recording};
-    use kinewright_media::voice_note::{PlayheadLog, VoiceJob, VoiceJobKey, VoiceTranscript};
+    use kinewright_media::voice_note::{PlayheadLog, VoiceTranscript};
+    pub(crate) use kinewright_project::voice_store::JobKey;
+    use kinewright_project::voice_store::{PendingVoiceWrite, save_voice};
     use kinewright_project::{
         bundle::{BundleError, ProjectBundle},
         bundle_records::{ObjectRef, ProjectId, RecordKind},
-        receipts::{ReceiptLookup, ReceiptResult},
         storage_budget::StorageReservation,
-        store::StorePin,
-        studio_records::{
-            FeedbackAnchor, JobId, MetadataChange, MetadataEnvelope, MetadataResult, MetadataScope,
-            MetadataUpdate, NoteId, VoiceRef,
-        },
+        studio_records::{FeedbackAnchor, MetadataEnvelope, NoteId, VoiceRef},
         studio_store::PinnedSnapshot,
     };
     use std::{
@@ -1217,7 +1214,6 @@ pub(crate) mod feedback_capture {
         sync::atomic::{AtomicBool, Ordering},
         sync::mpsc::{Receiver, TryRecvError},
     };
-    pub(crate) type JobKey = VoiceJobKey<ProjectId, NoteId, JobId>;
 
     static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
     struct CapturePermit;
@@ -1265,11 +1261,6 @@ pub(crate) mod feedback_capture {
         snapshot: PinnedSnapshot,
         reservation: StorageReservation,
     }
-    #[derive(Clone)]
-    pub(crate) struct PendingVoiceWrite {
-        pub(crate) envelope: MetadataEnvelope,
-        pub(crate) update: MetadataUpdate,
-    }
     pub(crate) struct CapturedAudio {
         project: ProjectId,
         anchor: FeedbackAnchor,
@@ -1283,26 +1274,11 @@ pub(crate) mod feedback_capture {
         pending_write: Option<PendingVoiceWrite>,
     }
     pub(crate) struct SavedAudio {
-        project: ProjectId,
+        note: kinewright_project::voice_store::VoiceNoteHandle,
         anchor: FeedbackAnchor,
         voice: VoiceRef,
-        job: Option<VoiceJob<JobKey>>,
-        expected_chosen: Option<ObjectRef>,
-        pending_write: Option<PendingVoiceWrite>,
-        pending_asr: Option<PendingAsr>,
         pub(crate) complete: bool,
         pub(crate) capture_error: Option<String>,
-        _pin: StorePin,
-    }
-    type OriginalAsr =
-        kinewright_media::voice_note::OriginalVoiceAsr<ProjectId, NoteId, JobId, FeedbackAnchor>;
-    enum PendingAsr {
-        Unvalidated(Box<OriginalAsr>),
-        Completion(Box<OriginalAsr>),
-        Sealed {
-            reference: ObjectRef,
-            _pin: StorePin,
-        },
     }
     impl Capture {
         pub(crate) fn anchor(&self) -> &FeedbackAnchor {
@@ -1429,55 +1405,6 @@ pub(crate) mod feedback_capture {
             .store_mut()?
             .admit_blob(&mut &*bytes, &reference, dependencies)
     }
-    fn save_voice(
-        owner: &mut ProjectBundle,
-        envelope: &MetadataEnvelope,
-        voice: &VoiceRef,
-        pending: &mut Option<PendingVoiceWrite>,
-    ) -> Result<(), BundleError> {
-        if let Some(original) = pending {
-            if &original.envelope != envelope
-                || original.update.change != MetadataChange::SaveVoice(voice.clone())
-            {
-                return Err(BundleError::Unsettled);
-            }
-        } else {
-            *pending = Some(PendingVoiceWrite {
-                envelope: envelope.clone(),
-                update: MetadataUpdate {
-                    expected_root_generation: owner
-                        .root()
-                        .ok_or(BundleError::HistoryBarrierInvariant)?
-                        .generation,
-                    change: MetadataChange::SaveVoice(voice.clone()),
-                },
-            });
-        }
-        let original = pending
-            .as_ref()
-            .ok_or(BundleError::HistoryBarrierInvariant)?;
-        let lookup = owner.metadata_command(
-            &original.envelope,
-            MetadataScope::Feedback,
-            &original.update,
-        )?;
-        let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) = lookup else {
-            return Err(BundleError::Unsettled);
-        };
-        let index = owner.feedback_index()?;
-        let retained = index.notes.get(&voice.note_id);
-        if !matches!(receipt.result, ReceiptResult::Metadata { result: MetadataResult::Voice(ref id) } if id == &voice.note_id)
-            || retained.is_none_or(|saved| {
-                saved.audio_ref != voice.audio_ref
-                    || saved.playhead_log_ref != voice.playhead_log_ref
-                    || saved.duration_micros != voice.duration_micros
-            })
-        {
-            return Err(BundleError::HistoryChanged);
-        }
-        *pending = None;
-        Ok(())
-    }
     impl CapturedAudio {
         pub(crate) fn anchor(&self) -> &FeedbackAnchor {
             &self.anchor
@@ -1589,91 +1516,44 @@ pub(crate) mod feedback_capture {
                 Ok((voice, pin))
             })();
             match result {
-                Ok((voice, pin)) => Ok(SavedAudio {
-                    project: self.project,
-                    anchor: self.anchor,
-                    voice,
-                    job: None,
-                    expected_chosen: None,
-                    pending_write: None,
-                    pending_asr: None,
-                    complete: self.complete,
-                    capture_error: self.capture_error,
-                    _pin: pin,
-                }),
+                Ok((voice, _pin)) => SavedAudio::reopen(owner, &voice.note_id)
+                    .map_err(|error| Box::new((self, error))),
                 Err(error) => Err(Box::new((self, error))),
             }
         }
     }
     impl SavedAudio {
+        pub(crate) fn reopen(owner: &ProjectBundle, note: &NoteId) -> Result<Self, BundleError> {
+            let note = owner.voice_note(note)?;
+            let snapshot = note.snapshot()?;
+            Ok(Self {
+                note,
+                anchor: snapshot.anchor,
+                voice: snapshot.voice,
+                complete: snapshot.complete,
+                capture_error: snapshot.capture_error,
+            })
+        }
+        fn refresh(&mut self) -> Result<(), BundleError> {
+            self.voice = self.note.snapshot()?.voice;
+            Ok(())
+        }
         pub(crate) fn anchor(&self) -> &FeedbackAnchor {
             &self.anchor
         }
-
-        pub(crate) fn pending_write(&self) -> Option<&PendingVoiceWrite> {
-            self.pending_write.as_ref()
+        pub(crate) fn voice(&self) -> &VoiceRef {
+            &self.voice
         }
-        /// Settle the original command after an unknown reply, even if its job completed.
+        pub(crate) fn pending_write(&self) -> Result<Option<PendingVoiceWrite>, BundleError> {
+            self.note.pending_write()
+        }
         pub(crate) fn retry_pending(
             &mut self,
             owner: &mut ProjectBundle,
         ) -> Result<bool, BundleError> {
-            if owner.project_id() != &self.project {
-                return Err(BundleError::HistoryChanged);
-            }
-            if self.pending_asr.is_some() {
-                return self.publish_asr(owner, None);
-            }
-            let Some(pending) = self.pending_write.clone() else {
-                return Ok(false);
-            };
-            let MetadataChange::SaveVoice(voice) = pending.update.change else {
-                return Err(BundleError::HistoryChanged);
-            };
-            save_voice(owner, &pending.envelope, &voice, &mut self.pending_write)?;
-            self.voice = voice;
-            Ok(true)
-        }
-        pub(crate) fn reopen(owner: &ProjectBundle, note: &NoteId) -> Result<Self, BundleError> {
-            let index = owner.feedback_index()?;
-            let voice = index
-                .notes
-                .get(note)
-                .cloned()
-                .ok_or(BundleError::HistoryChanged)?;
-            let log_ref = voice.playhead_log_ref.as_ref().ok_or_else(|| {
-                BundleError::Unsupported("voice has no retained anchor log".into())
-            })?;
-            let bytes = owner.store().read_evidence(log_ref)?;
-            let log: PlayheadLog<FeedbackAnchor> =
-                serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            log.validate(voice.duration_micros)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            let anchor = log.samples[0].displayed.clone();
-            let snapshot = owner.read_snapshot(&anchor.snapshot)?;
-            let pin = owner.store().pin(&[
-                voice.audio_ref.clone(),
-                log_ref.clone(),
-                snapshot.descriptor.checkpoint_ref.clone(),
-            ])?;
-            Ok(Self {
-                project: owner.project_id().clone(),
-                anchor,
-                voice,
-                job: None,
-                expected_chosen: None,
-                pending_write: None,
-                pending_asr: None,
-                complete: log
-                    .capture_status
-                    .as_ref()
-                    .is_some_and(|status| status.complete),
-                capture_error: log.capture_status.as_ref().map_or_else(
-                    || Some("Capture completion status was not retained by this older note".into()),
-                    |status| status.capture_error.clone(),
-                ),
-                _pin: pin,
-            })
+            let result = self.note.retry_pending(owner)?;
+            self.refresh()?;
+            Ok(result)
         }
         pub(crate) fn remark_voice(
             &self,
@@ -1690,32 +1570,12 @@ pub(crate) mod feedback_capture {
             });
             Ok(voice)
         }
-        pub(crate) fn voice(&self) -> &VoiceRef {
-            &self.voice
-        }
         pub(crate) fn start_job(
             &mut self,
             owner: &ProjectBundle,
-            transcript_revision: u64,
+            revision: u64,
         ) -> Result<JobKey, BundleError> {
-            if self.pending_write.is_some() || self.pending_asr.is_some() {
-                return Err(BundleError::Unsettled);
-            }
-            if owner.project_id() != &self.project
-                || owner.feedback_index()?.notes.get(&self.voice.note_id) != Some(&self.voice)
-            {
-                return Err(BundleError::HistoryChanged);
-            }
-            let key = JobKey {
-                project: self.project.clone(),
-                note: self.voice.note_id.clone(),
-                job: JobId::fresh()?,
-                audio_sha256: self.voice.audio_ref.sha256.clone(),
-                transcript_revision,
-            };
-            self.job = Some(VoiceJob::new(key.clone()));
-            self.expected_chosen = self.voice.chosen_transcript_revision.clone();
-            Ok(key)
+            self.note.start_job(owner, &self.voice, revision)
         }
         pub(crate) fn spawn_job(
             &self,
@@ -1723,28 +1583,10 @@ pub(crate) mod feedback_capture {
             data_dir: PathBuf,
             key: &JobKey,
         ) -> Result<kinewright_media::voice_note::VoiceTask<JobKey>, BundleError> {
-            let Some(job) = &self.job else {
-                return Err(BundleError::HistoryChanged);
-            };
-            if owner.project_id() != &self.project
-                || job.key() != key
-                || owner.feedback_index()?.notes.get(&self.voice.note_id) != Some(&self.voice)
-            {
-                return Err(BundleError::HistoryChanged);
-            }
-            let audio = owner.store().read_evidence(&self.voice.audio_ref)?;
-            kinewright_media::voice_note::spawn_voice_transcription(
-                key.clone(),
-                audio,
-                data_dir,
-                job.cancellation(),
-            )
-            .map_err(|e| BundleError::Corrupt(e.to_string()))
+            self.note.spawn_job(owner, data_dir, key)
         }
         pub(crate) fn cancel(&self) {
-            if let Some(job) = &self.job {
-                job.cancel();
-            }
+            self.note.cancel();
         }
         pub(crate) fn choose_transcript(
             &mut self,
@@ -1752,25 +1594,9 @@ pub(crate) mod feedback_capture {
             envelope: &MetadataEnvelope,
             reference: ObjectRef,
         ) -> Result<(), BundleError> {
-            if owner.project_id() != &self.project
-                || owner.feedback_index()?.notes.get(&self.voice.note_id) != Some(&self.voice)
-            {
-                return Err(BundleError::HistoryChanged);
-            }
-            let text = owner.store().read_evidence(&reference)?;
-            if text.len() > kinewright_media::voice_note::MAX_VOICE_TEXT_BYTES {
-                return Err(BundleError::Capacity("voice transcript text"));
-            }
-            std::str::from_utf8(&text).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if self.pending_asr.is_some() {
-                return Err(BundleError::Unsettled);
-            }
-            self.cancel();
-            let mut voice = self.voice.clone();
-            voice.chosen_transcript_revision = Some(reference);
-            save_voice(owner, envelope, &voice, &mut self.pending_write)?;
-            self.voice = voice;
-            Ok(())
+            self.note
+                .choose_transcript(owner, envelope, &self.voice, reference)?;
+            self.refresh()
         }
         pub(crate) fn accept_asr(
             &mut self,
@@ -1780,152 +1606,11 @@ pub(crate) mod feedback_capture {
             current: &JobKey,
             transcript: VoiceTranscript,
         ) -> Result<bool, BundleError> {
-            if self.pending_write.is_some() || self.pending_asr.is_some() {
-                return Err(BundleError::Unsettled);
-            }
-            if owner.project_id() != &self.project {
-                return Ok(false);
-            }
-            transcript
-                .validate(self.voice.duration_micros)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if !matches!(transcript, VoiceTranscript::Ready(_)) && !self.live_note_for_asr(owner)? {
-                return Ok(false);
-            }
-            let log = self
-                .voice
-                .playhead_log_ref
-                .as_ref()
-                .ok_or(BundleError::HistoryChanged)?
-                .clone();
-            let Some(transcript) = self
-                .job
-                .as_mut()
-                .and_then(|job| job.accept(key, current, transcript))
-            else {
-                return Ok(false);
-            };
-            if let VoiceTranscript::Ready(_) = &transcript {
-                let original = kinewright_media::voice_note::OriginalVoiceAsr {
-                    version: 1,
-                    job: key.clone(),
-                    anchor: self.anchor.clone(),
-                    playhead_log_sha256: log.sha256.clone(),
-                    model_sha256: kinewright_media::WHISPER_MODEL_SHA256.into(),
-                    transcript,
-                };
-                self.pending_asr = Some(PendingAsr::Unvalidated(Box::new(original)));
-                return self.publish_asr(owner, Some(envelope));
-            }
-            Ok(true)
-        }
-        fn live_note_for_asr(&self, owner: &ProjectBundle) -> Result<bool, BundleError> {
-            Ok(owner
-                .feedback_index()?
-                .notes
-                .get(&self.voice.note_id)
-                .is_some_and(|saved| {
-                    saved.audio_ref == self.voice.audio_ref
-                        && saved.chosen_transcript_revision == self.expected_chosen
-                        && saved.original_asr_ref.is_none()
-                }))
-        }
-        fn publish_asr(
-            &mut self,
-            owner: &mut ProjectBundle,
-            envelope: Option<&MetadataEnvelope>,
-        ) -> Result<bool, BundleError> {
-            if matches!(self.pending_asr, Some(PendingAsr::Unvalidated(_))) {
-                if !self.live_note_for_asr(owner)? {
-                    self.pending_asr = None;
-                    return Ok(false);
-                }
-                let Some(PendingAsr::Unvalidated(original)) = self.pending_asr.take() else {
-                    return Err(BundleError::HistoryBarrierInvariant);
-                };
-                self.pending_asr = Some(PendingAsr::Completion(original));
-            }
-            if let Some(PendingAsr::Completion(original)) = &self.pending_asr {
-                let log = self
-                    .voice
-                    .playhead_log_ref
-                    .as_ref()
-                    .ok_or(BundleError::HistoryChanged)?;
-                let asr = evidence(
-                    owner,
-                    &serde_json::to_vec(original)
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                    &[self.voice.audio_ref.clone(), log.clone()],
-                )?;
-                let reference = asr.reference.clone();
-                self.pending_asr = Some(PendingAsr::Sealed {
-                    reference,
-                    _pin: asr.into_pin(),
-                });
-            }
-            let Some(PendingAsr::Sealed { reference, .. }) = &self.pending_asr else {
-                return Ok(false);
-            };
-            let reference = reference.clone();
-            let (envelope, voice) = if let Some(pending) = &self.pending_write {
-                let MetadataChange::SaveVoice(voice) = &pending.update.change else {
-                    return Err(BundleError::HistoryChanged);
-                };
-                (pending.envelope.clone(), voice.clone())
-            } else {
-                let mut voice = owner
-                    .feedback_index()?
-                    .notes
-                    .get(&self.voice.note_id)
-                    .cloned()
-                    .ok_or(BundleError::HistoryChanged)?;
-                if voice.audio_ref != self.voice.audio_ref
-                    || voice.playhead_log_ref != self.voice.playhead_log_ref
-                    || voice.duration_micros != self.voice.duration_micros
-                    || voice
-                        .original_asr_ref
-                        .as_ref()
-                        .is_some_and(|saved| saved != &reference)
-                {
-                    return Err(BundleError::HistoryChanged);
-                }
-                if voice.original_asr_ref.as_ref() == Some(&reference) {
-                    self.voice = voice;
-                    self.pending_asr = None;
-                    return Ok(true);
-                }
-                voice.original_asr_ref = Some(reference);
-                let envelope = match envelope {
-                    Some(envelope) => envelope.clone(),
-                    None => MetadataEnvelope {
-                        id: kinewright_project::receipts::CommandId {
-                            issuer: owner.issue_metadata_issuer()?,
-                            sequence: 1,
-                        },
-                        project_id: self.project.clone(),
-                        target_branch: owner.manual_branch_id().clone(),
-                        owner_epoch: owner.store().owner_epoch(),
-                        expected_head: owner.manual_head().cloned(),
-                    },
-                };
-                (envelope, voice)
-            };
-            if let Err(error) = save_voice(owner, &envelope, &voice, &mut self.pending_write) {
-                if !matches!(
-                    error,
-                    BundleError::DurabilityUnknown
-                        | BundleError::DurabilityUnknownAt(_)
-                        | BundleError::Unsettled
-                ) && owner.publication_state()
-                    != kinewright_project::bundle::PublicationState::Unknown
-                {
-                    self.pending_write = None;
-                }
-                return Err(error);
-            }
-            self.voice = voice;
-            self.pending_asr = None;
-            Ok(true)
+            let accepted = self
+                .note
+                .accept_asr(owner, envelope, key, current, transcript)?;
+            self.refresh()?;
+            Ok(accepted)
         }
     }
     pub(crate) struct AnchoredRemark {
@@ -1996,7 +1681,9 @@ pub(crate) mod feedback_capture {
             },
         };
         use kinewright_project::{
-            bundle::LoadedBundle, c0_fixtures::build_c0_fixture_pair, receipts::CommandId,
+            bundle::LoadedBundle,
+            c0_fixtures::build_c0_fixture_pair,
+            receipts::{CommandId, ReceiptLookup, ReceiptResult},
             studio_records::*,
         };
         use std::path::Path;
@@ -2184,6 +1871,291 @@ pub(crate) mod feedback_capture {
                 .unwrap();
         }
         #[test]
+        fn s3_voice_fix2_any_handle_retries_refused_choice() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-choice-slot");
+            let (mut owner, anchor) = setup(root.root());
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let note = a.voice.note_id.clone();
+            let mut b = SavedAudio::reopen(&owner, &note).unwrap();
+            let chosen = evidence(&mut owner, b"chosen before refusal", &[]).unwrap();
+            let reference = chosen.reference.clone();
+            let stale = envelope(&mut owner);
+            let core = kinewright_core::Core::spawn(
+                (*owner
+                    .branch_history(owner.manual_branch_id())
+                    .unwrap()
+                    .document)
+                    .clone(),
+            )
+            .unwrap();
+            core.restore_history(
+                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
+            )
+            .unwrap();
+            move_for_asr(&mut owner, &core, 1);
+            assert!(matches!(
+                a.choose_transcript(&mut owner, &stale, reference.clone()),
+                Err(BundleError::HistoryChanged)
+            ));
+            drop(chosen);
+            drop(a);
+            owner.collect_after_ack().unwrap();
+            assert_eq!(
+                &*owner
+                    .store()
+                    .read_evidence(&reference)
+                    .expect("S3_VOICE_PENDING_CHOICE_PIN"),
+                b"chosen before refusal"
+            );
+            assert!(matches!(
+                b.start_job(&owner, 0),
+                Err(BundleError::Unsettled)
+            ));
+            assert!(
+                b.retry_pending(&mut owner)
+                    .expect("S3_VOICE_REFUSED_CHOICE_REPREPARED")
+            );
+            assert_eq!(b.voice.chosen_transcript_revision, Some(reference));
+        }
+        #[test]
+        fn s3_voice_fix2_owner_slot_blocks_competing_handle() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-owner-slot");
+            let (mut owner, anchor) = setup(root.root());
+            let mut limits = owner.store().limits().clone();
+            limits.owned_bytes = 16 << 20;
+            owner.restrict_limits_probe(limits).unwrap();
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let note = a.voice.note_id.clone();
+            let mut b = SavedAudio::reopen(&owner, &note).unwrap();
+            let key = a.start_job(&owner, 0).unwrap();
+            let (reference, bytes) = original_asr(&a, &key);
+            let stale = envelope(&mut owner);
+            let core = kinewright_core::Core::spawn(
+                (*owner
+                    .branch_history(owner.manual_branch_id())
+                    .unwrap()
+                    .document)
+                    .clone(),
+            )
+            .unwrap();
+            core.restore_history(
+                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
+            )
+            .unwrap();
+            move_for_asr(&mut owner, &core, 1);
+            let usage = owner.store().usage().unwrap();
+            let pressure = owner
+                .store()
+                .reserve_copy(
+                    owner.store().limits().owned_bytes + owner.store().limits().metadata_bytes
+                        - (usage.physical_bytes - usage.copy_bytes)
+                        - usage.reserved_bytes
+                        - 512,
+                )
+                .unwrap();
+            assert!(matches!(
+                a.accept_asr(&mut owner, &stale, &key, &key, asr()),
+                Err(BundleError::Capacity(_))
+            ));
+            assert!(
+                matches!(b.start_job(&owner, 1), Err(BundleError::Unsettled)),
+                "S3_VOICE_OWNER_SLOT_EXCLUDES_COMPETING_JOB"
+            );
+            let e = stale.clone();
+            assert!(matches!(
+                b.choose_transcript(&mut owner, &e, reference.clone()),
+                Err(BundleError::Unsettled)
+            ));
+            assert!(matches!(
+                b.accept_asr(&mut owner, &e, &key, &key, asr()),
+                Err(BundleError::Unsettled)
+            ));
+            drop(pressure);
+            assert!(
+                matches!(
+                    a.note.retry_asr_with_envelope_probe(&mut owner, &stale),
+                    Err(BundleError::HistoryChanged)
+                ),
+                "S3_VOICE_OWNER_SLOT_DEFINITE_REFUSAL"
+            );
+            assert!(matches!(
+                b.start_job(&owner, 1),
+                Err(BundleError::Unsettled)
+            ));
+            move_for_asr(&mut owner, &core, 2);
+            drop(a);
+            drop(b);
+            owner.collect_after_ack().unwrap();
+            assert_eq!(
+                &*owner
+                    .store()
+                    .read_evidence(&reference)
+                    .expect("S3_VOICE_OWNER_SLOT_PIN_WITHOUT_VIEWS"),
+                &bytes
+            );
+            let mut b = SavedAudio::reopen(&owner, &note).unwrap();
+            assert!(matches!(
+                b.start_job(&owner, 1),
+                Err(BundleError::Unsettled)
+            ));
+            let mut published = owner.feedback_index().unwrap().notes[&note].clone();
+            published.original_asr_ref = Some(reference.clone());
+            metadata(
+                &mut owner,
+                MetadataScope::Feedback,
+                MetadataChange::SaveVoice(published),
+            );
+            owner.collect_after_ack().unwrap();
+            assert!(matches!(
+                b.start_job(&owner, 1),
+                Err(BundleError::Unsettled)
+            ));
+            let generation = owner.root().unwrap().generation;
+            assert!(
+                b.retry_pending(&mut owner).unwrap(),
+                "S3_VOICE_OWNER_SLOT_ANY_VIEW_SETTLES"
+            );
+            assert_eq!(
+                owner.root().unwrap().generation,
+                generation,
+                "S3_VOICE_ALREADY_PUBLISHED_SETTLES_WITHOUT_REPUBLICATION"
+            );
+            owner.collect_after_ack().unwrap();
+            assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
+            assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
+            let chosen = evidence(&mut owner, b"edit after shared settlement", &[]).unwrap();
+            let e = envelope(&mut owner);
+            b.choose_transcript(&mut owner, &e, chosen.reference.clone())
+                .unwrap();
+            let chosen_ref = chosen.reference.clone();
+            drop(chosen);
+            drop(b);
+            drop(core);
+            drop(owner);
+            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            let b = SavedAudio::reopen(&owner, &note).unwrap();
+            assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
+            assert_eq!(b.voice.chosen_transcript_revision, Some(chosen_ref));
+            assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
+        }
+        #[test]
+        fn s3_voice_fix2_owner_drop_settles_slots() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-drop-settles");
+            let (mut owner, anchor) = setup(root.root());
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let key = a.start_job(&owner, 0).unwrap();
+            let (reference, bytes) = original_asr(&a, &key);
+            let stale = envelope(&mut owner);
+            let core = kinewright_core::Core::spawn(
+                (*owner
+                    .branch_history(owner.manual_branch_id())
+                    .unwrap()
+                    .document)
+                    .clone(),
+            )
+            .unwrap();
+            core.restore_history(
+                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
+            )
+            .unwrap();
+            move_for_asr(&mut owner, &core, 1);
+            assert!(matches!(
+                a.accept_asr(&mut owner, &stale, &key, &key, asr()),
+                Err(BundleError::HistoryChanged)
+            ));
+            drop(core);
+            drop(owner);
+            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            assert!(
+                matches!(a.start_job(&owner, 1), Err(BundleError::HistoryChanged)),
+                "S3_VOICE_VIEW_EXPIRES_WITH_OWNER"
+            );
+            assert_eq!(
+                &*owner
+                    .store()
+                    .read_evidence(&reference)
+                    .expect("S3_VOICE_OWNER_DROP_TRIES_SETTLEMENT"),
+                &bytes
+            );
+            assert!(
+                owner
+                    .feedback_index()
+                    .unwrap()
+                    .notes
+                    .values()
+                    .any(|voice| voice.original_asr_ref.as_ref() == Some(&reference))
+            );
+        }
+        #[test]
+        fn s3_voice_fix2_failed_teardown_reopens_transcribable() {
+            let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-drop-failure");
+            let (mut owner, anchor) = setup(root.root());
+            let mut limits = owner.store().limits().clone();
+            limits.owned_bytes = 16 << 20;
+            owner.restrict_limits_probe(limits).unwrap();
+            let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
+            let note = a.voice.note_id.clone();
+            let audio = a.voice.audio_ref.clone();
+            let log = a.voice.playhead_log_ref.clone().unwrap();
+            let audio_bytes = owner.store().read_evidence(&audio).unwrap().to_vec();
+            let log_bytes = owner.store().read_evidence(&log).unwrap().to_vec();
+            let key = a.start_job(&owner, 0).unwrap();
+            let e = envelope(&mut owner);
+            let usage = owner.store().usage().unwrap();
+            let pressure = owner
+                .store()
+                .reserve_copy(
+                    owner.store().limits().owned_bytes + owner.store().limits().metadata_bytes
+                        - (usage.physical_bytes - usage.copy_bytes)
+                        - usage.reserved_bytes
+                        - 512,
+                )
+                .unwrap();
+            assert!(matches!(
+                a.accept_asr(&mut owner, &e, &key, &key, asr()),
+                Err(BundleError::Capacity(_))
+            ));
+            assert!(matches!(
+                owner.settle_voice_notes(),
+                Err(BundleError::Capacity(_))
+            ));
+            drop(owner);
+            drop(pressure);
+            let mut owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            assert!(
+                matches!(a.start_job(&owner, 1), Err(BundleError::HistoryChanged)),
+                "S3_VOICE_FAILED_DROP_EXPIRES_OLD_VIEW"
+            );
+            let mut a = SavedAudio::reopen(&owner, &note).unwrap();
+            assert!(
+                a.voice.original_asr_ref.is_none(),
+                "S3_VOICE_FAILED_DROP_HAS_NO_DANGLING_ASR"
+            );
+            assert_eq!(&*owner.store().read_evidence(&audio).unwrap(), &audio_bytes);
+            assert_eq!(&*owner.store().read_evidence(&log).unwrap(), &log_bytes);
+            let key = a
+                .start_job(&owner, 1)
+                .expect("S3_VOICE_FAILED_DROP_IS_TRANSCRIBABLE");
+            let e = envelope(&mut owner);
+            assert!(a.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap());
+            let chosen = evidence(&mut owner, b"edit after failed teardown", &[]).unwrap();
+            let e = envelope(&mut owner);
+            a.choose_transcript(&mut owner, &e, chosen.reference.clone())
+                .expect("S3_VOICE_FAILED_DROP_IS_EDITABLE");
+            owner.collect_after_ack().unwrap();
+            assert_eq!(&*owner.store().read_evidence(&audio).unwrap(), &audio_bytes);
+            assert_eq!(&*owner.store().read_evidence(&log).unwrap(), &log_bytes);
+        }
+        #[test]
         fn s3_voice_fix1_stale_transcript_choice() {
             let root = TempDirectory::new_in(&workspace_target_dir(), "s3-stale-choice");
             let (mut owner, anchor) = setup(root.root());
@@ -2286,18 +2258,29 @@ pub(crate) mod feedback_capture {
                         evidence(&mut owner, b"edited after admission refusal", &[]).unwrap();
                     let reference = text.reference.clone();
                     let e = envelope(&mut owner);
-                    editor
-                        .choose_transcript(&mut owner, &e, reference.clone())
-                        .unwrap();
-                    Some(reference)
+                    assert!(matches!(
+                        editor.choose_transcript(&mut owner, &e, reference.clone()),
+                        Err(BundleError::Unsettled)
+                    ));
+                    Some(text)
                 };
                 assert!(
                     saved.retry_pending(&mut owner).unwrap(),
                     "S3_VOICE_ASR_COMPLETION_RETAINED"
                 );
-                assert_eq!(saved.voice.chosen_transcript_revision, chosen);
+                if let Some(chosen) = &chosen {
+                    let e = envelope(&mut owner);
+                    saved
+                        .choose_transcript(&mut owner, &e, chosen.reference.clone())
+                        .unwrap();
+                }
+                assert_eq!(
+                    saved.voice.chosen_transcript_revision,
+                    chosen.as_ref().map(|text| text.reference.clone())
+                );
                 assert_eq!(saved.voice.original_asr_ref, Some(reference.clone()));
                 assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
+                drop(chosen);
                 drop(saved);
                 drop(owner);
                 let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
@@ -2337,9 +2320,10 @@ pub(crate) mod feedback_capture {
             let mut editor = SavedAudio::reopen(&owner, &note).unwrap();
             let chosen = evidence(&mut owner, b"edited while ASR publication waited", &[]).unwrap();
             let e = envelope(&mut owner);
-            editor
-                .choose_transcript(&mut owner, &e, chosen.reference.clone())
-                .unwrap();
+            assert!(matches!(
+                editor.choose_transcript(&mut owner, &e, chosen.reference.clone()),
+                Err(BundleError::Unsettled)
+            ));
             owner.collect_after_ack().unwrap();
             assert_eq!(
                 &*owner
@@ -2352,6 +2336,10 @@ pub(crate) mod feedback_capture {
                 saved.retry_pending(&mut owner).unwrap(),
                 "S3_VOICE_DEFINITE_REFUSAL_REBASES"
             );
+            let e = envelope(&mut owner);
+            saved
+                .choose_transcript(&mut owner, &e, chosen.reference.clone())
+                .unwrap();
             assert_eq!(
                 saved.voice.chosen_transcript_revision,
                 Some(chosen.reference.clone())
@@ -2384,19 +2372,21 @@ pub(crate) mod feedback_capture {
             let generation = owner.root().unwrap().generation;
             assert!(saved.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap());
             let accepted = saved.voice.clone();
-            let reference = accepted.original_asr_ref.clone().unwrap();
             saved.voice = before;
-            saved.pending_asr = Some(PendingAsr::Sealed {
-                reference: reference.clone(),
-                _pin: owner.store().pin(&[reference]).unwrap(),
-            });
-            saved.pending_write = Some(PendingVoiceWrite {
-                envelope: e.clone(),
-                update: MetadataUpdate {
-                    expected_root_generation: generation,
-                    change: MetadataChange::SaveVoice(accepted.clone()),
-                },
-            });
+            saved
+                .note
+                .retain_reply_probe(
+                    &owner,
+                    PendingVoiceWrite {
+                        envelope: e.clone(),
+                        update: MetadataUpdate {
+                            expected_root_generation: generation,
+                            change: MetadataChange::SaveVoice(accepted.clone()),
+                        },
+                    },
+                    true,
+                )
+                .unwrap();
             let core = kinewright_core::Core::spawn(
                 (*owner
                     .branch_history(owner.manual_branch_id())
@@ -2412,14 +2402,16 @@ pub(crate) mod feedback_capture {
             move_for_asr(&mut owner, &core, 1);
             assert_ne!(e.expected_head.as_ref(), owner.manual_head());
             let before_retry = owner.root().unwrap().generation;
-            assert!(saved.retry_pending(&mut owner).unwrap());
+            let mut other = SavedAudio::reopen(&owner, &saved.voice.note_id).unwrap();
+            assert!(other.retry_pending(&mut owner).unwrap());
+            assert!(!saved.retry_pending(&mut owner).unwrap());
             assert_eq!(
                 owner.root().unwrap().generation,
                 before_retry,
                 "S3_VOICE_UNKNOWN_REPLAYS_WITHOUT_NEW_PUBLICATION"
             );
             assert_eq!(saved.voice, accepted);
-            assert!(saved.pending_asr.is_none());
+            assert!(!saved.retry_pending(&mut owner).unwrap());
         }
         #[test]
         fn s3_voice_fix1_incomplete_capture_is_retained() {
@@ -2584,13 +2576,20 @@ pub(crate) mod feedback_capture {
             let original_generation = owner.root().unwrap().generation;
             assert!(saved.accept_asr(&mut owner, &e, &key, &key, asr()).unwrap());
             let accepted_voice = saved.voice.clone();
-            saved.pending_write = Some(PendingVoiceWrite {
-                envelope: e,
-                update: MetadataUpdate {
-                    expected_root_generation: original_generation,
-                    change: MetadataChange::SaveVoice(accepted_voice.clone()),
-                },
-            });
+            saved
+                .note
+                .retain_reply_probe(
+                    &owner,
+                    PendingVoiceWrite {
+                        envelope: e,
+                        update: MetadataUpdate {
+                            expected_root_generation: original_generation,
+                            change: MetadataChange::SaveVoice(accepted_voice.clone()),
+                        },
+                    },
+                    false,
+                )
+                .unwrap();
             saved.voice = original_voice;
             assert!(matches!(
                 saved.start_job(&owner, 2),
