@@ -51,6 +51,13 @@ pub(crate) enum Icon {
     Undo,
     Unlock,
     Waveform,
+    // PO0 Studio plate and composer glyphs (JA-1 S3).
+    ArrowUp,
+    ChevronDown,
+    Draw,
+    Mic,
+    Neutral,
+    Point,
 }
 
 impl Icon {
@@ -90,6 +97,12 @@ impl Icon {
         Self::Undo,
         Self::Unlock,
         Self::Waveform,
+        Self::ArrowUp,
+        Self::ChevronDown,
+        Self::Draw,
+        Self::Mic,
+        Self::Neutral,
+        Self::Point,
     ];
 }
 
@@ -127,6 +140,12 @@ impl Icon {
             Self::Undo => "bytes://kinewright/icons/undo.svg",
             Self::Unlock => "bytes://kinewright/icons/unlock.svg",
             Self::Waveform => "bytes://kinewright/icons/waveform.svg",
+            Self::ArrowUp => "bytes://kinewright/icons/arrow-up.svg",
+            Self::ChevronDown => "bytes://kinewright/icons/chevron-down.svg",
+            Self::Draw => "bytes://kinewright/icons/draw.svg",
+            Self::Mic => "bytes://kinewright/icons/mic.svg",
+            Self::Neutral => "bytes://kinewright/icons/neutral.svg",
+            Self::Point => "bytes://kinewright/icons/point.svg",
         }
     }
 
@@ -163,6 +182,12 @@ impl Icon {
             Self::Undo => include_bytes!("../assets/icons/undo.svg"),
             Self::Unlock => include_bytes!("../assets/icons/unlock.svg"),
             Self::Waveform => include_bytes!("../assets/icons/waveform.svg"),
+            Self::ArrowUp => include_bytes!("../assets/icons/arrow-up.svg"),
+            Self::ChevronDown => include_bytes!("../assets/icons/chevron-down.svg"),
+            Self::Draw => include_bytes!("../assets/icons/draw.svg"),
+            Self::Mic => include_bytes!("../assets/icons/mic.svg"),
+            Self::Neutral => include_bytes!("../assets/icons/neutral.svg"),
+            Self::Point => include_bytes!("../assets/icons/point.svg"),
         }
     }
 
