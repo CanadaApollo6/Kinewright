@@ -1488,7 +1488,7 @@ impl Probe {
             "motion_repaints_after_settle":self.post_settle_repaints,"repaint_windows_ms":distribution(&self.repaint_windows),
             "downsample_worker_ms":distribution(&self.light.worker_ms),"downsample_updates":self.light.worker_ms.len(),
             "sampled_frames":self.light.sampled_frames,"thumbnail_decode_ms":distribution(&self.tile_ms),"strip_fill_ms":distribution(&self.fill_ms),
-            "pf1_g1_bad_percent":g1,"pf1_window_bad_percent":if self.window_due==0 {None}else{Some(self.window_bad as f64/self.window_due as f64*100.0)},"pf1_window_due":self.window_due,"pf1_window_present_ms":distribution(&self.window_present_ms),"pf1_due_frames":stats.due_frames,"pf1_late":stats.late,"pf1_dropped":stats.dropped,"pf1_max_held_ms":stats.max_held_ms,
+            "pf1_g1_bad_percent":g1,"pf1_window_bad_percent":if self.window_due==0 {None}else{Some(self.window_bad as f64/self.window_due as f64*100.0)},"pf1_window_due":self.window_due,"pf1_window_present_ms":distribution(&self.window_present_ms),"pf1_due_frames":stats.due_frames,"pf1_on_time":stats.on_time,"pf1_acks_unmatched":stats.acks_unmatched,"pf1_late":stats.late,"pf1_dropped":stats.dropped,"pf1_max_held_ms":stats.max_held_ms,
             "atlas_bytes":(usize::from(self.strip.is_some())+self.version_strips.iter().flatten().count())*144*80*4*16*2,"held_frame_peak_bytes":self.held_peak,"light_texture_bytes":self.light.bytes(),
             "dissolve_start_delay_frames":distribution(&self.dissolve_delays),"tracked_pin_samples":self.pin.len(),
             "surface_capabilities":SURFACE.get(),"transition_completions":self.completions});

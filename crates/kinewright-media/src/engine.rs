@@ -2435,19 +2435,7 @@ impl Worker {
                 self.lane.set_wakeup(Arc::clone(&wakeup));
                 self.event_wakeup = Some(wakeup);
             }
-            Control::Po0Version(doc, issued) => {
-                self.take_requests_before(issued);
-                self.apply_control(issued);
-                self.document = doc;
-                self.generation += 1;
-                self.rebind_lut_library();
-                let at = self.clock.position();
-                if self.playing {
-                    self.post(JobKind::Playback { from: at }, issued.stamp);
-                } else {
-                    self.post_paused(at, issued.stamp);
-                }
-            }
+            Control::Po0Version(doc, issued) => self.po0_version(doc, issued),
             Control::Po0ClearThumbnails { reply, cancel } => self.push_agent(AgentJob {
                 work: AgentWork::Po0ClearThumbnails { reply },
                 cancel,
@@ -2518,6 +2506,34 @@ impl Worker {
                 let work = AgentWork::CacheStats { clear, reply };
                 self.push_agent(AgentJob { work, cancel });
             }
+        }
+    }
+
+    fn po0_version(&mut self, doc: Arc<Document>, issued: Issued) {
+        self.take_requests_before(issued);
+        self.apply_control(issued);
+        if self.playing
+            && let Some(at) = self.applied_position()
+        {
+            let now = Instant::now();
+            let mut counters = self.lane.settle();
+            counters.end(now, Some(at.0));
+            counters.begin(
+                now,
+                at.0,
+                crate::preview::frame_ms(doc.fps),
+                doc.duration.0,
+                issued.stamp.epoch,
+            );
+        }
+        self.document = doc;
+        self.generation += 1;
+        self.rebind_lut_library();
+        let at = self.clock.position();
+        if self.playing {
+            self.post(JobKind::Playback { from: at }, issued.stamp);
+        } else {
+            self.post_paused(at, issued.stamp);
         }
     }
 
@@ -4374,6 +4390,47 @@ mod tests {
         (worker, events_rx)
     }
 
+    #[test]
+    fn po0_version_switch_keeps_audio_and_settles_both_paint_epochs() {
+        let (mut worker, audio, _events) =
+            stepped_worker(Rational::new(30, 1).unwrap(), TimeCode(1_200));
+        assert_eq!(play_out(&mut worker, &audio, 5), 5);
+        let outgoing = worker.handled;
+        let at = worker.clock.position();
+        let samples = worker.clock.position_samples.load(Ordering::Acquire);
+        let before = worker.lane.counters().stats;
+        let version = Arc::clone(&worker.document);
+        let issued = worker.lock_coalesced().control();
+        worker.apply(Control::Po0Version(version, issued));
+
+        assert!(worker.playing);
+        assert_eq!(worker.clock.position(), at);
+        assert_eq!(
+            worker.clock.position_samples.load(Ordering::Acquire),
+            samples,
+            "a video-only switch must not re-cue the audio"
+        );
+        acknowledge(&worker.lane, outgoing, at, Instant::now(), true);
+        acknowledge(&worker.lane, issued.stamp, at, Instant::now(), true);
+        {
+            let mut counters = worker.lane.settle();
+            counters.sample(Instant::now(), Some(at.0));
+            assert_eq!(
+                counters.stats.late,
+                before.late + 2,
+                "both the outgoing paint and the first incoming paint must settle"
+            );
+            assert_eq!(counters.stats.acks_unmatched, before.acks_unmatched);
+            assert_eq!(counters.stats.due_frames, before.due_frames + 1);
+        }
+        assert_eq!(play_out(&mut worker, &audio, 2), 2);
+        assert_eq!(
+            worker.clock.position_samples.load(Ordering::Acquire),
+            samples + 2 * u64::try_from(CALLBACK_FRAMES).unwrap()
+        );
+        assert!(worker.clock.position() > at);
+    }
+
     /// E-2 / H-7: the preview thread starts with the first job; a spawn
     /// failure is new, so it is prefixed, and the job reports it.
     #[test]
@@ -6101,6 +6158,23 @@ mod tests {
             .texture;
         assert_eq!((frame.width, frame.height), (720, 1_280));
         assert_eq!(frame.rgba.len(), 720 * 1_280 * 4);
+    }
+
+    #[test]
+    fn po0_unset_keeps_the_normal_1080p_source_preview_cap() {
+        assert!(
+            std::env::var_os("KINEWRIGHT_MOTION_PROBE").is_none(),
+            "run the normal-preview regression with the probe flag unset"
+        );
+        let source = (1_920, 1_080);
+        let normal_cap = monitor_max_width(source);
+        assert_eq!(normal_cap, 1_280);
+        for max_width in [normal_cap, 1_920] {
+            assert_eq!(
+                RenderScale::Proxy { max_width }.output_resolution(source),
+                (1_280, 720)
+            );
+        }
     }
 
     /// AU4 §7 item A15 (§4.4 rule 89): the defaulted `Playback::update_audio`
