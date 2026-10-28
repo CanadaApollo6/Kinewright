@@ -2133,6 +2133,8 @@ impl KinewrightApp {
                 .move_pending_to(&mut remaining[0].recovery);
         }
         self.projects.remove(index);
+        // Preview cleanup during rebind reads the focused project's Studio state.
+        self.focused_project = next_focus;
         self.media_statuses.remove_session(id);
         if self
             .pending_source_edit

@@ -1912,6 +1912,36 @@ impl VideoDecoder {
         threads: usize,
         stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Self, MediaError> {
+        let managed = Self::admit_managed_source(path, description, assumption)?;
+        Self::open_scaled_internal(
+            path,
+            fps,
+            max_width,
+            Some(managed),
+            threads.max(1),
+            stop,
+            None,
+        )
+    }
+
+    pub(crate) fn open_certified(
+        path: &Path,
+        fps: Rational,
+        max_width: Option<u32>,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+        source: &crate::owned_io::CertifiedSource,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Self, MediaError> {
+        let managed = Self::admit_managed_source(path, description, assumption)?;
+        Self::open_scaled_internal(path, fps, max_width, Some(managed), 1, stop, Some(source))
+    }
+
+    fn admit_managed_source(
+        path: &Path,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+    ) -> Result<ManagedSource, MediaError> {
         // IN1 §4.2 rule 8: the typed refusal leaves the decoder intact. The
         // contextual sentence this site used to build by hand is rebuilt by
         // `SourceColorRefusal`'s `#[error(...)]` template once
@@ -1928,22 +1958,7 @@ impl VideoDecoder {
                 format!("managed source depth rejected: {error}"),
             )
         })?;
-        let managed = Some(source);
-        Self::open_scaled_internal(path, fps, max_width, managed, threads.max(1), stop, None)
-    }
-
-    pub(crate) fn open_certified(
-        path: &Path,
-        fps: Rational,
-        max_width: Option<u32>,
-        description: &ColorDescription,
-        assumption: Option<ColorSourceProfileAssumption>,
-        source: &crate::owned_io::CertifiedSource,
-        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Result<Self, MediaError> {
-        let managed = ManagedSource::with_conversion(description, assumption)
-            .map_err(MediaError::SourceColor)?;
-        Self::open_scaled_internal(path, fps, max_width, Some(managed), 1, stop, Some(source))
+        Ok(source)
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]

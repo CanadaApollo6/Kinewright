@@ -64,7 +64,11 @@ fn studio_owned_colour() -> StudioOwnedColour {
     let asset = owned_asset.id;
     app.projects[0].ja1 = Some(attachment);
     in1_poll_production_until(&mut app, |app| {
-        app.projects[0].document.asset(asset).is_some()
+        let project = &app.projects[0];
+        project.document.asset(asset).is_some()
+            && project.ja1_job.is_none()
+            && project.ja1.is_some()
+            && project.studio.manual_inputs.is_some()
     });
     let saved = core.export_history().unwrap();
     let mut observation = IncidentObservation::from_media_error(
