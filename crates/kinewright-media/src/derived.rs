@@ -89,7 +89,7 @@ pub struct DerivedAnalysisConfig {
 }
 
 pub(crate) struct DerivedAnalysisService {
-    jobs: Sender<Job>,
+    jobs: Sender<crate::locator::LocatorJob<Job>>,
     silence_states: StatusReporter<SilenceStatus>,
     scene_states: StatusReporter<SceneStatus>,
     beat_states: StatusReporter<BeatStatus>,
@@ -123,7 +123,7 @@ impl DerivedAnalysisService {
             "kinewright-derived-analysis",
             "derived analysis",
             jobs_rx,
-            move |job| worker.handle(job),
+            move |job| worker.handle_scoped(job),
         )?;
         Ok(Self {
             jobs,
@@ -138,7 +138,11 @@ impl DerivedAnalysisService {
         })
     }
 
-    pub(crate) fn request_silences(&self, asset: MediaAsset) {
+    pub(crate) fn request_silences(
+        &self,
+        asset: MediaAsset,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.silence_states
                 .update(&asset.path, SilenceStatus::NoAudio);
@@ -165,10 +169,9 @@ impl DerivedAnalysisService {
         let path = asset.path.clone();
         if self
             .jobs
-            .send(Job::Silences(
-                asset,
-                self.config.silence,
-                cancellation.clone(),
+            .send(crate::locator::LocatorJob::new(
+                grant,
+                Job::Silences(asset, self.config.silence, cancellation.clone()),
             ))
             .is_err()
         {
@@ -180,7 +183,11 @@ impl DerivedAnalysisService {
         }
     }
 
-    pub(crate) fn request_scenes(&self, asset: MediaAsset) {
+    pub(crate) fn request_scenes(
+        &self,
+        asset: MediaAsset,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) {
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
             self.scene_states.update(&asset.path, SceneStatus::NoVideo);
             return;
@@ -205,7 +212,10 @@ impl DerivedAnalysisService {
         let path = asset.path.clone();
         if self
             .jobs
-            .send(Job::Scenes(asset, self.config.scenes, cancellation.clone()))
+            .send(crate::locator::LocatorJob::new(
+                grant,
+                Job::Scenes(asset, self.config.scenes, cancellation.clone()),
+            ))
             .is_err()
         {
             self.scene_cancellations.finish(&path, &cancellation);
@@ -225,7 +235,11 @@ impl DerivedAnalysisService {
         self.scene_states.get_or(path, SceneStatus::NotRequested)
     }
 
-    pub(crate) fn request_beats(&self, asset: MediaAsset) {
+    pub(crate) fn request_beats(
+        &self,
+        asset: MediaAsset,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.beat_states.update(&asset.path, BeatStatus::NoAudio);
             return;
@@ -250,7 +264,10 @@ impl DerivedAnalysisService {
         let path = asset.path.clone();
         if self
             .jobs
-            .send(Job::Beats(asset, self.config.beats, cancellation.clone()))
+            .send(crate::locator::LocatorJob::new(
+                grant,
+                Job::Beats(asset, self.config.beats, cancellation.clone()),
+            ))
             .is_err()
         {
             self.beat_cancellations.finish(&path, &cancellation);
@@ -383,6 +400,36 @@ impl DerivedAnalysisWorker {
             beat_cancellations,
             hashes: ContentHashes,
         }
+    }
+
+    fn handle_scoped(&mut self, job: crate::locator::LocatorJob<Job>) -> bool {
+        job.run(self, Self::handle, |worker, job, error| {
+            match job {
+                Job::Silences(asset, _, cancellation) => {
+                    worker
+                        .silence_states
+                        .update(&asset.path, SilenceStatus::Failed(error.to_string()));
+                    worker
+                        .silence_cancellations
+                        .finish(&asset.path, &cancellation);
+                }
+                Job::Scenes(asset, _, cancellation) => {
+                    worker
+                        .scene_states
+                        .update(&asset.path, SceneStatus::Failed(error.to_string()));
+                    worker
+                        .scene_cancellations
+                        .finish(&asset.path, &cancellation);
+                }
+                Job::Beats(asset, _, cancellation) => {
+                    worker
+                        .beat_states
+                        .update(&asset.path, BeatStatus::Failed(error.to_string()));
+                    worker.beat_cancellations.finish(&asset.path, &cancellation);
+                }
+            }
+            true
+        })
     }
 
     fn handle(&mut self, job: Job) -> bool {

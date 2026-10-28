@@ -38,7 +38,7 @@ pub const WHISPER_MODEL_SHA256: &str =
 pub const WHISPER_MODEL_LICENSE: &str = "MIT";
 
 pub(crate) struct TranscriptService {
-    jobs: Sender<TranscriptJob>,
+    jobs: Sender<crate::locator::LocatorJob<TranscriptJob>>,
     states: StatusReporter<TranscriptStatus>,
     cancellations: CancellationRegistry,
     root: PathBuf,
@@ -57,9 +57,24 @@ impl TranscriptService {
         let cancellations = CancellationRegistry::default();
         let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
         let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
-        spawn_worker("kinewright-transcript", "transcript", jobs_rx, move |job| {
-            worker.handle(&job)
-        })?;
+        spawn_worker(
+            "kinewright-transcript",
+            "transcript",
+            jobs_rx,
+            move |job: crate::locator::LocatorJob<TranscriptJob>| {
+                job.run(
+                    &mut worker,
+                    |worker, job| worker.handle(&job),
+                    |worker, job, error| {
+                        worker.update(&job.asset.path, TranscriptStatus::Failed(error.to_string()));
+                        worker
+                            .cancellations
+                            .finish(&job.asset.path, &job.cancellation);
+                        true
+                    },
+                )
+            },
+        )?;
         Ok(Self {
             jobs,
             states,
@@ -68,7 +83,12 @@ impl TranscriptService {
         })
     }
 
-    pub(crate) fn request(&self, asset: MediaAsset, language: Option<String>) {
+    pub(crate) fn request(
+        &self,
+        asset: MediaAsset,
+        language: Option<String>,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.update(&asset.path, TranscriptStatus::NoSpeech);
             return;
@@ -94,11 +114,14 @@ impl TranscriptService {
         let path = asset.path.clone();
         if self
             .jobs
-            .send(TranscriptJob {
-                asset,
-                language,
-                cancellation: cancellation.clone(),
-            })
+            .send(crate::locator::LocatorJob::new(
+                grant,
+                TranscriptJob {
+                    asset,
+                    language,
+                    cancellation: cancellation.clone(),
+                },
+            ))
             .is_err()
         {
             self.cancellations.finish(&path, &cancellation);

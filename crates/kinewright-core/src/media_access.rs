@@ -1,23 +1,154 @@
 //! Authority to reopen locators belongs to a legacy project source, not a Document.
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 /// A revocable grant issued by a source that has no owned Studio envelope.
 #[derive(Clone, Debug)]
-pub struct LegacyMediaGrant(Arc<AtomicBool>);
+pub struct LegacyMediaGrant(Arc<LegacyMediaState>);
+
+#[derive(Debug, Default)]
+struct LegacyMediaState {
+    revoked: AtomicBool,
+    active: Mutex<usize>,
+    #[cfg(feature = "test-util")]
+    hold: Mutex<Option<Arc<WorkHoldState>>>,
+    #[cfg(feature = "test-util")]
+    opens: std::sync::atomic::AtomicUsize,
+}
+
+/// An active locator operation. Activation waits for these leases to drain.
+#[derive(Debug)]
+pub struct LegacyMediaWork(LegacyMediaGrant);
+
+impl Drop for LegacyMediaWork {
+    fn drop(&mut self) {
+        *self
+            .0
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+    }
+}
 
 impl LegacyMediaGrant {
     /// Refuse a request whose source has since become owned.
     /// # Errors
     /// Returns the named media-admission refusal after revocation.
     pub fn check(&self) -> Result<(), crate::MediaError> {
-        if self.0.load(Ordering::Acquire) {
+        if self.0.revoked.load(Ordering::Acquire) {
             Err(crate::MediaError::MediaAdmissionRequired)
         } else {
             Ok(())
         }
+    }
+    /// Start work atomically with respect to revocation.
+    /// # Panics
+    /// In test-util builds, panics if a fixture poisons its barrier.
+    /// # Errors
+    /// Returns the named admission refusal if the source was revoked.
+    pub fn begin(&self) -> Result<LegacyMediaWork, crate::MediaError> {
+        #[cfg(feature = "test-util")]
+        {
+            let hold = self.0.hold.lock().unwrap().clone();
+            if let Some(hold) = hold {
+                let mut state = hold.state.lock().unwrap();
+                state.0 += 1;
+                hold.changed.notify_all();
+                while !state.1 {
+                    state = hold.changed.wait(state).unwrap();
+                }
+            }
+        }
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.check()?;
+        *active += 1;
+        Ok(LegacyMediaWork(self.clone()))
+    }
+
+    /// True when no operation can still be opening or reading a locator.
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        *self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == 0
+    }
+    /// Native locator-open count for retained-authority witnesses.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn locator_opens(&self) -> usize {
+        self.0.opens.load(Ordering::Acquire)
+    }
+    /// Record an authorized native locator open in a test build.
+    #[cfg(feature = "test-util")]
+    pub fn record_locator_open(&self) {
+        self.0.opens.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Pause worker admission for a deterministic queued-work witness.
+    /// # Panics
+    /// Panics if a fixture poisons its barrier.
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn hold_work(&self) -> LegacyMediaWorkHold {
+        let state = Arc::new(WorkHoldState::default());
+        *self.0.hold.lock().unwrap() = Some(Arc::clone(&state));
+        LegacyMediaWorkHold {
+            state,
+            grant: self.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "test-util")]
+#[derive(Debug, Default)]
+struct WorkHoldState {
+    state: Mutex<(usize, bool)>,
+    changed: std::sync::Condvar,
+}
+
+/// A test barrier that releases every waiting worker on drop.
+#[cfg(feature = "test-util")]
+pub struct LegacyMediaWorkHold {
+    state: Arc<WorkHoldState>,
+    grant: LegacyMediaGrant,
+}
+#[cfg(feature = "test-util")]
+impl LegacyMediaWorkHold {
+    /// Wait for the named number of worker threads to reach admission.
+    /// # Panics
+    /// Panics if workers do not arrive within thirty seconds.
+    pub fn wait(&self, workers: usize) {
+        let (state, timeout) = self
+            .state
+            .changed
+            .wait_timeout_while(
+                self.state.state.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |state| state.0 < workers,
+            )
+            .unwrap();
+        assert!(
+            !timeout.timed_out() && state.0 >= workers,
+            "locator workers reached barrier"
+        );
+    }
+}
+#[cfg(feature = "test-util")]
+impl Drop for LegacyMediaWorkHold {
+    fn drop(&mut self) {
+        *self.grant.0.hold.lock().unwrap() = None;
+        self.state.state.lock().unwrap().1 = true;
+        self.state.changed.notify_all();
     }
 }
 
@@ -34,7 +165,7 @@ impl MediaSourceOrigin {
     pub fn new_project() -> Self {
         Self {
             owned: false,
-            legacy: Some(LegacyMediaGrant(Arc::new(AtomicBool::new(false)))),
+            legacy: Some(LegacyMediaGrant(Arc::default())),
         }
     }
 
@@ -70,7 +201,12 @@ impl MediaSourceOrigin {
     /// Revoke copies already handed to background work before activation.
     pub fn revoke_legacy_media(&self) {
         if let Some(grant) = &self.legacy {
-            grant.0.store(true, Ordering::Release);
+            let _active = grant
+                .0
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            grant.0.revoked.store(true, Ordering::Release);
         }
     }
 }

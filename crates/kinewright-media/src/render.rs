@@ -357,10 +357,11 @@ impl SourceSpec {
                 stop,
             );
         }
-        self.legacy_media
-            .as_ref()
-            .ok_or(MediaError::MediaAdmissionRequired)?
-            .check()?;
+        let _access = crate::locator::LocatorAccess::enter(
+            self.legacy_media
+                .as_ref()
+                .ok_or(MediaError::MediaAdmissionRequired)?,
+        )?;
         open_managed(
             self.asset,
             path,
@@ -1403,12 +1404,15 @@ impl FrameRenderer {
         fingerprint: &MediaSourceFingerprint,
         description: &ColorDescription,
     ) -> Result<WorkingFrame, MediaError> {
-        if self.inputs.is_none() {
-            self.legacy_media
-                .as_ref()
-                .ok_or(MediaError::MediaAdmissionRequired)?
-                .check()?;
-        }
+        let _access = if self.inputs.is_none() {
+            Some(crate::locator::LocatorAccess::enter(
+                self.legacy_media
+                    .as_ref()
+                    .ok_or(MediaError::MediaAdmissionRequired)?,
+            )?)
+        } else {
+            None
+        };
         let assumption = d65_assumption(description);
         let key = VideoSourceKey::new(
             asset,

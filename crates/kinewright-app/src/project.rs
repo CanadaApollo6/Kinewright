@@ -120,6 +120,10 @@ pub(crate) struct ProjectSession {
     media_backend: crate::media_access::MediaBackend,
     pub(crate) studio: crate::studio::Studio,
     pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
+    pub(crate) ja1_activation: Option<(
+        kinewright_core::LegacyMediaGrant,
+        crate::ja1_attachment::Ja1Attachment,
+    )>,
     pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
     pub(crate) retired_agent_threads: BTreeSet<u64>,
     /// The project-relative LUT store, derived from `project_path` at runtime
@@ -427,6 +431,7 @@ impl ProjectSession {
             media_backend,
             studio: crate::studio::Studio::default(),
             ja1: None,
+            ja1_activation: None,
             ja1_job: None,
             retired_agent_threads: BTreeSet::new(),
             lut_store,
@@ -538,7 +543,7 @@ impl ProjectSession {
     /// Whether the project differs from the last save: the live document
     /// differs structurally, or the investigator mutes changed since the save.
     pub(crate) fn is_dirty(&self) -> bool {
-        if self.ja1_job.is_some() {
+        if self.ja1_job.is_some() || self.ja1_activation.is_some() {
             return true;
         }
         if let Some(ja1) = &self.ja1 {
@@ -746,7 +751,7 @@ impl ProjectSession {
         &self,
         command: kinewright_core::Command,
     ) -> Result<(), kinewright_core::CoreDisconnected> {
-        if self.studio.selection.is_some() {
+        if self.ja1_activation.is_some() || self.studio.selection.is_some() {
             return Err(kinewright_core::CoreDisconnected);
         }
         if let Some(attachment) = &self.ja1 {
@@ -756,7 +761,8 @@ impl ProjectSession {
         }
     }
     pub(crate) fn ja1_read_only(&self) -> bool {
-        self.studio.selection.is_some()
+        self.ja1_activation.is_some()
+            || self.studio.selection.is_some()
             || self.ja1_job.is_some()
             || self
                 .ja1

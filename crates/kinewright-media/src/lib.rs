@@ -17,6 +17,7 @@ mod dsp;
 mod engine;
 mod export;
 mod frame;
+mod locator;
 mod loudness;
 mod lut;
 mod lut_store;

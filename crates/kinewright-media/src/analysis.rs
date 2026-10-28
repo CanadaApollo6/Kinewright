@@ -33,7 +33,7 @@ const MAX_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAGIC: &[u8; 8] = b"ORTH0001";
 
 pub(crate) struct VisualAssetService {
-    jobs: Sender<Job>,
+    jobs: Sender<crate::locator::LocatorJob<Job>>,
     results: Receiver<VisualAssetResult>,
     in_flight: Arc<Mutex<HashSet<JobKey>>>,
     root: PathBuf,
@@ -51,7 +51,7 @@ impl VisualAssetService {
             "kinewright-visual-assets",
             "visual asset",
             jobs_rx,
-            move |job| worker.handle(job),
+            move |job| worker.handle_scoped(job),
         )?;
         Ok(Self {
             jobs,
@@ -61,14 +61,22 @@ impl VisualAssetService {
         })
     }
 
-    pub(crate) fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
+    pub(crate) fn request_waveform(
+        &self,
+        asset: MediaAsset,
+        request_generation: u64,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) -> bool {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             return false;
         }
-        self.request(Job::Waveform {
-            asset,
-            request_generation,
-        })
+        self.request(
+            grant,
+            Job::Waveform {
+                asset,
+                request_generation,
+            },
+        )
     }
 
     pub(crate) fn request_thumbnail(
@@ -77,6 +85,7 @@ impl VisualAssetService {
         source_at: TimeCode,
         max_width: u32,
         request_generation: u64,
+        grant: kinewright_core::LegacyMediaGrant,
     ) -> bool {
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
             return false;
@@ -86,12 +95,15 @@ impl VisualAssetService {
                 .0
                 .clamp(0, asset.duration.0.saturating_sub(1).max(0)),
         );
-        self.request(Job::Thumbnail {
-            asset,
-            source_at,
-            max_width: max_width.clamp(1, 512),
-            request_generation,
-        })
+        self.request(
+            grant,
+            Job::Thumbnail {
+                asset,
+                source_at,
+                max_width: max_width.clamp(1, 512),
+                request_generation,
+            },
+        )
     }
 
     pub(crate) fn results(&self) -> Receiver<VisualAssetResult> {
@@ -106,7 +118,7 @@ impl VisualAssetService {
         clear_cache_root(&self.root)
     }
 
-    fn request(&self, job: Job) -> bool {
+    fn request(&self, grant: kinewright_core::LegacyMediaGrant, job: Job) -> bool {
         let key = job.key();
         let inserted = self
             .in_flight
@@ -115,7 +127,10 @@ impl VisualAssetService {
         if !inserted {
             return true;
         }
-        if let Ok(()) = self.jobs.try_send(job) {
+        if let Ok(()) = self
+            .jobs
+            .try_send(crate::locator::LocatorJob::new(grant, job))
+        {
             true
         } else {
             if let Ok(mut in_flight) = self.in_flight.lock() {
@@ -206,9 +221,44 @@ impl VisualAssetWorker {
         }
     }
 
-    fn handle(&mut self, job: Job) -> bool {
-        let key = job.key();
-        let result = self.process(job);
+    fn handle_scoped(&mut self, job: crate::locator::LocatorJob<Job>) -> bool {
+        // Release the lease before a bounded result send can block on the UI.
+        let (key, result) = job.run(
+            self,
+            |worker, job| (job.key(), worker.process(job)),
+            |_, job, error| {
+                let key = job.key();
+                let result = match job {
+                    Job::Waveform {
+                        asset,
+                        request_generation,
+                    } => VisualAssetResult::Failed {
+                        asset: asset.id,
+                        path: asset.path,
+                        request_generation,
+                        request: VisualRequestKind::Waveform,
+                        message: error.to_string(),
+                    },
+                    Job::Thumbnail {
+                        asset,
+                        source_at,
+                        max_width,
+                        request_generation,
+                    } => VisualAssetResult::Failed {
+                        asset: asset.id,
+                        path: asset.path,
+                        request_generation,
+                        request: VisualRequestKind::Thumbnail(ThumbnailKey {
+                            asset: asset.id,
+                            source_at,
+                            max_width,
+                        }),
+                        message: error.to_string(),
+                    },
+                };
+                (key, result)
+            },
+        );
         if let Ok(mut in_flight) = self.in_flight.lock() {
             in_flight.remove(&key);
         }
@@ -507,14 +557,28 @@ mod tests {
             root: PathBuf::from("visual-assets/v1"),
         };
 
-        assert!(service.request(Job::Waveform {
-            asset: asset(1),
-            request_generation: 1,
-        }));
-        assert!(!service.request(Job::Waveform {
-            asset: asset(2),
-            request_generation: 1,
-        }));
+        assert!(
+            service.request(
+                kinewright_core::MediaSourceOrigin::new_project()
+                    .legacy_media()
+                    .unwrap(),
+                Job::Waveform {
+                    asset: asset(1),
+                    request_generation: 1,
+                }
+            )
+        );
+        assert!(
+            !service.request(
+                kinewright_core::MediaSourceOrigin::new_project()
+                    .legacy_media()
+                    .unwrap(),
+                Job::Waveform {
+                    asset: asset(2),
+                    request_generation: 1,
+                }
+            )
+        );
         assert_eq!(in_flight.lock().unwrap().len(), 1);
         assert!(in_flight.lock().unwrap().contains(&JobKey::Waveform {
             asset: AssetId(1),

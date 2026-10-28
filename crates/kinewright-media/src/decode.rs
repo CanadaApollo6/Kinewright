@@ -80,6 +80,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         })?;
         let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .map_err(|error| media_error(path, "could not read video codec parameters", error))?;
+        crate::locator::check()?;
         let decoder = context
             .decoder()
             .video()
@@ -801,6 +802,7 @@ pub(crate) fn stream_timestamp_to_global(timestamp: i64, time_base: ffmpeg::Rati
 }
 
 pub(crate) fn media_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
+    crate::locator::before_decoder_open()?;
     crate::quiet_ffmpeg_log();
     ffmpeg::format::input(path).map_err(|error| {
         MediaError::Backend(format!(
@@ -855,6 +857,7 @@ fn reader_input(
         #[cfg(test)]
         path: path.to_path_buf(),
     }));
+    crate::locator::before_decoder_open()?;
     ffmpeg::format::input_with_interrupt(path, reader_interrupted).map_err(|error| {
         #[cfg(test)]
         interrupt_seam::exited(path, error);
@@ -1804,6 +1807,7 @@ mod s4_cpu {
 }
 
 pub(crate) struct VideoDecoder {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     path: std::path::PathBuf,
     decoder: ffmpeg::decoder::Video,
     converter: VideoConverter,
@@ -2010,6 +2014,7 @@ impl VideoDecoder {
             kind: ffmpeg::codec::threading::Type::Frame,
             count: threads,
         });
+        crate::locator::check()?;
         let decoder = context
             .decoder()
             .video()
@@ -2102,6 +2107,7 @@ impl VideoDecoder {
         };
 
         Ok(Self {
+            legacy_media: crate::locator::capture(),
             path: path.to_path_buf(),
             input,
             decoder,
@@ -2170,6 +2176,7 @@ impl VideoDecoder {
     /// Seek to the global `timestamp` for a window from `start`, and reset
     /// the decode state (a failed seek resets the decoder).
     fn seek_to(&mut self, timestamp: i64, start: TimeCode) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if let Err(error) = self.input.seek(timestamp, ..timestamp) {
             // Amendment R43 (RS-1): the reader's interrupt ended the seek.
             #[cfg(test)]
@@ -2572,6 +2579,7 @@ impl VideoDecoder {
     /// PF1 S2c S-2 rule 1: A(t), the first packet of the selected stream
     /// after today's seek to `t` on the shadow context (`None`: unknown).
     fn shadow_anchor(&mut self, t: TimeCode, at_seek: bool) -> Option<Anchor> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref()).ok()?;
         #[cfg(test)]
         if matches!(
             self.s2.fault,
@@ -2648,6 +2656,7 @@ impl VideoDecoder {
         end: TimeCode,
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if end < start {
             self.continuation_at = Some(start);
             return Ok(());
