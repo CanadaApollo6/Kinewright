@@ -1,0 +1,359 @@
+{
+  "manifest_sha256": "aa0e5712c616e3534a93ff4bf2011467bfd65340fee9e4c14c2d805c784c4ce2",
+  "sources_match": true,
+  "gates": [
+    {
+      "gate": "final-build",
+      "command": "build --workspace",
+      "exit": 0,
+      "log_sha256": "80067cfe3fb5d98be1d3ad893b2b8b1782217e1d8781cd69f93c021653feab6b",
+      "test_results": [],
+      "ignored": [],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-clippy",
+      "command": "clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "log_sha256": "84b846a8034054dd366120f3341bbd5e0f40fd5a015756a1a5a25d76e057574f",
+      "test_results": [],
+      "ignored": [],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-fmt",
+      "command": "fmt -- --check",
+      "exit": 0,
+      "log_sha256": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83",
+      "test_results": [],
+      "ignored": [],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-core",
+      "command": "test -p kinewright-core --features test-util --lib --tests --no-fail-fast -- --test-threads=4",
+      "exit": 0,
+      "log_sha256": "1d184acc50312b3919642a3d06fe9f3eebbb65d4007dbd86bdeb63354fa4ccba",
+      "test_results": [
+        "test result: ok. 325 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.91s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "ignored": [
+        "test actor::tests::performance_batch_workloads ... ignored, manual release performance measurement",
+        "test result: ok. 325 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.91s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-agent",
+      "command": "test -p kinewright-agent --lib --tests --no-fail-fast -- --test-threads=1 --nocapture",
+      "exit": 0,
+      "log_sha256": "055897fd3b36ef43a19d167ba35bdb37a123c98d669ecc72564adce7ecf881d5",
+      "test_results": [
+        "test result: ok. 795 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 253.38s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 2.48s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 10 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 10.57s",
+        "test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 16.89s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.14s",
+        "test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 36.27s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+        "test result: ok. 5 passed; 0 failed; 27 ignored; 0 measured; 0 filtered out; finished in 0.07s",
+        "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+        "test result: ok. 40 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.43s",
+        "test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+        "test result: ok. 76 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 72.60s",
+        "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "ignored": [
+        "test muse::tests::off_session_notifications_are_ignored ... ok",
+        "test server::tests::s4_editor_result_to_candidate ... ignored, H3 resolved attachment dispatch and C2 contained connector integration are not merged",
+        "test server::tests::served_tools_direct_vs_legacy_filtered_microbench ... ignored, manual release performance measurement",
+        "test result: ok. 795 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 253.38s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test tests::cc7_every_color_fixture_builds_a_valid_document ... ignored, constructs a real media engine, whose process-exit teardown raises the known SIGSEGV",
+        "test tests::v3_fixture_builds_with_authored_and_recognized_truth ... ignored, requires local speech synthesis and Whisper analysis",
+        "test tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels ... ignored, requires the explicitly prepared M40 event fixture pack",
+        "test tests::v5_fixture_builds_from_verified_real_media ... ignored, requires the explicitly prepared M40 fixture pack and Whisper analysis",
+        "test tests::v5_music_fixture_builds_with_real_media_and_pinned_beats ... ignored, requires the explicitly prepared M40 music fixture pack and beat analysis",
+        "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 2.48s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two ... ignored, on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY",
+        "test native_app_bridge_rejects_abnormal_exit_after_completed_report ... ignored, on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY",
+        "test native_app_bridge_retains_exercised_control_and_property_failures ... ignored, on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY",
+        "test result: ok. 10 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 10.57s",
+        "test s2_additive_app_fixture_observes_real_controls ... ignored, on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY",
+        "test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 16.89s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.14s",
+        "test c11_switch_gui_participant ... ignored, on-demand C11 GUI process participant: private bootstrap required",
+        "test g05a_switch_reply_drop_and_participant_death ... ignored, slow tier: cargo test --features slow-tests",
+        "test g05l_host_death_recovers_absent_and_committed_drag_suffix ... ignored, slow tier: cargo test --features slow-tests",
+        "test g05l_shared_floor_and_recovery_close_reply_drop ... ignored, slow tier: cargo test --features slow-tests",
+        "test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 36.27s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s",
+        "test rescue_reopen_recopy_retention_stress ... ignored, slow tier: cargo test --features slow-tests",
+        "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+        "test s4_c2_blocked_guardian_exits_and_manager_kills ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_init_reaps_and_exits_with_provider ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_launch_refuses_without_nsdelegate ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_launch_refuses_without_pid_namespace ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_launch_under_runtime_dir ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_migration_outside_service_refused ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_migration_to_service_root_refused ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_proc_shows_only_the_namespace ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_runtime_alias_refused ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_runtime_dir_masked ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_events_recovery ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_events_session ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_identity_refused ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_proof_recovery_live ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_proof_recovery_zombie ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_proof_session_live ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_c2_service_proof_session_zombie ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_cancel_tree_and_retire_once ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_deleted_cgroup_zombies_still_block_retirement ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_guardian_death_and_observation_loss ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_guardian_subreaps_real_orphans ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_lost_startup_acknowledgments ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_precommit_cannot_execute ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_real_host_death_skips_grace ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_reaped_guardian_and_identity_are_required ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_retained_inode_deletion_signal ... ignored, slow tier: cargo test --features slow-tests",
+        "test s4_startup_deadline_kills_a_contained_shim ... ignored, slow tier: cargo test --features slow-tests",
+        "test result: ok. 5 passed; 0 failed; 27 ignored; 0 measured; 0 filtered out; finished in 0.07s",
+        "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+        "test s4_durable_owner_lifecycle_reopen ... ignored, H1 durable owner publication and reopen are not merged",
+        "test s4_person_holder_approval_and_secret ... ignored, H3 person-facing holder and attachment roles are not merged",
+        "test result: ok. 40 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.43s",
+        "test s4_usage_durable_reopen_h1 ... ignored, S3 H1 durable orchestration publisher/reopen is not integrated",
+        "test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+        "test au3_queue_export_normalizes_and_verifies_audio ... ignored, slow tier: cargo test --features slow-tests",
+        "test au4_plan_audio_ducking_converges_through_the_real_engine ... ignored, slow tier: cargo test --features slow-tests",
+        "test au5_the_repair_and_normalization_planners_agree_in_either_order ... ignored, slow tier: cargo test --features slow-tests",
+        "test au6_a1_the_interview_ducks_the_bed_and_matches_the_voices ... ignored, slow tier: cargo test --features slow-tests",
+        "test au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride ... ignored, slow tier: cargo test --features slow-tests",
+        "test au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled ... ignored, slow tier: cargo test --features slow-tests",
+        "test au6_a4_the_multicam_cuts_leave_the_master_audio_untouched ... ignored, slow tier: cargo test --features slow-tests",
+        "test au6_a5a_the_delivery_lands_on_the_ebu_r128_target ... ignored, slow tier: cargo test --features slow-tests",
+        "test r28_solo_peak_resources_and_elapsed ... ignored, slow tier: cargo test --features slow-tests",
+        "test solo_strip_inside_byte_budget ... ignored, slow tier: cargo test --features slow-tests",
+        "test result: ok. 76 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 72.60s",
+        "test copilot_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test devin_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test kimi_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test kiro_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test muse_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test opencode_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test qwen_splits_then_deletes_via_the_live_mcp_server ... ignored, live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1",
+        "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "equipped_skips": [
+        "test claude_splits_then_deletes_via_the_live_mcp_server ... skipped: set KINEWRIGHT_AGENT_TEST=1 to use the installed Claude Code CLI",
+        "test codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch ... skipped: set KINEWRIGHT_M33_AGENT_TEST=1 to run the Codex M33 smoke",
+        "test codex_edits_an_isolated_branch_then_one_merge_publishes_it ... skipped: set KINEWRIGHT_BRANCH_AGENT_TEST=1 to run the installed Codex branch smoke",
+        "test codex_splits_then_deletes_via_the_live_mcp_server ... skipped: set KINEWRIGHT_AGENT_TEST=1 to use the installed Codex CLI",
+        "test codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch ... skipped: set KINEWRIGHT_M32_AGENT_TEST=1 to run the Codex M32 smoke",
+        "test cursor_splits_then_deletes_via_the_live_mcp_server ... skipped: set KINEWRIGHT_CURSOR_AGENT_TEST=1 to use the installed Cursor Agent CLI",
+        "test claude_removes_long_silences_with_one_atomic_plan ... skipped: set KINEWRIGHT_AGENT_TEST=1 to run SAPI, Whisper, and Claude",
+        "test one_agent_message_removes_the_transcribed_filler_word ... skipped: set KINEWRIGHT_TRANSCRIPT_TEST=1 to run SAPI, Whisper, and Claude"
+      ]
+    },
+    {
+      "gate": "final-project-1",
+      "command": "test -p kinewright-project --features test-util --lib --test ja_s1_copy --test ja_s1_receipts --no-fail-fast -- --test-threads=4 --nocapture",
+      "exit": 0,
+      "log_sha256": "47e982d01cef0f524338bd47e506542e799e8cacacfc92ce88d2f373c7fc7412",
+      "test_results": [
+        "test result: ok. 158 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 97.38s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.42s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 57.24s"
+      ],
+      "ignored": [
+        "test lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed ... ignored, historical uncooperative journal injection; C7 covers the real GUI writer",
+        "test project::tests::mo2_old_reader_corpus ... ignored, manual pre-land check: scripts/mo2-old-reader-check.sh",
+        "test result: ok. 158 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 97.38s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.42s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 57.24s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-project-2",
+      "command": "test -p kinewright-project --features test-util --test ja_s1_storage --test ja_s2_rescue --no-fail-fast -- --test-threads=4 --nocapture",
+      "exit": 0,
+      "log_sha256": "def09b752afa35aac9e70b34a8b4e8815ac3773d946c5ee4ec37a2b7871900c0",
+      "test_results": [
+        "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 106.64s",
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.28s"
+      ],
+      "ignored": [
+        "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 106.64s",
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.28s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-project-3",
+      "command": "test -p kinewright-project --features test-util --test ja_s2_rescue_record --test ja_s2_save --no-fail-fast -- --test-threads=4 --nocapture",
+      "exit": 0,
+      "log_sha256": "d9df7b6d58af0499121bd7700fd0ab5ca2234c4ff216128c1c70622d6e995730",
+      "test_results": [
+        "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 164.69s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.23s"
+      ],
+      "ignored": [
+        "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 164.69s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.23s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-project-4",
+      "command": "test -p kinewright-project --features test-util --test ja_s2_save_cost --test ja_s2_source_boundary --test ja_s2_switch --test ja_s2_writer --test ja_s3_owned_inputs --test ja_s3_read_only_inputs --test ja_s3_store --test ja_s4_candidate --test ja_s4_store --no-fail-fast -- --test-threads=4 --nocapture",
+      "exit": 0,
+      "log_sha256": "3c21011d080deeef00eb31f53d6ac70f727ab7e8cfb5779a89479747ce9c9e73",
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.63s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.00s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.91s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.29s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ],
+      "ignored": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.63s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.00s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.91s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.29s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-app",
+      "command": "test -p kinewright-app --bin kinewright-app -- --test-threads=1 --nocapture",
+      "exit": 101,
+      "log_sha256": "4f4a3765209bc4467c12717f8a9221300edaa181451519dd3fc31edf22a99c10",
+      "test_results": [
+        "test result: FAILED. 887 passed; 10 failed; 6 ignored; 0 measured; 0 filtered out; finished in 420.05s"
+      ],
+      "ignored": [
+        "test ja1_attachment::tests::rescue_complete_app_lifecycle_stress ... ignored, slow tier: cargo test --features slow-tests",
+        "test ja_harness::tests::run_fixture_from_env ... ignored, on-demand fixture adapter: requires JA_HARNESS_FIXTURE and JA_HARNESS_OUTPUT",
+        "test preview_ui::mo2_tests::new_mo2_combined_transform_real_program_drags ... ignored, slow tier: cargo test --features slow-tests",
+        "test project::tests::is_dirty_memoized_poll_release_perf ... ignored, manual release performance measurement",
+        "test recovery::tests::corruption_stops_at_the_bad_record_and_reports_ignored_bytes ... ok",
+        "test recovery::tests::crash_child_process ... ignored, invoked as the deliberately crashing subprocess",
+        "test solo_ui::tests::new_mo2_solo_control_argument_matrix ... ignored, slow tier: cargo test --features slow-tests",
+        "test result: FAILED. 887 passed; 10 failed; 6 ignored; 0 measured; 0 filtered out; finished in 420.05s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-docs",
+      "command": "test -p kinewright-core -p kinewright-project -p kinewright-agent --doc",
+      "exit": 0,
+      "log_sha256": "8c873de95187b70625a3d9d3ec0d91264d30fc65ed32d0f2978d3a394e93fa9a",
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "ignored": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-windows-core",
+      "command": "check -p kinewright-core --target x86_64-pc-windows-msvc",
+      "exit": 0,
+      "log_sha256": "c8a28c1529a0fd0bb1a0a4b36a1ba3558e679da81ec37dd35d4cb55d6877d53b",
+      "test_results": [],
+      "ignored": [],
+      "equipped_skips": []
+    },
+    {
+      "gate": "final-windows-desktop",
+      "command": "check -p kinewright-agent --target x86_64-pc-windows-msvc",
+      "exit": 101,
+      "log_sha256": "61d445fd61725be762815163e07212e7e9352c27833fa2546f21584647803502",
+      "test_results": [],
+      "ignored": [],
+      "equipped_skips": [
+        "  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_SKIP_VERSION_CHECK_x86_64_pc_windows_msvc",
+        "  cargo:rerun-if-env-changed=AWS_LC_SYS_SYSTEM_SKIP_VERSION_CHECK"
+      ]
+    },
+    {
+      "gate": "slow-lint",
+      "exit": 0,
+      "command": "nice -n 19 python3 -I scripts/slow_tests.py lint",
+      "log_sha256": "fe82e541c184439bdc8e901d3b5aae6134ce994c48604bdb703ea899d4267dc7",
+      "output": "slow-test manifest and markers agree: 117 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 60 allowlist entries well-formed; 27 equipped-session skip sites counted\n"
+    },
+    {
+      "gate": "slow-selftest",
+      "exit": 0,
+      "command": "nice -n 19 python3 -I scripts/slow_tests_selftest.py",
+      "log_sha256": "4e4f2e23744cc53371bd8dea80e3e4e59c166bf899b5087a16c4722963dac70b",
+      "output": "......................................../home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/scripts/slow_tests_selftest.py:577: ResourceWarning: unclosed file <_io.TextIOWrapper name=3 encoding='utf-8'>\n  code, captured = st.run_cargo(\nResourceWarning: Enable tracemalloc to get the object allocation traceback\n..\n----------------------------------------------------------------------\nRan 42 tests in 0.571s\n\nOK\n"
+    }
+  ]
+}

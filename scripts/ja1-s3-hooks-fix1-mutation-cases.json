@@ -1,0 +1,44 @@
+[
+  {
+    "name": "HF1-major1-consent-consumption",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witnesses": [
+      "writer_host::hooks_tests::tests::h3_stopped_run_revokes_queued_approval",
+      "writer_host::hooks_tests::tests::h3_stopped_run_revokes_queued_secret",
+      "writer_host::hooks_tests::tests::h3_queued_consent_deadline_is_checked_at_delivery",
+      "writer_host::hooks_tests::tests::h3_queued_consent_durable_turn_is_checked_at_delivery"
+    ],
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_grant_tests.rs",
+    "red_text": [
+      "HF1_STOP_APPROVAL_DELIVERY",
+      "HF1_STOP_SECRET_DELIVERY",
+      "HF1_CONSENT_DEADLINE",
+      "HF1_CONSENT_DURABLE_TURN"
+    ],
+    "red_location": "hooks_grant_tests.rs",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/session.rs",
+        "if control.authority_live() {",
+        "if true {"
+      ]
+    ]
+  },
+  {
+    "name": "HF1-major2-mcp-consumption",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::hooks_tests::tests::h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay",
+    "witness_source": "crates/kinewright-agent/src/writer_host/hooks_grant_tests.rs",
+    "red_text": "HF1_RETIRED_MCP_PREPARED",
+    "red_location": "hooks_grant_tests.rs",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/orchestration/tasks.rs",
+        "if self.0.revoked.load(Ordering::SeqCst)\n            || self.0.paused.load(Ordering::SeqCst)",
+        "if self.0.paused.load(Ordering::SeqCst)"
+      ]
+    ]
+  }
+]

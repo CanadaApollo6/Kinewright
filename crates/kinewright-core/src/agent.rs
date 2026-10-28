@@ -259,10 +259,16 @@ pub struct RuntimeResponseControl {
     authority: Option<RuntimeControlAuthority>,
 }
 #[derive(Debug, Clone)]
-struct RuntimeControlAuthority(std::sync::Arc<std::sync::atomic::AtomicBool>);
+struct RuntimeControlAuthority {
+    holder: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    expires: std::time::Instant,
+}
 impl PartialEq for RuntimeControlAuthority {
     fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
+        std::sync::Arc::ptr_eq(&self.holder, &other.holder)
+            && std::sync::Arc::ptr_eq(&self.revoked, &other.revoked)
+            && self.expires == other.expires
     }
 }
 impl Eq for RuntimeControlAuthority {}
@@ -277,13 +283,19 @@ impl RuntimeResponseControl {
             authority: None,
         })
     }
-    /// Bind a host-authorized runtime response to its revocable attachment instance.
+    /// Bind consent to its holder, exact host request grant, and delivery deadline.
     #[must_use]
     pub fn with_live_authority(
         mut self,
-        authority: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        holder: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        expires: std::time::Instant,
     ) -> Self {
-        self.authority = Some(RuntimeControlAuthority(authority));
+        self.authority = Some(RuntimeControlAuthority {
+            holder,
+            revoked,
+            expires,
+        });
         self
     }
     #[must_use]
@@ -291,10 +303,11 @@ impl RuntimeResponseControl {
         !matches!(
             self.response,
             RuntimeResponse::ApprovalDecision(_) | RuntimeResponse::SecretReference(_)
-        ) || self
-            .authority
-            .as_ref()
-            .is_some_and(|authority| authority.0.load(std::sync::atomic::Ordering::Acquire))
+        ) || self.authority.as_ref().is_some_and(|authority| {
+            authority.holder.load(std::sync::atomic::Ordering::Acquire)
+                && !authority.revoked.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < authority.expires
+        })
     }
     #[must_use]
     pub const fn request(&self) -> &RuntimeRequest {

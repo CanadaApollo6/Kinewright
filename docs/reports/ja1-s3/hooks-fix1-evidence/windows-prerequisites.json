@@ -1,0 +1,11 @@
+{
+  "parent_head": "4bd37517bfa2c7043f38592a1ef7bd200f3a7d18",
+  "parent_log_sha256": "9afc694f09a05bb474c9d06d8e2fb1dbeac37e6c7075e804d6028926fcb97dc6",
+  "same_native_prerequisite_errors": [
+    "'errno.h' file not found",
+    "'stdio.h' file not found",
+    "unknown type name 'pthread_rwlock_t'"
+  ],
+  "fresh_parent_rerun": false,
+  "agent_windows_compile_validated": false
+}

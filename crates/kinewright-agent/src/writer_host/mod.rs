@@ -1773,6 +1773,13 @@ impl HostCommandOwner {
                 self.message = format!("Saved {}.", destination.display());
             }
             HostCommand::Retry => {
+                if self.hooks.pending.is_some() {
+                    return Err(HostRefusal::new(
+                        "orchestration_refused",
+                        "original uncertain orchestration command must reconcile first",
+                    )
+                    .into());
+                }
                 if self.owner()?.has_prepared_selection() {
                     self.execute_inner(HostCommand::OpenRecovery, roots, reply)?;
                 } else {

@@ -1,0 +1,39 @@
+{
+  "name": "HF1-major2-mcp-consumption",
+  "witness": "writer_host::hooks_tests::tests::h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay",
+  "witnesses": [
+    "writer_host::hooks_tests::tests::h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay"
+  ],
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/orchestration/tasks.rs",
+      "if self.0.revoked.load(Ordering::SeqCst)\n            || self.0.paused.load(Ordering::SeqCst)",
+      "if self.0.paused.load(Ordering::SeqCst)"
+    ]
+  ],
+  "expected_red": {
+    "text": "HF1_RETIRED_MCP_PREPARED",
+    "location": "hooks_grant_tests.rs"
+  },
+  "baseline_manifest_sha256": "aa0e5712c616e3534a93ff4bf2011467bfd65340fee9e4c14c2d805c784c4ce2",
+  "witness_sha256": "6a2c22112aefd5acbdbc90412d976c3941024d97165c3ef111ebcc9d0a3f0ed6",
+  "source_sha256": {
+    "crates/kinewright-agent/src/orchestration/tasks.rs": "7d594d7d54b55055e795c14f49506a5abedd3a37b93ece07531c40f34ce64bd3"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/orchestration/tasks.rs": "0da1e4364b14aa774fa727981cd4433fb95ae46ccb00d6ae9f72ed48c6e2a1e7"
+  },
+  "red_exit": 101,
+  "command": "set -e\npython3() { command nice -n 19 python3 -I \"$@\"; }\nexport -f python3\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-hooks-fix1/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib -- writer_host::hooks_tests::tests::h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "0e01aaeb79f24489757112a8c94a341dd222656f01da6b89a30cf30a3ccbf621",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 796 filtered out; finished in 1.91s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "74e48392c9dde30ae7d0b0dbca4bf48d418fee765cef1caf7fc037bc593a4497",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 796 filtered out; finished in 1.69s"
+  ],
+  "restored": true
+}

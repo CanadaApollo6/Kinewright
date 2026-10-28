@@ -615,10 +615,6 @@ pub fn pump_session(
                     break;
                 };
                 let request = control.request();
-                if !control.authority_live() {
-                    observer.on_runtime_response_result(request, LiveResponseOutcome::Revoked);
-                    continue;
-                }
                 if request.kind() != kinewright_core::RuntimeRequestKind::Question
                     && !observer.supports_live_attention()
                 {
@@ -635,12 +631,16 @@ pub fn pump_session(
                 }
                 let outcome = if responses.take(request, session.runtime_request_binding().as_ref())
                 {
-                    match session.respond_runtime_request(request, control.response().clone()) {
-                        Ok(()) => LiveResponseOutcome::Consumed,
-                        Err(error) => {
-                            observer.on_confirmation_error(error.to_string());
-                            LiveResponseOutcome::Unknown
+                    if control.authority_live() {
+                        match session.respond_runtime_request(request, control.response().clone()) {
+                            Ok(()) => LiveResponseOutcome::Consumed,
+                            Err(error) => {
+                                observer.on_confirmation_error(error.to_string());
+                                LiveResponseOutcome::Unknown
+                            }
                         }
+                    } else {
+                        LiveResponseOutcome::Revoked
                     }
                 } else {
                     LiveResponseOutcome::Expired

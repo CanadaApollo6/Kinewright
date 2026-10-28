@@ -694,7 +694,11 @@ fn h3_delegate_cannot_forge_live_consent() {
             LiveRequest::new("delegate".into(), binding.clone(), kind, "fixture".into()).unwrap();
         let control = RuntimeResponseControl::new(request, answer)
             .unwrap()
-            .with_live_authority(Arc::new(AtomicBool::new(true)));
+            .with_live_authority(
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(300),
+            );
         let mut observer = f
             .host
             .owner

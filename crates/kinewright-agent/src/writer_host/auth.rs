@@ -252,6 +252,7 @@ impl super::HostCommandOwner {
             .iter()
             .position(|grant| {
                 grant.auth.accepts(bearer)
+                    && grant.alive.load(std::sync::atomic::Ordering::Acquire)
                     && grant.incarnation == self.instance
                     && grant.project == self.config.project
             })

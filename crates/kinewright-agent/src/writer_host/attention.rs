@@ -1,4 +1,5 @@
 //! A person-facing holder can answer only a request freshly checked by the sole pump.
+use super::orchestration::RuntimeGrantBinding;
 use super::{AttachmentRole, HostAuth, HostCommandOwner, HostError, HostRefusal};
 use crate::orchestration::orchestration_records::{AttemptId, RunId, TaskId};
 use crate::{
@@ -12,7 +13,10 @@ use kinewright_core::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -52,13 +56,39 @@ pub enum AttentionOutcome {
     Queued,
 }
 struct PendingAttention {
+    grant: RuntimeGrantBinding,
+    revoked: Arc<AtomicBool>,
     request: RuntimeRequest,
     digest: String,
     expires: Instant,
     sender: StudioResponseSender,
     submitted: Option<(super::auth::AttachmentId, LiveAttentionResponse)>,
 }
+impl Drop for PendingAttention {
+    fn drop(&mut self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+}
 impl PendingAttention {
+    fn live_in(
+        &self,
+        projection: &crate::orchestration::orchestration_records::RunProjection,
+        epoch: Option<u64>,
+    ) -> bool {
+        let binding = self.request.binding();
+        self.grant.live_in(projection, epoch)
+            && Instant::now() < self.expires
+            && projection.tasks.iter().any(|task| {
+                task.id == self.grant.task
+                    && task.progress.turn.as_ref().is_some_and(|turn| {
+                        crate::orchestration::requests::live_turn(projection, turn).is_ok()
+                            && turn.session.as_str() == binding.session
+                            && turn.ordinal == binding.turn
+                            && turn.owner_epoch == binding.owner_epoch
+                            && turn.attempt.0.as_str() == binding.attempt
+                    })
+            })
+    }
     fn facts(&self, run: &RunId) -> Vec<u8> {
         serde_json::to_vec(&(run, self.request.id(), &self.digest, self.request.text()))
             .expect("bounded nonsecret attention facts")
@@ -74,15 +104,73 @@ impl PendingAttention {
 }
 #[derive(Default)]
 pub(super) struct AttentionState {
+    grants: BTreeMap<RuntimeGrantBinding, Weak<AtomicBool>>,
     current: BTreeMap<(RunId, String), RuntimeRequestBinding>,
     requests: BTreeMap<(RunId, String), PendingAttention>,
     consumed: BTreeMap<(RunId, String), RuntimeRequestBinding>,
 }
+impl AttentionState {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn set_deadline_for_test(&mut self, run: &RunId, expires: Instant) {
+        let (_, pending) = self
+            .requests
+            .iter_mut()
+            .find(|((request_run, _), _)| request_run == run)
+            .expect("HF1_DEADLINE_REQUEST_SETUP");
+        pending.expires = expires;
+    }
+    fn grant(&mut self, binding: RuntimeGrantBinding) -> Result<Arc<AtomicBool>, HostError> {
+        self.grants.retain(|_, flag| flag.strong_count() > 0);
+        if let Some(flag) = self.grants.get(&binding).and_then(Weak::upgrade) {
+            return Ok(flag);
+        }
+        if self.grants.len() >= 64 {
+            return Err(
+                HostRefusal::new("attention_capacity", "64 live attempt grants maximum").into(),
+            );
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        self.grants.insert(binding, Arc::downgrade(&flag));
+        Ok(flag)
+    }
+    pub(super) fn sync_grants(
+        &mut self,
+        projection: &crate::orchestration::orchestration_records::RunProjection,
+        epoch: Option<u64>,
+    ) {
+        for (binding, flag) in &self.grants {
+            if binding.run == projection.run
+                && !binding.live_in(projection, epoch)
+                && let Some(flag) = flag.upgrade()
+            {
+                flag.store(true, Ordering::Release);
+            }
+        }
+        for ((run, _), pending) in &self.requests {
+            if run == &projection.run
+                && (!pending.live_in(projection, epoch)
+                    || self
+                        .current
+                        .get(&(run.clone(), pending.request.binding().task.clone()))
+                        != Some(pending.request.binding()))
+            {
+                pending.revoked.store(true, Ordering::Release);
+            }
+        }
+        self.grants.retain(|_, flag| flag.strong_count() > 0);
+    }
+    pub(super) fn revoke_grants(&mut self) {
+        for flag in self.grants.values().filter_map(Weak::upgrade) {
+            flag.store(true, Ordering::Release);
+        }
+        for pending in self.requests.values() {
+            pending.revoked.store(true, Ordering::Release);
+        }
+    }
+}
 pub struct HostRunObserver {
-    run: RunId,
-    task: TaskId,
-    attempt: AttemptId,
-    epoch: u64,
+    grant: RuntimeGrantBinding,
+    revoked: Arc<AtomicBool>,
     state: Arc<Mutex<AttentionState>>,
     sender: StudioResponseSender,
     queue: StudioResponseQueue,
@@ -130,19 +218,24 @@ impl SessionObserver for HostRunObserver {
     }
     fn on_runtime_binding(&mut self, binding: Option<&RuntimeRequestBinding>) {
         if let Ok(mut state) = self.state.lock() {
-            let key = (self.run.clone(), self.task.0.as_str().to_owned());
+            let key = (
+                self.grant.run.clone(),
+                self.grant.task.0.as_str().to_owned(),
+            );
             let binding = binding.filter(|b| {
-                b.task == self.task.0.as_str()
-                    && b.attempt == self.attempt.0.as_str()
-                    && b.owner_epoch == self.epoch
+                b.task == self.grant.task.0.as_str()
+                    && b.attempt == self.grant.attempt.0.as_str()
+                    && b.owner_epoch == self.grant.owner_epoch
             });
             state.requests.retain(|(run, _), pending| {
-                run != &self.run
-                    || pending.request.binding().task != self.task.0.as_str()
+                run != &self.grant.run
+                    || pending.request.binding().task != self.grant.task.0.as_str()
                     || binding == Some(pending.request.binding())
             });
             state.consumed.retain(|(run, _), prior| {
-                run != &self.run || prior.task != self.task.0.as_str() || binding == Some(prior)
+                run != &self.grant.run
+                    || prior.task != self.grant.task.0.as_str()
+                    || binding == Some(prior)
             });
             if let Some(binding) = binding {
                 state.current.insert(key, binding.clone());
@@ -156,28 +249,36 @@ impl SessionObserver for HostRunObserver {
         if request.kind() == RuntimeRequestKind::Question {
             return self.delegate.on_runtime_request(request);
         }
+        if self.revoked.load(Ordering::Acquire) {
+            return RuntimeResponse::Pending;
+        }
         let Ok(mut state) = self.state.lock() else {
             return RuntimeResponse::H3AttentionUnavailable;
         };
         if state
             .consumed
-            .get(&(self.run.clone(), request.id().to_owned()))
+            .get(&(self.grant.run.clone(), request.id().to_owned()))
             == Some(request.binding())
         {
             return RuntimeResponse::Pending;
         }
-        if state
-            .current
-            .get(&(self.run.clone(), request.binding().task.clone()))
-            != Some(request.binding())
+        if request.binding().task != self.grant.task.0.as_str()
+            || request.binding().attempt != self.grant.attempt.0.as_str()
+            || request.binding().owner_epoch != self.grant.owner_epoch
+            || state
+                .current
+                .get(&(self.grant.run.clone(), request.binding().task.clone()))
+                != Some(request.binding())
             || state.requests.len() + state.consumed.len() >= 64
         {
             return RuntimeResponse::Expired;
         }
         state
             .requests
-            .entry((self.run.clone(), request.id().to_owned()))
+            .entry((self.grant.run.clone(), request.id().to_owned()))
             .or_insert_with(|| PendingAttention {
+                grant: self.grant.clone(),
+                revoked: Arc::new(AtomicBool::new(false)),
                 request: request.clone(),
                 digest: digest(request),
                 expires: Instant::now() + Duration::from_secs(300),
@@ -199,7 +300,7 @@ impl SessionObserver for HostRunObserver {
         outcome: LiveResponseOutcome,
     ) {
         if let Ok(mut state) = self.state.lock() {
-            let key = (self.run.clone(), request.id().to_owned());
+            let key = (self.grant.run.clone(), request.id().to_owned());
             if outcome == LiveResponseOutcome::Revoked {
                 if let Some(pending) = state.requests.get_mut(&key) {
                     pending.submitted = None;
@@ -295,29 +396,33 @@ impl HostCommandOwner {
             .owner()?
             .orchestration_projection(run)?
             .ok_or_else(|| HostRefusal::new("orchestration_refused", "unknown run"))?;
-        if self.attachments[index].role != AttachmentRole::Producer
-            || &scope.run != run
-            || scope.task.is_some()
-            || state.outcome != crate::orchestration::orchestration_records::RunOutcome::Pending
-            || scope.expired()
-            || !state.attempts.iter().any(|reservation| {
-                &reservation.identity.task == task
-                    && &reservation.identity.attempt == attempt
-                    && reservation.owner_epoch == scope.owner_epoch
-                    && !matches!(
-                        reservation.state,
-                        crate::orchestration::orchestration_records::AttemptState::Retired(_)
-                    )
-            })
-        {
-            return Err(HostRefusal::new("role_refused", "live run attempt required").into());
-        }
-        let (sender, queue) = crate::studio_response_queue();
-        Ok(HostRunObserver {
+        let grant = RuntimeGrantBinding {
             run: run.clone(),
             task: task.clone(),
             attempt: attempt.clone(),
-            epoch: scope.owner_epoch,
+            owner_epoch: scope.owner_epoch,
+        };
+        let epoch = self.owner()?.store()?.owner_epoch();
+        if self.attachments[index].role != AttachmentRole::Producer
+            || &scope.run != run
+            || scope.task.is_some()
+            || scope.expired()
+            || !grant.live_in(&state, Some(epoch))
+        {
+            return Err(HostRefusal::new("role_refused", "live run attempt required").into());
+        }
+        let revoked = self
+            .hooks
+            .attention
+            .lock()
+            .map_err(|_| {
+                HostRefusal::new("attention_expired", "live request registry unavailable")
+            })?
+            .grant(grant.clone())?;
+        let (sender, queue) = crate::studio_response_queue();
+        Ok(HostRunObserver {
+            grant,
+            revoked,
             state: Arc::clone(&self.hooks.attention),
             sender,
             queue,
@@ -370,24 +475,15 @@ impl HostCommandOwner {
             .get(&key)
             .ok_or_else(|| HostRefusal::new("attention_expired", "no live request"))?;
         let binding = pending.request.binding();
-        if response.command == 0
+        if pending.revoked.load(Ordering::Acquire)
+            || response.command == 0
             || response.binding_digest != pending.digest
             || Instant::now() >= pending.expires
             || state
                 .current
                 .get(&(response.run.clone(), binding.task.clone()))
                 != Some(binding)
-            || !projection.tasks.iter().any(|task| {
-                task.id.0.as_str() == binding.task
-                    && !task.progress.expired
-                    && task.progress.turn.as_ref().is_some_and(|turn| {
-                        crate::orchestration::requests::live_turn(&projection, turn).is_ok()
-                            && turn.session.as_str() == binding.session
-                            && turn.ordinal == binding.turn
-                            && turn.owner_epoch == binding.owner_epoch
-                            && turn.attempt.0.as_str() == binding.attempt
-                    })
-            })
+            || !pending.live_in(&projection, Some(self.owner()?.store()?.owner_epoch()))
         {
             return Err(HostRefusal::new(
                 "attention_expired",
@@ -408,7 +504,11 @@ impl HostCommandOwner {
                     "ordinary answers cannot approve or provide a secret",
                 )
             })?
-            .with_live_authority(Arc::clone(&attachment.alive));
+            .with_live_authority(
+                Arc::clone(&attachment.alive),
+                Arc::clone(&pending.revoked),
+                pending.expires,
+            );
         if let Some((holder, previous)) = &pending.submitted {
             if holder != &attachment.id || previous != &response {
                 return Err(HostRefusal::new(

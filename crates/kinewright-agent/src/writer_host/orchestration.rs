@@ -66,6 +66,45 @@ impl ProducerScope {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }
+/// Immutable provenance for every attempt-derived runtime authorization.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct RuntimeGrantBinding {
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub owner_epoch: u64,
+}
+impl RuntimeGrantBinding {
+    pub(super) fn live_in(&self, projection: &RunProjection, epoch: Option<u64>) -> bool {
+        self.run == projection.run
+            && Some(self.owner_epoch) == epoch
+            && projection.outcome == RunOutcome::Pending
+            && projection.phase != RunPhase::Finished
+            && projection.tasks.iter().any(|task| {
+                task.id == self.task
+                    && !task.progress.expired
+                    && !matches!(
+                        task.state,
+                        TaskState::Terminal(_)
+                            | TaskState::Cancelled
+                            | TaskState::Cancelling
+                            | TaskState::CleanupBlocked(_)
+                    )
+            })
+            && projection.attempts.iter().any(|attempt| {
+                attempt.identity.run == self.run
+                    && attempt.identity.task == self.task
+                    && attempt.identity.attempt == self.attempt
+                    && attempt.owner_epoch == self.owner_epoch
+                    && !matches!(
+                        attempt.state,
+                        AttemptState::Stopping
+                            | AttemptState::CleanupBlocked(_)
+                            | AttemptState::Retired(_)
+                    )
+            })
+    }
+}
 pub(super) struct HostRun {
     pub producer: HostAuth,
     pub inputs: super::continuation::HostOwnedInputClosure,
@@ -77,6 +116,19 @@ pub(super) struct Hooks {
     pub runs: BTreeMap<RunId, HostRun>,
     pub pending: Option<PendingPublication>,
     pub attention: Arc<Mutex<super::attention::AttentionState>>,
+}
+impl Drop for Hooks {
+    fn drop(&mut self) {
+        for run in self.runs.values() {
+            for task in run.tasks.values() {
+                task.endpoint().revoke();
+            }
+        }
+        self.attention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revoke_grants();
+    }
 }
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub(super) enum PendingPublication {
@@ -106,23 +158,43 @@ pub(super) fn is_hook(command: &HostCommand) -> bool {
 }
 
 impl HostCommandOwner {
-    fn sync_task_endpoints(&self, projection: &RunProjection) {
+    fn sync_runtime_grants(&self, projection: &RunProjection) {
+        let epoch = self
+            .owner()
+            .and_then(|owner| Ok(owner.store()?.owner_epoch()))
+            .ok();
+        for attachment in &self.attachments {
+            if let Some(scope) = &attachment.producer_scope
+                && scope.run == projection.run
+                && let (Some(task), Some(attempt)) = (&scope.task, &scope.attempt)
+                && (scope.expired()
+                    || !(RuntimeGrantBinding {
+                        run: scope.run.clone(),
+                        task: task.clone(),
+                        attempt: attempt.clone(),
+                        owner_epoch: scope.owner_epoch,
+                    })
+                    .live_in(projection, epoch))
+            {
+                attachment
+                    .alive
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
         if let Some(run) = self.hooks.runs.get(&projection.run) {
             for (id, task) in &run.tasks {
                 let endpoint = task.endpoint();
+                let authority = endpoint.authority();
+                let binding = RuntimeGrantBinding {
+                    run: authority.run.clone(),
+                    task: authority.task.clone(),
+                    attempt: authority.attempt.clone(),
+                    owner_epoch: authority.owner_epoch,
+                };
                 let current = projection.tasks.iter().find(|record| &record.id == id);
-                if projection.outcome != RunOutcome::Pending
-                    || current.is_none_or(|record| {
-                        !endpoint.matches_brief(&record.brief)
-                            || record.progress.expired
-                            || matches!(
-                                record.state,
-                                TaskState::Terminal(_)
-                                    | TaskState::Cancelled
-                                    | TaskState::Cancelling
-                                    | TaskState::CleanupBlocked(_)
-                            )
-                    })
+                if !binding.live_in(projection, epoch)
+                    || Instant::now() >= authority.expires_at
+                    || current.is_none_or(|record| !endpoint.matches_brief(&record.brief))
                 {
                     endpoint.revoke();
                 }
@@ -131,6 +203,10 @@ impl HostCommandOwner {
                         || matches!(projection.cleanup, RunCleanup::Blocked(_, _)),
                 );
             }
+        }
+        match self.hooks.attention.lock() {
+            Ok(mut attention) => attention.sync_grants(projection, epoch),
+            Err(poisoned) => poisoned.into_inner().revoke_grants(),
         }
     }
     pub(super) fn check_producer_attachment(
@@ -468,7 +544,7 @@ impl HostCommandOwner {
                 None => receipt.envelope.identity("run").map_err(scheduler_error)?,
             };
             if let Some(current) = self.owner()?.orchestration_projection(&run)? {
-                self.sync_task_endpoints(&current);
+                self.sync_runtime_grants(&current);
                 if let Some(runtime) = self.hooks.runs.get_mut(&run) {
                     runtime.continuable = current.outcome == RunOutcome::Pending
                         || current.cleanup != RunCleanup::Settled;
@@ -529,7 +605,7 @@ impl HostCommandOwner {
         );
         match result {
             Ok(receipt) => {
-                self.sync_task_endpoints(&published);
+                self.sync_runtime_grants(&published);
                 self.hooks.pending = None;
                 if let Some(run) = self.hooks.runs.get_mut(&run_id) {
                     run.continuable = continuable;
@@ -667,7 +743,7 @@ impl HostCommandOwner {
             .owner()?
             .orchestration_projection(&transition.projection().run)?
             .ok_or_else(|| refused("committed run disappeared"))?;
-        self.sync_task_endpoints(&current);
+        self.sync_runtime_grants(&current);
         if let Some(run) = self.hooks.runs.get_mut(&current.run) {
             run.continuable =
                 current.outcome == RunOutcome::Pending || current.cleanup != RunCleanup::Settled;
@@ -744,6 +820,16 @@ impl HostCommandOwner {
             .find(|record| &record.id == task)
             .ok_or_else(|| refused("unknown task"))?;
         let epoch = self.owner()?.store()?.owner_epoch();
+        if !(RuntimeGrantBinding {
+            run: run.clone(),
+            task: task.clone(),
+            attempt: attempt.clone(),
+            owner_epoch: epoch,
+        })
+        .live_in(&state, Some(epoch))
+        {
+            return Err(refused("task attempt is no longer live"));
+        }
         if !state.attempts.iter().any(|reservation| {
             &reservation.identity.task == task
                 && &reservation.identity.attempt == attempt

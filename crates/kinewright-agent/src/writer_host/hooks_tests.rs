@@ -18,6 +18,7 @@ mod tests {
 
     include!("hooks_attention_tests.rs");
     include!("hooks_store_tests.rs");
+    include!("hooks_grant_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,
@@ -31,12 +32,15 @@ mod tests {
             Self::with_media(false)
         }
         fn with_media(media: bool) -> Self {
+            Self::with_document(media, Document::default())
+        }
+        fn with_document(media: bool, document: Document) -> Self {
             let temp = kinewright_media::test_support::TempDirectory::new_in(
                 &kinewright_media::test_support::workspace_target_dir(),
                 "s3-hooks",
             );
             let path = temp.path("project.kinewright");
-            let core = Core::spawn(Document::default()).unwrap();
+            let core = Core::spawn(document).unwrap();
             let mut bundle =
                 ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
             let mut inputs = bundle.empty_inputs().unwrap().reference.clone();

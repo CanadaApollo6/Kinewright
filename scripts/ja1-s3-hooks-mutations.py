@@ -27,10 +27,11 @@ def run(case, log):
         args += [case["kind"]]
         if case.get("target"):
             args += [case["target"]]
-    args += [case["witness"], "--", "--exact", "--test-threads=1", "--nocapture"]
+    witnesses = case.get("witnesses", [case.get("witness")])
+    args += ["--", *witnesses, "--exact", "--test-threads=1", "--nocapture"]
     command = (
         "set -e\npython3() { command nice -n 19 python3 -I \"$@\"; }\nexport -f python3\nsource scripts/setup-ffmpeg.sh\n"
-        'c1_runtime="$PWD/target/ja1-s3-hooks/runtime"\n'
+        'c1_runtime="$PWD/target/ja1-s3-hooks-fix1/runtime"\n'
         'export LOCALAPPDATA="$PWD/target/c1fix-localappdata" TMPDIR="$c1_runtime/tmp"\n'
         'export XDG_STATE_HOME="$c1_runtime/state" XDG_DATA_HOME="$c1_runtime/share"\n'
         'export XDG_CACHE_HOME="$c1_runtime/cache" XDG_CONFIG_HOME="$c1_runtime/config"\n'
@@ -39,17 +40,24 @@ def run(case, log):
         "flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 "
         "RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo " + shlex.join(args)
     )
-    process = subprocess.Popen(
-        ["bash", "-c", command], cwd=ROOT, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, start_new_session=True,
-    )
-    try:
-        # The timeout inside flock bounds execution without expiring in the queue.
-        raw = process.communicate()[0]
-    except BaseException:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        raise
+    attempt = 0
+    while True:
+        attempt += 1
+        process = subprocess.Popen(
+            ["bash", "-c", command], cwd=ROOT, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, start_new_session=True,
+        )
+        try:
+            raw = process.communicate()[0]
+        except BaseException:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+        with gzip.open(log.with_name(log.name + f".attempt-{attempt}.gz"), "wb") as stream:
+            stream.write(raw)
+        if process.returncode not in (124, 137):
+            break
+        print(f"600000 ms timeout: {case['name']}; rerunning in foreground", flush=True)
     with gzip.open(log, "wb") as stream:
         stream.write(raw)
     return process.returncode, raw.decode(errors="replace"), command
@@ -71,7 +79,7 @@ def main():
             if (ROOT / path).read_text().count(old) != 1:
                 raise RuntimeError(f"{case['name']}: {path} requires one exact anchor")
         if args.list:
-            print(case["name"], case["witness"], sep="\t")
+            print(case["name"], case.get("witnesses", case.get("witness")), sep="\t")
     if args.list:
         return
     evidence = ROOT / args.evidence
@@ -83,7 +91,8 @@ def main():
             if path.startswith("crates/") and digest((ROOT / path).read_bytes()) != expected:
                 raise RuntimeError(f"source no longer matches the gated manifest: {path}")
         originals = {path: (ROOT / path).read_bytes() for path, _, _ in case["changes"]}
-        result = {"name": case["name"], "witness": case["witness"], "accepted": False,
+        result = {"name": case["name"], "witness": case.get("witness"),
+                  "witnesses": case.get("witnesses", [case.get("witness")]), "accepted": False,
                   "changes": case["changes"],
                   "expected_red": {"text": case["red_text"],
                                    "location": case.get("red_location")},
@@ -104,8 +113,10 @@ def main():
             result.update(red_exit=code, command=command)
             result["red_log_sha256"] = digest((evidence / f"{case['name']}-red.log.gz").read_bytes())
             result["red_summary"] = [line for line in red.splitlines() if "test result:" in line]
-            red_ok = (code == 101 and "test result: FAILED. 0 passed; 1 failed; 0 ignored;" in red
-                      and case["red_text"] in red and "could not compile" not in red
+            count = len(result["witnesses"])
+            markers = case["red_text"] if isinstance(case["red_text"], list) else [case["red_text"]]
+            red_ok = (code == 101 and f"test result: FAILED. 0 passed; {count} failed; 0 ignored;" in red
+                      and all(marker in red for marker in markers) and "could not compile" not in red
                       and case.get("red_location", "") in red
                       and "error[E" not in red)
             for path, original in originals.items():
@@ -116,7 +127,7 @@ def main():
             result["green_summary"] = [line for line in green.splitlines() if "test result:" in line]
             result["restored"] = all((ROOT / p).read_bytes() == b for p, b in originals.items())
             result["accepted"] = (red_ok and code == 0 and result["restored"]
-                                  and "test result: ok. 1 passed; 0 failed; 0 ignored;" in green)
+                                  and f"test result: ok. {count} passed; 0 failed; 0 ignored;" in green)
             if not result["accepted"]:
                 raise RuntimeError(f"{case['name']}: rejected pair; see {status_path}")
             print(f"{case['name']}: runtime red 101; restored green 0", flush=True)
