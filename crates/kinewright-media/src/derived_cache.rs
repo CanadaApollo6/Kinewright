@@ -92,6 +92,12 @@ impl<S> StatusReporter<S> {
         }
     }
 
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        if let Ok(mut states) = self.states.write() {
+            states.retain(|key, _| key.authority != Some(authority));
+        }
+    }
+
     pub(crate) fn should_queue(&self, path: &Path, blocks_queue: impl FnOnce(&S) -> bool) -> bool {
         self.states.read().map_or(true, |states| {
             states
@@ -150,6 +156,19 @@ impl CancellationRegistry {
                     cancellation.cancel();
                 }
             }
+        }
+    }
+
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        if let Ok(mut active) = self.active.lock() {
+            active.retain(|key, cancellation| {
+                if key.authority == Some(authority) {
+                    cancellation.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
         }
     }
 
@@ -462,6 +481,38 @@ fn cache_error(action: &str, error: &std::io::Error) -> MediaError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn c6a_retire_analysis_cancels_only_inactive_authority() {
+        let reporter = super::StatusReporter::new();
+        let registry = super::CancellationRegistry::default();
+        let origin_a = kinewright_core::MediaSourceOrigin::new_project();
+        let a = origin_a.legacy_media().unwrap();
+        let origin_b = kinewright_core::MediaSourceOrigin::new_project();
+        let b = origin_b.legacy_media().unwrap();
+        let path = std::path::Path::new("same-path.wav");
+        let token_a = {
+            let _scope = crate::locator::LocatorAuthority::enter(&a);
+            reporter.update(path, 1);
+            registry.start(path).unwrap()
+        };
+        let token_b = {
+            let _scope = crate::locator::LocatorAuthority::enter(&b);
+            reporter.update(path, 2);
+            registry.start(path).unwrap()
+        };
+        registry.retire(a.identity());
+        reporter.retire(a.identity());
+        assert!(token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
+        {
+            let _scope = crate::locator::LocatorAuthority::enter(&a);
+            assert_eq!(reporter.get_or(path, 0), 0);
+            assert!(registry.start(path).is_some(), "focus can request again");
+        }
+        let _scope = crate::locator::LocatorAuthority::enter(&b);
+        assert_eq!(reporter.get_or(path, 0), 2);
+    }
+
     use std::fs;
 
     use super::*;

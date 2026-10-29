@@ -86,6 +86,16 @@ pub(crate) struct Studio {
     neutral: bool,
 }
 
+impl Studio {
+    pub(crate) fn update_manual_document(&mut self, document: Arc<Document>) {
+        self.manual_inputs = self
+            .manual_inputs
+            .as_ref()
+            .and_then(|inputs| inputs.with_document(document).ok())
+            .map(Arc::new);
+    }
+}
+
 /// PO0 rev 2.2 tokens that the current theme can express (§2): colour, radii,
 /// spacing and type. Glass, frame light, grain and springs stay in the PO0 rollout.
 pub(crate) mod po0 {
@@ -674,30 +684,39 @@ impl KinewrightApp {
         if quiet_button(ui, "Current edit", manual_ready, false).clicked()
             && self.focused().studio.selection.is_some()
         {
-            self.focused_mut().studio.selection = None;
-            if self.focused().studio.failure.is_some() {
-                self.focused_mut().studio.manual_inputs = None;
-            }
-            self.focused_mut().studio.failure = None;
-            self.presenter.suspend();
-            self.playback.pause();
-            self.playing = false;
-            if let Some(inputs) = self.focused().studio.manual_inputs.clone() {
-                let stamp = self.lut_publisher.set_certified_document(inputs);
-                self.presenter.set_context(stamp.epoch, None);
-                self.playback.seek(self.focused().position);
-                self.playback.request_frame(self.focused().position);
-            } else if self.focused().ja1.is_some() {
-                self.start_ja1(Action::StudioManualPlayback(Arc::clone(
-                    &self.focused().document,
-                )));
-            } else {
-                self.playback
-                    .set_document(Arc::clone(&self.focused().document));
-                self.presenter
-                    .set_context(self.playback.stamp().epoch, None);
-                self.playback.request_frame(self.focused().position);
-            }
+            self.return_to_current_edit();
+        }
+    }
+    pub(crate) fn return_to_current_edit(&mut self) {
+        self.focused_mut().studio.selection = None;
+        if self.focused().studio.failure.is_some() {
+            self.focused_mut().studio.manual_inputs = None;
+        }
+        self.focused_mut().studio.failure = None;
+        self.presenter.suspend();
+        self.playback.pause();
+        self.playing = false;
+        if let Some(inputs) = self
+            .focused()
+            .studio
+            .manual_inputs
+            .clone()
+            .filter(|inputs| inputs.document() == &*self.focused().document)
+        {
+            let stamp = self.lut_publisher.set_certified_document(inputs);
+            self.presenter.set_context(stamp.epoch, None);
+            self.playback.seek(self.focused().position);
+            self.playback.request_frame(self.focused().position);
+        } else if self.focused().ja1.is_some() {
+            self.start_ja1(Action::StudioManualPlayback(Arc::clone(
+                &self.focused().document,
+            )));
+        } else {
+            self.playback
+                .set_document(Arc::clone(&self.focused().document));
+            self.presenter
+                .set_context(self.playback.stamp().epoch, None);
+            self.playback.request_frame(self.focused().position);
         }
     }
     fn studio_picture(&mut self, ui: &mut egui::Ui) {

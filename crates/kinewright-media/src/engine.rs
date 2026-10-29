@@ -693,6 +693,15 @@ impl FfmpegMediaEngine {
             authority: MediaAuthority::Controls,
         })
     }
+    /// Retire cached analysis and visual delivery for an inactive project.
+    /// Existing consumers retain their grants; focusing the project creates fresh channels.
+    pub fn retire_media(&self, grant: &kinewright_core::LegacyMediaGrant) {
+        let authority = grant.identity();
+        self.transcripts.retire(authority);
+        self.derived_analysis.retire(authority);
+        self.visual_assets.retire(authority);
+    }
+
     #[must_use]
     pub fn legacy_media(
         self: &Arc<Self>,

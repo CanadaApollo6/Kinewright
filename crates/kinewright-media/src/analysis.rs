@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -33,7 +33,8 @@ const MAX_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAGIC: &[u8; 8] = b"ORTH0001";
 
 type VisualJob = crate::locator::LocatorJob<(Job, Sender<VisualAssetResult>)>;
-type VisualInFlight = Arc<Mutex<HashSet<(kinewright_core::LegacyMediaIdentity, JobKey)>>>;
+type VisualInFlight =
+    Arc<Mutex<HashMap<(kinewright_core::LegacyMediaIdentity, JobKey), Sender<VisualAssetResult>>>>;
 type VisualReply = (Sender<VisualAssetResult>, Receiver<VisualAssetResult>);
 type VisualAuthorities =
     HashMap<kinewright_core::LegacyMediaIdentity, (kinewright_core::LegacyMediaGrant, VisualReply)>;
@@ -48,7 +49,7 @@ pub(crate) struct VisualAssetService {
 impl VisualAssetService {
     pub(crate) fn new(data_dir: &Path) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = bounded(JOB_CAPACITY);
-        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let worker_in_flight = Arc::clone(&in_flight);
         let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
         let mut worker = VisualAssetWorker::new(root.clone(), worker_in_flight);
@@ -133,6 +134,12 @@ impl VisualAssetService {
         )
     }
 
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        if let Ok(mut results) = self.results.lock() {
+            results.remove(&authority);
+        }
+    }
+
     pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
         inventory_cache_root(&self.root)
     }
@@ -149,19 +156,19 @@ impl VisualAssetService {
         let Ok(mut in_flight) = self.in_flight.lock() else {
             return false;
         };
-        if in_flight.contains(&key) {
-            return true;
+        if let Some(pending) = in_flight.get(&key) {
+            return pending.same_channel(&reply);
         }
         if reply.len()
             + in_flight
                 .iter()
-                .filter(|(authority, _)| *authority == key.0)
+                .filter(|((authority, _), _)| *authority == key.0)
                 .count()
             >= RESULT_CAPACITY
         {
             return false;
         }
-        in_flight.insert(key.clone());
+        in_flight.insert(key.clone(), reply.clone());
         if let Ok(()) = self
             .jobs
             .try_send(crate::locator::LocatorJob::new(grant, (job, reply)))
@@ -626,6 +633,52 @@ mod tests {
     }
 
     #[test]
+    fn c6a_retire_visual_channel_releases_registry_and_preserves_other_project() {
+        let directory = TempDirectory::new("c6a-visual-retire");
+        let (jobs, receiver) = bounded(JOB_CAPACITY);
+        let service = VisualAssetService {
+            jobs,
+            results: Mutex::default(),
+            in_flight: Arc::default(),
+            root: directory.root().into(),
+        };
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let old = service.results(&a);
+        let other = service.results(&b);
+        assert!(service.request_waveform(asset(1), 1, a.clone()));
+        let pending = receiver.recv().unwrap();
+        service.retire(a.identity());
+        assert_eq!(service.results.lock().unwrap().len(), 1);
+        let fresh = service.results(&a);
+        assert!(
+            !service.request_waveform(asset(1), 1, a.clone()),
+            "C6A_RETIRED_REPLY_REFUSES_DUPLICATE_UNTIL_COMPLETION"
+        );
+        let mut worker =
+            VisualAssetWorker::new(directory.root().into(), Arc::clone(&service.in_flight));
+        assert!(worker.handle_scoped(pending));
+        assert!(
+            old.try_recv().is_ok(),
+            "accepted work keeps its original channel"
+        );
+        assert!(fresh.is_empty(), "focus gets a fresh channel");
+        assert!(service.request_waveform(asset(1), 1, a));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(
+            fresh.try_recv().is_ok(),
+            "C6A_FRESH_CHANNEL_RETRY_RECEIVES_REPLY"
+        );
+        assert!(service.request_waveform(asset(2), 1, b));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(other.try_recv().is_ok());
+    }
+
+    #[test]
     fn c6b_full_inactive_visual_channel_preserves_active_progress() {
         let directory = TempDirectory::new("c6b-visual-backpressure");
         let (jobs, receiver) = bounded(JOB_CAPACITY);
@@ -744,7 +797,7 @@ mod tests {
     #[test]
     fn a_full_job_queue_is_reported_without_leaking_in_flight_keys() {
         let (jobs, _jobs_rx) = bounded(1);
-        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let service = VisualAssetService {
             jobs,
             results: Mutex::default(),
@@ -770,7 +823,7 @@ mod tests {
             }
         ));
         assert_eq!(in_flight.lock().unwrap().len(), 1);
-        assert!(in_flight.lock().unwrap().contains(&(
+        assert!(in_flight.lock().unwrap().contains_key(&(
             grant.identity(),
             JobKey::Waveform {
                 asset: AssetId(1),

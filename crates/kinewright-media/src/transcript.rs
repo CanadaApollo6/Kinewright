@@ -175,6 +175,11 @@ impl TranscriptService {
         self.states.get_or(path, TranscriptStatus::NotRequested)
     }
 
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        self.cancellations.retire(authority);
+        self.states.retire(authority);
+    }
+
     pub(crate) fn cancel_all(&self) {
         self.cancellations.cancel_all();
     }

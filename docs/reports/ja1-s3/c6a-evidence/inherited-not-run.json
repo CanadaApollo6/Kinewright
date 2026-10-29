@@ -1,0 +1,205 @@
+{
+  "qualification": "Historical NOT RUN inventory, carried verbatim. Only explicit fresh gate records supersede test-suite omissions; platform/equipment/product gaps remain open.",
+  "entries": [
+    {
+      "source": "docs/reports/ja1-s3/c0.md",
+      "line": 62,
+      "text": "Native Windows decoder/handle witnesses are eligible but **NOT RUN** on this Linux workstation. Linux read-only results do not certify Windows. Windows durable-write refusal is unchanged; G1-W and Windows end-to-end owned import/save remain uncertified. Hosted CI and the remaining full workspace suites are **NOT RUN** because this task forbids pushing and leaves those suites to CI. Fix round 1 adds full App and Project tests at the lead's request. No device/microphone/GPU acceptance is claimed."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c0.md",
+      "line": 97,
+      "text": "**NOT RUN.** Native Windows execution, decoder/handle certification and G1-W durable-write acceptance need a Windows runtime; this Linux run earns compile/Clippy credit only. Hosted CI for this fix is not run because this worker must not push. The full workspace and full Agent/Media suites remain CI scope; the requested full App/Project targets and focused Agent/Media controls ran here."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 72,
+      "text": "NOT RUN: full workspace/touched-crate suites and hosted CI (speed rule 3 assigns full suites to CI; this brief forbids pushing); native Windows durable writes and decoder controls (Linux host, G1-W remains uncertified); `rescue_complete_app_lifecycle_stress` (existing slow repetition, individual rescue controls passed in the focused App lane); independent reviews (lead-owned, explicitly excluded here). C2/C3/C4/C5, H2/H3/H4 and S4 runtime gates are outside C1 and receive no credit."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 86,
+      "text": "Riel corrected the brief's requirement for four nonempty indexes. The runtime leg uses nonempty VersionIndex, FeedbackIndex, and RunIndex. All four refs remain carried and compared in production. ClaimIndex runtime is **NOT RUN**, with the agreed reason \"no ClaimIndex producer; nonempty refused at bundle.rs:156\"."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 152,
+      "text": "The additional MSVC-target compile attempt included Project, Agent, and App. It exited 101 in the FFmpeg cross-build and `aws-lc-sys` native build prerequisites before checking the touched crates. The latter used the host `cc` with Windows defines and reported unknown `pthread_rwlock_t`. Its full log is retained as `c1-evidence/fix1/windows.log.gz`. Windows source compilation and native Windows runtime are **NOT RUN** beyond that blocked prerequisite attempt. No Windows acceptance is claimed."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 154,
+      "text": "Also **NOT RUN** in this round are hosted CI and full workspace/Agent/App suites, because this brief selects the full Project target, host writer tests, and attachment tests and forbids pushing. The two existing Project ignores are the historical uncooperative journal injection and manual MO2 old-reader corpus. The existing App ignore is `rescue_complete_app_lifecycle_stress`. Those three ignored controls were not forced. No new ignore or slow-test marker was added. No independent review round ran, as the brief explicitly excludes it. ClaimIndex runtime remains **NOT RUN** for the producer limitation stated above."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 186,
+      "text": "The lead confirmed that Reviewer must not be added in this fix. Reviewer is **NOT RUN**, because that role does not exist at this head. The available non-Editor roles are Viewer and Producer. The existing subject-bound witness now gives its two Editors the same subject to verify instance isolation. The four fix 1 foreground witnesses remain in the full host gate and are rerun as mutation pairs with updated instance-cleanup anchors."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 232,
+      "text": "The additional Windows compile attempt exited 101 in native FFmpeg, Whisper, and `aws-lc-sys` prerequisites before checking the touched code. The latter invoked the Linux `cc` with Windows defines and reported unknown `pthread_rwlock_t`; the full log is `c1-evidence/fix2/windows.log.gz`. Windows source compilation beyond those prerequisites and native Windows runtime are **NOT RUN**. No Windows acceptance is claimed from the Linux runs or from earlier CI."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 234,
+      "text": "Also **NOT RUN** in this round: Project lib and integration tests, because that crate is untouched and the brief makes its gate conditional; full workspace/Agent/App test suites and hosted CI, because full suites are assigned to CI and this task forbids pushing; the existing App ignore `rescue_complete_app_lifecycle_stress`; and independent review rounds, which the brief excludes. No ignore or slow-test marker was added. Reviewer is **NOT RUN**, because the role does not exist at this head. ClaimIndex runtime remains **NOT RUN**: \"no ClaimIndex producer; nonempty refused at bundle.rs:156\"."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 293,
+      "text": "The extra MSVC-target compile attempt exited 101 in native FFmpeg and `aws-lc-sys` prerequisites before checking the touched code. The latter invoked the Linux `cc` with Windows defines and reported unknown `pthread_rwlock_t`. The full log is `c1-evidence/fix3/windows.log.gz`. Windows source compilation beyond those prerequisites and native Windows runtime are **NOT RUN**."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 295,
+      "text": "Also **NOT RUN**: full workspace/Agent/App suites and hosted CI, assigned to CI by the speed rules and not triggered because this task forbids pushing; Project tests, because that crate is untouched; and independent review rounds, excluded by the brief. The four existing Agent integration ignores were not forced: three slow-tier restart/death controls and the private GUI process participant. The existing App ignore `rescue_complete_app_lifecycle_stress` was not forced. No ignore, manifest, or slow-test marker changed. Reviewer remains **NOT RUN**, because the role does not exist at this head. ClaimIndex runtime remains **NOT RUN**: \"no ClaimIndex producer; nonempty refused at bundle.rs:156\"."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 328,
+      "text": "**C1F1-M3 is NOT RUN:** \"no ClaimIndex producer; nonempty refused at bundle.rs:156\". All four refs remain carried, compared and checked by the generic manifest oracle; runtime coverage has three supported nonempty indexes. The assigned C0/C2 and H3-owned items remain deferred. S4 hook semantics and the design plan are unchanged."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c1.md",
+      "line": 343,
+      "text": "**NOT RUN:** the slow tier and forced ignores; the full workspace and Core/Media/App tests outside the requested selections; hosted CI; native Windows and compilation beyond the blocked FFmpeg/aws-lc-sys prerequisites; S4 H1/H3/H4 end-to-end wiring; equipped/live-provider/GPU/model/media-pack certification; and independent review rounds, excluded by the brief. Each source cut retained 66 declared ignores, with exact names and reasons in the [merge](c1-evidence/integration/merge/ignored-tests.json) and [follow-up](c1-evidence/integration/followups/ignored-tests.json) inventories. Ordinary fast-tier counts are not native or provider certification. ClaimIndex and the absent Reviewer attachment role remain unavailable. The complete [NOT RUN inventory](c1-evidence/integration/not-run.json) also records the explicitly deferred C0/C2 and H3-owned items."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 58,
+      "text": "NOT RUN:\n\n- Hosted CI, complete local workspace fast/slow suites, and review rounds.\n- Changed-crate Windows compilation and native Windows runtime/G1-W. The attempted\n  all-target cross-check stopped in native FFmpeg bindings (`errno.h` missing)\n  and aws-lc pthread errors before reaching the changed Rust crates.\n- Physical audio-device listening and custom owned-font rendering. This head has\n  no document producer that binds owned fonts; verified font resources stay pinned.\n- The unrelated S2 `w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry`\n  pressure case and the remainder of the broad attachment selector, interrupted\n  in favor of the focused journal, switch, and bootstrap Save selectors.\n- The existing ignored manual release performance measurement.\n- C3 feedback persistence/annotations, C4/C5 integration, and completion of H1/H3/H4.\n  Draw and Point remain inert as required.\n- ClaimIndex runtime: \"no ClaimIndex producer; nonempty refused at bundle.rs:156\".\n  Reviewer runtime: the role does not exist at this head. Neither was added.\n- Push.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 150,
+      "text": "unless `KINEWRIGHT_TRANSCRIPT_TEST=1`; actual Whisper execution was NOT RUN.\nSlow-test manifest lint and all 42 slow-test runner self-tests pass."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 210,
+      "text": "NOT RUN in this round:\n\n- Hosted CI, the complete workspace fast and slow suites, and all slow-tier or\n  explicitly ignored tests. The commit carries `[slow-tier]` for later CI.\n- Changed-crate Windows Rust compilation, native Windows runtime, and G1-W.\n- Manual GUI capture, physical audio-device listening, and real Whisper inference.\n- Separate certified-thumbnail requests through every agent endpoint. Their\n  shared boundary is exercised in media; the owned-host refusal route was inspected.\n- The earlier 14 C2 mutation pairs and combined G7-S/G8 acceptance legs. Their\n  evidence remains bound to the earlier C2 source. This round adds three A1 pairs.\n- Independent review rounds, as required by the worker brief, and push.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 314,
+      "text": "was NOT RUN. The media doc-test command passes with 0 tests."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 322,
+      "text": "NOT RUN in this regression repair:\n\n- Hosted CI, native Windows runtime, changed-crate MSVC Rust compilation, and\n  G1-W. The cross-check attempt above is blocked before the changed Rust code.\n- The complete workspace fast and slow suites, slow-tier or explicitly ignored\n  tests, and local full-suite replays at `7f73f9c8`. The parent CI result above\n  is Riel's supplied evidence; the parent/C2 decoder diff was checked locally.\n- Slow-test runner self-tests. Neither the manifest nor test markers changed.\n- Manual GUI capture, physical audio-device listening, real Whisper inference,\n  other JA-1 acceptance legs, and earlier C2/A1 mutation-pair reruns.\n- Independent review rounds, push, and PR creation, per the worker scope.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 703,
+      "text": "NOT RUN for fix 2:\n\n- The 82 Linux-applicable slow-tier tests and 60 explicit ignores. Exact observed\n  names and reasons are retained in `ignored-observed.json`; the manifests remain\n  unchanged.\n- Hosted CI, native Windows execution/G1-W, and changed desktop-crate MSVC Rust\n  compilation. The desktop cross-check was attempted but stopped in FFmpeg's\n  missing `errno.h` and aws-lc pthread C errors before the changed desktop Rust\n  could be checked. Only Core's all-target MSVC Rust check passed.\n- The four Linux-only app witnesses listed above on non-Linux targets. Production\n  Studio write authority is Linux-only; no portable app store fixture or Windows\n  Studio write support was added. Portable media witnesses remain enabled.\n- Manual interactive GUI and physical-display acceptance, physical audio-device\n  listening, real Whisper/model execution (`KINEWRIGHT_TRANSCRIPT_TEST` was not\n  enabled), and live provider acceptance.\n- The older combined G7/G8 acceptance gaps and old A1 mutation points after this\n  receiver refactor. C2-A2 and C2-A3 remain C6 follow-ups. The new File > Open/QC\n  and memo-binding mutation pairs are this round's security evidence.\n- Independent review rounds, PR creation, and push.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 748,
+      "text": "is a dependency failure, described under NOT RUN."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 885,
+      "text": "NOT RUN for fix 3:\n\n- Hosted CI and native Windows execution. The desktop MSVC check was attempted\n  and stopped in FFmpeg's missing `errno.h` and aws-lc `pthread_rwlock_t` C\n  errors before checking the changed desktop Rust. This is the same dependency\n  limitation recorded for the parent implementation.\n- The two Linux app witnesses on non-Linux targets. Production Studio write\n  authority is unavailable there. The two media witnesses stay portable;\n  execution on Windows is unverified.\n- Slow-tier tests and explicit hardware/manual ignores; the final archive lists\n  the exact observed names and reasons. Plain full-suite Cargo tests run the\n  default fast tier, not the feature-enabled slow tier.\n- Interactive GUI/physical-display acceptance, physical audio-device listening,\n  real Whisper/model execution and live-provider acceptance. The new transcript\n  witness deliberately cannot download a model.\n- C2-A2 and C2-A3/C6 acceptance: stale Current edit cache, the older combined\n  tampered-seek/presentation/audio, failed-copy switch and SnapshotKey route\n  switch cases, and earlier receiver mutation points not replayed in this fix.\n- Fresh certification-cost measurements; this fix does not change the accepted\n  memo or certificate implementation. The fix 2 measurements remain historical\n  evidence, not fresh timings for this commit.\n- Independent review rounds, PR creation and push. Review remains with the lead.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c2.md",
+      "line": 1042,
+      "text": "NOT RUN: the Windows compile of the media and App crates (it fails in native\ndependencies on this host, as recorded for fix 3), native Windows, hosted CI,\nthe slow tier, GUI or physical-audio acceptance, and real Whisper inference.\nThe known Linux-CI-only `c0_studio_owned_auto_colour_fix_is_not_sent_unstaged`\npassed locally in the App suite. Idle reader threads and an idle preview with\nlive readers now wake every 50 ms to observe revocation; that cost was not\nmeasured."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c3.md",
+      "line": 42,
+      "text": "## NOT RUN\n\n- GPU-route pixel digest. The GPU route keeps no CPU copy, so its proof records the bound identity with `pixels: null`.\n- Source orientation. Capture records `Upright`. The four rotations are covered only by the geometry oracle.\n- App-to-host `HostFeedback` end to end. The agent-side host test covers the commands.\n- Live-app manual-cut capture. The witness is store-level.\n- First-save refusal for an unsaved project in a test.\n- Media suite (not touched).\n- Windows: `cargo check --target x86_64-pc-windows-msvc` stops in the native `ffmpeg-sys-next`, `whisper-rs-sys` and `aws-lc-sys` build scripts.\n- Hosted CI.\n- S4 scheduler wiring.\n- Review rounds.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c3.md",
+      "line": 110,
+      "text": "### NOT RUN\n\n- A stroke during real playback. Headless, playing frames bind only through paint acknowledgments, and ALSA refuses the device here. The witness uses a landing seek and a version switch.\n- `is_dirty` from drafts alone. The app witness's edit is already dirty, so it checks `unsaved()`, the warning and the exit prompt.\n- Evidence pins after a restart. Pins are not kept on disk. If the store collected a retried command's evidence, the retry is expected to be refused with the note kept as a draft. This is not witnessed.\n- Agent `slow-tests`, and the media suite (not touched).\n- Windows: `cargo check --target x86_64-pc-windows-msvc` stops in the `aws-lc-sys`, `ffmpeg-sys-next` and `whisper-rs-sys` build scripts.\n- Hosted CI and review rounds.\n- C6 items: M3, M4, M6, M7.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c3.md",
+      "line": 212,
+      "text": "### NOT RUN\n\n- A real second launch. The restart leg replaces the app's feedback and rereads the kept file in-process. It gives the restored proof a frame id from this run, because the frame-ID counter does not restart in-process.\n- A real Save As in the running app. Save As is covered by the migration code, not by a witness.\n- A stroke during real playback (unchanged from fix 1).\n- A shared file between two copies made outside Kinewright (the residual risk above).\n- Evidence pins after a restart (unchanged from fix 1).\n- Agent suites (not changed), and the media suite.\n- Windows: the per-user folder there is `LOCALAPPDATA`, and Studio bundles are Linux-only.\n- Hosted CI and review rounds.\n- C6 items: M3, M4, M6, M7.\n"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c3.md",
+      "line": 283,
+      "text": "### NOT RUN\n\n- Two live GUI windows on two copies. The witness drives two `Feedback` owners in one process, plus an outside `flock` process.\n- A real process crash while holding the lock. The crash is modelled by dropping the owner, which closes the handle the same way.\n- Native Windows `LockFileEx`, the agent suites (not changed), the media suite, hosted CI and review rounds.\n- Earlier NOT RUN items still stand: a real second launch, a real Save As, a stroke during playback, and evidence pins after a restart."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c3.md",
+      "line": 288,
+      "text": "- Earlier NOT RUN items still stand: a real second launch, a real Save As, a stroke during playback, and evidence pins after a restart."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c4.md",
+      "line": 23,
+      "text": "**NOT RUN:** native Windows runtime and compilation beyond the native prerequisite failure; the workspace-wide test aggregate; slow tier and forced ignores; equipped GPU, provider, model, and media-pack controls, including optional tests that return without equipment; Studio/C6 composition and a live S4 specialist; hosted CI; and independent review rounds, excluded by the brief. G10 backend evidence does not close the C6 App gate. No push was made."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c5.md",
+      "line": 26,
+      "text": "**NOT RUN:** the real spoken-note and commentary controls: the pinned Whisper small model was absent from the existing cache, and no model was downloaded. Also NOT RUN: actual microphone/device capture; actual displayed-frame/audio-clock synchronization; native model/workspace and capture-staging residue accounting; Studio/C6/shared-host upload composition and G11 App closure; native Windows runtime and compilation beyond the native dependency failure; workspace-wide test aggregate, slow tier and forced ignores; equipped GPU/provider/model/media-pack controls, including optional tests returning early; live S4 specialist; hosted CI; laptop offload (Tailscale authentication required); and independent review rounds, excluded by the brief. No push was made."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c5.md",
+      "line": 40,
+      "text": "Final-source Linux workspace build, all-target Clippy with warnings denied, formatting, and slow-test manifest lint passed. Recording reported 22 passes (including two real-model controls that returned early and remain **NOT RUN**); voice-note tests reported 5 passes, transcript tests 9, lineage fixtures 3, and the incomplete-ancestry unit control 1. The manifest self-tests reported 42 passes. The three-crate MSVC check stopped in native `aws-lc-sys` prerequisites and earns no Windows Rust/runtime credit."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c5.md",
+      "line": 44,
+      "text": "**NOT RUN for this fix:** full touched-crate/workspace suites, slow tier and forced ignores (the binding fix gate names focused targets); the previous full-Media readback failure was not revalidated or resolved. Native Windows beyond the `aws-lc-sys` prerequisite failure, actual Whisper/model-installed speech controls, microphone/displayed-frame/audio-clock integration, native allocation/staging accounting, C6/shared-host/private-range composition, persisted commentary editing, live S4 specialist, equipped GPU/provider/media-pack lanes, hosted CI, laptop offload, and independent reviews remain NOT RUN. No model download or push was made."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c5.md",
+      "line": 65,
+      "text": "**NOT RUN for this fix:** the full workspace test aggregate, slow tier, forced ignores, and Media integration/doctest targets (the requested Media command is the full serial lib suite); native Windows Rust/runtime beyond the dependency blocker; real Whisper spoken-note/commentary controls without the pinned model; actual microphone, displayed-frame, and recorded-audio clock integration; native model/workspace and capture-staging accounting/cleanup; C6/shared-host streaming, private-range enforcement, incomplete-status UI, and G11 App closure; persisted remark split/merge/re-anchor/delete with collection/reopen and a post-edit mutation; native filesystem unknown-outcome injection; an actual process-crash pending-ASR control (failed normal teardown is exercised); live S4 specialist and equipped GPU/provider/media-pack lanes; hosted CI; laptop offload (Tailscale authentication required); and independent review rounds excluded for this worker. No model download or push was made."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c5.md",
+      "line": 87,
+      "text": "**NOT RUN for this fix:** the workspace slow tier and forced ignores; real Whisper spoken-note and commentary bodies without the pinned model; native Windows execution; actual microphone, displayed-frame, and recorded-audio clock integration; native model workspace and capture-staging accounting or cleanup; C6 shared-host streaming, private-range enforcement, incomplete-status UI, and G11 App closure; persisted remark split, merge, re-anchor, or deletion with collection, reopen, and a post-edit mutation; native filesystem unknown-outcome injection and actual pending-ASR process crash; live S4 specialist, equipped GPU, provider, and media-pack acceptance; the sixteen prior mutation pairs; fresh full parent suites; hosted CI, laptop offload, and independent review rounds. [The complete NOT RUN record](b-evidence/c5-fix3/NOT-RUN.md) distinguishes these from exercised normal-teardown and audio-ack crash controls. Both real-model controls explicitly reported `NOT RUN` inside otherwise passing test aggregates. No model download or push was made."
+    },
+    {
+      "source": "docs/reports/ja1-s3/c6b.md",
+      "line": 39,
+      "text": "| Windows compile check of media, project, App | BLOCKED, exit 101 before any touched crate compiled. FFmpeg and AWS-LC native build scripts fail on this Linux cross environment; both also fail at exact `74b22001`. Native Windows compilation and runtime remain NOT RUN. |"
+    },
+    {
+      "source": "docs/reports/ja1-s3/c6b.md",
+      "line": 93,
+      "text": "The cancellation witness drives the production abort predicate with a real grant and lease; it does not run native Whisper inference. Workspace App output explicitly reports `NOT RUN s3_real_spoken_note_control` and `NOT RUN s3_real_commentary_control` because the pinned `ggml-small.bin` is absent. The media synthesized-speech control also reports its opt-in `KINEWRIGHT_TRANSCRIPT_TEST=1` lane was skipped. These real inference controls remain C6a's work. Native Windows execution, hosted CI, independent lead review, and the full workspace slow tier are NOT RUN. The changed media and App crates did run with their slow-test features enabled. Existing ignored and opt-in lanes are not promoted to runtime acceptance by their libtest counts."
+    },
+    {
+      "source": "docs/reports/ja1-s3/hooks.md",
+      "line": 31,
+      "text": "The three library doc-tests passed. Agent's reported passes include eight equipped-session skips; those are NOT RUN. Both architecture scans, all 28 new host witnesses, the shipping-host owned-audio Close/detach/reattach witness, and the corrected legacy Close fixture passed."
+    },
+    {
+      "source": "docs/reports/ja1-s3/hooks.md",
+      "line": 41,
+      "text": "NOT RUN: native Windows runtime/durability, real provider callbacks/secret delivery, C6 native same-attempt continuation, Studio UI controls/screenshots, hosted CI and slow tier. Reviewer: NOT RUN because the attachment role does not exist at this head. Nonempty ClaimIndex runtime: NOT RUN \u2014 no ClaimIndex producer; nonempty refused at bundle.rs:156. All four index refs remain in the inherited root-producer projection and oracle."
+    },
+    {
+      "source": "docs/reports/ja1-s3/hooks.md",
+      "line": 43,
+      "text": "The inherited `s4_usage_durable_reopen_h1` and `s4_editor_result_to_candidate` slots remain ignored. Every actual ignored/equipped case is listed in the gate inventory. Full workspace fast-tier execution and laptop offload are NOT RUN; SSH requires additional Tailscale authentication."
+    },
+    {
+      "source": "docs/reports/ja1-s3/hooks.md",
+      "line": 68,
+      "text": "The three library doc-tests passed. Agent's reported passes include eight explicit equipped/provider skips, which are NOT RUN. [Commands, raw summaries and the complete ignored/skip inventory](hooks-fix1-evidence/gates.json) are retained. App's ten failures [exactly match](hooks-fix1-evidence/app-failures.json) both the approved C2 inventory and the archived parent `4bd37517` run. No other suite failed. Parent comparisons used verified archived logs; a fresh parent rerun was NOT RUN because no additional suite failure appeared."
+    },
+    {
+      "source": "docs/reports/ja1-s3/hooks.md",
+      "line": 72,
+      "text": "NOT RUN for this fix: native Windows runtime/durability and completed Windows Agent compilation; real provider callbacks/secret delivery; C6 integration, native same-attempt continuation and Studio controls/screenshots; hosted CI and slow tier; the full workspace fast tier; every ignored/equipped case listed in the inventory. Laptop offload was unavailable because Tailscale SSH required an additional authentication check. Worker review rounds were NOT RUN under the binding worker brief. Reviewer: NOT RUN because the role does not exist at this head. Nonempty ClaimIndex runtime: NOT RUN, with reason \"no ClaimIndex producer; nonempty refused at bundle.rs:156\". The inherited projection and oracle still carry and compare all four refs."
+    }
+  ]
+}

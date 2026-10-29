@@ -118,6 +118,7 @@ pub(crate) struct ProjectSession {
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
     media_backend: crate::media_access::MediaBackend,
+    media_retirement: Option<kinewright_core::LegacyMediaGrant>,
     pub(crate) studio: crate::studio::Studio,
     pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
     pub(crate) ja1_activation: Option<(
@@ -427,6 +428,7 @@ impl ProjectSession {
             document: Arc::clone(&document),
             revision: TimelineRevision::default(),
             project_path,
+            media_retirement: source_admission.legacy_media(),
             source_admission,
             media_backend,
             studio: crate::studio::Studio::default(),
@@ -526,6 +528,25 @@ impl ProjectSession {
             self.legacy_media(),
             self.studio.manual_inputs.clone(),
         )
+    }
+
+    pub(crate) fn set_source_admission(
+        &mut self,
+        admission: kinewright_project::bundle::BundleWriteAdmission,
+    ) {
+        self.retire_media();
+        self.media_retirement = admission.legacy_media();
+        self.source_admission = admission;
+    }
+
+    pub(crate) fn retire_media(&self) {
+        if let Some(grant) = &self.media_retirement {
+            match &self.media_backend {
+                crate::media_access::MediaBackend::Engine(engine) => engine.retire_media(grant),
+                #[cfg(test)]
+                crate::media_access::MediaBackend::Stub { .. } => {}
+            }
+        }
     }
 
     pub(crate) fn analysis(&self) -> Arc<dyn Analysis> {
@@ -841,6 +862,7 @@ impl ProjectSession {
         {
             return false;
         }
+        self.retire_media();
         // Cloned before the investigator borrow: `incidents` now resolves
         // through the sidecar deref, which borrows the whole session.
         let incidents = std::sync::Arc::clone(&self.incidents);

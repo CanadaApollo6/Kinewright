@@ -887,3 +887,154 @@ mod tests {
         }
     }
 }
+
+#[test]
+fn s3_current_edit_refreshes_trim_while_frozen() {
+    let mut retire = tests::Retire::default();
+    let mut fixtures = fixtures();
+    let frozen = Arc::clone(&fixtures.contexts[0]);
+    let key = frozen.snapshot.descriptor.key.clone();
+    let (mut app, engine) = in1_harness(frozen.document.clone());
+    retire.arm(&engine);
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
+    attach(&mut app, fixtures.owners.remove(0));
+    app.install_studio_context(Arc::clone(&frozen)).unwrap();
+    let ctx = egui::Context::default();
+    wait_frame(&mut app, &ctx, &key, TimeCode::ZERO);
+    app.focused_mut().studio.manual_inputs = Some(frozen.playback_inputs().unwrap());
+    let clip = app
+        .focused()
+        .document
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .unwrap()
+        .clips[0]
+        .clone();
+    assert!(matches!(
+        app.focused()
+            .core
+            .request(Command::Do(Operation::TrimClip {
+                clip: clip.id,
+                new_source: TimeCode(2)..clip.source_range.end,
+            }))
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    app.poll_background(&ctx);
+    assert_eq!(
+        app.program_document(),
+        &frozen.document,
+        "C6A_FROZEN_PICTURE_UNCHANGED"
+    );
+    assert_eq!(
+        app.focused()
+            .studio
+            .manual_inputs
+            .as_ref()
+            .unwrap()
+            .document(),
+        &*app.focused().document,
+        "C6A_MANUAL_TRIM_REFRESHED"
+    );
+    app.return_to_current_edit();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        app.poll_background(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.finalize_preview(ui.ctx());
+        });
+        if app
+            .presenter
+            .bound()
+            .is_some_and(|cell| !cell.stale && cell.context.is_none())
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "C6A_CURRENT_EDIT_PAINTED");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        app.program_document()
+            .clip(clip.id)
+            .unwrap()
+            .source_range
+            .start,
+        TimeCode(2)
+    );
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}
+
+#[test]
+fn s3_retire_media_after_studio_revokes_legacy_grant() {
+    let mut retire = tests::Retire::default();
+    let (mut app, engine) = in1_harness(Document::default());
+    retire.arm(&engine);
+    let results = app.focused().analysis().visual_asset_results();
+    assert!(matches!(
+        results.try_recv(),
+        Err(crossbeam_channel::TryRecvError::Empty)
+    ));
+    app.focused_mut()
+        .set_source_admission(kinewright_project::bundle::BundleWriteAdmission::new_document());
+    assert!(
+        matches!(
+            results.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Disconnected)
+        ),
+        "C6A_REPLACED_SOURCE_CHANNEL_RETIRED"
+    );
+    let results = app.focused().analysis().visual_asset_results();
+    app.focused().source_admission.revoke_legacy_media();
+    app.focused().retire_media();
+    assert!(
+        matches!(
+            results.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Disconnected)
+        ),
+        "C6A_REVOKED_PROJECT_CHANNEL_RETIRED"
+    );
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}
+
+#[test]
+fn s3_rapid_focus_round_trip_rebinds_visual_cache() {
+    let mut retire = tests::Retire::default();
+    let fixtures = fixtures();
+    let document = fixtures.contexts[0].document.clone();
+    let asset = document.media_pool[0].clone();
+    let (mut app, engine) = in1_harness(document);
+    retire.arm(&engine);
+    let ctx = egui::Context::default();
+    let media = app.focused().analysis();
+    assert!(app.visual_cache.poll_scoped(&ctx, &*media).is_empty());
+    drop(media);
+    app.new_project();
+    assert_eq!(app.projects.len(), 2);
+    app.focus_project(0);
+    let media = app.focused().analysis();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(app.visual_cache.poll_scoped(&ctx, &*media).is_empty());
+        if app.visual_cache.waveform(&*media, &asset).is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "C6A_FOCUS_ROUND_TRIP_DELIVERS_VISUAL_RESULT"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(media);
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}

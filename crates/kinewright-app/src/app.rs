@@ -1342,6 +1342,8 @@ impl KinewrightApp {
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
         self.mixer_selection = None;
         self.clear_preview();
+        self.focused().retire_media();
+        self.visual_cache = crate::visual_cache::VisualCache::new(crossbeam_channel::never());
         self.focused_project = index;
         if let Some(context) = self.focused().studio.selection.clone() {
             let position = self.focused().studio.position;
@@ -1356,7 +1358,13 @@ impl KinewrightApp {
             return;
         }
         if self.focused().is_owned() {
-            if let Some(inputs) = self.focused().studio.manual_inputs.clone() {
+            if let Some(inputs) = self
+                .focused()
+                .studio
+                .manual_inputs
+                .clone()
+                .filter(|inputs| inputs.document() == &*self.focused().document)
+            {
                 let stamp = self.lut_publisher.set_certified_document(inputs);
                 self.presenter.set_context(stamp.epoch, None);
                 self.playback.seek(self.focused().position);
@@ -1629,11 +1637,12 @@ impl KinewrightApp {
             report.digest, new_digest,
             "one serialisation serves both files"
         );
-        self.focused_mut().source_admission =
+        self.focused_mut().set_source_admission(
             kinewright_project::bundle::BundleWriteAdmission::from_written_legacy(
                 writer.resolved_identity(),
                 json.as_bytes(),
-            )?;
+            )?,
+        );
         report.path = path.to_path_buf();
         self.adopt_saved_path(path, &new_digest, written_version);
         if let Some(reason) = &report.lut_store_error {
@@ -3346,6 +3355,9 @@ impl KinewrightApp {
                             self.visual_cache.invalidate_and_unblock_path(&asset.path);
                         }
                     }
+                    self.projects[project_index]
+                        .studio
+                        .update_manual_document(Arc::clone(&doc));
                     self.projects[project_index].document = Arc::clone(&doc);
                     self.projects[project_index].revision = revision;
                     if previous_document.lut_assets != doc.lut_assets {

@@ -1518,6 +1518,9 @@ impl Feedback {
         }
     }
     fn save_inner(&mut self, port: &mut dyn FeedbackPort, comment: &CommentId) -> Outcome {
+        if let Keeping::Failed { why, .. } = &self.keeping {
+            return Outcome::Refused(why.clone());
+        }
         let comments = self
             .saved
             .iter()
@@ -1666,6 +1669,9 @@ impl Feedback {
         outcome
     }
     fn submit_inner(&mut self, port: &mut dyn FeedbackPort) -> Outcome {
+        if let Keeping::Failed { why, .. } = &self.keeping {
+            return Outcome::Refused(why.clone());
+        }
         if self.submission.is_none() {
             if self.selection.is_empty() {
                 return Outcome::Refused("Choose saved notes for Revise cut first.".into());

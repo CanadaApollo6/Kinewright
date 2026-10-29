@@ -293,6 +293,15 @@ impl DerivedAnalysisService {
         clear_cache_root(&self.root)
     }
 
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        self.silence_cancellations.retire(authority);
+        self.scene_cancellations.retire(authority);
+        self.beat_cancellations.retire(authority);
+        self.silence_states.retire(authority);
+        self.scene_states.retire(authority);
+        self.beat_states.retire(authority);
+    }
+
     pub(crate) fn cancel_all(&self) {
         self.silence_cancellations.cancel_all();
         self.scene_cancellations.cancel_all();

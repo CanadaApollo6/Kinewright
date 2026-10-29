@@ -726,6 +726,8 @@ struct Lossy<'a> {
     seen: Vec<Option<Vec<u8>>>,
     /// Commands that reached this port.
     calls: usize,
+    admits: usize,
+    envelopes: usize,
 }
 impl<'a> Lossy<'a> {
     fn new(inner: &'a mut dyn FeedbackPort) -> Self {
@@ -738,6 +740,8 @@ impl<'a> Lossy<'a> {
             crash_at_dispatch: None,
             seen: Vec::new(),
             calls: 0,
+            admits: 0,
+            envelopes: 0,
         }
     }
 }
@@ -747,12 +751,14 @@ impl FeedbackPort for Lossy<'_> {
         kind: FeedbackEvidenceKind,
         bytes: &[u8],
     ) -> Result<(ObjectRef, Option<StorePin>), String> {
+        self.admits += 1;
         self.inner.admit(kind, bytes)
     }
     fn envelope(
         &mut self,
         issuer: &mut Option<IssuerId>,
     ) -> Result<(MetadataEnvelope, u64), String> {
+        self.envelopes += 1;
         self.inner.envelope(issuer)
     }
     fn metadata(&mut self, envelope: &MetadataEnvelope, update: &MetadataUpdate) -> Reply {
@@ -1678,6 +1684,27 @@ fn s3_fix3_one_owner_per_recovery_file() {
     b.refresh(&b_bundle).unwrap();
     let mut counting = Lossy::new(&mut b_bundle);
     let outcome = b.save(&mut counting, &y_id);
+    assert_eq!(counting.admits, 0, "C6A_SECOND_OWNER_NO_ADMISSION");
+    assert_eq!(counting.envelopes, 0, "C6A_SECOND_OWNER_NO_ISSUER");
+    b.selection = a_bundle
+        .feedback_index()
+        .unwrap()
+        .revisions
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
+    // Even a fabricated nonempty selection must refuse before issuer publication.
+    if b.selection.is_empty() {
+        b.selection.push(ObjectRef {
+            sha256: "a".repeat(64),
+            byte_length: 1,
+            record_kind: kinewright_project::bundle_records::RecordKind::FeedbackRevision,
+        });
+    }
+    assert!(matches!(b.submit(&mut counting), Outcome::Refused(_)));
+    assert_eq!(counting.admits, 0, "C6A_SECOND_OWNER_NO_ADMISSION");
+    assert_eq!(counting.envelopes, 0, "C6A_SECOND_OWNER_NO_ISSUER");
     let calls = counting.calls;
     drop(counting);
     assert!(
