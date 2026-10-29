@@ -2211,7 +2211,7 @@ impl KinewrightApp {
     }
 
     /// Whether an exit waits for the person's choice about unsaved work.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn exit_waits_for_choice(&self) -> bool {
         matches!(self.pending_project_action, Some(ProjectAction::Exit(_)))
     }

@@ -109,6 +109,10 @@ fn refuse_volatile(directory: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the Linux signature, which can refuse"
+)]
 fn refuse_volatile(_directory: &Path) -> Result<(), String> {
     Ok(())
 }
