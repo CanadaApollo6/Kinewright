@@ -146,22 +146,29 @@ impl VisualAssetService {
         let Some((reply, _)) = self.result_channel(&grant) else {
             return false;
         };
-        let inserted = self
-            .in_flight
-            .lock()
-            .is_ok_and(|mut in_flight| in_flight.insert(key.clone()));
-        if !inserted {
+        let Ok(mut in_flight) = self.in_flight.lock() else {
+            return false;
+        };
+        if in_flight.contains(&key) {
             return true;
         }
+        if reply.len()
+            + in_flight
+                .iter()
+                .filter(|(authority, _)| *authority == key.0)
+                .count()
+            >= RESULT_CAPACITY
+        {
+            return false;
+        }
+        in_flight.insert(key.clone());
         if let Ok(()) = self
             .jobs
             .try_send(crate::locator::LocatorJob::new(grant, (job, reply)))
         {
             true
         } else {
-            if let Ok(mut in_flight) = self.in_flight.lock() {
-                in_flight.remove(&key);
-            }
+            in_flight.remove(&key);
             false
         }
     }
@@ -242,7 +249,7 @@ impl VisualAssetWorker {
     }
 
     fn handle_scoped(&mut self, job: VisualJob) -> bool {
-        // Release the lease before a bounded result send can block on the UI.
+        // Result backpressure from an inactive project must not stop shared work.
         let (key, result, reply) = job.run(
             self,
             |worker, (job, reply)| {
@@ -296,9 +303,9 @@ impl VisualAssetWorker {
             },
         );
         if let Ok(mut in_flight) = self.in_flight.lock() {
+            let _ = reply.try_send(result);
             in_flight.remove(&key);
         }
-        let _ = reply.send(result);
         true
     }
 
@@ -383,13 +390,14 @@ impl VisualAssetWorker {
     ) -> Result<VisualAssetResult, MediaError> {
         let hash = self.content_hash(&asset.path)?;
         let store = ThumbnailStore::new(self.root.join("thumbnails"));
-        let image = if let Some(cached) = store.load(&hash, key.source_at, key.max_width)? {
-            cached
-        } else {
-            let decoded = thumbnail(&asset.path, asset.fps, key.source_at, key.max_width)?;
-            store.save(&hash, key.source_at, key.max_width, &decoded)?;
-            decoded
-        };
+        let image =
+            if let Some(cached) = store.load(&hash, asset.fps, key.source_at, key.max_width)? {
+                cached
+            } else {
+                let decoded = thumbnail(&asset.path, asset.fps, key.source_at, key.max_width)?;
+                store.save(&hash, asset.fps, key.source_at, key.max_width, &decoded)?;
+                decoded
+            };
         Ok(VisualAssetResult::Thumbnail(ThumbnailFrame {
             key,
             request_generation,
@@ -461,10 +469,11 @@ impl ThumbnailStore {
     fn load(
         &self,
         hash: &str,
+        fps: Rational,
         source_at: TimeCode,
         max_width: u32,
     ) -> Result<Option<RgbaImage>, MediaError> {
-        let Some(bytes) = read_cache(&self.path_for(hash, source_at, max_width), "thumbnail")?
+        let Some(bytes) = read_cache(&self.path_for(hash, fps, source_at, max_width), "thumbnail")?
         else {
             return Ok(None);
         };
@@ -474,6 +483,7 @@ impl ThumbnailStore {
     fn save(
         &self,
         hash: &str,
+        fps: Rational,
         source_at: TimeCode,
         max_width: u32,
         image: &RgbaImage,
@@ -481,7 +491,7 @@ impl ThumbnailStore {
         create_cache_dir(&self.root, "thumbnail")?;
         let bytes = encode_thumbnail_cache(image)?;
         atomic_write(
-            &self.path_for(hash, source_at, max_width),
+            &self.path_for(hash, fps, source_at, max_width),
             &bytes,
             "visual asset",
             TempFileStyle::ReplaceExtension,
@@ -490,11 +500,16 @@ impl ThumbnailStore {
         Ok(())
     }
 
-    fn path_for(&self, hash: &str, source_at: TimeCode, max_width: u32) -> PathBuf {
+    fn path_for(&self, hash: &str, fps: Rational, source_at: TimeCode, max_width: u32) -> PathBuf {
         cache_path(
             &self.root,
             hash,
-            &format!("-{}-{max_width}", source_at.0),
+            &format!(
+                "-{}-{}-{}-{max_width}",
+                fps.numerator(),
+                fps.denominator(),
+                source_at.0
+            ),
             "rgba",
         )
     }
@@ -580,6 +595,83 @@ mod tests {
             color_description: kinewright_core::ColorDescription::default(),
             assumed_from: None,
         }
+    }
+
+    #[test]
+    fn c6b_thumbnail_cache_misses_when_fps_changes() {
+        let directory = TempDirectory::new("c6b-thumbnail-recipe");
+        let store = ThumbnailStore::new(directory.root().into());
+        let image = RgbaImage {
+            width: 1,
+            height: 1,
+            pixels: vec![12, 34, 56, 255],
+        };
+        let hash = crate::sha256::sha256_bytes(b"the same source bytes");
+        let fps = Rational::new(24, 1).unwrap();
+        store.save(&hash, fps, TimeCode(24), 32, &image).unwrap();
+        assert_eq!(
+            store
+                .load(&hash, fps, TimeCode(24), 32)
+                .unwrap()
+                .unwrap()
+                .pixels,
+            image.pixels
+        );
+        assert!(
+            store
+                .load(&hash, Rational::new(30, 1).unwrap(), TimeCode(24), 32)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn c6b_full_inactive_visual_channel_preserves_active_progress() {
+        let directory = TempDirectory::new("c6b-visual-backpressure");
+        let (jobs, receiver) = bounded(JOB_CAPACITY);
+        let service = VisualAssetService {
+            jobs,
+            results: Mutex::default(),
+            in_flight: Arc::default(),
+            root: directory.root().into(),
+        };
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let a_results = service.results(&a);
+        let b_results = service.results(&b);
+        let mut worker =
+            VisualAssetWorker::new(directory.root().into(), Arc::clone(&service.in_flight));
+        for generation in 0..RESULT_CAPACITY as u64 {
+            assert!(service.request_waveform(asset(1), generation, a.clone()));
+            assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        }
+        assert_eq!(a_results.len(), RESULT_CAPACITY);
+        assert!(
+            !service.request_waveform(asset(1), RESULT_CAPACITY as u64, a.clone()),
+            "a full authority refuses before accepting work"
+        );
+        assert!(service.request_waveform(asset(2), 0, b));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(matches!(
+            b_results.try_recv().unwrap(),
+            VisualAssetResult::Failed {
+                asset: AssetId(2),
+                ..
+            }
+        ));
+        for _ in 0..RESULT_CAPACITY {
+            a_results.try_recv().unwrap();
+        }
+        assert!(service.request_waveform(asset(1), RESULT_CAPACITY as u64, a));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(
+            a_results.try_recv().is_ok(),
+            "A retries after draining without losing accepted results"
+        );
     }
 
     #[test]

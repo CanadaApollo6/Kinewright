@@ -184,3 +184,19 @@ fn s3_chat_start_reply_loss_is_unconfirmed_without_resend() {
     assert!(app.close());
     drop(proxy);
 }
+
+#[test]
+fn c6b_dropping_app_fixture_reaps_its_host() {
+    let (_temp, app, _path) = s2h_fix3_app(false);
+    let host = app.host.as_ref().unwrap();
+    let pid = host.child_id().unwrap();
+    let client = host.client.clone();
+    let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+    assert!(process.exists(), "the fixture launched a real host");
+    drop(app);
+    let survived = process.exists();
+    if survived {
+        let _ = client.request(kinewright_agent::writer_host::HostCommand::Shutdown);
+    }
+    assert!(!survived, "C6B_FIXTURE_HOST_REAPED_ON_DROP");
+}

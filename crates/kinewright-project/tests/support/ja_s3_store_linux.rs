@@ -1244,3 +1244,109 @@ fn assert_projection_manifest_oracle(bundle: &mut ProjectBundle, path: &Path, so
         drop((checkpoint, manifest_hold));
     }
 }
+
+#[test]
+fn c6b_run_update_checks_sequence_and_consumes_admission() {
+    let tmp = temp("c6b-run-admission");
+    let path = tmp.path("studio.kinewright");
+    let (_core, mut bundle, _inputs) = setup(&path);
+    let issuer = bundle.issue_metadata_issuer().unwrap();
+    let request = update(
+        &bundle,
+        MetadataChange::Orchestration {
+            runs: vec![run_record(RunId::fresh().unwrap())],
+            consume_batch: None,
+        },
+    );
+    let before = bundle.store().usage().unwrap().objects;
+    let (refused, trace) = io_observer::observe(|| {
+        bundle.validate_run_update(&envelope(&bundle, &issuer, 2), &request)
+    });
+    assert!(
+        matches!(refused, Err(BundleError::Identity(ref message)) if message == "metadata issuer sequence"),
+        "C6B_RUN_SEQUENCE_CHECKED_BEFORE_ADMISSION"
+    );
+    assert!(
+        trace.events.is_empty(),
+        "invalid issuer must not stage records"
+    );
+    assert_eq!(bundle.store().usage().unwrap().objects, before);
+    let command = envelope(&bundle, &issuer, 1);
+    let (validated, staged) =
+        io_observer::observe(|| bundle.validate_run_update(&command, &request));
+    let staged_hashes: Vec<_> = staged
+        .events
+        .iter()
+        .filter(|event| event.operation == "object_stage")
+        .map(|event| event.attempted_sha256.clone().unwrap())
+        .collect();
+    assert!(
+        !staged_hashes.is_empty(),
+        "the update admitted real records"
+    );
+    let validations = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = std::rc::Rc::clone(&validations);
+    let receipt = io_observer::at_barrier(
+        "metadata_admission",
+        move || observed.set(observed.get() + 1),
+        || bundle.commit_orchestration(&command, validated.unwrap()),
+    )
+    .unwrap();
+    assert_eq!(validations.get(), 0, "C6B_COMMIT_CONSUMES_ADMITTED_SEALS");
+    let replay = bundle.validate_run_update(&command, &request).unwrap();
+    assert_eq!(
+        bundle.commit_orchestration(&command, replay).unwrap(),
+        receipt
+    );
+}
+
+#[test]
+fn c6b_refused_voice_requests_do_not_exhaust_slots() {
+    let tmp = temp("c6b-voice-slots");
+    let path = tmp.path("studio.kinewright");
+    let (_core, mut bundle, _inputs) = setup(&path);
+    let limits = StorageLimits {
+        comments: 1,
+        ..StorageLimits::default()
+    };
+    bundle.restrict_limits_probe(limits).unwrap();
+    let issuer = bundle.issue_metadata_issuer().unwrap();
+    let audio = blob(&mut bundle, b"retained voice audio");
+    let mut voice = VoiceRef {
+        note_id: NoteId::fresh().unwrap(),
+        audio_ref: audio.reference.clone(),
+        duration_micros: 1_000_000,
+        range: None,
+        playhead_log_ref: None,
+        original_asr_ref: None,
+        chosen_transcript_revision: None,
+    };
+    for _ in 0..8 {
+        voice.note_id = NoteId::fresh().unwrap();
+        let request = update(&bundle, MetadataChange::SaveVoice(voice.clone()));
+        let refused = bundle.metadata_command(
+            &envelope(&bundle, &issuer, 1),
+            MetadataScope::Snapshot,
+            &request,
+        );
+        assert!(
+            matches!(refused, Err(BundleError::Identity(ref message)) if message == "metadata scope/project"),
+            "C6B_REFUSALS_DO_NOT_EXHAUST_VOICE_SLOTS"
+        );
+    }
+    voice.note_id = NoteId::fresh().unwrap();
+    let request = update(&bundle, MetadataChange::SaveVoice(voice.clone()));
+    committed(
+        bundle
+            .metadata_command(
+                &envelope(&bundle, &issuer, 1),
+                MetadataScope::Feedback,
+                &request,
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        bundle.feedback_index().unwrap().notes.get(&voice.note_id),
+        Some(&voice)
+    );
+}

@@ -25,7 +25,7 @@ use crate::{
     sha256::sha256_file,
 };
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 /// `OpenAI` Whisper `small`, converted to GGML by the whisper.cpp project. The
@@ -272,7 +272,13 @@ impl TranscriptWorker {
         self.update(&asset.path, TranscriptStatus::Hashing);
         let content_sha256 = sha256_file(&asset.path)?;
         cancelled(cancellation)?;
-        if let Some(cached) = self.store.load(&content_sha256, asset.id)? {
+        if let Some(cached) = self.store.load(
+            &content_sha256,
+            asset.id,
+            asset.fps,
+            asset.duration,
+            language,
+        )? {
             cancelled(cancellation)?;
             self.finish(&asset.path, cached);
             return Ok(());
@@ -342,7 +348,7 @@ impl TranscriptWorker {
             language,
         )?;
         cancelled(cancellation)?;
-        self.store.save(&transcript)?;
+        self.store.save(&transcript, asset.duration, language)?;
         cancelled(cancellation)?;
         self.finish(&asset.path, transcript);
         Ok(())
@@ -363,8 +369,14 @@ impl TranscriptWorker {
 
 fn inference_abort(cancellation: &ExportCancellation) -> Box<dyn FnMut() -> bool> {
     let cancellation = cancellation.clone();
+    let authority = crate::locator::capture();
     // whisper-rs 0.16's erased trampoline expects a boxed callback value.
-    Box::new(move || cancellation.is_cancelled())
+    Box::new(move || {
+        cancellation.is_cancelled()
+            || authority
+                .as_ref()
+                .is_some_and(|grant| grant.check().is_err())
+    })
 }
 
 fn run_whisper(
@@ -736,6 +748,8 @@ struct StoredTranscript {
     model_sha256: String,
     source_fps: Rational,
     words: Vec<TranscriptWord>,
+    source_frames: TimeCode,
+    language: Option<String>,
 }
 
 struct TranscriptStore {
@@ -749,21 +763,41 @@ impl TranscriptStore {
         }
     }
 
-    #[cfg(test)]
-    fn path_for(&self, content_sha256: &str) -> PathBuf {
-        self.cache.path_for(content_sha256, "")
+    fn path_for(
+        &self,
+        content_sha256: &str,
+        fps: Rational,
+        frames: TimeCode,
+        language: Option<&str>,
+    ) -> PathBuf {
+        let language_key = crate::sha256::sha256_bytes(format!("{language:?}").as_bytes());
+        self.cache.path_for(
+            content_sha256,
+            &format!(
+                "-{}-{}-{}-{language_key}",
+                fps.numerator(),
+                fps.denominator(),
+                frames.0
+            ),
+        )
     }
 
     fn load(
         &self,
         content_sha256: &str,
         asset: AssetId,
+        fps: Rational,
+        frames: TimeCode,
+        language: Option<&str>,
     ) -> Result<Option<AssetTranscript>, MediaError> {
         self.cache.load(
-            &self.cache.path_for(content_sha256, ""),
+            &self.path_for(content_sha256, fps, frames, language),
             |stored: StoredTranscript| {
                 (stored.content_sha256 == content_sha256
-                    && stored.model_sha256 == WHISPER_MODEL_SHA256)
+                    && stored.model_sha256 == WHISPER_MODEL_SHA256
+                    && stored.source_fps == fps
+                    && stored.source_frames == frames
+                    && stored.language.as_deref() == language)
                     .then_some(AssetTranscript {
                         asset,
                         content_sha256: stored.content_sha256,
@@ -774,14 +808,26 @@ impl TranscriptStore {
         )
     }
 
-    fn save(&self, transcript: &AssetTranscript) -> Result<(), MediaError> {
+    fn save(
+        &self,
+        transcript: &AssetTranscript,
+        frames: TimeCode,
+        language: Option<&str>,
+    ) -> Result<(), MediaError> {
         self.cache.save(
-            &self.cache.path_for(&transcript.content_sha256, ""),
+            &self.path_for(
+                &transcript.content_sha256,
+                transcript.source_fps,
+                frames,
+                language,
+            ),
             &StoredTranscript {
                 content_sha256: transcript.content_sha256.clone(),
                 model_sha256: WHISPER_MODEL_SHA256.to_owned(),
                 source_fps: transcript.source_fps,
                 words: transcript.words.clone(),
+                source_frames: frames,
+                language: language.map(str::to_owned),
             },
         )
     }
@@ -904,9 +950,8 @@ pub(crate) fn transcribe_voice_wav(
     }
     let store = TranscriptStore::new(cache_root(data_dir, "voice-transcripts", CACHE_VERSION));
     let fps = Rational::new(1_000_000, 1).map_err(|e| MediaError::Backend(e.to_string()))?;
-    let cached = store
-        .load(content_sha256, AssetId(0))?
-        .filter(|value| value.source_fps == fps);
+    let frames = TimeCode(i64::try_from(duration).map_err(|e| MediaError::Backend(e.to_string()))?);
+    let cached = store.load(content_sha256, AssetId(0), fps, frames, Some("en"))?;
     let transcript = if let Some(cached) = cached {
         cached
     } else {
@@ -948,11 +993,7 @@ pub(crate) fn transcribe_voice_wav(
             asset: AssetId(0),
             content_sha256: content_sha256.into(),
             source_fps: fps,
-            words: extract_words(
-                &state.as_iter().collect::<Vec<_>>(),
-                fps,
-                TimeCode(i64::try_from(duration).map_err(|e| MediaError::Backend(e.to_string()))?),
-            )?,
+            words: extract_words(&state.as_iter().collect::<Vec<_>>(), fps, frames)?,
         }
     };
     cancelled(cancellation)?;
@@ -983,7 +1024,7 @@ pub(crate) fn transcribe_voice_wav(
             "Whisper returned invalid voice timing or text bounds".into(),
         ));
     }
-    store.save(&transcript)?;
+    store.save(&transcript, frames, Some("en"))?;
     cancelled(cancellation)?;
     Ok(if words.is_empty() {
         VoiceTranscript::NoSpeech
@@ -1014,6 +1055,77 @@ mod tests {
     }
 
     #[test]
+    fn c6b_transcript_cache_requires_the_requested_recipe() {
+        let directory = TempDirectory::new("c6b-transcript-recipe");
+        let store = TranscriptStore::new(directory.root().into());
+        let transcript = fixture_transcript(
+            AssetId(1),
+            &crate::sha256::sha256_bytes(b"same audio"),
+            Rational::new(24, 1).unwrap(),
+        );
+        store.save(&transcript, TimeCode(240), Some("en")).unwrap();
+        let load = |fps, frames, language| {
+            store
+                .load(
+                    &transcript.content_sha256,
+                    AssetId(2),
+                    fps,
+                    frames,
+                    language,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            load(transcript.source_fps, TimeCode(240), Some("en"))
+                .unwrap()
+                .words,
+            transcript.words
+        );
+        assert!(load(transcript.source_fps, TimeCode(240), Some("fr")).is_none());
+        assert!(load(transcript.source_fps, TimeCode(240), None).is_none());
+        assert!(load(Rational::new(30, 1).unwrap(), TimeCode(240), Some("en")).is_none());
+        assert!(load(transcript.source_fps, TimeCode(120), Some("en")).is_none());
+    }
+
+    #[test]
+    fn c6b_inference_admitted_after_cancellation_aborts_on_revocation() {
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        let registry = CancellationRegistry::default();
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        registry.cancel_all();
+        let token = registry
+            .start(Path::new("admitted-after-sweep.wav"))
+            .unwrap();
+        let worker_token = token.clone();
+        let worker_grant = grant.clone();
+        let (arrived, ready) = crossbeam_channel::bounded(0);
+        let (release, released) = crossbeam_channel::bounded(0);
+        let worker = std::thread::spawn(move || {
+            let _access = crate::locator::LocatorAccess::enter(&worker_grant).unwrap();
+            let mut abort = inference_abort(&worker_token);
+            assert!(!abort());
+            arrived.send(()).unwrap();
+            released.recv().unwrap();
+            abort()
+        });
+        ready
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        origin.revoke_legacy_media();
+        assert!(
+            !token.is_cancelled(),
+            "the first sweep could not see this later token"
+        );
+        release.send(()).unwrap();
+        assert!(
+            worker.join().unwrap(),
+            "C6B_LATE_ADMISSION_ABORTS_ON_REVOCATION"
+        );
+        assert!(grant.is_quiescent());
+    }
+
+    #[test]
     fn transcript_cache_round_trips_and_rebinds_asset_id() {
         let directory = TempDirectory::new("transcript-cache-roundtrip");
         let store = TranscriptStore::new(directory.root().to_path_buf());
@@ -1022,10 +1134,16 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             Rational::new(24, 1).unwrap(),
         );
-        store.save(&transcript).unwrap();
+        store.save(&transcript, TimeCode(300), None).unwrap();
 
         let loaded = store
-            .load(&transcript.content_sha256, AssetId(99))
+            .load(
+                &transcript.content_sha256,
+                AssetId(99),
+                transcript.source_fps,
+                TimeCode(300),
+                None,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(loaded.asset, AssetId(99));
@@ -1059,16 +1177,51 @@ mod tests {
         let first_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let second_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         store
-            .save(&fixture_transcript(
-                AssetId(1),
-                first_hash,
-                Rational::new(30, 1).unwrap(),
-            ))
+            .save(
+                &fixture_transcript(AssetId(1), first_hash, Rational::new(30, 1).unwrap()),
+                TimeCode(300),
+                None,
+            )
             .unwrap();
 
-        assert!(store.load(first_hash, AssetId(2)).unwrap().is_some());
-        assert!(store.load(second_hash, AssetId(2)).unwrap().is_none());
-        assert_ne!(store.path_for(first_hash), store.path_for(second_hash));
+        assert!(
+            store
+                .load(
+                    first_hash,
+                    AssetId(2),
+                    Rational::new(30, 1).unwrap(),
+                    TimeCode(300),
+                    None
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .load(
+                    second_hash,
+                    AssetId(2),
+                    Rational::new(30, 1).unwrap(),
+                    TimeCode(300),
+                    None
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_ne!(
+            store.path_for(
+                first_hash,
+                Rational::new(30, 1).unwrap(),
+                TimeCode(300),
+                None
+            ),
+            store.path_for(
+                second_hash,
+                Rational::new(30, 1).unwrap(),
+                TimeCode(300),
+                None
+            )
+        );
     }
 
     #[test]
@@ -1077,9 +1230,24 @@ mod tests {
         let store = TranscriptStore::new(directory.root().to_path_buf());
         let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         fs::create_dir_all(directory.root()).unwrap();
-        fs::write(store.path_for(hash), b"not json").unwrap();
+        fs::write(
+            store.path_for(hash, Rational::new(30, 1).unwrap(), TimeCode(300), None),
+            b"not json",
+        )
+        .unwrap();
 
-        assert!(store.load(hash, AssetId(1)).unwrap().is_none());
+        assert!(
+            store
+                .load(
+                    hash,
+                    AssetId(1),
+                    Rational::new(30, 1).unwrap(),
+                    TimeCode(300),
+                    None
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

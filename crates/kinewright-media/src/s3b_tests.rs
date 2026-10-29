@@ -338,6 +338,54 @@ fn render(c: &Compositor, f: &WorkingFrame) -> Vec<f32> {
 }
 
 #[test]
+fn c6b_completed_readbacks_can_still_wait_for_upload_callbacks() {
+    let gpu = fixture_gpu_or_skip().expect("actual GPU required");
+    let c = Compositor::new(gpu);
+    let input = frame();
+    render(&c, &input);
+    c.maintain();
+    let mut completions = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        COMPLETE_HOLD.set(Some(tx));
+        assert!(
+            !render(&c, &input).is_empty(),
+            "the actual readback completed"
+        );
+        completions.push(Deferred(Some(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        )));
+    }
+    assert!(
+        !c.upload_available(),
+        "completion delivery still owns both upload batches"
+    );
+    let refused = c.render_working(
+        (input.width, input.height),
+        &[CompositorLayer {
+            frame: &input,
+            effects: &[],
+            transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
+        }],
+    );
+    assert!(
+        matches!(refused, Err(MediaError::Backend(ref message)) if message == "upload ring exhausted")
+    );
+    drop(completions);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !c.upload_available() {
+        c.maintain();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "delivered uploads become available"
+        );
+        std::thread::yield_now();
+    }
+    assert!(!render(&c, &input).is_empty());
+}
+
+#[test]
 fn s3b_u1_reuses_the_completed_mapped_buffer() {
     let gpu = fixture_gpu_or_skip().expect("actual GPU required");
     let c = Compositor::new(gpu);
