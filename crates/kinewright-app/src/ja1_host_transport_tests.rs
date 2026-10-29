@@ -109,6 +109,16 @@ impl Drop for ReplyDropProxy {
     }
 }
 
+impl Drop for HostAttachment {
+    fn drop(&mut self) {
+        // Test fixtures own every host they launch, including panic paths.
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl HostAttachment {
     pub(in crate::ja1_attachment) fn take_child_for_test(&mut self) -> std::process::Child {
         self.child.take().expect("owned fixture host")

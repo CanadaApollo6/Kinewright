@@ -591,7 +591,7 @@ impl ProjectBundle {
         if matches!(update.change, MetadataChange::SaveVoice(_)) {
             return crate::voice_store::metadata_command(self, envelope, scope, update);
         }
-        self.metadata_command_inner(envelope, scope, update)
+        self.metadata_command_inner(envelope, scope, update, None)
     }
     /// Only the locked note slot can authorize a voice publication, including `WriterHost` writes.
     pub(crate) fn voice_metadata_command(
@@ -607,13 +607,14 @@ impl ProjectBundle {
         if publication.note() != &voice.note_id {
             return Err(BundleError::HistoryBarrierInvariant);
         }
-        self.metadata_command_inner(envelope, scope, update)
+        self.metadata_command_inner(envelope, scope, update, None)
     }
     fn metadata_command_inner(
         &mut self,
         envelope: &MetadataEnvelope,
         scope: MetadataScope,
         update: &MetadataUpdate,
+        admitted: Option<(ValidatedMetadataUpdate, MetadataResult)>,
     ) -> Result<ReceiptLookup, BundleError> {
         let allowed = matches!(
             (scope, &update.change),
@@ -661,7 +662,10 @@ impl ProjectBundle {
             return Err(BundleError::Capacity("metadata receipts/pending"));
         }
         let reservation = self.store.reserve(0, command.encoded_bytes()?, 0, false)?;
-        let (validated, result) = self.validate_metadata(envelope, update)?;
+        let (validated, result) = match admitted {
+            Some(admitted) => admitted,
+            None => self.validate_metadata(envelope, update)?,
+        };
         self.pending_metadata = Some(validated);
         self.pending_command = Some(reservation.hold(command.clone()));
         self.pending_result = Some(ReceiptResult::Metadata { result });
@@ -698,6 +702,8 @@ impl ProjectBundle {
         envelope: &MetadataEnvelope,
         update: &MetadataUpdate,
     ) -> Result<(ValidatedMetadataUpdate, MetadataResult), BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::at_test_hook("metadata_admission");
         let mut pending = ValidatedMetadataUpdate {
             versions: None,
             feedback: None,
@@ -1263,7 +1269,7 @@ impl RunProjectionCursor {
 pub struct ValidatedRunUpdate {
     envelope: MetadataEnvelope,
     update: MetadataUpdate,
-    _admitted: Option<ValidatedMetadataUpdate>,
+    admitted: Option<(ValidatedMetadataUpdate, MetadataResult)>,
     _request_charge: StorageReservation,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1299,7 +1305,11 @@ impl ProjectBundle {
             {
                 return Err(BundleError::HistoryChanged);
             }
-            Some(self.validate_metadata(envelope, update)?.0)
+            self.issuers
+                .get(&envelope.id.issuer)
+                .filter(|issuer| !issuer.retired && issuer.next_sequence == envelope.id.sequence)
+                .ok_or_else(|| BundleError::Identity("metadata issuer sequence".into()))?;
+            Some(self.validate_metadata(envelope, update)?)
         } else if matches!(
             lookup,
             ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_)
@@ -1313,14 +1323,14 @@ impl ProjectBundle {
         Ok(ValidatedRunUpdate {
             envelope: envelope.clone(),
             update: update.clone(),
-            _admitted: admitted,
+            admitted,
             _request_charge: charge_value(&self.store, update)?,
         })
     }
     pub fn commit_orchestration(
         &mut self,
         envelope: &MetadataEnvelope,
-        transition: ValidatedRunUpdate,
+        mut transition: ValidatedRunUpdate,
     ) -> Result<OrchestrationReceipt, BundleError> {
         if envelope != &transition.envelope {
             return Err(BundleError::Identity(
@@ -1336,8 +1346,12 @@ impl ProjectBundle {
                 "validated orchestration domain changed".into(),
             ));
         };
-        let lookup =
-            self.metadata_command(envelope, MetadataScope::Orchestration, &transition.update)?;
+        let lookup = self.metadata_command_inner(
+            envelope,
+            MetadataScope::Orchestration,
+            &transition.update,
+            transition.admitted.take(),
+        )?;
         let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) = lookup else {
             return Err(BundleError::Unsettled);
         };

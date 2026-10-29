@@ -380,7 +380,7 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     assert!(visual.supported);
     assert_eq!(visual.file_count, 1);
     assert_eq!(visual.bytes, 12);
-    let transcript_root = directory.root().join("transcripts/v2");
+    let transcript_root = directory.root().join("transcripts/v3");
     let transcripts = inventory
         .families
         .iter()

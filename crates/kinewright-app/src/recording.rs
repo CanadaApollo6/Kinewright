@@ -2054,7 +2054,7 @@ pub(crate) mod feedback_capture {
             let (mut owner, anchor) = setup(root.root());
             let mut a = acknowledge(capture(root.root(), &owner, anchor, 1000), &mut owner);
             let note = a.voice.note_id.clone();
-            let mut b = SavedAudio::reopen(&owner, &note).unwrap();
+            let b = SavedAudio::reopen(&owner, &note).unwrap();
             let chosen = evidence(&mut owner, b"chosen before refusal", &[]).unwrap();
             let reference = chosen.reference.clone();
             let stale = envelope(&mut owner);
@@ -2077,6 +2077,9 @@ pub(crate) mod feedback_capture {
             ));
             drop(chosen);
             drop(a);
+            drop(b);
+            assert!(owner.voice_note(&NoteId::fresh().unwrap()).is_err());
+            let mut b = SavedAudio::reopen(&owner, &note).unwrap();
             owner.collect_after_ack().unwrap();
             assert_eq!(
                 &*owner

@@ -926,16 +926,29 @@ fn rev3_concurrent_readbacks_never_refuse() {
                 let c = Compositor::new(gpu);
                 let src = frame(8, 8);
                 (0..600)
-                    .filter(|_| c.render_working((8, 8), &[layer(&src)]).is_err())
-                    .count()
+                    .filter_map(|frame| {
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while !c.upload_available() {
+                            c.maintain();
+                            assert!(Instant::now() < deadline, "upload callbacks did not settle");
+                            std::thread::yield_now();
+                        }
+                        c.render_working((8, 8), &[layer(&src)])
+                            .err()
+                            .map(|error| (frame, error.to_string()))
+                    })
+                    .collect::<Vec<_>>()
             })
         })
         .collect::<Vec<_>>();
     let refused = threads
         .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .sum::<usize>();
-    assert_eq!(refused, 0, "completed readbacks refused");
+        .flat_map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        refused.is_empty(),
+        "completed readbacks refused: {refused:?}"
+    );
 }
 
 // Reviewer-only callback scheduling seam: production send/result/receive are unchanged.

@@ -652,13 +652,24 @@ impl RunView {
     /// Shape and resource validation only. S4 owns lifecycle and action eligibility.
     pub fn validate(&self) -> Result<(), BundleError> {
         if self.sequence == 0
-            || self.control_revision.0.is_empty()
+            || self.control_revision.0.trim().is_empty()
             || self.control_revision.0.len() > 256
             || self.display_label.len() > 16_384
             || self.allowed_actions.len() > 4
         {
             return Err(BundleError::Capacity(
                 "run projection identity/label/actions",
+            ));
+        }
+        if self
+            .allowed_actions
+            .iter()
+            .enumerate()
+            .any(|(index, action)| self.allowed_actions[..index].contains(action))
+            || matches!(&self.wait, RunWait::Children(children) if children.is_empty())
+        {
+            return Err(BundleError::Corrupt(
+                "run projection actions/children".into(),
             ));
         }
         let pages = [&self.completed, &self.queued];
@@ -671,6 +682,11 @@ impl RunView {
                 || page.next.as_ref().is_some_and(|s| s.len() > 256)
             {
                 return Err(BundleError::Capacity("run page bound/sequence"));
+            }
+            if page.rows.iter().any(|task| {
+                matches!(&task.state, TaskState::WaitingForChildren(children) if children.is_empty())
+            }) {
+                return Err(BundleError::Corrupt("run task children".into()));
             }
         }
         if self.assumptions.sequence != self.sequence

@@ -502,6 +502,17 @@ impl ProjectBundle {
             .voice_slots
             .try_lock()
             .map_err(|_| BundleError::Unsettled)?;
+        slots.retain(|_, slot| {
+            Arc::strong_count(slot) != 1
+                || Arc::weak_count(slot) != 0
+                || slot.try_lock().map_or(true, |slot| {
+                    slot.state.as_ref().is_some_and(|state| {
+                        state.job.is_some()
+                            || state.pending_write.is_some()
+                            || state.pending_asr.is_some()
+                    })
+                })
+        });
         if let Some(slot) = slots.get(note) {
             return Ok(Arc::clone(slot));
         }

@@ -315,3 +315,32 @@ fn s3_run_projection_contract() {
 
 #[path = "support/ja_s3_store_linux.rs"]
 mod linux;
+
+#[test]
+fn c6b_projection_rejects_ambiguous_actions_and_empty_children() {
+    let mut projection = view(RunId::fresh().unwrap());
+    projection.allowed_actions = vec![RunActionKind::Pause, RunActionKind::Pause];
+    assert!(projection.validate().is_err());
+    projection.allowed_actions = vec![RunActionKind::Pause];
+    projection.wait = RunWait::Children(vec![]);
+    assert!(projection.validate().is_err());
+    projection.wait = RunWait::Children(vec![TaskId::fresh().unwrap()]);
+    projection.validate().unwrap();
+    projection.control_revision.0 = " ".into();
+    assert!(projection.validate().is_err());
+    projection.control_revision.0 = "control".into();
+    projection.queued.rows.push(TaskView {
+        id: TaskId::fresh().unwrap(),
+        state: TaskState::WaitingForChildren(vec![]),
+        base: None,
+        attempts: vec![],
+        effects: vec![],
+        deliveries: vec![],
+        requests: vec![],
+        frozen_result: None,
+        terminal_result: None,
+    });
+    assert!(projection.validate().is_err());
+    projection.queued.rows[0].state = TaskState::WaitingForChildren(vec![TaskId::fresh().unwrap()]);
+    projection.validate().unwrap();
+}

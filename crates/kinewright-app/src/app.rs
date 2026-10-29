@@ -7170,7 +7170,14 @@ pub(crate) mod in1_tests {
     /// there (review-app-2 S3).
     pub(crate) fn in1b_app() -> (GeneratedMedia, KinewrightApp) {
         let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
+        let finished = probe_engine.teardown_observer();
         let (fixture, document) = in1_untagged(&probe_engine);
+        drop(probe_engine);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "the probe worker releases its native renderer before fixture teardown"
+        );
         let (app, _engine) = in1_harness(document);
         (fixture, app)
     }
@@ -7987,7 +7994,14 @@ pub(crate) mod in1_tests {
             3,
             "one audit line per opened incident, not per failure"
         );
+        let finished = app.lut_publisher.teardown_observer();
         in1_shutdown(&mut app);
+        drop(app);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "the app worker releases its native renderer before process exit"
+        );
     }
 
     /// The third aggregate of `IN1b` §5.1 rule 14, which shares item 22's
