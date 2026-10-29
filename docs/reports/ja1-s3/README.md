@@ -1,8 +1,8 @@
 # JA-1 S3 evidence
 
-S3 acceptance is **partial**. Immutable owned inputs, selection, typed/drawn feedback, mapping/voice backends and host hooks have implementation evidence. Studio voice composition, scheduler presentation/controls and the combined App end-to-end witness remain open.
+S3 acceptance is **partial**. Immutable owned inputs, selection, typed/drawn feedback, mapping, Studio voice notes, host hooks and the combined App end-to-end test have implementation evidence. Scheduler run controls, the remaining acceptance legs, equipment-only controls and CI are listed in the final report's gate ledger.
 
-- [Final source and gate status](final.md).
+- [Final-head gate ledger](final.md).
 - [C6a fixes, mutations and limits](c6a.md).
 - [Deferred work and owners](deferred.md).
 - [Inherited NOT RUN inventory](c6a-evidence/inherited-not-run.json), preserved from C0–C6b and hooks. Fresh named suite results supersede historical suite omissions only.

@@ -1,20 +1,40 @@
 # JA-1 S3 final source report
 
-S3 certification remains **partial**. This commit pair fixes the focused C6a data paths and records final-source checks. It does not close the missing Studio voice/scheduler composition or `s3_studio_end_to_end`. See the [deferred list](deferred.md) for each item, reason and destination.
+S3 certification remains **partial**. This ledger is the gate status at the final head. The per-commit reports are the history: [C0](c0.md), [C1](c1.md), [C2](c2.md), [C3](c3.md), [C4](c4.md), [C5](c5.md), [C6a](c6a.md), [C6b](c6b.md), [hooks](hooks.md), [C7](c7.md), [C8](c8.md), [C9](c9.md), [C10](c10.md), [C11](c11.md) and the [lease timeout CI fix](ci-lease-timeout.md). See the [deferred list](deferred.md) for each open item and its owner.
 
-## Update at C10
+## Final-head gate ledger
 
-C7 to C10 add the Studio scheduler and voice composition. C10 adds `s3_studio_end_to_end`, the combined App, host, store and media route with Save As and the unknown-reply leg, and the Director setting. It passes in the slow tier, and `s3_studio_end_to_end_live_voice` passes on demand with the Whisper model and espeak-ng. The C10 gate and its three mutation pairs are in [c10.md](c10.md).
+**Covered on Linux.** At the final head, the App suite with slow-test features has 959 passed, 0 failed and 4 ignored. Workspace all-target Clippy with warnings denied, formatting and the manifest lint pass.
 
-## Update at C11
+| Gate | What the tests show |
+| --- | --- |
+| G7-S | Snapshot save, load and copy. Attached playback of frozen versions through the snapshot lease, and of the Current edit through the current-edit lease, at launch, after edits, First Save, Save As and rescue. `s3_studio_end_to_end` runs Save As and the unknown-reply leg. |
+| G8 | `s3_bound_ab_identity` and `s3_bound_ab_gpu_identity` on lavapipe: presentation identity of the bound A/B picture. |
+| G9 | Typed and drawn notes on the displayed cell, retained drafts, the immutable batch and its lost reply, and the mixed-version host route in the end-to-end test. |
+| G10 | Lineage fixtures, host `ResolveFeedback`, and remapping when the saved checkpoint changes. |
+| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording refuses Save As, New, Open, switching project and Close, and then finishes under its own project (stage fix 1). |
 
-C11 adds Current-edit playback while host-attached: a host lease on the current edit's inputs, beside C9's snapshot lease. The Studio plays the Current edit at launch, after edits, First Save, Save As and rescue, and `s3_studio_end_to_end` now checks the Current-edit frame after "Edit a copy". See [c11.md](c11.md).
+**Remaining acceptance legs.** No test covers these yet:
 
-Still open after C11:
+- C2-A3's combined damage and switch legs: tamper and damage, uncached mixer seek, a real switch after a failed copy or lost reply, CPU/GPU route continuity and output frequency.
+- The rescue copy inside the end-to-end test. Separate C1 and C6 rescue tests cover rescue on its own.
+- Reopening B after Save As inside the end-to-end test.
+- For G8, an out-of-order B completion and a single audio owner in the combined route.
 
-- A live Director. No connector is certified yet; certification is a separate item before S5.
-- The rescue-copy leg inside the end-to-end test, settling a run before Close, and detached hosts left by a failed test.
-- Native Windows, hosted CI, the physical microphone, review rounds and push.
+**Equipment-only controls.** CI cannot certify these:
+
+- Live ASR. `s3_studio_end_to_end_live_voice` and `c9_studio_real_spoken_note_edit_and_batch` need the pinned Whisper small model and espeak-ng. CI skips the first, and the second returns early without the model. The first last passed on demand at C10, the second at C9.
+- The physical microphone. Never run. The capture tests read a WAV file through FFmpeg.
+
+**Pending CI.** This head is not pushed. Hosted Linux and Windows CI, fast and slow tiers, has not run on it, and the previous head's run had not finished when the stage review checked it. The Windows jobs do not run the Linux-only Studio tests, so they are no native Windows Studio acceptance.
+
+## Stage fix 1
+
+The stage review found that Save As or Close during a spoken recording dropped the recording (M1, data loss). The fix refuses each transition with "Stop the recording first. Your note is still recording." A recording now counts as unsaved work, and the close warning names it. Discard never drops a live recording. If the project's identity changes anyway, the Studio stops the note and keeps it with the project it was recorded in, and only then opens the new project's notes.
+
+Three witnesses hold a real capture worker before it finishes, with FFmpeg reading from a pipe that stays open. Save As is refused and the note finishes under A. Close is refused and the note finishes under A. A Save As that bypasses the App's refusals leaves the capture with A, and reopening A uploads the exact audio, NoteId, anchor and log. Removing the guard turns all three red; removing only the identity-change defence turns the third red; removing only the Close refusal turns the second red. With the guard restored, all three pass.
+
+## C6a
 
 The rest of this report describes C6a and is kept as it was.
 

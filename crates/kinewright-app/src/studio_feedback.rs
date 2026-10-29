@@ -2476,12 +2476,19 @@ impl KinewrightApp {
             .as_ref()
             .filter(|attachment| attachment.project_path().is_some())
             .map(|attachment| attachment.studio_project_id().map_err(text));
-        let feedback = &mut self.focused_mut().studio.feedback;
-        let reopen = match (&identity, &feedback.keeping) {
+        let mut reopen = match (&identity, &self.focused().studio.feedback.keeping) {
             (None, _) | (Some(Err(_)), Keeping::Failed { project: None, .. }) => false,
             (Some(Ok(project)), keeping) => keeping.project() != Some(project),
             (Some(Err(_)), _) => true,
         };
+        // S3 stage fix 1: a spoken note still recording belongs to the project
+        // it started in. Stop it, and keep that project's notes until the
+        // finished capture is kept in its file; the next frame then reopens.
+        if reopen && self.focused().studio.voice.recording() {
+            self.focused().studio.voice.stop_recording();
+            reopen = false;
+        }
+        let feedback = &mut self.focused_mut().studio.feedback;
         if let Some(identity) = identity.filter(|_| reopen) {
             let directory = feedback.state_directory();
             if let Err(why) = feedback.open(identity, directory) {

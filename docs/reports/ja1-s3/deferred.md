@@ -56,9 +56,9 @@ These are implementation follow-ups, not accepted S3 gates. They remain on the S
 | Hooks fresh-attempt grants and replacement holder | S3 deferred list, host lifecycle. Issue grants for fresh retries and route attention response delivery to the replacement holder. |
 | Hooks re-check Minor 3 | S3 deferred list, host lifecycle. Private issuer reissue reply-loss continuity. |
 | Studio visual leftovers | S3 deferred list. Picture slack, waveform peaks, clip beat labels, open A/B menu and narrow Timeline captures remain open. Delivered labels have their separate contract gap above. |
-| C1F3-m1 | Next stage's first commit. Detached Save As/Switch handoff continuity across a replacement client. |
 | C2 50 ms wake cost | Efficiency gate if idle CPU flags it. No numeric S3 speed gate is added. |
 | C2-A3 | S3 deferred list, acceptance. Combined PF1 tamper/damage, uncached mixer seek, real switch after failed copy/lost reply, CPU/GPU route continuity and output-frequency legs. |
 | C8C9-M4 completed voice jobs | Next stage first commit. Evict completed host jobs after deriving missing-model/no-speech progress from durable ASR, so eviction preserves the current plain reasons and completion retry. |
 | C8C9-M5 Whisper context reuse | Next stage first commit. Reuse a context behind the shared model-lifetime guard without weakening pinned hash validation or note/asset mutual exclusion. |
-| C6 end-to-end | S3 deferred list, acceptance after composition. Drive all stages in one App/host/store/media route, including Save As and rescue; existing individual witnesses do not replace this test. |
+| C6 end-to-end | S3 deferred list, acceptance. C10's `s3_studio_end_to_end` drives the stages in one App/host/store/media route, with Save As and the unknown reply. Still missing inside it: the rescue copy and reopening B after Save As. C2-A3's combined legs are the row above. |
+| Stage review M1, a live recording across Save As or Close | Fixed by stage fix 1. A spoken note that is still recording refuses Save As, New, Open, Studio recovery and rescue actions, switching project and Close. It counts as unsaved work, and Discard never drops it. If the identity changes anyway, the Studio stops the note and keeps it with its own project before opening the new one. See final.md. |

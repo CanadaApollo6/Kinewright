@@ -886,7 +886,19 @@ impl KinewrightApp {
     pub(crate) fn focused_mut(&mut self) -> &mut ProjectSession {
         &mut self.projects[self.focused_project]
     }
+    /// Refuse a transition that would drop project `index`'s live spoken
+    /// capture: it has no kept owner until Stop finishes it (S3 stage fix 1).
+    pub(crate) fn refuse_while_recording(&mut self, index: usize) -> bool {
+        let recording = self.projects[index].studio.voice.recording();
+        if recording {
+            self.status = crate::studio_voice::RECORDING_REFUSAL.into();
+        }
+        recording
+    }
     fn ja1_destination_change(&mut self) -> bool {
+        if self.refuse_while_recording(self.focused_project) {
+            return false;
+        }
         let error = if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             Some("A save or selection is in progress. Wait for its outcome before changing destination.".to_owned())
         } else {
@@ -1060,6 +1072,9 @@ impl KinewrightApp {
     pub(crate) fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
         if let crate::ja1_attachment::Action::OpenCapture(path) = &action {
             self.open_project(path);
+            return;
+        }
+        if !action.keeps_identity() && self.refuse_while_recording(self.focused_project) {
             return;
         }
         let session = self.focused_mut();
@@ -2169,6 +2184,9 @@ impl KinewrightApp {
                 "Wait for this save or selection before closing the editing context.".into();
             return;
         }
+        if self.refuse_while_recording(index) {
+            return;
+        }
         if self.projects[index].is_dirty() || !self.projects[index].ja1_close_warning().is_empty() {
             self.focus_project(index);
             self.pending_project_action = Some(ProjectAction::CloseProject(id));
@@ -2182,6 +2200,10 @@ impl KinewrightApp {
             return;
         };
         if self.projects.len() <= 1 {
+            return;
+        }
+        // The confirmation's Discard never discards a live recording.
+        if self.refuse_while_recording(index) {
             return;
         }
         let closing_focused = index == self.focused_project;
@@ -2228,6 +2250,12 @@ impl KinewrightApp {
         matches!(self.pending_project_action, Some(ProjectAction::Exit(_)))
     }
 
+    /// Whether an exit went ahead and asked the window to close.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn exit_allowed(&self) -> bool {
+        self.allow_close
+    }
+
     pub(crate) fn request_exit(&mut self, ctx: &egui::Context) {
         if self
             .projects
@@ -2235,6 +2263,17 @@ impl KinewrightApp {
             .any(|p| p.ja1_job.is_some() || p.ja1_activation.is_some())
         {
             self.status = "Wait for the current Studio operation before closing.".into();
+            return;
+        }
+        if let Some(index) = self
+            .projects
+            .iter()
+            .position(|project| project.studio.voice.recording())
+        {
+            self.pending_project_action = None;
+            self.exit_discarded_projects.clear();
+            self.focus_project(index);
+            self.refuse_while_recording(index);
             return;
         }
         if let Some(index) = self.projects.iter().position(|project| {

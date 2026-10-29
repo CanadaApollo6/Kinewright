@@ -96,6 +96,30 @@ pub(crate) enum Action {
     CloseSession(BranchId),
     OpenCapture(PathBuf),
 }
+impl Action {
+    /// Whether this action keeps the project's identity and session, so it may
+    /// run while a spoken note is recording. Anything else can move the
+    /// project (Save As, recovery, rescue, a retried switch, a Save that
+    /// completes a confirmed successor Save As) or end a session.
+    pub(crate) fn keeps_identity(&self) -> bool {
+        matches!(
+            self,
+            Self::StudioVersions
+                | Self::StudioManualPlayback(_)
+                | Self::StudioSelect(_)
+                | Self::ImportMedia(_)
+                | Self::ChangeMediaInterpretation(_)
+                | Self::PreviewRecovery(_)
+                | Self::PreviewRescue
+                | Self::PreviewRetirement(_)
+                | Self::PreviewForget
+                | Self::PreviewRelease(_)
+                | Self::ConsentTrim
+                | Self::ConsentOmission
+                | Self::Cancel
+        )
+    }
+}
 enum Choice {
     SuccessorSave(Option<PathBuf>),
     Recovery,

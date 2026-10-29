@@ -63,6 +63,23 @@ pub(crate) struct KeptVoice {
     edited: bool,
     pending_choice: Option<PendingChoice>,
 }
+/// Said wherever a transition would drop a spoken note that is still recording.
+pub(crate) const RECORDING_REFUSAL: &str =
+    "Stop the recording first. Your note is still recording.";
+/// The close warning's line for it: there is no discard for a live recording.
+pub(crate) const RECORDING_CLOSE_TEXT: &str = "A spoken note is still recording. Stop it first: Close keeps it only once it stops, and Discard does not drop it.";
+impl Voice {
+    /// A live capture has no kept owner until Stop finishes it, so nothing may
+    /// change this project's identity or end its session meanwhile (S3 stage fix 1).
+    pub(crate) fn recording(&self) -> bool {
+        matches!(self.state, State::Recording(_))
+    }
+    pub(crate) fn stop_recording(&self) {
+        if let State::Recording(capture) = &self.state {
+            capture.stop();
+        }
+    }
+}
 impl KeptVoice {
     pub(crate) fn holds_work(&self) -> bool {
         self.capture.is_some() || self.edited || self.pending_choice.is_some()
@@ -458,7 +475,10 @@ impl KinewrightApp {
     )]
     pub(crate) fn voice_frame(&mut self) {
         let project = self.focused().studio.feedback.keeping.project().cloned();
-        if self.focused().studio.voice.project != project {
+        // A live capture keeps its project's voice until it is kept there.
+        if self.focused().studio.voice.project != project
+            && !self.focused().studio.voice.recording()
+        {
             let note = self.focused().studio.feedback.active_voice.clone();
             self.focused_mut().studio.voice = Voice {
                 project,
@@ -1050,10 +1070,7 @@ mod tests {
         drop(engine);
         retire.wait();
     }
-    pub(super) fn recorded(
-        app: &mut KinewrightApp,
-        fixture: &crate::studio::tests::Fixtures,
-    ) -> Box<CapturedAudio> {
+    fn quiet(fixture: &crate::studio::tests::Fixtures) -> std::path::PathBuf {
         let source = fixture.root.path("quiet.wav");
         if !source.exists() {
             run_ffmpeg(
@@ -1070,6 +1087,13 @@ mod tests {
                 &source,
             );
         }
+        source
+    }
+    pub(super) fn recorded(
+        app: &mut KinewrightApp,
+        fixture: &crate::studio::tests::Fixtures,
+    ) -> Box<CapturedAudio> {
+        let source = quiet(fixture);
         app.begin_spoken_note(crate::recording::FeedbackInput::Wav(source))
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -1148,8 +1172,17 @@ mod tests {
         fixture: &crate::studio::tests::Fixtures,
         engine: &Arc<kinewright_media::FfmpegMediaEngine>,
     ) {
+        reopen_at(app, fixture, engine, None);
+    }
+    /// Close this host and reopen `path`, or the project's own path.
+    fn reopen_at(
+        app: &mut KinewrightApp,
+        fixture: &crate::studio::tests::Fixtures,
+        engine: &Arc<kinewright_media::FfmpegMediaEngine>,
+        path: Option<std::path::PathBuf>,
+    ) {
         let mut attachment = app.focused_mut().ja1.take().unwrap();
-        let path = attachment.project_path().unwrap().clone();
+        let path = path.unwrap_or_else(|| attachment.project_path().unwrap().clone());
         let key = app
             .focused()
             .studio
@@ -1553,6 +1586,281 @@ mod tests {
                     .notes
                     .len(),
                 1
+            );
+        });
+    }
+
+    /// A real capture worker held before completion: `FFmpeg` reads the note
+    /// from a pipe that stays open until `release`.
+    /// Read from the state itself, never through the guard under test.
+    fn live(app: &KinewrightApp) -> bool {
+        matches!(app.focused().studio.voice.state, State::Recording(_))
+    }
+    struct Held {
+        release: Option<std::sync::mpsc::Sender<()>>,
+        writer: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Held {
+        fn release(&mut self) {
+            drop(self.release.take());
+            if let Some(writer) = self.writer.take() {
+                writer.join().unwrap();
+            }
+        }
+    }
+    impl Drop for Held {
+        // A failed witness still lets FFmpeg reach the end of the pipe.
+        fn drop(&mut self) {
+            drop(self.release.take());
+        }
+    }
+    fn held_recording(app: &mut KinewrightApp, fixture: &crate::studio::tests::Fixtures) -> Held {
+        use std::io::Write as _;
+        let bytes = std::fs::read(quiet(fixture)).unwrap();
+        let pipe = fixture.root.path("held.wav");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success(), "M1_FIFO");
+        app.begin_spoken_note(crate::recording::FeedbackInput::Wav(pipe.clone()))
+            .unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+            let half = bytes.len() / 2;
+            let _ = file.write_all(&bytes[..half]);
+            let _ = held.recv();
+            let _ = file.write_all(&bytes[half..]);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        app.voice_frame();
+        assert!(
+            live(app),
+            "M1_CAPTURE_HELD {}",
+            app.focused().studio.voice.message
+        );
+        Held {
+            release: Some(release),
+            writer: Some(writer),
+        }
+    }
+    fn settle_jobs(app: &mut KinewrightApp) {
+        let ctx = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.focused().ja1_job.is_some() || app.focused().ja1_activation.is_some() {
+            app.poll_background(&ctx);
+            assert!(Instant::now() < deadline, "M1_JOB_DEADLINE");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// What a finished note reached the host with: the capture's bytes and its
+    /// upload descriptor, read before acknowledgement cleans the capture up.
+    fn finish_saved(app: &mut KinewrightApp) -> (Vec<u8>, VoiceUpload) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut sent = None;
+        loop {
+            app.feedback_frame();
+            app.voice_frame();
+            match &app.focused().studio.voice.state {
+                State::Upload {
+                    captured, upload, ..
+                } if sent.is_none() => {
+                    sent = Some((std::fs::read(&captured.path).unwrap(), upload.clone()));
+                }
+                State::Saved { .. } => return sent.expect("M1_UPLOAD_SEEN"),
+                State::Idle => panic!("M1_CAPTURE_DROPPED {}", app.focused().studio.voice.message),
+                _ => (),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "M1_FINISH_DEADLINE {}",
+                app.focused().studio.voice.message
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// The note is saved by A's host exactly as recorded: its `NoteId`, frame,
+    /// audio and playhead log, and nothing else.
+    fn assert_exact_note(
+        app: &KinewrightApp,
+        note: &NoteId,
+        key: &kinewright_project::studio_records::SnapshotKey,
+        bytes: &[u8],
+        upload: &VoiceUpload,
+    ) {
+        let State::Saved { status, .. } = &app.focused().studio.voice.state else {
+            panic!("saved")
+        };
+        assert_eq!(&status.voice.note_id, note, "M1_EXACT_NOTE");
+        assert_eq!(&status.anchor.snapshot, key, "M1_EXACT_ANCHOR");
+        assert_eq!(status.anchor.frame, 0, "M1_EXACT_FRAME");
+        assert_eq!(
+            status.voice.audio_ref.sha256,
+            kinewright_media::sha256_bytes(bytes),
+            "M1_EXACT_AUDIO"
+        );
+        assert_eq!(status.voice.audio_ref, upload.audio, "M1_EXACT_AUDIO_REF");
+        assert_eq!(
+            status.voice.playhead_log_ref.as_ref(),
+            Some(&upload.log),
+            "M1_EXACT_LOG"
+        );
+        assert!(
+            app.focused().studio.feedback.voices[note].status.is_some(),
+            "M1_KEPT_UNDER_A"
+        );
+        let notes = app
+            .voice_client()
+            .unwrap()
+            .request(HostCommand::ListFeedback)
+            .unwrap()
+            .feedback_index
+            .unwrap()
+            .notes;
+        assert_eq!(notes.len(), 1, "M1_ONE_NOTE");
+    }
+    fn displayed_key(app: &KinewrightApp) -> kinewright_project::studio_records::SnapshotKey {
+        app.focused()
+            .studio
+            .selection
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .descriptor
+            .key
+            .clone()
+    }
+    #[test]
+    fn m1_save_as_while_recording_is_refused_and_the_note_finishes_under_a() {
+        hosted_case(|app, fixture, _engine| {
+            let a = app.focused().studio.feedback.keeping.project().cloned();
+            let path = app.focused().ja1.as_ref().unwrap().project_path();
+            let key = displayed_key(app);
+            let mut held = held_recording(app, fixture);
+            let note = app.focused().studio.voice.note.clone().unwrap();
+            app.return_to_current_edit();
+            settle_jobs(app);
+            // The Save As route after its file dialog, then the menu entries
+            // that would leave or replace this project.
+            app.start_ja1(crate::ja1_attachment::Action::SaveAs(
+                fixture.root.path("m1-b.kinewright"),
+            ));
+            let refused = app.status.clone();
+            settle_jobs(app);
+            if refused == RECORDING_REFUSAL {
+                assert!(!app.save_project(true), "M1_SAVE_AS_REFUSED");
+                assert_eq!(app.status, RECORDING_REFUSAL);
+                let projects = app.projects.len();
+                app.new_project();
+                assert_eq!(app.projects.len(), projects, "M1_NEW_REFUSED");
+            }
+            for _ in 0..5 {
+                app.feedback_frame();
+                app.voice_frame();
+            }
+            assert!(live(app), "M1_STILL_RECORDING");
+            held.release();
+            let (bytes, upload) = finish_saved(app);
+            assert_exact_note(app, &note, &key, &bytes, &upload);
+            assert_eq!(refused, RECORDING_REFUSAL, "M1_SAVE_AS_REFUSAL_TEXT");
+            assert_eq!(
+                app.focused().studio.feedback.keeping.project().cloned(),
+                a,
+                "M1_STILL_A"
+            );
+            assert_eq!(app.focused().ja1.as_ref().unwrap().project_path(), path);
+        });
+    }
+    #[test]
+    fn m1_close_while_recording_is_refused_and_the_note_finishes_under_a() {
+        hosted_case(|app, fixture, _engine| {
+            let key = displayed_key(app);
+            let mut held = held_recording(app, fixture);
+            let note = app.focused().studio.voice.note.clone().unwrap();
+            app.request_exit(&egui::Context::default());
+            assert!(!app.exit_allowed(), "M1_CLOSE_REFUSED");
+            assert!(!app.exit_waits_for_choice(), "M1_NO_DISCARD_OFFERED");
+            assert_eq!(app.status, RECORDING_REFUSAL);
+            assert!(app.focused().is_dirty(), "M1_RECORDING_IS_UNSAVED");
+            assert!(
+                app.focused()
+                    .ja1_close_warning()
+                    .contains(RECORDING_CLOSE_TEXT),
+                "M1_CLOSE_WARNING"
+            );
+            assert!(
+                app.focused().ja1.as_ref().unwrap().host_attached(),
+                "M1_HOST_KEPT"
+            );
+            held.release();
+            let (bytes, upload) = finish_saved(app);
+            assert_exact_note(app, &note, &key, &bytes, &upload);
+        });
+    }
+    #[test]
+    fn m1_identity_change_under_a_live_capture_keeps_it_with_a() {
+        hosted_case(|app, fixture, engine| {
+            let a = app.focused().studio.feedback.keeping.project().cloned();
+            let a_path = app.focused().ja1.as_ref().unwrap().project_path();
+            let key = displayed_key(app);
+            let mut held = held_recording(app, fixture);
+            let note = app.focused().studio.voice.note.clone().unwrap();
+            // Past every App refusal: the attachment itself moves to B.
+            app.focused_mut()
+                .ja1
+                .as_mut()
+                .unwrap()
+                .apply(crate::ja1_attachment::Action::SaveAs(
+                    fixture.root.path("m1-b.kinewright"),
+                ))
+                .unwrap();
+            app.focused_mut().install_ja1_view();
+            app.feedback_frame();
+            held.release();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut kept = None;
+            while app.focused().studio.feedback.keeping.project().cloned() == a {
+                app.feedback_frame();
+                app.voice_frame();
+                if let State::Unprepared(captured) = &app.focused().studio.voice.state {
+                    kept = Some((
+                        std::fs::read(&captured.path).unwrap(),
+                        captured.playhead_bytes().unwrap(),
+                    ));
+                }
+                assert!(Instant::now() < deadline, "M1_REOPENS_B");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.voice_frame();
+            reopen_at(app, fixture, engine, a_path);
+            assert_eq!(app.focused().studio.feedback.keeping.project().cloned(), a);
+            assert!(
+                app.focused().studio.feedback.voices[&note]
+                    .capture
+                    .is_some(),
+                "M1_A_HOLDS_CAPTURE"
+            );
+            wait_saved(app);
+            let State::Saved { status, .. } = &app.focused().studio.voice.state else {
+                panic!("saved")
+            };
+            assert_eq!(status.voice.note_id, note, "M1_EXACT_NOTE");
+            assert_eq!(status.anchor.snapshot, key, "M1_EXACT_ANCHOR");
+            let (bytes, log) = kept.expect("M1_CAPTURE_KEPT");
+            assert_eq!(
+                status.voice.audio_ref.sha256,
+                kinewright_media::sha256_bytes(&bytes),
+                "M1_EXACT_AUDIO"
+            );
+            assert_eq!(
+                status
+                    .voice
+                    .playhead_log_ref
+                    .as_ref()
+                    .map(|log| &log.sha256),
+                Some(&kinewright_media::sha256_bytes(&log)),
+                "M1_EXACT_LOG"
             );
         });
     }
