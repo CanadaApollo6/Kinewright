@@ -93,6 +93,7 @@ pub(super) struct Attachment {
     pub roots: SessionRoots,
     pub bootstrap: bool,
     pub read_pins: Vec<ReadPin>,
+    pub snapshot_leases: std::collections::BTreeMap<String, super::snapshot_lease::LeasePin>,
 }
 impl Drop for Attachment {
     fn drop(&mut self) {
@@ -133,10 +134,15 @@ impl Attachment {
             | HostCommand::StartTranscription { .. }
             | HostCommand::VoiceStatus { .. }
             | HostCommand::ChooseTranscript { .. }
-            | HostCommand::ReadVoiceRange { .. } => {
+            | HostCommand::ReadVoiceRange { .. }
+            | HostCommand::ReadFeedbackEvidence { .. }
+            | HostCommand::ReadFeedbackView { .. } => {
                 matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
             }
             HostCommand::ListVersions
+            | HostCommand::LeaseSnapshot { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. }
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadSubmittedBatch { .. } => true,
             HostCommand::ReadFeedback { .. } | HostCommand::ListFeedback => {
@@ -226,6 +232,7 @@ impl super::HostCommandOwner {
             roots,
             bootstrap,
             read_pins: Vec::new(),
+            snapshot_leases: std::collections::BTreeMap::new(),
         });
         Ok(())
     }
@@ -369,7 +376,11 @@ impl super::HostCommandOwner {
             {
                 self.require_metadata_issuer(index, &upload.envelope.id.issuer)?;
             }
-            self.check_producer_attachment(index, &request.command)?;
+            // Expiry cannot prevent an attachment from releasing its own lease.
+            // Release checks the attachment-owned id and digest and grants no reads.
+            if !matches!(request.command, super::HostCommand::ReleaseSnapshot { .. }) {
+                self.check_producer_attachment(index, &request.command)?;
+            }
             let roots = request.roots.canonicalize()?;
             let mut command_roots = grant.roots.clone();
             if grant.bootstrap
@@ -500,7 +511,9 @@ impl super::HostCommandOwner {
             super::HostCommand::ChooseTranscript { text_ref, .. } => vec![text_ref.clone()],
             _ => vec![],
         };
-        let reply = if super::orchestration::is_hook(&request.command) {
+        let reply = if super::snapshot_lease::is_lease_command(&request.command) {
+            self.execute_snapshot_lease(index, request.command)
+        } else if super::orchestration::is_hook(&request.command) {
             self.execute_hook(index, request.command, &roots)
         } else if detach {
             super::HostReply::default()
@@ -515,7 +528,10 @@ impl super::HostCommandOwner {
         {
             self.attachments[index].read_pins.push(pin);
         }
-        if reply.error.is_none() && reply.metadata.is_some() && !published_evidence.is_empty() {
+        if reply.error.is_none()
+            && (reply.metadata.is_some() || reply.voice.is_some())
+            && !published_evidence.is_empty()
+        {
             self.attachments[index].read_pins.retain(|pin| {
                 !(pin.roots.len() == 1 && published_evidence.contains(&pin.roots[0]))
             });

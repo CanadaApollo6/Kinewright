@@ -339,6 +339,9 @@ pub(crate) struct SourceSpec {
 
 impl SourceSpec {
     pub(crate) fn check_authority(&self) -> Result<(), MediaError> {
+        if let Some(source) = &self.certified {
+            source.check_read_authority()?;
+        }
         self.legacy_media
             .as_ref()
             .map_or(Ok(()), kinewright_core::LegacyMediaGrant::check)
@@ -438,6 +441,7 @@ impl SourceSpec {
         paused: bool,
         (refill, discard): (Option<Refill>, Option<(i64, i64)>),
     ) -> Result<WorkingFrame, MediaError> {
+        self.check_authority()?;
         let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         decoder.check_certified()?;
         if let Some(keep) = discard {
@@ -543,7 +547,11 @@ pub(crate) fn reader_demand(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one demand admission keeps authority, source measurement and cache budgeting together"
+)]
 pub(crate) fn reader_demand_with_inputs(
     document: &Document,
     at: TimeCode,
@@ -554,6 +562,9 @@ pub(crate) fn reader_demand_with_inputs(
     inputs: Option<&crate::owned_io::PlaybackInputs>,
     legacy_media: Option<&kinewright_core::LegacyMediaGrant>,
 ) -> Result<ReaderDemand, MediaError> {
+    if let Some(inputs) = inputs {
+        inputs.check_read_authority()?;
+    }
     if inputs.is_none() {
         legacy_media
             .ok_or(MediaError::MediaAdmissionRequired)?
@@ -1304,6 +1315,10 @@ impl FrameRenderer {
 
     /// Decode and stage every visual layer for one project frame, in
     /// production z-order, before any output transform is selected.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one render boundary checks authority before staging every visual layer"
+    )]
     fn decoded_layers(
         &mut self,
         document: &Document,
@@ -1312,6 +1327,9 @@ impl FrameRenderer {
         scale: RenderScale,
         video: Video<'_>,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
+        if let Some(inputs) = &self.inputs {
+            inputs.check_read_authority()?;
+        }
         let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         validate_managed_context(document)?;
         // MO2 R8 (review-1 B1): every render root refuses an invalid

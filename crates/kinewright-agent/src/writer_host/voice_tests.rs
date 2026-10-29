@@ -240,6 +240,21 @@ mod tests {
         )
         .metadata_issuer
         .unwrap();
+        let mut stale = grant.envelope.clone();
+        stale.owner_epoch = stale.owner_epoch.wrapping_add(1).max(1);
+        let refused = client
+            .request(HostCommand::ChooseTranscript {
+                envelope: stale,
+                note: upload.note.clone(),
+                text_ref: text_ref.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            refused.error.unwrap().code,
+            "history_changed",
+            "C9_STALE_CHOICE_REFUSED"
+        );
+        let choice_generation = grant.root_generation;
         let choice = HostCommand::ChooseTranscript {
             envelope: grant.envelope,
             note: upload.note.clone(),
@@ -249,6 +264,25 @@ mod tests {
             .voice
             .unwrap();
         assert_eq!(status.text.as_bytes(), text, "C8_EDIT_THEN_CHOOSE");
+        {
+            let owner = host.owner.upgrade().unwrap();
+            let owner = owner.lock().unwrap();
+            assert_eq!(
+                owner.owner().unwrap().metadata_generation().unwrap(),
+                choice_generation + 1,
+                "C9_ONE_CHOICE_PUBLICATION"
+            );
+            let index = owner
+                .resolve_attachment(Some(&client.bootstrap.auth.bearer()))
+                .unwrap();
+            assert!(
+                !owner.attachments[index]
+                    .read_pins
+                    .iter()
+                    .any(|pin| pin.roots == vec![text_ref.clone()]),
+                "C9_CHOSEN_TEXT_ADMISSION_RELEASED"
+            );
+        }
         accepted(client.request(choice).unwrap());
         voice.chosen_transcript_revision = Some(text_ref.clone());
         voice.range = Some(AudioRange {

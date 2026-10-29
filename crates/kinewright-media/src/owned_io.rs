@@ -31,6 +31,42 @@ pub const CURSOR_RESERVATION_BYTES: u64 =
 pub type LifetimeGuard = Arc<dyn Send + Sync>;
 pub type CursorReservation = dyn Fn(u64) -> Result<LifetimeGuard, String> + Send + Sync;
 
+/// Revocable access to one host-pinned immutable snapshot. All clones retain
+/// the same local grant and live owner check; cache hits cannot renew authority.
+#[derive(Clone)]
+pub struct ReadAuthority {
+    binding: String,
+    grant: kinewright_core::LegacyMediaGrant,
+    owner_check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+}
+impl ReadAuthority {
+    #[must_use]
+    pub fn new(
+        grant: kinewright_core::LegacyMediaGrant,
+        binding: String,
+        owner_check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Self {
+        Self {
+            binding,
+            grant,
+            owner_check,
+        }
+    }
+    #[must_use]
+    pub fn binding(&self) -> &str {
+        &self.binding
+    }
+    pub fn check(&self) -> Result<(), kinewright_core::MediaError> {
+        self.grant.check()?;
+        (self.owner_check)().map_err(|_| kinewright_core::MediaError::MediaAdmissionRequired)?;
+        self.grant.check()
+    }
+    #[must_use]
+    pub fn local_grant(&self) -> kinewright_core::LegacyMediaGrant {
+        self.grant.clone()
+    }
+}
+
 #[path = "certified_playback.rs"]
 mod playback;
 pub(crate) use playback::PlaybackAuthority;
@@ -196,6 +232,7 @@ pub struct CertifiedIdentity {
 }
 
 struct Source {
+    read_authority: Option<ReadAuthority>,
     file: File,
     verified_identity: OnceLock<memo::FileIdentity>,
     failure: Mutex<Option<OwnedIoError>>,
@@ -221,6 +258,22 @@ struct SelectedStreams {
 }
 
 impl CertifiedSource {
+    pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, OwnedIoError> {
+        authority
+            .check()
+            .map_err(|e| OwnedIoError::Unavailable(e.to_string()))?;
+        Arc::get_mut(&mut self.0)
+            .ok_or_else(|| OwnedIoError::InvalidCertificate("source already shared".into()))?
+            .read_authority = Some(authority);
+        Ok(self)
+    }
+    pub fn check_read_authority(&self) -> Result<(), kinewright_core::MediaError> {
+        self.0
+            .read_authority
+            .as_ref()
+            .map_or(Ok(()), ReadAuthority::check)
+    }
+
     pub(crate) fn still_orientation(
         &self,
     ) -> Result<Option<crate::still_orientation::StillOrientation>, OwnedIoError> {
@@ -298,6 +351,7 @@ impl CertifiedSource {
         }
         Ok(Self(
             Arc::new(Source {
+                read_authority: None,
                 file,
                 verified_identity: OnceLock::new(),
                 failure: Mutex::new(None),
@@ -716,6 +770,11 @@ impl VerifiedCursor {
     }
 
     fn check(&mut self) -> Result<(), OwnedIoError> {
+        if let Some(authority) = &self.source.read_authority
+            && let Err(error) = authority.check()
+        {
+            return self.fail(OwnedIoError::Unavailable(error.to_string()));
+        }
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -785,7 +844,10 @@ impl VerifiedCursor {
         .expect("bounded remaining bytes");
         let count = output.len().min(CHUNK_BYTES - offset).min(remaining);
         output[..count].copy_from_slice(&self.slots[slot].bytes[offset..offset + count]);
-        self.check()?;
+        if let Err(error) = self.check() {
+            output[..count].fill(0);
+            return Err(error);
+        }
         self.position += count as u64;
         Ok(count)
     }

@@ -100,6 +100,9 @@ impl HostCommandOwner {
                 self.switch_frozen = true;
                 self.lookup_switch(envelope, reply)?;
                 self.pending_switch = None;
+                for attachment in &mut self.attachments {
+                    attachment.snapshot_leases.clear();
+                }
                 self.message = "Working edit selected. Editing stays read-only until the current checkpoint and resources are restored.".into();
                 Ok(())
             }

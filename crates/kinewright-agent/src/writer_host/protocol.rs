@@ -221,6 +221,24 @@ pub enum HostCommand {
         start_micros: u64,
         end_micros: u64,
     },
+    LeaseSnapshot {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    SnapshotLeaseStatus {
+        id: String,
+        payload_sha256: String,
+    },
+    ReleaseSnapshot {
+        id: String,
+        payload_sha256: String,
+    },
+    ReadFeedbackView {
+        revision: ObjectRef,
+    },
+    ReadFeedbackEvidence {
+        revision: ObjectRef,
+        evidence: ObjectRef,
+    },
     ListVersions,
     ReadSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
@@ -490,6 +508,8 @@ pub enum HostChoiceKind {
 )]
 pub struct HostStatus {
     #[serde(default)]
+    pub project_id: Option<kinewright_project::bundle_records::ProjectId>,
+    #[serde(default)]
     pub continuation_runs: usize,
     pub choice: Option<HostChoiceKind>,
     pub rescue_trim_required: bool,
@@ -545,6 +565,8 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
+    pub evidence_bytes: Option<Vec<u8>>,
     pub voice: Option<super::voice::VoiceStatus>,
     pub voice_audio: Option<Vec<u8>>,
     pub voice_receipt: Option<super::voice::VoiceReceipt>,

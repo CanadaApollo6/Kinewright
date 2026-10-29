@@ -1155,7 +1155,7 @@ pub struct FrozenContext {
 impl ProjectBundle {
     pub fn frozen_context(&self, key: &SnapshotKey) -> Result<FrozenContext, BundleError> {
         let snapshot = self.read_snapshot(key)?;
-        self.build_frozen_context(snapshot)
+        self.store.build_frozen_context(snapshot)
     }
     pub fn frozen_context_descriptor(
         &self,
@@ -1165,22 +1165,24 @@ impl ProjectBundle {
         let roots = descriptor.references();
         let pin = self.store.pin(&roots)?;
         let charges = vec![charge_value(&self.store, descriptor)?];
-        self.build_frozen_context(PinnedSnapshot {
+        self.store.build_frozen_context(PinnedSnapshot {
             descriptor: descriptor.clone(),
             pin,
             roots,
             _charges: charges,
         })
     }
-    fn build_frozen_context(&self, snapshot: PinnedSnapshot) -> Result<FrozenContext, BundleError> {
-        let original_document = self
-            .store
-            .read_record::<kinewright_core::Document>(&snapshot.descriptor.document_ref)?;
-        let document_charge = charge_value(&self.store, &*original_document)?;
+}
+impl crate::store::ProjectStore {
+    pub(crate) fn build_frozen_context(
+        &self,
+        snapshot: PinnedSnapshot,
+    ) -> Result<FrozenContext, BundleError> {
+        let original_document =
+            self.read_record::<kinewright_core::Document>(&snapshot.descriptor.document_ref)?;
+        let document_charge = charge_value(self, &*original_document)?;
         let document = (*original_document).clone();
-        let manifest = self
-            .store
-            .read_input_manifest(&snapshot.descriptor.input_manifest_ref)?;
+        let manifest = self.read_input_manifest(&snapshot.descriptor.input_manifest_ref)?;
         crate::bundle_commit::validate_document_inputs(&document, &manifest)?;
         let mut certified_input_leases = Vec::new();
         let mut resource_context = Vec::new();
@@ -1193,9 +1195,9 @@ impl ProjectBundle {
                 entry.object.record_kind,
                 RecordKind::OwnedFont | RecordKind::OwnedLut
             ) {
-                resource_context.push(self.store.certify_resource_input(&identity)?);
+                resource_context.push(self.certify_resource_input(&identity)?);
             } else {
-                certified_input_leases.push(self.store.lease_input_for_owner(
+                certified_input_leases.push(self.lease_input_for_owner(
                     &identity,
                     &(manifest.project_id.clone(), manifest.session_id.clone()),
                 )?);
@@ -1207,7 +1209,7 @@ impl ProjectBundle {
             certified_input_leases,
             resource_context,
             _document_charge: document_charge,
-            reserve_frame: self.store.decoder_reserver(),
+            reserve_frame: self.decoder_reserver(),
         })
     }
 }
@@ -1417,10 +1419,32 @@ impl crate::editing_session::Ja1EditingSession {
 }
 
 impl FrozenContext {
+    pub fn capture_project_id(&self) -> Result<crate::bundle_records::ProjectId, BundleError> {
+        self.snapshot.pin.read_store().snapshot_project_id()
+    }
+
+    pub fn pin_snapshot(&self) -> Result<PinnedSnapshot, BundleError> {
+        let store = self.snapshot.pin.read_store();
+        store.check_read_authority()?;
+        Ok(PinnedSnapshot {
+            descriptor: self.snapshot.descriptor.clone(),
+            pin: store.pin(&self.snapshot.roots)?,
+            roots: self.snapshot.roots.clone(),
+            _charges: vec![charge_value(&store, &self.snapshot.descriptor)?],
+        })
+    }
+    pub fn reserve_voice_capture(&self) -> Result<StorageReservation, BundleError> {
+        let store = self.snapshot.pin.read_store();
+        store.check_read_authority()?;
+        let bytes = crate::voice_ingress::AUDIO_BYTES + crate::voice_ingress::LOG_BYTES;
+        store.reserve(bytes, 3 * bytes, 0, true)
+    }
+
     /// Check retained native descriptors, failure latches and one verified chunk
     /// before releasing an originating attachment. Later chunks remain verified
     /// by the existing cursor on demand; this is not a new full-media scan.
     pub fn verify_retained_inputs(&self) -> Result<(), BundleError> {
+        self.snapshot.pin.read_store().check_read_authority()?;
         for lease in &self.certified_input_leases {
             let source = lease.certified_source()?.playback_source();
             let mut cursor = source
@@ -1483,7 +1507,7 @@ impl FrozenContext {
         let mut luts = HashMap::new();
         for resource in &self.resource_context {
             if resource.identity().entry.object.record_kind == RecordKind::OwnedLut {
-                let lut = kinewright_media::parse_cube_lut_bytes(resource.bytes())
+                let lut = kinewright_media::parse_cube_lut_bytes(resource.bytes()?)
                     .map_err(|error| BundleError::Corrupt(error.to_string()))?;
                 luts.insert(
                     resource.identity().entry.object.sha256.clone(),
@@ -1502,6 +1526,13 @@ impl FrozenContext {
             Arc::new(library),
             Arc::clone(self) as kinewright_media::owned_io::LifetimeGuard,
         )
+        .and_then(|inputs| {
+            if let Some(authority) = self.snapshot.pin.read_store().read_authority() {
+                inputs.with_read_authority(authority)
+            } else {
+                Ok(inputs)
+            }
+        })
         .map(Arc::new)
         .map_err(|error| BundleError::Corrupt(error.to_string()))
     }
@@ -1555,7 +1586,7 @@ impl crate::store::ProjectStore {
             ) {
                 let resource = self.certify_resource_input(&identity)?;
                 if entry.object.record_kind == RecordKind::OwnedLut {
-                    let lut = kinewright_media::parse_cube_lut_bytes(resource.bytes())
+                    let lut = kinewright_media::parse_cube_lut_bytes(resource.bytes()?)
                         .map_err(|error| BundleError::Corrupt(error.to_string()))?;
                     luts.insert(entry.object.sha256.clone(), Arc::new(lut));
                 }
@@ -1590,5 +1621,34 @@ impl crate::store::ProjectStore {
         )
         .map(Arc::new)
         .map_err(|error| BundleError::Corrupt(error.to_string()))
+    }
+}
+
+impl crate::store::ProjectStore {
+    pub(crate) fn leased_frozen_context(
+        &self,
+        descriptor: &SnapshotDescriptor,
+    ) -> Result<FrozenContext, BundleError> {
+        self.check_read_authority()?;
+        let c = self.read_record::<BranchCheckpoint>(&descriptor.checkpoint_ref)?;
+        if c.head_id != descriptor.key.head
+            || c.document_hash != descriptor.key.document_hash
+            || c.document_ref != descriptor.document_ref
+            || c.lineage_ref != descriptor.lineage_ref
+            || c.input_manifest_ref != descriptor.input_manifest_ref
+            || descriptor.key.document_hash != descriptor.document_ref.sha256
+            || descriptor.key.input_manifest_ref != descriptor.input_manifest_ref
+        {
+            return Err(BundleError::Corrupt(
+                "leased snapshot checkpoint binding".into(),
+            ));
+        }
+        let roots = descriptor.references();
+        self.build_frozen_context(PinnedSnapshot {
+            descriptor: descriptor.clone(),
+            pin: self.pin(&roots)?,
+            roots,
+            _charges: vec![charge_value(self, descriptor)?],
+        })
     }
 }

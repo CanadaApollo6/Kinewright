@@ -604,7 +604,7 @@ impl FeedbackPort for Ja1EditingSession {
 /// authenticated `WriterHost`; immutable records are read from this owner's store.
 pub(crate) struct HostFeedback<'a> {
     pub(crate) client: &'a kinewright_agent::writer_host::HostClient,
-    pub(crate) reader: &'a Ja1EditingSession,
+    pub(crate) reader: &'a crate::ja1_attachment::Ja1Attachment,
 }
 impl HostFeedback<'_> {
     fn request(
@@ -682,22 +682,36 @@ impl FeedbackPort for HostFeedback<'_> {
             .ok_or_else(|| "The host returned no feedback index.".into())
     }
     fn revision(&self, reference: &ObjectRef) -> Result<FeedbackRevision, String> {
-        Ok((*self
-            .reader
-            .store()
-            .map_err(text)?
-            .read_record::<FeedbackRevision>(reference)
-            .map_err(text)?)
-        .clone())
+        self.request(
+            kinewright_agent::writer_host::HostCommand::ReadFeedbackView {
+                revision: reference.clone(),
+            },
+        )?
+        .feedback
+        .ok_or_else(|| "The host returned no feedback revision.".into())
     }
     fn evidence(&self, reference: &ObjectRef) -> Result<Vec<u8>, String> {
-        Ok((*self
-            .reader
-            .store()
-            .map_err(text)?
-            .read_evidence(reference)
-            .map_err(text)?)
-        .clone())
+        for revision in self.index()?.revisions.values().flatten() {
+            let value = self.revision(revision)?;
+            if [
+                &value.original_text_ref,
+                &value.strokes_ref,
+                &value.frame_proof_ref,
+            ]
+            .contains(&reference)
+            {
+                return self
+                    .request(
+                        kinewright_agent::writer_host::HostCommand::ReadFeedbackEvidence {
+                            revision: revision.clone(),
+                            evidence: reference.clone(),
+                        },
+                    )?
+                    .evidence_bytes
+                    .ok_or_else(|| "The host returned no note evidence.".into());
+            }
+        }
+        Err("This evidence is not part of an indexed note.".into())
     }
     fn batch(&self, batch: &FeedbackBatchId) -> Result<FeedbackBatch, String> {
         self.request(
@@ -712,15 +726,19 @@ impl FeedbackPort for HostFeedback<'_> {
         let versions = self
             .request(kinewright_agent::writer_host::HostCommand::ListVersions)?
             .versions;
-        let descriptors = versions
+        versions
             .into_iter()
             .map(|key| {
-                self.request(kinewright_agent::writer_host::HostCommand::ReadSnapshot { key })?
-                    .snapshot
-                    .ok_or_else(|| "The host returned no snapshot.".to_owned())
+                let reader = self.reader.studio_snapshot_reader(&key).map_err(text)?;
+                let checkpoint = reader
+                    .read_record::<BranchCheckpoint>(&reader.descriptor().checkpoint_ref)
+                    .map_err(text)?;
+                let history = reader
+                    .read_record::<HistorySnapshot>(&checkpoint.history_ref)
+                    .map_err(text)?;
+                Ok((key, AcceptedCut::of(&checkpoint.branch_id, &history)?))
             })
-            .collect::<Result<Vec<_>, String>>()?;
-        published_cuts(self.reader.store().map_err(text)?, descriptors)
+            .collect()
     }
 }
 
@@ -1918,7 +1936,7 @@ impl KinewrightApp {
         if let Some(client) = attachment.host_client() {
             let mut port = HostFeedback {
                 client: &client,
-                reader: &attachment.owner,
+                reader: attachment,
             };
             Ok(act(feedback, &mut port))
         } else {
@@ -1935,7 +1953,7 @@ impl KinewrightApp {
             .ja1
             .as_ref()
             .filter(|attachment| attachment.project_path().is_some())
-            .map(|attachment| attachment.owner.project_id().map_err(text));
+            .map(|attachment| attachment.studio_project_id().map_err(text));
         let feedback = &mut self.focused_mut().studio.feedback;
         let reopen = match (&identity, &feedback.keeping) {
             (None, _) | (Some(Err(_)), Keeping::Failed { project: None, .. }) => false,
@@ -2195,6 +2213,12 @@ impl KinewrightApp {
     /// or the Revise cut selector.
     fn stage_feedback_scene(&mut self, scene: &str) {
         self.focused_mut().studio.tab = crate::studio::Tab::Notes;
+        if scene.starts_with("voice-") {
+            if let Err(why) = self.stage_saved_voice(scene == "voice-batch") {
+                self.focused_mut().studio.feedback.message = Some(why);
+            }
+            return;
+        }
         if scene == "new-note" {
             let _ = self.new_feedback_note();
             return;
@@ -2266,6 +2290,7 @@ impl KinewrightApp {
     #[allow(clippy::too_many_lines, reason = "one immediate-mode panel")]
     pub(crate) fn studio_notes(&mut self, ui: &mut egui::Ui) {
         use crate::studio::po0;
+        self.voice_controls(ui);
         if !self.focused().studio.feedback.loaded && self.focused().ja1.is_some() {
             self.focused_mut().studio.feedback.loaded = true;
             let refreshed = self.with_feedback(|feedback, port| feedback.refresh(&*port));
@@ -2458,6 +2483,7 @@ impl KinewrightApp {
                         {
                             action = Some(NoteAction::Toggle(note.reference.clone()));
                         }
+                        if note.revision.voice_ref.is_some() { ui.small("Voice · transcript"); }
                         if ui.small_button("Edit").clicked() {
                             action = Some(NoteAction::Revise(Box::new(note.clone())));
                         }
@@ -2485,6 +2511,7 @@ impl KinewrightApp {
                             },
                         );
                         ui.colored_label(po0::TEXT_2, label);
+                        if note.as_ref().is_some_and(|note| note.revision.voice_ref.is_some()) { ui.small("Voice · chosen transcript"); }
                         if let Some(newer) = newer
                             && ui.small_button("Use newest").clicked()
                         {
@@ -2564,3 +2591,89 @@ impl KinewrightApp {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "studio_feedback_tests.rs"]
 mod ja_s3_feedback;
+
+impl KinewrightApp {
+    pub(crate) fn voice_anchor(&self, comment: &CommentId) -> Result<FeedbackAnchor, String> {
+        let draft = self
+            .focused()
+            .studio
+            .feedback
+            .drafts
+            .iter()
+            .find(|d| &d.comment == comment)
+            .ok_or("Voice draft missing")?;
+        match &draft.origin {
+            Origin::Captured {
+                proof,
+                snapshot,
+                layers,
+                layer,
+                ..
+            } => captured_anchor(proof, snapshot.as_ref(), layers, *layer)
+                .ok_or_else(|| "Save this displayed version before recording a note.".into()),
+            Origin::Revises { anchor, .. } => Ok(anchor.clone()),
+        }
+    }
+    pub(crate) fn attach_voice(
+        &mut self,
+        comment: &CommentId,
+        voice: VoiceRef,
+        transcript: Option<ObjectRef>,
+        text: String,
+    ) -> Result<(), String> {
+        self.with_feedback(|feedback, port| {
+            let draft = feedback
+                .drafts
+                .iter_mut()
+                .find(|d| &d.comment == comment)
+                .ok_or("Voice draft missing")?;
+            draft.settle_readback();
+            let origin = match &draft.origin {
+                Origin::Captured {
+                    proof,
+                    snapshot,
+                    layers,
+                    layer,
+                    ..
+                } => {
+                    let anchor = captured_anchor(proof, snapshot.as_ref(), layers, *layer)
+                        .ok_or("Voice picture is not saved")?;
+                    let (frame_proof_ref, _) = port.admit(
+                        FeedbackEvidenceKind::FrameProof,
+                        &serde_json::to_vec(proof).map_err(|e| e.to_string())?,
+                    )?;
+                    let (strokes_ref, _) = port.admit(
+                        FeedbackEvidenceKind::Strokes,
+                        &strokes_bytes(&draft.strokes)?,
+                    )?;
+                    Origin::Revises {
+                        anchor,
+                        frame_proof_ref,
+                        strokes_ref,
+                        strokes: draft.strokes.clone(),
+                        voice_ref: Some(voice),
+                        transcript_revision: transcript,
+                    }
+                }
+                Origin::Revises {
+                    anchor,
+                    frame_proof_ref,
+                    strokes_ref,
+                    strokes,
+                    ..
+                } => Origin::Revises {
+                    anchor: anchor.clone(),
+                    frame_proof_ref: frame_proof_ref.clone(),
+                    strokes_ref: strokes_ref.clone(),
+                    strokes: strokes.clone(),
+                    voice_ref: Some(voice),
+                    transcript_revision: transcript,
+                },
+            };
+            draft.origin = origin;
+            draft.text = text;
+            feedback.changed = true;
+            Ok(())
+        })?
+    }
+}

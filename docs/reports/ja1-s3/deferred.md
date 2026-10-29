@@ -4,8 +4,8 @@ These are implementation follow-ups, not accepted S3 gates. They remain on the S
 
 | Item | Destination and reason |
 | --- | --- |
-| Studio C4/C5 composition | C8 supplies the session/host owner adapter, bounded capture and private range reads, reservations, transcript choice and completion retry. C9 owns the missing host snapshot read lease, attached Studio controls, capture cleanup, G11 App control and screenshots. |
-| C6 ASR completion retry | C8 retains and retries the completion carrier in the host on `Unsettled`; complete Agent suite and contention witness pass. C9 supplies the attached App caller and progress/edit UI. |
+| Studio C4/C5 composition | Closed by C8/C9: host voice ports, bounded capture, private range reads, receipt-first recovery, snapshot read leases, attached Studio controls, acknowledged capture cleanup, installed-model G11 App control and screenshots; see c8.md and c9.md. |
+| C6 ASR completion retry | Closed by C8/C9: the host retains and retries the completion carrier on `Unsettled`; the attached App supplies progress, edit and choice controls. Complete-suite and real installed-model evidence are in c8.md and c9.md. |
 | Batch disposition and S4 ports | S3 deferred list. Translate the actual S4 `RunProjection`/host commands into presentation and typed intent, including refresh/revision checks; the fixture `RunView` is not the production projection. |
 | Delivered labels | S5 delivery integration or an explicit S3 delivery-record contract. Neither S4 `DeliveryRecord` nor Studio `DeliveryView` carries a delivery timestamp; internal task-message delivery is not reviewed cut delivery. Do not invent age or label unfinished work Delivered. |
 | Astra 4 persisted remark-edit retention | S3 deferred list. The metadata API has immutable SaveFeedback revisions but no persisted remark deletion or split/merge operation. Add those App semantics before claiming a persisted edit/delete witness or its mutation pair. Existing local-vector edits remain backend evidence only. |

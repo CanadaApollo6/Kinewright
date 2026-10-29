@@ -600,6 +600,7 @@ impl SessionMedia {
                 Ok(None)
             }
             MediaAuthority::Certified(inputs) => {
+                inputs.check_read_authority()?;
                 if std::ptr::eq(inputs.document(), Arc::as_ptr(&document)) {
                     Ok(Some(Arc::clone(inputs)))
                 } else {
@@ -1672,6 +1673,7 @@ impl Playback for SessionMedia {
     fn frames(&self) -> Receiver<PreviewFrame> {
         if matches!(self.authority, MediaAuthority::Unavailable)
             || matches!(&self.authority, MediaAuthority::Legacy(grant) if grant.check().is_err())
+            || matches!(&self.authority, MediaAuthority::Certified(inputs) if inputs.check_read_authority().is_err())
         {
             return crossbeam_channel::never();
         }
@@ -3470,6 +3472,9 @@ impl Worker {
         from: TimeCode,
         mix_meters: &Arc<MixMeters>,
     ) -> Result<Option<AudioRuntime>, MediaError> {
+        if let Some(inputs) = &self.inputs {
+            inputs.check_read_authority()?;
+        }
         if self.inputs.is_none() && !self.document.media_pool.is_empty() {
             self.legacy_media
                 .as_ref()

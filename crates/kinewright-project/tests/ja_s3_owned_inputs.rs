@@ -235,7 +235,7 @@ fn s3_owned_input_identity() {
             })
             .unwrap();
         assert_eq!(
-            kinewright_media::sha256_bytes(resource.bytes()),
+            kinewright_media::sha256_bytes(resource.bytes().unwrap()),
             fixture.lut_ref.sha256
         );
         drop(resource);

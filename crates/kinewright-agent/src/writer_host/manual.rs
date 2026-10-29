@@ -38,9 +38,20 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
             | HostCommand::DetachForContinuation
             | HostCommand::Metadata { .. }
             | HostCommand::AdmitFeedbackEvidence { .. }
+            | HostCommand::VoiceReceipt { .. }
+            | HostCommand::AcknowledgeVoice { .. }
+            | HostCommand::StartTranscription { .. }
+            | HostCommand::VoiceStatus { .. }
+            | HostCommand::ChooseTranscript { .. }
+            | HostCommand::ReadVoiceRange { .. }
             | HostCommand::ListFeedback
             | HostCommand::ListVersions
             | HostCommand::ReadSnapshot { .. }
+            | HostCommand::LeaseSnapshot { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. }
+            | HostCommand::ReadFeedbackEvidence { .. }
+            | HostCommand::ReadFeedbackView { .. }
             | HostCommand::ReadFeedback { .. }
             | HostCommand::ReadSubmittedBatch { .. }
             | HostCommand::Attach

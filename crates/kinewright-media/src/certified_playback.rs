@@ -1,6 +1,6 @@
 //! One immutable PF1 scene admission. A missing certified asset is an error,
 //! never permission to open the document's locator.
-use super::{CertifiedSource, LifetimeGuard};
+use super::{CertifiedSource, LifetimeGuard, ReadAuthority};
 use crate::LutLibrary;
 use kinewright_core::{AssetId, Document, MediaError};
 use std::{collections::BTreeMap, sync::Arc};
@@ -20,6 +20,7 @@ impl std::hash::Hash for PlaybackAuthority {
 }
 
 pub struct PlaybackInputs {
+    pub(crate) read_authority: Option<ReadAuthority>,
     pub(crate) authority: PlaybackAuthority,
     pub(crate) document: Arc<Document>,
     pub(crate) sources: BTreeMap<AssetId, CertifiedSource>,
@@ -27,6 +28,17 @@ pub struct PlaybackInputs {
     pub(crate) lifetime: LifetimeGuard,
 }
 impl PlaybackInputs {
+    pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, MediaError> {
+        authority.check()?;
+        self.read_authority = Some(authority);
+        Ok(self)
+    }
+    pub fn check_read_authority(&self) -> Result<(), MediaError> {
+        self.read_authority
+            .as_ref()
+            .map_or(Ok(()), ReadAuthority::check)
+    }
+
     #[must_use]
     pub fn document(&self) -> &Document {
         &self.document
@@ -36,6 +48,7 @@ impl PlaybackInputs {
     /// Returns the mixer's source, verification, or decoding refusal.
     #[cfg(any(test, feature = "test-util"))]
     pub fn test_audio_samples(&self) -> Result<Vec<f32>, MediaError> {
+        self.check_read_authority()?;
         crate::audio::test_certified_mix_samples(self)
     }
     /// Retarget editorial changes without reopening an unchanged namespace.
@@ -43,6 +56,7 @@ impl PlaybackInputs {
     /// # Errors
     /// Refuses changes that require a new certified input namespace.
     pub fn with_document(&self, document: Arc<Document>) -> Result<Self, MediaError> {
+        self.check_read_authority()?;
         if document.media_pool != self.document.media_pool
             || document.lut_assets != self.document.lut_assets
         {
@@ -57,6 +71,7 @@ impl PlaybackInputs {
             Arc::clone(&self.lifetime),
         )?;
         inputs.authority = self.authority.clone();
+        inputs.read_authority.clone_from(&self.read_authority);
         Ok(inputs)
     }
     /// The project owner supplies manifest-bound sources and resource leases.
@@ -75,6 +90,7 @@ impl PlaybackInputs {
             let source = sources
                 .get(&asset.id)
                 .ok_or_else(|| MediaError::Backend("missing certified playback input".into()))?;
+            source.check_read_authority()?;
             let identity = source.identity();
             let digest = identity
                 .source_sha256
@@ -101,6 +117,7 @@ impl PlaybackInputs {
             }
         }
         Ok(Self {
+            read_authority: None,
             authority: PlaybackAuthority(Arc::new(())),
             document,
             sources,
@@ -109,6 +126,7 @@ impl PlaybackInputs {
         })
     }
     pub(crate) fn source(&self, id: AssetId) -> Result<CertifiedSource, MediaError> {
+        self.check_read_authority()?;
         self.sources
             .get(&id)
             .cloned()

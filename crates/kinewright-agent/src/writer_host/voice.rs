@@ -143,29 +143,35 @@ pub(super) async fn upload_request(
     let Ok(permit) = Arc::clone(&state.ingress).try_acquire_owned() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    let reservation = {
-        let Ok(mut owner) = state.owner.lock() else {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        };
-        let checked = (|| -> Result<_, HostError> {
-            let (_, _, roots) = owner.authorize_request(Some(&bearer), &metadata)?;
-            owner.prove_retention()?;
-            for pin in &owner.pins {
-                if !roots.permits(&pin.anchor, true) {
-                    return Err(HostRefusal::roots("voice project write root").into());
-                }
-            }
-            Ok(owner.owner()?.reserve_voice_capture()?)
-        })();
-        match checked {
-            Ok(r) => r,
-            Err(e) => {
-                return json_response(&HostReply {
-                    error: Some(e.refusal()),
-                    ..HostReply::default()
-                });
+    // GUI retention proof performs blocking callback IO, like ordinary host
+    // commands. It must not run on the async HTTP executor.
+    let admission_state = Arc::clone(&state);
+    let admission_bearer = bearer.clone();
+    let admission_request = metadata.clone();
+    let admission = tokio::task::spawn_blocking(move || -> Result<_, HostError> {
+        let mut owner = admission_state
+            .owner
+            .lock()
+            .map_err(|_| HostRefusal::new("owner_unavailable", "Voice owner unavailable"))?;
+        let (_, _, roots) = owner.authorize_request(Some(&admission_bearer), &admission_request)?;
+        owner.prove_retention()?;
+        for pin in &owner.pins {
+            if !roots.permits(&pin.anchor, true) {
+                return Err(HostRefusal::roots("voice project write root").into());
             }
         }
+        Ok(owner.owner()?.reserve_voice_capture()?)
+    })
+    .await;
+    let reservation = match admission {
+        Ok(Ok(reservation)) => reservation,
+        Ok(Err(error)) => {
+            return json_response(&HostReply {
+                error: Some(error.refusal()),
+                ..HostReply::default()
+            });
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let Ok(bytes) = to_bytes(request.into_body(), usize::try_from(length).unwrap_or(0)).await
     else {

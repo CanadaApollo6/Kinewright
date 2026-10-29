@@ -138,6 +138,11 @@ impl Ja1EditingSession {
                 _ => Err(BundleError::HistoryChanged),
             };
         }
+        // A committed old-epoch choice was settled above. An absent one must
+        // never enter the new owner's per-note publication slot.
+        if envelope.owner_epoch != owner.store().owner_epoch() {
+            return Err(BundleError::HistoryChanged);
+        }
         let handle = owner.voice_note(note)?;
         handle.retry_pending(owner)?;
         let voice = handle.snapshot()?.voice;

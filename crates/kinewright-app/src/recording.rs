@@ -206,18 +206,33 @@ pub(crate) fn start_recording(
     })
 }
 
-fn start_feedback_recording(microphone: &str, directory: &Path) -> Result<ActiveRecording, String> {
+pub(crate) enum FeedbackInput {
+    Microphone(String),
+    #[cfg(all(test, target_os = "linux"))]
+    Wav(PathBuf),
+}
+fn start_feedback_recording(
+    input: &FeedbackInput,
+    directory: &Path,
+) -> Result<ActiveRecording, String> {
     let ffmpeg = find_ffmpeg().ok_or_else(|| "FFmpeg was not found".to_owned())?;
     std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
     let path = next_recording_path(directory, "wav");
     let log = std::fs::File::create(path.with_extension("log")).map_err(|e| e.to_string())?;
-    let mut args = ffmpeg_record_args(
-        &RecordingMode::Voice {
-            microphone: microphone.into(),
-        },
-        &path,
-    );
-    args.pop();
+    let mut args = match input {
+        FeedbackInput::Microphone(microphone) => {
+            let mut args = ffmpeg_record_args(
+                &RecordingMode::Voice {
+                    microphone: microphone.clone(),
+                },
+                &path,
+            );
+            args.pop();
+            args
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        FeedbackInput::Wav(wav) => vec!["-y".into(), "-i".into(), wav.as_os_str().to_owned()],
+    };
     args.extend(
         [
             "-t",
@@ -1241,6 +1256,15 @@ pub(crate) mod feedback_capture {
         reservation: StorageReservation,
     }
     impl CaptureReservation {
+        pub(crate) fn reserve_context(
+            context: &kinewright_project::studio_store::FrozenContext,
+        ) -> Result<Self, BundleError> {
+            Ok(Self {
+                project: context.capture_project_id()?,
+                reservation: context.reserve_voice_capture()?,
+            })
+        }
+
         pub(crate) fn reserve(owner: &ProjectBundle) -> Result<Self, BundleError> {
             Ok(Self {
                 project: owner.project_id().clone(),
@@ -1311,6 +1335,25 @@ pub(crate) mod feedback_capture {
             anchor: FeedbackAnchor,
             snapshot: PinnedSnapshot,
         ) -> Result<Self, String> {
+            Self::start_input(
+                budget,
+                super::FeedbackInput::Microphone(microphone),
+                directory,
+                anchor,
+                snapshot,
+            )
+        }
+        pub(crate) fn start_input(
+            budget: CaptureReservation,
+            input: super::FeedbackInput,
+            directory: PathBuf,
+            anchor: FeedbackAnchor,
+            snapshot: PinnedSnapshot,
+        ) -> Result<Self, String> {
+            #[cfg(all(test, target_os = "linux"))]
+            let expected_eof = matches!(&input, super::FeedbackInput::Wav(_));
+            #[cfg(not(all(test, target_os = "linux")))]
+            let expected_eof = false;
             let CaptureReservation {
                 project,
                 reservation,
@@ -1328,12 +1371,12 @@ pub(crate) mod feedback_capture {
                 .spawn(move || {
                     let _permit = permit;
                     let capture = (|| {
-                        let mut active = start_feedback_recording(&microphone, &directory)?;
+                        let mut active = start_feedback_recording(&input, &directory)?;
                         let deadline = Instant::now() + Duration::from_secs(120);
                         let mut unexpected_exit = false;
                         while !stopping.load(Ordering::Acquire) && Instant::now() < deadline {
                             if active.exited().is_some() {
-                                unexpected_exit = true;
+                                unexpected_exit = !expected_eof;
                                 break;
                             }
                             std::thread::sleep(Duration::from_millis(25));
@@ -1520,6 +1563,63 @@ pub(crate) mod feedback_capture {
                     .map_err(|error| Box::new((self, error))),
                 Err(error) => Err(Box::new((self, error))),
             }
+        }
+    }
+    impl CapturedAudio {
+        pub(crate) fn prepare_upload(
+            &self,
+            envelope: MetadataEnvelope,
+            root_generation: u64,
+        ) -> Result<(kinewright_project::voice_ingress::VoiceUpload, Vec<u8>), BundleError>
+        {
+            if envelope.project_id != self.project {
+                return Err(BundleError::HistoryChanged);
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.path)?;
+            file.sync_all()?;
+            let mut wav = Vec::new();
+            file.by_ref()
+                .take(kinewright_project::voice_ingress::AUDIO_BYTES + 1)
+                .read_to_end(&mut wav)?;
+            if wav.len() as u64 > kinewright_project::voice_ingress::AUDIO_BYTES {
+                return Err(BundleError::Capacity("voice capture bytes"));
+            }
+            let mut log = self.log.clone().ok_or(BundleError::HistoryChanged)?;
+            log.version = 2;
+            log.capture_status = Some(kinewright_media::voice_note::CaptureStatus {
+                complete: self.complete,
+                capture_error: self.capture_error.clone(),
+            });
+            let log = serde_json::to_vec(&log).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let reference = |bytes: &[u8]| ObjectRef {
+                sha256: kinewright_media::sha256_bytes(bytes),
+                byte_length: bytes.len() as u64,
+                record_kind: RecordKind::OwnedEvidence,
+            };
+            let upload = kinewright_project::voice_ingress::VoiceUpload {
+                envelope,
+                note: self.note_id.clone(),
+                root_generation,
+                duration_micros: kinewright_media::voice_note::voice_audio_duration(&wav)
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                audio: reference(&wav),
+                log: reference(&log),
+            };
+            upload.validate()?;
+            Ok((upload, log))
+        }
+        pub(crate) fn cleanup_acknowledged(&self) -> Result<(), std::io::Error> {
+            for path in [&self.path, &self.path.with_extension("log")] {
+                match std::fs::remove_file(path) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
         }
     }
     impl SavedAudio {

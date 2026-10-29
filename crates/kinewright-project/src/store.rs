@@ -65,6 +65,10 @@ pub struct CollectionFailure {
 }
 
 struct Ledger {
+    // A leased reader receives the host's authenticated graph declarations.
+    // This admits graph traversal only: local byte reads still hash the object
+    // or certify its complete media fingerprint and chunks before exposure.
+    authenticated_read_graph: bool,
     collection: CollectionStatus,
     objects: BTreeMap<String, (ObjectRef, Vec<ObjectRef>)>,
     pins: BTreeMap<String, u64>,
@@ -94,6 +98,8 @@ struct MediaAdmission {
 }
 
 struct StoreInner {
+    read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
+    read_graph_charge: Option<snapshot_reader::GraphCharge>,
     namespace: Mutex<ProjectNamespace>,
     verified_memo: Mutex<crate::bundle_recovery::VerifiedIdentityMemo>,
     chunk_tables:
@@ -550,29 +556,45 @@ impl ProjectStore {
                 "exactly one project/session owner is required".into(),
             ));
         }
-        namespace.verify()?;
+        let read_authority = namespace.read_authority();
+        if read_authority.is_some() {
+            namespace.verify_read_authority()?;
+        } else {
+            namespace.verify()?;
+        }
         let mut epoch_bytes = [0_u8; 8];
         getrandom::fill(&mut epoch_bytes).map_err(|e| BundleError::Identity(e.to_string()))?;
         let owner_epoch = u64::from_le_bytes(epoch_bytes).max(1);
-        let root_bytes = namespace.read_root()?.map_or(0, |b| b.len() as u64);
-        let inventory_bytes = namespace
-            .read(
-                &crate::bundle_recovery::inventory_path()?,
-                limits.control_bytes,
-            )?
-            .map_or(0, |b| b.len() as u64);
+        let root_bytes = if read_authority.is_some() {
+            0
+        } else {
+            namespace.read_root()?.map_or(0, |b| b.len() as u64)
+        };
+        let inventory_bytes = if read_authority.is_some() {
+            0
+        } else {
+            namespace
+                .read(
+                    &crate::bundle_recovery::inventory_path()?,
+                    limits.control_bytes,
+                )?
+                .map_or(0, |b| b.len() as u64)
+        };
         let control_bytes = root_bytes
             .checked_add(inventory_bytes)
             .ok_or(BundleError::Capacity("control files"))?;
-        let can_collect = root_bytes == 0;
+        let can_collect = read_authority.is_none() && root_bytes == 0;
         Ok(Self {
             inner: Arc::new(StoreInner {
+                read_authority,
+                read_graph_charge: None,
                 namespace: Mutex::new(namespace),
                 verified_memo: Mutex::new(crate::bundle_recovery::VerifiedIdentityMemo::default()),
                 chunk_tables: Mutex::new(BTreeMap::new()),
                 resources: Mutex::new(BTreeMap::new()),
                 media_admissions: Mutex::new(BTreeMap::new()),
                 ledger: Mutex::new(Ledger {
+                    authenticated_read_graph: false,
                     collection: CollectionStatus::default(),
                     objects: BTreeMap::new(),
                     pins: BTreeMap::new(),
@@ -1311,6 +1333,7 @@ impl ProjectStore {
             inner: Arc::clone(&self.inner),
         };
         Arc::new(move |bytes| {
+            store.check_read_authority().map_err(|e| e.to_string())?;
             if store
                 .inner
                 .session_closing
@@ -1535,6 +1558,9 @@ impl ProjectStore {
         }
     }
     pub fn collect_unpublished(&mut self) -> Result<u64, BundleError> {
+        if self.inner.read_authority.is_some() {
+            return Err(BundleError::Identity("read-only snapshot".into()));
+        }
         self.inner
             .chunk_tables
             .lock()
@@ -1633,7 +1659,9 @@ fn walk(
     let (known, dependencies) = ledger.objects.get(&reference.sha256).ok_or_else(|| {
         BundleError::Corrupt(format!("missing dependency declaration: {reference:?}"))
     })?;
-    if known != reference || !ledger.verified.contains(&reference.sha256) {
+    if known != reference
+        || (!ledger.authenticated_read_graph && !ledger.verified.contains(&reference.sha256))
+    {
         return Err(BundleError::Corrupt(
             "unverified dependency identity".into(),
         ));
@@ -2017,6 +2045,9 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
 
 impl Drop for StoreInner {
     fn drop(&mut self) {
+        if self.read_authority.is_some() {
+            return;
+        }
         if self
             .session_closed
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -2417,7 +2448,9 @@ impl ProjectStore {
         let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, cleanup_only)?;
         let mut file = self.open_copy_source(reference, cleanup_only)?;
         let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
-        if bytes.len() as u64 != reference.byte_length {
+        if bytes.len() as u64 != reference.byte_length
+            || kinewright_media::sha256_bytes(&bytes) != reference.sha256
+        {
             return Err(BundleError::Corrupt("record changed while decoding".into()));
         }
         let preflight = self.reserve_copy_read(
@@ -2452,6 +2485,7 @@ impl ProjectStore {
             .lock()
             .map_err(|_| BundleError::Capacity("memo poisoned"))?
             .remember(reference, &value, decoded, None, self.limits());
+        self.check_read_authority()?;
         Ok(decoded_reservation.hold(value))
     }
 }
@@ -3317,6 +3351,11 @@ impl ProjectStore {
         reference: &ObjectRef,
         retained: bool,
     ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
+        if self.inner.read_authority.is_some() {
+            return Err(BundleError::Identity(
+                "private evidence requires the host evidence route".into(),
+            ));
+        }
         if reference.record_kind != RecordKind::OwnedEvidence
             || reference.byte_length > self.limits().control_bytes
         {
@@ -4060,5 +4099,35 @@ mod c0_fix1_tests {
             drop(ledger);
             drop(sealed);
         }
+    }
+}
+
+#[path = "snapshot_reader.rs"]
+pub mod snapshot_reader;
+impl ProjectStore {
+    pub(crate) fn read_authority(&self) -> Option<kinewright_media::owned_io::ReadAuthority> {
+        self.inner.read_authority.clone()
+    }
+    pub(crate) fn check_read_authority(&self) -> Result<(), BundleError> {
+        self.inner.read_authority.as_ref().map_or(Ok(()), |a| {
+            a.check().map_err(|e| BundleError::Identity(e.to_string()))
+        })
+    }
+}
+impl StorePin {
+    pub(crate) fn read_store(&self) -> ProjectStore {
+        ProjectStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl ProjectStore {
+    pub(crate) fn snapshot_project_id(&self) -> Result<ProjectId, BundleError> {
+        self.check_read_authority()?;
+        self.inner
+            .project_id
+            .clone()
+            .ok_or_else(|| BundleError::Identity("snapshot has no named owner".into()))
     }
 }

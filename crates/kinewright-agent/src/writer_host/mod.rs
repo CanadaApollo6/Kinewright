@@ -12,8 +12,12 @@ mod orchestration;
 mod owned_media;
 mod protocol;
 mod recovery;
+mod snapshot_lease;
+#[cfg(all(test, target_os = "linux"))]
+mod snapshot_lease_tests;
 mod switch;
 mod voice;
+pub use snapshot_lease::SnapshotLeaseRemote;
 #[cfg(all(test, target_os = "linux"))]
 mod voice_tests;
 pub use attention::{
@@ -430,11 +434,13 @@ impl WriterHost {
             },
             owner: Arc::clone(&owner),
             ingress: Arc::new(tokio::sync::Semaphore::new(1)),
+            lease_ingress: Arc::new(tokio::sync::Semaphore::new(64)),
         });
         let router = axum::Router::new()
             .route("/issuer", post(issuer::issuer_request))
             .route("/host", post(host_request))
             .route("/voice", post(voice::upload_request))
+            .route("/snapshot-lease", post(snapshot_lease::lease_request))
             .route("/mcp", post(mcp_request))
             .with_state(state);
         let server = serve(listener, router, "kinewright-writer-host", stop)?;
@@ -553,6 +559,7 @@ struct HttpState {
     bootstrap: HostBootstrap,
     owner: Arc<Mutex<HostCommandOwner>>,
     ingress: Arc<tokio::sync::Semaphore>,
+    lease_ingress: Arc<tokio::sync::Semaphore>,
 }
 fn check_headers(headers: &HeaderMap, bootstrap: &HostBootstrap) -> Result<(), StatusCode> {
     let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
@@ -1361,12 +1368,17 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    fn snapshot_read_owner(&self) -> Option<(kinewright_project::bundle_records::ProjectId, u64)> {
+        let owner = self.owner.as_ref()?;
+        Some((owner.project_id().ok()?, owner.store().ok()?.owner_epoch()))
+    }
     /// Errors stay typed in the reply; source retention loss is latched for the whole context.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "The same owned request boundary serves HTTP ingress and scoped observer callers"
     )]
     fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+        let previous_snapshot_owner = self.snapshot_read_owner();
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {
             let write = !matches!(
@@ -1375,6 +1387,8 @@ impl HostCommandOwner {
                     | HostCommand::ListFeedback
                     | HostCommand::ReadSnapshot { .. }
                     | HostCommand::ReadFeedback { .. }
+                    | HostCommand::ReadFeedbackView { .. }
+                    | HostCommand::ReadFeedbackEvidence { .. }
                     | HostCommand::ReadSubmittedBatch { .. }
                     | HostCommand::Attach
                     | HostCommand::CurrentAttachment
@@ -1415,7 +1429,10 @@ impl HostCommandOwner {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
         }
-        if reply.activation.is_some() {
+        if reply.activation.is_some() || self.snapshot_read_owner() != previous_snapshot_owner {
+            for attachment in &mut self.attachments {
+                attachment.snapshot_leases.clear();
+            }
             self.voice_jobs.clear();
         }
         if reply.activation.is_some()
@@ -1622,6 +1639,36 @@ impl HostCommandOwner {
             }
             HostCommand::ListVersions => {
                 reply.versions = self.owner()?.studio_versions()?;
+            }
+            HostCommand::LeaseSnapshot { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. } => {
+                return Err(HostRefusal::new(
+                    "attachment_required",
+                    "snapshot lease requires attachment ownership",
+                )
+                .into());
+            }
+            HostCommand::ReadFeedbackView { revision } => {
+                reply.feedback = Some(self.owner()?.read_feedback(&revision)?.revision);
+            }
+            HostCommand::ReadFeedbackEvidence { revision, evidence } => {
+                let feedback = self.owner()?.read_feedback(&revision)?;
+                if ![
+                    &feedback.revision.original_text_ref,
+                    &feedback.revision.strokes_ref,
+                    &feedback.revision.frame_proof_ref,
+                ]
+                .contains(&&evidence)
+                {
+                    return Err(HostRefusal::new(
+                        "private_evidence",
+                        "only this revision's text, strokes and proof may be read",
+                    )
+                    .into());
+                }
+                reply.evidence_bytes =
+                    Some(self.owner()?.store()?.read_evidence(&evidence)?.to_vec());
             }
             HostCommand::ReadSnapshot { key } => {
                 let pinned = self.owner()?.read_snapshot(&key)?;
@@ -2277,6 +2324,7 @@ impl HostCommandOwner {
             ..HostStatus::default()
         };
         if let Some(owner) = &self.owner {
+            status.project_id = owner.project_id().ok();
             status.association = owner.association().map(|a| a.path().to_path_buf());
             status.saved_digest = owner
                 .association()

@@ -2389,6 +2389,12 @@ impl Preview {
     }
 
     fn publish(&self, frame: Rendered) {
+        if let Some(inputs) = &frame.scene.inputs
+            && let Err(error) = inputs.check_read_authority()
+        {
+            self.fail(frame.stamp, error);
+            return;
+        }
         let _access = match crate::locator::enter_retained(frame.scene.legacy_media.as_ref()) {
             Ok(access) => access,
             Err(error) => {

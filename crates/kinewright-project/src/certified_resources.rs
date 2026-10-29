@@ -15,12 +15,12 @@ pub(crate) struct ResourceBytes {
 pub struct CertifiedResource {
     shared: Arc<ResourceBytes>,
     identity: OwnedInputRef,
-    _context: Arc<StorePin>,
+    context: Arc<StorePin>,
 }
 impl CertifiedResource {
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.shared.bytes
+    pub fn bytes(&self) -> Result<&[u8], BundleError> {
+        self.context.read_store().check_read_authority()?;
+        Ok(&self.shared.bytes)
     }
     #[must_use]
     pub fn identity(&self) -> &OwnedInputRef {
@@ -41,7 +41,7 @@ impl ProjectStore {
         Ok(CertifiedResource {
             shared,
             identity: reference.clone(),
-            _context: Arc::new(context),
+            context: Arc::new(context),
         })
     }
 }
