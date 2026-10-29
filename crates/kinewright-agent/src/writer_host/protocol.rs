@@ -38,6 +38,10 @@ pub struct HostConfig {
     pub path: Option<PathBuf>,
     pub roots: SessionRoots,
     pub origin: HostOrigin,
+    /// Where S4 reads the person's Director setting. `None` is the per-user
+    /// scheduler folder; tests name their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_settings: Option<PathBuf>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
@@ -187,6 +191,11 @@ pub enum HostCommand {
         response: super::LiveAttentionResponse,
     },
     DetachForContinuation,
+    /// S4: start the Director run for one submitted batch, exactly once per
+    /// request. Replies with `revise_result`.
+    ReviseCut {
+        request: kinewright_project::studio_records::ReviseRequest,
+    },
     Metadata {
         envelope: kinewright_project::studio_records::MetadataEnvelope,
         update: kinewright_project::studio_records::MetadataUpdate,
@@ -538,6 +547,12 @@ pub struct HostReply {
     pub versions: Vec<kinewright_project::studio_records::SnapshotKey>,
     pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
     pub feedback: Option<kinewright_project::studio_records::FeedbackRevision>,
+    /// `ReadFeedback`: the revision's exact text and strokes evidence, so a
+    /// GUI whose bundle the host holds can show the saved note (S3 C7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_text: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_strokes: Option<Vec<u8>>,
     pub feedback_evidence: Option<ObjectRef>,
     pub feedback_index: Option<kinewright_project::studio_records::FeedbackIndex>,
     pub submitted_batch: Option<kinewright_project::studio_records::FeedbackBatch>,

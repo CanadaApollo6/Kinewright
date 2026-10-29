@@ -260,6 +260,7 @@ mod tests {
                 write: vec![root.root().into()],
             };
             let mut host = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "c11-pin-host".into(),
                 path: Some(path.clone()),
                 roots: roots.clone(),
@@ -492,6 +493,7 @@ mod tests {
                 write: vec![root.root().into()],
             };
             let mut host = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "c11-target-host".into(),
                 path: Some(path),
                 roots: roots.clone(),
@@ -675,6 +677,7 @@ mod tests {
                 write: vec![root.root().into()],
             };
             let mut host = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "c11-frozen-host".into(),
                 path: Some(path.clone()),
                 roots: roots.clone(),
@@ -853,6 +856,7 @@ mod tests {
             write: vec![root.root().into()],
         };
         let mut host = HostCommandOwner::open(HostConfig {
+            scheduler_settings: None,
             project: "c11-registered-host".into(),
             path: Some(path.clone()),
             roots: roots.clone(),

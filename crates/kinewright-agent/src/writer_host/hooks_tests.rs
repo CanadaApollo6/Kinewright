@@ -19,6 +19,7 @@ mod tests {
     include!("hooks_attention_tests.rs");
     include!("hooks_store_tests.rs");
     include!("hooks_grant_tests.rs");
+    include!("revise_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,
@@ -65,6 +66,7 @@ mod tests {
             let issuer_auth = HostAuth::generate().unwrap();
             let host = WriterHost::start_with_issuer(
                 HostConfig {
+                    scheduler_settings: None,
                     project: "hooks".into(),
                     path: Some(path),
                     roots: roots.clone(),

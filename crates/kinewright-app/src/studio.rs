@@ -265,6 +265,9 @@ impl KinewrightApp {
     ) -> Result<(), String> {
         let mut attachment =
             crate::ja1_attachment::Ja1Attachment::open(path).map_err(|error| error.to_string())?;
+        if std::env::var("KINEWRIGHT_SCREENSHOT_STUDIO_SCENE").as_deref() == Ok("revise") {
+            return self.prepare_revise_screenshot(attachment, path);
+        }
         let versions = attachment
             .studio_versions()
             .map_err(|error| error.to_string())?;
@@ -279,12 +282,54 @@ impl KinewrightApp {
         );
         attachment.panel_open = false;
         attachment.view = None;
+        let scene = std::env::var("KINEWRIGHT_SCREENSHOT_STUDIO_SCENE").ok();
         self.focused_mut().ja1 = Some(attachment);
-        self.focused_mut().studio.feedback.scene =
-            std::env::var("KINEWRIGHT_SCREENSHOT_STUDIO_SCENE").ok();
+        self.focused_mut().studio.feedback.scene = scene;
         self.focused_mut().studio.versions = versions;
         self.focused_mut().studio.mode = Mode::Studio;
         self.install_studio_context(context)
+    }
+    /// The `revise` scene: the project's saved notes, sent by Revise cut through
+    /// its writer host, with the run Notes shows. No picture is bound: a version
+    /// context's readers would hold the bundle the host needs.
+    fn prepare_revise_screenshot(
+        &mut self,
+        mut attachment: crate::ja1_attachment::Ja1Attachment,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or("screenshot bundle has no folder")?
+            .to_path_buf();
+        attachment
+            .launch_host(
+                "studio-screenshot".into(),
+                kinewright_agent::writer_host::SessionRoots {
+                    read: vec![parent.clone()],
+                    write: vec![parent],
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        attachment.panel_open = false;
+        attachment.view = None;
+        let versions = attachment
+            .studio_versions()
+            .map_err(|error| error.to_string())?;
+        self.focused_mut().ja1 = Some(attachment);
+        self.focused_mut().studio.versions = versions;
+        self.focused_mut().studio.mode = Mode::Studio;
+        self.focused_mut().studio.tab = Tab::Notes;
+        self.feedback_frame();
+        self.with_feedback(|feedback, port| {
+            feedback.refresh(&*port)?;
+            feedback.selection = feedback
+                .saved
+                .iter()
+                .map(|note| note.reference.clone())
+                .collect();
+            feedback.submit(port);
+            Ok::<(), String>(())
+        })?
     }
     pub(crate) fn update_owned_playback(
         &mut self,

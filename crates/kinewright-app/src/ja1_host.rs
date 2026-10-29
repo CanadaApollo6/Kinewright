@@ -23,6 +23,13 @@ mod recovery;
 #[path = "ja1_host_transport_tests.rs"]
 pub(super) mod transport_tests;
 
+#[cfg(test)]
+thread_local! {
+    /// The scheduler settings folder hosts launched on this test thread read.
+    pub(crate) static SCHEDULER_SETTINGS: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SwitchState {
     Complete,
@@ -284,6 +291,11 @@ impl HostAttachment {
         let launched = HostClient::launch_with_issuer(
             executable,
             HostConfig {
+                // Production hosts read the person's scheduler settings folder.
+                #[cfg(test)]
+                scheduler_settings: SCHEDULER_SETTINGS.with(|folder| folder.borrow().clone()),
+                #[cfg(not(test))]
+                scheduler_settings: None,
                 project,
                 path: transfer.named_path,
                 roots,

@@ -8,6 +8,7 @@ use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{BranchCheckpoint, BranchId, ObjectRef, ProjectId},
     editing_session::Ja1EditingSession,
+    orchestration_records::{RunOutcome, RunPhase, RunProjection, RunWait},
     receipts::{CommandId, IssuerId, ReceiptLookup, ReceiptResult},
     storage_budget::StorageLimits,
     store::{ProjectStore, StorePin},
@@ -15,7 +16,7 @@ use kinewright_project::{
         CommentId, FeedbackAnchor, FeedbackBatch, FeedbackBatchId, FeedbackEvidenceKind,
         FeedbackIndex, FeedbackRevision, FeedbackTarget, FrameRate, MetadataChange,
         MetadataEnvelope, MetadataResult, MetadataScope, MetadataUpdate, Orientation,
-        ReviseRequest, SnapshotDescriptor, SnapshotKey, VoiceRef,
+        ReviseRequest, ReviseResult, RunId, SnapshotDescriptor, SnapshotKey, VoiceRef,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -454,9 +455,42 @@ pub(crate) trait FeedbackPort {
     fn index(&self) -> Result<FeedbackIndex, String>;
     fn revision(&self, reference: &ObjectRef) -> Result<FeedbackRevision, String>;
     fn evidence(&self, reference: &ObjectRef) -> Result<Vec<u8>, String>;
+    /// A saved revision with its text and strokes evidence.
+    fn note(&self, reference: &ObjectRef) -> Result<(FeedbackRevision, Vec<u8>, Vec<u8>), String> {
+        let revision = self.revision(reference)?;
+        let text = self.evidence(&revision.original_text_ref)?;
+        let strokes = self.evidence(&revision.strokes_ref)?;
+        Ok((revision, text, strokes))
+    }
     fn batch(&self, batch: &FeedbackBatchId) -> Result<FeedbackBatch, String>;
     /// Published versions and the exact cut each one acknowledges.
     fn published(&self) -> Result<Vec<(SnapshotKey, AcceptedCut)>, String>;
+    /// Ask S4 to start the Director run for one submitted batch. Only the
+    /// writer host schedules runs; an in-process owner answers Waiting.
+    fn revise(&mut self, _request: &ReviseRequest) -> RunStart {
+        RunStart::Known(ReviseResult::Waiting {
+            reason: NO_SCHEDULER.into(),
+        })
+    }
+    /// One run's state, as S4's `ObserveRun` projects it.
+    fn observe(&self, _run: &RunId) -> Result<RunProjection, String> {
+        Err(NO_SCHEDULER.into())
+    }
+}
+const NO_SCHEDULER: &str =
+    "Runs start once this project's writer host is running. Your notes are saved.";
+/// What a Revise cut send came back with.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RunStart {
+    Known(ReviseResult),
+    /// Definitely not started. The batch stays submitted and can start again.
+    Refused(String),
+    /// The original request is retained for an exact retry.
+    Unknown(String),
+}
+/// The scheduler and Studio name one run with the same identity string.
+fn same_identity<T: for<'de> Deserialize<'de>>(run: &impl Serialize) -> Result<T, String> {
+    serde_json::from_value(serde_json::to_value(run).map_err(text)?).map_err(text)
 }
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -722,6 +756,51 @@ impl FeedbackPort for HostFeedback<'_> {
             .collect::<Result<Vec<_>, String>>()?;
         published_cuts(self.reader.store().map_err(text)?, descriptors)
     }
+    /// The host holds the bundle, so saved notes are read through it.
+    fn note(&self, reference: &ObjectRef) -> Result<(FeedbackRevision, Vec<u8>, Vec<u8>), String> {
+        let reply = self.request(kinewright_agent::writer_host::HostCommand::ReadFeedback {
+            reference: reference.clone(),
+        })?;
+        match (reply.feedback, reply.feedback_text, reply.feedback_strokes) {
+            (Some(revision), Some(text), Some(strokes)) => Ok((revision, text, strokes)),
+            _ => Err("The host returned no saved note.".into()),
+        }
+    }
+    fn revise(&mut self, request: &ReviseRequest) -> RunStart {
+        let reply =
+            match self
+                .client
+                .request(kinewright_agent::writer_host::HostCommand::ReviseCut {
+                    request: request.clone(),
+                }) {
+                Ok(reply) => reply,
+                Err(error) => return RunStart::Unknown(error.to_string()),
+            };
+        if let Some(error) = reply.error {
+            return if matches!(
+                error.code.as_str(),
+                "durability_unknown" | "unsettled" | "recovery_frozen"
+            ) {
+                RunStart::Unknown(error.message)
+            } else {
+                RunStart::Refused(error.message)
+            };
+        }
+        reply.revise_result.map_or_else(
+            || RunStart::Unknown("The host returned no Revise cut result.".into()),
+            RunStart::Known,
+        )
+    }
+    fn observe(&self, run: &RunId) -> Result<RunProjection, String> {
+        Ok(self
+            .request(kinewright_agent::writer_host::HostCommand::ObserveRun {
+                run: same_identity(run)?,
+                after_sequence: 0,
+            })?
+            .run_view
+            .ok_or("The host returned no run.")?
+            .projection)
+    }
 }
 
 /// A saved comment's revision, as the Notes list shows it.
@@ -744,12 +823,12 @@ fn saved_note(
     comment: &CommentId,
     reference: &ObjectRef,
 ) -> Result<SavedNote, String> {
-    let revision = port.revision(reference)?;
+    let (revision, text, strokes) = port.note(reference)?;
     Ok(SavedNote {
         comment: comment.clone(),
         reference: reference.clone(),
-        text: String::from_utf8_lossy(&port.evidence(&revision.original_text_ref)?).into_owned(),
-        strokes: parse_strokes(&port.evidence(&revision.strokes_ref)?),
+        text: String::from_utf8_lossy(&text).into_owned(),
+        strokes: parse_strokes(&strokes),
         revision,
     })
 }
@@ -783,6 +862,8 @@ struct KeptRef<'a> {
     selection: &'a [ObjectRef],
     submission: Option<&'a Submission>,
     detached: &'a [Detached],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revise: Option<&'a ReviseRequest>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -793,6 +874,9 @@ struct Kept {
     selection: Vec<ObjectRef>,
     submission: Option<Submission>,
     detached: Vec<Detached>,
+    /// A durable batch's Revise cut, kept before it is sent (S3 C7).
+    #[serde(default)]
+    revise: Option<ReviseRequest>,
 }
 const KEPT_VERSION: u32 = 2;
 const RESTARTED: &str = "Kinewright closed before this outcome was known";
@@ -955,6 +1039,82 @@ fn submission_matches(submission: &Submission) -> bool {
     )
 }
 
+/// A submitted batch as Notes shows it: its exact revisions and its linked run.
+#[derive(Clone, Debug)]
+pub(crate) struct BatchRow {
+    pub(crate) batch: FeedbackBatchId,
+    pub(crate) request: ReviseRequest,
+    pub(crate) revisions: Vec<ObjectRef>,
+    pub(crate) run: Option<RunId>,
+    /// The linked run's last observed state, or why it could not be read.
+    pub(crate) state: Option<Result<RunState, String>>,
+}
+/// A run's phase, outcome and wait, from S4's projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunState {
+    pub(crate) phase: RunPhase,
+    pub(crate) outcome: RunOutcome,
+    pub(crate) wait: RunWait,
+}
+impl RunState {
+    pub(crate) fn of(projection: &RunProjection) -> Self {
+        Self {
+            phase: projection.phase,
+            outcome: projection.outcome.clone(),
+            wait: projection.wait.clone(),
+        }
+    }
+    fn settled(&self) -> bool {
+        self.phase == RunPhase::Finished
+    }
+    /// Plain words for the run. A finished run is ready to review; S3 never
+    /// calls work delivered.
+    pub(crate) fn label(&self) -> String {
+        let phase = match (&self.phase, &self.outcome) {
+            (RunPhase::Queued, _) => "run queued".to_owned(),
+            (RunPhase::Running, _) => "run running".to_owned(),
+            (RunPhase::Reviewing, _) => "run reviewing its work".to_owned(),
+            (RunPhase::Paused, _) => "run paused".to_owned(),
+            (RunPhase::Interrupted, _) => "run interrupted".to_owned(),
+            (RunPhase::Finished, RunOutcome::Ready) => "run finished · ready to review".to_owned(),
+            (RunPhase::Finished, RunOutcome::Failed(detail)) => {
+                format!("run failed · {}", detail.code)
+            }
+            (RunPhase::Finished, RunOutcome::Cancelled(_)) => "run stopped".to_owned(),
+            (RunPhase::Finished, RunOutcome::Pending) => "run finished".to_owned(),
+        };
+        let wait = match &self.wait {
+            RunWait::None => "",
+            RunWait::Files(_) => " · waiting for files",
+            RunWait::Provider(_) => " · waiting for the provider",
+            RunWait::Question(_) => " · waiting for your answer",
+            RunWait::Children(_) => " · waiting for its tasks",
+        };
+        format!("{phase}{wait}")
+    }
+}
+impl BatchRow {
+    fn settled(&self) -> bool {
+        matches!(&self.state, Some(Ok(state)) if state.settled())
+    }
+    pub(crate) fn label(&self) -> String {
+        let notes = match self.revisions.len() {
+            1 => "1 note".to_owned(),
+            n => format!("{n} notes"),
+        };
+        match (&self.run, &self.state) {
+            (None, _) => format!("{notes} · submitted · run not started"),
+            (Some(_), None) => format!("{notes} · Accepted · run starting"),
+            (Some(_), Some(Ok(state))) => format!("{notes} · Accepted · {}", state.label()),
+            (Some(_), Some(Err(why))) => {
+                format!("{notes} · Accepted · run state unavailable ({why})")
+            }
+        }
+    }
+}
+/// How often Notes re-reads runs that have not finished.
+pub(crate) const RUN_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Studio feedback state for one project session.
 #[derive(Default)]
 #[allow(
@@ -975,6 +1135,12 @@ pub(crate) struct Feedback {
     /// Selected revisions that are no longer their comment's newest.
     pub(crate) older: BTreeMap<ObjectRef, SavedNote>,
     pub(crate) submission: Option<Submission>,
+    /// A durable batch's Revise cut, kept until S4's reply is known.
+    pub(crate) revise: Option<ReviseRequest>,
+    /// Submitted batches and their linked runs.
+    pub(crate) rows: Vec<BatchRow>,
+    /// When linked runs were last read.
+    pub(crate) observed_at: Option<std::time::Instant>,
     /// Sent commands that no longer match their drafts, retried to settle.
     pub(crate) detached: Vec<Detached>,
     pub(crate) saved: Vec<SavedNote>,
@@ -1005,6 +1171,7 @@ impl Feedback {
     /// Feedback that closing now would leave outside the project.
     pub(crate) fn unsaved(&self) -> bool {
         self.submission.is_some()
+            || self.revise.is_some()
             || !self.detached.is_empty()
             || self.drafts.iter().any(Draft::holds_work)
     }
@@ -1023,7 +1190,10 @@ impl Feedback {
             1 => "1 note is not saved".to_owned(),
             n => format!("{n} notes are not saved"),
         };
-        let what = match (notes.is_empty(), self.submission.is_some()) {
+        let what = match (
+            notes.is_empty(),
+            self.submission.is_some() || self.revise.is_some(),
+        ) {
             (false, true) => format!("{notes}, and a Revise cut request is not confirmed."),
             (false, false) => format!("{notes}."),
             (true, true) => "A Revise cut request is not confirmed.".to_owned(),
@@ -1068,6 +1238,7 @@ impl Feedback {
         let result = if self.drafts.is_empty()
             && self.selection.is_empty()
             && self.submission.is_none()
+            && self.revise.is_none()
             && self.detached.is_empty()
         {
             match std::fs::remove_file(&path) {
@@ -1082,6 +1253,7 @@ impl Feedback {
                 selection: &self.selection,
                 submission: self.submission.as_ref(),
                 detached: &self.detached,
+                revise: self.revise.as_ref(),
             })
             .map_err(std::io::Error::other)
             .and_then(|bytes| write_atomically(&path, &bytes))
@@ -1129,6 +1301,8 @@ impl Feedback {
         self.saved.clear();
         self.older.clear();
         self.batches.clear();
+        self.rows.clear();
+        self.observed_at = None;
         self.loaded = false;
         self.persist_error = None;
         self.gesture = None;
@@ -1209,6 +1383,9 @@ impl Feedback {
     /// not be written, nothing is dropped: every draft carries as unsent, and an
     /// unconfirmed batch's notes go back into the selection.
     fn leave(&mut self, written: bool) {
+        // A kept Revise cut names a durable batch of the project left: its own
+        // file keeps it, and that batch's Start run sends the same request.
+        self.revise = None;
         if written {
             self.drafts.retain(|draft| !draft.pending());
             self.submission = None;
@@ -1332,7 +1509,11 @@ impl Feedback {
                 }),
             }
         }
+        if self.revise.is_none() {
+            self.revise = kept.revise;
+        }
         self.resume = self.submission.is_some()
+            || self.revise.is_some()
             || !self.detached.is_empty()
             || self.drafts.iter().any(Draft::pending);
         self.changed = true;
@@ -1375,7 +1556,7 @@ impl Feedback {
         for comment in &pending {
             self.save(port, comment);
         }
-        if self.submission.is_some() {
+        if self.submission.is_some() || self.revise.is_some() {
             self.submit(port);
         }
         if let Err(why) = self.refresh(&*port) {
@@ -1461,6 +1642,21 @@ impl Feedback {
         self.saved = saved;
         self.older = older;
         self.batches = index.batches.keys().cloned().collect();
+        let mut rows = Vec::new();
+        for (batch, submitted) in &index.batches {
+            rows.push(BatchRow {
+                batch: batch.clone(),
+                request: submitted.request.clone(),
+                revisions: port.batch(batch)?.revision_refs,
+                run: submitted.consumed_by.clone(),
+                state: submitted.consumed_by.as_ref().map(|run| {
+                    port.observe(run)
+                        .map(|projection| RunState::of(&projection))
+                }),
+            });
+        }
+        self.rows = rows;
+        self.observed_at = Some(std::time::Instant::now());
         if self.drafts.iter().any(|draft| draft.waiting().is_some()) {
             self.promote(&port.published()?);
         }
@@ -1655,18 +1851,134 @@ impl Feedback {
     }
     /// Durably create one immutable batch of the selected exact revisions. An unknown
     /// outcome retries the original batch, whatever the selection became since.
+    /// Once the batch is durable its kept `ReviseRequest` goes to S4, and a
+    /// kept request whose reply was lost is retried exactly before any new batch.
     pub(crate) fn submit(&mut self, port: &mut dyn FeedbackPort) -> Outcome {
+        if self.submission.is_none()
+            && let Some(request) = &self.revise
+        {
+            let batch = request.batch_id.clone();
+            self.start_run(port);
+            self.keep();
+            return Outcome::Submitted(batch);
+        }
         let outcome = self.submit_inner(port);
         self.message = match &outcome {
-            Outcome::Submitted(_) => Some("Submitted · waiting for a run".into()),
+            // Without a kept request, submit_inner said why its run is not sent.
+            Outcome::Submitted(_) if self.revise.is_none() => self.message.take(),
+            Outcome::Submitted(_) => Some("Submitted · starting its run".into()),
             Outcome::Waiting(why) | Outcome::Refused(why) => Some(why.clone()),
             Outcome::Unknown(why) => Some(format!(
                 "Not submitted yet: the outcome is unknown ({why}). Retry sends this exact batch."
             )),
             Outcome::Saved(_) => None,
         };
+        if matches!(outcome, Outcome::Submitted(_)) && self.revise.is_some() {
+            self.start_run(port);
+        }
         self.keep();
         outcome
+    }
+    /// Start the run of a submitted batch that has none: Waiting or a refusal
+    /// left it submitted, and this sends its own durable request again.
+    pub(crate) fn start_batch(
+        &mut self,
+        port: &mut dyn FeedbackPort,
+        batch: &FeedbackBatchId,
+    ) -> Option<RunStart> {
+        if let Some(kept) = &self.revise
+            && kept.batch_id != *batch
+        {
+            self.message = Some(
+                "An earlier Revise cut is not confirmed yet. Retry Revise cut checks it first."
+                    .into(),
+            );
+            return None;
+        }
+        let request = self
+            .rows
+            .iter()
+            .find(|row| row.batch == *batch && row.run.is_none())?
+            .request
+            .clone();
+        self.revise = Some(request);
+        if let Err(why) = self.retain_for_dispatch() {
+            self.revise = None;
+            self.message = Some(format!(
+                "Not sent: this request could not be kept on this computer first ({why})."
+            ));
+            return None;
+        }
+        let start = self.start_run(port);
+        self.keep();
+        start
+    }
+    /// Send the kept Revise cut. Only a known reply clears it; an unknown one
+    /// keeps the exact request for Retry and for the next session.
+    fn start_run(&mut self, port: &mut dyn FeedbackPort) -> Option<RunStart> {
+        let request = self.revise.clone()?;
+        let start = port.revise(&request);
+        self.message = Some(match &start {
+            RunStart::Known(ReviseResult::Accepted { .. }) => {
+                "Revise cut accepted · the Director run has started.".to_owned()
+            }
+            RunStart::Known(ReviseResult::Waiting { reason }) => reason.clone(),
+            RunStart::Known(ReviseResult::Conflict) => "The cut changed after these notes were submitted. Reopen them and Revise cut again.".to_owned(),
+            RunStart::Refused(why) => format!(
+                "Revise cut did not start ({why}). Your notes are saved; Start run tries again."
+            ),
+            RunStart::Unknown(why) => format!(
+                "Revise cut is sent, but its outcome is unknown ({why}). Retry sends this exact request."
+            ),
+        });
+        if !matches!(start, RunStart::Unknown(_)) {
+            self.revise = None;
+            self.changed = true;
+            self.observe_runs(&*port);
+        }
+        Some(start)
+    }
+    /// Whether a linked run has not finished, so Notes keeps reading it.
+    pub(crate) fn observing(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.run.is_some() && !row.settled())
+    }
+    /// Re-read run links and unfinished runs. This touches only the run rows:
+    /// the selection, drafts and manual work stay exactly as they are.
+    pub(crate) fn observe_runs(&mut self, port: &dyn FeedbackPort) {
+        self.observed_at = Some(std::time::Instant::now());
+        let Ok(index) = port.index() else {
+            return;
+        };
+        for row in &mut self.rows {
+            if let Some(submitted) = index.batches.get(&row.batch)
+                && submitted.consumed_by != row.run
+            {
+                row.run.clone_from(&submitted.consumed_by);
+                row.state = None;
+            }
+            if let Some(run) = &row.run
+                && !row.settled()
+            {
+                row.state = Some(
+                    port.observe(run)
+                        .map(|projection| RunState::of(&projection)),
+                );
+            }
+        }
+    }
+    /// The batch's Revise cut is kept, in the same write that drops the settled
+    /// submission, before it is sent.
+    fn keep_revise(&mut self, port: &dyn FeedbackPort, request: Option<ReviseRequest>) {
+        self.revise = request;
+        if let Err(why) = self.retain_for_dispatch() {
+            self.revise = None;
+            self.message = Some(format!(
+                "Submitted. Its run is not started: the request could not be kept on this computer first ({why}). Start run sends it."
+            ));
+        }
+        let _ = self.refresh(port);
     }
     fn submit_inner(&mut self, port: &mut dyn FeedbackPort) -> Outcome {
         if let Keeping::Failed { why, .. } = &self.keeping {
@@ -1737,10 +2049,14 @@ impl Feedback {
                         .is_ok_and(|index| index.batches.contains_key(&id)) =>
             {
                 let submitted = submission.batch.revision_refs.clone();
+                let request = match &submission.write.update.change {
+                    MetadataChange::SubmitBatch { request, .. } => Some(request.clone()),
+                    _ => None,
+                };
                 self.submission = None;
                 self.selection
                     .retain(|reference| !submitted.contains(reference));
-                let _ = self.refresh(&*port);
+                self.keep_revise(&*port, request);
                 Outcome::Submitted(id)
             }
             Reply::Durable(_) => {
@@ -1893,6 +2209,7 @@ enum NoteAction {
     Replace(ObjectRef, ObjectRef),
     Revise(Box<SavedNote>),
     Reopen(FeedbackBatchId),
+    StartRun(FeedbackBatchId),
     Submit,
     FirstSave,
     NewNote,
@@ -1935,7 +2252,7 @@ impl KinewrightApp {
             .ja1
             .as_ref()
             .filter(|attachment| attachment.project_path().is_some())
-            .map(|attachment| attachment.owner.project_id().map_err(text));
+            .map(|attachment| attachment.project_identity().map_err(text));
         let feedback = &mut self.focused_mut().studio.feedback;
         let reopen = match (&identity, &feedback.keeping) {
             (None, _) | (Some(Err(_)), Keeping::Failed { project: None, .. }) => false,
@@ -1957,6 +2274,16 @@ impl KinewrightApp {
                 feedback.resume = false;
                 feedback.message = Some(why);
             }
+        }
+        // Linked runs are read about once a second until they finish; nothing
+        // else in Notes changes when they do.
+        let feedback = &self.focused().studio.feedback;
+        if feedback.observing()
+            && feedback
+                .observed_at
+                .is_none_or(|at| at.elapsed() >= RUN_POLL)
+        {
+            let _ = self.with_feedback(|feedback, port| feedback.observe_runs(&*port));
         }
         let feedback = &mut self.focused_mut().studio.feedback;
         if feedback.changed && feedback.gesture.is_none() {
@@ -2293,7 +2620,11 @@ impl KinewrightApp {
             ui.colored_label(po0::TEXT_2, message);
         }
         let fps = self.program_document().fps;
-        let pending = self.focused().studio.feedback.submission.is_some();
+        let pending = self.focused().studio.feedback.submission.is_some()
+            || self.focused().studio.feedback.revise.is_some();
+        if self.focused().studio.feedback.observing() {
+            ui.ctx().request_repaint_after(RUN_POLL);
+        }
         let selected = self.focused().studio.feedback.selection.len();
         let unsaved = self
             .focused()
@@ -2341,7 +2672,8 @@ impl KinewrightApp {
                     drafts,
                     saved,
                     selection,
-                    batches,
+                    rows: batch_rows,
+                    revise,
                     active,
                     focus,
                     changed,
@@ -2495,15 +2827,45 @@ impl KinewrightApp {
                         }
                     });
                 }
-                if !batches.is_empty() {
+                if !batch_rows.is_empty() {
                     ui.add_space(8.0);
                     ui.label("Revise cut requests");
                 }
-                for batch in batches.iter() {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(po0::TEXT_2, "Submitted · waiting for a run");
+                for row in batch_rows.iter() {
+                    ui.horizontal_wrapped(|ui| {
+                        let revisions = row
+                            .revisions
+                            .iter()
+                            .map(|reference| {
+                                saved
+                                    .iter()
+                                    .find(|note| &note.reference == reference)
+                                    .map_or_else(
+                                        || "An earlier revision".to_owned(),
+                                        |note| {
+                                            format!(
+                                                "{} · revision {}",
+                                                short(&note.text),
+                                                note.revision.revision
+                                            )
+                                        },
+                                    )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.colored_label(po0::TEXT_2, row.label())
+                            .on_hover_text(revisions);
+                        let kept = revise
+                            .as_ref()
+                            .is_some_and(|request| request.batch_id == row.batch);
+                        if row.run.is_none()
+                            && !kept
+                            && ui.small_button("Start run").clicked()
+                        {
+                            action = Some(NoteAction::StartRun(row.batch.clone()));
+                        }
                         if ui.small_button("Reopen").clicked() {
-                            action = Some(NoteAction::Reopen(batch.clone()));
+                            action = Some(NoteAction::Reopen(row.batch.clone()));
                         }
                     });
                 }
@@ -2545,6 +2907,13 @@ impl KinewrightApp {
             Some(NoteAction::Submit) => {
                 let result = self.with_feedback(|feedback, port| feedback.submit(port));
                 self.feedback_message(result);
+            }
+            Some(NoteAction::StartRun(batch)) => {
+                let result =
+                    self.with_feedback(|feedback, port| feedback.start_batch(port, &batch));
+                if let Err(why) = result {
+                    self.focused_mut().studio.feedback.message = Some(why);
+                }
             }
             Some(NoteAction::FirstSave) => {
                 self.save_project(false);

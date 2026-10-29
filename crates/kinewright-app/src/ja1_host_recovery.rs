@@ -299,6 +299,7 @@ impl HostAttachment {
                     )?;
                 }
                 let config = HostConfig {
+                    scheduler_settings: None,
                     project,
                     path: Some(path),
                     roots,

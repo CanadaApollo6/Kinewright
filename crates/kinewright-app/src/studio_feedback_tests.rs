@@ -804,6 +804,15 @@ impl FeedbackPort for Lossy<'_> {
     fn published(&self) -> Result<Vec<(SnapshotKey, AcceptedCut)>, String> {
         self.inner.published()
     }
+    fn note(&self, reference: &ObjectRef) -> Result<(FeedbackRevision, Vec<u8>, Vec<u8>), String> {
+        self.inner.note(reference)
+    }
+    fn revise(&mut self, request: &ReviseRequest) -> RunStart {
+        self.inner.revise(request)
+    }
+    fn observe(&self, run: &RunId) -> Result<RunProjection, String> {
+        self.inner.observe(run)
+    }
 }
 
 fn saved_ref(outcome: Outcome, marker: &str) -> ObjectRef {
@@ -1742,3 +1751,6 @@ fn s3_fix3_one_owner_per_recovery_file() {
         "C3F3_NOTHING_FROM_THE_SECOND"
     );
 }
+
+#[path = "studio_feedback_c7_tests.rs"]
+mod c7;

@@ -144,6 +144,7 @@ fn roots(path: &Path) -> SessionRoots {
 }
 fn config(path: &Path, named: Option<PathBuf>) -> HostConfig {
     HostConfig {
+        scheduler_settings: None,
         project: "c8-exact-originating-context".into(),
         path: named,
         roots: roots(path),

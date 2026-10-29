@@ -16,6 +16,8 @@ use kinewright_project::{
 use std::fmt::Write as _;
 #[path = "ja1_host.rs"]
 mod host;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use host::SCHEDULER_SETTINGS;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -152,6 +154,9 @@ pub(crate) struct Ja1Attachment {
     retention_lost: bool,
     originating_context: Arc<std::sync::atomic::AtomicBool>,
     host: Option<host::HostAttachment>,
+    /// The project identity the host was launched with: the local owner cannot
+    /// read it while the host holds the bundle (S3 C7).
+    host_project: Option<kinewright_project::bundle_records::ProjectId>,
     host_history_digest: std::cell::RefCell<
         Option<(
             kinewright_core::ActorIdentity,
@@ -195,6 +200,7 @@ impl Ja1Attachment {
             frozen: false,
             panel_open: true,
             retention_lost: false,
+            host_project: None,
             originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             host: None,
             host_history_digest: std::cell::RefCell::new(None),
@@ -485,6 +491,7 @@ impl Ja1Attachment {
         if self.host.is_some() {
             return Ok(());
         }
+        let identity = self.owner.project_id().ok();
         let result = host::HostAttachment::launch(
             &mut self.owner,
             executable,
@@ -501,6 +508,7 @@ impl Ja1Attachment {
                 }
                 self.message.clone_from(&host.status.message);
                 self.host = Some(host);
+                self.host_project = identity;
                 self.start_host_manual()
             }
             Err(error) => {
@@ -659,6 +667,19 @@ impl Ja1Attachment {
             return None;
         }
         self.host.as_ref().map(|host| host.client.clone())
+    }
+
+    /// The project's durable identity, which Studio feedback is kept by. While
+    /// the host holds the bundle, the identity it was launched with answers.
+    pub(crate) fn project_identity(
+        &self,
+    ) -> Result<kinewright_project::bundle_records::ProjectId, BundleError> {
+        self.owner.project_id().or_else(|error| {
+            self.host_project
+                .clone()
+                .filter(|_| self.host.is_some())
+                .ok_or(error)
+        })
     }
 
     pub fn host_attached(&self) -> bool {

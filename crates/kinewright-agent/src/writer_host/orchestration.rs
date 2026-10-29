@@ -154,6 +154,7 @@ pub(super) fn is_hook(command: &HostCommand) -> bool {
             | HostCommand::ObserveRun { .. }
             | HostCommand::ResolveAttention { .. }
             | HostCommand::DetachForContinuation
+            | HostCommand::ReviseCut { .. }
     )
 }
 
@@ -267,7 +268,7 @@ impl HostCommandOwner {
         }
         Ok(())
     }
-    fn issue_metadata(
+    pub(super) fn issue_metadata(
         &mut self,
         index: usize,
         issuer: Option<IssuerId>,
@@ -360,6 +361,9 @@ impl HostCommandOwner {
                 }
                 HostCommand::DetachForContinuation => {
                     reply.detached = Some(self.detach_for_continuation(index)?);
+                }
+                HostCommand::ReviseCut { request } => {
+                    reply.revise_result = Some(self.revise_cut(index, &request)?);
                 }
                 _ => return Err(refused("not an orchestration command")),
             }
@@ -519,7 +523,7 @@ impl HostCommandOwner {
         }
         Ok(())
     }
-    fn dispatch_orchestration(
+    pub(super) fn dispatch_orchestration(
         &mut self,
         index: usize,
         request: &ScopedOrchestrationRequest,

@@ -12,6 +12,8 @@ mod orchestration;
 mod owned_media;
 mod protocol;
 mod recovery;
+mod revise;
+pub use revise::{DirectorSetting, configured_director, scheduler_settings_directory};
 mod switch;
 pub use attention::{
     AttentionAnswer, AttentionOutcome, AttentionPrompt, HostRunObserver, LiveAttentionResponse,
@@ -1536,7 +1538,8 @@ impl HostCommandOwner {
             | HostCommand::DispatchOrchestration { .. }
             | HostCommand::ObserveRun { .. }
             | HostCommand::ResolveAttention { .. }
-            | HostCommand::DetachForContinuation => {
+            | HostCommand::DetachForContinuation
+            | HostCommand::ReviseCut { .. } => {
                 return Err(HostRefusal::new(
                     "attachment_refused",
                     "resolved attachment required for hook dispatch",
@@ -1578,7 +1581,7 @@ impl HostCommandOwner {
                 });
                 if matches!(update.change, MetadataChange::SubmitBatch { .. }) {
                     reply.revise_result = Some(ReviseResult::Waiting {
-                        reason: "Feedback is saved. No scheduler is attached.".into(),
+                        reason: "Feedback is saved. Revise cut starts its run.".into(),
                     });
                 }
             }
@@ -1606,6 +1609,12 @@ impl HostCommandOwner {
             }
             HostCommand::ReadFeedback { reference } => {
                 let pinned = self.owner()?.read_feedback(&reference)?;
+                // The indexed revision's own bounded evidence, under its pin.
+                let store = self.owner()?.store()?;
+                reply.feedback_text =
+                    Some((*store.read_evidence(&pinned.revision.original_text_ref)?).clone());
+                reply.feedback_strokes =
+                    Some((*store.read_evidence(&pinned.revision.strokes_ref)?).clone());
                 reply.feedback = Some(pinned.revision);
                 self.pending_read_pin = Some(auth::ReadPin {
                     roots: pinned.roots,
@@ -2867,6 +2876,7 @@ mod tests {
     #[test]
     fn s3_portable_roles_revoke_and_refuse_before_manual_write_admission() {
         let configuration = || HostConfig {
+            scheduler_settings: None,
             project: "portable-s3-roles".into(),
             path: None,
             roots: SessionRoots::default(),
@@ -2966,6 +2976,7 @@ mod tests {
     #[test]
     fn ordinary_attachment_and_history_use_real_authenticated_loopback() {
         let host = WriterHost::start(HostConfig {
+            scheduler_settings: None,
             project: "unit-host".into(),
             path: None,
             roots: SessionRoots::default(),
@@ -3019,6 +3030,7 @@ mod tests {
                 snapshot.history_sha256 = "0".repeat(64);
             }
             let result = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "fu3-bootstrap".into(),
                 path: None,
                 roots: SessionRoots::default(),
@@ -3061,6 +3073,7 @@ mod tests {
         let mut snapshot = HostSnapshot::capture(&core).unwrap();
         snapshot.history_sha256 = "0".repeat(64);
         let mut owner = HostCommandOwner::open(HostConfig {
+            scheduler_settings: None,
             project: "unit-snapshot".into(),
             path: None,
             roots: SessionRoots::default(),

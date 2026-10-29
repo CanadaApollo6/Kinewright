@@ -20,7 +20,7 @@ use kinewright_core::{
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use super::orchestration_records::{Role, TaskScope};
+use super::orchestration_records::{BranchBinding, Role, TaskScope};
 
 #[derive(Debug, Clone)]
 pub struct TaskPolicy {
@@ -1422,6 +1422,54 @@ fn document_objects(document: &Document) -> Result<Objects, String> {
         put(&mut objects, format!("lut:{}", lut.id), record(lut)?)?;
     }
     Ok(objects)
+}
+
+/// The scope S4 admits for a Revise cut Director: every operation, every base
+/// model field, and every object, track and routing member of the document at
+/// `base`. Exact names only. Per-effect parameter fields are not included: the
+/// whole vocabulary is larger than one scope list may name, so effect tuning needs
+/// its own narrower task scope. Clip and effect identities created later are not
+/// pre-admitted either.
+///
+/// # Errors
+/// The document has a field outside the closed vocabulary, or more objects,
+/// tracks or routing members than one scope may name.
+pub fn director_scope(document: &Document, base: BranchBinding) -> Result<TaskScope, String> {
+    let limit = super::orchestration_records::ITEM_LIMIT;
+    let fields: BTreeSet<String> = FIELDS
+        .iter()
+        .flat_map(|(kind, fields)| fields.iter().map(move |field| format!("{kind}.{field}")))
+        .filter(|field| known_field(field))
+        .collect();
+    let objects: BTreeSet<String> = document_objects(document)?.into_keys().collect();
+    let tracks: BTreeSet<String> = document
+        .tracks
+        .iter()
+        .map(|track| format!("track:{}", track.id))
+        .collect();
+    let mut closure = tracks.clone();
+    closure.extend(
+        document
+            .audio_mix
+            .buses
+            .iter()
+            .map(|bus| format!("bus:{}", bus.id)),
+    );
+    if objects.len() > limit || closure.len() > limit || fields.len() > limit {
+        return Err(format!(
+            "This project has more than {limit} clips, tracks and other parts, more than one revised-cut run can work on yet. Your notes are saved."
+        ));
+    }
+    Ok(TaskScope {
+        operations: OPERATION_NAMES.iter().map(|name| (*name).into()).collect(),
+        objects,
+        fields,
+        tracks,
+        bus_sidechain_closure: closure,
+        asset_roots: vec![],
+        base,
+        consent_refs: vec![],
+    })
 }
 
 #[cfg(test)]

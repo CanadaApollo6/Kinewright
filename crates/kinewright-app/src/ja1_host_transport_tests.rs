@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-pub(in crate::ja1_attachment) struct ReplyDropProxy {
+pub(crate) struct ReplyDropProxy {
     stop: Arc<AtomicBool>,
     pub dropped: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -162,4 +162,18 @@ pub(in crate::ja1_attachment) fn drop_launch_reply<T>(
         .with_borrow_mut(Option::take)
         .expect("launch proxy");
     (result, proxy)
+}
+
+impl crate::ja1_attachment::Ja1Attachment {
+    /// Drop one HTTP request or reply of `command` between this App and its host.
+    pub(crate) fn drop_host_reply(
+        &mut self,
+        command: &'static str,
+        before: bool,
+    ) -> ReplyDropProxy {
+        self.host
+            .as_mut()
+            .expect("launched host")
+            .drop_http_reply(command, before)
+    }
 }

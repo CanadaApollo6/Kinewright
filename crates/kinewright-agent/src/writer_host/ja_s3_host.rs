@@ -59,6 +59,7 @@ fn fixture() -> (
     bundle.save(&core, &inputs).unwrap();
     drop(bundle);
     let host = WriterHost::start(HostConfig {
+        scheduler_settings: None,
         project: "s3-capabilities".into(),
         path: Some(path),
         roots: SessionRoots {
@@ -677,6 +678,7 @@ fn s3_viewer_capabilities() {
     let old_auth = fresh.bootstrap.auth.clone();
     drop(host);
     let replacement = WriterHost::start(HostConfig {
+        scheduler_settings: None,
         project: "s3-capabilities".into(),
         path: Some(temp.path("a.kinewright")),
         roots: roots.clone(),

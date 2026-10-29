@@ -152,9 +152,15 @@ impl ProjectBundle {
                 .get_mut(batch)
                 .ok_or_else(|| invalid("unsubmitted batch"))?;
             let legacy_run = crate::studio_records::RunId(run.0.clone());
-            if transition.projection().tasks.first().is_none_or(|task| {
-                task.brief.scope.base.head != submitted.request.expected_candidate_head
-            }) {
+            let director = transition
+                .projection()
+                .tasks
+                .first()
+                .ok_or_else(|| invalid("feedback run has no Director"))?;
+            if !self.revises_head(
+                &director.brief.scope.base,
+                &submitted.request.expected_candidate_head,
+            )? {
                 return Err(invalid("feedback candidate head changed"));
             }
             if submitted
@@ -190,6 +196,31 @@ impl ProjectBundle {
         Ok((vec![snapshot, segment, sealed_index], reference))
     }
 
+    /// Whether a run based on `base` revises the cut at `expected`: the base is that
+    /// head itself, or a candidate forked from it with nothing applied yet (the same
+    /// document, no accepted batches) while the manual branch still stands there. A
+    /// fork publishes a fresh head identity, so the head alone cannot link it.
+    fn revises_head(
+        &self,
+        base: &crate::orchestration_records::BranchBinding,
+        expected: &crate::bundle_records::HeadId,
+    ) -> Result<bool, BundleError> {
+        if &base.head == expected {
+            return Ok(true);
+        }
+        let candidate = self
+            .store
+            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.checkpoint)?;
+        let manual = self.checkpoint(&self.manual_branch_id)?;
+        Ok(base.branch != self.manual_branch_id
+            && self.checkpoint_reference(&base.branch)? == base.checkpoint
+            && candidate.branch_id == base.branch
+            && candidate.head_id == base.head
+            && candidate.batch_ids.is_empty()
+            && candidate.document_hash == base.document_hash
+            && &manual.head_id == expected
+            && manual.document_hash == candidate.document_hash)
+    }
     pub fn orchestration_cut(&self, run: &RunId) -> Result<Option<PublishedRunCut>, BundleError> {
         Ok(self
             .run_index()?

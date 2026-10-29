@@ -10,6 +10,12 @@ fn metadata_request(f: &Fixture, actor: &HostClient, change: MetadataChange) -> 
     }
 }
 fn submitted_batch(f: &Fixture) -> FeedbackBatchId {
+    submitted_batch_at(f, f.brief.scope.base.head.clone())
+}
+fn submitted_batch_at(
+    f: &Fixture,
+    expected_candidate_head: kinewright_project::bundle_records::HeadId,
+) -> FeedbackBatchId {
     use kinewright_project::studio_records::{
         CommentId, FeedbackAnchor, FeedbackRevision, FrameRate, Orientation,
     };
@@ -114,7 +120,7 @@ fn submitted_batch(f: &Fixture) -> FeedbackBatchId {
                         request: ReviseRequest {
                             command_id: issued.envelope.id.clone(),
                             batch_id: batch.clone(),
-                            expected_candidate_head: f.brief.scope.base.head.clone(),
+                            expected_candidate_head,
                         },
                     },
                 },

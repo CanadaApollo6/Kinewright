@@ -113,6 +113,8 @@ impl Attachment {
             HostCommand::DispatchOrchestration { .. }
             | HostCommand::ResolveAttention { .. }
             | HostCommand::DetachForContinuation => true,
+            // Viewers get Waiting; Producers are refused inside the hook.
+            HostCommand::ReviseCut { .. } => true,
             HostCommand::Metadata { update, .. } => match &update.change {
                 kinewright_project::studio_records::MetadataChange::PublishSnapshot(_) => {
                     self.role == AttachmentRole::Producer
