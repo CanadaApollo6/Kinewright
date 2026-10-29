@@ -1599,3 +1599,119 @@ fn s3_fix2_edited_draft_survives_old_receipt() {
     );
     assert_eq!(feedback.selection, vec![x1], "C3F2_EDITED_BATCH_KEPT");
 }
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    if from.is_dir() {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        }
+    } else {
+        std::fs::copy(from, to).unwrap();
+    }
+}
+
+/// Fix 3: two copies of one project share a `ProjectId`, and so one kept-notes
+/// file. Opened before either has a note, the first is its one live owner; the
+/// second is refused, warns that closing discards its note, and never changes
+/// the file. After both close (or crash), X is back byte for byte.
+#[test]
+fn s3_fix3_one_owner_per_recovery_file() {
+    let (temp, path, mut a_bundle, a_core, _inputs) = new_project("c3f3-two-copies");
+    drop(a_bundle);
+    let copy = temp.path("copy/feedback.kinewright");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    copy_tree(&path, &copy);
+    copy_tree(
+        &path.with_extension("kinewright-assets"),
+        &copy.with_extension("kinewright-assets"),
+    );
+    a_bundle = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let mut b_bundle = LoadedBundle::read(&copy).unwrap().into_writer().unwrap();
+    assert_eq!(a_bundle.project_id(), b_bundle.project_id(), "C3F3_SAME_ID");
+    let kept = kept_file(&temp, &a_bundle);
+
+    // Both open before either has a note.
+    let mut a = kept_by(&temp, &a_bundle);
+    let mut b = Feedback::default();
+    let opened = b.open(Ok(b_bundle.project_id().clone()), Ok(temp.path("state")));
+    assert_eq!(
+        opened,
+        Err(OPEN_ELSEWHERE.to_owned()),
+        "C3F3_SECOND_OWNER_REFUSED"
+    );
+
+    // Another process is refused too (util-linux `flock`, the same lock).
+    let lock = temp
+        .path("state")
+        .join(format!("{}.lock", a_bundle.project_id().as_str()));
+    match std::process::Command::new("flock")
+        .args(["-n", "-E", "75"])
+        .arg(&lock)
+        .arg("true")
+        .status()
+    {
+        Ok(status) => assert_eq!(status.code(), Some(75), "C3F3_OTHER_PROCESS_REFUSED"),
+        Err(error) => eprintln!("C3F3: no flock binary ({error}); other-process leg skipped"),
+    }
+
+    // X in the first copy, kept.
+    let branch = a_bundle.manual_branch_id().clone();
+    let mut x = capture_cut(&a_core, &branch, 1, 1);
+    let x_text = "X typed in the first copy · kept exactly";
+    x.text = x_text.into();
+    x.strokes = vec![vec![[0.25, 0.5], [0.5, 0.75]]];
+    let x_id = x.comment.clone();
+    a.drafts.push(x);
+    a.changed = true;
+    a.persist().unwrap();
+    let image = std::fs::read(&kept).unwrap();
+
+    // Y in the second copy: refused, never written.
+    // The copy has the same history, so the first copy's core captures for it.
+    let mut y = capture_cut(&a_core, &b_bundle.manual_branch_id().clone(), 2, 2);
+    y.text = "Y typed in the second copy".into();
+    let y_id = y.comment.clone();
+    b.drafts.push(y);
+    publish(&mut b_bundle);
+    b.refresh(&b_bundle).unwrap();
+    let mut counting = Lossy::new(&mut b_bundle);
+    let outcome = b.save(&mut counting, &y_id);
+    let calls = counting.calls;
+    drop(counting);
+    assert!(
+        matches!(&outcome, Outcome::Refused(why) if why.contains(OPEN_ELSEWHERE)),
+        "C3F3_SECOND_OWNER_REFUSED: {outcome:?}"
+    );
+    assert_eq!(calls, 0, "C3F3_NOTHING_REACHES_THE_OWNER");
+    let warning = b.close_text();
+    assert!(
+        warning.contains(OPEN_ELSEWHERE) && warning.contains("Closing discards them"),
+        "C3F3_SECOND_WARNS: {warning}"
+    );
+    // What closing does (`stop_threads`): a persist, refused.
+    b.changed = true;
+    assert!(b.persist().is_err());
+    assert_eq!(std::fs::read(&kept).unwrap(), image, "C3F3_FILE_UNCHANGED");
+
+    // Close the second, crash the first: the file is what the first kept.
+    drop(b);
+    drop(a);
+    assert_eq!(std::fs::read(&kept).unwrap(), image, "C3F3_FILE_UNCHANGED");
+    let reopened = kept_by(&temp, &a_bundle);
+    let restored = reopened
+        .drafts
+        .iter()
+        .find(|draft| draft.comment == x_id)
+        .expect("C3F3_X_SURVIVES");
+    assert_eq!(
+        restored.text.as_bytes(),
+        x_text.as_bytes(),
+        "C3F3_X_SURVIVES"
+    );
+    assert!(
+        !reopened.drafts.iter().any(|draft| draft.comment == y_id),
+        "C3F3_NOTHING_FROM_THE_SECOND"
+    );
+}

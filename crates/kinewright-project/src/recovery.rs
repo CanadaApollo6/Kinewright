@@ -113,6 +113,59 @@ fn refuse_volatile(_directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Exclusive ownership of one project's feedback state file (S3 C3 fix 3). Two
+/// copies of a project share a `ProjectId`, so they share the file: only the
+/// holder of this lock reads, merges or writes it. The lock is `flock` (or
+/// `LockFileEx` on Windows) on a handle of its own, so a second owner in the
+/// same process conflicts too. Dropping it releases it; the lock file is never
+/// removed, so no unlink can race a new owner.
+#[derive(Debug)]
+pub struct FeedbackStateLock {
+    _file: fs::File,
+}
+
+/// Why a feedback state lock was not taken.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FeedbackStateRefusal {
+    /// Another live session owns this project's notes.
+    Held,
+    /// The lock file could not be opened or locked.
+    Failed(String),
+}
+
+/// Take the exclusive lock on `<project>.lock` in `directory`, creating the
+/// folder (`0700`) and the lock file (`0600`) when needed. Never waits.
+///
+/// # Errors
+/// [`FeedbackStateRefusal::Held`] while another owner holds it; otherwise why
+/// the lock could not be taken.
+pub fn lock_feedback_state(
+    directory: &Path,
+    project: &str,
+) -> Result<FeedbackStateLock, FeedbackStateRefusal> {
+    use fs2::FileExt as _;
+    let failed = |error: io::Error| FeedbackStateRefusal::Failed(error.to_string());
+    let mut folder = fs::DirBuilder::new();
+    folder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
+    folder.create(directory).map_err(failed)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options
+        .open(directory.join(format!("{project}.lock")))
+        .map_err(failed)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(FeedbackStateLock { _file: file }),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(FeedbackStateRefusal::Held)
+        }
+        Err(error) => Err(failed(error)),
+    }
+}
+
 /// FNV-1a, chosen over the standard hasher because journal names must stay
 /// stable across builds and Rust versions to find their project again.
 ///

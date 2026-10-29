@@ -796,6 +796,7 @@ struct Kept {
 }
 const KEPT_VERSION: u32 = 2;
 const RESTARTED: &str = "Kinewright closed before this outcome was known";
+const OPEN_ELSEWHERE: &str = "This project's notes are open in another window";
 
 /// A sent command whose draft no longer matches it. It is retried exactly until
 /// its outcome is known, and its draft stays a separate draft whatever the
@@ -814,7 +815,13 @@ pub(crate) enum Keeping {
     #[default]
     Unsaved,
     /// Kept in per-user state, in the file named by the project's identity.
-    Kept { project: ProjectId, path: PathBuf },
+    /// The lock makes this session the file's one live owner until the identity
+    /// changes or the session drops.
+    Kept {
+        project: ProjectId,
+        path: PathBuf,
+        _owner: kinewright_project::FeedbackStateLock,
+    },
     /// The project is saved, but its kept state cannot be read or has no
     /// persistent place. Nothing is sent and nothing is written over it.
     Failed {
@@ -1055,7 +1062,7 @@ impl Feedback {
                 return Ok(());
             }
             Keeping::Failed { why, .. } => return Err(why.clone()),
-            Keeping::Kept { project, path } => (project.clone(), path.clone()),
+            Keeping::Kept { project, path, .. } => (project.clone(), path.clone()),
         };
         self.drafts.iter_mut().for_each(Draft::settle_readback);
         let result = if self.drafts.is_empty()
@@ -1116,6 +1123,8 @@ impl Feedback {
             let left = self.persist();
             self.leave(left.is_ok());
         }
+        // The old file's lock is released only after its last write.
+        self.keeping = Keeping::Unsaved;
         self.issuer = None;
         self.saved.clear();
         self.older.clear();
@@ -1144,6 +1153,17 @@ impl Feedback {
         let directory = match directory {
             Ok(directory) => directory,
             Err(why) => return fail(self, format!("no persistent place for notes: {why}")),
+        };
+        // One live owner per file, taken before it is read: a second copy of
+        // this project never merges, sets aside or writes the first's notes.
+        let owner = match kinewright_project::lock_feedback_state(&directory, project.as_str()) {
+            Ok(owner) => owner,
+            Err(kinewright_project::FeedbackStateRefusal::Held) => {
+                return fail(self, OPEN_ELSEWHERE.to_owned());
+            }
+            Err(kinewright_project::FeedbackStateRefusal::Failed(why)) => {
+                return fail(self, format!("kept notes cannot be locked: {why}"));
+            }
         };
         let path = directory.join(format!("{}.json", project.as_str()));
         let kept = match std::fs::read(&path) {
@@ -1176,6 +1196,7 @@ impl Feedback {
         self.keeping = Keeping::Kept {
             project: project.clone(),
             path,
+            _owner: owner,
         };
         self.changed |= self.unsaved();
         if let Some(kept) = kept {
