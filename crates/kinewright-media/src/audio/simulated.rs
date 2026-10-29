@@ -122,6 +122,7 @@ impl SimulatedAudio {
         *lock(&self.0.frozen_until) = Some(Instant::now() + duration);
     }
 
+    #[cfg(test)]
     pub(super) fn attach(
         &self,
         consumer: Consumer<f32>,
@@ -129,9 +130,25 @@ impl SimulatedAudio {
         gain: Arc<AtomicI32>,
         diagnostics: Arc<AudioDiagnostics>,
     ) -> SimulatedOutput {
+        self.attach_with_authority(
+            consumer,
+            position,
+            gain,
+            diagnostics,
+            crate::locator::capture(),
+        )
+    }
+    pub(super) fn attach_with_authority(
+        &self,
+        consumer: Consumer<f32>,
+        position: Arc<AtomicU64>,
+        gain: Arc<AtomicI32>,
+        diagnostics: Arc<AudioDiagnostics>,
+        authority: Option<kinewright_core::LegacyMediaGrant>,
+    ) -> SimulatedOutput {
         let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
         *lock(&self.0.stream) = Some(Stream {
-            authority: crate::locator::capture(),
+            authority,
             id,
             consumer,
             position,

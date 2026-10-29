@@ -308,6 +308,7 @@ impl VoiceNoteState {
             audio,
             data_dir,
             job.cancellation(),
+            owner.store().decoder_reserver().as_ref(),
         )
         .map_err(|e| BundleError::Corrupt(e.to_string()))
     }

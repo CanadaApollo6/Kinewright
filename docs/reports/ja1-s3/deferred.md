@@ -4,13 +4,13 @@ These are implementation follow-ups, not accepted S3 gates. They remain on the S
 
 | Item | Destination and reason |
 | --- | --- |
-| Studio C4/C5 composition | S3 deferred list. Authenticated streamed capture, private audio-range reads, model/workspace and capture-file reservations, cleanup, transcript revision selection and completion retry need an owner adapter together. Enabling the current direct-owner helper as a GUI writer would bypass that contract. |
-| C6 ASR completion retry | S3 deferred list. Retain the borrowed completion carrier on `Unsettled` in the new App caller; no such production caller is added here. Existing backend controls exercise this contract. |
+| Studio C4/C5 composition | Closed by C8/C9: host voice ports, bounded capture, private range reads, receipt-first recovery, snapshot read leases, attached Studio controls, acknowledged capture cleanup, installed-model G11 App control and screenshots; see c8.md and c9.md. |
+| C6 ASR completion retry | Closed by C8/C9: the host retains and retries the completion carrier on `Unsettled`; the attached App supplies progress, edit and choice controls. Complete-suite and real installed-model evidence are in c8.md and c9.md. |
 | Batch disposition and S4 ports | Mostly closed by C7: Revise cut reaches S4's `ReviseCut`, and Notes reads the linked run through `ObserveRun`. The control intents remain open: see the C7 rows below. |
 | C7 Pause, Stop and Continue | S3 deferred list. A `RunIntent` from Notes needs its own durably retained envelope and lost-reply retry, like the Revise cut request. That is more than a focused addition to C7. |
 | C7 run refresh | S3 deferred list. Notes polls `ObserveRun` once a second until the run finishes. There is no host push channel for run events. |
 | C7 in-process issuer | S3 deferred list. Notes saved in-process before the host attaches carry an issuer that the host refuses ("issuer belongs to another attachment subject"). The C7 tests reset the issuer. The App needs one issuer that survives the host handover. |
-| C7 host-attached reader store | S3 deferred list. `HostFeedback::published()` and `frozen_context_descriptor` still read the App's reader store, which is gone while the host holds the bundle. C7 moved only note evidence into `ReadFeedback`. |
+| C7 host-attached reader store | S3 deferred list. C9's snapshot lease now serves `HostFeedback::published()` and frozen contexts. Note evidence goes through C7's `ReadFeedback`. Check for any remaining reader-store path in the end-to-end commit. |
 | C7 ReadFeedback pin cap | S3 deferred list. `ReadFeedback` pins at most 64 revisions per read, so a refresh with more saved notes needs paging. |
 | C7 Director scope | S3 deferred list. `director_scope` names the whole document but leaves out effect-parameter fields, and it refuses documents over 256 items. |
 | C7 orphan candidate branches | S3 deferred list, host lifecycle. A fork made before a refused or failed run publication remains as an unused durable branch. |
@@ -37,4 +37,6 @@ These are implementation follow-ups, not accepted S3 gates. They remain on the S
 | C1F3-m1 | Next stage's first commit. Detached Save As/Switch handoff continuity across a replacement client. |
 | C2 50 ms wake cost | Efficiency gate if idle CPU flags it. No numeric S3 speed gate is added. |
 | C2-A3 | S3 deferred list, acceptance. Combined PF1 tamper/damage, uncached mixer seek, real switch after failed copy/lost reply, CPU/GPU route continuity and output-frequency legs. |
+| C8C9-M4 completed voice jobs | Next stage first commit. Evict completed host jobs after deriving missing-model/no-speech progress from durable ASR, so eviction preserves the current plain reasons and completion retry. |
+| C8C9-M5 Whisper context reuse | Next stage first commit. Reuse a context behind the shared model-lifetime guard without weakening pinned hash validation or note/asset mutual exclusion. |
 | C6 end-to-end | S3 deferred list, acceptance after composition. Drive all stages in one App/host/store/media route, including Save As and rescue; existing individual witnesses do not replace this test. |

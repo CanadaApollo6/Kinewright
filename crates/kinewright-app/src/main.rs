@@ -37,6 +37,7 @@ mod slash;
 mod solo_ui;
 mod studio;
 mod studio_feedback;
+mod studio_voice;
 mod theme;
 mod timeline_ui;
 mod transcript_edit;

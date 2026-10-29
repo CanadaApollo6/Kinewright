@@ -31,6 +31,53 @@ pub const CURSOR_RESERVATION_BYTES: u64 =
 pub type LifetimeGuard = Arc<dyn Send + Sync>;
 pub type CursorReservation = dyn Fn(u64) -> Result<LifetimeGuard, String> + Send + Sync;
 
+/// Revocable access to one host-pinned immutable snapshot. All clones retain
+/// the same local grant and live owner check; cache hits cannot renew authority.
+#[derive(Clone)]
+pub struct ReadAuthority {
+    binding: String,
+    grant: kinewright_core::LegacyMediaGrant,
+    owner_check: Arc<dyn Fn() -> Result<(), kinewright_core::MediaError> + Send + Sync>,
+}
+impl ReadAuthority {
+    #[must_use]
+    pub fn new(
+        grant: kinewright_core::LegacyMediaGrant,
+        binding: String,
+        owner_check: Arc<dyn Fn() -> Result<(), kinewright_core::MediaError> + Send + Sync>,
+    ) -> Self {
+        Self {
+            binding,
+            grant,
+            owner_check,
+        }
+    }
+    #[must_use]
+    pub fn binding(&self) -> &str {
+        &self.binding
+    }
+    pub fn check(&self) -> Result<(), kinewright_core::MediaError> {
+        self.grant.check()?;
+        (self.owner_check)()?;
+        self.grant.check()
+    }
+    #[must_use]
+    pub fn temporarily_unavailable() -> kinewright_core::MediaError {
+        kinewright_core::MediaError::MediaReadTemporarilyUnavailable
+    }
+    #[must_use]
+    pub fn is_temporarily_unavailable(error: &kinewright_core::MediaError) -> bool {
+        matches!(
+            error,
+            kinewright_core::MediaError::MediaReadTemporarilyUnavailable
+        )
+    }
+    #[must_use]
+    pub fn local_grant(&self) -> kinewright_core::LegacyMediaGrant {
+        self.grant.clone()
+    }
+}
+
 #[path = "certified_playback.rs"]
 mod playback;
 pub(crate) use playback::PlaybackAuthority;
@@ -148,7 +195,11 @@ impl DecodeInput {
     reason = "map_err transfers the owned decoder error"
 )]
 fn media_io_error(error: OwnedIoError) -> kinewright_core::MediaError {
-    kinewright_core::MediaError::Backend(error.to_string())
+    if matches!(error, OwnedIoError::TemporarilyUnavailable) {
+        ReadAuthority::temporarily_unavailable()
+    } else {
+        kinewright_core::MediaError::Backend(error.to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,6 +208,7 @@ pub enum OwnedIoError {
     Capacity(String),
     Damaged(String),
     Unavailable(String),
+    TemporarilyUnavailable,
     Cancelled,
     Decoder(String),
 }
@@ -168,6 +220,7 @@ impl fmt::Display for OwnedIoError {
             Self::Capacity(message) => write!(f, "input cursor capacity refused: {message}"),
             Self::Damaged(message) => write!(f, "damaged certified input: {message}"),
             Self::Unavailable(message) => write!(f, "certified input unavailable: {message}"),
+            Self::TemporarilyUnavailable => f.write_str("certified input temporarily unavailable"),
             Self::Cancelled => f.write_str("certified input cancelled"),
             Self::Decoder(message) => write!(f, "certified decoder: {message}"),
         }
@@ -196,6 +249,7 @@ pub struct CertifiedIdentity {
 }
 
 struct Source {
+    read_authority: Option<ReadAuthority>,
     file: File,
     verified_identity: OnceLock<memo::FileIdentity>,
     failure: Mutex<Option<OwnedIoError>>,
@@ -221,6 +275,20 @@ struct SelectedStreams {
 }
 
 impl CertifiedSource {
+    pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, OwnedIoError> {
+        authority.check().map_err(authority_error)?;
+        Arc::get_mut(&mut self.0)
+            .ok_or_else(|| OwnedIoError::InvalidCertificate("source already shared".into()))?
+            .read_authority = Some(authority);
+        Ok(self)
+    }
+    pub fn check_read_authority(&self) -> Result<(), kinewright_core::MediaError> {
+        self.0
+            .read_authority
+            .as_ref()
+            .map_or(Ok(()), ReadAuthority::check)
+    }
+
     pub(crate) fn still_orientation(
         &self,
     ) -> Result<Option<crate::still_orientation::StillOrientation>, OwnedIoError> {
@@ -298,6 +366,7 @@ impl CertifiedSource {
         }
         Ok(Self(
             Arc::new(Source {
+                read_authority: None,
                 file,
                 verified_identity: OnceLock::new(),
                 failure: Mutex::new(None),
@@ -674,6 +743,17 @@ impl CertifiedSource {
 fn unavailable(error: io::Error) -> OwnedIoError {
     OwnedIoError::Unavailable(error.to_string())
 }
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err transfers an owned authority error"
+)]
+fn authority_error(error: kinewright_core::MediaError) -> OwnedIoError {
+    if ReadAuthority::is_temporarily_unavailable(&error) {
+        OwnedIoError::TemporarilyUnavailable
+    } else {
+        OwnedIoError::Unavailable(error.to_string())
+    }
+}
 fn decoder_error(error: impl fmt::Display) -> OwnedIoError {
     OwnedIoError::Decoder(error.to_string())
 }
@@ -716,6 +796,14 @@ impl VerifiedCursor {
     }
 
     fn check(&mut self) -> Result<(), OwnedIoError> {
+        if let Some(authority) = &self.source.read_authority
+            && let Err(error) = authority.check()
+        {
+            if ReadAuthority::is_temporarily_unavailable(&error) {
+                return Err(OwnedIoError::TemporarilyUnavailable);
+            }
+            return self.fail(OwnedIoError::Unavailable(error.to_string()));
+        }
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
@@ -785,7 +873,10 @@ impl VerifiedCursor {
         .expect("bounded remaining bytes");
         let count = output.len().min(CHUNK_BYTES - offset).min(remaining);
         output[..count].copy_from_slice(&self.slots[slot].bytes[offset..offset + count]);
-        self.check()?;
+        if let Err(error) = self.check() {
+            output[..count].fill(0);
+            return Err(error);
+        }
         self.position += count as u64;
         Ok(count)
     }
@@ -982,6 +1073,9 @@ impl CertifiedInput {
                 Ok(()) if packet.stream() == stream_index => return Ok(Some(packet)),
                 Ok(()) => {}
                 Err(ffmpeg::Error::Eof) => return Ok(None),
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                    return Err(OwnedIoError::TemporarilyUnavailable);
+                }
                 Err(error) => return Err(decoder_error(error)),
             }
         }
@@ -1488,6 +1582,12 @@ mod bridge {
         }
         pub(super) fn check(&mut self) -> Result<(), OwnedIoError> {
             self.cursor.check()?;
+            unsafe {
+                if self.context.as_ref().error == ffi::AVERROR(ffmpeg::error::EAGAIN) {
+                    self.context.as_mut().error = 0;
+                    self.context.as_mut().eof_reached = 0;
+                }
+            }
             let buffer_size = unsafe { self.context.as_ref().buffer_size };
             if buffer_size < 0
                 || usize::try_from(buffer_size).expect("nonnegative AVIO buffer")
@@ -1502,6 +1602,58 @@ mod bridge {
         #[cfg(test)]
         pub(super) fn buffer_size(&self) -> usize {
             usize::try_from(unsafe { self.context.as_ref().buffer_size }).unwrap()
+        }
+    }
+    #[cfg(test)]
+    #[test]
+    fn fix2_native_avio_recovers_without_false_eof() {
+        use super::ReadAuthority;
+        let (_directory, _path, source) = super::tests::bytes_fixture(&[71; 4096]);
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let busy = Arc::new(AtomicBool::new(false));
+        let probe = Arc::clone(&busy);
+        let authority = ReadAuthority::new(
+            origin.legacy_media().unwrap(),
+            "native-retry".into(),
+            Arc::new(move || {
+                if probe.load(Ordering::Acquire) {
+                    Err(ReadAuthority::temporarily_unavailable())
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+        let source = source.with_read_authority(authority).unwrap();
+        let mut cursor = Box::new(source.cursor(Arc::new(AtomicBool::new(false))).unwrap());
+        unsafe {
+            let buffer = ffi::av_malloc(AVIO_BUFFER_BYTES).cast::<u8>();
+            assert!(!buffer.is_null());
+            let context = NonNull::new(ffi::avio_alloc_context(
+                buffer,
+                c_int::try_from(AVIO_BUFFER_BYTES).unwrap(),
+                0,
+                ptr::from_mut(cursor.as_mut()).cast(),
+                Some(read),
+                None,
+                Some(seek),
+            ))
+            .unwrap();
+            let mut avio = Avio { context, cursor };
+            let mut bytes = [0; 32];
+            busy.store(true, Ordering::Release);
+            assert_eq!(
+                ffi::avio_read(avio.context.as_ptr(), bytes.as_mut_ptr(), 32),
+                ffi::AVERROR(ffmpeg::error::EAGAIN)
+            );
+            assert_eq!(bytes, [0; 32]);
+            busy.store(false, Ordering::Release);
+            avio.check().unwrap();
+            assert_eq!(
+                ffi::avio_read(avio.context.as_ptr(), bytes.as_mut_ptr(), 32),
+                32,
+                "FIX2_NATIVE_RETRY_NEVER_FALSE_EOF"
+            );
+            assert_eq!(bytes, [71; 32]);
         }
     }
     impl Drop for Avio {
@@ -1574,7 +1726,9 @@ mod bridge {
     unsafe extern "C" fn interrupt(opaque: *mut c_void) -> c_int {
         // The Box stays alive until format and AVIO teardown have completed.
         let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
-        i32::from(cursor.check().is_err())
+        i32::from(
+            matches!(cursor.check(), Err(error) if error != OwnedIoError::TemporarilyUnavailable),
+        )
     }
     unsafe extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, length: c_int) -> c_int {
         let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
@@ -1605,6 +1759,7 @@ mod bridge {
                     .fetch_add(count, Ordering::Relaxed);
                 c_int::try_from(count).expect("read cannot exceed FFmpeg c_int request")
             }
+            Ok(Err(OwnedIoError::TemporarilyUnavailable)) => ffi::AVERROR(ffmpeg::error::EAGAIN),
             Ok(Err(_)) => ffi::AVERROR(ffmpeg::error::EIO),
             Err(_) => {
                 let _ = cursor.fail::<()>(OwnedIoError::Unavailable("panic in AVIO read".into()));
@@ -1630,6 +1785,9 @@ mod bridge {
         }));
         match result {
             Ok(Ok(position)) => i64::try_from(position).expect("certificate fits i64"),
+            Ok(Err(OwnedIoError::TemporarilyUnavailable)) => {
+                i64::from(ffi::AVERROR(ffmpeg::error::EAGAIN))
+            }
             Ok(Err(_)) => i64::from(ffi::AVERROR(ffmpeg::error::EIO)),
             Err(_) => {
                 let _ = cursor.fail::<()>(OwnedIoError::Unavailable("panic in AVIO seek".into()));
@@ -1722,12 +1880,58 @@ mod tests {
         )
         .unwrap()
     }
-    fn bytes_fixture(bytes: &[u8]) -> (TempDirectory, PathBuf, CertifiedSource) {
+    pub(super) fn bytes_fixture(bytes: &[u8]) -> (TempDirectory, PathBuf, CertifiedSource) {
         let directory = TempDirectory::new("kinewright-owned-io");
         let path = directory.path("source.bin");
         fs::write(&path, bytes).unwrap();
         let source = source(&path);
         (directory, path, source)
+    }
+    #[test]
+    fn fix2_temporary_authority_does_not_poison_cached_cursors() {
+        let bytes = vec![71; 4096];
+        let (_directory, _path, source) = bytes_fixture(&bytes);
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let mode = Arc::new(AtomicUsize::new(0));
+        let check = Arc::clone(&mode);
+        let authority = ReadAuthority::new(
+            origin.legacy_media().unwrap(),
+            "temporary-cursor".into(),
+            Arc::new(move || match check.load(Ordering::Acquire) {
+                0 => Ok(()),
+                1 => Err(ReadAuthority::temporarily_unavailable()),
+                _ => Err(kinewright_core::MediaError::MediaAdmissionRequired),
+            }),
+        );
+        let source = source.with_read_authority(authority).unwrap();
+        let mut cursors = (0..3)
+            .map(|_| source.cursor(running()).unwrap())
+            .collect::<Vec<_>>();
+        for cursor in &mut cursors {
+            assert_eq!(cursor.read(&mut [0; 32]).unwrap(), 32);
+        }
+        mode.store(1, Ordering::Release);
+        for cursor in &mut cursors {
+            assert_eq!(
+                cursor.read(&mut [0; 32]),
+                Err(OwnedIoError::TemporarilyUnavailable)
+            );
+            assert_eq!(
+                cursor.seek(SeekFrom::Start(0)),
+                Err(OwnedIoError::TemporarilyUnavailable)
+            );
+        }
+        mode.store(0, Ordering::Release);
+        for cursor in &mut cursors {
+            cursor.seek(SeekFrom::Start(0)).unwrap();
+            let mut output = [0; 32];
+            assert_eq!(cursor.read(&mut output).unwrap(), 32);
+            assert_eq!(output, [71; 32]);
+        }
+        mode.store(2, Ordering::Release);
+        assert!(cursors[0].read(&mut [0; 32]).is_err());
+        mode.store(0, Ordering::Release);
+        assert!(cursors[0].read(&mut [0; 32]).is_err());
     }
     fn media_fixture(color: &str) -> (TempDirectory, PathBuf, CertifiedSource) {
         let directory = TempDirectory::new("kinewright-owned-decoder");

@@ -60,7 +60,7 @@ pub struct OwnedInputRef {
 /// Retains the actual store authority and physical charge. It grants no decoder certification.
 pub struct OwnedInputLease {
     file: File,
-    _pin: StorePin,
+    pin: StorePin,
     identity: OwnedInputRef,
     owner_epoch: u64,
     source: Option<CertifiedMediaInput>,
@@ -68,17 +68,30 @@ pub struct OwnedInputLease {
 }
 impl Read for OwnedInputLease {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.pin
+            .read_store()
+            .check_read_authority()
+            .map_err(std::io::Error::other)?;
         if self.source.is_some() {
             self.verified_cursor()?
                 .read(buffer)
                 .map_err(std::io::Error::other)
         } else {
-            self.file.read(buffer)
+            let count = self.file.read(buffer)?;
+            if let Err(error) = self.pin.read_store().check_read_authority() {
+                buffer[..count].fill(0);
+                return Err(std::io::Error::other(error));
+            }
+            Ok(count)
         }
     }
 }
 impl Seek for OwnedInputLease {
     fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.pin
+            .read_store()
+            .check_read_authority()
+            .map_err(std::io::Error::other)?;
         if self.source.is_some() {
             self.verified_cursor()?
                 .seek(position)
@@ -107,7 +120,7 @@ impl OwnedInputLease {
     ) -> Self {
         Self {
             file,
-            _pin: pin,
+            pin,
             identity,
             owner_epoch,
             source,
@@ -129,6 +142,7 @@ impl OwnedInputLease {
         })
     }
     pub fn certified_source(&self) -> Result<CertifiedMediaInput, BundleError> {
+        self.pin.read_store().check_read_authority()?;
         self.source
             .clone()
             .ok_or_else(|| BundleError::Unsupported("input is not certified media".into()))

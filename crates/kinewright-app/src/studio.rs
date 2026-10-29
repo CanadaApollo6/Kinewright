@@ -72,6 +72,7 @@ pub(crate) struct Studio {
     /// The presenter frame id of `cpu_frame`, so a proof hashes only the bound image.
     pub(crate) cpu_frame_id: Option<u64>,
     pub(crate) feedback: crate::studio_feedback::Feedback,
+    pub(crate) voice: crate::studio_voice::Voice,
     pub(crate) manual_inputs: Option<Arc<kinewright_media::owned_io::PlaybackInputs>>,
     manual_scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
     versions: Vec<SnapshotKey>,
@@ -275,6 +276,23 @@ impl KinewrightApp {
             .first()
             .ok_or("screenshot bundle has no published version")?
             .clone();
+        if std::env::var("KINEWRIGHT_SCREENSHOT_STUDIO_SCENE")
+            .is_ok_and(|scene| scene.starts_with("voice-"))
+        {
+            let parent = path
+                .parent()
+                .ok_or("Screenshot bundle parent")?
+                .to_path_buf();
+            attachment
+                .launch_host(
+                    "c9-voice-screenshot".into(),
+                    kinewright_agent::writer_host::SessionRoots {
+                        read: vec![parent.clone()],
+                        write: vec![parent],
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+        }
         let context = Arc::new(
             attachment
                 .studio_context(&key)
@@ -500,6 +518,7 @@ impl KinewrightApp {
     pub(crate) fn studio_layout(&mut self, ui: &mut egui::Ui) {
         // Kept notes come back, and their unconfirmed commands retry, before any input.
         self.feedback_frame();
+        self.voice_frame();
         if !ui.ctx().egui_wants_keyboard_input() {
             for (index, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3]
                 .into_iter()
@@ -1122,16 +1141,19 @@ impl KinewrightApp {
                 if response.changed() && self.active_thread().input.is_empty() {
                     self.focused_mut().studio.draft_snapshot = None;
                 }
-                // C6 wires voice notes to this slot.
-                round_button(
+                if round_button(
                     ui,
                     Icon::Mic,
                     "Voice note",
-                    "Voice notes · not available yet",
+                    "Record a note at the displayed picture",
                     32.0,
                     Round::Quiet,
-                    false,
-                );
+                    true,
+                )
+                .clicked()
+                {
+                    self.voice_press();
+                }
                 let can_send = !self.focused().ja1_read_only()
                     && !self.active_thread().input.trim().is_empty();
                 if round_button(

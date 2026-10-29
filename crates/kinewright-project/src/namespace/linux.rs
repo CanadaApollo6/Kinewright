@@ -480,6 +480,7 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         batch_objects: false,
         uncertain: false,
         read_only: true,
+        read_authority: None,
     };
     verify_parent(&namespace)?;
     Ok(namespace)
@@ -1230,6 +1231,7 @@ pub(super) fn create_session(
         batch_objects: false,
         uncertain: false,
         read_only: false,
+        read_authority: None,
         session: Some((base, name)),
         session_unlinked: false,
     })

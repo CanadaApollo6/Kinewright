@@ -14,6 +14,7 @@ const SCREENSHOT_DELAY_ENV: &str = "KINEWRIGHT_SCREENSHOT_AFTER_MS";
 pub(crate) struct ScreenshotCapture {
     output: Option<PathBuf>,
     requested: bool,
+    saved: bool,
     /// Waiting until async visuals (thumbnails, waveforms) have a chance to
     /// arrive makes captures representative, not just fast.
     ready_at: Instant,
@@ -28,13 +29,17 @@ impl ScreenshotCapture {
         Self {
             output: std::env::var_os(SCREENSHOT_ENV).map(PathBuf::from),
             requested: false,
+            saved: false,
             ready_at: Instant::now() + Duration::from_millis(delay_ms),
         }
     }
 
-    pub(crate) fn update(&mut self, ctx: &egui::Context) {
+    pub(crate) fn update(&mut self, ctx: &egui::Context) -> bool {
+        if self.saved {
+            return true;
+        }
         let Some(output) = self.output.as_ref() else {
-            return;
+            return false;
         };
         let screenshot = ctx.input(|input| {
             input.events.iter().find_map(|event| match event {
@@ -46,7 +51,10 @@ impl ScreenshotCapture {
             let output = output.clone();
             self.output = None;
             match save_screenshot(&output, &image) {
-                Ok(()) => process::exit(0),
+                Ok(()) => {
+                    self.saved = true;
+                    return true;
+                }
                 Err(error) => {
                     eprintln!("screenshot failed: {error}");
                     process::exit(1);
@@ -61,6 +69,7 @@ impl ScreenshotCapture {
         } else {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
+        false
     }
 }
 

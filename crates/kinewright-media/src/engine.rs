@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
@@ -486,7 +486,10 @@ impl SessionMedia {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        if self.inputs_for(Arc::clone(&document)).is_err() {
+        let access = self.inputs_for(Arc::clone(&document));
+        if let Err(error) = &access
+            && !matches!(error, MediaError::MediaReadTemporarilyUnavailable)
+        {
             self.refuse_document();
             return false;
         }
@@ -509,6 +512,9 @@ impl SessionMedia {
                     }
         };
         if !current {
+            if access.is_err() {
+                return false;
+            }
             self.set_document(document);
         }
         true
@@ -600,6 +606,7 @@ impl SessionMedia {
                 Ok(None)
             }
             MediaAuthority::Certified(inputs) => {
+                inputs.check_read_authority()?;
                 if std::ptr::eq(inputs.document(), Arc::as_ptr(&document)) {
                     Ok(Some(Arc::clone(inputs)))
                 } else {
@@ -607,7 +614,13 @@ impl SessionMedia {
                         .with_document(document)
                         .map(Arc::new)
                         .map(Some)
-                        .map_err(|_| MediaError::MediaAdmissionRequired)
+                        .map_err(|error| {
+                            if matches!(error, MediaError::MediaReadTemporarilyUnavailable) {
+                                error
+                            } else {
+                                MediaError::MediaAdmissionRequired
+                            }
+                        })
                 }
             }
             MediaAuthority::Unavailable | MediaAuthority::Controls => {
@@ -1639,6 +1652,7 @@ impl Playback for SessionMedia {
                 self.set_certified_document(inputs);
                 return;
             }
+            Err(MediaError::MediaReadTemporarilyUnavailable) => return,
             Err(_) => {
                 self.refuse_document();
                 return;
@@ -1672,6 +1686,7 @@ impl Playback for SessionMedia {
     fn frames(&self) -> Receiver<PreviewFrame> {
         if matches!(self.authority, MediaAuthority::Unavailable)
             || matches!(&self.authority, MediaAuthority::Legacy(grant) if grant.check().is_err())
+            || matches!(&self.authority, MediaAuthority::Certified(inputs) if matches!(inputs.check_read_authority(), Err(error) if error != MediaError::MediaReadTemporarilyUnavailable))
         {
             return crossbeam_channel::never();
         }
@@ -2786,6 +2801,8 @@ struct Worker {
     loudness: WorkerLoudness,
     monitor_gain_tenth_db: Arc<AtomicI32>,
     playing: bool,
+    waiting_play: Option<(TimeCode, FrameStamp)>,
+    last_paused: Cell<Option<(TimeCode, FrameStamp)>>,
     /// PF1 V-2 (review B F1): the transport stopped at the end on its own,
     /// not by a pause; a seek published before that stop resumes playing.
     resume_after_eos: bool,
@@ -2902,6 +2919,8 @@ impl Worker {
             loudness: WorkerLoudness::new(loudness),
             monitor_gain_tenth_db,
             playing: false,
+            waiting_play: None,
+            last_paused: Cell::new(None),
             resume_after_eos: false,
             last_position: None,
             output_device: OutputDevice::Default,
@@ -3222,6 +3241,7 @@ impl Worker {
 
     /// S-1: the paused slot's newest target, exact.
     fn post_paused(&self, at: TimeCode, stamp: FrameStamp) {
+        self.last_paused.set(Some((at, stamp)));
         self.post(JobKind::Paused(at), stamp);
     }
 
@@ -3237,6 +3257,24 @@ impl Worker {
     fn handle_preview_failures(&mut self) {
         for (stamp, error) in self.lane.take_failures() {
             if stamp.is_current(self.lock_coalesced().latest) {
+                if matches!(error, MediaError::MediaReadTemporarilyUnavailable) {
+                    if self.playing {
+                        self.post(
+                            JobKind::Playback {
+                                from: self.clock.position(),
+                            },
+                            stamp,
+                        );
+                    } else {
+                        let at = self
+                            .last_paused
+                            .get()
+                            .filter(|(_, previous)| *previous == stamp)
+                            .map_or_else(|| self.clock.position(), |(at, _)| at);
+                        self.post_paused(at, stamp);
+                    }
+                    continue;
+                }
                 self.pause();
                 self.emit(MediaEvent::StampedError(stamp, error));
             } else {
@@ -3404,7 +3442,7 @@ impl Worker {
             // PF1 V-2 (review B F1): a seek published while playing, which
             // raced the terminal stop, keeps playing.
             let raced_eos = self.resume_after_eos && seek_predates_eos;
-            if self.playing || raced_eos {
+            if self.playing || self.waiting_play.is_some() || raced_eos {
                 self.start_playback(at, seek.stamp);
             } else {
                 self.clock.set_frame(at);
@@ -3427,6 +3465,7 @@ impl Worker {
     }
 
     fn start_playback(&mut self, from: TimeCode, stamp: FrameStamp) {
+        self.waiting_play = None;
         self.resume_after_eos = false;
         // R34/R35 (re-review 2 D2, 3 D2): the outgoing stream stops first;
         // its epoch is then due through the frame its callbacks consumed,
@@ -3459,6 +3498,10 @@ impl Worker {
                 self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Playing));
                 self.post(JobKind::Playback { from }, stamp);
             }
+            Err(MediaError::MediaReadTemporarilyUnavailable) => {
+                self.playing = false;
+                self.waiting_play = Some((from, stamp));
+            }
             Err(error) => self.fail(error),
         }
     }
@@ -3470,6 +3513,9 @@ impl Worker {
         from: TimeCode,
         mix_meters: &Arc<MixMeters>,
     ) -> Result<Option<AudioRuntime>, MediaError> {
+        if let Some(inputs) = &self.inputs {
+            inputs.check_read_authority()?;
+        }
         if self.inputs.is_none() && !self.document.media_pool.is_empty() {
             self.legacy_media
                 .as_ref()
@@ -3537,6 +3583,7 @@ impl Worker {
     /// consumed (R35); `modelled` stands in only without a runtime (the
     /// I8 model's fake audio), the clock if every issued call is applied.
     fn pause_through(&mut self, modelled: Option<TimeCode>) {
+        self.waiting_play = None;
         self.resume_after_eos = false;
         self.lane.post(None);
         let running = self.audio.is_some();
@@ -3613,6 +3660,11 @@ impl Worker {
     }
 
     fn tick(&mut self) {
+        if let Some((from, stamp)) = self.waiting_play.take()
+            && stamp.is_current(self.lock_coalesced().latest)
+        {
+            self.start_playback(from, stamp);
+        }
         if !self.playing {
             // R34: acks queued after a stop are settled all the same.
             self.lane.settle().sample(Instant::now(), None);
@@ -3710,6 +3762,9 @@ impl Worker {
     }
 
     fn fail(&mut self, error: MediaError) {
+        if matches!(error, MediaError::MediaReadTemporarilyUnavailable) {
+            return;
+        }
         self.pause();
         self.emit(MediaEvent::Error(error));
     }

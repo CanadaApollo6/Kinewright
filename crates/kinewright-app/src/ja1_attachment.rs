@@ -18,6 +18,8 @@ use std::fmt::Write as _;
 mod host;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use host::SCHEDULER_SETTINGS;
+#[path = "host_snapshot.rs"]
+mod host_snapshot;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -153,6 +155,7 @@ pub(crate) struct Ja1Attachment {
     pub panel_open: bool,
     retention_lost: bool,
     originating_context: Arc<std::sync::atomic::AtomicBool>,
+    snapshot_readers: host_snapshot::SnapshotReaders,
     host: Option<host::HostAttachment>,
     /// The project identity the host was launched with: the local owner cannot
     /// read it while the host holds the bundle (S3 C7).
@@ -202,6 +205,7 @@ impl Ja1Attachment {
             retention_lost: false,
             host_project: None,
             originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            snapshot_readers: host_snapshot::SnapshotReaders::new()?,
             host: None,
             host_history_digest: std::cell::RefCell::new(None),
             known_agent_effects: std::collections::BTreeSet::new(),
@@ -621,27 +625,44 @@ impl Ja1Attachment {
         }
         self.owner.studio_versions()
     }
+    pub(crate) fn studio_project_id(
+        &self,
+    ) -> Result<kinewright_project::bundle_records::ProjectId, BundleError> {
+        if let Some(project) = self
+            .host
+            .as_ref()
+            .and_then(|host| host.status.project_id.clone())
+        {
+            return Ok(project);
+        }
+        self.owner.project_id().or_else(|error| {
+            self.host_project
+                .clone()
+                .filter(|_| self.host.is_some())
+                .ok_or(error)
+        })
+    }
     pub(crate) fn studio_context(
         &self,
         key: &kinewright_project::studio_records::SnapshotKey,
     ) -> Result<kinewright_project::studio_store::FrozenContext, BundleError> {
-        if let Some(host) = &self.host {
-            let reply = host
-                .client
-                .request(kinewright_agent::writer_host::HostCommand::ReadSnapshot {
-                    key: key.clone(),
-                })
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if let Some(error) = reply.error {
-                return Err(BundleError::Corrupt(error.message));
-            }
-            let descriptor = reply.snapshot.ok_or(BundleError::HistoryChanged)?;
-            if descriptor.key != *key {
-                return Err(BundleError::HistoryChanged);
-            }
-            return self.owner.frozen_context_descriptor(&descriptor);
+        if self.host.is_some() {
+            return self.studio_snapshot_reader(key)?.frozen_context();
         }
         self.owner.frozen_context(key)
+    }
+    pub(crate) fn studio_snapshot_reader(
+        &self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<kinewright_project::store::snapshot_reader::HostSnapshotReader, BundleError> {
+        let host = self.host.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let path = self.project_path().ok_or(BundleError::HistoryChanged)?;
+        self.snapshot_readers.open(
+            &host.client,
+            &path,
+            Arc::downgrade(&self.originating_context),
+            key,
+        )
     }
     pub(crate) fn studio_edit_copy(
         &mut self,
@@ -649,12 +670,18 @@ impl Ja1Attachment {
     ) -> Result<(), BundleError> {
         let context = self.studio_context(key)?;
         let descriptor = &context.snapshot.descriptor;
-        let checkpoint = self
-            .owner
-            .store()?
-            .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
-                &descriptor.checkpoint_ref,
-            )?;
+        let checkpoint = if self.host.is_some() {
+            self.studio_snapshot_reader(key)?
+                .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                    &descriptor.checkpoint_ref,
+                )?
+        } else {
+            self.owner
+                .store()?
+                .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                    &descriptor.checkpoint_ref,
+                )?
+        };
         self.apply(Action::PreviewRecovery(RecoverySelection::Checkpoint {
             root: descriptor.checkpoint_ref.clone(),
             branch: checkpoint.branch_id.clone(),
@@ -667,19 +694,6 @@ impl Ja1Attachment {
             return None;
         }
         self.host.as_ref().map(|host| host.client.clone())
-    }
-
-    /// The project's durable identity, which Studio feedback is kept by. While
-    /// the host holds the bundle, the identity it was launched with answers.
-    pub(crate) fn project_identity(
-        &self,
-    ) -> Result<kinewright_project::bundle_records::ProjectId, BundleError> {
-        self.owner.project_id().or_else(|error| {
-            self.host_project
-                .clone()
-                .filter(|_| self.host.is_some())
-                .ok_or(error)
-        })
     }
 
     pub fn host_attached(&self) -> bool {
@@ -1015,6 +1029,7 @@ impl Ja1Attachment {
                 return false;
             }
         }
+        self.snapshot_readers.revoke_all();
         self.originating_context
             .store(false, std::sync::atomic::Ordering::Release);
         self.retention_lost = true;

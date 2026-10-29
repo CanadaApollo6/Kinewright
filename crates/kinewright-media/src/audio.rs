@@ -4339,6 +4339,7 @@ impl AudioDiagnostics {
 }
 
 pub(crate) struct AudioRuntime {
+    read_authority: Option<crate::owned_io::ReadAuthority>,
     legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     output: AudioOutput,
     producer: Producer<f32>,
@@ -4400,6 +4401,14 @@ impl AudioRuntime {
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
         let error_flag = Arc::new(AtomicBool::new(false));
+        let read_authority = inputs.and_then(|inputs| inputs.read_authority.clone());
+        if let Some(authority) = &read_authority {
+            authority.check()?;
+        }
+        let callback_authority = read_authority
+            .as_ref()
+            .map(crate::owned_io::ReadAuthority::local_grant)
+            .or_else(crate::locator::capture);
         let output = match sink {
             Sink::Cpal(device, sample_format, config) => AudioOutput::Cpal(build_stream(
                 &device,
@@ -4411,13 +4420,15 @@ impl AudioRuntime {
                 Arc::clone(&error_flag),
                 monitor_gain_tenth_db,
                 Arc::clone(diagnostics),
+                callback_authority.clone(),
             )?),
             #[cfg(any(test, feature = "test-util"))]
-            Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach(
+            Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach_with_authority(
                 consumer,
                 Arc::clone(position_samples),
                 monitor_gain_tenth_db,
                 Arc::clone(diagnostics),
+                callback_authority,
             )),
         };
         #[cfg(any(test, feature = "test-util"))]
@@ -4443,6 +4454,7 @@ impl AudioRuntime {
             .saturating_div(1_000)
             .max(1);
         Ok(Self {
+            read_authority,
             legacy_media: crate::locator::capture(),
             output,
             producer,
@@ -4534,6 +4546,9 @@ impl AudioRuntime {
     /// AU1 §5.3: top the ring up to the live target, metering as it goes
     /// (AU3 §3.9).
     pub(crate) fn fill(&mut self, meter: &mut LiveLoudnessMeter) -> Result<(), MediaError> {
+        if let Some(authority) = &self.read_authority {
+            authority.check()?;
+        }
         let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         self.exhausted |= !fill_ring(
             &mut self.producer,
@@ -4564,6 +4579,7 @@ fn build_stream(
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
     diagnostics: Arc<AudioDiagnostics>,
+    authority: Option<kinewright_core::LegacyMediaGrant>,
 ) -> Result<cpal::Stream, MediaError> {
     match format {
         cpal::SampleFormat::F32 => build_typed_stream::<f32>(
@@ -4575,6 +4591,7 @@ fn build_stream(
             error_flag,
             monitor_gain_tenth_db,
             diagnostics,
+            authority,
         ),
         cpal::SampleFormat::I16 => build_typed_stream::<i16>(
             device,
@@ -4585,6 +4602,7 @@ fn build_stream(
             error_flag,
             monitor_gain_tenth_db,
             diagnostics,
+            authority,
         ),
         cpal::SampleFormat::U16 => build_typed_stream::<u16>(
             device,
@@ -4595,6 +4613,7 @@ fn build_stream(
             error_flag,
             monitor_gain_tenth_db,
             diagnostics,
+            authority,
         ),
         unsupported => Err(MediaError::Backend(format!(
             "unsupported audio device sample format {unsupported}"
@@ -4612,12 +4631,12 @@ fn build_typed_stream<T>(
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
     diagnostics: Arc<AudioDiagnostics>,
+    authority: Option<kinewright_core::LegacyMediaGrant>,
 ) -> Result<cpal::Stream, MediaError>
 where
     T: cpal::SizedSample + cpal::Sample + cpal::FromSample<f32>,
 {
     let callback_channels = usize::from(channels).max(1);
-    let authority = crate::locator::capture();
     device
         .build_output_stream(
             *config,

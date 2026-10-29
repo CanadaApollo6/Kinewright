@@ -228,7 +228,6 @@ struct TranscriptWorker {
     data_dir: PathBuf,
     states: StatusReporter<TranscriptStatus>,
     store: TranscriptStore,
-    model: Option<WhisperContext>,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
     cancellations: CancellationRegistry,
@@ -244,7 +243,6 @@ impl TranscriptWorker {
             store: TranscriptStore::new(cache_root(&data_dir, "transcripts", CACHE_VERSION)),
             data_dir,
             states,
-            model: None,
             #[cfg(any(test, feature = "test-util"))]
             inference_gate: Arc::default(),
             cancellations,
@@ -317,11 +315,7 @@ impl TranscriptWorker {
             }
         }
 
-        if self.model.is_none() {
-            let model_path = ensure_model(&self.data_dir, &asset.path, &self.states, cancellation)?;
-            cancelled(cancellation)?;
-            self.model = Some(load_whisper_context(&model_path)?);
-        }
+        let model_path = ensure_model(&self.data_dir, &asset.path, &self.states, cancellation)?;
 
         self.update(
             &asset.path,
@@ -339,12 +333,13 @@ impl TranscriptWorker {
             cancellation,
         )?;
         cancelled(cancellation)?;
-        let context = self
-            .model
-            .as_ref()
-            .ok_or_else(|| MediaError::Backend("Whisper model was not loaded".to_owned()))?;
+        let _model_permit = WHISPER_CONTEXT
+            .lock()
+            .map_err(|_| MediaError::Backend("Whisper model lock poisoned".into()))?;
+        cancelled(cancellation)?;
+        let context = load_whisper_context(&model_path)?;
         let transcript = run_whisper(
-            context,
+            &context,
             &samples,
             asset,
             content_sha256,
@@ -456,6 +451,8 @@ fn run_whisper(
     })
 }
 
+// Asset and note inference share the permit for the whole native context lifetime.
+static WHISPER_CONTEXT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn load_whisper_context(model_path: &Path) -> Result<WhisperContext, MediaError> {
     let model_path = model_path.to_string_lossy();
     WhisperContext::new_with_params(model_path.as_ref(), WhisperContextParameters::default())
@@ -842,7 +839,6 @@ impl TranscriptStore {
 ///
 /// # Errors
 /// Returns the normal model download, verification, installation or cancellation error.
-#[cfg(any(test, feature = "test-util"))]
 pub fn provision_voice_model(
     data_dir: &Path,
     cancellation: &ExportCancellation,
@@ -984,6 +980,10 @@ pub(crate) fn transcribe_voice_wav(
         if !path.is_file() || sha256_file(&path)? != WHISPER_MODEL_SHA256 {
             return Ok(VoiceTranscript::AwaitingModel);
         }
+        let path = provision_voice_model(data_dir, cancellation)?;
+        let _model_permit = WHISPER_CONTEXT
+            .lock()
+            .map_err(|_| MediaError::Backend("Whisper model lock poisoned".into()))?;
         cancelled(cancellation)?;
         let mut parameters = WhisperContextParameters::default();
         parameters.use_gpu(false);

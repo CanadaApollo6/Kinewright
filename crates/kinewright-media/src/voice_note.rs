@@ -4,6 +4,7 @@ use kinewright_core::{ExportCancellation, MediaError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub const MAX_VOICE_AUDIO_BYTES: u64 = 3_905_536;
 pub const MAX_VOICE_MICROS: u64 = 120_000_000;
 pub const MAX_PLAYHEAD_ENTRIES: usize = 8192;
 pub const MAX_VOICE_TEXT_BYTES: usize = 16_384;
@@ -465,6 +466,55 @@ fn parse_time_prefix(tokens: &[&str]) -> Option<(u64, usize)> {
     }
 }
 
+/// Return a new WAV containing only the requested samples.
+///
+/// # Errors
+/// Refuses malformed audio and out-of-bounds or empty ranges.
+pub fn voice_range_wav(
+    audio: &[u8],
+    start_micros: u64,
+    end_micros: u64,
+) -> Result<Vec<u8>, MediaError> {
+    let (samples, duration) = voice_pcm(audio)?;
+    if start_micros >= end_micros || end_micros > duration {
+        return Err(MediaError::Backend("private voice range".into()));
+    }
+    let start = usize::try_from((start_micros * 16_000).div_ceil(1_000_000))
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+    let end = usize::try_from(end_micros * 16_000 / 1_000_000)
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+    if start >= end {
+        return Err(MediaError::Backend(
+            "voice range contains no complete sample".into(),
+        ));
+    }
+    let selected = samples
+        .get(start..end)
+        .ok_or_else(|| MediaError::Backend("voice sample range".into()))?;
+    let length =
+        u32::try_from(selected.len() * 2).map_err(|e| MediaError::Backend(e.to_string()))?;
+    let mut wav = b"RIFF".to_vec();
+    wav.extend((36 + length).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16_u32.to_le_bytes());
+    wav.extend(1_u16.to_le_bytes());
+    wav.extend(1_u16.to_le_bytes());
+    wav.extend(16_000_u32.to_le_bytes());
+    wav.extend(32_000_u32.to_le_bytes());
+    wav.extend(2_u16.to_le_bytes());
+    wav.extend(16_u16.to_le_bytes());
+    wav.extend(b"data");
+    wav.extend(length.to_le_bytes());
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "voice_pcm is normalized signed 16 bit PCM"
+    )]
+    for sample in selected {
+        wav.extend(((*sample * 32768.0) as i16).to_le_bytes());
+    }
+    Ok(wav)
+}
+
 struct InferenceSlots {
     active: bool,
     pending: bool,
@@ -571,7 +621,7 @@ pub(crate) fn voice_pcm(audio: &[u8]) -> Result<(Vec<f32>, u64), MediaError> {
     let invalid =
         || MediaError::Backend("voice capture requires a complete mono 16 kHz PCM16 WAV".into());
     if audio.len() < 44
-        || audio.len() > 3_840_000 + 65_536
+        || audio.len() as u64 > MAX_VOICE_AUDIO_BYTES
         || &audio[..4] != b"RIFF"
         || &audio[8..12] != b"WAVE"
     {
@@ -678,6 +728,7 @@ pub fn spawn_voice_transcription<P, N, J, B>(
     audio: B,
     data_dir: std::path::PathBuf,
     cancellation: ExportCancellation,
+    budget: &crate::owned_io::CursorReservation,
 ) -> Result<VoiceTask<VoiceJobKey<P, N, J>>, MediaError>
 where
     P: Send + 'static,
@@ -686,11 +737,14 @@ where
     B: std::ops::Deref<Target = Vec<u8>> + Send + 'static,
 {
     let permit = InferencePermit::acquire()?;
+    // Small model, native workspaces and the bounded two-minute PCM buffer overlap.
+    let native_charge = budget(2 << 30).map_err(MediaError::Backend)?;
     let (tx, result) = std::sync::mpsc::sync_channel(1);
     let inference_cancel = cancellation.clone();
     std::thread::Builder::new()
         .name("voice-note-whisper".into())
         .spawn(move || {
+            let _native_charge = native_charge;
             let mut permit = permit;
             let result = permit.wait(&inference_cancel).and_then(|()| {
                 transcribe_reserved(&data_dir, &key.audio_sha256, &audio, &inference_cancel)
@@ -710,6 +764,26 @@ mod tests {
     use crate::test_support::TempDirectory;
     use std::sync::{Arc, Barrier};
     static INFERENCE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn c8_voice_range_rounds_inward_to_whole_samples() {
+        let mut audio = wav(false);
+        audio[44..50].copy_from_slice(
+            &[
+                111_i16.to_le_bytes(),
+                222_i16.to_le_bytes(),
+                333_i16.to_le_bytes(),
+            ]
+            .concat(),
+        );
+        let selected = voice_range_wav(&audio, 1, 126).unwrap();
+        assert_eq!(
+            &selected[44..],
+            &222_i16.to_le_bytes(),
+            "C8_RANGE_SAMPLE_ALIGNMENT"
+        );
+        assert!(voice_range_wav(&audio, 1, 62).is_err());
+    }
 
     fn key() -> VoiceJobKey<u8, u8, u8> {
         VoiceJobKey {

@@ -232,8 +232,12 @@ impl HostCommandOwner {
             HostCommand::Status
             | HostCommand::IssueMetadataIssuer { .. }
             | HostCommand::DispatchOrchestration { .. }
-            | HostCommand::ObserveRun { .. } => true,
-            HostCommand::ReadSnapshot { key } => key.head == scope.scope.base.head,
+            | HostCommand::ObserveRun { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. } => true,
+            HostCommand::ReadSnapshot { key } | HostCommand::LeaseSnapshot { key } => {
+                key.head == scope.scope.base.head
+            }
             HostCommand::ReadSubmittedBatch { batch } => self
                 .owner()?
                 .orchestration_cut(&scope.run)?

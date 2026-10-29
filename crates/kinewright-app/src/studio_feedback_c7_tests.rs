@@ -76,7 +76,7 @@ fn with_host<R>(attachment: &Ja1Attachment, act: impl FnOnce(&mut HostFeedback<'
     let client = attachment.host_client().expect("C7_HOST_ATTACHED");
     act(&mut HostFeedback {
         client: &client,
-        reader: &attachment.owner,
+        reader: attachment,
     })
 }
 fn linked(path: &std::path::Path) -> (Vec<Option<RunId>>, usize) {
@@ -114,7 +114,7 @@ fn s3_c7_revise_cut_exactly_once_across_lost_reply_and_restart() {
     assert_eq!(kept.batch_id, batch);
     let on_disk = std::fs::read_to_string(project.temp.path("state").join(format!(
         "{}.json",
-        attachment.project_identity().unwrap().as_str()
+        attachment.studio_project_id().unwrap().as_str()
     )))
     .unwrap();
     assert!(
@@ -128,7 +128,7 @@ fn s3_c7_revise_cut_exactly_once_across_lost_reply_and_restart() {
     let attachment = launch(&project);
     project
         .feedback
-        .open(attachment.project_identity().map_err(text), Ok(directory))
+        .open(attachment.studio_project_id().map_err(text), Ok(directory))
         .unwrap();
     assert_eq!(
         project.feedback.revise.as_ref(),

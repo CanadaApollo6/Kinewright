@@ -696,16 +696,17 @@ impl ProjectStore {
         roots.extend(context.cloned());
         let pin = self.pin(&roots)?;
         if let Some(memo) = memo {
-            return memo
+            let source = memo
                 .reissue(
                     file,
                     Arc::clone(&table.chunks),
                     Arc::new((pin, table)),
                     self.decoder_reserver(),
                 )
-                .map_err(io_error);
+                .map_err(io_error)?;
+            return self.bind_source_read_authority(source);
         }
-        CertifiedSource::verify(
+        let source = CertifiedSource::verify(
             file,
             parse_digest(&source.sha256)?,
             source.byte_length,
@@ -714,7 +715,18 @@ impl ProjectStore {
             Arc::new((pin, table)),
             self.decoder_reserver(),
         )
-        .map_err(io_error)
+        .map_err(io_error)?;
+        self.bind_source_read_authority(source)
+    }
+    fn bind_source_read_authority(
+        &self,
+        source: CertifiedSource,
+    ) -> Result<CertifiedSource, BundleError> {
+        if let Some(authority) = self.read_authority() {
+            source.with_read_authority(authority).map_err(io_error)
+        } else {
+            Ok(source)
+        }
     }
 }
 #[allow(
@@ -1331,14 +1343,14 @@ mod resource_tests {
         alias.seek(SeekFrom::Start(0)).unwrap();
         alias.write_all(&[bytes[0] ^ 1]).unwrap();
         alias.flush().unwrap();
-        assert_eq!(resource.bytes(), bytes);
-        assert_eq!(second.bytes(), bytes);
+        assert_eq!(resource.bytes().unwrap(), bytes);
+        assert_eq!(second.bytes().unwrap(), bytes);
         drop(blob);
         drop(sealed);
         drop(second);
         owner.store_mut().collect_unpublished().unwrap();
         assert!(owner.store().open_input_descriptor(&object).is_ok());
-        assert_eq!(resource.bytes(), bytes);
+        assert_eq!(resource.bytes().unwrap(), bytes);
         drop(resource);
         owner.store_mut().collect_unpublished().unwrap();
         assert_eq!(owner.store().usage().unwrap().decoded_bytes, 0);

@@ -1721,6 +1721,7 @@ impl IncidentObservation {
             | MediaError::Scope(_)
             | MediaError::Store { .. }
             | MediaError::MediaAdmissionRequired
+            | MediaError::MediaReadTemporarilyUnavailable
             | MediaError::OwnedMediaOperationUnavailable
             | MediaError::NotImplemented
             | MediaError::Cancelled
@@ -1737,7 +1738,7 @@ impl IncidentObservation {
                     evidence: media_evidence(error, code),
                     revision,
                     name: None,
-                    transient: false,
+                    transient: matches!(error, MediaError::MediaReadTemporarilyUnavailable),
                 }
             }
         }

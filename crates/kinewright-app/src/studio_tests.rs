@@ -1038,3 +1038,57 @@ fn s3_rapid_focus_round_trip_rebinds_visual_cache() {
     drop(engine);
     retire.wait();
 }
+
+#[test]
+fn c9_host_attached_frozen_version_selects_and_plays() {
+    let mut fixture = fixtures();
+    let key = fixture.contexts[0].snapshot.descriptor.key.clone();
+    fixture.contexts.clear();
+    let mut attachment =
+        crate::ja1_attachment::Ja1Attachment::new(fixture.owners.remove(0)).unwrap();
+    attachment
+        .launch_host(
+            "c9-frozen-playback".into(),
+            kinewright_agent::writer_host::SessionRoots {
+                read: vec![fixture.root.root().into()],
+                write: vec![fixture.root.root().into()],
+            },
+        )
+        .unwrap();
+    assert!(attachment.host_attached());
+    let result = attachment.studio_context(&key);
+    if let Err(error) = &result {
+        assert!(attachment.close(), "baseline child reaped");
+        panic!("C9_ATTACHED_FROZEN_VERSION_OPENS: {error}");
+    }
+    let context = Arc::new(result.unwrap());
+    let (mut app, engine) = in1_harness(context.document.clone());
+    let mut retire = Retire::default();
+    retire.arm(&engine);
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
+    app.focused_mut().ja1 = Some(attachment);
+    app.focused_mut().install_ja1_view();
+    app.install_studio_context(context).unwrap();
+    let ctx = egui::Context::default();
+    wait_frame(&mut app, &ctx, &key, TimeCode::ZERO);
+    app.play_program_from(TimeCode::ZERO);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.playback.position() < TimeCode(3) {
+        app.poll_background(&ctx);
+        assert!(
+            Instant::now() < deadline,
+            "C9_ATTACHED_FROZEN_VERSION_PLAYS"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.playback.pause();
+    assert!(
+        app.focused_mut().ja1.as_mut().unwrap().close(),
+        "C9_PLAYBACK_CLOSE_REAPS_HOST"
+    );
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}

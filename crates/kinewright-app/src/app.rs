@@ -3965,7 +3965,20 @@ impl eframe::App for KinewrightApp {
         self.show_ja1(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
-        self.screenshot.update(ui.ctx());
+        if self.screenshot.update(ui.ctx()) {
+            // Attached screenshots own a child host; close its leases and reap it
+            // before the capture process exits.
+            let closed = self.projects.iter_mut().all(|project| {
+                project
+                    .ja1
+                    .as_mut()
+                    .is_none_or(crate::ja1_attachment::Ja1Attachment::close)
+            });
+            if closed {
+                std::process::exit(0);
+            }
+            ui.ctx().request_repaint();
+        }
         self.finalize_preview(ui.ctx());
         let picture_present = self.program_picture().is_some();
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)

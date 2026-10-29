@@ -14,7 +14,14 @@ mod protocol;
 mod recovery;
 mod revise;
 pub use revise::{DirectorSetting, configured_director, scheduler_settings_directory};
+mod snapshot_lease;
+#[cfg(all(test, target_os = "linux"))]
+mod snapshot_lease_tests;
 mod switch;
+mod voice;
+pub use snapshot_lease::{SnapshotLeaseError, SnapshotLeaseRemote};
+#[cfg(all(test, target_os = "linux"))]
+mod voice_tests;
 pub use attention::{
     AttentionAnswer, AttentionOutcome, AttentionPrompt, HostRunObserver, LiveAttentionResponse,
 };
@@ -58,6 +65,7 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+pub use voice::{VoiceReceipt, VoiceStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
@@ -428,10 +436,13 @@ impl WriterHost {
             },
             owner: Arc::clone(&owner),
             ingress: Arc::new(tokio::sync::Semaphore::new(1)),
+            lease_ingress: Arc::new(tokio::sync::Semaphore::new(64)),
         });
         let router = axum::Router::new()
             .route("/issuer", post(issuer::issuer_request))
             .route("/host", post(host_request))
+            .route("/voice", post(voice::upload_request))
+            .route("/snapshot-lease", post(snapshot_lease::lease_request))
             .route("/mcp", post(mcp_request))
             .with_state(state);
         let server = serve(listener, router, "kinewright-writer-host", stop)?;
@@ -550,6 +561,7 @@ struct HttpState {
     bootstrap: HostBootstrap,
     owner: Arc<Mutex<HostCommandOwner>>,
     ingress: Arc<tokio::sync::Semaphore>,
+    lease_ingress: Arc<tokio::sync::Semaphore>,
 }
 fn check_headers(headers: &HeaderMap, bootstrap: &HostBootstrap) -> Result<(), StatusCode> {
     let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
@@ -1095,6 +1107,12 @@ pub struct HostCommandOwner {
     dispatches: u64,
     foreground_owner: Option<manual::ForegroundOwner>,
     pending_read_pin: Option<auth::ReadPin>,
+    voice_payload: Option<(
+        Vec<u8>,
+        kinewright_project::storage_budget::StorageReservation,
+    )>,
+    voice_data_dir: std::path::PathBuf,
+    voice_jobs: BTreeMap<kinewright_project::studio_records::NoteId, voice::Job>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
@@ -1246,6 +1264,9 @@ impl HostCommandOwner {
             dispatches: 0,
             foreground_owner: None,
             pending_read_pin: None,
+            voice_payload: None,
+            voice_jobs: BTreeMap::new(),
+            voice_data_dir: kinewright_media::default_data_dir(),
             prepared_owned_media: None,
             pending_switch: None,
             confirmed_switch: None,
@@ -1349,12 +1370,25 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    fn snapshot_read_owner(&self) -> Option<(kinewright_project::bundle_records::ProjectId, u64)> {
+        let owner = self.owner.as_ref()?;
+        Some((owner.project_id().ok()?, owner.store().ok()?.owner_epoch()))
+    }
+    fn check_named_access(&self, roots: &SessionRoots, write: bool) -> Result<(), HostError> {
+        for pin in &self.pins {
+            if !roots.permits(&pin.anchor, write) {
+                return Err(HostRefusal::roots("forwarded roots exclude the named project").into());
+            }
+        }
+        Ok(())
+    }
     /// Errors stay typed in the reply; source retention loss is latched for the whole context.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "The same owned request boundary serves HTTP ingress and scoped observer callers"
     )]
     fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+        let previous_snapshot_owner = self.snapshot_read_owner();
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {
             let write = !matches!(
@@ -1363,6 +1397,8 @@ impl HostCommandOwner {
                     | HostCommand::ListFeedback
                     | HostCommand::ReadSnapshot { .. }
                     | HostCommand::ReadFeedback { .. }
+                    | HostCommand::ReadFeedbackView { .. }
+                    | HostCommand::ReadFeedbackEvidence { .. }
                     | HostCommand::ReadSubmittedBatch { .. }
                     | HostCommand::Attach
                     | HostCommand::CurrentAttachment
@@ -1379,13 +1415,7 @@ impl HostCommandOwner {
             }
             // Every named access honors the forwarded roots again. Its IO owner already holds
             // pinned descriptors; narrowed roots cannot retain an older wider authorization.
-            for pin in &self.pins {
-                if !roots.permits(&pin.anchor, write) {
-                    return Err(
-                        HostRefusal::roots("forwarded roots exclude the named project").into(),
-                    );
-                }
-            }
+            self.check_named_access(&roots, write)?;
             self.execute_inner(command, &roots, &mut reply)
         });
         if let Err(error) = result {
@@ -1402,6 +1432,12 @@ impl HostCommandOwner {
         {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
+        }
+        if reply.activation.is_some() || self.snapshot_read_owner() != previous_snapshot_owner {
+            for attachment in &mut self.attachments {
+                attachment.snapshot_leases.clear();
+            }
+            self.voice_jobs.clear();
         }
         if reply.activation.is_some()
             || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.project)) && !saved.root_sha256.is_empty())
@@ -1513,7 +1549,11 @@ impl HostCommandOwner {
             && (!manual::connector_command(&command)
                 || matches!(
                     command,
-                    HostCommand::Metadata { .. } | HostCommand::AdmitFeedbackEvidence { .. }
+                    HostCommand::Metadata { .. }
+                        | HostCommand::AdmitFeedbackEvidence { .. }
+                        | HostCommand::AcknowledgeVoice { .. }
+                        | HostCommand::StartTranscription { .. }
+                        | HostCommand::ChooseTranscript { .. }
                 ))
             && !matches!(
                 command,
@@ -1585,6 +1625,12 @@ impl HostCommandOwner {
                     });
                 }
             }
+            command @ (HostCommand::VoiceReceipt { .. }
+            | HostCommand::AcknowledgeVoice { .. }
+            | HostCommand::StartTranscription { .. }
+            | HostCommand::VoiceStatus { .. }
+            | HostCommand::ChooseTranscript { .. }
+            | HostCommand::ReadVoiceRange { .. }) => self.voice_command(command, reply)?,
             HostCommand::AdmitFeedbackEvidence { kind, bytes } => {
                 let sealed = self.owner_mut()?.admit_feedback_evidence(kind, &bytes)?;
                 reply.feedback_evidence = Some(sealed.reference.clone());
@@ -1598,6 +1644,36 @@ impl HostCommandOwner {
             }
             HostCommand::ListVersions => {
                 reply.versions = self.owner()?.studio_versions()?;
+            }
+            HostCommand::LeaseSnapshot { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. } => {
+                return Err(HostRefusal::new(
+                    "attachment_required",
+                    "snapshot lease requires attachment ownership",
+                )
+                .into());
+            }
+            HostCommand::ReadFeedbackView { revision } => {
+                reply.feedback = Some(self.owner()?.read_feedback(&revision)?.revision);
+            }
+            HostCommand::ReadFeedbackEvidence { revision, evidence } => {
+                let feedback = self.owner()?.read_feedback(&revision)?;
+                if ![
+                    &feedback.revision.original_text_ref,
+                    &feedback.revision.strokes_ref,
+                    &feedback.revision.frame_proof_ref,
+                ]
+                .contains(&&evidence)
+                {
+                    return Err(HostRefusal::new(
+                        "private_evidence",
+                        "only this revision's text, strokes and proof may be read",
+                    )
+                    .into());
+                }
+                reply.evidence_bytes =
+                    Some(self.owner()?.store()?.read_evidence(&evidence)?.to_vec());
             }
             HostCommand::ReadSnapshot { key } => {
                 let pinned = self.owner()?.read_snapshot(&key)?;
@@ -2259,6 +2335,7 @@ impl HostCommandOwner {
             ..HostStatus::default()
         };
         if let Some(owner) = &self.owner {
+            status.project_id = owner.project_id().ok();
             status.association = owner.association().map(|a| a.path().to_path_buf());
             status.saved_digest = owner
                 .association()

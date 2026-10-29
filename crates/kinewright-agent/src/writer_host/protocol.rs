@@ -208,6 +208,46 @@ pub enum HostCommand {
     },
     /// S3 C3: the person's private feedback index (saved revisions and batches).
     ListFeedback,
+    VoiceReceipt {
+        upload: kinewright_project::voice_ingress::VoiceUpload,
+    },
+    AcknowledgeVoice {
+        upload: kinewright_project::voice_ingress::VoiceUpload,
+    },
+    StartTranscription {
+        note: kinewright_project::studio_records::NoteId,
+    },
+    VoiceStatus {
+        note: kinewright_project::studio_records::NoteId,
+    },
+    ChooseTranscript {
+        envelope: kinewright_project::studio_records::MetadataEnvelope,
+        note: kinewright_project::studio_records::NoteId,
+        text_ref: ObjectRef,
+    },
+    ReadVoiceRange {
+        revision: ObjectRef,
+        start_micros: u64,
+        end_micros: u64,
+    },
+    LeaseSnapshot {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    SnapshotLeaseStatus {
+        id: String,
+        payload_sha256: String,
+    },
+    ReleaseSnapshot {
+        id: String,
+        payload_sha256: String,
+    },
+    ReadFeedbackView {
+        revision: ObjectRef,
+    },
+    ReadFeedbackEvidence {
+        revision: ObjectRef,
+        evidence: ObjectRef,
+    },
     ListVersions,
     ReadSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
@@ -477,6 +517,8 @@ pub enum HostChoiceKind {
 )]
 pub struct HostStatus {
     #[serde(default)]
+    pub project_id: Option<kinewright_project::bundle_records::ProjectId>,
+    #[serde(default)]
     pub continuation_runs: usize,
     pub choice: Option<HostChoiceKind>,
     pub rescue_trim_required: bool,
@@ -532,6 +574,11 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
+    pub evidence_bytes: Option<Vec<u8>>,
+    pub voice: Option<super::voice::VoiceStatus>,
+    pub voice_audio: Option<Vec<u8>>,
+    pub voice_receipt: Option<super::voice::VoiceReceipt>,
     pub metadata_issuer: Option<super::MetadataIssuer>,
     pub orchestration: Option<kinewright_project::orchestration_commit::OrchestrationReceipt>,
     pub run_view: Option<super::RunViewPage>,
