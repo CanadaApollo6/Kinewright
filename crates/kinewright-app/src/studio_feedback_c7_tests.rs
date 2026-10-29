@@ -173,10 +173,6 @@ fn s3_c7_revise_cut_exactly_once_across_lost_reply_and_restart() {
 fn s3_c7_studio_revise_cut_shows_accepted_run_in_notes() {
     let (mut app, _engine) = in1_harness(Document::default());
     let mut project = project("c7-studio");
-    // Evidence only: the screenshot run's `revise` scene opens this project.
-    if let Some(to) = std::env::var_os("KINEWRIGHT_C7_SHOT_PROJECT") {
-        copy_tree(project.temp.root(), std::path::Path::new(&to));
-    }
     let attachment = launch(&project);
     app.projects[0].recovery.stop_for_studio();
     app.projects[0].ja1 = Some(attachment);
@@ -227,4 +223,113 @@ fn s3_c7_studio_revise_cut_shows_accepted_run_in_notes() {
     assert_eq!(feedback.selection, selection, "C7_SELECTION_PINNED");
     assert_eq!(feedback.drafts.len(), drafts, "C7_DRAFTS_UNTOUCHED");
     in1_shutdown(&mut app);
+    drop(app);
+    // Evidence only: the screenshot's read-only `revise` scene opens this
+    // project with its run already accepted.
+    if let Some(to) = std::env::var_os("KINEWRIGHT_C7_SHOT_PROJECT") {
+        copy_tree(project.temp.root(), std::path::Path::new(&to));
+    }
+}
+
+/// The host starts before First Save; then Save As makes B. A's file is written
+/// first and unsent drafts carry into B (C3 fix 2), so B's own notes never
+/// reach A's recovery file, and reopening each restores only what is its own.
+#[test]
+fn s3_c7_fix1_host_save_as_keeps_each_projects_notes_apart() {
+    use crate::ja1_attachment::Action;
+    use kinewright_project::bundle_records::{BranchId, ProjectId};
+    let (mut app, _engine) = in1_harness(Document::default());
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-save-as");
+    let core = Core::spawn(Document::default()).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        kinewright_project::storage_budget::StorageLimits::default(),
+    )
+    .unwrap();
+    let mut attachment = Ja1Attachment::new(owner).unwrap();
+    attachment
+        .launch_host(
+            "c7-fix1".into(),
+            SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+        .unwrap();
+    app.projects[0].recovery.stop_for_studio();
+    app.projects[0].ja1 = Some(attachment);
+    let directory = temp.path("state");
+    app.focused_mut().studio.feedback.directory_override = Some(directory.clone());
+    let kept = |app: &KinewrightApp| -> ProjectId {
+        app.focused()
+            .studio
+            .feedback
+            .keeping
+            .project()
+            .cloned()
+            .expect("C7_KEPT")
+    };
+    let type_note = |app: &mut KinewrightApp, text: &str| {
+        let mut note = capture_cut(&core, &BranchId::fresh().unwrap(), 1, 0);
+        note.text = text.into();
+        let feedback = &mut app.focused_mut().studio.feedback;
+        feedback.drafts.push(note);
+        feedback.changed = true;
+        app.feedback_frame();
+    };
+    let texts = |feedback: &Feedback| -> Vec<String> {
+        feedback
+            .drafts
+            .iter()
+            .map(|draft| draft.text.clone())
+            .collect()
+    };
+    let a = temp.path("a.kinewright");
+    let b = temp.path("b.kinewright");
+    let apply = |app: &mut KinewrightApp, action| {
+        app.projects[0].ja1.as_mut().unwrap().apply(action).unwrap();
+        app.feedback_frame();
+    };
+    apply(&mut app, Action::FirstSave(a.clone()));
+    let project_a = kept(&app);
+    type_note(&mut app, "typed in A");
+    apply(&mut app, Action::SaveAs(b.clone()));
+    let project_b = kept(&app);
+    println!(
+        "C7_IDENTITIES A={} B={}",
+        project_a.as_str(),
+        project_b.as_str()
+    );
+    assert_ne!(project_a, project_b, "C7_SAVE_AS_IDENTITY");
+    assert_eq!(
+        texts(&app.focused().studio.feedback),
+        vec!["typed in A".to_owned()],
+        "C7_UNSENT_DRAFTS_CARRY"
+    );
+    type_note(&mut app, "typed in B");
+    in1_shutdown(&mut app);
+    drop(app);
+    let only_a = vec!["typed in A".to_owned()];
+    let a_and_b = vec!["typed in A".to_owned(), "typed in B".to_owned()];
+    for (path, restored) in [(&a, only_a), (&b, a_and_b)] {
+        // Reopened by the identity each bundle itself carries.
+        let project = kinewright_project::editing_session::Ja1EditingSession::open(path)
+            .unwrap()
+            .project_id()
+            .unwrap();
+        let file =
+            std::fs::read_to_string(directory.join(format!("{}.json", project.as_str()))).unwrap();
+        for text in ["typed in A", "typed in B"] {
+            assert_eq!(
+                file.contains(text),
+                restored.iter().any(|kept| kept == text),
+                "C7_RECOVERY_FILE {} and {text}",
+                path.display()
+            );
+        }
+        let mut feedback = Feedback::default();
+        feedback.open(Ok(project), Ok(directory.clone())).unwrap();
+        assert_eq!(texts(&feedback), restored, "C7_RESTORED {}", path.display());
+    }
 }

@@ -157,9 +157,6 @@ pub(crate) struct Ja1Attachment {
     originating_context: Arc<std::sync::atomic::AtomicBool>,
     snapshot_readers: host_snapshot::SnapshotReaders,
     host: Option<host::HostAttachment>,
-    /// The project identity the host was launched with: the local owner cannot
-    /// read it while the host holds the bundle (S3 C7).
-    host_project: Option<kinewright_project::bundle_records::ProjectId>,
     host_history_digest: std::cell::RefCell<
         Option<(
             kinewright_core::ActorIdentity,
@@ -203,7 +200,6 @@ impl Ja1Attachment {
             frozen: false,
             panel_open: true,
             retention_lost: false,
-            host_project: None,
             originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             snapshot_readers: host_snapshot::SnapshotReaders::new()?,
             host: None,
@@ -495,7 +491,6 @@ impl Ja1Attachment {
         if self.host.is_some() {
             return Ok(());
         }
-        let identity = self.owner.project_id().ok();
         let result = host::HostAttachment::launch(
             &mut self.owner,
             executable,
@@ -512,7 +507,6 @@ impl Ja1Attachment {
                 }
                 self.message.clone_from(&host.status.message);
                 self.host = Some(host);
-                self.host_project = identity;
                 self.start_host_manual()
             }
             Err(error) => {
@@ -628,19 +622,14 @@ impl Ja1Attachment {
     pub(crate) fn studio_project_id(
         &self,
     ) -> Result<kinewright_project::bundle_records::ProjectId, BundleError> {
-        if let Some(project) = self
-            .host
-            .as_ref()
-            .and_then(|host| host.status.project_id.clone())
-        {
-            return Ok(project);
+        // One source: while a host holds the bundle, only its authenticated
+        // status names the project, refreshed by every reply. First Save, Save
+        // As and rescue change it there; a launch-time copy would file B's
+        // notes under A (S3 C7 fix 1).
+        match &self.host {
+            Some(host) => host.status.project_id.clone().ok_or(BundleError::Unsettled),
+            None => self.owner.project_id(),
         }
-        self.owner.project_id().or_else(|error| {
-            self.host_project
-                .clone()
-                .filter(|_| self.host.is_some())
-                .ok_or(error)
-        })
     }
     pub(crate) fn studio_context(
         &self,

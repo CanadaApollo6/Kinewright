@@ -799,3 +799,74 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
         .unwrap();
     assert_eq!(restored.export_history().unwrap(), lost.history.unwrap());
 }
+
+/// S3 C7 fix 1: the reply that confirms a rescue names the rescue copy's
+/// project. Studio keys feedback recovery by that status, so notes typed after
+/// a rescue are never filed under the original project.
+#[test]
+fn c7_fix1_rescue_status_names_the_rescue_copy() {
+    let parent = kinewright_media::test_support::workspace_target_dir();
+    let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "c7-fix1-rescue");
+    let drive = temp.path("drive");
+    std::fs::create_dir(&drive).unwrap();
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut owner = Ja1EditingSession::new(&drive, &core, StorageLimits::default()).unwrap();
+    owner
+        .first_save(&drive.join("a.kinewright"), StorageLimits::default())
+        .unwrap();
+    let original = owner.project_id().unwrap();
+    edit(&core, false);
+    assert!(io_observer::fail_once("root_parent_sync", || owner.save_active()).is_err());
+    std::fs::rename(&drive, temp.path("hidden-drive")).unwrap();
+    let roots = SessionRoots {
+        read: vec![temp.root().into()],
+        write: vec![temp.root().into()],
+    };
+    let mut host = HostCommandOwner::open(HostConfig {
+        scheduler_settings: None,
+        project: "c7-fix1-rescue".into(),
+        path: None,
+        roots: roots.clone(),
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    host.initial_core = core.clone();
+    host.owner = Some(owner);
+    checked(
+        &mut host,
+        HostCommand::PreviewRescue {
+            snapshot: HostSnapshot::capture(&core).unwrap(),
+        },
+    );
+    let destination = temp.path("rescue.kinewright");
+    let reply = host.execute_operation(
+        HostCommand::RescueTo {
+            destination: destination.clone(),
+        },
+        roots,
+        Some(&"s".repeat(64)),
+        Some(1),
+    );
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    drop(host);
+    let rescued = Ja1EditingSession::open(&destination)
+        .unwrap()
+        .project_id()
+        .unwrap();
+    println!(
+        "C7_RESCUE_IDENTITY original={} rescued={} status={:?}",
+        original.as_str(),
+        rescued.as_str(),
+        reply.status.project_id
+    );
+    assert_eq!(reply.status.project_id, Some(rescued), "C7_RESCUE_IDENTITY");
+}

@@ -113,11 +113,26 @@ impl HostCommandOwner {
             .into());
         }
         // An uncertain earlier publication of this batch's run retries its
-        // original envelope; nothing new is built until it settles.
+        // original envelope; nothing new is built until it settles. Only the
+        // exact request its Director assignment names may retry it.
         if let Some(PendingPublication::Wire(original, actor)) = &self.hooks.pending
             && original.consume_batch.as_ref() == Some(&request.batch_id)
             && *actor == self.attachments[index].id
         {
+            let OrchestrationCommand::StartRun(start) = &original.envelope.command else {
+                return Err(HostRefusal::new(
+                    "orchestration_refused",
+                    "original uncertain command must reconcile first",
+                )
+                .into());
+            };
+            if start.director.assignment != evidence_ref(&assignment_bytes(request)?) {
+                return Err(HostRefusal::new(
+                    "id_payload_conflict",
+                    "Revise cut retry changed the submitted request",
+                )
+                .into());
+            }
             let original = (**original).clone();
             let run: RunId = original.envelope.identity("run").map_err(|reason| {
                 HostRefusal::new("orchestration_refused", &format!("{reason:?}"))

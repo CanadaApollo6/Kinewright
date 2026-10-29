@@ -307,9 +307,11 @@ impl KinewrightApp {
         self.focused_mut().studio.mode = Mode::Studio;
         self.install_studio_context(context)
     }
-    /// The `revise` scene: the project's saved notes, sent by Revise cut through
-    /// its writer host, with the run Notes shows. No picture is bound: a version
-    /// context's readers would hold the bundle the host needs.
+    /// The `revise` scene: a project whose notes were already sent by Revise cut
+    /// (staged by the C7 Studio test), shown in Notes with its run. The scene
+    /// only reads: it sends no Revise cut, so it can never start a run or reach
+    /// a Director provider. No picture is bound: a version context's readers
+    /// would hold the bundle the host needs.
     fn prepare_revise_screenshot(
         &mut self,
         mut attachment: crate::ja1_attachment::Ja1Attachment,
@@ -333,21 +335,20 @@ impl KinewrightApp {
         let versions = attachment
             .studio_versions()
             .map_err(|error| error.to_string())?;
+        let project = attachment
+            .studio_project_id()
+            .map_err(|error| error.to_string());
         self.focused_mut().ja1 = Some(attachment);
         self.focused_mut().studio.versions = versions;
         self.focused_mut().studio.mode = Mode::Studio;
         self.focused_mut().studio.tab = Tab::Notes;
+        // Notes open with no place to keep them: nothing kept on this computer
+        // is read, resumed or written, and every send is refused.
+        let feedback = &mut self.focused_mut().studio.feedback;
+        let _ = feedback.open(project, Err("screenshot scene".into()));
+        feedback.message = None;
         self.feedback_frame();
-        self.with_feedback(|feedback, port| {
-            feedback.refresh(&*port)?;
-            feedback.selection = feedback
-                .saved
-                .iter()
-                .map(|note| note.reference.clone())
-                .collect();
-            feedback.submit(port);
-            Ok::<(), String>(())
-        })?
+        self.with_feedback(|feedback, port| feedback.refresh(&*port))?
     }
     pub(crate) fn update_owned_playback(
         &mut self,

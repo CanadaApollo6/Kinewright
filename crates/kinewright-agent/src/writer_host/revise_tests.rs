@@ -291,6 +291,59 @@ fn c7_fault_before_the_run_publication_leaves_the_batch_unconsumed() {
     assert_eq!(run_count(&f), 1, "C7_ATOMIC_LINK");
 }
 
+/// While the run publication's outcome is unknown, a retry with the same batch
+/// but a changed request is `id_payload_conflict`, and the exact request still
+/// settles its one run.
+#[test]
+fn c7_fix1_pending_retry_with_a_changed_request_is_conflict() {
+    let syncs = {
+        let f = Fixture::new();
+        configure_director(&f);
+        let batch = manual_batch(&f);
+        let request = submitted_request(&f, &batch);
+        let (reply, trace) = io_observer::observe(|| revise(&f, &f.editor, &request));
+        revise_result(reply, "C7_PENDING_PAYLOAD");
+        trace
+            .events
+            .iter()
+            .filter(|event| event.operation == "root_rename")
+            .count()
+    };
+    let f = Fixture::new();
+    configure_director(&f);
+    let batch = manual_batch(&f);
+    let request = submitted_request(&f, &batch);
+    // The run's own publication renames, then its parent sync fails: unknown.
+    let unknown = io_observer::fail_nth("root_parent_sync", syncs, || {
+        revise(&f, &f.editor, &request)
+    });
+    assert_eq!(
+        unknown.error.as_ref().map(|error| error.code.as_str()),
+        Some("durability_unknown"),
+        "C7_PENDING_PAYLOAD: {:?}",
+        unknown.error
+    );
+    let mut changed = request.clone();
+    changed.expected_candidate_head = kinewright_project::bundle_records::HeadId::fresh().unwrap();
+    let refused = revise(&f, &f.editor, &changed);
+    assert_eq!(
+        refused.error.as_ref().map(|error| error.code.as_str()),
+        Some("id_payload_conflict"),
+        "C7_PENDING_PAYLOAD: {:?}",
+        refused.error
+    );
+    let settled = revise_result(revise(&f, &f.editor, &request), "C7_PENDING_PAYLOAD");
+    let ReviseResult::Accepted { run_id, .. } = settled else {
+        panic!("C7_PENDING_PAYLOAD: {settled:?}")
+    };
+    assert_eq!(
+        consumed(&f, &batch).as_deref(),
+        Some(run_id.as_str()),
+        "C7_PENDING_PAYLOAD"
+    );
+    assert_eq!(run_count(&f), 1, "C7_PENDING_PAYLOAD");
+}
+
 #[test]
 fn c7_moved_head_is_conflict() {
     use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
