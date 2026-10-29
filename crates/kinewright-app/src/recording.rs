@@ -1297,6 +1297,56 @@ pub(crate) mod feedback_capture {
         reservation: Option<StorageReservation>,
         pending_write: Option<PendingVoiceWrite>,
     }
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(crate) struct KeptCapture {
+        project: ProjectId,
+        pub(crate) anchor: FeedbackAnchor,
+        note: NoteId,
+        log: PlayheadLog<FeedbackAnchor>,
+        path: PathBuf,
+        complete: bool,
+        capture_error: Option<String>,
+    }
+    impl KeptCapture {
+        pub(crate) fn restore(
+            &self,
+            context: &kinewright_project::studio_store::FrozenContext,
+        ) -> Result<CapturedAudio, BundleError> {
+            if context.capture_project_id()? != self.project
+                || context.snapshot.descriptor.key != self.anchor.snapshot
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            let directory = kinewright_media::default_data_dir().join("feedback-captures");
+            if self.path.parent() != Some(directory.as_path()) {
+                return Err(BundleError::Identity(
+                    "capture is outside the feedback capture directory".into(),
+                ));
+            }
+            if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
+                && (!metadata.is_file()
+                    || metadata.len() > kinewright_project::voice_ingress::AUDIO_BYTES)
+            {
+                return Err(BundleError::Identity(
+                    "capture is not a bounded regular file".into(),
+                ));
+            }
+            let budget = CaptureReservation::reserve_context(context)?;
+            Ok(CapturedAudio {
+                project: self.project.clone(),
+                anchor: self.anchor.clone(),
+                note_id: self.note.clone(),
+                log: Some(self.log.clone()),
+                path: self.path.clone(),
+                complete: self.complete,
+                capture_error: self.capture_error.clone(),
+                snapshot: Some(context.pin_snapshot()?),
+                reservation: Some(budget.reservation),
+                pending_write: None,
+            })
+        }
+    }
     pub(crate) struct SavedAudio {
         note: kinewright_project::voice_store::VoiceNoteHandle,
         anchor: FeedbackAnchor,
@@ -1566,6 +1616,26 @@ pub(crate) mod feedback_capture {
         }
     }
     impl CapturedAudio {
+        pub(crate) fn kept_binding(&self) -> Result<KeptCapture, BundleError> {
+            Ok(KeptCapture {
+                project: self.project.clone(),
+                anchor: self.anchor.clone(),
+                note: self.note_id.clone(),
+                log: self.log.clone().ok_or(BundleError::HistoryChanged)?,
+                path: self.path.clone(),
+                complete: self.complete,
+                capture_error: self.capture_error.clone(),
+            })
+        }
+        pub(crate) fn playhead_bytes(&self) -> Result<Vec<u8>, BundleError> {
+            let mut log = self.log.clone().ok_or(BundleError::HistoryChanged)?;
+            log.version = 2;
+            log.capture_status = Some(kinewright_media::voice_note::CaptureStatus {
+                complete: self.complete,
+                capture_error: self.capture_error.clone(),
+            });
+            serde_json::to_vec(&log).map_err(|e| BundleError::Corrupt(e.to_string()))
+        }
         pub(crate) fn prepare_upload(
             &self,
             envelope: MetadataEnvelope,
@@ -1587,13 +1657,7 @@ pub(crate) mod feedback_capture {
             if wav.len() as u64 > kinewright_project::voice_ingress::AUDIO_BYTES {
                 return Err(BundleError::Capacity("voice capture bytes"));
             }
-            let mut log = self.log.clone().ok_or(BundleError::HistoryChanged)?;
-            log.version = 2;
-            log.capture_status = Some(kinewright_media::voice_note::CaptureStatus {
-                complete: self.complete,
-                capture_error: self.capture_error.clone(),
-            });
-            let log = serde_json::to_vec(&log).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let log = self.playhead_bytes()?;
             let reference = |bytes: &[u8]| ObjectRef {
                 sha256: kinewright_media::sha256_bytes(bytes),
                 byte_length: bytes.len() as u64,

@@ -14,7 +14,7 @@ use kinewright_project::{
     studio_records::{
         CommentId, FeedbackAnchor, FeedbackBatch, FeedbackBatchId, FeedbackEvidenceKind,
         FeedbackIndex, FeedbackRevision, FeedbackTarget, FrameRate, MetadataChange,
-        MetadataEnvelope, MetadataResult, MetadataScope, MetadataUpdate, Orientation,
+        MetadataEnvelope, MetadataResult, MetadataScope, MetadataUpdate, NoteId, Orientation,
         ReviseRequest, SnapshotDescriptor, SnapshotKey, VoiceRef,
     },
 };
@@ -801,6 +801,8 @@ struct KeptRef<'a> {
     selection: &'a [ObjectRef],
     submission: Option<&'a Submission>,
     detached: &'a [Detached],
+    voices: &'a BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
+    active_voice: &'a Option<NoteId>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -811,6 +813,10 @@ struct Kept {
     selection: Vec<ObjectRef>,
     submission: Option<Submission>,
     detached: Vec<Detached>,
+    #[serde(default)]
+    voices: BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
+    #[serde(default)]
+    active_voice: Option<NoteId>,
 }
 const KEPT_VERSION: u32 = 2;
 const RESTARTED: &str = "Kinewright closed before this outcome was known";
@@ -981,6 +987,8 @@ fn submission_matches(submission: &Submission) -> bool {
 )]
 pub(crate) struct Feedback {
     pub(crate) drafts: Vec<Draft>,
+    pub(crate) voices: BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
+    pub(crate) active_voice: Option<NoteId>,
     pub(crate) active: Option<CommentId>,
     pub(crate) drawing: bool,
     /// The stroke being drawn: its draft and the bound frame it started on.
@@ -1022,7 +1030,10 @@ impl Feedback {
     }
     /// Feedback that closing now would leave outside the project.
     pub(crate) fn unsaved(&self) -> bool {
-        self.submission.is_some()
+        self.voices
+            .values()
+            .any(crate::studio_voice::KeptVoice::holds_work)
+            || self.submission.is_some()
             || !self.detached.is_empty()
             || self.drafts.iter().any(Draft::holds_work)
     }
@@ -1087,6 +1098,7 @@ impl Feedback {
             && self.selection.is_empty()
             && self.submission.is_none()
             && self.detached.is_empty()
+            && self.voices.is_empty()
         {
             match std::fs::remove_file(&path) {
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
@@ -1100,6 +1112,8 @@ impl Feedback {
                 selection: &self.selection,
                 submission: self.submission.as_ref(),
                 detached: &self.detached,
+                voices: &self.voices,
+                active_voice: &self.active_voice,
             })
             .map_err(std::io::Error::other)
             .and_then(|bytes| write_atomically(&path, &bytes))
@@ -1120,7 +1134,7 @@ impl Feedback {
     /// The exact command about to be sent is durably kept, or why it is not.
     /// Only a durable file for this project counts: an unsaved project or one
     /// whose kept state failed to load refuses the send.
-    fn retain_for_dispatch(&mut self) -> Result<(), String> {
+    pub(crate) fn retain_for_dispatch(&mut self) -> Result<(), String> {
         match &self.keeping {
             Keeping::Unsaved => Err("the project is not saved yet".to_owned()),
             Keeping::Failed { why, .. } => Err(why.clone()),
@@ -1143,6 +1157,8 @@ impl Feedback {
         }
         // The old file's lock is released only after its last write.
         self.keeping = Keeping::Unsaved;
+        self.voices.clear();
+        self.active_voice = None;
         self.issuer = None;
         self.saved.clear();
         self.older.clear();
@@ -1262,6 +1278,10 @@ impl Feedback {
     /// when it is this project's and still exactly its draft's; otherwise its
     /// draft becomes a separate unsent draft and the command settles alone.
     fn merge(&mut self, project: &ProjectId, kept: Kept) {
+        self.voices = kept.voices;
+        self.active_voice = kept
+            .active_voice
+            .filter(|note| self.voices.contains_key(note));
         let ours = |write: &PendingWrite| write.envelope.project_id == *project;
         for mut draft in kept.drafts {
             if let DraftState::Pending(pending) = &mut draft.state {
@@ -2619,7 +2639,6 @@ impl KinewrightApp {
         comment: &CommentId,
         voice: VoiceRef,
         transcript: Option<ObjectRef>,
-        text: String,
     ) -> Result<(), String> {
         self.with_feedback(|feedback, port| {
             let draft = feedback
@@ -2671,7 +2690,6 @@ impl KinewrightApp {
                 },
             };
             draft.origin = origin;
-            draft.text = text;
             feedback.changed = true;
             Ok(())
         })?

@@ -33,7 +33,7 @@ impl LeaseLifetime {
             .upgrade()
             .is_some_and(|alive| alive.load(Ordering::Acquire))
         {
-            self.remote.check()
+            self.remote.check_cached()
         } else {
             Err("attachment ended".into())
         };
@@ -83,18 +83,25 @@ impl SnapshotReaders {
             return Err(BundleError::Identity(error.message));
         }
         let lease = reply.snapshot_lease.ok_or(BundleError::HistoryChanged)?;
-        if lease.descriptor.key != *key {
-            return Err(BundleError::HistoryChanged);
-        }
-        let remote = client
-            .snapshot_lease_remote(&lease.id, &lease.payload_sha256)
-            .map_err(cause)?;
+        let remote = match client.snapshot_lease_remote(&lease.id, &lease.payload_sha256) {
+            Ok(remote) => remote,
+            Err(error) => {
+                let _ = client.request(HostCommand::ReleaseSnapshot {
+                    id: lease.id.clone(),
+                    payload_sha256: lease.payload_sha256.clone(),
+                });
+                return Err(cause(error));
+            }
+        };
         let lifetime = Arc::new(LeaseLifetime {
             origin: MediaSourceOrigin::new_project(),
             remote,
             context,
             released: AtomicBool::new(false),
         });
+        if lease.descriptor.key != *key {
+            return Err(BundleError::HistoryChanged);
+        }
         let grant = lifetime
             .origin
             .legacy_media()

@@ -1372,6 +1372,14 @@ impl HostCommandOwner {
         let owner = self.owner.as_ref()?;
         Some((owner.project_id().ok()?, owner.store().ok()?.owner_epoch()))
     }
+    fn check_named_access(&self, roots: &SessionRoots, write: bool) -> Result<(), HostError> {
+        for pin in &self.pins {
+            if !roots.permits(&pin.anchor, write) {
+                return Err(HostRefusal::roots("forwarded roots exclude the named project").into());
+            }
+        }
+        Ok(())
+    }
     /// Errors stay typed in the reply; source retention loss is latched for the whole context.
     #[allow(
         clippy::needless_pass_by_value,
@@ -1405,13 +1413,7 @@ impl HostCommandOwner {
             }
             // Every named access honors the forwarded roots again. Its IO owner already holds
             // pinned descriptors; narrowed roots cannot retain an older wider authorization.
-            for pin in &self.pins {
-                if !roots.permits(&pin.anchor, write) {
-                    return Err(
-                        HostRefusal::roots("forwarded roots exclude the named project").into(),
-                    );
-                }
-            }
+            self.check_named_access(&roots, write)?;
             self.execute_inner(command, &roots, &mut reply)
         });
         if let Err(error) = result {

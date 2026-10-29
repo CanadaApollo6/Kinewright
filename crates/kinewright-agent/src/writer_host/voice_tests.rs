@@ -168,6 +168,45 @@ mod tests {
     }
 
     #[test]
+    fn fix1_stalled_voice_body_releases_permit_and_reservation() {
+        use std::io::{Read as _, Write as _};
+        let (_temp, host, refs) = fixture();
+        let client = host.client();
+        let (upload, wav, log) = descriptor(&client, snapshot(&host), &refs, false);
+        let before = usage(&host);
+        let request = HostRequest {
+            editor: client.editor.clone(),
+            operation: None,
+            protocol: HOST_PROTOCOL,
+            project: client.endpoint().project.clone(),
+            roots: client.bootstrap.roots.clone(),
+            command: HostCommand::AcknowledgeVoice {
+                upload: upload.clone(),
+            },
+        };
+        let mut socket = std::net::TcpStream::connect(client.endpoint().address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(25)))
+            .unwrap();
+        write!(socket, "POST /voice HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: {}\r\nx-kinewright-project: {}\r\nx-kinewright-protocol: 1\r\nx-kinewright-voice: {}\r\nContent-Length: {}\r\n\r\nx", client.bootstrap.auth.bearer(), client.endpoint().project, serde_json::to_string(&request).unwrap(), wav.len()+log.len()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while usage(&host).reserved_bytes == before.reserved_bytes {
+            assert!(Instant::now() < deadline, "FIX1_UPLOAD_ADMITTED");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 408"),
+            "FIX1_BODY_DEADLINE {response}"
+        );
+        assert_eq!(usage(&host).reserved_bytes, before.reserved_bytes);
+        assert_eq!(usage(&host).objects, before.objects);
+        send(&client, &upload, &wav, &log);
+        assert_eq!(notes(&client).notes.len(), 1);
+    }
+
+    #[test]
     fn c8_bounds_refuse_without_objects_or_reservations() {
         let (_temp, host, refs) = fixture();
         let key = snapshot(&host);

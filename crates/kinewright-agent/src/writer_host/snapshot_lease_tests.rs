@@ -327,6 +327,171 @@ mod tests {
             "lease_revoked"
         );
     }
+    #[test]
+    fn fix1_lease_honors_forwarded_roots_on_both_routes() {
+        let (_root, host, key) = fixture();
+        let client = host.client();
+        let lease = accepted(
+            client
+                .request(HostCommand::LeaseSnapshot { key: key.clone() })
+                .unwrap(),
+        )
+        .snapshot_lease
+        .unwrap();
+        let mut narrowed = client.clone();
+        narrowed.bootstrap.roots = SessionRoots::default();
+        let refused = narrowed
+            .request(HostCommand::LeaseSnapshot { key: key.clone() })
+            .unwrap();
+        assert_eq!(
+            refused.error.as_ref().map(|e| e.code.as_str()),
+            Some("root_refused"),
+            "FIX1_LEASE_ROOTS_ISSUANCE"
+        );
+        assert!(refused.snapshot_lease.is_none());
+        let status = HostCommand::SnapshotLeaseStatus {
+            id: lease.id.clone(),
+            payload_sha256: lease.payload_sha256.clone(),
+        };
+        assert_eq!(
+            narrowed
+                .request(status.clone())
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "root_refused",
+            "FIX1_LEASE_ROOTS_STATUS"
+        );
+        assert!(
+            narrowed
+                .snapshot_lease_remote(&lease.id, &lease.payload_sha256)
+                .unwrap()
+                .check()
+                .is_err(),
+            "FIX1_LEASE_ROOTS_DEDICATED"
+        );
+        accepted(client.request(status).unwrap());
+        client
+            .snapshot_lease_remote(&lease.id, &lease.payload_sha256)
+            .unwrap()
+            .check()
+            .unwrap();
+        accepted(
+            narrowed
+                .request(HostCommand::ReleaseSnapshot {
+                    id: lease.id.clone(),
+                    payload_sha256: lease.payload_sha256,
+                })
+                .unwrap(),
+        );
+    }
+    #[test]
+    fn fix1_lease_status_timeout_keeps_playback_and_revoke_stops_it() {
+        use kinewright_core::{Playback, TimeCode};
+        let (_root, host, key) = fixture();
+        let client = host.client();
+        let lease = accepted(client.request(HostCommand::LeaseSnapshot { key }).unwrap())
+            .snapshot_lease
+            .unwrap();
+        let remote = client
+            .snapshot_lease_remote(&lease.id, &lease.payload_sha256)
+            .unwrap();
+        let origin = Arc::new(kinewright_core::MediaSourceOrigin::new_project());
+        let grant = origin.legacy_media().unwrap();
+        let checker = remote.clone();
+        let revoke = Arc::clone(&origin);
+        let authority = ReadAuthority::new(
+            grant,
+            lease.payload_sha256.clone(),
+            Arc::new(move || {
+                let result = checker.check_cached();
+                if result.is_err() {
+                    revoke.revoke_legacy_media();
+                }
+                result
+            }),
+        );
+        let session = SnapshotReadSession::new(StorageLimits::default()).unwrap();
+        let reader = session
+            .open(&host.config_path_probe(), &lease, authority)
+            .unwrap();
+        let context = Arc::new(reader.frozen_context().unwrap());
+        let inputs = context.playback_inputs().unwrap();
+        let engine = Arc::new(
+            kinewright_media::FfmpegMediaEngine::new_with_paced_test_audio(
+                kinewright_media::GpuContext::headless(true).unwrap(),
+                kinewright_media::default_data_dir(),
+            )
+            .unwrap(),
+        );
+        let mut document = context.document.clone();
+        for track in &mut document.tracks {
+            let original = track.clips[0].clone();
+            track.clips = (0..40_u64)
+                .map(|index| {
+                    let mut clip = original.clone();
+                    clip.id = kinewright_core::ClipId(track.id.0 * 1000 + index);
+                    clip.timeline_start = TimeCode(i64::try_from(index * 60).unwrap());
+                    clip
+                })
+                .collect();
+        }
+        document.duration = TimeCode(39 * 60 + context.document.duration.0);
+        let document = Arc::new(document);
+        let media = engine.certified_media_for_document(Arc::clone(&inputs), Arc::clone(&document));
+        media.set_document(document);
+        let frames = media.frames();
+        media.play(TimeCode::ZERO);
+        media.request_frame(TimeCode::ZERO);
+        frames
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "FIX1_PLAYBACK_POSITIVE {error:?}: {:?}",
+                    media.events().try_iter().collect::<Vec<_>>()
+                )
+            });
+        let owner = host.owner.upgrade().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let load = thread::spawn(move || {
+            let _held = owner.lock().unwrap();
+            tx.send(()).unwrap();
+            thread::sleep(Duration::from_secs(4));
+        });
+        rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let probing = std::time::Instant::now();
+        assert!(
+            remote.check_cached().is_ok(),
+            "FIX1_TIMEOUT_PRESERVES_LEASE"
+        );
+        assert!(
+            probing.elapsed() >= Duration::from_secs(1),
+            "FIX1_REAL_STATUS_TIMEOUT"
+        );
+        assert!(origin.legacy_media().is_some());
+        load.join().unwrap();
+        let before = media.position();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while media.position() <= before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "FIX1_PLAYBACK_AFTER_TIMEOUT"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!inputs.test_audio_samples().unwrap().is_empty());
+        remote.release().unwrap();
+        media.request_frame(TimeCode(3));
+        assert!(
+            inputs.test_audio_samples().is_err(),
+            "FIX1_EXPLICIT_REVOKE_STOPS_PLAYBACK"
+        );
+        media.pause();
+        drop(media);
+        drop(engine);
+    }
     impl WriterHost {
         fn config_path_probe(&self) -> std::path::PathBuf {
             self.owner

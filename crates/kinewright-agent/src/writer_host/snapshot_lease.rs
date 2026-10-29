@@ -25,9 +25,13 @@ impl HostCommandOwner {
         &mut self,
         index: usize,
         command: HostCommand,
+        roots: &super::SessionRoots,
     ) -> HostReply {
         let mut reply = HostReply::default();
         let result = (|| -> Result<(), HostError> {
+            if !matches!(command, HostCommand::ReleaseSnapshot { .. }) {
+                self.check_named_access(roots, false)?;
+            }
             match command {
                 HostCommand::LeaseSnapshot { key } => {
                     if self.attachments[index].snapshot_leases.len() >= 64 {
@@ -116,9 +120,18 @@ pub struct SnapshotLeaseRemote {
     project: String,
     status: Vec<u8>,
     release: Vec<u8>,
+    cache: Arc<std::sync::Mutex<LeaseCache>>,
+}
+struct LeaseCache {
+    fresh_until: std::time::Instant,
+    revoked: bool,
+}
+enum ProbeFailure {
+    Busy,
+    Ended,
 }
 impl SnapshotLeaseRemote {
-    fn send(&self, body: &[u8]) -> Result<(), String> {
+    fn send(&self, body: &[u8]) -> Result<(), ProbeFailure> {
         let response = self
             .http
             .post(&self.url)
@@ -128,18 +141,56 @@ impl SnapshotLeaseRemote {
             .header("content-type", "application/json")
             .body(body.to_vec())
             .send()
-            .map_err(|_| "snapshot host unavailable".to_owned())?;
+            .map_err(|error| {
+                if error.is_connect() && !error.is_timeout() {
+                    ProbeFailure::Ended
+                } else {
+                    ProbeFailure::Busy
+                }
+            })?;
         if response.status() == StatusCode::NO_CONTENT {
             Ok(())
+        } else if response.status() == StatusCode::TOO_MANY_REQUESTS
+            || response.status().is_server_error()
+        {
+            Err(ProbeFailure::Busy)
         } else {
-            Err("snapshot lease revoked".into())
+            Err(ProbeFailure::Ended)
         }
     }
     pub fn check(&self) -> Result<(), String> {
         self.send(&self.status)
+            .map_err(|_| "snapshot lease unavailable".into())
+    }
+    /// Issuance establishes the lease. Busy status probes retain it; refusal or
+    /// a dead loopback endpoint ends it. Cursor checks share a 250 ms positive cache.
+    pub fn check_cached(&self) -> Result<(), String> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| "snapshot lease cache unavailable")?;
+        if cache.revoked {
+            return Err("snapshot lease revoked".into());
+        }
+        if std::time::Instant::now() < cache.fresh_until {
+            return Ok(());
+        }
+        let probe = self.send(&self.status);
+        cache.fresh_until = std::time::Instant::now() + Duration::from_millis(250);
+        match probe {
+            Ok(()) | Err(ProbeFailure::Busy) => Ok(()),
+            Err(ProbeFailure::Ended) => {
+                cache.revoked = true;
+                Err("snapshot lease revoked or host ended".into())
+            }
+        }
     }
     pub fn release(&self) -> Result<(), String> {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.revoked = true;
+        }
         self.send(&self.release)
+            .map_err(|_| "snapshot lease release unavailable".into())
     }
 }
 impl HostClient {
@@ -157,6 +208,10 @@ impl HostClient {
             command,
         };
         Ok(SnapshotLeaseRemote {
+            cache: Arc::new(std::sync::Mutex::new(LeaseCache {
+                fresh_until: std::time::Instant::now() + Duration::from_millis(250),
+                revoked: false,
+            })),
             http: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .redirect(reqwest::redirect::Policy::none())
@@ -203,10 +258,10 @@ pub(super) async fn lease_request(
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut owner = state.owner.lock().map_err(|_| ())?;
-        let (index, _, _) = owner
+        let (index, _, roots) = owner
             .authorize_request(Some(&bearer), &request)
             .map_err(|_| ())?;
-        let reply = owner.execute_snapshot_lease(index, request.command);
+        let reply = owner.execute_snapshot_lease(index, request.command, &roots);
         if reply.error.is_none() {
             Ok(())
         } else {

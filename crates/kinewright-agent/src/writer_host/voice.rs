@@ -173,9 +173,15 @@ pub(super) async fn upload_request(
         }
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let Ok(bytes) = to_bytes(request.into_body(), usize::try_from(length).unwrap_or(0)).await
-    else {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(15),
+        to_bytes(request.into_body(), usize::try_from(length).unwrap_or(0)),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
     if bytes.len() as u64 != length {
         return StatusCode::BAD_REQUEST.into_response();

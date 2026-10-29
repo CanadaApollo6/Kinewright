@@ -512,7 +512,7 @@ impl super::HostCommandOwner {
             _ => vec![],
         };
         let reply = if super::snapshot_lease::is_lease_command(&request.command) {
-            self.execute_snapshot_lease(index, request.command)
+            self.execute_snapshot_lease(index, request.command, &roots)
         } else if super::orchestration::is_hook(&request.command) {
             self.execute_hook(index, request.command, &roots)
         } else if detach {
