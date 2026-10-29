@@ -217,7 +217,7 @@ pub use timeline::{
     visual_layers_at,
 };
 #[cfg(any(test, feature = "test-util"))]
-pub use transcript::TranscriptInferenceHold;
+pub use transcript::{TranscriptInferenceHold, provision_voice_model};
 pub use transcript::{
     WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,
     default_data_dir,

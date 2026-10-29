@@ -838,6 +838,23 @@ impl TranscriptStore {
     }
 }
 
+/// Provision the same pinned, hash-checked model used by asset transcription.
+///
+/// # Errors
+/// Returns the normal model download, verification, installation or cancellation error.
+#[cfg(any(test, feature = "test-util"))]
+pub fn provision_voice_model(
+    data_dir: &Path,
+    cancellation: &ExportCancellation,
+) -> Result<PathBuf, MediaError> {
+    ensure_model(
+        data_dir,
+        Path::new("voice-control"),
+        &StatusReporter::new(),
+        cancellation,
+    )
+}
+
 fn ensure_model(
     data_dir: &Path,
     asset_path: &Path,

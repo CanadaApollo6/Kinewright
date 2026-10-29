@@ -1,8 +1,10 @@
 # JA-1: Studio, versions, pointing and orchestration v1
 
-Status: **design accepted 2026-10-20** (revision 3). Implementation has not started. Builds,
-provider probes, renders, fault injections and measurements are NOT RUN. Windows durable writes
-(G1-W) are a Windows release blocker; Linux ships first.
+Status: **design accepted 2026-10-20** (revision 3). Implementation is staged. S3 has owned-input,
+selection, typed/drawn feedback, mapping/voice backend and host-hook implementations. S3 acceptance
+remains partial: Studio voice/scheduler composition and the combined App end-to-end route are open.
+[The S3 source report](reports/ja1-s3/final.md) records gates, deferrals and NOT RUN lanes. Windows
+durable writes (G1-W) remain a Windows release blocker; Linux ships first.
 
 Part of job A in the [product brief](PRODUCT-BRIEF-2026-10.md#programme-mapping). This is
 data-loss work: each implementation stage gets two reviews (Astra and Muse). JA-2

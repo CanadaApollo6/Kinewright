@@ -1,0 +1,16 @@
+{
+  "current": {
+    "exit": 101,
+    "aws_lc_native_failure": true,
+    "pthread_rwlock_t": true,
+    "missing_errno": true,
+    "log": "gate1-windows.log"
+  },
+  "parent_295619cc": {
+    "exit": 101,
+    "aws_lc_native_failure": true,
+    "pthread_rwlock_t": true,
+    "missing_errno": true,
+    "log": "windows-parent-295619cc.log"
+  }
+}

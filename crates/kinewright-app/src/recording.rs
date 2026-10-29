@@ -3100,6 +3100,21 @@ pub(crate) mod feedback_capture {
             } else {
                 "s3_real_spoken_note_control"
             };
+            let _inference = INFERENCE_TESTS.lock().unwrap();
+            if std::env::var_os("KINEWRIGHT_S3_PROVISION_MODEL").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                match kinewright_media::provision_voice_model(
+                    &model_root,
+                    &kinewright_core::ExportCancellation::default(),
+                ) {
+                    Ok(path) => eprintln!("S3_PINNED_MODEL_READY {}", path.display()),
+                    Err(error) => {
+                        eprintln!("NOT RUN {control}: ensure_model failed: {error}");
+                        return;
+                    }
+                }
+            }
             if !model.is_file() || sha256_file(&model).ok().as_deref() != Some(WHISPER_MODEL_SHA256)
             {
                 eprintln!(
@@ -3108,7 +3123,6 @@ pub(crate) mod feedback_capture {
                 );
                 return;
             }
-            let _inference = INFERENCE_TESTS.lock().unwrap();
             let root = TempDirectory::new_in(&workspace_target_dir(), control);
             let cache = root.path("voice-control-cache");
             std::fs::create_dir_all(cache.join("models/whisper")).unwrap();

@@ -35,3 +35,13 @@ The first rapid-focus control reached waveform delivery but failed its engine te
 | Media doctest | 1 | 0 | 0 |
 
 Workspace build, all-target Clippy with warnings denied, formatting and manifest lint pass. Windows compilation exits 101 in native prerequisites at both this source and exact base `295619cc`; neither validates the touched Windows Rust. The final trim mutation was refreshed after the last `app.rs` lifecycle edit; all three pairs restore the exact guarded source and pass. Astra 4's persisted-edit pair is NOT RUN because that composition is deferred.
+
+## Commit 2 equipped controls and scope
+
+The test-util model provisioning adapter calls the existing pinned, hash-checked `ensure_model` path. The model is in this worktree's isolated test cache. The first equipped attempt revealed the missing `espeak-ng` fixture prerequisite. Its helper source is byte-identical at `295619cc`; the model-equipped parent control itself is NOT RUN. Task-local package extraction supplies the prerequisite with hashes checked against the local repository database. No system package or desktop setting changed.
+
+The real CPU Whisper spoken-note control then passed, and the final equipped pair passed `2 passed; 0 failed; 0 ignored` without a NOT RUN marker. These controls retain original ASR and edited transcript references through the existing owner adapter. They do not exercise a new Studio UI, authenticated upload or private range adapter. G11 App closure remains open.
+
+The final slow-enabled App suite passed `939 passed; 0 failed; 3 ignored`. Final Project S3 controls passed 49 tests, host controls passed 109 tests, and the explicit final App frozen-selection/copy/reopen control passed one test. Workspace build, Clippy with warnings denied, formatting, manifest lint and all 44 lint self-tests pass. Final serial Media totals are recorded below when its exhaustive run completes.
+
+The final Media slow run completed: unit inventory `1229 passed; 0 failed; 29 ignored`, integrations `33 passed; 0 failed; 3 ignored`, doctest `1 passed; 0 failed; 0 ignored`. See [final.md](final.md) for the complete final table and named NOT RUN lanes. All suites started by this task have exited.

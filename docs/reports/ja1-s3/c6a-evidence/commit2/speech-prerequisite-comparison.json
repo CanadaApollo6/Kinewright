@@ -1,0 +1,8 @@
+{
+  "base": "295619cc",
+  "fixture_helper_sha256": "0d395f3542303a7e517d290b6148528c2f91a8856640232086500f3646076c21",
+  "current_helper_sha256": "0d395f3542303a7e517d290b6148528c2f91a8856640232086500f3646076c21",
+  "initial_failure": "espeak-ng executable absent",
+  "fresh_model_equipped_base_run": "NOT RUN",
+  "qualification": "Unchanged fixture helper invokes the same missing executable at the base; this is a source comparison, not a claimed parent runtime run."
+}

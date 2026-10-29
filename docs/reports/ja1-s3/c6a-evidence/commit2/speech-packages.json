@@ -1,0 +1,17 @@
+[
+  {
+    "url": "https://mirror.omarchy.org/extra/os/x86_64/pcaudiolib-1.3-1-x86_64.pkg.tar.zst",
+    "sha256": "be519c77ee888b5abb265b993471e1ef42f8b5d0af00bf9d73ce7d4a1019e9b3",
+    "metadata": "/var/lib/pacman/sync/extra.db:pcaudiolib-1.3-1/desc"
+  },
+  {
+    "url": "https://mirror.omarchy.org/extra/os/x86_64/libsonic-0.2.0-2-x86_64.pkg.tar.zst",
+    "sha256": "b2eaa5075d038d6839c7ddb1f742eaca9a31648f8e79ec45ac05f38992b56d42",
+    "metadata": "/var/lib/pacman/sync/extra.db:libsonic-0.2.0-2/desc"
+  },
+  {
+    "url": "https://mirror.omarchy.org/extra/os/x86_64/espeak-ng-1.52.0-1-x86_64.pkg.tar.zst",
+    "sha256": "baad119a494cacd1ba0f290f78a0159051ba1d17e09bc7d1b2df5fa7e7df78d9",
+    "metadata": "/var/lib/pacman/sync/extra.db:espeak-ng-1.52.0-1/desc"
+  }
+]

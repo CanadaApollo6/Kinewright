@@ -1,0 +1,132 @@
+[
+  {
+    "log": "final-selection-fixtures.log.gz",
+    "identity": {
+      "dependencies": [
+        {
+          "byte_length": 2609,
+          "record_kind": "branch_checkpoint",
+          "sha256": "7f62d002f559637fa8315fe3a0f41fe1b1aad65a78dce22d8b2012cb1a5225c5"
+        },
+        {
+          "byte_length": 2027,
+          "record_kind": "document",
+          "sha256": "204a55dab9910437e7c8ef7e4dbd68a83d6697fa3c88339d9bba192451f4e993"
+        },
+        {
+          "byte_length": 1185,
+          "record_kind": "lineage",
+          "sha256": "87470b0cb8fd1e0f5419ba502b07746111bf4332d9589f90e670737f624aef0f"
+        },
+        {
+          "byte_length": 1677,
+          "record_kind": "input_manifest",
+          "sha256": "bdef5c58554d9cc5d78c88fd4b74965cfdc09699e7f583b81f61f3b803bd36dd"
+        }
+      ],
+      "document": "204a55dab9910437e7c8ef7e4dbd68a83d6697fa3c88339d9bba192451f4e993",
+      "media": {
+        "entry": {
+          "dependencies": [
+            {
+              "byte_length": 290,
+              "record_kind": "input_chunk_table",
+              "sha256": "956a472157b3f5dee4d52c69e0348c78c93ac16190f57e312db0d0e6234bad75"
+            }
+          ],
+          "entry_id": "media:1:5eed02d49a096b954ad7446d0f0c733efcab3bc93fdcc01c14c654361ca284a4:50948:44397a704f47e1e2be611288ede1d82c7c333b433263b30d5374e1a4cd76ce3e",
+          "object": {
+            "byte_length": 50948,
+            "record_kind": "owned_media",
+            "sha256": "5eed02d49a096b954ad7446d0f0c733efcab3bc93fdcc01c14c654361ca284a4"
+          },
+          "origin": null,
+          "profile": "{\"version\":1,\"video\":{\"index\":0,\"time_base\":[1,1000],\"timestamp_origin\":0},\"audio\":{\"index\":1,\"time_base\":[1,1000],\"timestamp_origin\":0},\"fps\":{\"numerator\":24,\"denominator\":1},\"duration\":12,\"kind\":\"AudioVideo\",\"resolution\":[32,24],\"effective_color\":{\"primaries\":\"bt709\",\"transfer\":\"bt709\",\"matrix\":\"bt709\",\"range\":\"limited\",\"white_point\":\"unknown\",\"bit_depth\":8,\"confidence_basis_points\":10000,\"provenance\":\"stream_metadata\"},\"probed_color\":{\"primaries\":\"bt709\",\"transfer\":\"bt709\",\"matrix\":\"bt709\",\"range\":\"limited\",\"white_point\":\"unknown\",\"bit_depth\":8,\"confidence_basis_points\":10000,\"provenance\":\"stream_metadata\"},\"source_profile_assumption\":\"d65\"}",
+          "selected_stream": null,
+          "time_base": null
+        },
+        "manifest_ref": {
+          "byte_length": 1677,
+          "record_kind": "input_manifest",
+          "sha256": "bdef5c58554d9cc5d78c88fd4b74965cfdc09699e7f583b81f61f3b803bd36dd"
+        }
+      },
+      "snapshot": {
+        "document_hash": "204a55dab9910437e7c8ef7e4dbd68a83d6697fa3c88339d9bba192451f4e993",
+        "head": "10e9c81906b0914a4683427eb1a32ca7",
+        "input_manifest_ref": {
+          "byte_length": 1677,
+          "record_kind": "input_manifest",
+          "sha256": "bdef5c58554d9cc5d78c88fd4b74965cfdc09699e7f583b81f61f3b803bd36dd"
+        },
+        "project": "b9a42e72c14bcd0fab422ff513b65886",
+        "version": "1318f7ef4bfbd476021c8e2b41bad4b7"
+      }
+    }
+  },
+  {
+    "log": "final-selection-fixtures.log.gz",
+    "identity": {
+      "dependencies": [
+        {
+          "byte_length": 2772,
+          "record_kind": "branch_checkpoint",
+          "sha256": "27b5d92bb3faec431cf1530bbb3c85114f4901a0c03cd1e70ba8ad2d84a75588"
+        },
+        {
+          "byte_length": 2049,
+          "record_kind": "document",
+          "sha256": "d4bb2161b5a71ed354f9d8972c41df6fab700e693f6cb37ce558259566facc86"
+        },
+        {
+          "byte_length": 1449,
+          "record_kind": "lineage",
+          "sha256": "389a089f71ea64491b03ab8d9e7be5c783e152acb30a37389465478b40b34a66"
+        },
+        {
+          "byte_length": 1676,
+          "record_kind": "input_manifest",
+          "sha256": "3df4a203ace5e9990379ca2163ce35f595e86c51b2098eb02ca2d3848b1fd7a8"
+        }
+      ],
+      "document": "d4bb2161b5a71ed354f9d8972c41df6fab700e693f6cb37ce558259566facc86",
+      "media": {
+        "entry": {
+          "dependencies": [
+            {
+              "byte_length": 296,
+              "record_kind": "input_chunk_table",
+              "sha256": "e560a9884f9ee31656cd0946127aa1c10dfe01ef7f42c1bc99718c25e190f9e8"
+            }
+          ],
+          "entry_id": "media:1:fab1415d40a6461eb3daf86f1aabcf1bb1c257c9f9aedeb08ee81eca9a96153f:50958:44397a704f47e1e2be611288ede1d82c7c333b433263b30d5374e1a4cd76ce3e",
+          "object": {
+            "byte_length": 50958,
+            "record_kind": "owned_media",
+            "sha256": "fab1415d40a6461eb3daf86f1aabcf1bb1c257c9f9aedeb08ee81eca9a96153f"
+          },
+          "origin": null,
+          "profile": "{\"version\":1,\"video\":{\"index\":0,\"time_base\":[1,1000],\"timestamp_origin\":0},\"audio\":{\"index\":1,\"time_base\":[1,1000],\"timestamp_origin\":0},\"fps\":{\"numerator\":24,\"denominator\":1},\"duration\":12,\"kind\":\"AudioVideo\",\"resolution\":[32,24],\"effective_color\":{\"primaries\":\"bt709\",\"transfer\":\"bt709\",\"matrix\":\"bt709\",\"range\":\"limited\",\"white_point\":\"unknown\",\"bit_depth\":8,\"confidence_basis_points\":10000,\"provenance\":\"stream_metadata\"},\"probed_color\":{\"primaries\":\"bt709\",\"transfer\":\"bt709\",\"matrix\":\"bt709\",\"range\":\"limited\",\"white_point\":\"unknown\",\"bit_depth\":8,\"confidence_basis_points\":10000,\"provenance\":\"stream_metadata\"},\"source_profile_assumption\":\"d65\"}",
+          "selected_stream": null,
+          "time_base": null
+        },
+        "manifest_ref": {
+          "byte_length": 1676,
+          "record_kind": "input_manifest",
+          "sha256": "3df4a203ace5e9990379ca2163ce35f595e86c51b2098eb02ca2d3848b1fd7a8"
+        }
+      },
+      "snapshot": {
+        "document_hash": "d4bb2161b5a71ed354f9d8972c41df6fab700e693f6cb37ce558259566facc86",
+        "head": "91e79af6d55b22848948e915bd7f78dd",
+        "input_manifest_ref": {
+          "byte_length": 1676,
+          "record_kind": "input_manifest",
+          "sha256": "3df4a203ace5e9990379ca2163ce35f595e86c51b2098eb02ca2d3848b1fd7a8"
+        },
+        "project": "9aff0280cd8d01032e13cfaaa1a2bb2d",
+        "version": "2c1814be36bcb5844044cb16c6b32419"
+      }
+    }
+  }
+]
