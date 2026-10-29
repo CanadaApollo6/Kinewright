@@ -453,16 +453,29 @@ mod tests {
         let media = engine.certified_media_for_document(Arc::clone(&inputs), Arc::clone(&document));
         media.set_document(document);
         let frames = media.frames();
-        media.play(TimeCode::ZERO);
+        // Read the positive frame while paused, independently of software-GPU throughput.
         media.request_frame(TimeCode::ZERO);
-        frames
+        let first = frames
             .recv_timeout(Duration::from_secs(10))
             .unwrap_or_else(|error| {
                 panic!(
-                    "FIX1_PLAYBACK_POSITIVE {error:?}: {:?}",
-                    media.events().try_iter().collect::<Vec<_>>()
+                    "FIX1_PLAYBACK_POSITIVE {error:?}: {:?}; stats={:?}",
+                    media.events().try_iter().collect::<Vec<_>>(),
+                    media.stats()
                 )
             });
+        assert_eq!(first.at, TimeCode::ZERO);
+        media.play(TimeCode::ZERO);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while media.position() == TimeCode::ZERO {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "FIX2_PLAYBACK_STARTED: {:?}; stats={:?}",
+                media.events().try_iter().collect::<Vec<_>>(),
+                media.stats()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         let owner = host.owner.upgrade().unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let load = thread::spawn(move || {
