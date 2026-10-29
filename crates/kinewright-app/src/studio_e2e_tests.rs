@@ -208,14 +208,16 @@ fn end_host(pid: u32) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-/// The Current edit's picture at `at`: bound, current and painted. Any
-/// playback failure fails `marker` at once (S3 C11).
+/// The Current edit's picture at `at`: bound, current and painted. A
+/// playback failure fails `marker` at once, unless it is temporary and the
+/// Studio will ask again (S3 C11, fu1).
 fn current_frame(
     app: &mut KinewrightApp,
     ctx: &egui::Context,
     at: TimeCode,
     marker: &str,
 ) -> kinewright_core::FrameTexture {
+    let mut retried = false;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         app.poll_background(ctx);
@@ -223,7 +225,18 @@ fn current_frame(
             app.finalize_preview(ui.ctx());
         });
         let studio = &app.focused().studio;
-        assert!(studio.failure.is_none(), "{marker} {:?}", studio.failure);
+        if studio.failure.is_some() && studio.manual_retry_pending() && !retried {
+            retried = true;
+            eprintln!(
+                "{marker}: temporary failure, retrying: {:?}",
+                studio.failure
+            );
+        }
+        assert!(
+            studio.failure.is_none() || studio.manual_retry_pending(),
+            "{marker} {:?}",
+            studio.failure
+        );
         if studio.selection.is_none()
             && studio.manual_inputs.is_some()
             && let Some(cell) = app.presenter.bound()
@@ -671,6 +684,57 @@ fn end_to_end(live: bool) {
             crate::studio_feedback::mapping_label(&Ok(mapping.clone()), context_b.document.fps)
         })
         .collect::<Vec<_>>();
+    // A clip move and a new checkpoint, with the inputs unchanged: the shown
+    // current-edit mapping follows without Refresh (S3 C11 fu1).
+    let inputs_before = scope(&mut app, &ctx);
+    let (drawn_clip, _) = drawn_on_copy.candidates[0];
+    let (track, start) = app
+        .focused()
+        .document
+        .tracks
+        .iter()
+        .find_map(|track| {
+            track
+                .clips
+                .iter()
+                .find(|clip| clip.id == drawn_clip)
+                .map(|clip| (track.id, clip.timeline_start))
+        })
+        .unwrap();
+    app.focused()
+        .send_manual_command(Command::Do(Operation::MoveClip {
+            clip: drawn_clip,
+            to_track: track,
+            to: TimeCode(start.0 + 5),
+        }))
+        .expect("E2E_CLIP_MOVED");
+    wait_document(&mut app, &ctx, "E2E_CLIP_MOVED", |document| {
+        document
+            .clip(drawn_clip)
+            .is_some_and(|clip| clip.timeline_start == TimeCode(start.0 + 5))
+    });
+    app.poll_background(&ctx);
+    app.focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .apply(Action::Save)
+        .unwrap();
+    app.poll_background(&ctx);
+    assert_eq!(
+        scope(&mut app, &ctx),
+        inputs_before,
+        "E2E_MOVE_KEEPS_INPUTS"
+    );
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.studio_notes(ui));
+    let followed = app.focused().studio.feedback.mapped.as_ref().unwrap().notes[&drawn_ref]
+        .clone()
+        .unwrap();
+    assert_eq!(
+        followed.candidates.first().map(|(_, frame)| *frame),
+        drawn_on_copy.candidates.first().map(|(_, frame)| frame + 5),
+        "E2E_MAPPING_FOLLOWS_CHECKPOINT {followed:?}"
+    );
 
     // 6. Close and reopen the App and its host: the same versions, notes,
     // batch, run and recomputed mappings.
@@ -861,6 +925,93 @@ fn s3_studio_end_to_end_live_voice() {
 
 /// S3 C11: while the host holds a saved project, the Current edit plays from
 /// launch, after an edit and after Save As, and Close ends its lease.
+/// S3 C11 fu1: another editor imports between the App's last status and its
+/// lease request. The host refuses the stale scope; the newer status lifts that
+/// failure at once, and the new frame plays with no action from the person.
+#[test]
+fn s3_c11_fu1_newer_scope_lifts_a_stale_acquisition() {
+    let mut retire = Retire::default();
+    let (fixture, owner, _a, _b) = two_versions();
+    let attachment = launch(&fixture, owner, "c11-fu1");
+    let (mut app, engine) = in1_harness(Document::default());
+    retire.arm(&engine);
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
+    install(&mut app, &fixture, attachment);
+    let ctx = egui::Context::default();
+    crate::theme::install(&ctx);
+    let at = app.focused().position;
+    app.sync_studio_selection();
+    current_frame(&mut app, &ctx, at, "C11FU1_LAUNCH_PLAYS");
+    let stale = scope(&mut app, &ctx);
+
+    let wav = fixture.root.path("c11-fu1.wav");
+    std::fs::write(
+        &wav,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+    )
+    .unwrap();
+    let reply = app.focused().ja1.as_ref().unwrap().import_elsewhere(&wav);
+    assert!(reply.error.is_none(), "C11FU1_IMPORT {:?}", reply.error);
+    // The App asks for its current edit again before any newer status. The
+    // job holds the attachment, so no heartbeat lands until it returns.
+    app.focused_mut().studio.manual_inputs = None;
+    app.sync_studio_selection();
+    assert!(app.focused().ja1_job.is_some(), "C11FU1_STALE_ATTEMPT");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.focused().ja1_job.is_some() || app.focused().ja1.is_none() {
+        app.poll_background(&ctx);
+        assert!(Instant::now() < deadline, "C11FU1_STALE_ATTEMPT");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let failed = app.focused().studio.manual_failure.as_ref();
+    assert_eq!(
+        failed.map(|failed| failed.scope.clone()),
+        Some(Some(stale.clone())),
+        "C11FU1_STALE_REFUSED {:?}",
+        app.focused().studio.failure
+    );
+    assert!(
+        app.focused().studio.failure.is_some(),
+        "C11FU1_STALE_REFUSED"
+    );
+
+    // The next status names the newer scope. In that same pass the failure for
+    // the stale scope is gone and a new acquisition starts.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        app.poll_background(&ctx);
+        if app.focused().ja1.as_ref().is_some_and(|attachment| {
+            attachment.studio_playback_scope().ok() != Some(stale.clone())
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "C11FU1_NEWER_STATUS");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.sync_studio_selection();
+    assert!(
+        app.focused()
+            .studio
+            .manual_failure
+            .as_ref()
+            .is_none_or(|failed| failed.scope.as_ref() != Some(&stale)),
+        "C11FU1_NEWER_SCOPE_LIFTS {:?}",
+        app.focused().studio.manual_failure
+    );
+    current_frame(&mut app, &ctx, at, "C11FU1_NEW_SCOPE_PLAYS");
+    assert_ne!(scope(&mut app, &ctx), stale, "C11FU1_NEW_SCOPE_PLAYS");
+
+    let host = app.focused().ja1.as_ref().unwrap().host_pid().unwrap();
+    close_host(&mut app, &ctx);
+    app.focused_mut().ja1 = None;
+    end_host(host);
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}
+
 #[test]
 fn s3_c11_current_edit_plays_host_attached() {
     let mut retire = Retire::default();

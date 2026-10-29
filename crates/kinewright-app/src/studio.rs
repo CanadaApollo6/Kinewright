@@ -75,6 +75,7 @@ pub(crate) struct Studio {
     pub(crate) voice: crate::studio_voice::Voice,
     pub(crate) manual_inputs: Option<Arc<kinewright_media::owned_io::PlaybackInputs>>,
     manual_scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
+    pub(crate) manual_failure: Option<ManualFailure>,
     versions: Vec<SnapshotKey>,
     versions_open: bool,
     pub(crate) tab: Tab,
@@ -87,7 +88,79 @@ pub(crate) struct Studio {
     neutral: bool,
 }
 
+/// A failed Current-edit acquisition, tied to the scope it tried. A newer
+/// scope lifts it at once; a temporary failure is tried again after a
+/// growing wait, at most `MANUAL_RETRIES` times (S3 C11 fu1).
+#[derive(Debug)]
+pub(crate) struct ManualFailure {
+    pub(crate) scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
+    message: String,
+    attempts: u32,
+    retry_at: Option<std::time::Instant>,
+}
+pub(crate) const MANUAL_RETRIES: u32 = 3;
+/// Longer than the host status heartbeat (about 1 s), so a newer scope
+/// usually arrives first.
+fn manual_retry_wait(attempts: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1 << attempts.min(MANUAL_RETRIES))
+}
+
 impl Studio {
+    /// Record a failed Current-edit acquisition against the scope it tried. A
+    /// temporary failure on the same scope waits longer each time, at most
+    /// `MANUAL_RETRIES` times (S3 C11 fu1).
+    fn record_manual_failure(
+        &mut self,
+        scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
+        temporary: bool,
+        message: String,
+    ) {
+        let attempts = self
+            .manual_failure
+            .as_ref()
+            .filter(|failed| failed.scope == scope)
+            .map_or(0, |failed| failed.attempts)
+            + 1;
+        self.manual_failure = Some(ManualFailure {
+            scope,
+            message,
+            attempts,
+            retry_at: (temporary && attempts <= MANUAL_RETRIES)
+                .then(|| std::time::Instant::now() + manual_retry_wait(attempts)),
+        });
+    }
+    /// A failure belongs to the scope it tried. A newer scope, or the due
+    /// retry of a temporary failure, asks again; neither loops per frame.
+    fn lift_manual_failure(
+        &mut self,
+        current_scope: Option<&(u64, kinewright_project::bundle_records::ObjectRef)>,
+    ) {
+        let lift = self.manual_failure.as_ref().and_then(|failed| {
+            let newer = failed.scope.as_ref() != current_scope;
+            let due = failed
+                .retry_at
+                .is_some_and(|at| std::time::Instant::now() >= at);
+            (newer || due).then(|| (newer, failed.message.clone()))
+        });
+        if let Some((newer, message)) = lift {
+            if self.failure.as_deref() == Some(message.as_str()) {
+                self.failure = None;
+            }
+            if newer {
+                self.manual_failure = None;
+            } else if let Some(failed) = &mut self.manual_failure {
+                failed.retry_at = None;
+            }
+        }
+    }
+    /// A temporary Current-edit failure that will be asked again.
+    #[cfg(test)]
+    pub(crate) fn manual_retry_pending(&self) -> bool {
+        self.manual_failure
+            .as_ref()
+            .is_some_and(|failed| failed.retry_at.is_some())
+    }
+
     pub(crate) fn update_manual_document(&mut self, document: Arc<Document>) {
         self.manual_inputs = self
             .manual_inputs
@@ -455,9 +528,17 @@ impl KinewrightApp {
         let context = attachment.studio_ready.take();
         let versions = attachment.studio_versions_ready.take();
         let failure = attachment.studio_error_ready.take();
+        let manual_failed = attachment.studio_manual_failed.take();
         let editing = attachment.studio_edit_pending && !attachment.read_only();
         if editing {
             attachment.studio_edit_pending = false;
+        }
+        if let Some((scope, temporary)) = manual_failed {
+            self.focused_mut().studio.record_manual_failure(
+                scope,
+                temporary,
+                failure.clone().unwrap_or_default(),
+            );
         }
         if let Some(failure) = failure {
             self.focused_mut().studio.failure = Some(failure);
@@ -477,10 +558,14 @@ impl KinewrightApp {
                 .clone_from(&current_scope);
             self.focused_mut().studio.manual_inputs = None;
         }
+        self.focused_mut()
+            .studio
+            .lift_manual_failure(current_scope.as_ref());
         if let Some((scope, inputs)) = manual
             && Some(scope) == current_scope
             && inputs.document() == &*self.focused().document
         {
+            self.focused_mut().studio.manual_failure = None;
             self.focused_mut().studio.manual_inputs = Some(Arc::clone(&inputs));
             if self.focused().studio.selection.is_none() {
                 let stamp = self.lut_publisher.set_certified_document(inputs);

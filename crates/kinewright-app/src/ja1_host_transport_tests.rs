@@ -211,6 +211,32 @@ impl crate::ja1_attachment::Ja1Attachment {
             .expect("launched host")
             .drop_http_replies(commands, false)
     }
+    /// Import media the way another editor of this host would: the host's
+    /// inputs move, and this App learns the new scope only from a later status
+    /// (S3 C11 fu1).
+    pub(crate) fn import_elsewhere(&self, path: &std::path::Path) -> HostReply {
+        let host = self.host.as_ref().expect("launched host");
+        let snapshot = HostSnapshot::capture(self.owner.core()).unwrap();
+        let asset_id = kinewright_core::AssetId(
+            snapshot
+                .history
+                .document
+                .media_pool
+                .iter()
+                .map(|asset| asset.id.0)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        host.client
+            .request(HostCommand::PrepareOwnedMedia {
+                client: host.manual_client.clone(),
+                path: path.into(),
+                asset_id,
+                snapshot,
+            })
+            .unwrap()
+    }
     /// The launched host process, so a test can end exactly that child.
     pub(crate) fn host_pid(&self) -> Option<u32> {
         self.host

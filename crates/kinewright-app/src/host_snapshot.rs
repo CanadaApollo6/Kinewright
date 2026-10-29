@@ -110,13 +110,19 @@ impl SnapshotReaders {
         scope: &(u64, ObjectRef),
     ) -> Result<CurrentEditReader, BundleError> {
         let mut live = self.admit()?;
+        // A lost reply, a moved scope or a busy host is temporary: the Studio
+        // asks again on a newer scope or after a bounded wait (S3 C11 fu1).
         let reply = client
             .request(HostCommand::LeaseCurrentEdit {
                 inputs: scope.1.clone(),
             })
-            .map_err(cause)?;
+            .map_err(|_| BundleError::Unsettled)?;
         if let Some(error) = reply.error {
-            return Err(BundleError::Identity(error.message));
+            return Err(match error.code.as_str() {
+                "history_changed" => BundleError::HistoryChanged,
+                "unsettled" | "save_in_progress" => BundleError::Unsettled,
+                _ => BundleError::Identity(error.message),
+            });
         }
         let lease = reply
             .current_edit_lease

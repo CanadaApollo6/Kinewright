@@ -480,6 +480,11 @@ impl Ja1EditingSession {
             .store
             .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))
     }
+    /// The manual branch's current checkpoint reference, without reading it.
+    pub fn manual_checkpoint_ref(&self) -> Result<crate::bundle_records::ObjectRef, BundleError> {
+        let bundle = self.active_bundle()?;
+        bundle.checkpoint_reference(bundle.manual_branch_id())
+    }
     pub fn manual_checkpoint(
         &self,
     ) -> Result<

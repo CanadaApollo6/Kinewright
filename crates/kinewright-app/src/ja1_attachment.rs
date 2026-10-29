@@ -140,6 +140,12 @@ pub(crate) struct Ja1Attachment {
     pub(crate) studio_versions_ready: Option<Vec<kinewright_project::studio_records::SnapshotKey>>,
     pub(crate) studio_edit_pending: bool,
     pub(crate) studio_error_ready: Option<String>,
+    /// The scope a failed Current-edit acquisition tried, and whether the
+    /// failure is temporary (S3 C11 fu1).
+    pub(crate) studio_manual_failed: Option<(
+        Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
+        bool,
+    )>,
     pub(crate) studio_manual_ready: Option<(
         (u64, kinewright_project::bundle_records::ObjectRef),
         Arc<kinewright_media::owned_io::PlaybackInputs>,
@@ -187,6 +193,7 @@ impl Ja1Attachment {
             studio_versions_ready: None,
             studio_edit_pending: false,
             studio_error_ready: None,
+            studio_manual_failed: None,
             studio_manual_ready: None,
             owner,
             message: "Studio editing. Saved means a verified durable save.".into(),
@@ -329,10 +336,13 @@ impl Ja1Attachment {
         self.require_retention()?;
         match &action {
             Action::StudioManualPlayback(document) => {
-                // A failure is reported once: an unreported one would be retried
-                // every frame (S3 C10). While a host holds the bundle, the inputs
-                // come from a host lease on its current edit (S3 C11).
-                let inputs = self.studio_playback_scope().and_then(|scope| {
+                // A failure is reported once, with the scope it tried: an
+                // unreported one would be retried every frame (S3 C10). While a
+                // host holds the bundle, the inputs come from a host lease on its
+                // current edit (S3 C11).
+                let scope = self.studio_playback_scope();
+                let attempted = scope.as_ref().ok().cloned();
+                let inputs = scope.and_then(|scope| {
                     let inputs = if self.host.is_some() {
                         self.studio_current_reader(&scope)?
                             .playback_inputs(Arc::clone(document))?
@@ -352,6 +362,13 @@ impl Ja1Attachment {
                     Err(error) => {
                         self.message = format!("Playback input unavailable: {error}");
                         self.studio_error_ready = Some(self.message.clone());
+                        let temporary = matches!(
+                            error,
+                            BundleError::HistoryChanged
+                                | BundleError::Unsettled
+                                | BundleError::SaveInProgress
+                        );
+                        self.studio_manual_failed = Some((attempted, temporary));
                         return Err(error);
                     }
                 }
@@ -602,6 +619,16 @@ impl Ja1Attachment {
             .permit
             .pending()
             .map_err(|e| e.to_string())
+    }
+    /// The saved checkpoint Current-edit mappings are made on: the host's,
+    /// from its status, or this session's own (S3 C11 fu1).
+    pub(crate) fn studio_map_checkpoint(
+        &self,
+    ) -> Option<kinewright_project::bundle_records::ObjectRef> {
+        match &self.host {
+            Some(host) => host.status.manual_checkpoint.clone(),
+            None => self.owner.manual_checkpoint_ref().ok(),
+        }
     }
     /// The owner epoch and inputs Current-edit playback reads. While a host
     /// holds the bundle, only its status names them; a change renews the lease.

@@ -2351,6 +2351,7 @@ impl HostCommandOwner {
                 .store()
                 .ok()
                 .map(|store| (store.owner_epoch(), owner.current_inputs_ref().clone()));
+            status.manual_checkpoint = owner.manual_checkpoint_ref().ok();
             status.association = owner.association().map(|a| a.path().to_path_buf());
             status.saved_digest = owner
                 .association()

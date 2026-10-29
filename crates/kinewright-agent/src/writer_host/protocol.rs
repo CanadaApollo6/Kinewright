@@ -535,6 +535,10 @@ pub struct HostStatus {
     /// change means the GUI renews its lease (S3 C11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playback_scope: Option<(u64, ObjectRef)>,
+    /// The manual branch's saved checkpoint, which Current-edit mappings are
+    /// made on. A change means those mappings are recomputed (S3 C11 fu1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_checkpoint: Option<ObjectRef>,
     pub choice: Option<HostChoiceKind>,
     pub rescue_trim_required: bool,
     pub rescue_trim_accepted: bool,

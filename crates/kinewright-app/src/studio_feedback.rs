@@ -1209,11 +1209,12 @@ impl BatchRow {
         }
     }
 }
-/// Saved notes mapped onto one target, as of one playback scope.
+/// Saved notes mapped onto one target. For the current edit, `checkpoint`
+/// is the saved checkpoint they were mapped on (S3 C11 fu1).
 #[derive(Debug)]
 pub(crate) struct Mapped {
     pub(crate) onto: MapTarget,
-    pub(crate) scope: Option<(u64, ObjectRef)>,
+    pub(crate) checkpoint: Option<ObjectRef>,
     pub(crate) notes: BTreeMap<ObjectRef, Result<FeedbackMapping, String>>,
 }
 /// One note's place on the mapped target, in plain words.
@@ -1247,7 +1248,9 @@ pub(crate) fn mapping_label(
     };
     match mapping.resolution.spatial {
         SpatialStatus::Exact => when,
-        SpatialStatus::Transformed => format!("{when} · drawing moved"),
+        // The proposed drawing does not reach the App yet, so promise no
+        // moved drawing (S3 C11 fu1).
+        SpatialStatus::Transformed => format!("{when} · picture changed, drawing may not line up"),
         SpatialStatus::Unresolved | SpatialStatus::Removed => {
             format!("{when} · drawing not placed")
         }
@@ -1851,14 +1854,18 @@ impl Feedback {
         &mut self,
         port: &dyn FeedbackPort,
         onto: MapTarget,
-        scope: Option<(u64, ObjectRef)>,
+        checkpoint: Option<ObjectRef>,
     ) {
         let notes = self
             .saved
             .iter()
             .map(|note| (note.reference.clone(), port.resolve(&note.reference, &onto)))
             .collect();
-        self.mapped = Some(Mapped { onto, scope, notes });
+        self.mapped = Some(Mapped {
+            onto,
+            checkpoint,
+            notes,
+        });
     }
     /// Save one draft as an immutable revision. Only a durable receipt that the
     /// index retains clears it; refusal or an unknown outcome keeps it.
@@ -2391,25 +2398,46 @@ enum NoteAction {
 }
 
 impl KinewrightApp {
-    /// What saved notes map onto: the version shown, or the current edit as saved.
-    pub(crate) fn studio_map_target(&self) -> Option<(MapTarget, Option<(u64, ObjectRef)>)> {
+    /// What saved notes map onto: the version shown, or the current edit as
+    /// saved, with the saved checkpoint that identifies it.
+    pub(crate) fn studio_map_target(&self) -> Option<(MapTarget, Option<ObjectRef>)> {
         let attachment = self.focused().ja1.as_ref()?;
-        let onto =
-            self.focused()
-                .studio
-                .selection
-                .as_ref()
-                .map_or(MapTarget::CurrentEdit, |context| MapTarget::Version {
+        Some(match &self.focused().studio.selection {
+            Some(context) => (
+                MapTarget::Version {
                     key: context.snapshot.descriptor.key.clone(),
-                });
-        Some((onto, attachment.studio_playback_scope().ok()))
+                },
+                None,
+            ),
+            None => (MapTarget::CurrentEdit, attachment.studio_map_checkpoint()),
+        })
     }
     /// Map every saved note onto the picture shown now (G10's Studio leg).
     pub(crate) fn map_studio_notes(&mut self) -> Result<(), String> {
-        let (onto, scope) = self
+        let (onto, checkpoint) = self
             .studio_map_target()
             .ok_or("Studio is busy saving or opening. Try again in a moment.")?;
-        self.with_feedback(|feedback, port| feedback.map_onto(&*port, onto, scope))
+        self.with_feedback(|feedback, port| feedback.map_onto(&*port, onto, checkpoint))
+    }
+    /// Keep shown mappings true to the target. Another target drops them; a
+    /// new saved checkpoint of the same current edit maps them again, so the
+    /// labels follow without Refresh (S3 C11 fu1).
+    pub(crate) fn sync_studio_mapping(&mut self) {
+        let target = self.studio_map_target();
+        let Some(mapped) = &self.focused().studio.feedback.mapped else {
+            return;
+        };
+        match target {
+            Some((onto, checkpoint)) if onto == mapped.onto => {
+                if checkpoint != mapped.checkpoint
+                    && let Err(why) = self.map_studio_notes()
+                {
+                    self.focused_mut().studio.feedback.mapped = None;
+                    self.focused_mut().studio.feedback.message = Some(why);
+                }
+            }
+            _ => self.focused_mut().studio.feedback.mapped = None,
+        }
     }
     /// Run `act` against this project's feedback owner: the shared host when one is
     /// attached, otherwise the in-process session. Unsaved projects take S2's
@@ -2822,12 +2850,15 @@ impl KinewrightApp {
                 self.focused_mut().studio.feedback.message = Some(why);
             }
         }
+        self.sync_studio_mapping();
         let target = self.studio_map_target();
-        if let Some(mapped) = &self.focused().studio.feedback.mapped
-            && target.as_ref() != Some(&(mapped.onto.clone(), mapped.scope.clone()))
-        {
-            self.focused_mut().studio.feedback.mapped = None;
-        }
+        // Current-edit mappings use the saved checkpoint; say so while the
+        // edit shown has unsaved changes.
+        let edit_unsaved = self
+            .focused()
+            .ja1
+            .as_ref()
+            .is_some_and(crate::ja1_attachment::Ja1Attachment::is_dirty);
         let mut action = None;
         ui.horizontal(|ui| {
             ui.label("Notes · newest first");
@@ -3001,6 +3032,16 @@ impl KinewrightApp {
                             }
                         });
                     });
+                    if edit_unsaved
+                        && mapped
+                            .as_ref()
+                            .is_some_and(|mapped| mapped.onto == MapTarget::CurrentEdit)
+                    {
+                        ui.colored_label(
+                            po0::TEXT_3,
+                            "Places are on the last saved edit. Save to place them on this one.",
+                        );
+                    }
                 }
                 let short = |text: &str| {
                     let line = text.lines().next().unwrap_or("Drawing");
