@@ -199,6 +199,28 @@ pub enum HostCommand {
     },
     /// S3 C3: the person's private feedback index (saved revisions and batches).
     ListFeedback,
+    VoiceReceipt {
+        upload: kinewright_project::voice_ingress::VoiceUpload,
+    },
+    AcknowledgeVoice {
+        upload: kinewright_project::voice_ingress::VoiceUpload,
+    },
+    StartTranscription {
+        note: kinewright_project::studio_records::NoteId,
+    },
+    VoiceStatus {
+        note: kinewright_project::studio_records::NoteId,
+    },
+    ChooseTranscript {
+        envelope: kinewright_project::studio_records::MetadataEnvelope,
+        note: kinewright_project::studio_records::NoteId,
+        text_ref: ObjectRef,
+    },
+    ReadVoiceRange {
+        revision: ObjectRef,
+        start_micros: u64,
+        end_micros: u64,
+    },
     ListVersions,
     ReadSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
@@ -523,6 +545,9 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub voice: Option<super::voice::VoiceStatus>,
+    pub voice_audio: Option<Vec<u8>>,
+    pub voice_receipt: Option<super::voice::VoiceReceipt>,
     pub metadata_issuer: Option<super::MetadataIssuer>,
     pub orchestration: Option<kinewright_project::orchestration_commit::OrchestrationReceipt>,
     pub run_view: Option<super::RunViewPage>,

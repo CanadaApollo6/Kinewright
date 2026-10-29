@@ -4,8 +4,8 @@ These are implementation follow-ups, not accepted S3 gates. They remain on the S
 
 | Item | Destination and reason |
 | --- | --- |
-| Studio C4/C5 composition | S3 deferred list. Authenticated streamed capture, private audio-range reads, model/workspace and capture-file reservations, cleanup, transcript revision selection and completion retry need an owner adapter together. Enabling the current direct-owner helper as a GUI writer would bypass that contract. |
-| C6 ASR completion retry | S3 deferred list. Retain the borrowed completion carrier on `Unsettled` in the new App caller; no such production caller is added here. Existing backend controls exercise this contract. |
+| Studio C4/C5 composition | C8 supplies the session/host owner adapter, bounded capture and private range reads, reservations, transcript choice and completion retry. C9 owns the missing host snapshot read lease, attached Studio controls, capture cleanup, G11 App control and screenshots. |
+| C6 ASR completion retry | C8 retains and retries the completion carrier in the host on `Unsettled`; complete Agent suite and contention witness pass. C9 supplies the attached App caller and progress/edit UI. |
 | Batch disposition and S4 ports | S3 deferred list. Translate the actual S4 `RunProjection`/host commands into presentation and typed intent, including refresh/revision checks; the fixture `RunView` is not the production projection. |
 | Delivered labels | S5 delivery integration or an explicit S3 delivery-record contract. Neither S4 `DeliveryRecord` nor Studio `DeliveryView` carries a delivery timestamp; internal task-message delivery is not reviewed cut delivery. Do not invent age or label unfinished work Delivered. |
 | Astra 4 persisted remark-edit retention | S3 deferred list. The metadata API has immutable SaveFeedback revisions but no persisted remark deletion or split/merge operation. Add those App semantics before claiming a persisted edit/delete witness or its mutation pair. Existing local-vector edits remain backend evidence only. |

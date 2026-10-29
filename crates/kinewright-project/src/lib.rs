@@ -35,6 +35,7 @@ pub mod store;
 pub mod studio_records;
 pub mod studio_store;
 // JA-1 S3 C5 fix 2
+pub mod voice_ingress;
 pub mod voice_store;
 
 pub mod headless;

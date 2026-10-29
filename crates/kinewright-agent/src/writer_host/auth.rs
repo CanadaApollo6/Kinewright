@@ -127,7 +127,13 @@ impl Attachment {
                     ..
                 } => false,
             },
-            HostCommand::AdmitFeedbackEvidence { .. } => {
+            HostCommand::AdmitFeedbackEvidence { .. }
+            | HostCommand::VoiceReceipt { .. }
+            | HostCommand::AcknowledgeVoice { .. }
+            | HostCommand::StartTranscription { .. }
+            | HostCommand::VoiceStatus { .. }
+            | HostCommand::ChooseTranscript { .. }
+            | HostCommand::ReadVoiceRange { .. } => {
                 matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
             }
             HostCommand::ListVersions
@@ -293,12 +299,12 @@ impl super::HostCommandOwner {
         self.execute_bearer(Some(&auth.bearer()), request)
     }
 
-    pub(super) fn execute_bearer(
-        &mut self,
+    pub(super) fn authorize_request(
+        &self,
         bearer: Option<&str>,
-        request: super::HostRequest,
-    ) -> super::HostReply {
-        let checked = (|| -> Result<_, HostError> {
+        request: &super::HostRequest,
+    ) -> Result<(usize, AttachmentId, SessionRoots), HostError> {
+        (|| -> Result<_, HostError> {
             let index = self.resolve_attachment(bearer)?;
             let grant = &self.attachments[index];
             if request.project != grant.project || request.protocol != super::HOST_PROTOCOL {
@@ -353,8 +359,15 @@ impl super::HostCommandOwner {
                     }
                 }
             }
-            if let super::HostCommand::Metadata { envelope, .. } = &request.command {
+            if let super::HostCommand::Metadata { envelope, .. }
+            | super::HostCommand::ChooseTranscript { envelope, .. } = &request.command
+            {
                 self.require_metadata_issuer(index, &envelope.id.issuer)?;
+            }
+            if let super::HostCommand::AcknowledgeVoice { upload }
+            | super::HostCommand::VoiceReceipt { upload } = &request.command
+            {
+                self.require_metadata_issuer(index, &upload.envelope.id.issuer)?;
             }
             self.check_producer_attachment(index, &request.command)?;
             let roots = request.roots.canonicalize()?;
@@ -446,7 +459,14 @@ impl super::HostCommandOwner {
                 .into());
             }
             Ok((index, grant.id, roots))
-        })();
+        })()
+    }
+    pub(super) fn execute_bearer(
+        &mut self,
+        bearer: Option<&str>,
+        request: super::HostRequest,
+    ) -> super::HostReply {
+        let checked = self.authorize_request(bearer, &request);
         let (index, attachment, roots) = match checked {
             Ok(value) => value,
             Err(error) => {
@@ -472,8 +492,12 @@ impl super::HostCommandOwner {
                     revision.strokes_ref.clone(),
                     revision.frame_proof_ref.clone(),
                 ],
+                kinewright_project::studio_records::MetadataChange::SaveVoice(voice) => {
+                    voice.chosen_transcript_revision.iter().cloned().collect()
+                }
                 _ => vec![],
             },
+            super::HostCommand::ChooseTranscript { text_ref, .. } => vec![text_ref.clone()],
             _ => vec![],
         };
         let reply = if super::orchestration::is_hook(&request.command) {

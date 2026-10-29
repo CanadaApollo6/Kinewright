@@ -13,6 +13,9 @@ mod owned_media;
 mod protocol;
 mod recovery;
 mod switch;
+mod voice;
+#[cfg(all(test, target_os = "linux"))]
+mod voice_tests;
 pub use attention::{
     AttentionAnswer, AttentionOutcome, AttentionPrompt, HostRunObserver, LiveAttentionResponse,
 };
@@ -56,6 +59,7 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+pub use voice::{VoiceReceipt, VoiceStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
@@ -430,6 +434,7 @@ impl WriterHost {
         let router = axum::Router::new()
             .route("/issuer", post(issuer::issuer_request))
             .route("/host", post(host_request))
+            .route("/voice", post(voice::upload_request))
             .route("/mcp", post(mcp_request))
             .with_state(state);
         let server = serve(listener, router, "kinewright-writer-host", stop)?;
@@ -1093,6 +1098,12 @@ pub struct HostCommandOwner {
     dispatches: u64,
     foreground_owner: Option<manual::ForegroundOwner>,
     pending_read_pin: Option<auth::ReadPin>,
+    voice_payload: Option<(
+        Vec<u8>,
+        kinewright_project::storage_budget::StorageReservation,
+    )>,
+    voice_data_dir: std::path::PathBuf,
+    voice_jobs: BTreeMap<kinewright_project::studio_records::NoteId, voice::Job>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
@@ -1244,6 +1255,9 @@ impl HostCommandOwner {
             dispatches: 0,
             foreground_owner: None,
             pending_read_pin: None,
+            voice_payload: None,
+            voice_jobs: BTreeMap::new(),
+            voice_data_dir: kinewright_media::default_data_dir(),
             prepared_owned_media: None,
             pending_switch: None,
             confirmed_switch: None,
@@ -1401,6 +1415,9 @@ impl HostCommandOwner {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
         }
+        if reply.activation.is_some() {
+            self.voice_jobs.clear();
+        }
         if reply.activation.is_some()
             || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.project)) && !saved.root_sha256.is_empty())
         {
@@ -1511,7 +1528,11 @@ impl HostCommandOwner {
             && (!manual::connector_command(&command)
                 || matches!(
                     command,
-                    HostCommand::Metadata { .. } | HostCommand::AdmitFeedbackEvidence { .. }
+                    HostCommand::Metadata { .. }
+                        | HostCommand::AdmitFeedbackEvidence { .. }
+                        | HostCommand::AcknowledgeVoice { .. }
+                        | HostCommand::StartTranscription { .. }
+                        | HostCommand::ChooseTranscript { .. }
                 ))
             && !matches!(
                 command,
@@ -1582,6 +1603,12 @@ impl HostCommandOwner {
                     });
                 }
             }
+            command @ (HostCommand::VoiceReceipt { .. }
+            | HostCommand::AcknowledgeVoice { .. }
+            | HostCommand::StartTranscription { .. }
+            | HostCommand::VoiceStatus { .. }
+            | HostCommand::ChooseTranscript { .. }
+            | HostCommand::ReadVoiceRange { .. }) => self.voice_command(command, reply)?,
             HostCommand::AdmitFeedbackEvidence { kind, bytes } => {
                 let sealed = self.owner_mut()?.admit_feedback_evidence(kind, &bytes)?;
                 reply.feedback_evidence = Some(sealed.reference.clone());

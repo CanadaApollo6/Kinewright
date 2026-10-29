@@ -24,7 +24,7 @@ fn test_only_attach_editor_bypassing_issuance(
     HostClient::connect(host.endpoint.clone(), auth, roots)
 }
 
-fn fixture() -> (
+pub(super) fn fixture() -> (
     kinewright_media::test_support::TempDirectory,
     WriterHost,
     Vec<ObjectRef>,
@@ -226,7 +226,11 @@ fn refused(host: &WriterHost, client: &HostClient, command: HostCommand, marker:
     }
 }
 
-fn metadata(host: &WriterHost, client: &HostClient, change: MetadataChange) -> HostCommand {
+pub(super) fn metadata(
+    host: &WriterHost,
+    client: &HostClient,
+    change: MetadataChange,
+) -> HostCommand {
     let owner = host.owner.upgrade().unwrap();
     let mut host = owner.lock().unwrap();
     let index = host
@@ -251,7 +255,7 @@ fn metadata(host: &WriterHost, client: &HostClient, change: MetadataChange) -> H
     }
 }
 
-fn publish_command(host: &WriterHost, producer: &HostClient) -> HostCommand {
+pub(super) fn publish_command(host: &WriterHost, producer: &HostClient) -> HostCommand {
     let (reference, checkpoint) = host
         .owner
         .upgrade()
@@ -276,12 +280,12 @@ fn publish_command(host: &WriterHost, producer: &HostClient) -> HostCommand {
     )
 }
 
-fn accepted(reply: HostReply) -> HostReply {
+pub(super) fn accepted(reply: HostReply) -> HostReply {
     assert!(reply.error.is_none(), "{:?}", reply.error);
     reply
 }
 
-fn feedback_revision(key: SnapshotKey, refs: &[ObjectRef]) -> FeedbackRevision {
+pub(super) fn feedback_revision(key: SnapshotKey, refs: &[ObjectRef]) -> FeedbackRevision {
     FeedbackRevision {
         comment_id: CommentId::fresh().unwrap(),
         revision: 1,
