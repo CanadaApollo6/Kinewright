@@ -1651,6 +1651,7 @@ impl HostCommandOwner {
                 reply.versions = self.owner()?.studio_versions()?;
             }
             HostCommand::LeaseSnapshot { .. }
+            | HostCommand::LeaseCurrentEdit { .. }
             | HostCommand::SnapshotLeaseStatus { .. }
             | HostCommand::ReleaseSnapshot { .. } => {
                 return Err(HostRefusal::new(
@@ -2346,6 +2347,10 @@ impl HostCommandOwner {
         };
         if let Some(owner) = &self.owner {
             status.project_id = owner.project_id().ok();
+            status.playback_scope = owner
+                .store()
+                .ok()
+                .map(|store| (store.owner_epoch(), owner.current_inputs_ref().clone()));
             status.association = owner.association().map(|a| a.path().to_path_buf());
             status.saved_digest = owner
                 .association()

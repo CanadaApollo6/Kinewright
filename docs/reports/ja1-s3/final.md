@@ -4,14 +4,19 @@ S3 certification remains **partial**. This commit pair fixes the focused C6a dat
 
 ## Update at C10
 
-C7 to C10 add the Studio scheduler and voice composition. C10 adds `s3_studio_end_to_end`, the combined App, host, store and media route with Save As and the unknown-reply leg, and the Director setting. It passes in the slow tier, and `s3_studio_end_to_end_live_voice` passes on demand with the Whisper model and espeak-ng. The C10 gate and its three mutation pairs are in [c10.md](c10.md). The rest of this report describes C6a and is kept as it was.
+C7 to C10 add the Studio scheduler and voice composition. C10 adds `s3_studio_end_to_end`, the combined App, host, store and media route with Save As and the unknown-reply leg, and the Director setting. It passes in the slow tier, and `s3_studio_end_to_end_live_voice` passes on demand with the Whisper model and espeak-ng. The C10 gate and its three mutation pairs are in [c10.md](c10.md).
 
-Still open after C10:
+## Update at C11
 
-- Current-edit playback while a host holds a saved project: proposed C11, a current-edit playback port beside C9's lease.
+C11 adds Current-edit playback while host-attached: a host lease on the current edit's inputs, beside C9's snapshot lease. The Studio plays the Current edit at launch, after edits, First Save, Save As and rescue, and `s3_studio_end_to_end` now checks the Current-edit frame after "Edit a copy". See [c11.md](c11.md).
+
+Still open after C11:
+
 - A live Director. No connector is certified yet; certification is a separate item before S5.
 - The rescue-copy leg inside the end-to-end test, settling a run before Close, and detached hosts left by a failed test.
 - Native Windows, hosted CI, the physical microphone, review rounds and push.
+
+The rest of this report describes C6a and is kept as it was.
 
 The base is `295619cc`; commit 1 is `ce6e257c6148e0fe98b2b91ae33435b02c73b179`. Both commits stay local on `ja1/s3`, without a push. Source and runtime fixtures are bound separately for each code cut. C6a's three protected pairs cover second-owner save, second-owner submission and frozen-manual trim. Astra 4's persisted remark-edit pair is NOT RUN.
 

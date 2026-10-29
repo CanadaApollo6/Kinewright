@@ -6,8 +6,9 @@ use kinewright_core::MediaSourceOrigin;
 use kinewright_media::owned_io::ReadAuthority;
 use kinewright_project::{
     bundle::BundleError,
+    bundle_records::ObjectRef,
     storage_budget::StorageLimits,
-    store::snapshot_reader::{HostSnapshotReader, SnapshotReadSession},
+    store::snapshot_reader::{CurrentEditReader, HostSnapshotReader, SnapshotReadSession},
     studio_records::SnapshotKey,
 };
 use std::{
@@ -82,6 +83,54 @@ impl SnapshotReaders {
         context: Weak<AtomicBool>,
         key: &SnapshotKey,
     ) -> Result<HostSnapshotReader, BundleError> {
+        let mut live = self.admit()?;
+        let reply = client
+            .request(HostCommand::LeaseSnapshot { key: key.clone() })
+            .map_err(cause)?;
+        if let Some(error) = reply.error {
+            return Err(BundleError::Identity(error.message));
+        }
+        let lease = reply.snapshot_lease.ok_or(BundleError::HistoryChanged)?;
+        let (lifetime, authority) =
+            Self::lifetime(client, &lease.id, &lease.payload_sha256, context)?;
+        if lease.descriptor.key != *key {
+            return Err(BundleError::HistoryChanged);
+        }
+        let reader = self.session.open(path, &lease, authority)?;
+        live.push(Arc::downgrade(&lifetime));
+        Ok(reader)
+    }
+    /// Leases the host's current edit inputs named by `scope`, the owner epoch
+    /// and input manifest from the host's status (S3 C11).
+    pub(super) fn open_current(
+        &self,
+        client: &HostClient,
+        path: &Path,
+        context: Weak<AtomicBool>,
+        scope: &(u64, ObjectRef),
+    ) -> Result<CurrentEditReader, BundleError> {
+        let mut live = self.admit()?;
+        let reply = client
+            .request(HostCommand::LeaseCurrentEdit {
+                inputs: scope.1.clone(),
+            })
+            .map_err(cause)?;
+        if let Some(error) = reply.error {
+            return Err(BundleError::Identity(error.message));
+        }
+        let lease = reply
+            .current_edit_lease
+            .ok_or(BundleError::HistoryChanged)?;
+        let (lifetime, authority) =
+            Self::lifetime(client, &lease.id, &lease.payload_sha256, context)?;
+        if (lease.owner_epoch, &lease.inputs) != (scope.0, &scope.1) {
+            return Err(BundleError::HistoryChanged);
+        }
+        let reader = self.session.open_current(path, &lease, authority)?;
+        live.push(Arc::downgrade(&lifetime));
+        Ok(reader)
+    }
+    fn admit(&self) -> Result<std::sync::MutexGuard<'_, Vec<Weak<LeaseLifetime>>>, BundleError> {
         let mut live = self
             .live
             .lock()
@@ -90,19 +139,22 @@ impl SnapshotReaders {
         if live.len() >= 64 {
             return Err(BundleError::Capacity("64 open snapshot readers"));
         }
-        let reply = client
-            .request(HostCommand::LeaseSnapshot { key: key.clone() })
-            .map_err(cause)?;
-        if let Some(error) = reply.error {
-            return Err(BundleError::Identity(error.message));
-        }
-        let lease = reply.snapshot_lease.ok_or(BundleError::HistoryChanged)?;
-        let remote = match client.snapshot_lease_remote(&lease.id, &lease.payload_sha256) {
+        Ok(live)
+    }
+    /// The granted lease's lifetime: dropping it, or any failure before a
+    /// reader holds it, releases the lease.
+    fn lifetime(
+        client: &HostClient,
+        id: &str,
+        payload_sha256: &str,
+        context: Weak<AtomicBool>,
+    ) -> Result<(Arc<LeaseLifetime>, ReadAuthority), BundleError> {
+        let remote = match client.snapshot_lease_remote(id, payload_sha256) {
             Ok(remote) => remote,
             Err(error) => {
                 let _ = client.request(HostCommand::ReleaseSnapshot {
-                    id: lease.id.clone(),
-                    payload_sha256: lease.payload_sha256.clone(),
+                    id: id.into(),
+                    payload_sha256: payload_sha256.into(),
                 });
                 return Err(cause(error));
             }
@@ -113,9 +165,6 @@ impl SnapshotReaders {
             context,
             released: AtomicBool::new(false),
         });
-        if lease.descriptor.key != *key {
-            return Err(BundleError::HistoryChanged);
-        }
         let grant = lifetime
             .origin
             .legacy_media()
@@ -123,12 +172,10 @@ impl SnapshotReaders {
         let checker = Arc::clone(&lifetime);
         let authority = ReadAuthority::new(
             grant,
-            lease.payload_sha256.clone(),
+            payload_sha256.into(),
             Arc::new(move || checker.check()),
         );
-        let reader = self.session.open(path, &lease, authority)?;
-        live.push(Arc::downgrade(&lifetime));
-        Ok(reader)
+        Ok((lifetime, authority))
     }
     pub(super) fn revoke_all(&self) {
         if let Ok(mut live) = self.live.lock() {

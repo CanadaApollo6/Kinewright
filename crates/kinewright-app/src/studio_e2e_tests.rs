@@ -3,6 +3,7 @@
 //! note, a voice note and its transcript edit; one batch across two versions;
 //! Revise cut on the scripted Director until Accepted, across lost replies;
 //! the notes mapped onto an edited copy; close and reopen; then Save As.
+//! S3 C11 adds Current-edit playback while the host holds the project.
 use super::{
     State,
     tests::{VOICE_TEST, recorded, send_capture, wait_saved},
@@ -205,6 +206,72 @@ fn end_host(pid: u32) {
     while running() {
         assert!(Instant::now() < deadline, "E2E_END_HOST");
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+/// The Current edit's picture at `at`: bound, current and painted. Any
+/// playback failure fails `marker` at once (S3 C11).
+fn current_frame(
+    app: &mut KinewrightApp,
+    ctx: &egui::Context,
+    at: TimeCode,
+    marker: &str,
+) -> kinewright_core::FrameTexture {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        app.poll_background(ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.finalize_preview(ui.ctx());
+        });
+        let studio = &app.focused().studio;
+        assert!(studio.failure.is_none(), "{marker} {:?}", studio.failure);
+        if studio.selection.is_none()
+            && studio.manual_inputs.is_some()
+            && let Some(cell) = app.presenter.bound()
+            && !cell.stale
+            && cell.at == at
+            && cell.context.is_none()
+            && app
+                .presenter
+                .context_epoch()
+                .is_some_and(|epoch| cell.stamp.epoch >= epoch)
+            && studio.cpu_frame_id == Some(cell.frame_id)
+        {
+            return studio.cpu_frame.clone().expect("bound picture");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{marker} inputs={} job={} bound={:?}",
+            studio.manual_inputs.is_some(),
+            app.focused().ja1_job.is_some(),
+            app.presenter.bound().map(|cell| (cell.at, cell.stale)),
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+/// The playback scope, once no job holds the attachment.
+fn scope(app: &mut KinewrightApp, ctx: &egui::Context) -> (u64, ObjectRef) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        app.poll_background(ctx);
+        if let Some(attachment) = app.focused().ja1.as_ref() {
+            return attachment.studio_playback_scope().unwrap();
+        }
+        assert!(Instant::now() < deadline, "C11_SCOPE");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+/// Wait until the App's document satisfies `done`, after a manual command.
+fn wait_document(
+    app: &mut KinewrightApp,
+    ctx: &egui::Context,
+    marker: &str,
+    done: impl Fn(&Document) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done(&app.focused().document) {
+        app.poll_background(ctx);
+        assert!(Instant::now() < deadline, "{marker}");
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 /// A spoken note on the bound picture, saved by the host, its transcript
@@ -531,36 +598,15 @@ fn end_to_end(live: bool) {
     edit_copy.unwrap();
     app.focused_mut().install_ja1_view();
     app.sync_studio_selection();
-    // The copy opens as the current edit. While the host holds the bundle no
-    // host port admits the current edit's playback inputs (finding: C9 leases
-    // only frozen versions), so the Studio reports that once and stops asking.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while app.focused().ja1.is_none() || app.focused().studio.failure.is_none() {
-        app.poll_background(&ctx);
-        assert!(
-            Instant::now() < deadline,
-            "E2E_EDIT_COPY ja1={} job={} failure={:?} status={:?}",
-            app.focused().ja1.is_some(),
-            app.focused().ja1_job.is_some(),
-            app.focused().studio.failure,
-            app.status,
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // The copy opens as the current edit, and it plays through the host's
+    // current-edit lease (S3 C11).
+    let copy_at = app.focused().position;
+    let copy_frame = current_frame(&mut app, &ctx, copy_at, "E2E_CURRENT_EDIT_PLAYBACK");
     assert!(
-        app.focused()
-            .studio
-            .failure
-            .as_deref()
-            .is_some_and(|failure| failure.starts_with("Playback input unavailable")),
-        "E2E_CURRENT_EDIT_PLAYBACK {:?}",
-        app.focused().studio.failure
+        copy_frame.rgba[0] > 128 && copy_frame.rgba[2] < 64,
+        "E2E_CURRENT_EDIT_PICTURE {:?}",
+        &copy_frame.rgba[..4]
     );
-    for _ in 0..20 {
-        app.poll_background(&ctx);
-        assert!(app.focused().ja1_job.is_none(), "E2E_NO_RESPAWN");
-        std::thread::sleep(Duration::from_millis(5));
-    }
     assert!(app.focused().studio.selection.is_none(), "E2E_CURRENT_EDIT");
     // The person's edit goes through the host's manual gate, as the UI does.
     app.focused()
@@ -573,18 +619,9 @@ fn end_to_end(live: bool) {
             },
         }))
         .expect("E2E_COPY_EDITED");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !app
-        .focused()
-        .document
-        .tracks
-        .iter()
-        .any(|track| track.id == TrackId(100))
-    {
-        app.poll_background(&ctx);
-        assert!(Instant::now() < deadline, "E2E_COPY_EDITED");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_document(&mut app, &ctx, "E2E_COPY_EDITED", |document| {
+        document.tracks.iter().any(|track| track.id == TrackId(100))
+    });
     app.poll_background(&ctx);
     app.focused_mut()
         .ja1
@@ -820,4 +857,94 @@ fn s3_studio_end_to_end() {
 #[ignore = "needs the Whisper model and espeak-ng"]
 fn s3_studio_end_to_end_live_voice() {
     end_to_end(true);
+}
+
+/// S3 C11: while the host holds a saved project, the Current edit plays from
+/// launch, after an edit and after Save As, and Close ends its lease.
+#[test]
+fn s3_c11_current_edit_plays_host_attached() {
+    let mut retire = Retire::default();
+    let (fixture, owner, _a, _b) = two_versions();
+    let attachment = launch(&fixture, owner, "c11-current");
+    let (mut app, engine) = in1_harness(Document::default());
+    retire.arm(&engine);
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
+    install(&mut app, &fixture, attachment);
+    let ctx = egui::Context::default();
+    crate::theme::install(&ctx);
+    let at = app.focused().position;
+
+    // Straight after launch, no copy made.
+    app.sync_studio_selection();
+    let launched = current_frame(&mut app, &ctx, at, "C11_LAUNCH_PLAYS");
+    assert!(
+        launched.rgba[0] > 128 && launched.rgba[2] < 64,
+        "C11_LAUNCH_PICTURE {:?}",
+        &launched.rgba[..4]
+    );
+    let launch_scope = scope(&mut app, &ctx);
+
+    // The person's edit moves the head: the next picture is the new one, from
+    // the same lease.
+    let clip = app
+        .focused()
+        .document
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .unwrap()
+        .clips[0]
+        .id;
+    app.focused()
+        .send_manual_command(Command::Do(Operation::SetClipEnabled {
+            clip,
+            enabled: false,
+        }))
+        .expect("C11_EDIT");
+    wait_document(&mut app, &ctx, "C11_EDIT", |document| {
+        document.clip(clip).is_some_and(|clip| !clip.enabled)
+    });
+    let edited = current_frame(&mut app, &ctx, at, "C11_EDIT_PLAYS");
+    assert!(
+        edited.rgba[0] < 32,
+        "C11_EDIT_SHOWS_NEW_FRAME {:?}",
+        &edited.rgba[..4]
+    );
+    assert_eq!(scope(&mut app, &ctx), launch_scope, "C11_EDIT_KEEPS_LEASE");
+
+    // Save As moves the owner: the App renews its lease and still plays.
+    let b = fixture.root.path("c11-b.kinewright");
+    app.focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .apply(Action::SaveAs(b.clone()))
+        .unwrap();
+    assert_ne!(scope(&mut app, &ctx), launch_scope, "C11_SAVE_AS_RENEWS");
+    let after_save_as = current_frame(&mut app, &ctx, at, "C11_SAVE_AS_PLAYS");
+    assert!(after_save_as.rgba[0] < 32, "C11_SAVE_AS_PICTURE");
+    assert_eq!(
+        app.focused().ja1.as_ref().unwrap().project_path(),
+        Some(b.clone())
+    );
+
+    // Close ends the lease: inputs kept past Close cannot read.
+    let kept = app.focused().studio.manual_inputs.clone().unwrap();
+    kept.with_document(Arc::new(kept.document().clone()))
+        .expect("C11_LIVE_INPUTS_READ");
+    let host = app.focused().ja1.as_ref().unwrap().host_pid().unwrap();
+    close_host(&mut app, &ctx);
+    assert!(
+        kept.with_document(Arc::new(kept.document().clone()))
+            .is_err(),
+        "C11_CLOSE_STOPS_READS"
+    );
+    drop(kept);
+    app.focused_mut().ja1 = None;
+    end_host(host);
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
 }

@@ -78,9 +78,6 @@ pub(super) struct HostAttachment {
 }
 
 impl HostAttachment {
-    pub(super) fn playback_inputs_ref(&self) -> &ObjectRef {
-        &self.inputs
-    }
     pub fn import_unsaved_media(
         &mut self,
         owner: &mut Ja1EditingSession,

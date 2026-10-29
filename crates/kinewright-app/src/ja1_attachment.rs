@@ -330,13 +330,18 @@ impl Ja1Attachment {
         match &action {
             Action::StudioManualPlayback(document) => {
                 // A failure is reported once: an unreported one would be retried
-                // every frame. While a host holds the bundle there is no local
-                // store to admit the current edit's inputs from (S3 C10).
+                // every frame (S3 C10). While a host holds the bundle, the inputs
+                // come from a host lease on its current edit (S3 C11).
                 let inputs = self.studio_playback_scope().and_then(|scope| {
-                    self.owner
-                        .store()?
-                        .manual_playback_inputs(Arc::clone(document), &scope.1)
-                        .map(|inputs| (scope, inputs))
+                    let inputs = if self.host.is_some() {
+                        self.studio_current_reader(&scope)?
+                            .playback_inputs(Arc::clone(document))?
+                    } else {
+                        self.owner
+                            .store()?
+                            .manual_playback_inputs(Arc::clone(document), &scope.1)?
+                    };
+                    Ok((scope, inputs))
                 });
                 match inputs {
                     Ok((scope, inputs)) => {
@@ -598,14 +603,35 @@ impl Ja1Attachment {
             .pending()
             .map_err(|e| e.to_string())
     }
+    /// The owner epoch and inputs Current-edit playback reads. While a host
+    /// holds the bundle, only its status names them; a change renews the lease.
     pub(crate) fn studio_playback_scope(
         &self,
     ) -> Result<(u64, kinewright_project::bundle_records::ObjectRef), BundleError> {
-        let inputs = self.host.as_ref().map_or_else(
-            || self.owner.current_inputs_ref(),
-            host::HostAttachment::playback_inputs_ref,
-        );
-        Ok((self.owner.store()?.owner_epoch(), inputs.clone()))
+        match &self.host {
+            Some(host) => host
+                .status
+                .playback_scope
+                .clone()
+                .ok_or(BundleError::Unsettled),
+            None => Ok((
+                self.owner.store()?.owner_epoch(),
+                self.owner.current_inputs_ref().clone(),
+            )),
+        }
+    }
+    pub(crate) fn studio_current_reader(
+        &self,
+        scope: &(u64, kinewright_project::bundle_records::ObjectRef),
+    ) -> Result<kinewright_project::store::snapshot_reader::CurrentEditReader, BundleError> {
+        let host = self.host.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let path = self.project_path().ok_or(BundleError::HistoryChanged)?;
+        self.snapshot_readers.open_current(
+            &host.client,
+            &path,
+            Arc::downgrade(&self.originating_context),
+            scope,
+        )
     }
     pub(crate) fn studio_versions(
         &self,

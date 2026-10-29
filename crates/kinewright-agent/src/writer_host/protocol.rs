@@ -233,6 +233,11 @@ pub enum HostCommand {
     LeaseSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
     },
+    /// Lease the current edit's input graph for Current-edit playback. Only
+    /// the host's current inputs can be leased (S3 C11).
+    LeaseCurrentEdit {
+        inputs: ObjectRef,
+    },
     SnapshotLeaseStatus {
         id: String,
         payload_sha256: String,
@@ -526,6 +531,10 @@ pub struct HostStatus {
     pub project_id: Option<kinewright_project::bundle_records::ProjectId>,
     #[serde(default)]
     pub continuation_runs: usize,
+    /// The owner epoch and input manifest Current-edit playback leases. A
+    /// change means the GUI renews its lease (S3 C11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_scope: Option<(u64, ObjectRef)>,
     pub choice: Option<HostChoiceKind>,
     pub rescue_trim_required: bool,
     pub rescue_trim_accepted: bool,
@@ -600,6 +609,8 @@ pub struct FeedbackMapping {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
     pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_edit_lease: Option<kinewright_project::store::snapshot_reader::CurrentEditLease>,
     pub evidence_bytes: Option<Vec<u8>>,
     pub voice: Option<super::voice::VoiceStatus>,
     pub voice_audio: Option<Vec<u8>>,

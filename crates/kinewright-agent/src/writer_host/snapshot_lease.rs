@@ -9,6 +9,8 @@ use kinewright_project::{storage_budget::StorageReservation, store::StorePin};
 pub(super) struct LeasePin {
     payload_sha256: String,
     owner_epoch: u64,
+    /// Set for a current-edit lease: it ends once the host's inputs move.
+    current_inputs: Option<kinewright_project::bundle_records::ObjectRef>,
     _pin: Option<StorePin>,
     _charge: StorageReservation,
 }
@@ -16,6 +18,7 @@ pub(super) fn is_lease_command(command: &HostCommand) -> bool {
     matches!(
         command,
         HostCommand::LeaseSnapshot { .. }
+            | HostCommand::LeaseCurrentEdit { .. }
             | HostCommand::SnapshotLeaseStatus { .. }
             | HostCommand::ReleaseSnapshot { .. }
     )
@@ -32,18 +35,51 @@ impl HostCommandOwner {
             if !matches!(command, HostCommand::ReleaseSnapshot { .. }) {
                 self.check_named_access(roots, false)?;
             }
+            // A current-edit lease whose inputs moved has ended: its pin goes now.
+            let current = self.owner()?.current_inputs_ref().clone();
+            self.attachments[index]
+                .snapshot_leases
+                .retain(|_, lease| lease.current_inputs.as_ref().is_none_or(|i| *i == current));
+            if matches!(
+                command,
+                HostCommand::LeaseSnapshot { .. } | HostCommand::LeaseCurrentEdit { .. }
+            ) && self.attachments[index].snapshot_leases.len() >= 64
+            {
+                return Err(HostRefusal::new(
+                    "capacity",
+                    "64 snapshot leases per attachment maximum",
+                )
+                .into());
+            }
             match command {
-                HostCommand::LeaseSnapshot { key } => {
-                    if self.attachments[index].snapshot_leases.len() >= 64 {
+                HostCommand::LeaseCurrentEdit { inputs } => {
+                    let id = lease_id()?;
+                    let (lease, pin) = self.owner()?.lease_current_edit(&inputs, id.clone())?;
+                    let encoded = serde_json::to_vec(&lease)?;
+                    if encoded.len() > HOST_BODY_BYTES / 2 {
                         return Err(HostRefusal::new(
                             "capacity",
-                            "64 snapshot leases per attachment maximum",
+                            "current edit graph exceeds reply capacity",
                         )
                         .into());
                     }
-                    let mut random = [0_u8; 32];
-                    getrandom::fill(&mut random).map_err(|e| HostError::Protocol(e.to_string()))?;
-                    let id = kinewright_media::sha256_bytes(&random);
+                    let charge = self
+                        .owner()?
+                        .reserve_snapshot_lease(encoded.len() as u64 * 3)?;
+                    self.attachments[index].snapshot_leases.insert(
+                        id,
+                        LeasePin {
+                            payload_sha256: lease.payload_sha256.clone(),
+                            owner_epoch: lease.owner_epoch,
+                            current_inputs: Some(inputs),
+                            _pin: Some(pin),
+                            _charge: charge,
+                        },
+                    );
+                    reply.current_edit_lease = Some(lease);
+                }
+                HostCommand::LeaseSnapshot { key } => {
+                    let id = lease_id()?;
                     let (lease, pinned) = self.owner()?.lease_snapshot(&key, id.clone())?;
                     let encoded = serde_json::to_vec(&lease)?;
                     if encoded.len() > HOST_BODY_BYTES / 2 {
@@ -62,6 +98,7 @@ impl HostCommandOwner {
                         LeasePin {
                             payload_sha256: lease.payload_sha256.clone(),
                             owner_epoch,
+                            current_inputs: None,
                             _pin: Some(pinned.pin),
                             _charge: charge,
                         },
@@ -94,13 +131,19 @@ impl HostCommandOwner {
     fn check_snapshot_lease(&self, index: usize, id: &str, digest: &str) -> Result<(), HostError> {
         self.owner()?.check_snapshot_authority()?;
         let owner_epoch = self.owner()?.store()?.owner_epoch();
+        let inputs = self.owner()?.current_inputs_ref();
         if id.len() != 64
             || digest.len() != 64
             || self.attachments[index]
                 .snapshot_leases
                 .get(id)
                 .is_none_or(|lease| {
-                    lease.payload_sha256 != digest || lease.owner_epoch != owner_epoch
+                    lease.payload_sha256 != digest
+                        || lease.owner_epoch != owner_epoch
+                        || lease
+                            .current_inputs
+                            .as_ref()
+                            .is_some_and(|leased| leased != inputs)
                 })
         {
             return Err(
@@ -109,6 +152,12 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+}
+
+fn lease_id() -> Result<String, HostError> {
+    let mut random = [0_u8; 32];
+    getrandom::fill(&mut random).map_err(|e| HostError::Protocol(e.to_string()))?;
+    Ok(kinewright_media::sha256_bytes(&random))
 }
 
 /// Pooled, bounded liveness transport. It carries no mutable store capability.

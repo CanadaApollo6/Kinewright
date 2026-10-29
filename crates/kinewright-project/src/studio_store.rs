@@ -1627,6 +1627,11 @@ impl crate::store::ProjectStore {
             Arc::new(library),
             lifetime,
         )
+        // A host-leased reader binds every later read and retarget to its lease.
+        .and_then(|inputs| match self.read_authority() {
+            Some(authority) => inputs.with_read_authority(authority),
+            None => Ok(inputs),
+        })
         .map(Arc::new)
         .map_err(|error| BundleError::Corrupt(error.to_string()))
     }

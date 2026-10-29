@@ -150,6 +150,9 @@ impl Attachment {
             HostCommand::ReadFeedback { .. }
             | HostCommand::ResolveFeedback { .. }
             | HostCommand::ListFeedback => self.role != AttachmentRole::Producer,
+            HostCommand::LeaseCurrentEdit { .. } => {
+                matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+            }
             HostCommand::Attach
             | HostCommand::Status
             | HostCommand::ReadHistory

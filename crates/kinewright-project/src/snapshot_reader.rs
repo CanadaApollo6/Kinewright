@@ -32,6 +32,27 @@ impl SnapshotLease {
     }
 }
 
+/// The host's current edit input graph: the media and resources Current-edit
+/// playback reads. The document is the GUI's accepted view, checked against
+/// these inputs; the host ends the lease when its owner or inputs move (S3 C11).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentEditLease {
+    pub id: String,
+    pub owner_epoch: u64,
+    pub inputs: ObjectRef,
+    pub manifest: StoreManifest,
+    pub payload_sha256: String,
+}
+impl CurrentEditLease {
+    pub fn digest(&self) -> Result<String, BundleError> {
+        Ok(kinewright_media::sha256_bytes(
+            &serde_json::to_vec(&(&self.id, self.owner_epoch, &self.inputs, &self.manifest))
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+        ))
+    }
+}
+
 /// One GUI attachment shares this budget across all its open snapshots.
 pub struct SnapshotReadSession {
     usage: Arc<Mutex<StorageUsage>>,
@@ -51,7 +72,46 @@ impl SnapshotReadSession {
         lease: &SnapshotLease,
         authority: ReadAuthority,
     ) -> Result<HostSnapshotReader, BundleError> {
-        if authority.binding() != lease.payload_sha256 {
+        let store = self.open_graph(
+            path,
+            (&lease.id, &lease.payload_sha256, lease.digest()?),
+            &lease.manifest,
+            &lease.descriptor.references(),
+            authority,
+        )?;
+        Ok(HostSnapshotReader {
+            store,
+            descriptor: lease.descriptor.clone(),
+        })
+    }
+    /// Opens the current edit's leased input graph (S3 C11).
+    pub fn open_current(
+        &self,
+        path: &Path,
+        lease: &CurrentEditLease,
+        authority: ReadAuthority,
+    ) -> Result<CurrentEditReader, BundleError> {
+        let store = self.open_graph(
+            path,
+            (&lease.id, &lease.payload_sha256, lease.digest()?),
+            &lease.manifest,
+            std::slice::from_ref(&lease.inputs),
+            authority,
+        )?;
+        Ok(CurrentEditReader {
+            store,
+            inputs: lease.inputs.clone(),
+        })
+    }
+    fn open_graph(
+        &self,
+        path: &Path,
+        (id, payload_sha256, digest): (&str, &str, String),
+        manifest: &StoreManifest,
+        roots: &[ObjectRef],
+        authority: ReadAuthority,
+    ) -> Result<ProjectStore, BundleError> {
+        if authority.binding() != payload_sha256 {
             return Err(BundleError::Identity(
                 "snapshot authority belongs to another lease".into(),
             ));
@@ -59,11 +119,11 @@ impl SnapshotReadSession {
         authority
             .check()
             .map_err(|e| BundleError::Identity(e.to_string()))?;
-        if lease.id.is_empty()
-            || lease.id.len() > 128
-            || lease.digest()? != lease.payload_sha256
-            || lease.manifest.project_id.is_none()
-            || lease.manifest.session_id.is_some()
+        if id.is_empty()
+            || id.len() > 128
+            || digest != payload_sha256
+            || manifest.project_id.is_none()
+            || manifest.session_id.is_some()
         {
             return Err(BundleError::Identity("snapshot lease binding".into()));
         }
@@ -71,13 +131,12 @@ impl SnapshotReadSession {
         namespace.lend_read_authority(authority)?;
         let mut store = ProjectStore::new(
             namespace,
-            lease.manifest.project_id.clone(),
+            manifest.project_id.clone(),
             None,
             self.limits.clone(),
         )?;
         let inner = Arc::get_mut(&mut store.inner).ok_or(BundleError::Unsettled)?;
         inner.usage = Arc::clone(&self.usage);
-        let manifest = &lease.manifest;
         if manifest.objects.len() as u64 > self.limits.objects
             || manifest.dependencies.len() != manifest.objects.len()
         {
@@ -125,7 +184,7 @@ impl SnapshotReadSession {
             edges,
         )?);
         // Validate the entire closed graph, not just the first media object used.
-        let selected = store.closure(&lease.descriptor.references())?;
+        let selected = store.closure(roots)?;
         if selected.len() != manifest.objects.len()
             || !selected.iter().all(|r| manifest.objects.contains(r))
         {
@@ -134,10 +193,7 @@ impl SnapshotReadSession {
             ));
         }
         store.check_read_authority()?;
-        Ok(HostSnapshotReader {
-            store,
-            descriptor: lease.descriptor.clone(),
-        })
+        Ok(store)
     }
     pub fn usage(&self) -> Result<StorageUsage, BundleError> {
         self.usage
@@ -164,6 +220,25 @@ impl HostSnapshotReader {
         reference: &ObjectRef,
     ) -> Result<StorageReservation<T>, BundleError> {
         self.store.read_record(reference)
+    }
+}
+
+pub struct CurrentEditReader {
+    store: ProjectStore,
+    inputs: ObjectRef,
+}
+impl CurrentEditReader {
+    #[must_use]
+    pub fn inputs(&self) -> &ObjectRef {
+        &self.inputs
+    }
+    /// Admits the accepted document's playback inputs from the leased graph.
+    pub fn playback_inputs(
+        &self,
+        document: Arc<kinewright_core::Document>,
+    ) -> Result<Arc<kinewright_media::owned_io::PlaybackInputs>, BundleError> {
+        self.store.check_read_authority()?;
+        self.store.manual_playback_inputs(document, &self.inputs)
     }
 }
 
@@ -249,6 +324,39 @@ impl crate::editing_session::Ja1EditingSession {
         };
         lease.payload_sha256 = lease.digest()?;
         Ok((lease, pinned))
+    }
+}
+
+impl crate::editing_session::Ja1EditingSession {
+    /// Pins the current edit's input graph. Only the inputs the session holds
+    /// now can be leased; an older context is refused.
+    pub fn lease_current_edit(
+        &self,
+        inputs: &ObjectRef,
+        id: String,
+    ) -> Result<(CurrentEditLease, super::StorePin), BundleError> {
+        let bundle = self.active_bundle()?;
+        if inputs != self.current_inputs_ref() {
+            return Err(BundleError::HistoryChanged);
+        }
+        let roots = vec![inputs.clone()];
+        let pin = bundle.store.pin(&roots)?;
+        let manifest = bundle.store.selected_manifest(
+            &roots,
+            &[],
+            RecoveryInventory::default(),
+            &bundle.admission.data.inventory,
+            bundle.generation,
+        )?;
+        let mut lease = CurrentEditLease {
+            id,
+            owner_epoch: bundle.store.owner_epoch(),
+            inputs: inputs.clone(),
+            manifest,
+            payload_sha256: String::new(),
+        };
+        lease.payload_sha256 = lease.digest()?;
+        Ok((lease, pin))
     }
 }
 

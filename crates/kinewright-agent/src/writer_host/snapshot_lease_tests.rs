@@ -4,7 +4,7 @@ mod tests {
     use crate::writer_host::ja_s3_host::{accepted, publish_command};
     use kinewright_media::{owned_io::ReadAuthority, test_support::TempDirectory};
     use kinewright_project::{
-        store::snapshot_reader::{SnapshotLease, SnapshotReadSession},
+        store::snapshot_reader::{CurrentEditLease, SnapshotLease, SnapshotReadSession},
         studio_records::*,
     };
     use std::{io::SeekFrom, sync::atomic::AtomicBool};
@@ -780,6 +780,181 @@ mod tests {
             );
         }
         assert_eq!(dedicated_status(&client, &lease), StatusCode::NO_CONTENT);
+    }
+    /// The host's current playback scope and its document, read in-process.
+    fn current(host: &WriterHost) -> ((u64, ObjectRef), Arc<Document>) {
+        let client = host.client();
+        let status = accepted(client.request(HostCommand::Status).unwrap()).status;
+        let owner = host.owner.upgrade().unwrap();
+        let document = owner
+            .lock()
+            .unwrap()
+            .core()
+            .export_history()
+            .unwrap()
+            .document;
+        (status.playback_scope.expect("C11_SCOPE"), document)
+    }
+    fn lease_current(
+        host: &WriterHost,
+        scope: &(u64, ObjectRef),
+    ) -> (HostClient, CurrentEditLease, ReadAuthority) {
+        let client = host.client();
+        let lease = accepted(
+            client
+                .request(HostCommand::LeaseCurrentEdit {
+                    inputs: scope.1.clone(),
+                })
+                .unwrap(),
+        )
+        .current_edit_lease
+        .unwrap();
+        assert_eq!((lease.owner_epoch, &lease.inputs), (scope.0, &scope.1));
+        let remote = client
+            .snapshot_lease_remote(&lease.id, &lease.payload_sha256)
+            .unwrap();
+        let origin = Arc::new(kinewright_core::MediaSourceOrigin::new_project());
+        let grant = origin.legacy_media().unwrap();
+        let authority = ReadAuthority::new(
+            grant,
+            lease.payload_sha256.clone(),
+            Arc::new(move || {
+                let result = remote.check();
+                if result.is_err() {
+                    origin.revoke_legacy_media();
+                }
+                result.map_err(|_| kinewright_core::MediaError::MediaAdmissionRequired)
+            }),
+        );
+        (client, lease, authority)
+    }
+    fn status_code(client: &HostClient, lease: &CurrentEditLease) -> Option<String> {
+        client
+            .request(HostCommand::SnapshotLeaseStatus {
+                id: lease.id.clone(),
+                payload_sha256: lease.payload_sha256.clone(),
+            })
+            .unwrap()
+            .error
+            .map(|error| error.code)
+    }
+
+    /// S3 C11: the current edit's input graph is leased, read and admitted as
+    /// playback inputs. Once the host's inputs move (here an import, which
+    /// keeps the owner), the old lease ends and its inputs stop reading, even
+    /// if the reader never renews.
+    #[test]
+    fn c11_current_edit_lease_ends_when_the_inputs_move() {
+        let (root, host, _) = fixture();
+        let (scope, document) = current(&host);
+        let client = host.client();
+        let mut stale = scope.1.clone();
+        stale.sha256 = "0".repeat(64);
+        assert!(
+            client
+                .request(HostCommand::LeaseCurrentEdit { inputs: stale })
+                .unwrap()
+                .error
+                .is_some(),
+            "C11_ONLY_CURRENT_INPUTS"
+        );
+        let (client, lease, authority) = lease_current(&host, &scope);
+        let session = SnapshotReadSession::new(StorageLimits::default()).unwrap();
+        let reader = session
+            .open_current(&host.config_path_probe(), &lease, authority)
+            .unwrap();
+        let inputs = reader.playback_inputs(Arc::clone(&document)).unwrap();
+        assert!(
+            !inputs.test_audio_samples().unwrap().is_empty(),
+            "C11_CURRENT_EDIT_READS"
+        );
+        let wav = root.path("c11-moved.wav");
+        std::fs::write(
+            &wav,
+            kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+        )
+        .unwrap();
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .owner_mut()
+            .unwrap()
+            .import_owned_media(&wav)
+            .unwrap();
+        let (moved, moved_document) = current(&host);
+        assert_eq!(moved.0, scope.0, "C11_SAME_OWNER");
+        assert_ne!(moved.1, scope.1, "C11_INPUTS_MOVED");
+        assert_eq!(
+            status_code(&client, &lease).as_deref(),
+            Some("lease_revoked"),
+            "C11_MOVED_INPUTS_END_LEASE"
+        );
+        assert!(
+            inputs.test_audio_samples().is_err(),
+            "C11_OLD_HEAD_UNREADABLE"
+        );
+        assert!(
+            reader.playback_inputs(Arc::clone(&document)).is_err(),
+            "C11_OLD_READER_UNREADABLE"
+        );
+        let (_, renewed, authority) = lease_current(&host, &moved);
+        let reader = session
+            .open_current(&host.config_path_probe(), &renewed, authority)
+            .unwrap();
+        reader.playback_inputs(moved_document).expect("C11_RENEWED");
+    }
+
+    /// S3 C11: release, Save As and host death each stop current-edit reads.
+    #[test]
+    fn c11_release_save_as_and_host_death_stop_current_reads() {
+        let (root, host, _) = fixture();
+        let (scope, document) = current(&host);
+        let session = SnapshotReadSession::new(StorageLimits::default()).unwrap();
+        let path = host.config_path_probe();
+        let (client, released, authority) = lease_current(&host, &scope);
+        let reader = session.open_current(&path, &released, authority).unwrap();
+        let inputs = reader.playback_inputs(Arc::clone(&document)).unwrap();
+        accepted(
+            client
+                .request(HostCommand::ReleaseSnapshot {
+                    id: released.id.clone(),
+                    payload_sha256: released.payload_sha256.clone(),
+                })
+                .unwrap(),
+        );
+        assert!(inputs.test_audio_samples().is_err(), "C11_RELEASE_STOPS");
+        let (client, saved_as, authority) = lease_current(&host, &scope);
+        let reader = session.open_current(&path, &saved_as, authority).unwrap();
+        let inputs = reader.playback_inputs(Arc::clone(&document)).unwrap();
+        let snapshot = {
+            let owner = host.owner.upgrade().unwrap();
+            let owner = owner.lock().unwrap();
+            HostSnapshot::capture(owner.core()).unwrap()
+        };
+        let copy = root.path("c11-copy.kinewright");
+        accepted(
+            client
+                .request(HostCommand::SaveAs {
+                    destination: copy.clone(),
+                    snapshot,
+                })
+                .unwrap(),
+        );
+        assert!(inputs.test_audio_samples().is_err(), "C11_SAVE_AS_STOPS");
+        assert_eq!(
+            status_code(&client, &saved_as).as_deref(),
+            Some("lease_revoked")
+        );
+        let (moved, document) = current(&host);
+        assert_ne!(moved, scope, "C11_SAVE_AS_MOVES_SCOPE");
+        let (_, last, authority) = lease_current(&host, &moved);
+        let reader = session.open_current(&copy, &last, authority).unwrap();
+        let inputs = reader.playback_inputs(document).unwrap();
+        inputs.test_audio_samples().expect("C11_SAVE_AS_RENEWED");
+        drop(host);
+        assert!(inputs.test_audio_samples().is_err(), "C11_HOST_DEATH_STOPS");
     }
     impl WriterHost {
         fn config_path_probe(&self) -> std::path::PathBuf {

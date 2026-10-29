@@ -1662,6 +1662,66 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
     assert!(!source_root.exists());
 }
 
+/// S3 C11: after a host First Save, the Current edit's inputs come from a host
+/// lease on the saved project, and ending the host stops those reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn c11_host_first_save_then_current_edit_reads_through_the_lease() {
+    use kinewright_agent::writer_host::SessionRoots;
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let executable = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("kinewright");
+    assert!(
+        executable.is_file(),
+        "setup: build the shipping kinewright host first"
+    );
+    app.launch_host_at(
+        &executable,
+        "app-c11-first-save".into(),
+        SessionRoots {
+            read: vec![temp.root().to_path_buf()],
+            write: vec![temp.root().to_path_buf()],
+        },
+    )
+    .unwrap();
+    let path = temp.path("a.kinewright");
+    app.apply(Action::FirstSave(path.clone())).unwrap();
+    assert_eq!(app.project_path().as_deref(), Some(path.as_path()));
+    let scope = app.studio_playback_scope().expect("C11_FIRST_SAVE_SCOPE");
+    let document = core.export_history().unwrap().document;
+    let inputs = app
+        .studio_current_reader(&scope)
+        .expect("C11_FIRST_SAVE_LEASE")
+        .playback_inputs(Arc::clone(&document))
+        .expect("C11_FIRST_SAVE_PLAYS");
+    assert!(inputs.with_document(Arc::clone(&document)).is_ok());
+    let host_pid = app.host.as_ref().unwrap().child_id().unwrap();
+    app.host.as_mut().unwrap().close();
+    assert!(!Path::new(&format!("/proc/{host_pid}")).exists());
+    // C9's lease cache authorizes reads for at most 250 ms after a good probe.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        inputs.with_document(document).is_err(),
+        "C11_FIRST_SAVE_HOST_END_STOPS"
+    );
+    drop(inputs);
+    app.close();
+    drop(app);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
