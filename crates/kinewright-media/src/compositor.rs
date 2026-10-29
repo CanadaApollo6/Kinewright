@@ -268,6 +268,16 @@ struct GpuProvenance {
 }
 
 impl GpuContext {
+    /// Share the device and provenance while accounting only new test allocations.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_ledger_view(&self) -> Self {
+        Self {
+            ledger: Arc::default(),
+            ..self.clone()
+        }
+    }
+
     /// Exact selected renderer identity for eval observations; no render claim.
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
@@ -4544,6 +4554,36 @@ mod tests {
         assert_ne!(metadata.backend, "unknown");
         assert_ne!(metadata.adapter, "unknown");
         assert!(!metadata.gpu_claim || !metadata.software_fallback);
+    }
+
+    #[test]
+    fn test_ledger_view_retires_only_its_own_allocations() {
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let buffer = |context: &GpuContext, size| {
+            context.charge_buffer(context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("isolated test ledger"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }))
+        };
+        let original = buffer(&gpu, 4);
+        let view = gpu.test_ledger_view();
+        assert_eq!(view.observed_adapter(), gpu.observed_adapter());
+        assert_eq!(view.device, gpu.device);
+        assert_eq!(view.queue, gpu.queue);
+        assert_eq!(view.ledger().live_bytes(), 0);
+        let isolated = buffer(&view, 8);
+        let retained = view.clone();
+        assert_eq!(gpu.ledger().live_bytes(), 4);
+        assert_eq!(retained.ledger().live_bytes(), 8);
+        drop(isolated);
+        assert_eq!(retained.ledger().live_bytes(), 0);
+        assert_eq!(gpu.ledger().live_bytes(), 4);
+        drop(original);
+        assert_eq!(gpu.ledger().live_bytes(), 0);
     }
 
     fn assert_pixel_close(actual: &[u8], expected: [u8; 4], tolerance: u8) {

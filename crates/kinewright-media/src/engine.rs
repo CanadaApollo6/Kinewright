@@ -808,11 +808,22 @@ impl FfmpegMediaEngine {
     ///
     /// Returns a media error when `FFmpeg`, GPU, audio, or worker initialization fails.
     pub fn new_with_data_dir(data_dir: PathBuf) -> Result<Self, MediaError> {
+        Self::new_with_gpu_and_data_dir(Self::default_gpu()?, data_dir)
+    }
+
+    fn default_gpu() -> Result<GpuContext, MediaError> {
         static GPU: OnceLock<Result<GpuContext, MediaError>> = OnceLock::new();
-        let gpu = GPU
-            .get_or_init(|| GpuContext::headless(false).or_else(|_| GpuContext::headless(true)))
-            .clone()?;
-        Self::new_with_gpu_and_data_dir(gpu, data_dir)
+        GPU.get_or_init(|| GpuContext::headless(false).or_else(|_| GpuContext::headless(true)))
+            .clone()
+    }
+
+    /// Reuse the default device with a ledger for one test engine's allocations.
+    ///
+    /// # Errors
+    /// Returns the ordinary GPU initialization error.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_gpu_context() -> Result<GpuContext, MediaError> {
+        Ok(Self::default_gpu()?.test_ledger_view())
     }
 
     /// Start the media engine with an existing GPU context and default cache directory.

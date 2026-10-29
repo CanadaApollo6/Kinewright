@@ -1235,6 +1235,21 @@ mod tests {
         wait_frame(app, &egui::Context::default(), &key, TimeCode::ZERO);
         app.feedback_frame();
         app.voice_frame();
+        // The restored note's status request can publish transcription metadata.
+        // Finish it before the next recording snapshots an upload generation.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while matches!(
+            app.focused().studio.voice.state,
+            State::Saved { reply: Some(_), .. }
+        ) {
+            assert!(
+                Instant::now() < deadline,
+                "FIX1_REOPEN_STATUS {}",
+                app.focused().studio.voice.message
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            app.voice_frame();
+        }
     }
     #[test]
     fn fix1_acknowledgment_keeps_typed_text_live_and_reopened() {

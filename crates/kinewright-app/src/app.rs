@@ -6561,10 +6561,12 @@ pub(crate) mod in1_tests {
 
     /// The smallest real app that can tick: one project session on a real
     /// `Core` actor, a real engine behind the trait arcs, and default UI
-    /// state everywhere else. There is deliberately no window, no model, and
-    /// no audio device — the same terms §9 lays down.
+    /// state everywhere else. There is no window or model. Tests that play
+    /// audio supply a paced engine through `in1_harness_with_engine`.
     pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
-        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let gpu = FfmpegMediaEngine::test_gpu_context().expect("the test GPU starts");
+        let engine =
+            Arc::new(FfmpegMediaEngine::new_with_gpu(gpu).expect("the test engine starts"));
         in1_harness_with_engine(document, engine)
     }
 

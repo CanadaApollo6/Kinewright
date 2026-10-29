@@ -4,7 +4,7 @@
     reason = "end-to-end witnesses retain one complete transition and its oracles"
 )]
 use super::*;
-use crate::app::in1_tests::{in1_harness, in1_shutdown};
+use crate::app::in1_tests::{in1_harness, in1_harness_with_engine, in1_shutdown};
 use kinewright_core::{Command, Core, Event, Operation, Playback, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 use kinewright_project::{
@@ -1041,6 +1041,7 @@ fn s3_rapid_focus_round_trip_rebinds_visual_cache() {
 
 #[test]
 fn c9_host_attached_frozen_version_selects_and_plays() {
+    let mut retire = Retire::default();
     let mut fixture = fixtures();
     let key = fixture.contexts[0].snapshot.descriptor.key.clone();
     fixture.contexts.clear();
@@ -1062,8 +1063,15 @@ fn c9_host_attached_frozen_version_selects_and_plays() {
         panic!("C9_ATTACHED_FROZEN_VERSION_OPENS: {error}");
     }
     let context = Arc::new(result.unwrap());
-    let (mut app, engine) = in1_harness(context.document.clone());
-    let mut retire = Retire::default();
+    let gpu = kinewright_media::FfmpegMediaEngine::test_gpu_context().unwrap();
+    let engine = Arc::new(
+        kinewright_media::FfmpegMediaEngine::new_with_paced_test_audio(
+            gpu,
+            fixture.root.path("media-cache"),
+        )
+        .unwrap(),
+    );
+    let (mut app, engine) = in1_harness_with_engine(context.document.clone(), engine);
     retire.arm(&engine);
     app.frames = engine.controls().frames();
     app.media_events = engine.controls().events();
@@ -1077,8 +1085,13 @@ fn c9_host_attached_frozen_version_selects_and_plays() {
     while app.playback.position() < TimeCode(3) {
         app.poll_background(&ctx);
         assert!(
-            Instant::now() < deadline,
-            "C9_ATTACHED_FROZEN_VERSION_PLAYS"
+            app.focused().studio.failure.is_none() && Instant::now() < deadline,
+            "C9_ATTACHED_FROZEN_VERSION_PLAYS position={:?} stamp={:?} stats={:?} studio={:?} status={}",
+            app.playback.position(),
+            app.playback.stamp(),
+            app.playback.stats(),
+            app.focused().studio.failure,
+            app.status,
         );
         std::thread::sleep(Duration::from_millis(10));
     }
