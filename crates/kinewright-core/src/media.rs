@@ -1916,6 +1916,8 @@ pub enum MediaError {
         "owned_media_admission_required: activate Studio to preview or analyse this project's owned media"
     )]
     MediaAdmissionRequired,
+    #[error("owned_media_temporarily_unavailable: waiting for renewed snapshot read authority")]
+    MediaReadTemporarilyUnavailable,
     #[error("owned_media_operation_unavailable: this operation has no certified source route")]
     OwnedMediaOperationUnavailable,
     #[error("media operation is not implemented")]
@@ -2092,6 +2094,7 @@ impl MediaError {
             Self::MatteProof(error) => Some(error.code()),
             Self::MatteCoverage(error) => Some(error.code()),
             Self::Store { code, .. } => Some(code),
+            Self::MediaReadTemporarilyUnavailable => Some("owned_media_temporarily_unavailable"),
             Self::MediaAdmissionRequired
             | Self::OwnedMediaOperationUnavailable
             | Self::NotImplemented

@@ -17,7 +17,7 @@ mod snapshot_lease;
 mod snapshot_lease_tests;
 mod switch;
 mod voice;
-pub use snapshot_lease::SnapshotLeaseRemote;
+pub use snapshot_lease::{SnapshotLeaseError, SnapshotLeaseRemote};
 #[cfg(all(test, target_os = "linux"))]
 mod voice_tests;
 pub use attention::{

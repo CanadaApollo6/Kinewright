@@ -1,5 +1,7 @@
 //! Revocable GUI access to a host-owned immutable snapshot graph.
-use kinewright_agent::writer_host::{HostClient, HostCommand, SnapshotLeaseRemote};
+use kinewright_agent::writer_host::{
+    HostClient, HostCommand, SnapshotLeaseError, SnapshotLeaseRemote,
+};
 use kinewright_core::MediaSourceOrigin;
 use kinewright_media::owned_io::ReadAuthority;
 use kinewright_project::{
@@ -27,7 +29,7 @@ struct LeaseLifetime {
     released: AtomicBool,
 }
 impl LeaseLifetime {
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<(), kinewright_core::MediaError> {
         let result = if self
             .context
             .upgrade()
@@ -35,17 +37,29 @@ impl LeaseLifetime {
         {
             self.remote.check_cached()
         } else {
-            Err("attachment ended".into())
+            Err(SnapshotLeaseError::Ended)
         };
-        if result.is_err() {
-            self.origin.revoke_legacy_media();
-        }
-        result
+        lease_read_result(&self.origin, result)
     }
     fn revoke(&self) {
         self.origin.revoke_legacy_media();
         if !self.released.swap(true, Ordering::AcqRel) {
             let _ = self.remote.release();
+        }
+    }
+}
+fn lease_read_result(
+    origin: &MediaSourceOrigin,
+    result: Result<(), SnapshotLeaseError>,
+) -> Result<(), kinewright_core::MediaError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(SnapshotLeaseError::TemporarilyUnavailable) => {
+            Err(ReadAuthority::temporarily_unavailable())
+        }
+        Err(SnapshotLeaseError::Ended) => {
+            origin.revoke_legacy_media();
+            Err(kinewright_core::MediaError::MediaAdmissionRequired)
         }
     }
 }
@@ -131,4 +145,23 @@ impl Drop for SnapshotReaders {
 }
 fn cause(error: impl std::fmt::Display) -> BundleError {
     BundleError::Corrupt(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fix2_temporary_lease_failure_preserves_grant_and_ended_revokes() {
+        let origin = MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        assert!(lease_read_result(&origin, Ok(())).is_ok());
+        let error = lease_read_result(&origin, Err(SnapshotLeaseError::TemporarilyUnavailable))
+            .unwrap_err();
+        assert!(ReadAuthority::is_temporarily_unavailable(&error));
+        assert!(grant.check().is_ok());
+        assert!(lease_read_result(&origin, Ok(())).is_ok());
+        assert!(grant.check().is_ok());
+        assert!(lease_read_result(&origin, Err(SnapshotLeaseError::Ended)).is_err());
+        assert!(grant.check().is_err());
+    }
 }

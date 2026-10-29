@@ -64,7 +64,7 @@ mod tests {
                 if result.is_err() {
                     origin.revoke_legacy_media();
                 }
-                result
+                result.map_err(|_| kinewright_core::MediaError::MediaAdmissionRequired)
             }),
         );
         (client, lease, authority)
@@ -189,7 +189,7 @@ mod tests {
                             .legacy_media()
                             .unwrap(),
                         lease.payload_sha256.clone(),
-                        Arc::new(|| Err("ended".into()))
+                        Arc::new(|| Err(kinewright_core::MediaError::MediaAdmissionRequired))
                     )
                 )
                 .is_err()
@@ -387,7 +387,11 @@ mod tests {
         );
     }
     #[test]
-    fn fix1_lease_status_timeout_keeps_playback_and_revoke_stops_it() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one retained playback session covers timeout, recovery, paused target and cancellation"
+    )]
+    fn fix2_lease_status_timeout_suspends_then_resumes_playback() {
         use kinewright_core::{Playback, TimeCode};
         let (_root, host, key) = fixture();
         let client = host.client();
@@ -406,10 +410,16 @@ mod tests {
             lease.payload_sha256.clone(),
             Arc::new(move || {
                 let result = checker.check_cached();
-                if result.is_err() {
-                    revoke.revoke_legacy_media();
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(SnapshotLeaseError::TemporarilyUnavailable) => {
+                        Err(ReadAuthority::temporarily_unavailable())
+                    }
+                    Err(SnapshotLeaseError::Ended) => {
+                        revoke.revoke_legacy_media();
+                        Err(kinewright_core::MediaError::MediaAdmissionRequired)
+                    }
                 }
-                result
             }),
         );
         let session = SnapshotReadSession::new(StorageLimits::default()).unwrap();
@@ -463,8 +473,8 @@ mod tests {
         thread::sleep(Duration::from_millis(500));
         let probing = std::time::Instant::now();
         assert!(
-            remote.check_cached().is_ok(),
-            "FIX1_TIMEOUT_PRESERVES_LEASE"
+            remote.check_cached() == Err(SnapshotLeaseError::TemporarilyUnavailable),
+            "FIX2_TIMEOUT_SUSPENDS_READS"
         );
         assert!(
             probing.elapsed() >= Duration::from_secs(1),
@@ -482,6 +492,52 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(!inputs.test_audio_samples().unwrap().is_empty());
+        let events = media.events();
+        media.pause();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !matches!(
+            events.recv_timeout(Duration::from_millis(100)),
+            Ok(kinewright_core::MediaEvent::PlaybackStateChanged(
+                kinewright_core::PlaybackState::Paused
+            ))
+        ) {
+            assert!(std::time::Instant::now() < deadline);
+        }
+        let load = saturate_status(&client, &lease);
+        thread::sleep(Duration::from_millis(260));
+        media.play(TimeCode::ZERO);
+        thread::sleep(Duration::from_millis(100));
+        media.pause();
+        let applied = engine.test_applied_scene().unwrap();
+        assert_eq!(
+            applied["epoch"].as_u64(),
+            Some(media.stamp().epoch),
+            "FIX2_PAUSE_APPLIED_EPOCH"
+        );
+        assert_eq!(
+            applied["seq"].as_u64(),
+            Some(media.stamp().seq),
+            "FIX2_PAUSE_APPLIED_SEQUENCE"
+        );
+        for _ in frames.try_iter() {}
+        media.request_frame(TimeCode(6));
+        drop(load);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if frames
+                .recv_timeout(Duration::from_millis(100))
+                .is_ok_and(|frame| frame.at == TimeCode(6))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "FIX2_PAUSED_RETRY_KEEPS_TARGET"
+            );
+        }
+        let paused = media.position();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(media.position(), paused, "FIX2_NO_UNREQUESTED_RESUME");
         remote.release().unwrap();
         media.request_frame(TimeCode(3));
         assert!(
@@ -491,6 +547,238 @@ mod tests {
         media.pause();
         drop(media);
         drop(engine);
+    }
+    fn dedicated_status(client: &HostClient, lease: &SnapshotLease) -> reqwest::StatusCode {
+        let request = HostRequest {
+            editor: None,
+            operation: None,
+            protocol: HOST_PROTOCOL,
+            project: client.endpoint().project.clone(),
+            roots: client.bootstrap.roots.clone(),
+            command: HostCommand::SnapshotLeaseStatus {
+                id: lease.id.clone(),
+                payload_sha256: lease.payload_sha256.clone(),
+            },
+        };
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .post(format!(
+                "http://{}/snapshot-lease",
+                client.endpoint().address
+            ))
+            .header("authorization", client.bootstrap.auth.bearer())
+            .header("x-kinewright-project", &client.endpoint().project)
+            .header("x-kinewright-protocol", "1")
+            .json(&request)
+            .send()
+            .unwrap()
+            .status()
+    }
+    fn saturate_status(client: &HostClient, lease: &SnapshotLease) -> Vec<std::net::TcpStream> {
+        use std::io::Write as _;
+        let mut streams = Vec::new();
+        for _ in 0..64 {
+            let mut socket = std::net::TcpStream::connect(client.endpoint().address).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
+            write!(socket,"POST /snapshot-lease HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: {}\r\nx-kinewright-project: {}\r\nx-kinewright-protocol: 1\r\nContent-Length: 2\r\n\r\n{{",client.bootstrap.auth.bearer(),client.endpoint().project).unwrap();
+            streams.push(socket);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while dedicated_status(client, lease) != StatusCode::TOO_MANY_REQUESTS {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "FIX2_STATUS_SATURATED"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        streams
+    }
+    fn cached_authority(
+        client: &HostClient,
+        lease: &SnapshotLease,
+    ) -> (
+        SnapshotLeaseRemote,
+        Arc<kinewright_core::MediaSourceOrigin>,
+        ReadAuthority,
+    ) {
+        let remote = client
+            .snapshot_lease_remote(&lease.id, &lease.payload_sha256)
+            .unwrap();
+        remote.check_cached().unwrap();
+        let origin = Arc::new(kinewright_core::MediaSourceOrigin::new_project());
+        let checker = remote.clone();
+        let revoke = Arc::clone(&origin);
+        let authority = ReadAuthority::new(
+            origin.legacy_media().unwrap(),
+            lease.payload_sha256.clone(),
+            Arc::new(move || match checker.check_cached() {
+                Ok(()) => Ok(()),
+                Err(SnapshotLeaseError::TemporarilyUnavailable) => {
+                    Err(ReadAuthority::temporarily_unavailable())
+                }
+                Err(SnapshotLeaseError::Ended) => {
+                    revoke.revoke_legacy_media();
+                    Err(kinewright_core::MediaError::MediaAdmissionRequired)
+                }
+            }),
+        );
+        (remote, origin, authority)
+    }
+    #[test]
+    fn fix2_host_revocation_during_busy_status_stops_retained_reads() {
+        for transition in [false, true] {
+            let (root, host, key) = fixture();
+            let client = host.client();
+            let lease = accepted(client.request(HostCommand::LeaseSnapshot { key }).unwrap())
+                .snapshot_lease
+                .unwrap();
+            let (remote, origin, authority) = cached_authority(&client, &lease);
+            let session = SnapshotReadSession::new(StorageLimits::default()).unwrap();
+            let reader = session
+                .open(&host.config_path_probe(), &lease, authority)
+                .unwrap();
+            let context = Arc::new(reader.frozen_context().unwrap());
+            let source = context.certified_input_leases[0]
+                .certified_source()
+                .unwrap();
+            let mut cursors = (0..3)
+                .map(|_| source.cursor(Arc::new(AtomicBool::new(false))).unwrap())
+                .collect::<Vec<_>>();
+            for cursor in &mut cursors {
+                assert_eq!(cursor.read(&mut [0; 32]).unwrap(), 32);
+            }
+            assert!(!context.resource_context[0].bytes().unwrap().is_empty());
+            // Force a successful status after setup, then hold the dedicated lane busy.
+            thread::sleep(Duration::from_millis(260));
+            remote.check_cached().unwrap();
+            let last_positive = std::time::Instant::now();
+            let load = saturate_status(&client, &lease);
+            if transition {
+                let snapshot = {
+                    let owner = host.owner.upgrade().unwrap();
+                    let owner = owner.lock().unwrap();
+                    HostSnapshot::capture(owner.core()).unwrap()
+                };
+                accepted(
+                    client
+                        .request(HostCommand::SaveAs {
+                            destination: root.path("busy-copy.kinewright"),
+                            snapshot,
+                        })
+                        .unwrap(),
+                );
+            } else {
+                accepted(
+                    client
+                        .request(HostCommand::ReleaseSnapshot {
+                            id: lease.id.clone(),
+                            payload_sha256: lease.payload_sha256.clone(),
+                        })
+                        .unwrap(),
+                );
+            }
+            let remaining = (last_positive + Duration::from_millis(250))
+                .saturating_duration_since(std::time::Instant::now());
+            thread::sleep(remaining);
+            for cursor in &mut cursors {
+                let mut bytes = [0; 32];
+                assert!(
+                    matches!(
+                        cursor.read(&mut bytes),
+                        Err(kinewright_media::owned_io::OwnedIoError::TemporarilyUnavailable)
+                    ),
+                    "FIX2_BUSY_REVOKED_READ_STOP transition={transition}"
+                );
+                assert_eq!(bytes, [0; 32]);
+            }
+            assert!(
+                reader
+                    .read_record::<Document>(&lease.descriptor.document_ref)
+                    .is_err()
+            );
+            assert!(context.resource_context[0].bytes().is_err());
+            assert!(origin.legacy_media().is_some(), "FIX2_BUSY_IS_NOT_ENDED");
+            for _ in 0..3 {
+                thread::sleep(Duration::from_millis(70));
+                assert_eq!(
+                    remote.check_cached(),
+                    Err(SnapshotLeaseError::TemporarilyUnavailable),
+                    "FIX2_BUSY_NEVER_RENEWS"
+                );
+            }
+            assert_eq!(
+                dedicated_status(&client, &lease),
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            drop(load);
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while remote.check_cached() != Err(SnapshotLeaseError::Ended) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(cursors[0].read(&mut [0; 32]).is_err());
+        }
+    }
+    #[test]
+    fn fix2_busy_without_revocation_resumes_same_cached_cursor() {
+        let (_root, host, key) = fixture();
+        let client = host.client();
+        let lease = accepted(client.request(HostCommand::LeaseSnapshot { key }).unwrap())
+            .snapshot_lease
+            .unwrap();
+        let (remote, origin, authority) = cached_authority(&client, &lease);
+        let session = SnapshotReadSession::new(StorageLimits::default()).unwrap();
+        let reader = session
+            .open(&host.config_path_probe(), &lease, authority)
+            .unwrap();
+        let context = reader.frozen_context().unwrap();
+        let source = context.certified_input_leases[0]
+            .certified_source()
+            .unwrap();
+        let mut cursor = source.cursor(Arc::new(AtomicBool::new(false))).unwrap();
+        let mut before = [0; 32];
+        cursor.read(&mut before).unwrap();
+        cursor.seek(SeekFrom::Start(0)).unwrap();
+        let load = saturate_status(&client, &lease);
+        thread::sleep(Duration::from_millis(260));
+        assert!(matches!(
+            cursor.read(&mut [0; 32]),
+            Err(kinewright_media::owned_io::OwnedIoError::TemporarilyUnavailable)
+        ));
+        assert!(origin.legacy_media().is_some());
+        drop(load);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while remote.check_cached().is_err() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mut after = [0; 32];
+        assert_eq!(cursor.read(&mut after).unwrap(), 32);
+        assert_eq!(before, after);
+    }
+    #[test]
+    fn fix2_lease_body_deadline_frees_all_status_permits() {
+        use std::io::Read as _;
+        let (_root, host, key) = fixture();
+        let client = host.client();
+        let lease = accepted(client.request(HostCommand::LeaseSnapshot { key }).unwrap())
+            .snapshot_lease
+            .unwrap();
+        let mut load = saturate_status(&client, &lease);
+        for socket in &mut load {
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(
+                response.starts_with("HTTP/1.1 408"),
+                "FIX2_LEASE_BODY_TIMEOUT {response}"
+            );
+        }
+        assert_eq!(dedicated_status(&client, &lease), StatusCode::NO_CONTENT);
     }
     impl WriterHost {
         fn config_path_probe(&self) -> std::path::PathBuf {
