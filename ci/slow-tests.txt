@@ -184,3 +184,4 @@ ja_s4_guardian s4_c2_service_proof_recovery_zombie crates/kinewright-agent/tests
 ja_s4_guardian s4_c2_service_identity_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 ja_s4_guardian s4_c2_service_events_session crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 ja_s4_guardian s4_c2_service_events_recovery crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end crates/kinewright-app/src/studio_e2e_tests.rs linux-only # C10 start-to-finish Studio, host-attached

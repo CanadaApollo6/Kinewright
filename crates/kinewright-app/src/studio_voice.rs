@@ -987,6 +987,9 @@ impl KinewrightApp {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "studio_e2e_tests.rs"]
+mod e2e_tests;
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::{
@@ -997,7 +1000,7 @@ mod tests {
     use kinewright_media::test_support::{SpeechClip, normalized_words, run_ffmpeg};
     use std::sync::Arc;
 
-    static VOICE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(super) static VOICE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn hosted_case(
         run: impl FnOnce(
             &mut KinewrightApp,
@@ -1047,7 +1050,7 @@ mod tests {
         drop(engine);
         retire.wait();
     }
-    fn recorded(
+    pub(super) fn recorded(
         app: &mut KinewrightApp,
         fixture: &crate::studio::tests::Fixtures,
     ) -> Box<CapturedAudio> {
@@ -1084,7 +1087,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    fn send_capture(app: &mut KinewrightApp, captured: Box<CapturedAudio>, refuse: bool) {
+    pub(super) fn send_capture(
+        app: &mut KinewrightApp,
+        captured: Box<CapturedAudio>,
+        refuse: bool,
+    ) {
         let client = app.voice_client().unwrap();
         let grant = client
             .request(HostCommand::IssueMetadataIssuer { issuer: None })
@@ -1107,7 +1114,7 @@ mod tests {
             reply: Some(reply),
         };
     }
-    fn wait_saved(app: &mut KinewrightApp) {
+    pub(super) fn wait_saved(app: &mut KinewrightApp) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             app.voice_frame();

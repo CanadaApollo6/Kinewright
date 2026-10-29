@@ -10,6 +10,7 @@ use super::{
     orchestration::{PendingPublication, ScopedOrchestrationRequest},
 };
 use crate::orchestration::{
+    director_setting::configured_director,
     orchestration_records::{
         AuthorityBinding, OrchestrationCommand, OrchestrationEnvelope, ProviderSelectionRecord,
         Role, RunId, StartRun, TaskBrief,
@@ -22,62 +23,8 @@ use kinewright_project::{
     studio_records::{self, ReviseRequest, ReviseResult},
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
-const DIRECTOR_FILE: &str = "director.json";
-const DIRECTOR_FILE_BYTES: u64 = 16 << 10;
 const RUN_SLOTS: usize = 64;
-const NO_DIRECTOR: &str = "No Director provider is set up on this computer. Your notes are saved. Revise cut again after one is set up.";
-
-/// The person's Director choice, in per-user scheduler settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DirectorSetting {
-    pub version: u32,
-    pub director: ProviderSelectionRecord,
-}
-
-/// Where S4 keeps per-user scheduler settings: beside Studio feedback state.
-pub fn scheduler_settings_directory() -> Result<PathBuf, String> {
-    Ok(kinewright_project::feedback_state_directory_with(
-        |name| std::env::var_os(name),
-        &std::env::temp_dir(),
-    )?
-    .with_file_name("scheduler"))
-}
-
-/// The configured Director provider, or why there is none, in plain words.
-pub fn configured_director(folder: Option<&Path>) -> Result<ProviderSelectionRecord, String> {
-    let folder = match folder {
-        Some(folder) => folder.to_path_buf(),
-        None => scheduler_settings_directory().map_err(|why| format!("{NO_DIRECTOR} ({why})"))?,
-    };
-    let path = folder.join(DIRECTOR_FILE);
-    let bytes = match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > DIRECTOR_FILE_BYTES => {
-            return Err("The Director setting is too large to read.".into());
-        }
-        Ok(_) => std::fs::read(&path)
-            .map_err(|error| format!("The Director setting cannot be read ({error})."))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(NO_DIRECTOR.into());
-        }
-        Err(error) => return Err(format!("The Director setting cannot be read ({error}).")),
-    };
-    let setting: DirectorSetting = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("The Director setting cannot be read ({error})."))?;
-    let director = setting.director;
-    if setting.version != 1
-        || director.connector.is_empty()
-        || director.model.is_empty()
-        || director.connector.len() > 128
-        || director.model.len() > 256
-        || director.options.len() > 32
-    {
-        return Err("The Director setting has an unknown version or shape.".into());
-    }
-    Ok(director)
-}
 
 /// The Director's assignment names the exact request, command id included.
 fn assignment_bytes(request: &ReviseRequest) -> Result<Vec<u8>, HostError> {

@@ -375,6 +375,8 @@ pub(crate) struct KinewrightApp {
         Option<crossbeam_channel::Receiver<crate::chat_ui::HarnessUpdate>>,
     pub(crate) show_thread_rail: bool,
     pub(crate) settings_open: bool,
+    /// The Settings window's Director section, read when the window opens.
+    pub(crate) director_setting: Option<crate::settings_ui::DirectorView>,
     pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) relink_probe_tx: mpsc::Sender<crate::media_workflow::RelinkProbeResponse>,
@@ -690,6 +692,7 @@ impl KinewrightApp {
                 std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref(),
                 Ok("settings")
             ),
+            director_setting: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,
@@ -6569,6 +6572,7 @@ pub(crate) mod in1_tests {
             harness_update_rx: None,
             show_thread_rail: true,
             settings_open: false,
+            director_setting: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,
@@ -11732,6 +11736,7 @@ mod in2b_tests {
             harness_update_rx: None,
             show_thread_rail: true,
             settings_open: false,
+            director_setting: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,

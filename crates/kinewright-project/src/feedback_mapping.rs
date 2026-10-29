@@ -244,8 +244,7 @@ impl ProjectBundle {
                 && candidate.asset(new_layer.source.asset) == Some(old_asset)
             {
                 let original_points = self.store().read_evidence(&revision.strokes_ref)?;
-                let points: Vec<[f64; 2]> = serde_json::from_slice(&original_points)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                let points = drawn_points(&original_points)?;
                 if let Some(mapped) = kinewright_media::map_feedback_geometry(
                     &old_layer.effects,
                     &new_layer.effects,
@@ -262,6 +261,21 @@ impl ProjectBundle {
             }
         }
         Ok(result)
+    }
+}
+
+/// Every point of a strokes evidence, in order. Admission accepts flat point
+/// pairs and the Studio's list of strokes alike (`validate_strokes`).
+fn drawn_points(bytes: &[u8]) -> Result<Vec<[f64; 2]>, BundleError> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Drawn {
+        Points(Vec<[f64; 2]>),
+        Strokes(Vec<Vec<[f64; 2]>>),
+    }
+    match serde_json::from_slice(bytes).map_err(|e| BundleError::Corrupt(e.to_string()))? {
+        Drawn::Points(points) => Ok(points),
+        Drawn::Strokes(strokes) => Ok(strokes.concat()),
     }
 }
 
@@ -295,6 +309,21 @@ fn is_future_occurrence(occurrence: &OccurrenceId, lineage: &LineageRecord) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Studio drawings are lists of strokes; older evidence is flat points.
+    #[test]
+    fn c10_drawn_points_reads_points_and_strokes() {
+        assert_eq!(
+            drawn_points(b"[[0.25,0.75]]").unwrap(),
+            vec![[0.25, 0.75]],
+            "C10_FLAT_POINTS"
+        );
+        assert_eq!(
+            drawn_points(b"[[[0.25,0.25],[0.5,0.4]],[[0.75,0.6]]]").unwrap(),
+            vec![[0.25, 0.25], [0.5, 0.4], [0.75, 0.6]],
+            "C10_STUDIO_STROKES"
+        );
+        assert!(drawn_points(b"[0.25]").is_err(), "C10_NOT_POINTS");
+    }
     #[test]
     fn s3_incomplete_split_ancestry_cannot_prove_removal() {
         let branch = crate::bundle_records::BranchId::fresh().unwrap();

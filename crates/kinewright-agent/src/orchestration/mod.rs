@@ -12,6 +12,7 @@ pub use kinewright_project::{orchestration_commit, orchestration_records};
 
 pub mod adapters;
 pub mod context;
+pub mod director_setting;
 pub mod machine;
 pub mod mailbox;
 pub mod outbox;

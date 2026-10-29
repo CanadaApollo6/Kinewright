@@ -2,6 +2,17 @@
 
 S3 certification remains **partial**. This commit pair fixes the focused C6a data paths and records final-source checks. It does not close the missing Studio voice/scheduler composition or `s3_studio_end_to_end`. See the [deferred list](deferred.md) for each item, reason and destination.
 
+## Update at C10
+
+C7 to C10 add the Studio scheduler and voice composition. C10 adds `s3_studio_end_to_end`, the combined App, host, store and media route with Save As and the unknown-reply leg, and the Director setting. It passes in the slow tier, and `s3_studio_end_to_end_live_voice` passes on demand with the Whisper model and espeak-ng. The C10 gate and its three mutation pairs are in [c10.md](c10.md). The rest of this report describes C6a and is kept as it was.
+
+Still open after C10:
+
+- Current-edit playback while a host holds a saved project: proposed C11, a current-edit playback port beside C9's lease.
+- A live Director. No connector is certified yet; certification is a separate item before S5.
+- The rescue-copy leg inside the end-to-end test, settling a run before Close, and detached hosts left by a failed test.
+- Native Windows, hosted CI, the physical microphone, review rounds and push.
+
 The base is `295619cc`; commit 1 is `ce6e257c6148e0fe98b2b91ae33435b02c73b179`. Both commits stay local on `ja1/s3`, without a push. Source and runtime fixtures are bound separately for each code cut. C6a's three protected pairs cover second-owner save, second-owner submission and frozen-manual trim. Astra 4's persisted remark-edit pair is NOT RUN.
 
 The pinned model was fetched only through `transcript::ensure_model`, via the test-util provisioning adapter. Its SHA-256 is `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`. The test-local cache is `target/ja1-s3-c6a/model-data/models/whisper/ggml-small.bin`. The first equipped control revealed a missing `espeak-ng` prerequisite. The unchanged fixture helper at the base has the same executable dependency; a fresh model-equipped parent run is NOT RUN. Task-local packages, checked against the local Arch repository SHA-256 records, supply synthesis without changing system packages or settings. With that prerequisite, the real CPU Whisper spoken-note backend control passes. This earns no microphone, capture-clock, native allocation-accounting or Studio UI credit.
@@ -16,7 +27,7 @@ G7-S and G8 have existing App/PF1 evidence plus the focused Current edit trim an
 
 ## NOT RUN
 
-- `s3_studio_end_to_end`, the combined App/host/store/media preservation and unknown-reply route, including the requested combined Save As and rescue-copy legs.
+- `s3_studio_end_to_end`, the combined App/host/store/media preservation and unknown-reply route, including the requested combined Save As and rescue-copy legs. (At C10 this runs, without the rescue-copy leg; see above.)
 - Studio record/spoken-note controls, editable voice transcript and exact chosen revision in a UI batch; authenticated streaming, private unsubmitted ranges, native model/workspace grants and capture-file residue cleanup/accounting.
 - Persisted remark split/merge/re-anchor/delete with collection/reopen and its post-edit mutation pair.
 - App S4 request/result, run/event/intent controls, dispositions, holder replacement and same-attempt native continuation integration; hooks follow-ups listed in the deferred table.

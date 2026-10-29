@@ -333,3 +333,135 @@ fn s3_c7_fix1_host_save_as_keeps_each_projects_notes_apart() {
         assert_eq!(texts(&feedback), restored, "C7_RESTORED {}", path.display());
     }
 }
+
+/// C10 Part A: the person chooses the Director in Settings. A missing or a
+/// no-longer-offered setting waits with the batch unconsumed; opening Settings
+/// and choosing start nothing; the next Revise cut runs with the choice.
+#[test]
+fn s3_c10_settings_choose_director_then_revise_uses_it() {
+    use kinewright_agent::writer_host::{DirectorStatus, director_choices};
+    let (mut app, _engine) = in1_harness(Document::default());
+    let mut project = project("c10-settings");
+    let folder = project.temp.path("scheduler");
+    std::fs::remove_file(folder.join("director.json")).unwrap();
+    let attachment = launch(&project);
+    app.projects[0].recovery.stop_for_studio();
+    app.projects[0].ja1 = Some(attachment);
+    let mut feedback = std::mem::take(&mut project.feedback);
+    // The notes were saved in-process; the host attachment issues its own.
+    feedback.issuer = None;
+    feedback.directory_override = Some(project.temp.path("state"));
+    app.focused_mut().studio.feedback = feedback;
+    app.feedback_frame();
+    let ctx = egui::Context::default();
+    crate::theme::install(&ctx);
+    let settings = |app: &mut KinewrightApp| {
+        app.refresh_director_setting();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.show_director_settings(ui);
+        });
+        app.director_setting.clone().expect("C10_APP_VIEW")
+    };
+    let runs = |app: &mut KinewrightApp| {
+        app.with_feedback(|feedback, port| {
+            feedback.refresh(&*port).unwrap();
+            feedback
+                .rows
+                .iter()
+                .map(|row| row.run.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap()
+    };
+    let view = settings(&mut app);
+    assert_eq!(view.status, DirectorStatus::Missing, "C10_APP_MISSING");
+    assert_eq!(view.choices, director_choices(), "C10_APP_OFFERED");
+    let fixture = view.choices.first().cloned().expect("C10_APP_OFFERED");
+    // Revise cut without a Director waits; the batch stays submitted.
+    let outcome = app
+        .with_feedback(|feedback, port| feedback.submit(port))
+        .unwrap();
+    let Outcome::Submitted(batch) = outcome else {
+        panic!("C10_APP_SUBMITTED {outcome:?}");
+    };
+    let waiting = app.focused().studio.feedback.message.clone();
+    assert!(
+        waiting
+            .as_deref()
+            .is_some_and(|message| message.contains("No Director")),
+        "C10_APP_MISSING_WAITS {waiting:?}"
+    );
+    assert_eq!(runs(&mut app), vec![None], "C10_APP_MISSING_WAITS");
+    // A choice an older build offered is shown, and Revise cut still waits.
+    let unoffered = ProviderSelectionRecord {
+        connector: "codex".into(),
+        model: "gpt-6".into(),
+        options: vec![],
+    };
+    std::fs::write(
+        folder.join("director.json"),
+        serde_json::to_vec(&DirectorSetting {
+            version: 1,
+            director: unoffered.clone(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings(&mut app).status,
+        DirectorStatus::NoLongerOffered(unoffered),
+        "C10_APP_NO_LONGER_OFFERED"
+    );
+    let start = app
+        .with_feedback(|feedback, port| feedback.start_batch(port, &batch))
+        .unwrap();
+    let Some(RunStart::Known(ReviseResult::Waiting { reason })) = &start else {
+        panic!("C10_APP_NO_LONGER_OFFERED_WAITS {start:?}");
+    };
+    assert!(reason.contains("no longer available"), "{reason}");
+    assert_eq!(
+        runs(&mut app),
+        vec![None],
+        "C10_APP_NO_LONGER_OFFERED_WAITS"
+    );
+    // Choosing writes S4's setting and starts no run.
+    app.choose_director(&fixture);
+    let view = settings(&mut app);
+    assert_eq!(
+        view.status,
+        DirectorStatus::Set(fixture.clone()),
+        "C10_APP_CHOSEN"
+    );
+    assert_eq!(view.error, None, "C10_APP_CHOSEN");
+    assert_eq!(runs(&mut app), vec![None], "C10_APP_NO_RUN_FROM_SETTINGS");
+    // The next Revise cut is accepted, and its Director is the chosen one.
+    let start = app
+        .with_feedback(|feedback, port| feedback.start_batch(port, &batch))
+        .unwrap();
+    let Some(RunStart::Known(ReviseResult::Accepted { run_id, .. })) = &start else {
+        panic!("C10_APP_ACCEPTED {start:?}");
+    };
+    let projection = app
+        .with_feedback(|_, port| port.observe(run_id))
+        .unwrap()
+        .unwrap();
+    let providers = projection
+        .tasks
+        .iter()
+        .map(|task| task.brief.provider.clone())
+        .collect::<Vec<_>>();
+    println!(
+        "C10_APP_DIRECTOR {}",
+        serde_json::json!({"run": run_id, "providers": providers})
+    );
+    assert_eq!(providers, vec![fixture], "C10_APP_BRIEF_PROVIDER");
+    assert_eq!(
+        runs(&mut app),
+        vec![Some(run_id.clone())],
+        "C10_APP_ONE_RUN"
+    );
+    in1_shutdown(&mut app);
+    drop(app);
+    let (_, count) = linked(&project.path);
+    assert_eq!(count, 1, "C10_APP_ONE_RUN");
+}

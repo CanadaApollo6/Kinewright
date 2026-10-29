@@ -16,7 +16,7 @@ use kinewright_project::{
 use std::fmt::Write as _;
 #[path = "ja1_host.rs"]
 mod host;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 pub(crate) use host::SCHEDULER_SETTINGS;
 #[path = "host_snapshot.rs"]
 mod host_snapshot;
@@ -329,14 +329,17 @@ impl Ja1Attachment {
         self.require_retention()?;
         match &action {
             Action::StudioManualPlayback(document) => {
-                let scope = self.studio_playback_scope()?;
-                let inputs = &scope.1;
-                match self
-                    .owner
-                    .store()?
-                    .manual_playback_inputs(Arc::clone(document), inputs)
-                {
-                    Ok(inputs) => {
+                // A failure is reported once: an unreported one would be retried
+                // every frame. While a host holds the bundle there is no local
+                // store to admit the current edit's inputs from (S3 C10).
+                let inputs = self.studio_playback_scope().and_then(|scope| {
+                    self.owner
+                        .store()?
+                        .manual_playback_inputs(Arc::clone(document), &scope.1)
+                        .map(|inputs| (scope, inputs))
+                });
+                match inputs {
+                    Ok((scope, inputs)) => {
                         self.studio_manual_ready = Some((scope, inputs));
                         self.panel_open = false;
                         return Ok(());
@@ -652,6 +655,28 @@ impl Ja1Attachment {
             Arc::downgrade(&self.originating_context),
             key,
         )
+    }
+    /// The occurrence lineage of one published version, read-only.
+    pub(crate) fn studio_lineage(
+        &self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<kinewright_project::bundle_records::LineageRecord, BundleError> {
+        if self.host.is_some() {
+            let reader = self.studio_snapshot_reader(key)?;
+            let lineage = reader.descriptor().lineage_ref.clone();
+            Ok((*reader
+                .read_record::<kinewright_project::bundle_records::LineageRecord>(&lineage)?)
+            .clone())
+        } else {
+            let snapshot = self.owner.read_snapshot(key)?;
+            Ok((*self
+                .owner
+                .store()?
+                .read_record::<kinewright_project::bundle_records::LineageRecord>(
+                    &snapshot.descriptor.lineage_ref,
+                )?)
+            .clone())
+        }
     }
     pub(crate) fn studio_edit_copy(
         &mut self,

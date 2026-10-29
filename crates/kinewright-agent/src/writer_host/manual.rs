@@ -54,6 +54,7 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
             | HostCommand::ReadFeedbackEvidence { .. }
             | HostCommand::ReadFeedbackView { .. }
             | HostCommand::ReadFeedback { .. }
+            | HostCommand::ResolveFeedback { .. }
             | HostCommand::ReadSubmittedBatch { .. }
             | HostCommand::Attach
             | HostCommand::CurrentAttachment

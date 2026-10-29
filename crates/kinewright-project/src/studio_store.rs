@@ -1136,6 +1136,14 @@ impl crate::editing_session::Ja1EditingSession {
     pub fn read_feedback(&self, reference: &ObjectRef) -> Result<PinnedFeedback, BundleError> {
         self.active_bundle()?.read_feedback(reference)
     }
+    /// Map one note onto a checkpoint of this project's active bundle (S3 C10).
+    pub fn resolve_feedback(
+        &self,
+        request: &crate::studio_records::ResolveFeedback,
+        beats: Option<&dyn crate::feedback_mapping::FeedbackBeatOwner>,
+    ) -> Result<crate::feedback_mapping::MappedFeedback, BundleError> {
+        self.active_bundle()?.resolve_feedback(request, beats)
+    }
     pub fn read_submitted_batch(
         &self,
         batch: &FeedbackBatchId,

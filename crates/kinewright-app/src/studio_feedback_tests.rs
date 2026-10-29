@@ -813,6 +813,13 @@ impl FeedbackPort for Lossy<'_> {
     fn observe(&self, run: &RunId) -> Result<RunProjection, String> {
         self.inner.observe(run)
     }
+    fn resolve(
+        &self,
+        revision: &ObjectRef,
+        onto: &kinewright_agent::writer_host::MapTarget,
+    ) -> Result<kinewright_agent::writer_host::FeedbackMapping, String> {
+        self.inner.resolve(revision, onto)
+    }
 }
 
 fn saved_ref(outcome: Outcome, marker: &str) -> ObjectRef {

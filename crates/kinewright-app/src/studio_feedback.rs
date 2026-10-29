@@ -3,6 +3,7 @@
 //! image, never from the person's latest selection or requested position.
 use crate::{app::KinewrightApp, presenter::DisplayCell};
 use eframe::egui::{self, Pos2, Rect, Vec2};
+use kinewright_agent::writer_host::{FeedbackMapping, MapTarget};
 use kinewright_core::{ClipId, Document, FrameTexture, HistorySnapshot, TimeCode, TrackKind};
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
@@ -16,7 +17,8 @@ use kinewright_project::{
         CommentId, FeedbackAnchor, FeedbackBatch, FeedbackBatchId, FeedbackEvidenceKind,
         FeedbackIndex, FeedbackRevision, FeedbackTarget, FrameRate, MetadataChange,
         MetadataEnvelope, MetadataResult, MetadataScope, MetadataUpdate, NoteId, Orientation,
-        ReviseRequest, ReviseResult, RunId, SnapshotDescriptor, SnapshotKey, VoiceRef,
+        ResolveFeedback, ReviseRequest, ReviseResult, RunId, SnapshotDescriptor, SnapshotKey,
+        VoiceRef,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -211,6 +213,10 @@ pub(crate) struct View<'a> {
 pub(crate) struct Layer {
     pub(crate) clip: ClipId,
     pub(crate) label: String,
+    /// The clip's occurrence in the displayed version's lineage, so the note
+    /// can be mapped onto later edits (§7.3). Absent maps as unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) occurrence: Option<kinewright_project::bundle_records::OccurrenceId>,
 }
 /// Video clips at `frame`, top layer first.
 pub(crate) fn layers_at(document: &Document, frame: TimeCode) -> Vec<Layer> {
@@ -232,6 +238,7 @@ pub(crate) fn layers_at(document: &Document, frame: TimeCode) -> Vec<Layer> {
                 layers.push(Layer {
                     clip: clip.id,
                     label: format!("{name} · track {}", index + 1),
+                    occurrence: None,
                 });
             }
         }
@@ -476,6 +483,27 @@ pub(crate) trait FeedbackPort {
     fn observe(&self, _run: &RunId) -> Result<RunProjection, String> {
         Err(NO_SCHEDULER.into())
     }
+    /// Map one saved note onto a version or the saved current edit. Read-only
+    /// and recomputed on every ask; nothing about the mapping is stored.
+    fn resolve(&self, revision: &ObjectRef, onto: &MapTarget) -> Result<FeedbackMapping, String>;
+}
+fn mapping(mapped: &kinewright_project::feedback_mapping::MappedFeedback) -> FeedbackMapping {
+    FeedbackMapping {
+        resolution: mapped.resolution.clone(),
+        candidates: mapped
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.clip, candidate.frame))
+            .collect(),
+        original_frame: mapped.original_frame,
+    }
+}
+fn resolve_request(revision: &ObjectRef, candidate: ObjectRef) -> ResolveFeedback {
+    ResolveFeedback {
+        comment_revision_ref: revision.clone(),
+        candidate_checkpoint_ref: candidate,
+        beat_map_ref: None,
+    }
 }
 const NO_SCHEDULER: &str =
     "Runs start once this project's writer host is running. Your notes are saved.";
@@ -570,6 +598,24 @@ impl FeedbackPort for ProjectBundle {
         let index = self.version_index().map_err(text)?;
         published_cuts(self.store(), index.snapshots.values().cloned())
     }
+    fn resolve(&self, revision: &ObjectRef, onto: &MapTarget) -> Result<FeedbackMapping, String> {
+        let candidate = match onto {
+            MapTarget::Version { key } => {
+                self.read_snapshot(key)
+                    .map_err(text)?
+                    .descriptor
+                    .checkpoint_ref
+            }
+            MapTarget::CurrentEdit => self
+                .checkpoint_reference(self.manual_branch_id())
+                .map_err(text)?,
+        };
+        Ok(mapping(
+            &self
+                .resolve_feedback(&resolve_request(revision, candidate), None)
+                .map_err(text)?,
+        ))
+    }
 }
 impl FeedbackPort for Ja1EditingSession {
     fn admit(
@@ -631,6 +677,22 @@ impl FeedbackPort for Ja1EditingSession {
             .map(|key| Ok(self.read_snapshot(key).map_err(text)?.descriptor))
             .collect::<Result<Vec<_>, String>>()?;
         published_cuts(self.store().map_err(text)?, descriptors)
+    }
+    fn resolve(&self, revision: &ObjectRef, onto: &MapTarget) -> Result<FeedbackMapping, String> {
+        let candidate = match onto {
+            MapTarget::Version { key } => {
+                self.read_snapshot(key)
+                    .map_err(text)?
+                    .descriptor
+                    .checkpoint_ref
+            }
+            MapTarget::CurrentEdit => self.manual_checkpoint().map_err(text)?.0,
+        };
+        Ok(mapping(
+            &self
+                .resolve_feedback(&resolve_request(revision, candidate), None)
+                .map_err(text)?,
+        ))
     }
 }
 
@@ -819,6 +881,17 @@ impl FeedbackPort for HostFeedback<'_> {
             .ok_or("The host returned no run.")?
             .projection)
     }
+    /// The host chooses the target checkpoint; the App only names the target.
+    fn resolve(&self, revision: &ObjectRef, onto: &MapTarget) -> Result<FeedbackMapping, String> {
+        self.request(
+            kinewright_agent::writer_host::HostCommand::ResolveFeedback {
+                revision: revision.clone(),
+                onto: onto.clone(),
+            },
+        )?
+        .feedback_mapping
+        .ok_or_else(|| "The host returned no mapping.".into())
+    }
 }
 
 /// A saved comment's revision, as the Notes list shows it.
@@ -989,7 +1062,7 @@ fn captured_anchor(
             .and_then(|index| layers.get(index))
             .map(|layer| FeedbackTarget {
                 local_clip_id: layer.clip,
-                occurrence_id: None,
+                occurrence_id: layer.occurrence.clone(),
                 local_frame: None,
             }),
         source_ref: None,
@@ -1136,6 +1209,50 @@ impl BatchRow {
         }
     }
 }
+/// Saved notes mapped onto one target, as of one playback scope.
+#[derive(Debug)]
+pub(crate) struct Mapped {
+    pub(crate) onto: MapTarget,
+    pub(crate) scope: Option<(u64, ObjectRef)>,
+    pub(crate) notes: BTreeMap<ObjectRef, Result<FeedbackMapping, String>>,
+}
+/// One note's place on the mapped target, in plain words.
+pub(crate) fn mapping_label(
+    mapping: &Result<FeedbackMapping, String>,
+    fps: kinewright_core::Rational,
+) -> String {
+    use kinewright_project::studio_records::{SpatialStatus, TemporalStatus};
+    let mapping = match mapping {
+        Ok(mapping) => mapping,
+        Err(why) => return format!("Not mapped · {why}"),
+    };
+    let at = |mapping: &FeedbackMapping| {
+        mapping
+            .candidates
+            .first()
+            .map_or_else(String::new, |(_, frame)| {
+                crate::timeline_ui::format_timecode(TimeCode(*frame), fps)
+            })
+    };
+    let when = match mapping.resolution.temporal {
+        TemporalStatus::Exact => format!("Here · {}", at(mapping)),
+        TemporalStatus::Mapped => format!("Here · {} · moved", at(mapping)),
+        TemporalStatus::Ambiguous => format!(
+            "{} possible places · first {}",
+            mapping.candidates.len(),
+            at(mapping)
+        ),
+        TemporalStatus::Removed => return "Cut from this version".into(),
+        TemporalStatus::Unresolved => return "Not found in this version".into(),
+    };
+    match mapping.resolution.spatial {
+        SpatialStatus::Exact => when,
+        SpatialStatus::Transformed => format!("{when} · drawing moved"),
+        SpatialStatus::Unresolved | SpatialStatus::Removed => {
+            format!("{when} · drawing not placed")
+        }
+    }
+}
 /// How often Notes re-reads runs that have not finished.
 pub(crate) const RUN_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -1184,6 +1301,9 @@ pub(crate) struct Feedback {
     pub(crate) resume: bool,
     /// The draft whose text field takes focus next.
     pub(crate) focus: Option<CommentId>,
+    /// Where saved notes land on the picture shown now. Recomputed on every
+    /// ask, never kept: a refresh, a reopen or another target clears it.
+    pub(crate) mapped: Option<Mapped>,
     /// The per-user state folder, replaced in tests.
     #[cfg(test)]
     pub(crate) directory_override: Option<PathBuf>,
@@ -1679,6 +1799,7 @@ impl Feedback {
         }
         self.saved = saved;
         self.older = older;
+        self.mapped = None;
         self.batches = index.batches.keys().cloned().collect();
         let mut rows = Vec::new();
         for (batch, submitted) in &index.batches {
@@ -1723,6 +1844,21 @@ impl Feedback {
                 (reference.clone(), note, newer)
             })
             .collect()
+    }
+    /// Map every saved note onto one target. Each note asks the owner once;
+    /// one refusal shows on its own row and leaves the others.
+    pub(crate) fn map_onto(
+        &mut self,
+        port: &dyn FeedbackPort,
+        onto: MapTarget,
+        scope: Option<(u64, ObjectRef)>,
+    ) {
+        let notes = self
+            .saved
+            .iter()
+            .map(|note| (note.reference.clone(), port.resolve(&note.reference, &onto)))
+            .collect();
+        self.mapped = Some(Mapped { onto, scope, notes });
     }
     /// Save one draft as an immutable revision. Only a durable receipt that the
     /// index retains clears it; refusal or an unknown outcome keeps it.
@@ -2251,9 +2387,30 @@ enum NoteAction {
     Submit,
     FirstSave,
     NewNote,
+    Map,
 }
 
 impl KinewrightApp {
+    /// What saved notes map onto: the version shown, or the current edit as saved.
+    pub(crate) fn studio_map_target(&self) -> Option<(MapTarget, Option<(u64, ObjectRef)>)> {
+        let attachment = self.focused().ja1.as_ref()?;
+        let onto =
+            self.focused()
+                .studio
+                .selection
+                .as_ref()
+                .map_or(MapTarget::CurrentEdit, |context| MapTarget::Version {
+                    key: context.snapshot.descriptor.key.clone(),
+                });
+        Some((onto, attachment.studio_playback_scope().ok()))
+    }
+    /// Map every saved note onto the picture shown now (G10's Studio leg).
+    pub(crate) fn map_studio_notes(&mut self) -> Result<(), String> {
+        let (onto, scope) = self
+            .studio_map_target()
+            .ok_or("Studio is busy saving or opening. Try again in a moment.")?;
+        self.with_feedback(|feedback, port| feedback.map_onto(&*port, onto, scope))
+    }
     /// Run `act` against this project's feedback owner: the shared host when one is
     /// attached, otherwise the in-process session. Unsaved projects take S2's
     /// first-save flow before any feedback is durable.
@@ -2377,6 +2534,26 @@ impl KinewrightApp {
             manual,
             texture,
         })?;
+        let mut draft = draft;
+        // The displayed version's lineage names each offered clip's occurrence.
+        // An unreadable lineage leaves them absent: the note then maps as
+        // unresolved, never onto a guessed clip.
+        if let Origin::Captured {
+            snapshot: Some(key),
+            layers,
+            ..
+        } = &mut draft.origin
+            && !layers.is_empty()
+            && let Some(lineage) = self
+                .focused()
+                .ja1
+                .as_ref()
+                .and_then(|attachment| attachment.studio_lineage(key).ok())
+        {
+            for layer in layers.iter_mut() {
+                layer.occurrence = lineage.current.get(&layer.clip).cloned();
+            }
+        }
         let comment = draft.comment.clone();
         let feedback = &mut self.focused_mut().studio.feedback;
         feedback.drafts.push(draft);
@@ -2645,6 +2822,12 @@ impl KinewrightApp {
                 self.focused_mut().studio.feedback.message = Some(why);
             }
         }
+        let target = self.studio_map_target();
+        if let Some(mapped) = &self.focused().studio.feedback.mapped
+            && target.as_ref() != Some(&(mapped.onto.clone(), mapped.scope.clone()))
+        {
+            self.focused_mut().studio.feedback.mapped = None;
+        }
         let mut action = None;
         ui.horizontal(|ui| {
             ui.label("Notes · newest first");
@@ -2722,6 +2905,7 @@ impl KinewrightApp {
                     active,
                     focus,
                     changed,
+                    mapped,
                     ..
                 } = feedback;
                 if drafts.is_empty() && saved.is_empty() {
@@ -2801,7 +2985,22 @@ impl KinewrightApp {
                 }
                 if !saved.is_empty() {
                     ui.add_space(8.0);
-                    ui.label("Saved · private until Revise cut");
+                    ui.horizontal(|ui| {
+                        ui.label("Saved · private until Revise cut");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let here = match target.as_ref().map(|(onto, _)| onto) {
+                                Some(MapTarget::CurrentEdit) => "Find in current edit",
+                                _ => "Find in this version",
+                            };
+                            if ui
+                                .add_enabled(target.is_some(), egui::Button::new(here).small())
+                                .on_hover_text("Where each saved note lands on the picture shown now")
+                                .clicked()
+                            {
+                                action = Some(NoteAction::Map);
+                            }
+                        });
+                    });
                 }
                 let short = |text: &str| {
                     let line = text.lines().next().unwrap_or("Drawing");
@@ -2840,6 +3039,12 @@ impl KinewrightApp {
                             action = Some(NoteAction::Revise(Box::new(note.clone())));
                         }
                     });
+                    if let Some(found) = mapped
+                        .as_ref()
+                        .and_then(|mapped| mapped.notes.get(&note.reference))
+                    {
+                        ui.colored_label(po0::TEXT_3, mapping_label(found, fps));
+                    }
                 }
                 if !rows.is_empty() {
                     ui.add_space(8.0);
@@ -2967,6 +3172,11 @@ impl KinewrightApp {
             }
             Some(NoteAction::NewNote) => {
                 let _ = self.new_feedback_note();
+            }
+            Some(NoteAction::Map) => {
+                if let Err(why) = self.map_studio_notes() {
+                    self.focused_mut().studio.feedback.message = Some(why);
+                }
             }
             None => {}
         }

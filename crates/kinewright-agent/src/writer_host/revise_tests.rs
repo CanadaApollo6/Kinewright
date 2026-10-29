@@ -436,3 +436,42 @@ fn c7_director_scope_names_the_whole_document_exactly() {
         "C7_SCOPE"
     );
 }
+
+/// S3 C10: a Director this build no longer certifies is Waiting with the reason,
+/// and the batch stays submitted for a retry once another is chosen.
+#[test]
+fn c10_unoffered_director_is_waiting_until_chosen_again() {
+    let f = Fixture::new();
+    let folder = configure_director(&f);
+    std::fs::write(
+        folder.join("director.json"),
+        serde_json::to_vec(&super::super::DirectorSetting {
+            version: 1,
+            director: ProviderSelectionRecord {
+                connector: "codex".into(),
+                model: "gpt-6".into(),
+                options: vec![],
+            },
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let batch = manual_batch(&f);
+    let request = submitted_request(&f, &batch);
+    let result = revise_result(revise(&f, &f.editor, &request), "C10_UNOFFERED_WAITS");
+    let ReviseResult::Waiting { reason } = &result else {
+        panic!("C10_UNOFFERED_WAITS: {result:?}")
+    };
+    assert!(
+        reason.contains("no longer available"),
+        "C10_UNOFFERED_WAITS: {reason}"
+    );
+    assert_eq!(consumed(&f, &batch), None, "C10_UNOFFERED_WAITS");
+    assert_eq!(run_count(&f), 0, "C10_UNOFFERED_WAITS");
+    super::super::write_director_setting(Some(&folder), &f.brief.provider).unwrap();
+    let accepted = revise_result(revise(&f, &f.editor, &request), "C10_CHOSEN_AGAIN");
+    assert!(
+        matches!(accepted, ReviseResult::Accepted { .. }),
+        "C10_CHOSEN_AGAIN: {accepted:?}"
+    );
+}

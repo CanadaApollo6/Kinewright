@@ -2630,3 +2630,149 @@ fn s3_feedback_adapter_is_private_until_batch() {
         "C3_BATCH_VISIBLE_AFTER_SUBMIT"
     );
 }
+
+/// S3 C10: `ResolveFeedback` maps an indexed note onto the checkpoint the host
+/// chooses for the target, with `ReadFeedback`'s authority and pin capacity, and
+/// writes nothing.
+#[test]
+fn c10_resolve_feedback_maps_onto_the_host_chosen_checkpoint_read_only() {
+    let (_temp, host, refs) = fixture();
+    let viewer = host
+        .attach("mapper".into(), AttachmentRole::Viewer, host.roots.clone())
+        .unwrap();
+    let producer = host
+        .attach(
+            "c10-publisher".into(),
+            AttachmentRole::Producer,
+            host.roots.clone(),
+        )
+        .unwrap();
+    let published = accepted(direct(&host, &producer, publish_command(&host, &producer)));
+    let ReceiptResult::Metadata {
+        result: MetadataResult::Snapshot(key),
+    } = published.metadata.unwrap().result
+    else {
+        panic!("snapshot")
+    };
+    let reference =
+        metadata_feedback_reference(&host, &viewer, feedback_revision(key.clone(), &refs));
+    // The current edit moves on after the version was published.
+    let (manual, snapshot) = {
+        use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
+        let owner = host.owner.upgrade().unwrap();
+        let mut owner = owner.lock().unwrap();
+        let owner = owner.owner_mut().unwrap();
+        owner
+            .core()
+            .request(Command::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(41),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                },
+            }))
+            .unwrap();
+        owner.save_active().unwrap();
+        (
+            owner.manual_checkpoint().unwrap().0,
+            owner.read_snapshot(&key).unwrap().descriptor.checkpoint_ref,
+        )
+    };
+    assert_ne!(manual, snapshot, "C10_TWO_TARGETS");
+    let root = state(&host)["root"].clone();
+    let pins = || {
+        let owner = host.owner.upgrade().unwrap();
+        let owner = owner.lock().unwrap();
+        let index = owner
+            .resolve_attachment(Some(&viewer.bootstrap.auth.bearer()))
+            .unwrap();
+        owner.attachments[index].read_pins.len()
+    };
+    let before = pins();
+    for (onto, candidate) in [
+        (MapTarget::Version { key: key.clone() }, &snapshot),
+        (MapTarget::CurrentEdit, &manual),
+    ] {
+        let mapping = accepted(direct(
+            &host,
+            &viewer,
+            HostCommand::ResolveFeedback {
+                revision: reference.clone(),
+                onto: onto.clone(),
+            },
+        ))
+        .feedback_mapping
+        .expect("C10_MAPPING");
+        assert_eq!(
+            mapping.resolution.original_ref, reference,
+            "C10_MAPPED_NOTE"
+        );
+        assert!(
+            mapping.resolution.evidence_refs.contains(candidate),
+            "C10_HOST_CHOSEN_CHECKPOINT {onto:?}"
+        );
+        // Asking again recomputes under the same pin.
+        accepted(direct(
+            &host,
+            &viewer,
+            HostCommand::ResolveFeedback {
+                revision: reference.clone(),
+                onto,
+            },
+        ));
+    }
+    assert_eq!(pins(), before + 2, "C10_PIN_DEDUPE");
+    assert_eq!(state(&host)["root"], root, "C10_READ_ONLY");
+    let unindexed = direct(
+        &host,
+        &viewer,
+        HostCommand::ResolveFeedback {
+            revision: refs[0].clone(),
+            onto: MapTarget::CurrentEdit,
+        },
+    );
+    assert!(unindexed.error.is_some(), "C10_ONLY_INDEXED_NOTES");
+    let refused = direct(
+        &host,
+        &producer,
+        HostCommand::ResolveFeedback {
+            revision: reference.clone(),
+            onto: MapTarget::CurrentEdit,
+        },
+    );
+    assert!(refused.error.is_some(), "C10_PRODUCER_REFUSED");
+    // Distinct mappings count against the same 64 pinned reads.
+    while pins() < 64 {
+        let reference =
+            metadata_feedback_reference(&host, &viewer, feedback_revision(key.clone(), &refs));
+        accepted(direct(
+            &host,
+            &viewer,
+            HostCommand::ReadFeedback { reference },
+        ));
+    }
+    let extra = metadata_feedback_reference(&host, &viewer, feedback_revision(key.clone(), &refs));
+    let denied = direct(
+        &host,
+        &viewer,
+        HostCommand::ResolveFeedback {
+            revision: extra,
+            onto: MapTarget::Version { key },
+        },
+    );
+    assert_eq!(
+        denied.error.map(|error| error.code),
+        Some("attachment_capacity".into()),
+        "C10_PIN_CAPACITY"
+    );
+    accepted(direct(
+        &host,
+        &viewer,
+        HostCommand::ResolveFeedback {
+            revision: reference,
+            onto: MapTarget::CurrentEdit,
+        },
+    ));
+    assert_eq!(pins(), 64, "C10_PIN_CAPACITY_REPEAT");
+}

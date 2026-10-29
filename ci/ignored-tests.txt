@@ -112,3 +112,4 @@ ja_s4_lifecycle s4_person_holder_approval_and_secret crates/kinewright-agent/tes
 
 # S4 C5
 ja_s4_usage s4_usage_durable_reopen_h1 crates/kinewright-agent/tests/ja_s4_usage.rs any inherited-gap  # S3 H1 durable orchestration publisher and independent reopen are not integrated
+kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end_live_voice crates/kinewright-app/src/studio_e2e_tests.rs linux on-demand  # needs the Whisper model and espeak-ng

@@ -12,8 +12,12 @@ mod orchestration;
 mod owned_media;
 mod protocol;
 mod recovery;
+mod resolve;
 mod revise;
-pub use revise::{DirectorSetting, configured_director, scheduler_settings_directory};
+pub use crate::orchestration::director_setting::{
+    DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,
+    scheduler_settings_directory, write_director_setting,
+};
 mod snapshot_lease;
 #[cfg(all(test, target_os = "linux"))]
 mod snapshot_lease_tests;
@@ -1397,6 +1401,7 @@ impl HostCommandOwner {
                     | HostCommand::ListFeedback
                     | HostCommand::ReadSnapshot { .. }
                     | HostCommand::ReadFeedback { .. }
+                    | HostCommand::ResolveFeedback { .. }
                     | HostCommand::ReadFeedbackView { .. }
                     | HostCommand::ReadFeedbackEvidence { .. }
                     | HostCommand::ReadSubmittedBatch { .. }
@@ -1696,6 +1701,11 @@ impl HostCommandOwner {
                     roots: pinned.roots,
                     pin: pinned.pin,
                 });
+            }
+            HostCommand::ResolveFeedback { revision, onto } => {
+                let (mapping, pin) = self.resolve_feedback(&revision, &onto)?;
+                reply.feedback_mapping = Some(mapping);
+                self.pending_read_pin = Some(pin);
             }
             HostCommand::ReadSubmittedBatch { batch } => {
                 let pinned = self.owner()?.read_submitted_batch(&batch)?;

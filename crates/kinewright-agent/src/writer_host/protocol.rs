@@ -255,6 +255,12 @@ pub enum HostCommand {
     ReadFeedback {
         reference: ObjectRef,
     },
+    /// Map one indexed note onto a version or the saved current edit. Read-only;
+    /// nothing is kept, so a reopened App asks again (S3 C10).
+    ResolveFeedback {
+        revision: ObjectRef,
+        onto: MapTarget,
+    },
     ReadSubmittedBatch {
         batch: kinewright_project::studio_records::FeedbackBatchId,
     },
@@ -572,6 +578,25 @@ pub struct HostActivation {
     pub kind: HostActivationKind,
     pub history_sha256: String,
 }
+/// What a note is mapped onto: a published version, or the manual branch's
+/// saved checkpoint. The host chooses the checkpoint; the App never names one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "onto", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MapTarget {
+    Version {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    CurrentEdit,
+}
+/// One note's mapping, as `ProjectBundle::resolve_feedback` computes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackMapping {
+    pub resolution: kinewright_project::studio_records::CommentResolution,
+    /// Candidate frames on the target, at most the mapper's 512.
+    pub candidates: Vec<(kinewright_core::ClipId, i64)>,
+    pub original_frame: i64,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
     pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
@@ -601,6 +626,8 @@ pub struct HostReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_strokes: Option<Vec<u8>>,
     pub feedback_evidence: Option<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_mapping: Option<FeedbackMapping>,
     pub feedback_index: Option<kinewright_project::studio_records::FeedbackIndex>,
     pub submitted_batch: Option<kinewright_project::studio_records::FeedbackBatch>,
     #[serde(default)]

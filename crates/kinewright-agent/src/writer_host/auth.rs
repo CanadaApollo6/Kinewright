@@ -147,9 +147,9 @@ impl Attachment {
             | HostCommand::ReleaseSnapshot { .. }
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadSubmittedBatch { .. } => true,
-            HostCommand::ReadFeedback { .. } | HostCommand::ListFeedback => {
-                self.role != AttachmentRole::Producer
-            }
+            HostCommand::ReadFeedback { .. }
+            | HostCommand::ResolveFeedback { .. }
+            | HostCommand::ListFeedback => self.role != AttachmentRole::Producer,
             HostCommand::Attach
             | HostCommand::Status
             | HostCommand::ReadHistory
@@ -412,6 +412,13 @@ impl super::HostCommandOwner {
                         Some(ReadPin {
                             roots: pinned.roots,
                             pin: pinned.pin,
+                        })
+                    }
+                    super::HostCommand::ResolveFeedback { revision, onto } => {
+                        let roots = self.feedback_target_roots(revision, onto)?;
+                        Some(ReadPin {
+                            pin: self.owner()?.store()?.pin(&roots)?,
+                            roots,
                         })
                     }
                     super::HostCommand::ReadSubmittedBatch { batch } => {
