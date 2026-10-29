@@ -1761,3 +1761,32 @@ fn s3_fix3_one_owner_per_recovery_file() {
 
 #[path = "studio_feedback_c7_tests.rs"]
 mod c7;
+
+/// S3 stage fix 2: leaving a project whose last write fails keeps that
+/// project, its notes and its file's lock; the next attempt then moves on.
+#[test]
+fn s3_stage_fix2_a_failed_last_write_keeps_the_project() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (temp, _path, a, _core, inputs) = new_project("sf2-leave-a");
+    let (_b_temp, _b_path, b, _b_core, _b_inputs) = new_project("sf2-leave-b");
+    let mut feedback = kept_by(&temp, &a);
+    feedback.selection.push(inputs.clone());
+    feedback.persist().unwrap();
+    let state = temp.path("state");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let left = feedback.open(Ok(b.project_id().clone()), Ok(state.clone()));
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(left.is_err(), "SF2_LEAVE_REPORTS_FAILURE");
+    assert_eq!(
+        feedback.keeping.project(),
+        Some(a.project_id()),
+        "SF2_KEEPS_A"
+    );
+    assert_eq!(feedback.selection, vec![inputs.clone()], "SF2_KEEPS_NOTES");
+    feedback
+        .open(Ok(b.project_id().clone()), Ok(state))
+        .unwrap();
+    assert_eq!(feedback.keeping.project(), Some(b.project_id()));
+    let kept = std::fs::read_to_string(kept_file(&temp, &a)).unwrap();
+    assert!(kept.contains(&inputs.sha256), "SF2_A_FILE_WRITTEN");
+}

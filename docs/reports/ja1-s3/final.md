@@ -12,7 +12,7 @@ S3 certification remains **partial**. This ledger is the gate status at the fina
 | G8 | `s3_bound_ab_identity` and `s3_bound_ab_gpu_identity` on lavapipe: presentation identity of the bound A/B picture. |
 | G9 | Typed and drawn notes on the displayed cell, retained drafts, the immutable batch and its lost reply, and the mixed-version host route in the end-to-end test. |
 | G10 | Lineage fixtures, host `ResolveFeedback`, and remapping when the saved checkpoint changes. |
-| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording refuses Save As, New, Open, switching project and Close, and then finishes under its own project (stage fix 1). |
+| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording, or finished but not yet kept on this computer, refuses Save As, New, Open, switching project and Close. It then finishes under its own project (stage fixes 1 and 2). |
 
 **Remaining acceptance legs.** No test covers these yet:
 
@@ -33,6 +33,14 @@ S3 certification remains **partial**. This ledger is the gate status at the fina
 The stage review found that Save As or Close during a spoken recording dropped the recording (M1, data loss). The fix refuses each transition with "Stop the recording first. Your note is still recording." A recording now counts as unsaved work, and the close warning names it. Discard never drops a live recording. If the project's identity changes anyway, the Studio stops the note and keeps it with the project it was recorded in, and only then opens the new project's notes.
 
 Three witnesses hold a real capture worker before it finishes, with FFmpeg reading from a pipe that stays open. Save As is refused and the note finishes under A. Close is refused and the note finishes under A. A Save As that bypasses the App's refusals leaves the capture with A, and reopening A uploads the exact audio, NoteId, anchor and log. Removing the guard turns all three red; removing only the identity-change defence turns the third red; removing only the Close refusal turns the second red. With the guard restored, all three pass.
+
+## Stage fix 2
+
+The re-check found that the guard lifted as soon as the recording finished, even when keeping the finished note failed. If the first write of the note's link to its audio failed, the WAV was left with no NoteId, anchor or log. Save As or Close could then lose that link for good.
+
+The guard now asks whether the note is durably kept, not whether it is recording. A finished note whose write failed refuses the same transitions with "Your note hasn't been saved yet. Retry, or wait for it to save." It counts as unsaved work, and the close warning names it. The Studio retries the write twice a second until it succeeds, and Retry upload retries it at once. A project change waits until the note is kept. Leaving a project whose last write fails now keeps that project and its notes, reports the failure and tries again.
+
+Two witnesses finish a held capture while the notes folder is read-only, try Save As or Close, and then make the folder writable again. Both transitions are refused. The note is then kept under A, and Retry upload saves the exact audio, NoteId, anchor and log. A unit test shows that a failed last write keeps the project and its notes. When the guard ignores the failed write, Save As loses the capture and Close is not refused. When leaving ignores the failed write, the project is not kept. With both restored, all the witnesses pass.
 
 ## C6a
 

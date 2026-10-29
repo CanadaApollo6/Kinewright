@@ -1439,16 +1439,19 @@ impl Feedback {
     /// Keep feedback for `project` from now on, and bring back what was kept for
     /// it. Leaving a kept project first writes its state, which stays in its own
     /// file with its in-flight commands; unsent drafts and the selection come
-    /// along (a first save or Save As). A file that cannot be read is left
+    /// along (a first save or Save As). If that write fails, nothing changes
+    /// and the error is returned. A file that cannot be read is left
     /// untouched, and a file naming another project is set aside intact.
     pub(crate) fn open(
         &mut self,
         project: Result<ProjectId, String>,
         directory: Result<PathBuf, String>,
     ) -> Result<(), String> {
+        // A failed last write keeps this project, its notes and its file's
+        // lock; the next frame tries again (S3 stage fix 2).
         if matches!(self.keeping, Keeping::Kept { .. }) {
-            let left = self.persist();
-            self.leave(left.is_ok());
+            self.persist()?;
+            self.leave();
         }
         // The old file's lock is released only after its last write.
         self.keeping = Keeping::Unsaved;
@@ -1535,37 +1538,15 @@ impl Feedback {
         }
         Ok(())
     }
-    /// Leave a kept project: what is in flight stays in its file when that was
-    /// written, and only unsent drafts and the selection carry on. When it could
-    /// not be written, nothing is dropped: every draft carries as unsent, and an
-    /// unconfirmed batch's notes go back into the selection.
-    fn leave(&mut self, written: bool) {
+    /// Leave a kept project once its file is written: what is in flight stays
+    /// in that file, and only unsent drafts and the selection carry on.
+    fn leave(&mut self) {
         // A kept Revise cut names a durable batch of the project left: its own
         // file keeps it, and that batch's Start run sends the same request.
         self.revise = None;
-        if written {
-            self.drafts.retain(|draft| !draft.pending());
-            self.submission = None;
-            self.detached.clear();
-        } else {
-            for draft in &mut self.drafts {
-                if draft.pending() {
-                    draft.state = DraftState::Editing;
-                }
-            }
-            if let Some(submission) = self.submission.take() {
-                for reference in submission.batch.revision_refs {
-                    if !self.selection.contains(&reference) {
-                        self.selection.push(reference);
-                    }
-                }
-            }
-            self.detached.clear();
-            self.message = Some(
-                "The previous project's unconfirmed sends could not be kept; their notes are here as drafts."
-                    .into(),
-            );
-        }
+        self.drafts.retain(|draft| !draft.pending());
+        self.submission = None;
+        self.detached.clear();
         if self
             .active
             .as_ref()
@@ -2481,10 +2462,10 @@ impl KinewrightApp {
             (Some(Ok(project)), keeping) => keeping.project() != Some(project),
             (Some(Err(_)), _) => true,
         };
-        // S3 stage fix 1: a spoken note still recording belongs to the project
-        // it started in. Stop it, and keep that project's notes until the
-        // finished capture is kept in its file; the next frame then reopens.
-        if reopen && self.focused().studio.voice.recording() {
+        // S3 stage fixes 1 and 2: a spoken capture belongs to the project it
+        // started in. Stop it, and keep that project's notes until its binding
+        // is kept in that project's file; a later frame then reopens.
+        if reopen && self.focused().studio.voice.unkept().is_some() {
             self.focused().studio.voice.stop_recording();
             reopen = false;
         }

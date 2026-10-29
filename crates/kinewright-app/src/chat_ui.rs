@@ -1801,7 +1801,7 @@ impl KinewrightApp {
         if let Some(index) = close_project {
             self.request_close_project(index);
         } else if let Some(index) = focus_project
-            && (index == self.focused_project || !self.refuse_while_recording(self.focused_project))
+            && (index == self.focused_project || !self.refuse_unkept_voice(self.focused_project))
         {
             self.focus_project(index);
         }

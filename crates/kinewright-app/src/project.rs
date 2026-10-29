@@ -563,9 +563,10 @@ impl ProjectSession {
 
     /// Whether closing now would leave unsaved work: an edit (see
     /// [`Self::edit_dirty`]), Studio notes the person typed or drew that are not
-    /// saved yet (S3 C3 fix 1), or a spoken note still recording (S3 stage fix 1).
+    /// saved yet (S3 C3 fix 1), or a spoken note not durably kept yet (S3 stage
+    /// fixes 1 and 2).
     pub(crate) fn is_dirty(&self) -> bool {
-        self.edit_dirty() || self.studio.feedback.unsaved() || self.studio.voice.recording()
+        self.edit_dirty() || self.studio.feedback.unsaved() || self.studio.voice.unkept().is_some()
     }
 
     /// Whether the project differs from the last save: the live document
@@ -820,11 +821,11 @@ impl ProjectSession {
             }
             text.push_str(&notes);
         }
-        if self.studio.voice.recording() {
+        if let Some(voice) = self.studio.voice.close_text() {
             if !text.is_empty() {
                 text.push(' ');
             }
-            text.push_str(crate::studio_voice::RECORDING_CLOSE_TEXT);
+            text.push_str(voice);
         }
         text
     }
