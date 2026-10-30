@@ -59,6 +59,47 @@ impl HostInvocationOwner {
     }
 }
 impl InvocationOwner for HostInvocationOwner {
+    fn started(&self, identity: &ExecutionIdentity) -> io::Result<()> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| transport("host owner lost"))?;
+        host.lock()
+            .map_err(|_| transport("host owner poisoned"))?
+            .native_started(&self.producer, identity)
+            .map_err(transport)
+    }
+    fn raw(
+        &self,
+        identity: &ExecutionIdentity,
+        raw: &serde_json::Value,
+        ordinal: u64,
+        eof: bool,
+    ) -> io::Result<()> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| transport("host owner lost"))?;
+        host.lock()
+            .map_err(|_| transport("host owner poisoned"))?
+            .ingest_native_raw(&self.producer, identity, raw, ordinal, eof)
+            .map_err(transport)
+    }
+    fn completed(
+        &self,
+        identity: &ExecutionIdentity,
+        completed: bool,
+        proof: &crate::guardian::CleanupProof,
+    ) -> io::Result<()> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| transport("host owner lost"))?;
+        host.lock()
+            .map_err(|_| transport("host owner poisoned"))?
+            .native_completed(&self.producer, identity, completed, proof)
+            .map_err(transport)
+    }
     fn reserve(&self, invocation: &AuthorizedInvocation) -> io::Result<()> {
         let host = self
             .host
@@ -252,7 +293,7 @@ impl HostCommandOwner {
         }
         Ok(state)
     }
-    fn native_accounting(
+    pub(crate) fn native_accounting(
         &self,
         state: &RunProjection,
     ) -> Result<Option<AccountingRecord>, HostError> {
@@ -285,24 +326,19 @@ impl HostCommandOwner {
         let accounting = self
             .native_accounting(&state)?
             .ok_or_else(|| refused("native send has no durable charge"))?;
-        if !state.usage.contains(ack.accounting())
-            || !accounting.tasks.iter().any(|task| {
-                task.task == identity.task.0
-                    && task.sends.iter().any(|send| send == ack.consumption())
-            })
-            || !state.tasks.iter().any(|task| {
-                task.id == identity.task
-                    && task
-                        .progress
-                        .decisions
-                        .contains(invocation.invocation().manifest())
-            })
-            || !state.effects.iter().any(|effect| {
-                effect.task == identity.task
-                    && effect.state == EffectState::Claimed(identity.attempt.clone())
-                    && effect.safety == EffectSafety::ProcessBound
-            })
-        {
+        if !accounting.tasks.iter().any(|task| {
+            task.task == identity.task.0 && task.sends.iter().any(|send| send == ack.consumption())
+        }) || !state.tasks.iter().any(|task| {
+            task.id == identity.task
+                && task
+                    .progress
+                    .decisions
+                    .contains(invocation.invocation().manifest())
+        }) || !state.effects.iter().any(|effect| {
+            effect.task == identity.task
+                && effect.state == EffectState::Claimed(identity.attempt.clone())
+                && effect.safety == EffectSafety::ProcessBound
+        }) {
             return Err(refused("native send differs from acknowledged charge"));
         }
         Ok(state)
@@ -395,7 +431,60 @@ impl HostCommandOwner {
                 .filter(|delivery| &delivery.wake == effect)
                 .map(|delivery| &delivery.result)
                 .collect();
-            serde_json::to_vec(&references)?
+            let mut expanded = Vec::new();
+            for reference in references {
+                let record = self
+                    .owner()?
+                    .store()?
+                    .read_record::<OrchestrationRecord>(reference)?;
+                let OrchestrationPayload::Result(result) = &record.payload else {
+                    return Err(refused("wake reference is not a task result"));
+                };
+                let contents = |reference: &ObjectRef| -> Result<serde_json::Value, HostError> {
+                    if reference.byte_length > (crate::protocol::limits::FRAME_BYTES / 2) as u64 {
+                        return Err(refused("expanded result capacity"));
+                    }
+                    if reference.record_kind
+                        == kinewright_project::bundle_records::RecordKind::OwnedEvidence
+                    {
+                        let bytes = self.owner()?.store()?.read_evidence(reference)?;
+                        Ok(match std::str::from_utf8(&bytes) {
+                            Ok(text) => serde_json::Value::String(text.into()),
+                            Err(_) => {
+                                serde_json::json!({"encoding":"bytes", "contents":bytes.to_vec()})
+                            }
+                        })
+                    } else {
+                        use kinewright_project::bundle_records::{
+                            RecordKind, SpecialistBaseRecord,
+                        };
+                        Ok(match reference.record_kind {
+                            RecordKind::RunIndex => serde_json::to_value(
+                                &*self
+                                    .owner()?
+                                    .store()?
+                                    .read_record::<OrchestrationRecord>(reference)?,
+                            )?,
+                            RecordKind::SpecialistBase => serde_json::to_value(
+                                &*self
+                                    .owner()?
+                                    .store()?
+                                    .read_record::<SpecialistBaseRecord>(reference)?,
+                            )?,
+                            _ => return Err(refused("unsupported expanded result record")),
+                        })
+                    }
+                };
+                expanded.push(serde_json::json!({
+                    "result": result,
+                    "explanation": contents(&result.explanation)?,
+                    "delta": result.delta_ref.as_ref().map(contents).transpose()?,
+                    "artifacts": result.artifacts.iter().map(contents).collect::<Result<Vec<_>,_>>()?,
+                    "evidence": result.evidence.iter().map(contents).collect::<Result<Vec<_>,_>>()?,
+                    "usage": contents(&result.usage_ref)?,
+                }));
+            }
+            serde_json::to_vec(&expanded)?
         } else {
             self.owner()?
                 .store()?
@@ -508,7 +597,7 @@ impl HostCommandOwner {
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(accounting)),
             })?;
-        state.usage.push(sealed.reference.clone());
+        self.replace_accounting_reference(&mut state, sealed.reference.clone())?;
         let claimed = state
             .effects
             .iter_mut()
@@ -547,7 +636,7 @@ impl HostCommandOwner {
         .map_err(refused)
     }
 
-    fn publish_native(
+    pub(super) fn publish_native(
         &mut self,
         producer: &HostAuth,
         mut projection: RunProjection,
@@ -679,3 +768,7 @@ impl HostCommandOwner {
         Ok(())
     }
 }
+
+include!("native_spending.rs");
+
+include!("effect_execution.rs");

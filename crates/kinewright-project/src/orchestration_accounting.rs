@@ -419,7 +419,15 @@ impl AccountingRecord {
                 .iter()
                 .find(|task| task.task == old.task)
                 .ok_or(AccountingRefusal::Scope)?;
-            if new.token_limit != old.token_limit
+            let initial_ceiling = old.token_limit.is_none()
+                && new.token_limit.is_some()
+                && old.sends.is_empty()
+                && old.providers.is_empty()
+                && old.usage.is_empty()
+                && new.sends.is_empty()
+                && new.providers.is_empty()
+                && new.usage.is_empty();
+            if (new.token_limit != old.token_limit && !initial_ceiling)
                 || !new.sends.starts_with(&old.sends)
                 || !new.providers.starts_with(&old.providers)
                 || !new.usage.starts_with(&old.usage)
@@ -655,6 +663,24 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
 }
 
 impl TaskAccounting {
+    /// Provision a positive ceiling before the first provider admission. A
+    /// restart or later attempt cannot reset or raise an existing allowance.
+    pub fn configure_token_limit(&mut self, limit: u64) -> Result<(), AccountingRefusal> {
+        if self.token_limit == Some(limit) && limit > 0 {
+            return Ok(());
+        }
+        if limit == 0
+            || self.token_limit.is_some()
+            || !self.sends.is_empty()
+            || !self.providers.is_empty()
+            || !self.usage.is_empty()
+        {
+            return Err(AccountingRefusal::Scope);
+        }
+        self.token_limit = Some(limit);
+        Ok(())
+    }
+
     fn outstanding_usage(&self) -> Result<bool, AccountingRefusal> {
         for send in &self.sends {
             let samples: Vec<_> = self
@@ -928,6 +954,27 @@ mod tests {
             &next.record_bytes().unwrap(),
             next.dependencies().unwrap(),
         )
+    }
+
+    #[test]
+    fn c3_positive_ceiling_is_provisioned_once_and_cannot_reset() {
+        let mut record = AccountingRecord::new(id(1), id(2), 1000).unwrap();
+        record.add_task(id(3), None).unwrap();
+        let mut next = record.successor().unwrap();
+        next.tasks[0].configure_token_limit(100).unwrap();
+        next.validate_successor(&record).unwrap();
+        next.tasks[0].configure_token_limit(100).unwrap();
+        assert_eq!(
+            next.tasks[0].configure_token_limit(200),
+            Err(AccountingRefusal::Scope)
+        );
+        assert_eq!(
+            next.tasks[0].configure_token_limit(0),
+            Err(AccountingRefusal::Scope)
+        );
+        let mut reset = next.successor().unwrap();
+        reset.tasks[0].token_limit = None;
+        assert!(reset.validate_successor(&next).is_err());
     }
 
     #[test]

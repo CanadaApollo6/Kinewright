@@ -613,6 +613,7 @@ impl HostCommandOwner {
             attention.as_ref().map(|(proof, _)| proof),
         )
         .map_err(scheduler_error)?;
+        let transition = self.seed_run_spending(transition)?;
         if let Some((_, bytes)) = attention {
             self.owner_mut()?.admit_host_grant(&bytes)?;
         }

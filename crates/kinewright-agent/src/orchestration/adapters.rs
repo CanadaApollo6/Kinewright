@@ -26,6 +26,11 @@ pub struct ContainedSession {
     session: Box<dyn AgentSession>,
 }
 impl ContainedSession {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_session(self) -> Box<dyn AgentSession> {
+        self.session
+    }
+
     /// C2 calls only after its OWNED/CONTAINED/COMMIT barriers.
     #[allow(dead_code, reason = "C2 supplies the native containment constructor")]
     pub(crate) fn from_guardian(session: Box<dyn AgentSession>) -> Self {

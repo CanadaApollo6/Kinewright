@@ -671,6 +671,49 @@ pub struct RecoveryObserver {
 }
 #[cfg(target_os = "linux")]
 impl RecoveryObserver {
+    /// Reopen after a host crash, including an already deleted native tree.
+    /// The live path pins the original kernel identities. The late path requires
+    /// both original cgroups deleted on their original cgroup-v2 mount AND the
+    /// original guardian reaped. Neither a completion frame nor a free lock is proof.
+    /// # Errors
+    /// Keeps the machine claim on every ambiguous observation or missed deadline.
+    pub fn recover_cleanup(recovery: &RecoveryIdentity) -> io::Result<CleanupProof> {
+        recovery.validate()?;
+        let deadline = Instant::now() + protocol::CLEANUP;
+        loop {
+            if let Ok(mut observer) = Self::open(recovery) {
+                observer.stop_tree()?;
+                return observer.wait_for_cleanup();
+            }
+            let leaf = Path::new(&recovery.containment);
+            let service = leaf
+                .parent()
+                .ok_or_else(|| io::Error::other("missing service"))?;
+            if leaf.file_name().is_none_or(|p| p != "payload")
+                || service
+                    .file_name()
+                    .is_none_or(|p| p != recovery.attempt.unit().as_str())
+            {
+                return Err(io::Error::other("foreign service cgroup"));
+            }
+            if kinewright_job_sys::process_identity_reaped(
+                recovery.guardian_pid,
+                recovery.guardian_start,
+            )? && kinewright_job_sys::cgroup_removed(leaf, recovery.device)?
+                && kinewright_job_sys::cgroup_removed(service, recovery.service_device)?
+            {
+                return Ok(CleanupProof {
+                    identity: recovery.attempt.clone(),
+                    recovery: recovery.clone(),
+                    guardian_lost: true,
+                });
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other("cleanup_blocked: late recovery"));
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
     /// # Errors
     /// Refuses a recycled process, cgroup, or mismatching native identity.
     pub fn open(recovery: &RecoveryIdentity) -> io::Result<Self> {

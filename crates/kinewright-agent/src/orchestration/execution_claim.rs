@@ -232,6 +232,40 @@ impl MachineClaim {
         Ok(())
     }
 
+    /// Inspect the exact private record while holding the account-wide lock.
+    /// # Errors
+    /// Refuses missing, foreign or replaced native identities.
+    pub fn recovery(&self, identity: &AttemptIdentity) -> io::Result<RecoveryIdentity> {
+        if !self.attempts.contains(identity) {
+            return Err(io::Error::other("unretained recovery"));
+        }
+        let record: RecoveryIdentity =
+            read_record(&self.root.join(format!("native-{}.json", identity.nonce)))?;
+        record.validate()?;
+        if record.attempt != *identity {
+            return Err(io::Error::other("foreign recovery"));
+        }
+        Ok(record)
+    }
+    /// # Errors
+    /// Refuses recovery against a different project or run before H1 is changed.
+    pub fn check_run(&self, project: &str, run: &str) -> io::Result<()> {
+        if self.run.project != project || self.run.run != run {
+            return Err(io::Error::other("foreign machine run"));
+        }
+        Ok(())
+    }
+    /// Resume the SAME run without releasing its lock between recovery and admission.
+    /// # Errors
+    /// Refuses any unproved retained attempt or another project's run.
+    pub fn resume(mut self, project: &str, run: &str) -> io::Result<Self> {
+        if !self.attempts.is_empty() || self.run.project != project || self.run.run != run {
+            return Err(io::Error::other("cleanup_blocked: recovery scope"));
+        }
+        self.recovering = false;
+        Ok(self)
+    }
+
     #[must_use]
     pub fn retained_attempts(&self) -> usize {
         self.attempts.len()

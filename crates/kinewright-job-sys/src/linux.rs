@@ -109,6 +109,96 @@ impl ProcessHandle {
     }
 }
 
+/// Observe the original PID/start identity after reopening, without signalling it.
+/// # Errors
+/// Refuses unreadable or malformed kernel identity data.
+pub fn process_identity_reaped(pid: u32, start: u64) -> io::Result<bool> {
+    match start_time(pid) {
+        Ok(current) => Ok(current != start),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+/// Prove a systemd cgroup name has disappeared from the original cgroup-v2 mount.
+/// Includes zombies in deleted descendants. The caller must also prove the
+/// original guardian was reaped. This cannot signal
+/// a replacement group or accept a regular-directory substitute.
+/// # Errors
+/// Refuses an existing name, symlink, changed mount, or failed kernel observation.
+pub fn cgroup_removed(path: &Path, device: u64) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let normalized: PathBuf = path.components().collect();
+    if normalized.as_os_str() != path.as_os_str() {
+        return Err(invalid("noncanonical cgroup name"));
+    }
+    if !path.starts_with("/sys/fs/cgroup")
+        || path.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+    {
+        return Err(invalid("foreign cgroup path"));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut parent = path.parent().ok_or_else(|| invalid("cgroup parent"))?;
+    while !parent.try_exists()? {
+        parent = parent.parent().ok_or_else(|| invalid("cgroup mount"))?;
+    }
+    let file = File::open(parent)?;
+    if fs::canonicalize(parent)? != parent
+        || file.metadata()?.dev() != device
+        || rustix::fs::fstatfs(&file)?.f_type != 0x6367_7270
+    {
+        return Err(invalid("cgroup mount changed"));
+    }
+    scan_cgroup_processes(path, None)
+}
+
+fn scan_cgroup_processes(path: &Path, excluded: Option<u32>) -> io::Result<bool> {
+    let relative = path
+        .strip_prefix("/sys/fs/cgroup")
+        .map_err(io::Error::other)?;
+    let expected = format!("0::/{}", relative.display());
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let pid = entry
+            .file_name()
+            .to_str()
+            .and_then(|v| v.parse::<u32>().ok());
+        if pid.is_none() || pid == excluded {
+            continue;
+        }
+        match fs::read_to_string(entry.path().join("cgroup")) {
+            Ok(text)
+                if text.lines().any(|line| {
+                    line == expected
+                        || line
+                            .strip_prefix(&expected)
+                            .is_some_and(|suffix| suffix.starts_with('/') || suffix == " (deleted)")
+                }) =>
+            {
+                return Ok(false);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "cgroup scan {}: {error}",
+                    entry.path().display()
+                )));
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn start_time(pid: u32) -> io::Result<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     stat.rsplit_once(')')
@@ -339,42 +429,7 @@ impl Cgroup {
     /// # Errors
     /// Every error except an exited per-PID entry invalidates the sample.
     pub fn no_processes_except(&self, excluded: Option<u32>) -> io::Result<bool> {
-        let relative = self
-            .path
-            .strip_prefix("/sys/fs/cgroup")
-            .map_err(io::Error::other)?;
-        let expected = format!("0::/{}", relative.display());
-        for entry in fs::read_dir("/proc")? {
-            let entry = entry?;
-            let pid = entry
-                .file_name()
-                .to_str()
-                .and_then(|v| v.parse::<u32>().ok());
-            if pid.is_none() || pid == excluded {
-                continue;
-            }
-            match fs::read_to_string(entry.path().join("cgroup")) {
-                Ok(text)
-                    if text.lines().any(|line| {
-                        line == expected
-                            || line.strip_prefix(&expected).is_some_and(|suffix| {
-                                suffix.starts_with('/') || suffix == " (deleted)"
-                            })
-                    }) =>
-                {
-                    return Ok(false);
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(io::Error::other(format!(
-                        "cgroup scan {}: {error}",
-                        entry.path().display()
-                    )));
-                }
-            }
-        }
-        Ok(true)
+        scan_cgroup_processes(&self.path, excluded)
     }
 }
 

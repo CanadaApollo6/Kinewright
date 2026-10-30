@@ -360,6 +360,20 @@ pub(crate) trait InvocationOwner: Send + Sync {
         recovery: &RecoveryIdentity,
         send: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<()>;
+    fn started(&self, identity: &crate::orchestration::ExecutionIdentity) -> io::Result<()>;
+    fn raw(
+        &self,
+        identity: &crate::orchestration::ExecutionIdentity,
+        raw: &serde_json::Value,
+        ordinal: u64,
+        eof: bool,
+    ) -> io::Result<()>;
+    fn completed(
+        &self,
+        identity: &crate::orchestration::ExecutionIdentity,
+        completed: bool,
+        proof: &crate::guardian::CleanupProof,
+    ) -> io::Result<()>;
     fn steering(
         &self,
         identity: &crate::orchestration::ExecutionIdentity,
@@ -603,10 +617,13 @@ impl NativeGuardianLauncher {
             native.commit(&mut owner)
         };
         committed?;
+        self.owner.started(attempt.identity())?;
         #[cfg(test)]
         self.fail_startup(StartupFailure::Reader)?;
         let worker_control = Arc::clone(&control);
         let claim = Arc::clone(&self.claim);
+        let usage_owner = Arc::clone(&self.owner);
+        let execution = attempt.identity().clone();
         let (sender, events) = crate::protocol::limits::event_channel();
         thread::Builder::new()
             .name("kinewright-contained-codex".into())
@@ -616,10 +633,19 @@ impl NativeGuardianLauncher {
                     "kinewright-contained-stderr",
                 );
                 let mut parser = crate::protocol::CodexProtocol::default();
+                let mut ordinal = 0_u64;
+                let mut completed = false;
                 for line in crate::protocol::limits::Frames::new(pipes.output) {
-                    let result = line
-                        .map_err(io::Error::other)
-                        .and_then(|line| parser.parse_line(&line).map_err(io::Error::other));
+                    let result = line.map_err(io::Error::other).and_then(|line| {
+                        ordinal = ordinal
+                            .checked_add(1)
+                            .ok_or_else(|| io::Error::other("usage event capacity"))?;
+                        let raw: serde_json::Value = serde_json::from_str(&line)?;
+                        usage_owner.raw(&execution, &raw, ordinal, false)?;
+                        completed |= raw.get("type").and_then(serde_json::Value::as_str)
+                            == Some("turn.completed");
+                        parser.parse_line(&line).map_err(io::Error::other)
+                    });
                     if let Ok(parsed) = result {
                         for event in parsed {
                             if event != AgentEvent::Done && sender.send(event).is_err() {
@@ -634,12 +660,29 @@ impl NativeGuardianLauncher {
                         break;
                     }
                 }
+                if usage_owner
+                    .raw(
+                        &execution,
+                        &serde_json::json!({"type":"native.eof"}),
+                        ordinal.saturating_add(1),
+                        true,
+                    )
+                    .is_err()
+                {
+                    sender.interrupt("usage publication remains unresolved");
+                }
                 let mut native = worker_control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 native.close_lifetime();
                 match native.cleanup() {
                     Ok(proof) => {
+                        if usage_owner
+                            .completed(&execution, completed && !sender.failed(), &proof)
+                            .is_err()
+                        {
+                            sender.interrupt("native completion publication remains unresolved");
+                        }
                         if claim
                             .lock()
                             .map_err(|_| ())

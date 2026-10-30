@@ -2347,11 +2347,21 @@ impl Drop for ResumeGuardian {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum ProofCaller {
+    Session,
+    Retained,
+    Reopened,
+}
+
+#[cfg(target_os = "linux")]
 #[expect(
     clippy::too_many_lines,
     reason = "keep the controlled native lifetime, proof attempt and teardown together"
 )]
-fn service_proof_refused(recovery_caller: bool, zombie: bool, isolate_events: bool) {
+fn service_proof_refused(caller: ProofCaller, zombie: bool, isolate_events: bool) {
+    let recovery_caller = matches!(caller, ProofCaller::Retained);
+    let late = matches!(caller, ProofCaller::Reopened);
     let root = root("service-proof");
     let _cleanup = FixtureCleanup(root.clone());
     let mut profile = CertifiedProfile::fixture();
@@ -2434,7 +2444,20 @@ fn service_proof_refused(recovery_caller: bool, zombie: bool, isolate_events: bo
         zombie,
         "events must distinguish live descendants from zombies"
     );
-    let refused = if recovery_caller {
+    if late {
+        for group in [&leaf, &service] {
+            if let Err(error) = group.try_remove() {
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            }
+        }
+        assert!(
+            !service.path().try_exists().unwrap(),
+            "C3_LATE_SERVICE_GONE_SETUP"
+        );
+    }
+    let refused = if late {
+        RecoveryObserver::recover_cleanup(session.recovery()).is_err()
+    } else if recovery_caller {
         observer.wait_for_cleanup().is_err()
     } else {
         session.cleanup().is_err()
@@ -2446,7 +2469,9 @@ fn service_proof_refused(recovery_caller: bool, zombie: bool, isolate_events: bo
     assert_eq!(claim.retained_attempts(), 1);
     child.kill().unwrap();
     child.wait().unwrap();
-    let proof = if recovery_caller {
+    let proof = if late {
+        RecoveryObserver::recover_cleanup(session.recovery()).unwrap()
+    } else if recovery_caller {
         observer.wait_for_cleanup().unwrap()
     } else {
         session.cleanup().unwrap()
@@ -2455,7 +2480,7 @@ fn service_proof_refused(recovery_caller: bool, zombie: bool, isolate_events: bo
     claim.finish().unwrap();
     assert!(
         refused,
-        "proof caller must refuse an unobserved live or deleted-subtree zombie"
+        "C3_LATE_RECOVERY_WAITS_FOR_ZOMBIES: proof caller must refuse an unobserved live or deleted-subtree zombie"
     );
     for group in [&sibling, &leaf, &service] {
         if let Err(error) = group.try_remove() {
@@ -2475,7 +2500,7 @@ fn s4_c2_service_proof_session_live() {
     if !equipped_session("s4_c2_service_proof_session_live") {
         return;
     }
-    service_proof_refused(false, false, false);
+    service_proof_refused(ProofCaller::Session, false, false);
 }
 
 #[cfg(target_os = "linux")]
@@ -2488,7 +2513,7 @@ fn s4_c2_service_proof_recovery_live() {
     if !equipped_session("s4_c2_service_proof_recovery_live") {
         return;
     }
-    service_proof_refused(true, false, false);
+    service_proof_refused(ProofCaller::Retained, false, false);
 }
 
 #[cfg(target_os = "linux")]
@@ -2501,7 +2526,7 @@ fn s4_c2_service_proof_session_zombie() {
     if !equipped_session("s4_c2_service_proof_session_zombie") {
         return;
     }
-    service_proof_refused(false, true, false);
+    service_proof_refused(ProofCaller::Session, true, false);
 }
 
 #[cfg(target_os = "linux")]
@@ -2514,7 +2539,7 @@ fn s4_c2_service_proof_recovery_zombie() {
     if !equipped_session("s4_c2_service_proof_recovery_zombie") {
         return;
     }
-    service_proof_refused(true, true, false);
+    service_proof_refused(ProofCaller::Retained, true, false);
 }
 
 #[cfg(target_os = "linux")]
@@ -2601,7 +2626,7 @@ fn s4_c2_service_events_session() {
     if !equipped_session("s4_c2_service_events_session") {
         return;
     }
-    service_proof_refused(false, false, true);
+    service_proof_refused(ProofCaller::Session, false, true);
 }
 
 #[cfg(target_os = "linux")]
@@ -2614,7 +2639,7 @@ fn s4_c2_service_events_recovery() {
     if !equipped_session("s4_c2_service_events_recovery") {
         return;
     }
-    service_proof_refused(true, false, true);
+    service_proof_refused(ProofCaller::Retained, false, true);
 }
 
 #[test]
@@ -2704,4 +2729,14 @@ fn s4b_c2_provider_pipes_and_final_environment() {
     let mut diagnostics = String::new();
     pipes.diagnostics.read_to_string(&mut diagnostics).unwrap();
     assert_eq!(diagnostics, "dedicated diagnostic\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "on-demand: equipped Linux guardian qualification"]
+fn s4b_c3_late_recovery_deleted_service_zombie_blocks_proof() {
+    assert!(equipped_session(
+        "s4b_c3_late_recovery_deleted_service_zombie_blocks_proof"
+    ));
+    service_proof_refused(ProofCaller::Reopened, true, false);
 }

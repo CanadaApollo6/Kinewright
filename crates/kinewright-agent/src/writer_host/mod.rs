@@ -9,13 +9,14 @@ mod auth;
 mod continuation;
 mod manual;
 #[cfg(target_os = "linux")]
-mod native_invocation;
+pub(crate) mod native_invocation;
 mod orchestration;
 mod owned_media;
 mod protocol;
 mod recovery;
 mod resolve;
 mod revise;
+pub(crate) mod spending;
 pub use crate::orchestration::director_setting::{
     DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,
     scheduler_settings_directory, write_director_setting,
@@ -518,6 +519,13 @@ impl WriterHost {
 }
 impl Drop for WriterHost {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = self.owner.upgrade() {
+            owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .revoke_native_owner(None);
+        }
         self.server.stop.notify_one();
         if let Some(thread) = self.server.thread.take() {
             let _ = thread.join();

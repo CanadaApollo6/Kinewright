@@ -74,6 +74,16 @@ fn native_profile(
     NativeChecks,
     std::path::PathBuf,
 ) {
+    native_profile_at(f.temp.root(), admitted)
+}
+fn native_profile_at(
+    root: &std::path::Path,
+    admitted: &crate::orchestration::AdmittedAttempt,
+) -> (
+    crate::orchestration::adapters::CertifiedConnectorProfile,
+    NativeChecks,
+    std::path::PathBuf,
+) {
     use crate::orchestration::adapters::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let scratch = kinewright_media::test_support::workspace_target_dir().join(format!(
@@ -88,7 +98,7 @@ fn native_profile(
     let binding = AttemptBinding::issue(
         admitted,
         "http://127.0.0.1:12345/mcp".into(),
-        vec![f.temp.root().into()],
+        vec![root.into()],
         scratch.clone(),
     )
     .unwrap();
@@ -115,6 +125,16 @@ fn native_profile(
     let profile = certify_connector("scripted", binding, &checks).unwrap();
     (profile, checks, scratch)
 }
+fn native_now(f: &Fixture, run: &RunId) -> u64 {
+    let producer = f.producer(run);
+    let host = f.host.owner.upgrade().unwrap();
+    let mut host = host.lock().unwrap();
+    let state = host.spending_scope(&producer, run).unwrap();
+    host.native_accounting(&state)
+        .unwrap()
+        .unwrap()
+        .last_unix_ms
+}
 fn native_charge(
     f: &Fixture,
     admitted: &crate::orchestration::AdmittedAttempt,
@@ -123,6 +143,7 @@ fn native_charge(
     let state = f.projection(&admitted.identity().run);
     let effect = state.effects[0].id.clone();
     let producer = f.producer(&admitted.identity().run);
+    let now = native_now(f, &admitted.identity().run);
     f.host
         .owner
         .upgrade()
@@ -135,7 +156,7 @@ fn native_charge(
             profile,
             &effect,
             crate::orchestration::adapters::SendKind::OpeningAssignment,
-            1_000,
+            now,
         )
         .unwrap()
 }
@@ -543,18 +564,35 @@ fn s4b_c2_specialist_steering_and_coalesced_wakes_are_charged() {
                 child.parent = Some(target.id.clone());
                 child.state = TaskState::Terminal(f.brief.assignment.clone());
                 child.progress = TaskProgress::default();
-                let result = f
-                    .host
-                    .owner
-                    .upgrade()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .owner_mut()
-                    .unwrap()
-                    .admit_host_grant(format!("result {ordinal}").as_bytes())
-                    .unwrap();
-                expected_results.push(result.clone());
+                let text = format!("result {ordinal}");
+                let result = {
+                    let host = f.host.owner.upgrade().unwrap();
+                    let mut host = host.lock().unwrap();
+                    let explanation = host
+                        .owner_mut()
+                        .unwrap()
+                        .admit_host_grant(text.as_bytes())
+                        .unwrap();
+                    host.owner_mut()
+                        .unwrap()
+                        .admit_scheduler_record(&OrchestrationRecord {
+                            version: 1,
+                            payload: OrchestrationPayload::Result(Box::new(TaskResult {
+                                outcome: AttemptOutcome::Completed,
+                                base: Some(f.brief.scope.base.clone()),
+                                head: Some(f.brief.scope.base.clone()),
+                                delta_ref: None,
+                                artifacts: vec![],
+                                evidence: vec![],
+                                usage_ref: state.usage[0].clone(),
+                                explanation,
+                            })),
+                        })
+                        .unwrap()
+                        .reference
+                };
+                expected_results.push(text);
+                child.state = TaskState::Terminal(result.clone());
                 state.deliveries.push(DeliveryRecord {
                     id: identity(),
                     task: child.id.clone(),
@@ -572,6 +610,7 @@ fn s4b_c2_specialist_steering_and_coalesced_wakes_are_charged() {
         let admitted = native_admitted(&f, &execution);
         let (profile, _, scratch) = native_profile(&f, &admitted);
         let producer = f.producer(&run);
+        let now = native_now(&f, &run);
         let invocation = f
             .host
             .owner
@@ -579,7 +618,7 @@ fn s4b_c2_specialist_steering_and_coalesced_wakes_are_charged() {
             .unwrap()
             .lock()
             .unwrap()
-            .charge_native_invocation(&producer, &admitted, profile, &effect, kind, 1_000)
+            .charge_native_invocation(&producer, &admitted, profile, &effect, kind, now)
             .unwrap();
         assert_eq!(
             invocation.invocation().kind(),
@@ -587,8 +626,12 @@ fn s4b_c2_specialist_steering_and_coalesced_wakes_are_charged() {
             "S4B_C2_ALL_SEND_ROUTES"
         );
         if kind == SendKind::AutomaticResultWake {
-            let actual: Vec<kinewright_project::bundle_records::ObjectRef> =
+            let values: Vec<serde_json::Value> =
                 serde_json::from_slice(invocation.invocation().bytes()).unwrap();
+            let actual: Vec<_> = values
+                .iter()
+                .map(|value| value["explanation"].as_str().unwrap().to_owned())
+                .collect();
             assert_eq!(actual, expected_results, "S4B_C2_COALESCED_WAKE_PAYLOAD");
         }
         assert_eq!(
@@ -803,24 +846,31 @@ fn finish_stopped_native(claim: Arc<Mutex<crate::execution_claim::MachineClaim>>
         .unwrap();
 }
 fn stop_native_run(f: &Fixture, run: &RunId) {
-    let stop = f.control(&f.editor, run, RunAction::Stop);
-    ok(
-        call(
-            f,
-            &f.editor,
-            HostCommand::DispatchOrchestration {
-                request: Box::new(stop),
-            },
-            0,
-        ),
-        "S4B_C2_FIX1_CURRENT_STOP_ACK",
-    );
-    assert!(
-        f.projection(run)
-            .attempts
-            .iter()
-            .all(|attempt| attempt.state == AttemptState::Stopping)
-    );
+    // Raw usage now publishes concurrent H1 cuts. An explicitly stale control
+    // is a refused cut, so refresh its original view before asserting Stop won.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let stop = f.control(&f.editor, run, RunAction::Stop);
+        let reply = ok(
+            call(
+                f,
+                &f.editor,
+                HostCommand::DispatchOrchestration {
+                    request: Box::new(stop),
+                },
+                0,
+            ),
+            "S4B_C2_FIX1_CURRENT_STOP_ACK",
+        );
+        if reply.orchestration.unwrap().decision == CommandDecision::Applied {
+            break;
+        }
+        assert!(Instant::now() < deadline, "S4B_C2_FIX1_CURRENT_STOP_ACK");
+    }
+    assert!(f.projection(run).attempts.iter().all(|attempt| matches!(
+        attempt.state,
+        AttemptState::Stopping | AttemptState::Retired(_)
+    )));
 }
 
 #[test]
@@ -991,6 +1041,7 @@ fn s4b_c2_fix1_three_failed_launches_leave_machine_usable() {
         let producer = f.producer(&run);
         let projection = f.projection(&run);
         let effect = projection.effects.last().unwrap().id.clone();
+        let now = native_now(&f, &run);
         let invocation = host
             .lock()
             .unwrap()
@@ -1004,7 +1055,7 @@ fn s4b_c2_fix1_three_failed_launches_leave_machine_usable() {
                 } else {
                     SendKind::QueuedSteering
                 },
-                1_000 + ordinal as u64,
+                now + ordinal as u64,
             )
             .unwrap();
         let config = invocation.profile().session_config().clone();

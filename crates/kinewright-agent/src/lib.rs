@@ -118,3 +118,7 @@ pub use solo::{
     SOLO_FRAMING_BYTES, SOLO_PNG_BUDGET_BYTES, SOLO_REPORT_BUDGET_BYTES, SOLO_WIRE_BUDGET_BYTES,
     SoloArgs, SoloContext, SoloError, SoloStrip, preview_solo, sample_offsets,
 };
+
+#[cfg(target_os = "linux")]
+#[path = "orchestration/effect_pump.rs"]
+pub(crate) mod effect_pump;

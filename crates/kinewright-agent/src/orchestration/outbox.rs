@@ -49,7 +49,9 @@ pub fn claim(
         .iter()
         .find(|effect| &effect.id == id)
         .ok_or(Refusal::Unknown)?;
-    if next_effect(state, &effect.lane).map(|effect| &effect.id) != Some(id) {
+    if effect.safety == EffectSafety::ProcessBound
+        || next_effect(state, &effect.lane).map(|effect| &effect.id) != Some(id)
+    {
         return Err(Refusal::InvalidState);
     }
     let mut next = state.clone();
