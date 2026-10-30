@@ -113,3 +113,14 @@ ja_s4_lifecycle s4_person_holder_approval_and_secret crates/kinewright-agent/tes
 # S4 C5
 ja_s4_usage s4_usage_durable_reopen_h1 crates/kinewright-agent/tests/ja_s4_usage.rs any inherited-gap  # S3 H1 durable orchestration publisher and independent reopen are not integrated
 kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end_live_voice crates/kinewright-app/src/studio_e2e_tests.rs linux on-demand  # needs the Whisper model and espeak-ng
+
+kinewright_job_sys sandbox::tests::s4b_c2_home_denial crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
+kinewright_job_sys sandbox::tests::s4b_c2_project_denial crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
+kinewright_job_sys sandbox::tests::s4b_c2_desktop_denial crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
+kinewright_job_sys sandbox::tests::s4b_c2_credential_boundary crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
+kinewright_job_sys sandbox::tests::s4b_c2_metadata_denial crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c2_durable_charge_guardian_session_and_queued_steering crates/kinewright-agent/src/writer_host/native_invocation_tests.rs linux on-demand  # S4b C2 needs the native guardian binary, user systemd, namespaces, and delegated cgroups; explicitly run in the C2 gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c2_lost_commit_ack_reopens_one_charge_and_one_execution crates/kinewright-agent/src/writer_host/native_invocation_tests.rs linux on-demand  # S4b C2 needs the native guardian binary, user systemd, namespaces, and delegated cgroups; explicitly run in the C2 gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c2_full_event_queue_cancels_and_proves_cleanup crates/kinewright-agent/src/writer_host/native_invocation_tests.rs linux on-demand  # S4b C2 needs the native guardian binary, user systemd, namespaces, and delegated cgroups; explicitly run in the C2 gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c2_overflow_cleans_before_reusing_the_slot crates/kinewright-agent/src/writer_host/native_invocation_tests.rs linux on-demand  # S4b C2 needs the native guardian binary, user systemd, namespaces, and delegated cgroups; explicitly run in the C2 gate
+ja_s4_guardian s4b_c2_provider_pipes_and_final_environment crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand  # S4b C2 uses the user systemd manager and Landlock ABI 9; explicitly run in the C2 native gate

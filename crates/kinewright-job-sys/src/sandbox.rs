@@ -310,22 +310,27 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_home_denial() {
         sandbox_case(0);
     }
     #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_project_denial() {
         sandbox_case(1);
     }
     #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_desktop_denial() {
         sandbox_case(2);
     }
     #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_credential_boundary() {
         sandbox_case(3);
     }
     #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_metadata_denial() {
         sandbox_case(4);
     }

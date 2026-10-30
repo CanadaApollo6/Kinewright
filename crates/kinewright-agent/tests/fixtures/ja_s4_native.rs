@@ -45,6 +45,35 @@ fn main() {
         let _ = std::io::stdout().write_all(&vec![b'x'; 192 * 1024]);
         return;
     }
+    if role == "s4b-codex" {
+        let prompt = args[3].to_str().unwrap();
+        let mut executions = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.join("executions"))
+            .unwrap();
+        writeln!(executions, "execution").unwrap();
+        executions.sync_all().unwrap();
+        fs::write(root.join("execution-ready"), b"").unwrap();
+        if prompt == "overflow" || prompt == "block" {
+            for _ in 0..if prompt == "block" { 30 } else { 40 } {
+                writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"bounded fixture event\"}}}}").unwrap();
+            }
+            loop {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"fixture response\"}}}}").unwrap();
+        writeln!(
+            std::io::stdout(),
+            "{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}"
+        )
+        .unwrap();
+        while !root.join("exit").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        return;
+    }
     if role == "s4b-pipes" {
         use std::io::BufRead;
         let mut request = String::new();

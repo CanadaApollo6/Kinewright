@@ -38,6 +38,19 @@ pub struct CertifiedProfile {
     pub(crate) manager_process_only: bool,
 }
 impl CertifiedProfile {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_allowlist() -> Self {
+        Self {
+            _private: (),
+            #[cfg(test)]
+            missing_nsdelegate: false,
+            #[cfg(test)]
+            missing_pid_namespace: false,
+            #[cfg(test)]
+            manager_process_only: false,
+        }
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn fixture() -> Self {
@@ -383,6 +396,22 @@ impl ContainedSession {
             self.close_lifetime();
         }
         outcome
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn commit_without_reply(
+        &mut self,
+        owner: &mut impl DurableAttemptOwner,
+    ) -> io::Result<()> {
+        owner.authorize_commit(&self.recovery)?;
+        protocol::write_frame(
+            self.writer
+                .as_mut()
+                .ok_or_else(|| io::Error::other("lifetime closed"))?,
+            &HostMessage::Commit {
+                nonce: self.identity.nonce.clone(),
+            },
+        )
     }
 
     fn commit_once(&mut self, owner: &mut impl DurableAttemptOwner) -> io::Result<()> {

@@ -2458,6 +2458,7 @@ fn s4_c2_service_events_recovery() {
 
 #[test]
 #[cfg(target_os = "linux")]
+#[ignore = "on-demand: equipped Linux guardian qualification"]
 fn s4b_c2_provider_pipes_and_final_environment() {
     use kinewright_agent::provider_pipes::ProviderPipeListeners;
     use std::{

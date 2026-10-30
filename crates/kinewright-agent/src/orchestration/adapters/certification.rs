@@ -387,6 +387,11 @@ pub struct CertifiedConnectorProfile {
     runtime: RuntimeQualification,
 }
 impl CertifiedConnectorProfile {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn runtime(&self) -> &RuntimeQualification {
+        &self.runtime
+    }
+
     #[must_use]
     pub fn selection(&self) -> ProviderSelectionRecord {
         self.specification.selection()
@@ -451,6 +456,9 @@ impl CertifiedConnectorProfile {
         self.specification.validate_runtime(&runtime)?;
         if runtime.executable != self.runtime.executable {
             return Err(CertificationRefusal::ExecutableIdentity);
+        }
+        if runtime.launch_context != self.runtime.launch_context {
+            return Err(CertificationRefusal::EffectiveAuthentication);
         }
         Ok(())
     }
@@ -754,6 +762,19 @@ mod tests {
         assert_eq!(
             profile.recheck_runtime(&check),
             Err(CertificationRefusal::ApiAuthentication)
+        );
+    }
+
+    #[test]
+    fn s4b_c2_runtime_context_cannot_change_between_binding_and_spawn() {
+        let profile = certify_connector("scripted", binding(), &runtime()).unwrap();
+        let mut changed = runtime();
+        changed.launch_context.environment_digest = [3; 32];
+        changed.authentication.context = changed.launch_context.clone();
+        assert_eq!(
+            profile.recheck_runtime(&changed),
+            Err(CertificationRefusal::EffectiveAuthentication),
+            "S4B_C2_FRESH_CONTEXT_MATCHES_SPAWN"
         );
     }
 

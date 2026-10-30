@@ -90,7 +90,13 @@ impl Program {
             || self.environment.iter().any(|(key, value)| {
                 !matches!(
                     key.as_str(),
-                    "PATH" | "HOME" | "LANG" | "LC_ALL" | "TMPDIR" | "CODEX_HOME"
+                    "PATH"
+                        | "HOME"
+                        | "LANG"
+                        | "LC_ALL"
+                        | "TMPDIR"
+                        | "CODEX_HOME"
+                        | "XDG_RUNTIME_DIR"
                 ) || value.contains('\0')
             })
             || self

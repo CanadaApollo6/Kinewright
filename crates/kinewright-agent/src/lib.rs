@@ -8,6 +8,9 @@ pub mod guardian;
 pub mod job_guardian;
 // S4b C2
 #[cfg(target_os = "linux")]
+#[path = "orchestration/native_launcher.rs"]
+pub(crate) mod native_launcher;
+#[cfg(target_os = "linux")]
 #[path = "orchestration/provider_pipes.rs"]
 pub mod provider_pipes;
 

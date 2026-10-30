@@ -239,13 +239,15 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
         .env_clear()
         .envs(program.environment)
         .current_dir(program.working_directory)
-        .env(
-            "XDG_RUNTIME_DIR",
-            format!("/run/user/{}", rustix::process::getuid().as_raw()),
-        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if matches!(program.sandbox, ProviderSandbox::ContainmentOnly) {
+        command.env(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", rustix::process::getuid().as_raw()),
+        );
+    }
     if let Some(pipes) = pipes {
         let mut pipes = pipes.into_iter();
         command

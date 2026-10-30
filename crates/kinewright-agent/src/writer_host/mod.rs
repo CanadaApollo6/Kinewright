@@ -8,6 +8,8 @@ pub use issuer::HostIssuer;
 mod auth;
 mod continuation;
 mod manual;
+#[cfg(target_os = "linux")]
+mod native_invocation;
 mod orchestration;
 mod owned_media;
 mod protocol;
@@ -2145,7 +2147,7 @@ impl HostCommandOwner {
                     )
                     .into());
                 }
-                let driver = Box::new(crate::ScriptedDriver::new(turns));
+                let driver = crate::ScriptedDriver::new(turns);
                 let session =
                     self.start_session(driver, HostSessionConfig::default(), Some(prompts))?;
                 reply.session = Some(self.session_status(session)?);
@@ -2166,7 +2168,7 @@ impl HostCommandOwner {
                     )
                     .into());
                 }
-                let driver = Box::new(crate::ScriptedDriver::new(turns));
+                let driver = crate::ScriptedDriver::new(turns);
                 let session = self.start_registered_session(
                     driver,
                     HostSessionConfig::default(),
@@ -2175,12 +2177,12 @@ impl HostCommandOwner {
                 )?;
                 reply.session = Some(self.session_status(session)?);
             }
-            HostCommand::StartSession { harness, config } => {
-                let driver = crate::harness_driver(&harness).ok_or_else(|| {
-                    HostRefusal::new("harness_unavailable", "unknown installed harness")
-                })?;
-                let session = self.start_session(driver, config, None)?;
-                reply.session = Some(self.session_status(session)?);
+            HostCommand::StartSession { .. } => {
+                return Err(HostRefusal::new(
+                    "provider_unqualified",
+                    "This provider is not ready for Studio. Your notes are saved.",
+                )
+                .into());
             }
             HostCommand::SendMessage { session, message } => {
                 let session = self
@@ -2521,7 +2523,7 @@ impl crate::SessionObserver for HostObserver {
 impl HostCommandOwner {
     fn start_session(
         &mut self,
-        driver: Box<dyn AgentDriver>,
+        driver: crate::ScriptedDriver,
         cfg: HostSessionConfig,
         scripted_prompts: Option<Vec<String>>,
     ) -> Result<u64, HostError> {
@@ -2529,7 +2531,7 @@ impl HostCommandOwner {
     }
     fn start_registered_session(
         &mut self,
-        driver: Box<dyn AgentDriver>,
+        driver: crate::ScriptedDriver,
         cfg: HostSessionConfig,
         scripted_prompts: Option<Vec<String>>,
         reopen: Option<(BranchId, ObjectRef)>,
