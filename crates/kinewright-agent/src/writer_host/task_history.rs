@@ -148,6 +148,7 @@ impl HostCommandOwner {
                 && matches!(a.state, AttemptState::Retired(_))
         }))
     }
+    #[cfg(target_os = "linux")]
     pub(super) fn archive_retired_attempts(
         &mut self,
         state: &mut RunProjection,

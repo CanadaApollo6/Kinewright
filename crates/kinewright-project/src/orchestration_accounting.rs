@@ -726,6 +726,7 @@ impl TaskAccounting {
     }
 
     /// Recheck a charged send without charging it again or requiring its own future usage.
+    #[cfg(target_os = "linux")]
     pub fn check_release(&self, send: &SendConsumption) -> Result<(), AccountingRefusal> {
         if !self.sends.contains(send) {
             return Err(AccountingRefusal::Scope);

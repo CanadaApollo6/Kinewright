@@ -332,7 +332,7 @@ impl EditorTask {
     pub fn core(&self) -> &Core {
         self.registration.core()
     }
-    #[cfg(any(test, feature = "eval-harness"))]
+    #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
     pub fn freeze_fixture(
         &mut self,
         owner: &mut Ja1EditingSession,
