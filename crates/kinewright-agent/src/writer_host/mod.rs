@@ -1440,7 +1440,10 @@ impl HostCommandOwner {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
         }
-        if reply.activation.is_some() || self.snapshot_read_owner() != previous_snapshot_owner {
+        let current_snapshot_owner = self.snapshot_read_owner();
+        #[cfg(target_os = "linux")]
+        self.revoke_native_owner(current_snapshot_owner.as_ref());
+        if reply.activation.is_some() || current_snapshot_owner != previous_snapshot_owner {
             for attachment in &mut self.attachments {
                 attachment.snapshot_leases.clear();
             }

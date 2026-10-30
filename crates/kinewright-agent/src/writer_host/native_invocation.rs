@@ -191,6 +191,23 @@ impl InvocationOwner for HostInvocationOwner {
     }
 }
 impl HostCommandOwner {
+    pub(super) fn revoke_native_owner(
+        &mut self,
+        owner: Option<&(kinewright_project::bundle_records::ProjectId, u64)>,
+    ) {
+        self.hooks.native.retain(|_, attempt| {
+            let current = owner.is_some_and(|(project, epoch)| {
+                attempt.identity.project == *project && attempt.owner_epoch == *epoch
+            });
+            if !current {
+                attempt.control.close();
+            }
+            // Closing authority never retires a machine claim. The native
+            // reader/startup guard still requires an independent CleanupProof.
+            current && !attempt.control.closed()
+        });
+    }
+
     fn native_projection(
         &mut self,
         producer: &HostAuth,
