@@ -72,6 +72,8 @@ pub(crate) const RECORDING_REFUSAL: &str =
 /// Said for a finished note whose binding is not kept on this computer yet.
 pub(crate) const UNKEPT_REFUSAL: &str =
     "Your note hasn't been saved yet. Retry, or wait for it to save.";
+/// Said when the picture shown belongs to another project than the notes.
+pub(crate) const PICTURE_REFUSAL: &str = "Select this version again before recording a note.";
 /// The close warning's lines for them: neither has a discard.
 pub(crate) const RECORDING_CLOSE_TEXT: &str = "A spoken note is still recording. Stop it first: Close keeps it only once it stops, and Discard does not drop it.";
 pub(crate) const UNKEPT_CLOSE_TEXT: &str = "A spoken note is not saved on this computer yet. Wait for it to save, or press Retry upload: Close keeps it only once it is saved, and Discard does not drop it.";
@@ -225,11 +227,41 @@ impl KinewrightApp {
             Err(why) => format!("{UNKEPT_REFUSAL} ({why})"),
         };
     }
+    /// Every frame, whatever the layout shows: retry a failed retention once
+    /// it is due, so storage that comes back is used outside Studio too.
+    pub(crate) fn poll_voice_retention(&mut self, ctx: &egui::Context) {
+        if self.focused().studio.voice.retain_at.is_none() {
+            return;
+        }
+        let state = std::mem::take(&mut self.focused_mut().studio.voice.state);
+        match &state {
+            State::Unprepared(captured) => self.retry_voice_retention(captured, None),
+            State::Upload {
+                captured, upload, ..
+            } => self.retry_voice_retention(captured, Some(upload)),
+            _ => (),
+        }
+        let voice = &mut self.focused_mut().studio.voice;
+        voice.state = state;
+        if let Some(at) = voice.retain_at {
+            ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
+        }
+    }
+    /// Record starts a note, or stops the one recording.
+    pub(crate) fn can_record(&self) -> bool {
+        matches!(self.focused().studio.voice.state, State::Recording(_))
+            || self.feedback_handoff().is_none()
+    }
     fn bind_voice_capture(
         &mut self,
         captured: &CapturedAudio,
         upload: Option<&VoiceUpload>,
     ) -> Result<(), String> {
+        // A capture is kept only in its own project's file: one filed under
+        // another project could be restored by neither (S3 stage fix 3).
+        if self.focused().studio.feedback.keeping.project() != Some(captured.project()) {
+            return Err("these notes belong to another project".into());
+        }
         self.keep_voice_editor()?;
         let binding = captured.kept_binding().map_err(|e| e.to_string())?;
         let feedback = &mut self.focused_mut().studio.feedback;
@@ -514,6 +546,9 @@ impl KinewrightApp {
         }
     }
     fn begin_spoken_note(&mut self, input: crate::recording::FeedbackInput) -> Result<(), String> {
+        if let Some(why) = self.feedback_handoff() {
+            return Err(why.into());
+        }
         if self.focused().studio.voice.pending_choice.is_some() {
             return Err(
                 "Retry the pending transcript choice before recording another note.".into(),
@@ -545,6 +580,13 @@ impl KinewrightApp {
                     .map_err(|e| e.to_string())?,
             ),
         };
+        // The picture recorded at names the project its capture is kept under:
+        // a version opened before Save As still names the project left.
+        if context.capture_project_id().ok().as_ref()
+            != self.focused().studio.feedback.keeping.project()
+        {
+            return Err(PICTURE_REFUSAL.into());
+        }
         let pinned = context.pin_snapshot().map_err(|e| e.to_string())?;
         let budget = CaptureReservation::reserve_context(&context).map_err(|e| e.to_string())?;
         let directory = kinewright_media::default_data_dir().join("feedback-captures");
@@ -594,7 +636,6 @@ impl KinewrightApp {
                 log,
                 mut reply,
             } => {
-                self.retry_voice_retention(&captured, Some(&descriptor));
                 let received = reply.as_ref().map(|rx| {
                     rx.try_recv().map(|r| {
                         descriptor = r.descriptor;
@@ -745,11 +786,7 @@ impl KinewrightApp {
                     next_poll,
                 }
             }
-            State::Unprepared(captured) => {
-                self.retry_voice_retention(&captured, None);
-                State::Unprepared(captured)
-            }
-            State::Idle => State::Idle,
+            state @ (State::Unprepared(_) | State::Idle) => state,
         };
         self.focused_mut().studio.voice.state = next;
         if keep && let Err(why) = self.keep_voice_editor() {
@@ -761,6 +798,7 @@ impl KinewrightApp {
         reason = "one panel keeps capture, transcript and retry actions next to their visible state"
     )]
     pub(crate) fn voice_controls(&mut self, ui: &mut egui::Ui) {
+        let handoff = self.feedback_handoff();
         let mut stop = false;
         let mut retry = false;
         let mut choose = false;
@@ -863,7 +901,10 @@ impl KinewrightApp {
                     }
                 }
                 State::Idle => {
-                    stop = ui.button("Record spoken note").clicked();
+                    stop = ui
+                        .add_enabled(handoff.is_none(), egui::Button::new("Record spoken note"))
+                        .on_disabled_hover_text(handoff.unwrap_or_default())
+                        .clicked();
                 }
             }
         });
@@ -939,6 +980,9 @@ impl KinewrightApp {
     )]
     fn choose_spoken_transcript(&mut self) -> Result<(), String> {
         self.keep_voice_editor()?;
+        if let Some(why) = self.feedback_handoff() {
+            return Err(why.into());
+        }
         let client = self.voice_client()?;
         if self.focused().studio.voice.pending_choice.is_none() {
             let (note, text, comment) = {
@@ -1155,6 +1199,10 @@ mod tests {
         let source = quiet(fixture);
         app.begin_spoken_note(crate::recording::FeedbackInput::Wav(source))
             .unwrap();
+        finished(app)
+    }
+    /// The current recording once its worker ends, taken out of the voice.
+    fn finished(app: &mut KinewrightApp) -> Box<CapturedAudio> {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let State::Recording(capture) =
@@ -1993,7 +2041,9 @@ mod tests {
         (bytes, log): (Vec<u8>, Vec<u8>),
     ) {
         let deadline = Instant::now() + Duration::from_secs(30);
+        let ctx = egui::Context::default();
         while app.focused().studio.voice.retain_at.is_some() {
+            app.poll_background(&ctx);
             app.feedback_frame();
             app.voice_frame();
             assert!(
@@ -2076,6 +2126,141 @@ mod tests {
                 "M2_CLOSE_WARNING"
             );
             drop(storage);
+            retain_then_upload(app, a.as_ref(), &note, &key, kept);
+        });
+    }
+
+    /// S3 stage fix 3: A's last write fails as the attachment and the picture
+    /// move to B, then storage comes back. Record before the next handoff must
+    /// be refused, or keep its capture under B. B's host never acknowledges
+    /// it, so only B's kept binding can bring the note back.
+    #[test]
+    fn m3_record_while_the_notes_are_handed_to_b_is_refused() {
+        hosted_case(|app, fixture, engine| {
+            let a = app.focused().studio.feedback.keeping.project().cloned();
+            let key = displayed_key(app);
+            // A keeps a typed draft, so leaving A has a last write to make.
+            app.new_feedback_note().unwrap();
+            app.feedback_frame();
+            let storage = ReadOnly::new(fixture.root.path("kept-feedback"));
+            let attachment = app.focused_mut().ja1.as_mut().unwrap();
+            attachment
+                .apply(crate::ja1_attachment::Action::SaveAs(
+                    fixture.root.path("m3-b.kinewright"),
+                ))
+                .unwrap();
+            let b_path = attachment.project_path();
+            let b = attachment.studio_project_id().ok();
+            let context = Arc::new(attachment.studio_context(&key).unwrap());
+            app.focused_mut().install_ja1_view();
+            app.install_studio_context(context).unwrap();
+            wait_frame(app, &egui::Context::default(), &key, TimeCode::ZERO);
+            app.feedback_frame();
+            assert_eq!(
+                app.focused().studio.feedback.keeping.project().cloned(),
+                a,
+                "M3_HANDOFF_PENDING"
+            );
+            assert_ne!(a, b, "M3_B_IS_NEW");
+            drop(storage);
+            let source = quiet(fixture);
+            let first = app.begin_spoken_note(crate::recording::FeedbackInput::Wav(source.clone()));
+            if let Err(why) = &first {
+                assert_eq!(
+                    why,
+                    crate::studio_feedback::HANDOFF_REFUSAL,
+                    "M3_RECORD_REFUSAL_TEXT"
+                );
+                assert!(!app.can_record(), "M3_RECORD_DISABLED");
+                assert!(
+                    app.focused().studio.feedback.voices.is_empty(),
+                    "M3_NOTHING_KEPT_UNDER_A"
+                );
+                assert_eq!(
+                    app.new_feedback_note(),
+                    Err(crate::studio_feedback::HANDOFF_REFUSAL.into()),
+                    "M3_NEW_NOTE_REFUSED"
+                );
+                app.feedback_frame();
+                assert_eq!(
+                    app.focused().studio.feedback.keeping.project().cloned(),
+                    b,
+                    "M3_HANDED_TO_B"
+                );
+                app.voice_frame();
+                app.begin_spoken_note(crate::recording::FeedbackInput::Wav(source))
+                    .unwrap();
+            }
+            let note = app.focused().studio.voice.note.clone().unwrap();
+            let shown = displayed_key(app);
+            // No acknowledgment: the capture is kept the way a failed upload
+            // preparation leaves it, and B's host never hears of it.
+            let captured = finished(app);
+            let bytes = std::fs::read(&captured.path).unwrap();
+            let log = captured.playhead_bytes().unwrap();
+            let _ = app.keep_voice_capture(&captured, None);
+            app.focused_mut().studio.voice.state = State::Unprepared(captured);
+            for _ in 0..5 {
+                app.feedback_frame();
+                app.voice_frame();
+            }
+            reopen_at(app, fixture, engine, b_path);
+            assert_eq!(
+                app.focused().studio.feedback.keeping.project().cloned(),
+                b,
+                "M3_REOPENED_B"
+            );
+            assert!(
+                app.focused()
+                    .studio
+                    .feedback
+                    .voices
+                    .get(&note)
+                    .is_some_and(|kept| kept.capture.is_some()),
+                "M3_KEPT_UNDER_B"
+            );
+            app.voice_retry();
+            let State::Upload { upload, .. } = &app.focused().studio.voice.state else {
+                panic!("M3_UPLOAD {}", app.focused().studio.voice.message)
+            };
+            let upload = upload.clone();
+            assert_eq!(
+                upload.log.sha256,
+                kinewright_media::sha256_bytes(&log),
+                "M3_EXACT_LOG"
+            );
+            wait_saved(app);
+            assert_exact_note(app, &note, &shown, &bytes, &upload);
+        });
+    }
+    /// The retention retry runs in the per-frame pump, so storage that comes
+    /// back is used while the Editor layout is shown (S3 stage fix 3, m1).
+    #[test]
+    fn m3_a_failed_retention_is_retried_outside_studio() {
+        hosted_case(|app, fixture, _engine| {
+            let a = app.focused().studio.feedback.keeping.project().cloned();
+            let key = displayed_key(app);
+            let mut held = held_recording(app, fixture);
+            let note = app.focused().studio.voice.note.clone().unwrap();
+            let storage = ReadOnly::new(fixture.root.path("kept-feedback"));
+            let kept = finish_unkept(app, &mut held, &note);
+            app.return_to_current_edit();
+            app.focused_mut().studio.mode = crate::studio::Mode::Editor;
+            drop(storage);
+            // Only the pump runs: the Editor layout draws no Studio frame.
+            let ctx = egui::Context::default();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while app.focused().studio.voice.retain_at.is_some() {
+                app.poll_background(&ctx);
+                assert!(Instant::now() < deadline, "M3_RETRIED_OUTSIDE_STUDIO");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                app.focused().studio.feedback.voices[&note]
+                    .capture
+                    .is_some(),
+                "M3_KEPT_OUTSIDE_STUDIO"
+            );
             retain_then_upload(app, a.as_ref(), &note, &key, kept);
         });
     }

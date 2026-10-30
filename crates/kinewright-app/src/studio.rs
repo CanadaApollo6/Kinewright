@@ -154,7 +154,7 @@ impl Studio {
         }
     }
     /// A temporary Current-edit failure that will be asked again.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn manual_retry_pending(&self) -> bool {
         self.manual_failure
             .as_ref()
@@ -1227,14 +1227,19 @@ impl KinewrightApp {
                 if response.changed() && self.active_thread().input.is_empty() {
                     self.focused_mut().studio.draft_snapshot = None;
                 }
+                let can_record = self.can_record();
                 if round_button(
                     ui,
                     Icon::Mic,
                     "Voice note",
-                    "Record a note at the displayed picture",
+                    if can_record {
+                        "Record a note at the displayed picture"
+                    } else {
+                        crate::studio_feedback::HANDOFF_REFUSAL
+                    },
                     32.0,
                     Round::Quiet,
-                    true,
+                    can_record,
                 )
                 .clicked()
                 {

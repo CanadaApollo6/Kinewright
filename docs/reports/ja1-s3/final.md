@@ -12,7 +12,7 @@ S3 certification remains **partial**. This ledger is the gate status at the fina
 | G8 | `s3_bound_ab_identity` and `s3_bound_ab_gpu_identity` on lavapipe: presentation identity of the bound A/B picture. |
 | G9 | Typed and drawn notes on the displayed cell, retained drafts, the immutable batch and its lost reply, and the mixed-version host route in the end-to-end test. |
 | G10 | Lineage fixtures, host `ResolveFeedback`, and remapping when the saved checkpoint changes. |
-| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording, or finished but not yet kept on this computer, refuses Save As, New, Open, switching project and Close. It then finishes under its own project (stage fixes 1 and 2). |
+| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording, or finished but not yet kept on this computer, refuses Save As, New, Open, switching project and Close. It then finishes under its own project (stage fixes 1 and 2). New feedback work waits while the notes are still handed to a new project (stage fix 3). |
 
 **Remaining acceptance legs.** No test covers these yet:
 
@@ -41,6 +41,14 @@ The re-check found that the guard lifted as soon as the recording finished, even
 The guard now asks whether the note is durably kept, not whether it is recording. A finished note whose write failed refuses the same transitions with "Your note hasn't been saved yet. Retry, or wait for it to save." It counts as unsaved work, and the close warning names it. The Studio retries the write twice a second until it succeeds, and Retry upload retries it at once. A project change waits until the note is kept. Leaving a project whose last write fails now keeps that project and its notes, reports the failure and tries again.
 
 Two witnesses finish a held capture while the notes folder is read-only, try Save As or Close, and then make the folder writable again. Both transitions are refused. The note is then kept under A, and Retry upload saves the exact audio, NoteId, anchor and log. A unit test shows that a failed last write keeps the project and its notes. When the guard ignores the failed write, Save As loses the capture and Close is not refused. When leaving ignores the failed write, the project is not kept. With both restored, all the witnesses pass.
+
+## Stage fix 3
+
+The second re-check found a gap that stage fix 2 opened. When leaving project A fails its last write, the Studio keeps A's notes, but the attachment and the displayed picture are already on B. Record still worked then. Its capture came from B's picture but was kept in A's file, where neither project could restore it.
+
+New feedback work now waits until the attachment and the kept notes name the same project. Until then, Record, New note, drawing, Save, Submit, Revise cut, Start run and choosing a transcript all say "Still saving the last project's notes. Try again in a moment." Record is shown disabled. Record also checks the picture it records at, because that picture's project owns the capture. A version opened before Save As still names the project left, so Record asks for that version to be selected again. Typed and drawn notes on it still work, as before. A spoken note is also kept only in its own project's file, and any other write counts as a failed save, so the note stays guarded. A note A already holds still retries through A, as before. The save retry now runs every frame, so storage that comes back is used while the Editor layout is shown, not only in Studio.
+
+One witness makes A's last write fail as the project moves to B, makes the folder writable again, and presses Record before the next handoff. Record is refused. After the handoff, a note recorded under B is kept in B's file without any acknowledgment from the host. Reopening B restores it, and Retry upload saves the exact audio, NoteId, anchor and log. When Record's checks are removed, or those checks and the file check together, the witness fails because B holds no capture. A second witness makes the folder writable again while the Editor layout is shown, and the note is kept there. When the per-frame retry is removed, it fails. With the fix restored, both pass.
 
 ## C6a
 

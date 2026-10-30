@@ -1499,6 +1499,10 @@ pub(crate) mod feedback_capture {
             .admit_blob(&mut &*bytes, &reference, dependencies)
     }
     impl CapturedAudio {
+        /// The project whose picture this was recorded at.
+        pub(crate) fn project(&self) -> &ProjectId {
+            &self.project
+        }
         pub(crate) fn anchor(&self) -> &FeedbackAnchor {
             &self.anchor
         }

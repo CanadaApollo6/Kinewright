@@ -978,6 +978,9 @@ struct Kept {
 const KEPT_VERSION: u32 = 2;
 const RESTARTED: &str = "Kinewright closed before this outcome was known";
 const OPEN_ELSEWHERE: &str = "This project's notes are open in another window";
+/// Said for new feedback work while the notes still belong to the project left.
+pub(crate) const HANDOFF_REFUSAL: &str =
+    "Still saving the last project's notes. Try again in a moment.";
 
 /// A sent command whose draft no longer matches it. It is retried exactly until
 /// its outcome is known, and its draft stays a separate draft whatever the
@@ -2420,6 +2423,20 @@ impl KinewrightApp {
             _ => self.focused_mut().studio.feedback.mapped = None,
         }
     }
+    /// Why new feedback work must wait: the kept notes still belong to another
+    /// project than the attachment, as while the last project's final write is
+    /// retried (S3 stage fix 3). New work writes the notes' owner, so it would
+    /// be filed under the wrong project. A spoken note also checks the picture
+    /// it records at, whose project owns its capture.
+    pub(crate) fn feedback_handoff(&self) -> Option<&'static str> {
+        let session = self.focused();
+        let kept = session.studio.feedback.keeping.project()?;
+        let attached = session
+            .ja1
+            .as_ref()
+            .filter(|attachment| attachment.project_path().is_some())?;
+        (attached.studio_project_id().ok().as_ref() != Some(kept)).then_some(HANDOFF_REFUSAL)
+    }
     /// Run `act` against this project's feedback owner: the shared host when one is
     /// attached, otherwise the in-process session. Unsaved projects take S2's
     /// first-save flow before any feedback is durable.
@@ -2504,6 +2521,9 @@ impl KinewrightApp {
     /// Start a draft on the bound picture: its version or exact current-edit cut,
     /// its frame and its pixels, whatever the selection or playhead requests next.
     pub(crate) fn capture_feedback(&mut self) -> Result<CommentId, String> {
+        if let Some(why) = self.feedback_handoff() {
+            return Err(why.into());
+        }
         let cell = self.presenter.bound().ok_or("Nothing is shown yet.")?;
         let session = self.focused();
         let studio = &session.studio;
@@ -2593,6 +2613,10 @@ impl KinewrightApp {
     /// stroke, so later points go nowhere.
     pub(crate) fn feedback_stroke_start(&mut self) {
         self.focused_mut().studio.feedback.gesture = None;
+        if let Some(why) = self.feedback_handoff() {
+            self.focused_mut().studio.feedback.message = Some(why.into());
+            return;
+        }
         let current = self.presenter.bound().map(|cell| cell.frame_id);
         let reuse = {
             let feedback = &self.focused().studio.feedback;
@@ -3157,6 +3181,15 @@ impl KinewrightApp {
             });
         if !compact {
             footer(ui, &mut action);
+        }
+        // Only discarding a draft may run while the notes' project is handed off.
+        if let Some(why) = self.feedback_handoff()
+            && action
+                .as_ref()
+                .is_some_and(|action| !matches!(action, NoteAction::Discard(_)))
+        {
+            self.focused_mut().studio.feedback.message = Some(why.into());
+            action = None;
         }
         match action {
             Some(NoteAction::Save(comment)) => {

@@ -3248,6 +3248,7 @@ impl KinewrightApp {
         self.poll_noise_learn(ctx);
         self.poll_room_tone(ctx);
         self.poll_recording(ctx);
+        self.poll_voice_retention(ctx);
         self.poll_media_workflow(ctx);
         // Site 5 (`IN2B` §7 rule 3, N6/H11): transcript failures edge here,
         // per asset, whether the panel is open or not.
