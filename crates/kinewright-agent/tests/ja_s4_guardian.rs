@@ -52,6 +52,167 @@ use std::{
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static IPC_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+struct HostIpc(std::process::Child);
+#[cfg(target_os = "linux")]
+impl Drop for HostIpc {
+    fn drop(&mut self) {
+        self.0.stdin.take();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the native witness keeps its host IPC owners alive through cleanup"
+)]
+fn host_ipc_case(restricted: bool) {
+    use std::{
+        io::{BufRead, BufReader, Read},
+        os::unix::fs::MetadataExt,
+    };
+    assert!(equipped_session("s4b_c2_fix1_host_ipc"));
+    let root = root("host-ipc");
+    let _cleanup = FixtureCleanup(root.clone());
+    let binary = IPC_FIXTURE.get_or_init(|| {
+        let path =
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("c2-ipc-{}", std::process::id()));
+        let output = Command::new("rustc")
+            .args(["--edition", "2024"])
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../kinewright-job-sys/tests/fixtures/ja_s4b_ipc.rs"),
+            )
+            .arg("-o")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        path
+    });
+    let mut host = HostIpc(
+        Command::new(binary)
+            .arg("serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut output = BufReader::new(host.0.stdout.take().unwrap());
+    let mut ids = String::new();
+    output.read_line(&mut ids).unwrap();
+    let ids: Vec<_> = ids.split_whitespace().map(str::to_owned).collect();
+    assert_eq!(ids.len(), 4, "host IPC fixture prerequisites");
+    let credentials = root.join("credentials");
+    fs::create_dir(&credentials).unwrap();
+    let metadata = fs::metadata(binary).unwrap();
+    let report = root.join("ipc-report.json");
+    let pipes = restricted.then(|| {
+        kinewright_agent::provider_pipes::ProviderPipeListeners::bind(&root.join("pipes")).unwrap()
+    });
+    let program = Program {
+        executable: binary.clone(),
+        arguments: std::iter::once("probe".into())
+            .chain(ids)
+            .chain([report.to_string_lossy().into_owned()])
+            .collect(),
+        environment: std::collections::BTreeMap::new(),
+        working_directory: root.clone(),
+        sandbox: if restricted {
+            protocol::ProviderSandbox::LinuxAllowlist {
+                runtime: [
+                    "/usr",
+                    "/lib",
+                    "/lib64",
+                    "/dev/null",
+                    "/dev/shm",
+                    "/dev/mqueue",
+                ]
+                .map(Into::into)
+                .into(),
+                scratch: root.clone(),
+                credential_store: credentials,
+                executable_identity: [metadata.dev(), metadata.ino()],
+            }
+        } else {
+            protocol::ProviderSandbox::ContainmentOnly
+        },
+        pipe_directory: pipes.as_ref().map(|pipes| pipes.directory().into()),
+    };
+    let id = identity();
+    let mut claim =
+        MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
+    let mut owner = Owner::new(&root);
+    let mut session = ContainedSession::prepare(
+        &mut claim,
+        &mut owner,
+        id,
+        program,
+        guardian(),
+        &CertifiedProfile::fixture(),
+    )
+    .unwrap();
+    let mut accepted = pipes.map(|pipes| pipes.accept().unwrap());
+    if let Some(pipes) = &mut accepted {
+        pipes.credentials(b"").unwrap();
+    }
+    session.commit(&mut owner).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !report.exists() {
+        assert!(Instant::now() < deadline, "final provider IPC observation");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let result: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    session.close_lifetime();
+    let proof = session.cleanup().unwrap();
+    claim.retire(&proof).unwrap();
+    claim.finish().unwrap();
+    host.0.stdin.take();
+    let mut intact = String::new();
+    output.read_to_string(&mut intact).unwrap();
+    assert!(host.0.wait().unwrap().success());
+    println!(
+        "IPC restricted={restricted} result={result} host={}",
+        intact.trim()
+    );
+    assert!(
+        result
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(|(name, value)| name == "sysv_eperm" || value == false),
+        "S4B_C2_FIX1_HOST_IPC_DENIED"
+    );
+    assert_eq!(
+        intact.trim(),
+        "intact=true",
+        "S4B_C2_FIX1_HOST_IPC_UNCHANGED"
+    );
+    if restricted {
+        assert_eq!(result["sysv_eperm"], true, "S4B_C2_FIX1_SYSV_SECCOMP");
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "on-demand: equipped Linux guardian IPC qualification"]
+fn s4b_c2_fix1_host_ipc_denied_after_final_spawn() {
+    host_ipc_case(true);
+}
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "on-demand: equipped Linux guardian IPC qualification"]
+fn s4b_c2_fix1_namespaces_hide_host_ipc_without_seccomp() {
+    host_ipc_case(false);
+}
 fn fixture() -> &'static Path {
     FIXTURE.get_or_init(|| {
         if let Some(binary) = std::env::var_os("KINEWRIGHT_S4_PREBUILT_NATIVE") {

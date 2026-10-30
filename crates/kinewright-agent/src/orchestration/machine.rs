@@ -279,7 +279,7 @@ pub(crate) fn prepare_with_attention(
                 task: task.id.clone(),
                 lane: task.brief.scope.base.branch.clone(),
                 order: 1,
-                safety: EffectSafety::ReplaySafe,
+                safety: EffectSafety::ProcessBound,
                 state: EffectState::Pending,
                 payload: task.brief.assignment.clone(),
             });

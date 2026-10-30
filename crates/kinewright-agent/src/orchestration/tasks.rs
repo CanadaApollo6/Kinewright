@@ -432,7 +432,7 @@ pub fn apply_task_transition(
                 task: task.id.clone(),
                 lane: task.brief.scope.base.branch.clone(),
                 order,
-                safety: EffectSafety::ReplaySafe,
+                safety: EffectSafety::ProcessBound,
                 state: EffectState::Pending,
                 payload: task.brief.assignment.clone(),
             });

@@ -105,6 +105,10 @@ pub fn restrict_provider(
 /// # Errors
 /// Refuses unsupported architectures or a failed seccomp installation.
 #[cfg(target_arch = "x86_64")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the architecture check and complete syscall denylist are audited together"
+)]
 pub fn restrict_provider_syscalls() -> io::Result<()> {
     fn statement(code: u16, value: u32) -> libc::sock_filter {
         libc::sock_filter {
@@ -137,6 +141,36 @@ pub fn restrict_provider_syscalls() -> io::Result<()> {
         statement(0x06, 0x8000_0000),
     ];
     for syscall in [
+        libc::SYS_getxattr,
+        libc::SYS_lgetxattr,
+        libc::SYS_fgetxattr,
+        libc::SYS_listxattr,
+        libc::SYS_llistxattr,
+        libc::SYS_flistxattr,
+        // x86_64 kernel ABI: set/get/list/removexattrat. The installed kernel
+        // headers expose these before the pinned libc crate does.
+        463,
+        464,
+        465,
+        466,
+        libc::SYS_shmget,
+        libc::SYS_shmat,
+        libc::SYS_shmdt,
+        libc::SYS_shmctl,
+        libc::SYS_msgget,
+        libc::SYS_msgsnd,
+        libc::SYS_msgrcv,
+        libc::SYS_msgctl,
+        libc::SYS_semget,
+        libc::SYS_semop,
+        libc::SYS_semtimedop,
+        libc::SYS_semctl,
+        libc::SYS_mq_open,
+        libc::SYS_mq_unlink,
+        libc::SYS_mq_timedsend,
+        libc::SYS_mq_timedreceive,
+        libc::SYS_mq_notify,
+        libc::SYS_mq_getsetattr,
         libc::SYS_chmod,
         libc::SYS_fchmod,
         libc::SYS_fchmodat,
@@ -212,11 +246,20 @@ mod tests {
     };
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one isolated subprocess exercises every confinement probe"
+    )]
     fn s4b_c2_sandbox_child() {
         let Some(root) = std::env::var_os("KINEWRIGHT_S4B_SANDBOX_CHILD") else {
             return;
         };
         let root = std::path::PathBuf::from(root);
+        let case: u8 = std::env::var("KINEWRIGHT_S4B_CASE")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let outside = (case == 5).then(|| File::open(root.join("outside")).unwrap());
         let executable = std::env::current_exe().unwrap();
         let metadata = fs::metadata(&executable).unwrap();
         let runtime = ["/usr", "/lib", "/lib64", "/dev/null"].map(Into::into);
@@ -229,10 +272,6 @@ mod tests {
         )
         .unwrap();
         restrict_provider_syscalls().unwrap();
-        let case: u8 = std::env::var("KINEWRIGHT_S4B_CASE")
-            .unwrap()
-            .parse()
-            .unwrap();
         if case == 0 {
             assert!(
                 fs::read(root.join("outside")).is_err(),
@@ -264,6 +303,101 @@ mod tests {
                 "S4B_C2_METADATA_DENIED"
             );
         }
+        if case == 5 {
+            let path = std::ffi::CString::new(root.join("outside").as_os_str().as_encoded_bytes())
+                .unwrap();
+            let file = outside.as_ref().unwrap();
+            // SAFETY: All path/name pointers and the retained descriptor are live.
+            // Null output buffers request lengths only. The *at tests use invalid
+            // arguments intentionally: EPERM must precede argument validation.
+            let results = unsafe {
+                [
+                    libc::getxattr(
+                        path.as_ptr(),
+                        c"user.kinewright".as_ptr(),
+                        std::ptr::null_mut(),
+                        0,
+                    ),
+                    libc::lgetxattr(
+                        path.as_ptr(),
+                        c"user.kinewright".as_ptr(),
+                        std::ptr::null_mut(),
+                        0,
+                    ),
+                    libc::fgetxattr(
+                        file.as_raw_fd(),
+                        c"user.kinewright".as_ptr(),
+                        std::ptr::null_mut(),
+                        0,
+                    ),
+                    libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0),
+                    libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0),
+                    libc::flistxattr(file.as_raw_fd(), std::ptr::null_mut(), 0),
+                ]
+            };
+            assert!(
+                results.iter().all(|result| *result == -1),
+                "S4B_C2_FIX1_XATTR_READS_DENIED"
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::EPERM),
+                "S4B_C2_FIX1_XATTR_READS_DENIED"
+            );
+            #[cfg(target_arch = "x86_64")]
+            for syscall in [463, 464, 465, 466] {
+                // SAFETY: No argument may be inspected before seccomp denies this call.
+                let result = unsafe {
+                    libc::syscall(
+                        syscall,
+                        -1,
+                        std::ptr::null::<libc::c_char>(),
+                        0,
+                        std::ptr::null::<u8>(),
+                        0,
+                    )
+                };
+                assert_eq!(result, -1, "S4B_C2_FIX1_XATTR_AT_DENIED");
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EPERM),
+                    "S4B_C2_FIX1_XATTR_AT_DENIED"
+                );
+            }
+        }
+        if case == 6 {
+            // SAFETY: Invalid IDs cannot name a host object. These probes check
+            // seccomp's EPERM, independently of IPC namespace lookup failures.
+            unsafe {
+                assert_eq!(libc::shmat(-1, std::ptr::null(), 0) as isize, -1);
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EPERM),
+                    "S4B_C2_FIX1_IPC_SYSCALLS_DENIED"
+                );
+                assert_eq!(libc::msgctl(-1, libc::IPC_RMID, std::ptr::null_mut()), -1);
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EPERM),
+                    "S4B_C2_FIX1_IPC_SYSCALLS_DENIED"
+                );
+                assert_eq!(libc::semctl(-1, 0, libc::GETVAL), -1);
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EPERM),
+                    "S4B_C2_FIX1_IPC_SYSCALLS_DENIED"
+                );
+                assert_eq!(
+                    libc::mq_open(c"/kinewright-invalid-probe".as_ptr(), libc::O_RDONLY),
+                    -1
+                );
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EPERM),
+                    "S4B_C2_FIX1_IPC_SYSCALLS_DENIED"
+                );
+            }
+        }
         fs::write(root.join("credentials/auth.tmp-1"), b"refreshed").unwrap();
         fs::rename(
             root.join("credentials/auth.tmp-1"),
@@ -288,6 +422,23 @@ mod tests {
         fs::create_dir(root.join("scratch")).unwrap();
         fs::create_dir(root.join("credentials")).unwrap();
         fs::write(root.join("outside"), b"outside secret").unwrap();
+        if case == 5 {
+            let path = std::ffi::CString::new(root.join("outside").as_os_str().as_encoded_bytes())
+                .unwrap();
+            // SAFETY: The fixture owns this path and both byte slices remain live.
+            assert_eq!(
+                unsafe {
+                    libc::setxattr(
+                        path.as_ptr(),
+                        c"user.kinewright".as_ptr(),
+                        b"private-xattr".as_ptr().cast(),
+                        13,
+                        0,
+                    )
+                },
+                0
+            );
+        }
         let socket = UnixListener::bind(root.join("desktop")).unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -333,5 +484,15 @@ mod tests {
     #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_metadata_denial() {
         sandbox_case(4);
+    }
+    #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
+    fn s4b_c2_fix1_xattr_reads_denied() {
+        sandbox_case(5);
+    }
+    #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
+    fn s4b_c2_fix1_ipc_syscalls_denied() {
+        sandbox_case(6);
     }
 }

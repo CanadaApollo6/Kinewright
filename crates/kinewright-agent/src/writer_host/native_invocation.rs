@@ -39,6 +39,17 @@ pub(crate) struct HostInvocationOwner {
     host: Weak<Mutex<HostCommandOwner>>,
     producer: HostAuth,
 }
+pub(super) struct RegisteredNativeAttempt {
+    pub identity: ExecutionIdentity,
+    pub control: crate::guardian::StartupControl,
+    recovery: RecoveryIdentity,
+    pub owner_epoch: u64,
+    commit: NativeCommit,
+}
+enum NativeCommit {
+    Authorized,
+    Sent,
+}
 impl HostInvocationOwner {
     pub(crate) fn new(host: &Arc<Mutex<HostCommandOwner>>, producer: HostAuth) -> Self {
         Self {
@@ -62,6 +73,7 @@ impl InvocationOwner for HostInvocationOwner {
         &self,
         invocation: &AuthorizedInvocation,
         recovery: &RecoveryIdentity,
+        control: &crate::guardian::StartupControl,
     ) -> io::Result<()> {
         let host = self
             .host
@@ -81,6 +93,29 @@ impl InvocationOwner for HostInvocationOwner {
         if !matches {
             return Err(transport("native recovery identity changed"));
         }
+        host.hooks
+            .native
+            .retain(|_, attempt| !attempt.control.closed());
+        let key = (identity.run.clone(), identity.attempt.clone());
+        if host.hooks.native.len() >= ITEM_LIMIT || host.hooks.native.contains_key(&key) {
+            return Err(transport("native startup capacity or duplicate"));
+        }
+        let owner_epoch = host
+            .owner()
+            .map_err(transport)?
+            .store()
+            .map_err(transport)?
+            .owner_epoch();
+        host.hooks.native.insert(
+            key,
+            RegisteredNativeAttempt {
+                identity: identity.clone(),
+                control: control.clone(),
+                recovery: recovery.clone(),
+                owner_epoch,
+                commit: NativeCommit::Authorized,
+            },
+        );
         let recovery_ref = host
             .owner_mut()
             .map_err(transport)?
@@ -100,6 +135,50 @@ impl InvocationOwner for HostInvocationOwner {
         host.publish_native(&self.producer, projection, identity, vec![recovery_ref])
             .map_err(transport)?;
         Ok(())
+    }
+    fn commit(
+        &self,
+        invocation: &AuthorizedInvocation,
+        recovery: &RecoveryIdentity,
+        send: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| transport("host owner lost"))?;
+        let mut host = host.lock().map_err(|_| transport("host owner poisoned"))?;
+        let identity = invocation.invocation().binding().identity();
+        let projection = host
+            .native_projection(&self.producer, identity)
+            .map_err(transport)?;
+        if !projection.attempts.iter().any(|attempt| {
+            attempt.identity == *identity && attempt.state == AttemptState::Contained
+        }) {
+            return Err(transport("native release is no longer contained"));
+        }
+        let epoch = host
+            .owner()
+            .map_err(transport)?
+            .store()
+            .map_err(transport)?
+            .owner_epoch();
+        let registered = host
+            .hooks
+            .native
+            .get_mut(&(identity.run.clone(), identity.attempt.clone()))
+            .ok_or_else(|| transport("native startup revoked"))?;
+        if registered.identity != *identity
+            || registered.recovery != *recovery
+            || registered.owner_epoch != epoch
+            || !matches!(registered.commit, NativeCommit::Authorized)
+            || registered.control.closed()
+        {
+            return Err(transport("native startup changed or revoked"));
+        }
+        // Stop uses this same host mutex and the registered sole lifetime writer.
+        // Do not wait for the guardian acknowledgment while holding the host.
+        registered.commit = NativeCommit::Sent;
+        send()
     }
     fn steering(&self, identity: &ExecutionIdentity, text: &str) -> io::Result<()> {
         let host = self

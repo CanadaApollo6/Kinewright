@@ -151,6 +151,16 @@ fn native_start(
     checks: NativeChecks,
     lose_commit_ack: bool,
 ) -> NativeStart {
+    native_start_barrier(f, admitted, invocation, checks, lose_commit_ack, None)
+}
+fn native_start_barrier(
+    f: &Fixture,
+    admitted: crate::orchestration::AdmittedAttempt,
+    invocation: crate::orchestration::adapters::AuthorizedInvocation,
+    checks: NativeChecks,
+    lose_commit_ack: bool,
+    after_release: Option<Arc<dyn Fn() + Send + Sync>>,
+) -> NativeStart {
     use kinewright_core::AgentDriver;
     let machine = f.temp.path("native-machine");
     let claim = Arc::new(Mutex::new(
@@ -173,6 +183,8 @@ fn native_start(
             .join("debug/kinewright-job-guardian"),
         checks: Arc::new(checks),
         lose_commit_ack,
+        after_release,
+        startup_failure: None,
     };
     let config = invocation.profile().session_config().clone();
     let driver = crate::orchestration::adapters::ContainedDriver::new(
@@ -772,6 +784,261 @@ fn s4b_c2_executing_and_waiting_steering_is_queued_without_charge() {
         assert_eq!(projection.effects[1].state, EffectState::Pending);
         assert!(!scratch.join("executions").exists());
         drop(invocation);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+}
+
+fn finish_stopped_native(claim: Arc<Mutex<crate::execution_claim::MachineClaim>>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while claim.lock().unwrap().retained_attempts() != 0 || Arc::strong_count(&claim) != 1 {
+        assert!(Instant::now() < deadline, "S4B_C2_FIX1_STOP_CLEANUP");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Arc::try_unwrap(claim)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap()
+        .finish()
+        .unwrap();
+}
+fn stop_native_run(f: &Fixture, run: &RunId) {
+    let stop = f.control(&f.editor, run, RunAction::Stop);
+    ok(
+        call(
+            f,
+            &f.editor,
+            HostCommand::DispatchOrchestration {
+                request: Box::new(stop),
+            },
+            0,
+        ),
+        "S4B_C2_FIX1_CURRENT_STOP_ACK",
+    );
+    assert!(
+        f.projection(run)
+            .attempts
+            .iter()
+            .all(|attempt| attempt.state == AttemptState::Stopping)
+    );
+}
+
+#[test]
+#[ignore = "on-demand: equipped Linux guardian qualification"]
+fn s4b_c2_fix1_stop_between_release_and_commit_vetoes_execution() {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Stage {
+        Waiting,
+        Authorized,
+        Resumed,
+    }
+    let f = Fixture::new();
+    let (run, identity, _) = reserve(&f);
+    let _unit_cleanup = NativeUnitCleanup::new(&identity);
+    let admitted = native_admitted(&f, &identity);
+    let (profile, checks, scratch) = native_profile(&f, &admitted);
+    let invocation = native_charge(&f, &admitted, profile);
+    let handoff = Arc::new((Mutex::new(Stage::Waiting), std::sync::Condvar::new()));
+    let release_gate = handoff.clone();
+    let barrier = Arc::new(move || {
+        let (lock, changed) = &*release_gate;
+        let mut stage = lock.lock().unwrap();
+        *stage = Stage::Authorized;
+        changed.notify_all();
+        let (stage, _) = changed
+            .wait_timeout_while(stage, Duration::from_secs(10), |stage| {
+                *stage != Stage::Resumed
+            })
+            .unwrap();
+        assert!(*stage == Stage::Resumed, "startup resume barrier deadline");
+    });
+    let (result, claim) = std::thread::scope(|scope| {
+        let f = &f;
+        let launch = scope.spawn(move || {
+            native_start_barrier(f, admitted, invocation, checks, false, Some(barrier))
+        });
+        let (lock, changed) = &*handoff;
+        let (stage, _) = changed
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |stage| {
+                *stage != Stage::Authorized
+            })
+            .unwrap();
+        assert!(
+            *stage == Stage::Authorized,
+            "durable release barrier deadline"
+        );
+        drop(stage);
+        assert_eq!(
+            f.projection(&run).attempts[0].state,
+            AttemptState::Contained
+        );
+        assert!(!scratch.join("executions").exists());
+        stop_native_run(f, &run);
+        *lock.lock().unwrap() = Stage::Resumed;
+        changed.notify_all();
+        launch.join().unwrap()
+    });
+    let refused = result.is_err();
+    if let Ok(mut session) = result {
+        wait_native(&scratch.join("execution-ready"));
+        session.interrupt();
+        drop(session);
+    }
+    finish_stopped_native(claim);
+    assert!(
+        refused && !scratch.join("executions").exists(),
+        "S4B_C2_FIX1_STOP_WINS_ZERO_EXECUTION"
+    );
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+#[ignore = "on-demand: equipped Linux guardian qualification"]
+fn s4b_c2_fix1_commit_wins_stop_reaches_registered_session() {
+    let f = Fixture::new();
+    let (run, identity, _) = reserve(&f);
+    let _unit_cleanup = NativeUnitCleanup::new(&identity);
+    let admitted = native_admitted(&f, &identity);
+    let (profile, checks, scratch) = native_profile(&f, &admitted);
+    let invocation = native_charge(&f, &admitted, profile);
+    let (session, claim) = native_start(&f, admitted, invocation, checks, false);
+    let session = session.unwrap();
+    wait_native(&scratch.join("execution-ready"));
+    stop_native_run(&f, &run);
+    // Keep the returned session alive: only the serialized Stop may close it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while claim.lock().unwrap().retained_attempts() != 0 {
+        assert!(
+            Instant::now() < deadline,
+            "S4B_C2_FIX1_RELEASE_WINS_STOP_CLEANUP"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("executions")).unwrap(),
+        "execution\n"
+    );
+    drop(session);
+    finish_stopped_native(claim);
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+#[ignore = "on-demand: equipped Linux guardian qualification"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "four actual attempts share one bounded machine claim"
+)]
+fn s4b_c2_fix1_three_failed_launches_leave_machine_usable() {
+    use crate::{
+        native_launcher::{NativeGuardianLauncher, StartupFailure},
+        orchestration::adapters::*,
+    };
+    use kinewright_core::AgentDriver;
+    let f = Fixture::new();
+    let (run, mut execution, actor) = reserve(&f);
+    let machine = f.temp.path("failed-native-machine");
+    let claim = Arc::new(Mutex::new(
+        crate::execution_claim::MachineClaim::acquire_fixture(
+            &machine,
+            execution.project.as_str(),
+            run.0.as_str(),
+        )
+        .unwrap(),
+    ));
+    let mut cleanups = Vec::new();
+    let mut scratches = Vec::new();
+    let mut usable = false;
+    for (ordinal, failure) in [
+        Some(StartupFailure::Pipes),
+        Some(StartupFailure::Credentials),
+        Some(StartupFailure::Reader),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if ordinal > 0 {
+            // The fixture supplies C3's compacted next reservation after the
+            // preceding cleanup; production recovery policy is not exercised.
+            let mut projection = f.projection(&run);
+            let previous = projection.attempts.last_mut().unwrap();
+            previous.state = AttemptState::Retired(AttemptOutcome::Failed);
+            let mut reservation = previous.clone();
+            execution.attempt = identity();
+            execution.nonce = identity();
+            reservation.identity = execution.clone();
+            reservation.state = AttemptState::Reserved;
+            reservation.recovery_ref = f.brief.assignment.clone();
+            projection.attempts = vec![reservation];
+            projection.tasks[0].state = TaskState::Preparing;
+            projection.tasks[0].progress.capacity =
+                DependencyReservation::Backed(execution.attempt.clone());
+            let mut effect = projection.effects.last_mut().unwrap().clone();
+            projection.effects.last_mut().unwrap().state = EffectState::Disposed;
+            effect.id = identity();
+            effect.order += 1;
+            effect.state = EffectState::Pending;
+            projection.effects.push(effect);
+            crate::orchestration::tasks::refresh_cleanup(&mut projection);
+            publish_projection(&f, &actor, &run, projection, Some(&execution));
+        }
+        cleanups.push(NativeUnitCleanup::new(&execution));
+        let admitted = native_admitted(&f, &execution);
+        let (profile, checks, scratch) = native_profile(&f, &admitted);
+        scratches.push(scratch.clone());
+        let host = f.host.owner.upgrade().unwrap();
+        let producer = f.producer(&run);
+        let projection = f.projection(&run);
+        let effect = projection.effects.last().unwrap().id.clone();
+        let invocation = host
+            .lock()
+            .unwrap()
+            .charge_native_invocation(
+                &producer,
+                &admitted,
+                profile,
+                &effect,
+                if ordinal == 0 {
+                    SendKind::OpeningAssignment
+                } else {
+                    SendKind::QueuedSteering
+                },
+                1_000 + ordinal as u64,
+            )
+            .unwrap();
+        let config = invocation.profile().session_config().clone();
+        let launcher = NativeGuardianLauncher {
+            claim: claim.clone(),
+            owner: Arc::new(
+                crate::writer_host::native_invocation::HostInvocationOwner::new(&host, producer),
+            ),
+            guardian: kinewright_media::test_support::workspace_target_dir()
+                .join("debug/kinewright-job-guardian"),
+            checks: Arc::new(checks),
+            lose_commit_ack: false,
+            after_release: None,
+            startup_failure: failure,
+        };
+        let driver = ContainedDriver::new(
+            launcher,
+            admitted,
+            invocation,
+            crate::ScriptedDriver::new(vec![]).detect().unwrap(),
+        );
+        let result = driver.start_session(config);
+        if ordinal < 3 {
+            assert!(result.is_err(), "fixture startup error required");
+        } else if let Ok(mut session) = result {
+            wait_native(&scratch.join("execution-ready"));
+            usable = true;
+            session.interrupt();
+            drop(session);
+        }
+    }
+    assert!(usable, "S4B_C2_FIX1_FAILED_LAUNCH_CAPACITY_RECLAIMED");
+    finish_stopped_native(claim);
+    for scratch in scratches {
         std::fs::remove_dir_all(scratch).unwrap();
     }
 }

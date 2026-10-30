@@ -116,9 +116,15 @@ pub(super) struct Hooks {
     pub runs: BTreeMap<RunId, HostRun>,
     pub pending: Option<PendingPublication>,
     pub attention: Arc<Mutex<super::attention::AttentionState>>,
+    #[cfg(target_os = "linux")]
+    pub native: BTreeMap<(RunId, AttemptId), super::native_invocation::RegisteredNativeAttempt>,
 }
 impl Drop for Hooks {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        for attempt in self.native.values() {
+            attempt.control.close();
+        }
         for run in self.runs.values() {
             for task in run.tasks.values() {
                 task.endpoint().revoke();
@@ -159,11 +165,27 @@ pub(super) fn is_hook(command: &HostCommand) -> bool {
 }
 
 impl HostCommandOwner {
-    fn sync_runtime_grants(&self, projection: &RunProjection) {
+    fn sync_runtime_grants(&mut self, projection: &RunProjection) {
         let epoch = self
             .owner()
             .and_then(|owner| Ok(owner.store()?.owner_epoch()))
             .ok();
+        #[cfg(target_os = "linux")]
+        self.hooks.native.retain(|_, attempt| {
+            if attempt.identity.run != projection.run {
+                return true;
+            }
+            let binding = RuntimeGrantBinding {
+                run: attempt.identity.run.clone(),
+                task: attempt.identity.task.clone(),
+                attempt: attempt.identity.attempt.clone(),
+                owner_epoch: attempt.owner_epoch,
+            };
+            if !binding.live_in(projection, epoch) {
+                attempt.control.close();
+            }
+            !attempt.control.closed()
+        });
         for attachment in &self.attachments {
             if let Some(scope) = &attachment.producer_scope
                 && scope.run == projection.run

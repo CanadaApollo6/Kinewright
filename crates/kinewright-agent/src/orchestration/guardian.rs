@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Mutex,
+        Arc, Mutex,
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
@@ -78,6 +78,50 @@ pub trait DurableAttemptOwner {
     /// # Errors
     /// Refuses uncertainty, stale authority, changed ownership, or an unacknowledged root.
     fn authorize_commit(&mut self, recovery: &RecoveryIdentity) -> io::Result<()>;
+    /// Serialize the native COMMIT write with revocation. The default is for
+    /// standalone owners without concurrent Studio commands.
+    ///
+    /// # Errors
+    /// Refuses a revoked attempt or a failed COMMIT write.
+    fn commit_authorized(
+        &mut self,
+        _recovery: &RecoveryIdentity,
+        send: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        send()
+    }
+}
+
+/// Shared access to the sole lifetime writer, without duplicating its descriptor.
+/// Stop never needs the session/cleanup mutex to revoke a startup or live child.
+#[derive(Clone)]
+pub struct StartupControl(Arc<Mutex<Option<ChildStdin>>>);
+impl StartupControl {
+    pub fn close(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+    #[must_use]
+    pub fn closed(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    }
+    fn send(&self, message: &HostMessage) -> io::Result<()> {
+        let mut writer = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("lifetime poisoned"))?;
+        protocol::write_frame(
+            writer
+                .as_mut()
+                .ok_or_else(|| io::Error::other("lifetime closed"))?,
+            message,
+        )
+    }
 }
 
 /// Exact retirement evidence. Only native observation can construct it.
@@ -107,7 +151,7 @@ pub struct ContainedSession {
     identity: AttemptIdentity,
     recovery: RecoveryIdentity,
     root: PathBuf,
-    writer: Option<ChildStdin>,
+    control: StartupControl,
     replies: Receiver<io::Result<GuardianMessage>>,
     launcher: Launcher,
     guardian: ProcessHandle,
@@ -366,7 +410,7 @@ impl ContainedSession {
             identity,
             recovery,
             root,
-            writer: Some(writer),
+            control: StartupControl(Arc::new(Mutex::new(Some(writer)))),
             replies,
             launcher,
             guardian,
@@ -404,26 +448,20 @@ impl ContainedSession {
         owner: &mut impl DurableAttemptOwner,
     ) -> io::Result<()> {
         owner.authorize_commit(&self.recovery)?;
-        protocol::write_frame(
-            self.writer
-                .as_mut()
-                .ok_or_else(|| io::Error::other("lifetime closed"))?,
-            &HostMessage::Commit {
+        self.send_commit(owner)
+    }
+
+    fn send_commit(&self, owner: &mut impl DurableAttemptOwner) -> io::Result<()> {
+        owner.commit_authorized(&self.recovery, &mut || {
+            self.control.send(&HostMessage::Commit {
                 nonce: self.identity.nonce.clone(),
-            },
-        )
+            })
+        })
     }
 
     fn commit_once(&mut self, owner: &mut impl DurableAttemptOwner) -> io::Result<()> {
         owner.authorize_commit(&self.recovery)?;
-        protocol::write_frame(
-            self.writer
-                .as_mut()
-                .ok_or_else(|| io::Error::other("lifetime closed"))?,
-            &HostMessage::Commit {
-                nonce: self.identity.nonce.clone(),
-            },
-        )?;
+        self.send_commit(owner)?;
         let message = next_reply(&self.replies, Instant::now() + protocol::STARTUP)?;
         match message {
             GuardianMessage::Executing { nonce, at_us } if nonce == self.identity.nonce => {
@@ -487,19 +525,19 @@ impl ContainedSession {
     /// # Errors
     /// Returns a closed-pipe failure without releasing ownership.
     pub fn request_cancel(&mut self) -> io::Result<()> {
-        protocol::write_frame(
-            self.writer
-                .as_mut()
-                .ok_or_else(|| io::Error::other("lifetime closed"))?,
-            &HostMessage::Cancel {
-                nonce: self.identity.nonce.clone(),
-            },
-        )
+        self.control.send(&HostMessage::Cancel {
+            nonce: self.identity.nonce.clone(),
+        })
+    }
+
+    #[must_use]
+    pub fn startup_control(&self) -> StartupControl {
+        self.control.clone()
     }
 
     /// Close the host-owned lifetime writer. Cleanup gets no cancellation grace.
     pub fn close_lifetime(&mut self) {
-        self.writer.take();
+        self.control.close();
     }
 
     /// # Errors
@@ -617,7 +655,7 @@ impl ContainedSession {
 }
 impl Drop for ContainedSession {
     fn drop(&mut self) {
-        self.writer.take();
+        self.control.close();
     }
 }
 

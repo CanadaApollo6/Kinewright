@@ -40,7 +40,7 @@ pub fn verify_nsdelegate(info: &str) -> io::Result<()> {
 /// No provider code runs in this process before this function succeeds.
 ///
 /// # Errors
-/// Refuses unavailable user/cgroup/mount/PID namespaces, identity maps or masks.
+/// Refuses unavailable user/cgroup/mount/PID/IPC namespaces, identity maps or masks.
 pub fn enter_payload_boundary() -> io::Result<()> {
     require_nsdelegate()?;
     let uid = rustix::process::getuid().as_raw();
@@ -50,6 +50,7 @@ pub fn enter_payload_boundary() -> io::Result<()> {
         thread::UnshareFlags::NEWCGROUP,
         thread::UnshareFlags::NEWNS,
         thread::UnshareFlags::NEWPID,
+        thread::UnshareFlags::NEWIPC,
     ] {
         unshare_payload_namespace(flag)?;
     }
@@ -58,7 +59,25 @@ pub fn enter_payload_boundary() -> io::Result<()> {
     fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
     verify_cgroup_namespace()?;
     mask_runtime_directory(uid)?;
+    mask_host_ipc_files()?;
     thread::set_no_new_privs(true)?;
+    Ok(())
+}
+
+fn mask_host_ipc_files() -> io::Result<()> {
+    for path in ["/dev/shm", "/dev/mqueue"] {
+        let previous = fs::metadata(path)?;
+        mount::mount(
+            "kinewright-ipc-mask",
+            path,
+            "tmpfs",
+            mount::MountFlags::NOSUID | mount::MountFlags::NODEV | mount::MountFlags::NOEXEC,
+            c"mode=0700,size=4096",
+        )?;
+        if previous.dev() == fs::metadata(path)?.dev() || fs::read_dir(path)?.next().is_some() {
+            return Err(io::Error::other("host_ipc_mask_unavailable"));
+        }
+    }
     Ok(())
 }
 

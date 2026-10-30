@@ -123,7 +123,7 @@ pub fn result_and_delivery(
             task: parent.id.clone(),
             lane,
             order,
-            safety: EffectSafety::ReplaySafe,
+            safety: EffectSafety::ProcessBound,
             state: EffectState::Pending,
             payload: result.clone(),
         })

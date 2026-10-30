@@ -194,6 +194,8 @@ fn s4_outbox_order_unknown_and_reconcile_contract() {
     let envelope = envelope();
     let start = start(&envelope);
     let mut state = start.projection().clone();
+    // This oracle exercises generic replay-safe work, not a provider send.
+    state.effects[0].safety = EffectSafety::ReplaySafe;
     let first = state.effects[0].clone();
     let mut later = first.clone();
     later.id = id(90);
@@ -464,12 +466,11 @@ fn check_guardian_injection(attempt: orchestration::AdmittedAttempt) {
     );
 }
 
-#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one complete proposed assignment/freeze/result/delivery cut oracle"
 )]
-fn s4_task_assignment_and_frozen_result_delivery_share_a_cut() {
+fn task_assignment_result_cuts() -> [RunProjection; 3] {
     let initial = envelope();
     let initial_cut = start(&initial);
     let mut assignment = initial.clone();
@@ -614,5 +615,41 @@ fn s4_task_assignment_and_frozen_result_delivery_share_a_cut() {
     assert!(
         orchestration::mailbox::result_and_delivery(&next, &publish, next.results[0].clone())
             .is_err()
+    );
+    [
+        initial_cut.projection().clone(),
+        assigned.projection().clone(),
+        next,
+    ]
+}
+
+#[test]
+fn s4_task_assignment_and_frozen_result_delivery_share_a_cut() {
+    let _ = task_assignment_result_cuts();
+}
+#[test]
+fn s4b_c2_fix1_opening_created_process_bound() {
+    assert_eq!(
+        start(&envelope()).projection().effects[0].safety,
+        EffectSafety::ProcessBound,
+        "S4B_C2_FIX1_OPENING_PROCESS_BOUND"
+    );
+}
+#[test]
+fn s4b_c2_fix1_specialist_created_process_bound() {
+    let cuts = task_assignment_result_cuts();
+    assert_eq!(
+        cuts[1].effects.last().unwrap().safety,
+        EffectSafety::ProcessBound,
+        "S4B_C2_FIX1_SPECIALIST_PROCESS_BOUND"
+    );
+}
+#[test]
+fn s4b_c2_fix1_wake_created_process_bound() {
+    let cuts = task_assignment_result_cuts();
+    assert_eq!(
+        cuts[2].effects.last().unwrap().safety,
+        EffectSafety::ProcessBound,
+        "S4B_C2_FIX1_WAKE_PROCESS_BOUND"
     );
 }

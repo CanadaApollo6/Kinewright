@@ -6,7 +6,7 @@
 #![allow(clippy::missing_errors_doc)]
 use crate::{
     execution_claim::MachineClaim,
-    guardian::{CertifiedProfile, ContainedSession, DurableAttemptOwner},
+    guardian::{CertifiedProfile, ContainedSession, DurableAttemptOwner, StartupControl},
     job_guardian::protocol::{AttemptIdentity, Program, ProviderSandbox, RecoveryIdentity},
     orchestration::{
         AdmittedAttempt,
@@ -352,6 +352,13 @@ pub(crate) trait InvocationOwner: Send + Sync {
         &self,
         invocation: &AuthorizedInvocation,
         recovery: &RecoveryIdentity,
+        control: &StartupControl,
+    ) -> io::Result<()>;
+    fn commit(
+        &self,
+        invocation: &AuthorizedInvocation,
+        recovery: &RecoveryIdentity,
+        send: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<()>;
     fn steering(
         &self,
@@ -367,10 +374,45 @@ pub(crate) struct NativeGuardianLauncher {
     pub checks: Arc<dyn adapters::ConnectorRuntimeChecks + Send + Sync>,
     #[cfg(test)]
     pub lose_commit_ack: bool,
+    #[cfg(test)]
+    pub after_release: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    pub startup_failure: Option<StartupFailure>,
+}
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupFailure {
+    Pipes,
+    Credentials,
+    Reader,
+}
+
+struct StartupCleanup {
+    control: Option<Arc<Mutex<ContainedSession>>>,
+    claim: Arc<Mutex<MachineClaim>>,
+}
+impl Drop for StartupCleanup {
+    fn drop(&mut self) {
+        let Some(control) = self.control.take() else {
+            return;
+        };
+        let mut native = control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        native.close_lifetime();
+        if let Ok(proof) = native.cleanup()
+            && let Ok(mut claim) = self.claim.lock()
+        {
+            let _ = claim.retire(&proof);
+        }
+    }
 }
 struct Owner<'a> {
     port: &'a dyn InvocationOwner,
     invocation: &'a AuthorizedInvocation,
+    control: Option<StartupControl>,
+    #[cfg(test)]
+    after_release: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 impl DurableAttemptOwner for Owner<'_> {
     fn reserve(&mut self, identity: &AttemptIdentity) -> io::Result<()> {
@@ -380,7 +422,25 @@ impl DurableAttemptOwner for Owner<'_> {
         self.port.reserve(self.invocation)
     }
     fn authorize_commit(&mut self, recovery: &RecoveryIdentity) -> io::Result<()> {
-        self.port.release(self.invocation, recovery)
+        self.port.release(
+            self.invocation,
+            recovery,
+            self.control
+                .as_ref()
+                .ok_or_else(|| io::Error::other("startup control missing"))?,
+        )?;
+        #[cfg(test)]
+        if let Some(barrier) = &self.after_release {
+            barrier();
+        }
+        Ok(())
+    }
+    fn commit_authorized(
+        &mut self,
+        recovery: &RecoveryIdentity,
+        send: &mut dyn FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.port.commit(self.invocation, recovery, send)
     }
 }
 fn native_identity(identity: &crate::orchestration::ExecutionIdentity) -> AttemptIdentity {
@@ -404,6 +464,14 @@ impl adapters::GuardianLauncher for NativeGuardianLauncher {
     }
 }
 impl NativeGuardianLauncher {
+    #[cfg(test)]
+    fn fail_startup(&self, point: StartupFailure) -> io::Result<()> {
+        if self.startup_failure == Some(point) {
+            Err(io::Error::other("fixture startup failure after prepare"))
+        } else {
+            Ok(())
+        }
+    }
     #[allow(
         clippy::too_many_lines,
         reason = "one immutable invocation crosses the ordered native barriers"
@@ -457,6 +525,9 @@ impl NativeGuardianLauncher {
         let mut owner = Owner {
             port: self.owner.as_ref(),
             invocation,
+            control: None,
+            #[cfg(test)]
+            after_release: self.after_release.clone(),
         };
         let policy = invocation.profile().specification().sandbox_policy();
         let qualified = policy == adapters::SandboxPolicy::LinuxFilesystemAndIpc;
@@ -470,7 +541,7 @@ impl NativeGuardianLauncher {
             .claim
             .lock()
             .map_err(|_| io::Error::other("machine claim poisoned"))?;
-        let mut native = ContainedSession::prepare(
+        let native = ContainedSession::prepare(
             &mut claim_guard,
             &mut owner,
             native_identity(attempt.identity()),
@@ -479,7 +550,22 @@ impl NativeGuardianLauncher {
             &profile,
         )?;
         drop(claim_guard);
+        let control = Arc::new(Mutex::new(native));
+        let mut startup = StartupCleanup {
+            control: Some(control.clone()),
+            claim: self.claim.clone(),
+        };
+        owner.control = Some(
+            control
+                .lock()
+                .map_err(|_| io::Error::other("native session poisoned"))?
+                .startup_control(),
+        );
+        #[cfg(test)]
+        self.fail_startup(StartupFailure::Pipes)?;
         let mut pipes = pipes.accept()?;
+        #[cfg(test)]
+        self.fail_startup(StartupFailure::Credentials)?;
         let credentials = crate::writer_host::mcp_credentials(immutable.binding().endpoint());
         let secret = credentials
             .as_ref()
@@ -493,6 +579,9 @@ impl NativeGuardianLauncher {
         )?;
         #[cfg(test)]
         if self.lose_commit_ack {
+            let mut native = control
+                .lock()
+                .map_err(|_| io::Error::other("native session poisoned"))?;
             native.commit_without_reply(&mut owner)?;
             let deadline = std::time::Instant::now() + crate::job_guardian::protocol::STARTUP;
             let marker = immutable
@@ -505,16 +594,17 @@ impl NativeGuardianLauncher {
                 }
                 thread::sleep(std::time::Duration::from_millis(1));
             }
-            native.close_lifetime();
-            let proof = native.cleanup()?;
-            self.claim
-                .lock()
-                .map_err(|_| io::Error::other("machine claim poisoned"))?
-                .retire(&proof)?;
             return Err(io::Error::other("fixture lost EXECUTING acknowledgment"));
         }
-        native.commit(&mut owner)?;
-        let control = Arc::new(Mutex::new(native));
+        let committed = {
+            let mut native = control
+                .lock()
+                .map_err(|_| io::Error::other("native session poisoned"))?;
+            native.commit(&mut owner)
+        };
+        committed?;
+        #[cfg(test)]
+        self.fail_startup(StartupFailure::Reader)?;
         let worker_control = Arc::clone(&control);
         let claim = Arc::clone(&self.claim);
         let (sender, events) = crate::protocol::limits::event_channel();
@@ -567,6 +657,7 @@ impl NativeGuardianLauncher {
                 }
                 let _ = sender.send(AgentEvent::Done);
             })?;
+        startup.control.take();
         Ok(adapters::ContainedSession::from_guardian(Box::new(
             RestrictedSession {
                 control,
