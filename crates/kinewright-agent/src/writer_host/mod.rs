@@ -6,6 +6,7 @@ mod hooks_tests;
 mod issuer;
 pub use issuer::HostIssuer;
 mod auth;
+mod context_publication;
 mod continuation;
 mod manual;
 #[cfg(target_os = "linux")]
@@ -17,6 +18,7 @@ mod recovery;
 mod resolve;
 mod revise;
 pub(crate) mod spending;
+mod task_history;
 pub use crate::orchestration::director_setting::{
     DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,
     scheduler_settings_directory, write_director_setting,

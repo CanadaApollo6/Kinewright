@@ -194,6 +194,10 @@ impl OrchestrationRecord {
         encoded(self, CONTROL_BYTES)?;
         let mut refs = Vec::new();
         match &self.payload {
+            OrchestrationPayload::TaskHistory(history) => task_history_refs(history, &mut refs)?,
+            OrchestrationPayload::AttemptArchive(archive) => {
+                retired_attempt_refs(archive, &mut refs)?;
+            }
             // S4 C5
             OrchestrationPayload::Accounting(record) => {
                 refs.extend(record.dependencies().map_err(|_| Refusal::InvalidState)?);
@@ -627,6 +631,67 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
             || state.requests.iter().any(|request| !matches!(request, RuntimeRequest::Question(q) if q.status != super::orchestration_records::QuestionStatus::Pending)))
     {
         return Err(Refusal::InvalidState);
+    }
+    Ok(())
+}
+
+fn task_history_refs(
+    history: &crate::orchestration_records::TaskHistoryRecord,
+    refs: &mut Vec<ObjectRef>,
+) -> Result<(), Refusal> {
+    if history.base.branch == history.source.branch
+        || history.base_ref.record_kind != RecordKind::SpecialistBase
+        || history.candidate_base_ref.record_kind != RecordKind::SpecialistBase
+        || history.base.checkpoint.record_kind != RecordKind::BranchCheckpoint
+        || history.source.checkpoint.record_kind != RecordKind::BranchCheckpoint
+    {
+        return Err(Refusal::ScopeConflict);
+    }
+    if let Some(envelope) = &history.merge_envelope {
+        envelope
+            .encoded_bytes()
+            .map_err(|_| Refusal::InvalidState)?;
+        if !history.frozen
+            || envelope.project_id != history.project
+            || envelope.target_branch != history.base.branch
+            || envelope.expected_head.as_ref() != Some(&history.base.head)
+            || envelope.action != "edit"
+        {
+            return Err(Refusal::ScopeConflict);
+        }
+    }
+    refs.extend([
+        history.base.checkpoint.clone(),
+        history.source.checkpoint.clone(),
+        history.base_ref.clone(),
+        history.candidate_base_ref.clone(),
+    ]);
+    Ok(())
+}
+fn retired_attempt_refs(
+    archive: &crate::orchestration_records::RetiredAttemptArchive,
+    refs: &mut Vec<ObjectRef>,
+) -> Result<(), Refusal> {
+    if archive.attempts.len() > TASK_LIMIT * crate::orchestration_accounting::TASK_SENDS {
+        return Err(Refusal::Capacity);
+    }
+    let mut ids = BTreeSet::new();
+    let mut nonces = BTreeSet::new();
+    let mut projects = BTreeSet::new();
+    for attempt in &archive.attempts {
+        attempt.identity.validate()?;
+        if attempt.identity.run != archive.run
+            || !matches!(attempt.state, AttemptState::Retired(_))
+            || !ids.insert(&attempt.identity.attempt)
+            || !nonces.insert(&attempt.identity.nonce)
+        {
+            return Err(Refusal::ScopeConflict);
+        }
+        projects.insert(&attempt.identity.project);
+        refs.push(attempt.recovery_ref.clone());
+    }
+    if projects.len() > 1 {
+        return Err(Refusal::ScopeConflict);
     }
     Ok(())
 }

@@ -243,7 +243,21 @@ impl Ja1EditingSession {
         &mut self,
         guard: &mut DurableBranchSessionGuard,
     ) -> Result<FrozenTaskResult, BundleError> {
-        let base_ref = self.persist_durable_branch_inner(guard, false)?;
+        self.freeze_registered_candidate_inner(guard, false)
+    }
+    /// Reconstruct a frozen task without advancing an unchanged checkpoint.
+    pub fn freeze_registered_task_checkpoint(
+        &mut self,
+        guard: &mut DurableBranchSessionGuard,
+    ) -> Result<FrozenTaskResult, BundleError> {
+        self.freeze_registered_candidate_inner(guard, true)
+    }
+    fn freeze_registered_candidate_inner(
+        &mut self,
+        guard: &mut DurableBranchSessionGuard,
+        retain_checkpoint: bool,
+    ) -> Result<FrozenTaskResult, BundleError> {
+        let base_ref = self.persist_durable_branch_inner(guard, false, retain_checkpoint)?;
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("candidate_frozen_persisted");
         let base = guard.base();
@@ -601,12 +615,25 @@ impl Ja1EditingSession {
         &mut self,
         guard: &mut DurableBranchSessionGuard,
     ) -> Result<ObjectRef, BundleError> {
-        self.persist_durable_branch_inner(guard, true)
+        self.persist_durable_branch_inner(guard, true, false)
     }
+    /// Keep an unchanged task checkpoint identity; pending H1 records are
+    /// published separately by the serialized owner before task authority.
+    pub fn persist_registered_task_checkpoint(
+        &mut self,
+        guard: &mut DurableBranchSessionGuard,
+    ) -> Result<ObjectRef, BundleError> {
+        self.persist_durable_branch_inner(guard, true, true)
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one registered Core fence spans checkpoint reuse, publication and resume"
+    )]
     fn persist_durable_branch_inner(
         &mut self,
         guard: &mut DurableBranchSessionGuard,
         resume: bool,
+        retain_checkpoint: bool,
     ) -> Result<ObjectRef, BundleError> {
         let index = self.registered(guard)?;
         let canonical = self.durable_sessions[index].guard.clone();
@@ -655,6 +682,27 @@ impl Ja1EditingSession {
             base.full_applied_delta = full_delta;
             let base_bytes =
                 serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let same_base = base == *canonical.base();
+            let reference = ObjectRef {
+                sha256: kinewright_media::sha256_bytes(&base_bytes),
+                byte_length: base_bytes.len() as u64,
+                record_kind: crate::bundle_records::RecordKind::SpecialistBase,
+            };
+            if retain_checkpoint
+                && same_base
+                && cut.history()
+                    == &*self
+                        .registered_bundle(&canonical)?
+                        .branch_history(&canonical.branch)?
+                && self
+                    .registered_bundle(&canonical)?
+                    .store()
+                    .verify(&reference)
+                    .is_ok()
+            {
+                *guard = canonical.clone();
+                return Ok(reference);
+            }
             let history_bytes = serde_json::to_vec(cut.history())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let source = self.registered_bundle(&canonical)?.store();
@@ -702,6 +750,20 @@ impl Ja1EditingSession {
         &mut self,
         guard: &DurableBranchSessionGuard,
     ) -> Result<(), BundleError> {
+        self.close_durable_branch_inner(guard, false)
+    }
+    /// Seal an already persisted task without replacing its frozen checkpoint.
+    pub fn close_registered_task_checkpoint(
+        &mut self,
+        guard: &DurableBranchSessionGuard,
+    ) -> Result<(), BundleError> {
+        self.close_durable_branch_inner(guard, true)
+    }
+    fn close_durable_branch_inner(
+        &mut self,
+        guard: &DurableBranchSessionGuard,
+        retain_checkpoint: bool,
+    ) -> Result<(), BundleError> {
         let index = self.registered(guard)?;
         if self
             .core
@@ -722,7 +784,9 @@ impl Ja1EditingSession {
             ));
         }
         let inputs = bundle.checkpoint(&guard.branch)?.input_manifest_ref.clone();
-        if let Err(error) = bundle.save_frozen_branch(&guard.core, &inputs, &cut, &guard.branch) {
+        if !retain_checkpoint
+            && let Err(error) = bundle.save_frozen_branch(&guard.core, &inputs, &cut, &guard.branch)
+        {
             if !bundle.unsettled {
                 owner.resume(&cut).map_err(crate::bundle::history_error)?;
             }

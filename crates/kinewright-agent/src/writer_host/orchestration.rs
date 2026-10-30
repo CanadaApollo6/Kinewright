@@ -825,6 +825,10 @@ impl HostCommandOwner {
             || &root.run != run
             || root.task.is_some()
             || root.expired()
+            || root.owner_epoch != self.owner()?.store()?.owner_epoch()
+            || self.recovering
+            || self.switch_frozen
+            || self.hooks.pending.is_some()
             || ttl.is_zero()
             || ttl > Duration::from_secs(3600)
         {
@@ -877,13 +881,12 @@ impl HostCommandOwner {
         {
             let endpoint = existing.endpoint();
             let authority = endpoint.authority();
-            if &authority.attempt != attempt || endpoint.check_live().is_err() {
-                return Err(refused(
-                    "task endpoint already issued for another or revoked attempt",
-                ));
-            }
-            let attachment =
-                self.attachments
+            if &authority.attempt == attempt {
+                if endpoint.check_live().is_err() {
+                    return Err(refused("task authority revoked"));
+                }
+                let attachment = self
+                    .attachments
                     .iter()
                     .find(|attachment| {
                         attachment.producer_scope.as_ref().is_some_and(|scope| {
@@ -891,7 +894,11 @@ impl HostCommandOwner {
                         })
                     })
                     .ok_or_else(|| refused("task endpoint attachment was revoked"))?;
-            return Ok((attachment.auth.clone(), endpoint));
+                return Ok((attachment.auth.clone(), endpoint));
+            }
+            if !self.retired_task_authority(&state, task, &authority.attempt)? {
+                return Err(refused("previous task authority is not retired"));
+            }
         }
         let authority = RuntimeTaskAuthority {
             project: self.owner()?.active_manual_project()?,
@@ -911,9 +918,64 @@ impl HostCommandOwner {
             expires_at: Some(authority.expires_at),
             scope: task_record.brief.scope.clone(),
         };
-        let editor_task =
-            EditorTask::prepare(self.owner_mut()?, task_record.brief.clone(), authority)?;
+        let saved = self.saved_task_history(&state, task)?;
+        let previous = self
+            .hooks
+            .runs
+            .get_mut(run)
+            .and_then(|r| r.tasks.remove(task));
+        let editor_task = if let Some(previous) = previous {
+            previous.continue_authority(self.owner()?, &task_record.brief, authority)?
+        } else if let Some(history) = &saved {
+            if history.attempt == *attempt
+                || !self.retired_task_authority(&state, task, &history.attempt)?
+            {
+                return Err(refused("previous task authority is not retired"));
+            }
+            self.restore_task_candidate(history)?;
+            let mut reopened = EditorTask::reopen(
+                self.owner_mut()?,
+                task_record.brief.clone(),
+                authority,
+                history.source.branch.clone(),
+                &history.base_ref,
+                history.merge_envelope.clone(),
+            )?;
+            if self.owner()?.candidate_binding(&history.source.branch)? != history.source {
+                return Err(refused("task checkpoint changed"));
+            }
+            if history.frozen && reopened.freeze(self.owner_mut()?)?.source() != &history.source {
+                return Err(refused("frozen task checkpoint changed"));
+            }
+            reopened
+        } else {
+            if state
+                .attempts
+                .iter()
+                .any(|a| a.identity.task == *task && a.identity.attempt != *attempt)
+                || self.retired_task_authority_exists(&state, task)?
+            {
+                return Err(refused("prior task history is unavailable"));
+            }
+            EditorTask::prepare(self.owner_mut()?, task_record.brief.clone(), authority)?
+        };
         let endpoint = editor_task.endpoint();
+        self.hooks
+            .runs
+            .get_mut(run)
+            .ok_or_else(|| refused("run missing"))?
+            .tasks
+            .insert(task.clone(), editor_task);
+        let identity = state
+            .attempts
+            .iter()
+            .find(|a| a.identity.task == *task && a.identity.attempt == *attempt)
+            .ok_or_else(|| refused("reservation missing"))?
+            .identity
+            .clone();
+        let mut state = state;
+        self.persist_runtime_task(&mut state, &identity, false)?;
+        self.publish_native(producer, state, &identity, vec![])?;
         let roots = self.attachments[index].roots.clone();
         let auth = self.issue_attachment(
             format!("task:{}", task.0.as_str()),
@@ -922,12 +984,6 @@ impl HostCommandOwner {
         )?;
         let index = self.resolve_attachment(Some(&auth.bearer()))?;
         self.attachments[index].producer_scope = Some(scope);
-        self.hooks
-            .runs
-            .get_mut(run)
-            .ok_or_else(|| refused("run retention missing"))?
-            .tasks
-            .insert(task.clone(), editor_task);
         Ok((auth, endpoint))
     }
     pub fn start_task_server(

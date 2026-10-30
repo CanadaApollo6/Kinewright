@@ -619,6 +619,30 @@ pub struct EventSegment {
     pub events: Vec<OrchestrationEvent>,
 }
 
+/// Durable identity of one task's registered actor, independent of an attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskHistoryRecord {
+    pub project: ProjectId,
+    pub run: RunId,
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub base: BranchBinding,
+    pub source: BranchBinding,
+    pub base_ref: ObjectRef,
+    pub candidate_base_ref: ObjectRef,
+    pub frozen: bool,
+    pub merge_envelope: Option<crate::receipts::CommandEnvelope>,
+}
+
+/// Retired records retain their original identities and native recovery facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredAttemptArchive {
+    pub run: RunId,
+    pub attempts: Vec<AttemptReservation>,
+}
+
 /// All tagged payloads require sealed H1 admission. `RunIndex` is unsupported on main.
 /// These types do not admit them as opaque evidence blobs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -629,6 +653,8 @@ pub struct EventSegment {
     deny_unknown_fields
 )]
 pub enum OrchestrationPayload {
+    TaskHistory(Box<TaskHistoryRecord>),
+    AttemptArchive(Box<RetiredAttemptArchive>),
     RunIndex(Vec<ObjectRef>),
     Snapshot(Box<RunProjection>),
     EventSegment(EventSegment),

@@ -15,6 +15,7 @@ impl HostCommandOwner {
             AttemptReservation, DependencyReservation, TaskState,
         };
         let mut state = self.spending_scope(producer, run)?;
+        self.archive_retired_attempts(&mut state)?;
         if state
             .attempts
             .iter()
@@ -118,6 +119,7 @@ impl HostCommandOwner {
             AttemptOutcome, DependencyReservation, TaskState,
         };
         let mut state = self.spending_scope(producer, &identity.run)?;
+        self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
             .iter_mut()

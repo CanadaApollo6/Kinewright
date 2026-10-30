@@ -324,6 +324,7 @@ impl HostCommandOwner {
             return Err(refused("cleanup proof scope changed"));
         }
         let mut state = self.spending_scope(producer, &identity.run)?;
+        self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
             .iter_mut()

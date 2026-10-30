@@ -209,8 +209,20 @@ impl EditorTask {
         {
             return Err(BundleError::HistoryChanged);
         }
+        let registered = owner
+            .durable_sessions()
+            .into_iter()
+            .find(|(_, g)| g.branch_id() == &branch)
+            .map(|(_, g)| g);
+        let registration = if let Some(guard) = registered {
+            if guard.base() != &*base {
+                return Err(BundleError::HistoryChanged);
+            }
+            guard
+        } else {
+            owner.reopen_registered_candidate(branch, base_ref)?
+        };
         drop(base);
-        let registration = owner.reopen_registered_candidate(branch, base_ref)?;
         let endpoint = TaskEndpoint::from_authorized_owner(
             TaskPolicy {
                 role: brief.role,
@@ -225,6 +237,92 @@ impl EditorTask {
             frozen: None,
             merge_envelope: original_merge,
         })
+    }
+    /// Replace only retired authority. The registered actor and all receipts stay.
+    pub(crate) fn continue_authority(
+        mut self,
+        owner: &Ja1EditingSession,
+        brief: &TaskBrief,
+        authority: RuntimeTaskAuthority,
+    ) -> Result<Self, BundleError> {
+        validate_owner_authority(owner, &authority)?;
+        if !self.endpoint.matches_brief(brief) {
+            return Err(BundleError::HistoryChanged);
+        }
+        {
+            let _drain = self
+                .endpoint
+                .close_and_drain()
+                .map_err(BundleError::Unsupported)?;
+            self.endpoint.revoke();
+        }
+        self.endpoint = TaskEndpoint::from_authorized_owner(
+            TaskPolicy {
+                role: brief.role,
+                scope: brief.scope.clone(),
+            },
+            authority,
+            self.registration.core(),
+        );
+        if self.frozen.is_some() {
+            self.endpoint.0.closed.store(true, Ordering::SeqCst);
+        }
+        Ok(self)
+    }
+    pub(crate) fn persisted_history(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+        fence: bool,
+    ) -> Result<
+        (
+            super::orchestration_records::BranchBinding,
+            super::bundle_records::ObjectRef,
+            bool,
+        ),
+        BundleError,
+    > {
+        if let Some(frozen) = &self.frozen {
+            return Ok((frozen.source().clone(), frozen.base_ref().clone(), true));
+        }
+        if fence {
+            drop(
+                self.endpoint
+                    .close_and_drain()
+                    .map_err(BundleError::Unsupported)?,
+            );
+        }
+        let _gate = self
+            .endpoint
+            .0
+            .gate
+            .lock()
+            .map_err(|_| BundleError::HistoryChanged)?;
+        let base_ref = owner.persist_registered_task_checkpoint(&mut self.registration)?;
+        Ok((
+            owner.candidate_binding(self.registration.branch_id())?,
+            base_ref,
+            false,
+        ))
+    }
+    pub(crate) fn prepare_merge(
+        &mut self,
+        owner: &Ja1EditingSession,
+        id: CommandId,
+    ) -> Result<(), BundleError> {
+        if let Some(envelope) = &self.merge_envelope {
+            return if envelope.id == id {
+                Ok(())
+            } else {
+                Err(BundleError::HistoryChanged)
+            };
+        }
+        self.endpoint
+            .check_live()
+            .map_err(BundleError::Unsupported)?;
+        validate_owner_authority(owner, self.endpoint.authority())?;
+        let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
+        self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
+        Ok(())
     }
     #[must_use]
     pub fn endpoint(&self) -> TaskEndpoint {
@@ -243,7 +341,7 @@ impl EditorTask {
                 .endpoint
                 .close_and_drain()
                 .map_err(BundleError::Unsupported)?;
-            self.frozen = Some(owner.freeze_registered_candidate(&mut self.registration)?);
+            self.frozen = Some(owner.freeze_registered_task_checkpoint(&mut self.registration)?);
         }
         self.frozen.as_ref().ok_or(BundleError::HistoryChanged)
     }
@@ -313,7 +411,7 @@ impl EditorTask {
     /// Persist terminal work, seal its Core and release the owner's registration.
     pub fn close(&mut self, owner: &mut Ja1EditingSession) -> Result<(), BundleError> {
         self.freeze(owner)?;
-        owner.close_durable_branch(&self.registration)?;
+        owner.close_registered_task_checkpoint(&self.registration)?;
         self.endpoint.revoke();
         Ok(())
     }
