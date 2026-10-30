@@ -12,7 +12,7 @@ S3 certification remains **partial**. This ledger is the gate status at the fina
 | G8 | `s3_bound_ab_identity` and `s3_bound_ab_gpu_identity` on lavapipe: presentation identity of the bound A/B picture. |
 | G9 | Typed and drawn notes on the displayed cell, retained drafts, the immutable batch and its lost reply, and the mixed-version host route in the end-to-end test. |
 | G10 | Lineage fixtures, host `ResolveFeedback`, and remapping when the saved checkpoint changes. |
-| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording, or finished but not yet kept on this computer, refuses Save As, New, Open, switching project and Close. It then finishes under its own project (stage fixes 1 and 2). New feedback work waits while the notes are still handed to a new project (stage fix 3). |
+| G11 | Spoken notes through the host, with seeded speech state in the end-to-end test. A note that is still recording, or finished but not yet kept on this computer, refuses Save As, New, Open, switching project and Close. It then finishes under its own project (stage fixes 1 and 2). New feedback work waits while the notes are still handed to a new project (stage fix 3), and kept notes meet only their own project's host (stage fix 4). |
 
 **Remaining acceptance legs.** No test covers these yet:
 
@@ -49,6 +49,14 @@ The second re-check found a gap that stage fix 2 opened. When leaving project A 
 New feedback work now waits until the attachment and the kept notes name the same project. Until then, Record, New note, drawing, Save, Submit, Revise cut, Start run and choosing a transcript all say "Still saving the last project's notes. Try again in a moment." Record is shown disabled. Record also checks the picture it records at, because that picture's project owns the capture. A version opened before Save As still names the project left, so Record asks for that version to be selected again. Typed and drawn notes on it still work, as before. A spoken note is also kept only in its own project's file, and any other write counts as a failed save, so the note stays guarded. A note A already holds still retries through A, as before. The save retry now runs every frame, so storage that comes back is used while the Editor layout is shown, not only in Studio.
 
 One witness makes A's last write fail as the project moves to B, makes the folder writable again, and presses Record before the next handoff. Record is refused. After the handoff, a note recorded under B is kept in B's file without any acknowledgment from the host. Reopening B restores it, and Retry upload saves the exact audio, NoteId, anchor and log. When Record's checks are removed, or those checks and the file check together, the witness fails because B holds no capture. A second witness makes the folder writable again while the Editor layout is shown, and the note is kept there. When the per-frame retry is removed, it fails. With the fix restored, both pass.
+
+## Stage fix 4
+
+The third re-check found another path through the same gap. A spoken note's acknowledgment from A could be read after Save As to B while A's last write was failing. Attaching it then sent A's picture evidence to B's host and kept references to B's objects in A's file. After that, A could not save the note, and the note's audio and log files had already been deleted.
+
+Fixes 1 to 3 closed one path each, so this fix closes the whole class in one place. Kept notes now meet a host only when both name the same project. This covers every command that runs kept notes against the host or session, and every request the spoken notes make to the host. Otherwise nothing runs, and the caller is told the notes are still being handed over. An acknowledgment that arrives during that time waits unchanged: the note keeps its picture evidence, audio and log, and Save As and Close wait too. Its binding and upload stay in A's file, so reopening A finishes it there. Fix 3's checks are unchanged.
+
+The witness queues A's acknowledgment and moves the project to B. A's last write fails, the folder is made writable again, and the Studio reads the acknowledgment before the next handoff. The acknowledgment waits. Then B's files are deleted and A is reopened. The note is acknowledged by A and saved there with its exact NoteId, anchor, frame proof, strokes, audio and log. When the boundary always lets the projects through, the save from A fails on an object only B has. With the check restored, the witness passes.
 
 ## C6a
 

@@ -2,6 +2,7 @@
 use crate::{
     app::KinewrightApp,
     recording::feedback_capture::{Capture, CaptureReservation, CapturedAudio},
+    studio_feedback::{FeedbackRefusal, HANDOFF_REFUSAL},
 };
 use eframe::egui;
 use kinewright_agent::writer_host::{HostClient, HostCommand, HostReply};
@@ -45,6 +46,9 @@ pub(crate) struct Voice {
     /// When to retry keeping a finished capture whose binding failed to be
     /// kept: `None` once its `NoteId`, anchor, audio and log are durable.
     retain_at: Option<Instant>,
+    /// A received acknowledgment waits for these notes to meet their own
+    /// project's host before it is attached (S3 stage fix 4).
+    held_ack: bool,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PendingChoice {
@@ -83,13 +87,26 @@ impl Voice {
     /// Why nothing may change this project's identity or end its session: a
     /// capture with no durably kept binding. That is a live recording (S3
     /// stage fix 1), or a finished one whose retention write failed (fix 2).
+    /// An acknowledgment held for its own project's host also waits (fix 4).
     pub(crate) fn unkept(&self) -> Option<&'static str> {
         match &self.state {
             State::Recording(_) => Some(RECORDING_REFUSAL),
             State::Unprepared(_) | State::Upload { .. } if self.retain_at.is_some() => {
                 Some(UNKEPT_REFUSAL)
             }
+            State::Upload { .. } if self.held_ack => Some(UNKEPT_REFUSAL),
             _ => None,
+        }
+    }
+    /// Whether this project's notes must stay open for the capture: it has no
+    /// kept binding yet. A held acknowledgment does not hold them: its binding
+    /// and upload are kept in its own project's file, which finishes it when
+    /// that project is open again.
+    pub(crate) fn binding_pending(&self) -> bool {
+        match &self.state {
+            State::Recording(_) => true,
+            State::Unprepared(_) | State::Upload { .. } => self.retain_at.is_some(),
+            _ => false,
         }
     }
     pub(crate) fn close_text(&self) -> Option<&'static str> {
@@ -378,7 +395,9 @@ impl KinewrightApp {
         &mut self,
         captured: Box<CapturedAudio>,
         status: kinewright_agent::writer_host::VoiceStatus,
-    ) -> Result<State, (Box<CapturedAudio>, String)> {
+    ) -> Result<State, (Box<CapturedAudio>, FeedbackRefusal)> {
+        // The capture's files go only once the attached draft is kept by the
+        // owner whose project's host admitted its evidence.
         let attached = self
             .attach_voice(
                 &self.focused().studio.voice.comment.clone().unwrap(),
@@ -390,9 +409,11 @@ impl KinewrightApp {
                 let kept = feedback
                     .voices
                     .get_mut(&status.voice.note_id)
-                    .ok_or("Voice draft missing")?;
+                    .ok_or_else(|| FeedbackRefusal::Failed("Voice draft missing".into()))?;
                 kept.status = Some(status.clone());
-                feedback.retain_for_dispatch()
+                feedback
+                    .retain_for_dispatch()
+                    .map_err(FeedbackRefusal::Failed)
             });
         if let Err(why) = attached {
             return Err((captured, why));
@@ -469,14 +490,17 @@ impl KinewrightApp {
         }
     }
 
+    /// The host for this project's spoken notes, only where it meets them: a
+    /// host of another project never takes or answers for them (S3 stage fix 4).
     fn voice_client(&self) -> Result<HostClient, String> {
-        self.focused()
+        let client = self
+            .focused()
             .ja1
             .as_ref()
             .and_then(crate::ja1_attachment::Ja1Attachment::host_client)
-            .ok_or_else(|| {
-                "Save and open this project with its writer host before recording a note.".into()
-            })
+            .ok_or("Save and open this project with its writer host before recording a note.")?;
+        self.feedback_boundary()?;
+        Ok(client)
     }
     /// Retry upload: keep the capture first, then send it again.
     pub(crate) fn voice_retry(&mut self) {
@@ -610,7 +634,7 @@ impl KinewrightApp {
         let project = self.focused().studio.feedback.keeping.project().cloned();
         // A capture with no kept binding keeps its project's voice until it is kept there.
         if self.focused().studio.voice.project != project
-            && self.focused().studio.voice.unkept().is_none()
+            && !self.focused().studio.voice.binding_pending()
         {
             let note = self.focused().studio.feedback.active_voice.clone();
             self.focused_mut().studio.voice = Voice {
@@ -646,10 +670,28 @@ impl KinewrightApp {
                     Some(Ok(Ok(response)))
                         if response.error.is_none() && response.voice.is_some() =>
                     {
-                        let status = response.voice.unwrap();
-                        match self.acknowledge_spoken_capture(captured, status) {
+                        let status = response.voice.clone().unwrap();
+                        let acknowledged = self.acknowledge_spoken_capture(captured, status);
+                        self.focused_mut().studio.voice.held_ack =
+                            matches!(acknowledged, Err((_, FeedbackRefusal::Handoff)));
+                        match acknowledged {
                             Ok(state) => state,
-                            Err((captured, why)) => {
+                            // Untouched, and the same reply is read again next frame.
+                            Err((captured, FeedbackRefusal::Handoff)) => {
+                                self.focused_mut().studio.voice.message = HANDOFF_REFUSAL.into();
+                                let (again, held) = std::sync::mpsc::sync_channel(1);
+                                let _ = again.send(UploadReply {
+                                    descriptor: descriptor.clone(),
+                                    result: Ok(response),
+                                });
+                                State::Upload {
+                                    captured,
+                                    upload: descriptor,
+                                    log,
+                                    reply: Some(held),
+                                }
+                            }
+                            Err((captured, FeedbackRefusal::Failed(why))) => {
                                 self.focused_mut().studio.voice.message = why;
                                 State::Upload {
                                     captured,
@@ -2262,6 +2304,157 @@ mod tests {
                 "M3_KEPT_OUTSIDE_STUDIO"
             );
             retain_then_upload(app, a.as_ref(), &note, &key, kept);
+        });
+    }
+
+    /// The raw frame proof a captured draft keeps until it is acknowledged.
+    fn captured_proof(app: &KinewrightApp, comment: &CommentId) -> Option<String> {
+        let draft = app
+            .focused()
+            .studio
+            .feedback
+            .drafts
+            .iter()
+            .find(|draft| &draft.comment == comment)?;
+        match &draft.origin {
+            crate::studio_feedback::Origin::Captured { proof, .. } => Some(
+                kinewright_media::sha256_bytes(&serde_json::to_vec(proof).unwrap()),
+            ),
+            crate::studio_feedback::Origin::Revises { .. } => None,
+        }
+    }
+    /// Saving the note from A alone admits nothing new: its frame proof,
+    /// strokes and voice are A's own.
+    fn assert_saved_from_a(
+        app: &mut KinewrightApp,
+        comment: &CommentId,
+        note: &NoteId,
+        proof: &str,
+        strokes: &[crate::studio_feedback::Stroke],
+    ) {
+        let saved = app
+            .with_feedback(|feedback, port| feedback.save(port, comment))
+            .unwrap();
+        assert!(
+            matches!(saved, crate::studio_feedback::Outcome::Saved(_)),
+            "M4_SAVED_FROM_A {}",
+            app.focused()
+                .studio
+                .feedback
+                .message
+                .clone()
+                .unwrap_or_default()
+        );
+        app.with_feedback(|feedback, port| feedback.refresh(&*port))
+            .unwrap()
+            .unwrap();
+        let revision = app
+            .focused()
+            .studio
+            .feedback
+            .saved
+            .iter()
+            .find(|saved| &saved.comment == comment)
+            .cloned()
+            .expect("M4_NOTE_LISTED");
+        assert_eq!(
+            revision.revision.frame_proof_ref.sha256, proof,
+            "M4_EXACT_PROOF"
+        );
+        assert_eq!(revision.strokes, strokes, "M4_EXACT_STROKES");
+        assert_eq!(
+            revision.revision.voice_ref.map(|voice| voice.note_id),
+            Some(note.clone()),
+            "M4_EXACT_VOICE"
+        );
+    }
+    /// S3 stage fix 4: A's successful acknowledgment is read only after Save
+    /// As to B, while A's last write fails. It must wait for A's own host.
+    /// Reopening A without B then saves the exact note.
+    #[test]
+    fn m4_a_delayed_acknowledgment_waits_for_its_own_projects_host() {
+        hosted_case(|app, fixture, engine| {
+            let a = app.focused().studio.feedback.keeping.project().cloned();
+            let a_path = app.focused().ja1.as_ref().unwrap().project_path();
+            let key = displayed_key(app);
+            let captured = recorded(app, fixture);
+            let note = captured.note_id().clone();
+            let comment = app.focused().studio.voice.comment.clone().unwrap();
+            let bytes = std::fs::read(&captured.path).unwrap();
+            let log = captured.playhead_bytes().unwrap();
+            let strokes = vec![vec![[0.25_f32, 0.5], [0.75, 0.5]]];
+            app.focused_mut()
+                .studio
+                .feedback
+                .draft_mut(&comment)
+                .unwrap()
+                .strokes
+                .clone_from(&strokes);
+            send_capture(app, captured, false);
+            let proof = captured_proof(app, &comment).expect("M4_RAW_PROOF");
+            // A's host has acknowledged; the Studio has not read the reply yet.
+            let State::Upload { reply, upload, .. } = &mut app.focused_mut().studio.voice.state
+            else {
+                panic!("M4_UPLOAD")
+            };
+            let acknowledgment = reply.take().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let received = loop {
+                if let Ok(received) = acknowledgment.try_recv() {
+                    break received;
+                }
+                assert!(Instant::now() < deadline, "M4_ACK_DEADLINE");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(
+                received
+                    .result
+                    .as_ref()
+                    .is_ok_and(|r| r.error.is_none() && r.voice.is_some()),
+                "M4_A_ACKNOWLEDGED"
+            );
+            let sent = upload.clone();
+            let (queued, held) = std::sync::mpsc::sync_channel(1);
+            queued.send(received).unwrap();
+            *reply = Some(held);
+            let storage = ReadOnly::new(fixture.root.path("kept-feedback"));
+            let b_path = fixture.root.path("m4-b.kinewright");
+            app.focused_mut()
+                .ja1
+                .as_mut()
+                .unwrap()
+                .apply(crate::ja1_attachment::Action::SaveAs(b_path.clone()))
+                .unwrap();
+            app.focused_mut().install_ja1_view();
+            app.feedback_frame();
+            let pending = app.focused().studio.feedback.keeping.project().cloned() == a;
+            drop(storage);
+            app.voice_frame();
+            // Recorded now, checked after recovery, so a lost note fails there.
+            let held = pending
+                && matches!(
+                    &app.focused().studio.voice.state,
+                    State::Upload { captured, reply: Some(_), .. } if captured.path.exists()
+                )
+                && captured_proof(app, &comment).as_ref() == Some(&proof)
+                && app.focused().studio.voice.unkept() == Some(UNKEPT_REFUSAL);
+            app.feedback_frame();
+            app.voice_frame();
+            let handed = app.focused().studio.feedback.keeping.project().cloned() != a;
+            reopen_at(app, fixture, engine, a_path);
+            std::fs::remove_file(&b_path).unwrap();
+            std::fs::remove_dir_all(b_path.with_extension("kinewright-assets")).unwrap();
+            wait_saved(app);
+            assert_exact_note(app, &note, &key, &bytes, &sent);
+            assert_eq!(
+                sent.log.sha256,
+                kinewright_media::sha256_bytes(&log),
+                "M4_EXACT_LOG"
+            );
+            assert_saved_from_a(app, &comment, &note, &proof, &strokes);
+            assert!(pending, "M4_HANDOFF_PENDING");
+            assert!(held, "M4_ACK_HELD");
+            assert!(handed, "M4_HANDED_TO_B");
         });
     }
 

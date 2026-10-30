@@ -981,6 +981,27 @@ const OPEN_ELSEWHERE: &str = "This project's notes are open in another window";
 /// Said for new feedback work while the notes still belong to the project left.
 pub(crate) const HANDOFF_REFUSAL: &str =
     "Still saving the last project's notes. Try again in a moment.";
+/// Why kept feedback was not paired with the attached host or session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FeedbackRefusal {
+    /// The kept notes and the attachment name different projects, or either
+    /// cannot be read: nothing ran (S3 stage fix 4).
+    Handoff,
+    Failed(String),
+}
+impl std::fmt::Display for FeedbackRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Handoff => f.write_str(HANDOFF_REFUSAL),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+impl From<FeedbackRefusal> for String {
+    fn from(refusal: FeedbackRefusal) -> Self {
+        refusal.to_string()
+    }
+}
 
 /// A sent command whose draft no longer matches it. It is retried exactly until
 /// its outcome is known, and its draft stays a separate draft whatever the
@@ -2402,6 +2423,7 @@ impl KinewrightApp {
             .studio_map_target()
             .ok_or("Studio is busy saving or opening. Try again in a moment.")?;
         self.with_feedback(|feedback, port| feedback.map_onto(&*port, onto, checkpoint))
+            .map_err(String::from)
     }
     /// Keep shown mappings true to the target. Another target drops them; a
     /// new saved checkpoint of the same current edit maps them again, so the
@@ -2437,22 +2459,43 @@ impl KinewrightApp {
             .filter(|attachment| attachment.project_path().is_some())?;
         (attached.studio_project_id().ok().as_ref() != Some(kept)).then_some(HANDOFF_REFUSAL)
     }
+    /// Where kept feedback meets the attached host or session: only when both
+    /// name the same project. While they differ, as while the last project's
+    /// final write is retried, its notes and evidence would cross projects
+    /// (S3 stage fix 4). Every pairing goes through here.
+    pub(crate) fn feedback_boundary(&self) -> Result<(), FeedbackRefusal> {
+        let session = self.focused();
+        let attachment = session.ja1.as_ref().ok_or_else(|| {
+            FeedbackRefusal::Failed(
+                "Studio is busy saving or opening. Try again in a moment.".into(),
+            )
+        })?;
+        if attachment.project_path().is_none() {
+            return Err(FeedbackRefusal::Failed(
+                "Save the project first. Notes become durable with it.".into(),
+            ));
+        }
+        match (
+            attachment.studio_project_id().ok(),
+            session.studio.feedback.keeping.project(),
+        ) {
+            (Some(attached), Some(kept)) if &attached == kept => Ok(()),
+            _ => Err(FeedbackRefusal::Handoff),
+        }
+    }
     /// Run `act` against this project's feedback owner: the shared host when one is
     /// attached, otherwise the in-process session. Unsaved projects take S2's
     /// first-save flow before any feedback is durable.
     pub(crate) fn with_feedback<R>(
         &mut self,
         act: impl FnOnce(&mut Feedback, &mut dyn FeedbackPort) -> R,
-    ) -> Result<R, String> {
+    ) -> Result<R, FeedbackRefusal> {
+        self.feedback_boundary()?;
         let session = self.focused_mut();
         let feedback = &mut session.studio.feedback;
-        let attachment = session
-            .ja1
-            .as_mut()
-            .ok_or("Studio is busy saving or opening. Try again in a moment.")?;
-        if attachment.project_path().is_none() {
-            return Err("Save the project first. Notes become durable with it.".into());
-        }
+        let Some(attachment) = session.ja1.as_mut() else {
+            unreachable!("the boundary found the attachment")
+        };
         if let Some(client) = attachment.host_client() {
             let mut port = HostFeedback {
                 client: &client,
@@ -2482,7 +2525,7 @@ impl KinewrightApp {
         // S3 stage fixes 1 and 2: a spoken capture belongs to the project it
         // started in. Stop it, and keep that project's notes until its binding
         // is kept in that project's file; a later frame then reopens.
-        if reopen && self.focused().studio.voice.unkept().is_some() {
+        if reopen && self.focused().studio.voice.binding_pending() {
             self.focused().studio.voice.stop_recording();
             reopen = false;
         }
@@ -2496,11 +2539,14 @@ impl KinewrightApp {
             }
         }
         if feedback.resume {
-            let resumed = self.with_feedback(|feedback, port| feedback.resume(port));
-            if let Err(why) = resumed {
-                let feedback = &mut self.focused_mut().studio.feedback;
-                feedback.resume = false;
-                feedback.message = Some(why);
+            match self.with_feedback(|feedback, port| feedback.resume(port)) {
+                // Resumed once these notes meet their own project's host.
+                Ok(()) | Err(FeedbackRefusal::Handoff) => {}
+                Err(FeedbackRefusal::Failed(why)) => {
+                    let feedback = &mut self.focused_mut().studio.feedback;
+                    feedback.resume = false;
+                    feedback.message = Some(why);
+                }
             }
         }
         // Linked runs are read about once a second until they finish; nothing
@@ -2693,9 +2739,9 @@ impl KinewrightApp {
             feedback.changed = true;
         }
     }
-    fn feedback_message(&mut self, result: Result<Outcome, String>) {
+    fn feedback_message(&mut self, result: Result<Outcome, FeedbackRefusal>) {
         if let Err(why) = result {
-            self.focused_mut().studio.feedback.message = Some(why);
+            self.focused_mut().studio.feedback.message = Some(why.into());
         }
     }
     /// Draw on the displayed image and paint the active draft's strokes.
@@ -2857,7 +2903,9 @@ impl KinewrightApp {
         self.voice_controls(ui);
         if !self.focused().studio.feedback.loaded && self.focused().ja1.is_some() {
             self.focused_mut().studio.feedback.loaded = true;
-            let refreshed = self.with_feedback(|feedback, port| feedback.refresh(&*port));
+            let refreshed = self
+                .with_feedback(|feedback, port| feedback.refresh(&*port))
+                .map_err(String::from);
             if let Ok(Err(why)) | Err(why) = refreshed {
                 self.focused_mut().studio.feedback.message = Some(why);
             }
@@ -3213,6 +3261,7 @@ impl KinewrightApp {
             Some(NoteAction::Reopen(batch)) => {
                 let result = self
                     .with_feedback(|feedback, port| feedback.reopen(&*port, &batch))
+                    .map_err(String::from)
                     .and_then(|reopened| reopened);
                 if let Err(why) = result {
                     self.focused_mut().studio.feedback.message = Some(why);
@@ -3226,7 +3275,7 @@ impl KinewrightApp {
                 let result =
                     self.with_feedback(|feedback, port| feedback.start_batch(port, &batch));
                 if let Err(why) = result {
-                    self.focused_mut().studio.feedback.message = Some(why);
+                    self.focused_mut().studio.feedback.message = Some(why.into());
                 }
             }
             Some(NoteAction::FirstSave) => {
@@ -3280,7 +3329,7 @@ impl KinewrightApp {
         comment: &CommentId,
         voice: VoiceRef,
         transcript: Option<ObjectRef>,
-    ) -> Result<(), String> {
+    ) -> Result<(), FeedbackRefusal> {
         self.with_feedback(|feedback, port| {
             let draft = feedback
                 .drafts
@@ -3334,5 +3383,6 @@ impl KinewrightApp {
             feedback.changed = true;
             Ok(())
         })?
+        .map_err(FeedbackRefusal::Failed)
     }
 }
