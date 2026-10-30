@@ -70,6 +70,11 @@ impl BundleCommit {
         target: &crate::bundle_records::BranchId,
     ) -> Result<ReceiptLookup, BundleError> {
         use kinewright_core::{Command, Event, Query, QueryResult};
+        if envelope.action == "metadata" {
+            return Err(BundleError::Unsupported(
+                "metadata requires typed owner ingress".into(),
+            ));
+        }
         if install {
             crate::bundle::reconcile_core_save(core)?;
         } else if core
@@ -328,7 +333,6 @@ impl BundleCommit {
                 .root()
                 .is_none_or(|r| r.manual_switch_generation != binding.switch_generation)
             || inputs != &binding.inputs
-            || checkpoint.input_manifest_ref != *inputs
             || checkpoint.batch_ids.last() != manual.predecessor.as_ref()
             || checkpoint.history_ref.sha256 != manual.before_sha256
         {
@@ -336,6 +340,7 @@ impl BundleCommit {
                 "manual chain authority/predecessor".into(),
             ));
         }
+        validate_manifest_extension(&bundle.store, &checkpoint.input_manifest_ref, inputs)?;
         let issuer = bundle
             .issuers
             .get(&envelope.id.issuer)
@@ -1186,6 +1191,16 @@ impl BundleCommit {
             branch_index_ref.clone(),
             branches[&manual_branch_id].input_manifest_ref.clone(),
         ];
+        let mut metadata_root = bundle.root.clone();
+        if let Some(pending) = &bundle.pending_metadata {
+            pending.apply(metadata_root.as_mut().ok_or(BundleError::Unsettled)?);
+        }
+        if let Some(root) = &metadata_root {
+            roots.extend(root.version_index_ref.clone());
+            roots.extend(root.feedback_index_ref.clone());
+            roots.extend(root.run_index_ref.clone());
+            roots.extend(root.claim_index_ref.clone());
+        }
         roots.extend(receipt_index_ref.clone());
         roots.extend(issuer_state_ref.clone());
         let mut inventory = SupportInventory {
@@ -1206,6 +1221,10 @@ impl BundleCommit {
         if bundle.store.has_host_switch_receipts(&closure)? {
             inventory.required_apis.insert("host-switch".into(), 1);
         }
+        crate::studio_store::add_required_apis(
+            &mut inventory.required_apis,
+            closure.iter().map(|r| r.record_kind),
+        );
         let store_manifest = bundle.store.selected_manifest(
             &roots,
             &evidence,
@@ -1228,10 +1247,16 @@ impl BundleCommit {
                 .cloned()
                 .collect(),
             branch_index_ref,
-            version_index_ref: None,
-            feedback_index_ref: None,
-            run_index_ref: None,
-            claim_index_ref: None,
+            version_index_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.version_index_ref.clone()),
+            feedback_index_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.feedback_index_ref.clone()),
+            run_index_ref: metadata_root.as_ref().and_then(|r| r.run_index_ref.clone()),
+            claim_index_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.claim_index_ref.clone()),
             input_manifest_ref: branches[&manual_branch_id].input_manifest_ref.clone(),
             receipt_index_ref,
             issuer_state_ref,
@@ -1602,7 +1627,7 @@ pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut Ow
             document
                 .media_pool
                 .iter()
-                .any(|a| entry.entry_id == format!("media:{}", a.id.0))
+                .any(|a| entry.matches_media_asset(a))
                 || document.lut_assets.iter().any(|a| {
                     lut_entry_id_matches(&entry.entry_id, a)
                         && entry.object.sha256 == a.sha256
@@ -1627,23 +1652,8 @@ pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut Ow
             entry.entry_id = format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len);
         }
     }
-    // Merge dependency metadata for identical entries; conflicting non-LUT identities refuse.
-    let mut unique: BTreeMap<String, crate::owned_inputs::OwnedInputEntry> = BTreeMap::new();
-    for entry in std::mem::take(&mut manifest.entries) {
-        if let Some(prior) = unique.get_mut(&entry.entry_id) {
-            if prior.object == entry.object {
-                prior.dependencies.extend(entry.dependencies);
-                prior.dependencies.sort();
-                prior.dependencies.dedup();
-            } else {
-                // Retain the conflict so manifest validation refuses before any root publication.
-                manifest.entries.push(entry);
-            }
-        } else {
-            unique.insert(entry.entry_id.clone(), entry);
-        }
-    }
-    manifest.entries.extend(unique.into_values());
+    manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
+    manifest.entries.dedup();
 }
 fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
     id == format!("lut:{}", asset.id.0)
@@ -1655,14 +1665,14 @@ pub(crate) fn validate_document_inputs(
     manifest: &OwnedInputManifest,
 ) -> Result<(), BundleError> {
     for asset in &document.media_pool {
-        let id = format!("media:{}", asset.id.0);
         if !manifest
             .entries
             .iter()
-            .any(|e| e.entry_id == id && e.object.record_kind == RecordKind::OwnedMedia)
+            .any(|entry| entry.matches_media_asset(asset))
         {
             return Err(BundleError::Unsupported(format!(
-                "retained asset {id} lacks owned input"
+                "retained asset media:{} lacks exact fingerprint/interpretation/table",
+                asset.id.0
             )));
         }
     }
@@ -1677,6 +1687,7 @@ pub(crate) fn validate_document_inputs(
             e.entry_id == "font:Inter"
                 && e.object.record_kind == RecordKind::OwnedFont
                 && e.object.sha256 == digest
+                && e.object.byte_length == kinewright_core::title_font_bytes().len() as u64
         }) {
             return Err(BundleError::Unsupported(
                 "retained title requires its owned embedded font".into(),
@@ -1913,6 +1924,28 @@ pub fn history_cost_probe(
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
     record_cost(history, limits)
+}
+
+pub(crate) fn validate_manifest_extension(
+    store: &crate::store::ProjectStore,
+    previous: &ObjectRef,
+    next: &ObjectRef,
+) -> Result<(), BundleError> {
+    let before = store.read_input_manifest(previous)?;
+    let after = store.read_input_manifest(next)?;
+    if before.project_id != after.project_id
+        || before.session_id != after.session_id
+        || before.owner_epoch != after.owner_epoch
+        || before
+            .entries
+            .iter()
+            .any(|entry| !after.entries.contains(entry))
+    {
+        return Err(BundleError::Identity(
+            "manual input manifest is not an exact superset".into(),
+        ));
+    }
+    Ok(())
 }
 
 // G1-W: durable bundle activation and receipt publication are unsupported on Windows.

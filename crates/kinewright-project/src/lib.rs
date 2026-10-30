@@ -11,16 +11,32 @@ pub mod bundle_recovery;
 pub mod bundle_rescue;
 pub mod bundle_switch;
 pub mod editing_session;
+// JA-1 S3 C4
+pub mod feedback_mapping;
 mod history_save;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
+#[cfg(feature = "test-util")]
+pub mod c0_fixtures;
+mod certified_resources;
 pub mod owned_inputs;
+mod owned_media;
+mod read_only_inputs;
+pub use read_only_inputs::{ReadOnlyInputBinding, ReadOnlyInputFiles, ReadOnlyInputs};
 // S4 C5
 pub mod orchestration_accounting;
+pub mod orchestration_commit;
+pub mod orchestration_records;
 pub mod receipts;
 pub mod source_boundary;
 pub mod storage_budget;
 pub mod store;
+// JA-1 S3 C1 shared metadata and S4 receiving contracts.
+pub mod studio_records;
+pub mod studio_store;
+// JA-1 S3 C5 fix 2
+pub mod voice_ingress;
+pub mod voice_store;
 
 pub mod headless;
 #[cfg(any(test, feature = "test-util"))]
@@ -47,8 +63,10 @@ pub use project::{
     write_file_atomic, write_project_bytes, write_project_document,
 };
 pub use recovery::{
-    JOURNAL_MAGIC, allocate_journal_path, default_recovery_directory, fnv1a_64, journal_file_name,
-    pending_journal_for_project, restore_status, retire_journal_for_project,
+    FeedbackStateLock, FeedbackStateRefusal, JOURNAL_MAGIC, allocate_journal_path,
+    default_recovery_directory, feedback_state_directory, feedback_state_directory_with, fnv1a_64,
+    journal_file_name, lock_feedback_state, pending_journal_for_project, restore_status,
+    retire_journal_for_project,
 };
 pub use session::{
     IncidentLogHandle, LoadedSidecarSession, SidecarRollback, SidecarSession,

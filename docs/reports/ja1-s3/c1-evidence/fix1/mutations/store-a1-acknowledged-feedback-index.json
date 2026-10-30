@@ -1,0 +1,36 @@
+{
+  "name": "store-a1-acknowledged-feedback-index",
+  "witness": "linux::s3_indexes_survive_all_root_producers",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-project/src/bundle_commit.rs",
+      "        let mut metadata_root = bundle.root.clone();",
+      "        let mut metadata_root = bundle.root.clone();\n        if rescue_source.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+    ]
+  ],
+  "expected_red": {
+    "text": "S3_EXACT_FEEDBACK_INDEX",
+    "location": null
+  },
+  "baseline_manifest_sha256": "c06b0125d3fdbc76c50f50a511cb1462abc8a92abddceaabd2636b556121eabf",
+  "witness_sha256": "4d5fc5715d3b1d444c33555441c56766ed1f1211b4429f6dc0d5383badf52eb2",
+  "source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "297b38be868bfd4c57ff1aedfdcb2f726247421d3abe4652a952c26799743e1c"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "d094bb37e62ec958980ca6285f2aa6f9ef14971c3b2942d13a2c79fdf19ec9d4",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 5.08s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "677c6f4784e3ff2ab59b8e02564d4c20e30cb4db67d69e9e53c34cc3953a7c71",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.20s"
+  ],
+  "restored": true
+}

@@ -33,6 +33,407 @@ fn c9_fix1_manual_gate_controls_the_save_requirement_message() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn s3_fix1_import_lost_first_commit_recovers() {
+    s3_fix1_lost_first_commit(false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_fix1_colour_lost_first_commit_recovers() {
+    s3_fix1_lost_first_commit(true);
+}
+
+#[cfg(target_os = "linux")]
+fn s3_fix1_lost_first_commit(colour: bool) {
+    let (temp, mut app, path) = s2h_fix3_app(false);
+    let source = temp.path("accepted.wav");
+    std::fs::write(
+        &source,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+    )
+    .unwrap();
+    if colour {
+        app.apply(Action::ImportMedia(source.clone())).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.is_dirty() && std::time::Instant::now() < deadline {
+            app.poll_host();
+            std::thread::yield_now();
+        }
+        assert!(!app.is_dirty());
+    }
+    let proxy = app
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_reply("commit_history", true);
+    if colour {
+        let history = app.owner.core().export_history().unwrap();
+        let operation =
+            crate::color_ui::assume_sdr_rec709_operation(&history.document.media_pool[0]);
+        app.apply(Action::ChangeMediaInterpretation(Box::new(operation)))
+            .unwrap();
+    } else {
+        app.apply(Action::ImportMedia(source.clone())).unwrap();
+    }
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let expected = app.owner.core().export_history().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !app.read_only() && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(app.read_only());
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    std::fs::remove_file(source).unwrap();
+    app.apply(Action::Retry).unwrap();
+    s2h_fix3_wait(&mut app);
+    assert!(!app.read_only(), "C0_FIX1_ACCEPTED_SUFFIX: {}", app.message);
+    app.apply(Action::Save).unwrap();
+    assert!(!app.is_dirty(), "{}", app.message);
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), expected);
+    assert!(app.close());
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_owned_colour_reply_loss_preserves_prior_interpretation_for_undo() {
+    let (temp, mut app, path) = s2h_fix3_app(false);
+    let source = temp.path("colour.wav");
+    std::fs::write(
+        &source,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800].into_boxed_slice(), 48_000, 1),
+    )
+    .unwrap();
+    app.apply(Action::ImportMedia(source)).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while app.is_dirty() && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::yield_now();
+    }
+    assert!(!app.is_dirty(), "import setup must commit");
+    let before = app.owner.core().export_history().unwrap();
+    let asset = &before.document.media_pool[0];
+    let operation = crate::color_ui::assume_sdr_rec709_operation(asset);
+    let mut expected = (*before.document).clone();
+    operation.apply(&mut expected).unwrap();
+    let proxy = app
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_reply("prepare_media_interpretation", false);
+    assert!(
+        app.apply(Action::ChangeMediaInterpretation(Box::new(operation)))
+            .is_err()
+    );
+    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    assert!(app.read_only());
+    let _ = app.poll_host();
+    assert!(
+        app.read_only(),
+        "Status cannot thaw an unconfirmed interpretation grant"
+    );
+    app.apply(Action::Retry).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while app.is_dirty() && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::yield_now();
+    }
+    assert!(
+        !app.is_dirty(),
+        "interpretation must commit after exact replay"
+    );
+    assert_eq!(
+        *app.owner.core().export_history().unwrap().document,
+        expected
+    );
+    app.send_manual(Command::Undo).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while (app.is_dirty() || app.owner.core().export_history().unwrap().document != before.document)
+        && std::time::Instant::now() < deadline
+    {
+        app.poll_host();
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        app.owner.core().export_history().unwrap().document,
+        before.document
+    );
+    assert!(
+        !app.is_dirty(),
+        "old interpretation must remain saveable after undo"
+    );
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(
+        restored.export_history().unwrap(),
+        app.owner.core().export_history().unwrap()
+    );
+    assert!(app.close());
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_owned_import_lost_reply_refreshes_the_gui_lease_once() {
+    let (project_directory, mut app, path) = s2h_fix3_app(false);
+    let external = TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "s3-chosen-external-input",
+    );
+    assert!(!external.root().starts_with(project_directory.root()));
+    let source = external.path("owned.wav");
+    std::fs::write(
+        &source,
+        kinewright_media::test_support::wav_f32(
+            &kinewright_media::test_support::tone(523.25, 0.2, 48_000, 48_000),
+            48_000,
+            1,
+        ),
+    )
+    .unwrap();
+    let before = app.owner.core().export_history().unwrap();
+    let proxy = app
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_reply("prepare_owned_media", false);
+    assert!(app.apply(Action::ImportMedia(source.clone())).is_err());
+    assert!(app.read_only());
+    assert!(!app.retention_lost);
+    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    std::fs::remove_file(source).unwrap();
+    let _ = app.poll_host();
+    assert!(
+        app.read_only(),
+        "Status cannot thaw an unconfirmed input grant"
+    );
+    app.apply(Action::Retry).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while app.is_dirty() && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::yield_now();
+    }
+    let history = app.owner.core().export_history().unwrap();
+    assert_eq!(history.document.media_pool.len(), 1);
+    assert!(!app.read_only(), "{}", app.message);
+    assert!(!app.is_dirty(), "{}", app.message);
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), history);
+    assert!(app.close());
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_owned_pending_import_host_death_preserves_both_gui_contexts() {
+    use kinewright_agent::writer_host::SessionRoots;
+    for named in [false, true] {
+        let (temp, mut app, project_path) = if named {
+            s2h_fix3_app(false)
+        } else {
+            let temp = temp();
+            let core = Core::spawn(doc()).unwrap();
+            let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+                temp.root(),
+                &core,
+                StorageLimits::default(),
+            )
+            .unwrap();
+            let mut app = Ja1Attachment::new(owner).unwrap();
+            app.launch_host_at(
+                &host::executable(),
+                "s3-unsaved-host-death".into(),
+                SessionRoots {
+                    read: vec![temp.root().into()],
+                    write: vec![temp.root().into()],
+                },
+            )
+            .unwrap();
+            let path = temp.path("unused.kinewright");
+            (temp, app, path)
+        };
+        let source = temp.path("pending.wav");
+        std::fs::write(
+            &source,
+            kinewright_media::test_support::wav_f32(
+                &vec![0.25; 4800].into_boxed_slice(),
+                48_000,
+                1,
+            ),
+        )
+        .unwrap();
+        let retained_source = app.owner.source().map(|source| {
+            let store = source.store();
+            (
+                store.usage_handle(),
+                store
+                    .resolved_root()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .to_path_buf(),
+            )
+        });
+        let proxy = app.host.as_mut().unwrap().drop_http_reply(
+            if named {
+                "prepare_owned_media"
+            } else {
+                "refresh_unsaved_inputs"
+            },
+            false,
+        );
+        assert!(app.apply(Action::ImportMedia(source)).is_err());
+        let retained = app.owner.core().export_history().unwrap();
+        let persisted_root = named.then(|| std::fs::read(&project_path).unwrap());
+        let charged = retained_source.as_ref().map(|(usage, _)| usage().unwrap());
+        if let Some(charged) = &charged {
+            assert!(charged.physical_bytes > 0);
+        }
+        app.host.as_mut().unwrap().kill_owned_child();
+        let _ = app.poll_host();
+        assert!(app.read_only());
+        assert!(
+            app.retention_lost,
+            "confirmed host death must retain the freeze"
+        );
+        assert!(app.apply(Action::Retry).is_err());
+        let destination = temp.path("refused-rescue.kinewright");
+        assert!(app.apply(Action::SaveAs(destination.clone())).is_err());
+        assert!(!destination.exists());
+        assert_eq!(app.owner.core().export_history().unwrap(), retained);
+        if let Some((usage, source_root)) = retained_source {
+            assert!(source_root.exists());
+            assert_eq!(
+                usage().unwrap().physical_bytes,
+                charged.unwrap().physical_bytes
+            );
+            assert!(!usage().unwrap().damaged_accounting);
+        }
+        if let Some(persisted_root) = persisted_root {
+            assert_eq!(std::fs::read(&project_path).unwrap(), persisted_root);
+            let restored = Core::spawn(Document::default()).unwrap();
+            LoadedBundle::read(&project_path)
+                .unwrap()
+                .restore_manual(&restored)
+                .unwrap();
+            assert_eq!(restored.export_history().unwrap(), retained);
+        }
+        drop(proxy);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save() {
+    use kinewright_agent::writer_host::{
+        HostCommand, HostSnapshot, HostSourceBinding, SessionRoots, SourceServer,
+    };
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    app.launch_host_at(
+        &host::executable(),
+        "s3-unsaved-import".into(),
+        SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+    )
+    .unwrap();
+    let foreign_core = Core::spawn(doc()).unwrap();
+    let mut foreign = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &foreign_core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let transfer = foreign.prepare_host_attachment().unwrap();
+    let foreign_server = SourceServer::start(transfer.source_service.unwrap()).unwrap();
+    let refused = app
+        .host_client()
+        .unwrap()
+        .request(HostCommand::RefreshUnsavedInputs {
+            binding: HostSourceBinding {
+                source: transfer.source,
+                inputs: Some(transfer.inputs),
+                callback: foreign_server.bootstrap(),
+            },
+            snapshot: HostSnapshot::from_history(transfer.history).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(
+        refused.error.as_ref().map(|error| error.code.as_str()),
+        Some("unsaved_input_context")
+    );
+    drop(foreign_server);
+    assert!(foreign.close_originating_source().unwrap());
+    let source = temp.path("unsaved.wav");
+    std::fs::write(
+        &source,
+        kinewright_media::test_support::wav_f32(
+            &kinewright_media::test_support::tone(659.25, 0.2, 48_000, 48_000),
+            48_000,
+            1,
+        ),
+    )
+    .unwrap();
+    let proxy = app
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_reply("refresh_unsaved_inputs", false);
+    assert!(app.apply(Action::ImportMedia(source.clone())).is_err());
+    assert!(
+        app.read_only(),
+        "unsaved import cannot bypass first-save manual gating"
+    );
+    assert_eq!(core.export_history().unwrap().document.media_pool.len(), 1);
+    std::fs::remove_file(source).unwrap();
+    app.apply(Action::Retry).unwrap();
+    assert!(app.read_only());
+    assert!(app.imported_media.is_some());
+    let destination = temp.path("imported.kinewright");
+    app.apply(Action::FirstSave(destination.clone())).unwrap();
+    assert!(!app.read_only(), "{}", app.message);
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&destination)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(
+        restored.export_history().unwrap(),
+        core.export_history().unwrap()
+    );
+    assert!(app.close());
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn c9_fix1_unsaved_studio_activation_requires_first_save_before_manual_edit() {
     crate::app::ja_c9_bootstrap_save_witness(false);
 }
@@ -1261,6 +1662,66 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
     assert!(!source_root.exists());
 }
 
+/// S3 C11: after a host First Save, the Current edit's inputs come from a host
+/// lease on the saved project, and ending the host stops those reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn c11_host_first_save_then_current_edit_reads_through_the_lease() {
+    use kinewright_agent::writer_host::SessionRoots;
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let executable = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("kinewright");
+    assert!(
+        executable.is_file(),
+        "setup: build the shipping kinewright host first"
+    );
+    app.launch_host_at(
+        &executable,
+        "app-c11-first-save".into(),
+        SessionRoots {
+            read: vec![temp.root().to_path_buf()],
+            write: vec![temp.root().to_path_buf()],
+        },
+    )
+    .unwrap();
+    let path = temp.path("a.kinewright");
+    app.apply(Action::FirstSave(path.clone())).unwrap();
+    assert_eq!(app.project_path().as_deref(), Some(path.as_path()));
+    let scope = app.studio_playback_scope().expect("C11_FIRST_SAVE_SCOPE");
+    let document = core.export_history().unwrap().document;
+    let inputs = app
+        .studio_current_reader(&scope)
+        .expect("C11_FIRST_SAVE_LEASE")
+        .playback_inputs(Arc::clone(&document))
+        .expect("C11_FIRST_SAVE_PLAYS");
+    assert!(inputs.with_document(Arc::clone(&document)).is_ok());
+    let host_pid = app.host.as_ref().unwrap().child_id().unwrap();
+    app.host.as_mut().unwrap().close();
+    assert!(!Path::new(&format!("/proc/{host_pid}")).exists());
+    // C9's lease cache authorizes reads for at most 250 ms after a good probe.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        inputs.with_document(document).is_err(),
+        "C11_FIRST_SAVE_HOST_END_STOPS"
+    );
+    drop(inputs);
+    app.close();
+    drop(app);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
@@ -1361,6 +1822,7 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     let transfer = app.owner.prepare_host_attachment().unwrap();
     let server = SourceServer::start(transfer.source_service.unwrap()).unwrap();
     let writer = WriterHost::start(HostConfig {
+        scheduler_settings: None,
         project: "app-c8-floor-activation".into(),
         path: None,
         roots: SessionRoots {
@@ -1527,6 +1989,7 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
         write: vec![allowed.clone()],
     };
     let writer = WriterHost::start(HostConfig {
+        scheduler_settings: None,
         project: "app-person-destination".into(),
         path: None,
         roots: initial_roots,
@@ -2396,6 +2859,10 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
 fn s2h_begin_recovery_reply_loss_retries_original_plan() {
     s2h_fix3_barrier_reply("begin_recovery", false);
 }
+
+#[path = "ja1_s3_attachment_tests.rs"]
+mod s3;
+
 #[cfg(target_os = "linux")]
 #[test]
 fn s2h_floor_confirm_reply_loss_adopts_recorded_close_plan() {
@@ -2443,7 +2910,11 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
         .unwrap()
         .after()
         .clone();
-    assert_eq!(app.owner.core().export_history().unwrap(), exact);
+    assert_eq!(
+        app.owner.core().export_history().unwrap(),
+        exact,
+        "completed switch must route a later lost Save through C10"
+    );
     assert_eq!(
         app.host_client()
             .unwrap()
@@ -2464,8 +2935,8 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
             .unwrap(),
         Event::DocumentChanged { .. }
     ));
-    drop(proxy);
     assert!(app.close());
+    drop(proxy);
 }
 
 #[cfg(target_os = "linux")]
@@ -2807,3 +3278,5 @@ fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
     assert!(app.close());
     drop(proxy);
 }
+
+include!("ja1_hooks_tests.rs");

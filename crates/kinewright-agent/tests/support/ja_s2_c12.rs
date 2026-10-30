@@ -174,9 +174,7 @@ fn composed() {
         receipts::{ReceiptLookup, ReceiptResult},
     };
     use kinewright_project::{
-        bundle_records::{ObjectRef, RecordKind},
-        editing_session::Ja1EditingSession,
-        owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+        editing_session::Ja1EditingSession, owned_inputs::OwnedInputManifest,
         storage_budget::StorageLimits,
     };
     let started = Instant::now();
@@ -200,52 +198,23 @@ fn composed() {
     }))
     .unwrap();
     let mut gui = Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
-    let bytes = b"C12 exact owned input bytes, retained across adoption, restart and rescue";
-    let object = ObjectRef {
-        sha256: kinewright_media::sha256_bytes(bytes),
-        byte_length: bytes.len() as u64,
-        record_kind: RecordKind::OwnedMedia,
-    };
     let store = gui.source_mut().unwrap();
-    let blob = store
-        .store_mut()
-        .admit_blob(&mut &bytes[..], &object, &[])
-        .unwrap();
+    let (asset, entry, media, expected_bytes) =
+        import_known_wav(store.store_mut(), 700, &root.path("source.wav"), 660.0);
     let inputs = store
         .admit_inputs(&OwnedInputManifest {
             project_id: None,
             session_id: Some(store.session_id().clone()),
             owner_epoch: store.store().owner_epoch(),
-            entries: vec![OwnedInputEntry {
-                entry_id: "media:700".into(),
-                object,
-                dependencies: vec![],
-                selected_stream: None,
-                time_base: None,
-                origin: None,
-                profile: None,
-            }],
+            entries: vec![entry],
         })
         .unwrap()
         .reference
         .clone();
-    drop(blob);
     gui.set_unsaved_inputs(inputs.clone()).unwrap();
-    core.request(Edit::Do(Operation::AddAsset {
-        asset: kinewright_core::MediaAsset {
-            id: kinewright_core::AssetId(700),
-            path: root.path("source.wav"),
-            name: "owned-source".into(),
-            duration: kinewright_core::TimeCode(30),
-            fps: kinewright_core::Rational::new(30, 1).unwrap(),
-            kind: kinewright_core::MediaKind::Audio,
-            resolution: None,
-            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
-            color_description: kinewright_core::ColorDescription::default(),
-            assumed_from: None,
-        },
-    }))
-    .unwrap();
+    core.request(Edit::Do(Operation::AddAsset { asset }))
+        .unwrap();
+    drop(media);
     let prepared = gui.prepare_host_attachment().unwrap();
     let descriptor = prepared.source.unwrap();
     let service = prepared.source_service.unwrap();
@@ -533,10 +502,7 @@ fn composed() {
     )
     .unwrap();
     assert_eq!(kinewright_media::sha256_bytes(&raw), object.sha256);
-    assert_eq!(
-        raw,
-        b"C12 exact owned input bytes, retained across adoption, restart and rescue"
-    );
+    assert_eq!(raw, expected_bytes);
     println!(
         "C12 composed wall seconds: {:.3}",
         started.elapsed().as_secs_f64()

@@ -95,6 +95,14 @@ impl std::fmt::Debug for WorkingProofCache {
 }
 
 impl WorkingProofCache {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn cached_proof(&self) -> Option<Arc<WorkingProof>> {
+        self.entry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, proof)| Arc::clone(proof))
+    }
     /// The proof for `key`, rendered by `source` only if nobody has one.
     ///
     /// # Errors
@@ -1270,7 +1278,7 @@ impl KinewrightApp {
         }
     }
 
-    fn request_color_qc_measurement(
+    pub(crate) fn request_color_qc_measurement(
         &mut self,
         session_id: u64,
         revision: u64,
@@ -1305,7 +1313,7 @@ impl KinewrightApp {
             max_nodes: u8::try_from(kinewright_core::MAX_QC_NODE_CONTRIBUTIONS).unwrap_or(16),
             project_frame: frame.0,
         };
-        let analysis = Arc::clone(&self.analysis);
+        let analysis = self.focused().analysis();
         let cache = Arc::clone(&self.working_proof_cache);
         self.color_qc
             .request_measurement(analysis, cache, document, key, request);

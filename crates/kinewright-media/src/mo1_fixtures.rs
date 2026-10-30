@@ -222,7 +222,7 @@ fn mo1_document(media: &GeneratedMedia, effects: Vec<Effect>) -> Document {
 
 fn render_frame(document: &Document, at: TimeCode) -> FrameTexture {
     let gpu = fixture_gpu_or_skip().expect("the render gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     renderer
         .render(
             document,
@@ -889,7 +889,7 @@ fn push_in_step_sub_pixel_on_lavapipe() {
     assert_eq!(document.resolution, (320, 180));
     assert_push_in_sampler_path(&document);
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     let edge = |renderer: &mut FrameRenderer, at: i64| {
         let frame = renderer
             .render(
@@ -1007,7 +1007,7 @@ fn push_in_survives_trim_in_then_out_on_lavapipe() {
         .validate()
         .expect("the gate-1 document should validate");
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     let render = |renderer: &mut FrameRenderer, document: &Document, at: i64| {
         renderer
             .render(
@@ -1097,7 +1097,7 @@ fn still_hold_parity_across_five_seconds() {
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
     let mut first_by_strategy = Vec::new();
     for strategy in [DecodeStrategy::Seek, DecodeStrategy::Sequential] {
-        let mut renderer = FrameRenderer::new(gpu.clone());
+        let mut renderer = FrameRenderer::legacy_fixture(gpu.clone());
         let render = |renderer: &mut FrameRenderer, at: i64| {
             renderer
                 .render(
@@ -1261,7 +1261,7 @@ fn untagged_still_reaches_the_source_colour_incident() {
         .expect("the incident document should validate");
 
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     let error = renderer
         .render(
             &document,
@@ -1359,7 +1359,7 @@ fn untagged_jpeg_recovery_preserves_shadow_steps() {
         .validate()
         .expect("the recovered document should validate");
     let gpu = fixture_gpu_or_skip().expect("the gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     let frame = renderer
         .render(
             &document,
@@ -1704,7 +1704,7 @@ fn assumed_still_stamp() -> ColorDescription {
 /// share the decoder and cache instead of re-initing the GPU per frame.
 fn render_strip(document: &Document, frames: std::ops::Range<i64>) -> Vec<Vec<u8>> {
     let gpu = fixture_gpu_or_skip().expect("the render gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     frames
         .map(|at| {
             renderer
@@ -1727,7 +1727,7 @@ fn render_strip(document: &Document, frames: std::ops::Range<i64>) -> Vec<Vec<u8
 /// reference the export decode is compared against.
 fn render_delivery_strip(document: &Document, frames: std::ops::Range<i64>) -> Vec<Vec<u8>> {
     let gpu = fixture_gpu_or_skip().expect("the render gate needs an adapter");
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     frames
         .map(|at| {
             let delivery = renderer

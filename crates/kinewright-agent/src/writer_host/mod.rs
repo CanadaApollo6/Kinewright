@@ -1,10 +1,34 @@
 //! Product-owned, serialized named-project IO and authenticated UI-free sessions.
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
+mod attention;
+#[cfg(test)]
+mod hooks_tests;
+mod issuer;
+pub use issuer::HostIssuer;
 mod auth;
+mod continuation;
 mod manual;
+mod orchestration;
+mod owned_media;
 mod protocol;
 mod recovery;
+mod resolve;
+mod revise;
+pub use crate::orchestration::director_setting::{
+    DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,
+    scheduler_settings_directory, write_director_setting,
+};
+mod snapshot_lease;
+#[cfg(all(test, target_os = "linux"))]
+mod snapshot_lease_tests;
 mod switch;
+mod voice;
+pub use snapshot_lease::{SnapshotLeaseError, SnapshotLeaseRemote};
+#[cfg(all(test, target_os = "linux"))]
+mod voice_tests;
+pub use attention::{
+    AttentionAnswer, AttentionOutcome, AttentionPrompt, HostRunObserver, LiveAttentionResponse,
+};
 pub use auth::HostAuth;
 use auth::PinnedPath;
 use axum::{
@@ -14,6 +38,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+pub use continuation::{DetachOutcome, HostOwnedInputClosure};
 use kinewright_core::{AgentDriver, AgentEvent, AttachmentState, Core, Document, SessionConfig};
 use kinewright_project::{
     bundle::{BundleError, BundleSaveReport},
@@ -27,6 +52,7 @@ use kinewright_project::{
     },
     storage_budget::StorageLimits,
 };
+pub use orchestration::{MetadataIssuer, RunViewPage, ScopedOrchestrationRequest};
 pub use protocol::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +69,7 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+pub use voice::{VoiceReceipt, VoiceStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
@@ -221,10 +248,18 @@ impl HostClient {
     }
     /// Bootstrap is sent through a pipe; the child prints only public discovery.
     pub fn launch(executable: &Path, config: HostConfig) -> Result<(Self, Child), HostError> {
+        Self::launch_with_issuer(executable, config).map(|(client, child, _issuer)| (client, child))
+    }
+    pub fn launch_with_issuer(
+        executable: &Path,
+        config: HostConfig,
+    ) -> Result<(Self, Child, HostIssuer), HostError> {
         let auth = HostAuth::generate()?;
+        let issuer = HostAuth::generate()?;
         let bootstrap = serde_json::to_vec(&HostLaunch {
             config: config.clone(),
             auth: auth.clone(),
+            issuer: Some(issuer.clone()),
         })?;
         let mut child = Command::new(executable)
             .arg("host")
@@ -296,7 +331,14 @@ impl HostClient {
         }
         // Killing and reaping closes both pipes, so even a timed-out writer/reader retires.
         let _ = reader.join();
-        client.map(|client| (client, child))
+        client.and_then(|client| {
+            let issuer = HostIssuer::new(
+                client.endpoint().clone(),
+                issuer,
+                client.bootstrap.roots.clone(),
+            )?;
+            Ok((client, child, issuer))
+        })
     }
     /// One JSON-RPC line in, one response line out. Notifications have no stdout reply.
     pub fn proxy_stdio(
@@ -336,6 +378,8 @@ impl HostClient {
 pub struct HostLaunch {
     pub config: HostConfig,
     pub auth: HostAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<HostAuth>,
 }
 
 struct ServerThread {
@@ -355,13 +399,29 @@ pub struct WriterHost {
     auth: HostAuth,
     roots: SessionRoots,
     server: ServerThread,
+    owner: std::sync::Weak<Mutex<HostCommandOwner>>,
 }
 impl WriterHost {
     pub fn start(config: HostConfig) -> Result<Self, HostError> {
         Self::start_with_auth(config, HostAuth::generate()?)
     }
     pub fn start_with_auth(config: HostConfig, auth: HostAuth) -> Result<Self, HostError> {
-        let owner = HostCommandOwner::open(config.clone())?;
+        Self::start_with_issuer(config, auth, None)
+    }
+    pub fn start_with_issuer(
+        config: HostConfig,
+        auth: HostAuth,
+        issuer: Option<HostAuth>,
+    ) -> Result<Self, HostError> {
+        let mut owner = HostCommandOwner::open(config.clone())?;
+        owner.register_attachment(
+            auth.clone(),
+            "private-bootstrap".into(),
+            AttachmentRole::Editor,
+            config.roots.clone(),
+            true,
+        )?;
+        let owner = Arc::new(Mutex::new(owner));
         let roots = config.roots.canonicalize()?;
         let (listener, address) = bind_loopback()?;
         let endpoint = HostEndpoint {
@@ -371,17 +431,22 @@ impl WriterHost {
         };
         let stop = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(HttpState {
+            issuer,
             stop: Arc::clone(&stop),
             bootstrap: HostBootstrap {
                 endpoint: endpoint.clone(),
                 auth: auth.clone(),
                 roots: roots.clone(),
             },
-            owner: Mutex::new(owner),
+            owner: Arc::clone(&owner),
             ingress: Arc::new(tokio::sync::Semaphore::new(1)),
+            lease_ingress: Arc::new(tokio::sync::Semaphore::new(64)),
         });
         let router = axum::Router::new()
+            .route("/issuer", post(issuer::issuer_request))
             .route("/host", post(host_request))
+            .route("/voice", post(voice::upload_request))
+            .route("/snapshot-lease", post(snapshot_lease::lease_request))
             .route("/mcp", post(mcp_request))
             .with_state(state);
         let server = serve(listener, router, "kinewright-writer-host", stop)?;
@@ -390,7 +455,36 @@ impl WriterHost {
             auth,
             roots,
             server,
+            owner: Arc::downgrade(&owner),
         })
+    }
+    /// Trusted local issuance. This method is never exposed as an HTTP or MCP command.
+    pub fn attach(
+        &self,
+        subject: String,
+        role: AttachmentRole,
+        roots: SessionRoots,
+    ) -> Result<HostClient, HostError> {
+        let owner = self
+            .owner
+            .upgrade()
+            .ok_or_else(|| HostRefusal::new("attachment_refused", "host stopped"))?;
+        let auth = owner
+            .lock()
+            .map_err(|_| HostRefusal::new("retention_lost", RETENTION_LOST))?
+            .issue_attachment(subject, role, roots.clone())?;
+        HostClient::connect(self.endpoint.clone(), auth, roots)
+    }
+    /// Trusted local issuer action; never an HTTP or MCP command.
+    pub fn discard_detached_handoff(&self, expected_client: &str) -> Result<(), HostError> {
+        let owner = self
+            .owner
+            .upgrade()
+            .ok_or_else(|| HostRefusal::new("attachment_refused", "host stopped"))?;
+        let mut owner = owner
+            .lock()
+            .map_err(|_| HostRefusal::new("retention_lost", RETENTION_LOST))?;
+        owner.discard_detached_handoff(expected_client)
     }
     #[must_use]
     pub fn client(&self) -> HostClient {
@@ -466,10 +560,12 @@ fn serve(
     })
 }
 struct HttpState {
+    issuer: Option<HostAuth>,
     stop: Arc<tokio::sync::Notify>,
     bootstrap: HostBootstrap,
-    owner: Mutex<HostCommandOwner>,
+    owner: Arc<Mutex<HostCommandOwner>>,
     ingress: Arc<tokio::sync::Semaphore>,
+    lease_ingress: Arc<tokio::sync::Semaphore>,
 }
 fn check_headers(headers: &HeaderMap, bootstrap: &HostBootstrap) -> Result<(), StatusCode> {
     let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
@@ -483,10 +579,28 @@ fn check_headers(headers: &HeaderMap, bootstrap: &HostBootstrap) -> Result<(), S
     }
     Ok(())
 }
-async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
-    if let Err(status) = check_headers(request.headers(), &state.bootstrap) {
-        return status.into_response();
+fn check_host_headers(headers: &HeaderMap, state: &HttpState) -> Result<String, StatusCode> {
+    let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    if value("x-kinewright-project") != Some(state.bootstrap.endpoint.project.as_str())
+        || value("x-kinewright-protocol") != Some("1")
+    {
+        return Err(StatusCode::FORBIDDEN);
     }
+    let bearer = value("authorization").ok_or(StatusCode::UNAUTHORIZED)?;
+    let owner = state
+        .owner
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    owner
+        .resolve_attachment(Some(bearer))
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(bearer.to_owned())
+}
+async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
+    let bearer = match check_host_headers(request.headers(), &state) {
+        Ok(bearer) => bearer,
+        Err(status) => return status.into_response(),
+    };
     let Ok(permit) = Arc::clone(&state.ingress).try_acquire_owned() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
@@ -523,14 +637,7 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
                 error: Some(HostRefusal::new("retention_lost", RETENTION_LOST)),
                 ..HostReply::default()
             },
-            |mut owner| {
-                owner.execute_operation(
-                    request.command,
-                    request.roots,
-                    request.editor.as_deref(),
-                    request.operation,
-                )
-            },
+            |mut owner| owner.execute_bearer(Some(&bearer), request),
         );
         if shutting_down && reply.error.is_none() {
             state.stop.notify_one();
@@ -550,9 +657,10 @@ fn json_response(value: &impl Serialize) -> Response {
     }
 }
 async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
-    if let Err(status) = check_headers(request.headers(), &state.bootstrap) {
-        return status.into_response();
-    }
+    let bearer = match check_host_headers(request.headers(), &state) {
+        Ok(bearer) => bearer,
+        Err(status) => return status.into_response(),
+    };
     let roots = request
         .headers()
         .get("x-kinewright-roots")
@@ -618,7 +726,17 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
                 state
                     .owner
                     .lock()
-                    .map(|mut owner| owner.execute(command, roots))
+                    .map(|mut owner| {
+                        let request = HostRequest {
+                            editor: None,
+                            operation: None,
+                            protocol: HOST_PROTOCOL,
+                            project: state.bootstrap.endpoint.project.clone(),
+                            roots,
+                            command,
+                        };
+                        owner.execute_bearer(Some(&bearer), request)
+                    })
                     .map_err(|_| ())
             })
             .await;
@@ -986,6 +1104,20 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    hooks: orchestration::Hooks,
+    attachments: Vec<auth::Attachment>,
+    next_attachment_id: u64,
+    #[cfg(test)]
+    dispatches: u64,
+    foreground_owner: Option<manual::ForegroundOwner>,
+    pending_read_pin: Option<auth::ReadPin>,
+    voice_payload: Option<(
+        Vec<u8>,
+        kinewright_project::storage_budget::StorageReservation,
+    )>,
+    voice_data_dir: std::path::PathBuf,
+    voice_jobs: BTreeMap<kinewright_project::studio_records::NoteId, voice::Job>,
+    prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
     switch_frozen: bool,
@@ -1129,6 +1261,17 @@ impl HostCommandOwner {
             owner.freeze_manual_barrier()?;
         }
         let mut host = Self {
+            hooks: orchestration::Hooks::default(),
+            attachments: Vec::new(),
+            next_attachment_id: 1,
+            #[cfg(test)]
+            dispatches: 0,
+            foreground_owner: None,
+            pending_read_pin: None,
+            voice_payload: None,
+            voice_jobs: BTreeMap::new(),
+            voice_data_dir: kinewright_media::default_data_dir(),
+            prepared_owned_media: None,
             pending_switch: None,
             confirmed_switch: None,
             switch_frozen,
@@ -1231,17 +1374,38 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    fn snapshot_read_owner(&self) -> Option<(kinewright_project::bundle_records::ProjectId, u64)> {
+        let owner = self.owner.as_ref()?;
+        Some((owner.project_id().ok()?, owner.store().ok()?.owner_epoch()))
+    }
+    fn check_named_access(&self, roots: &SessionRoots, write: bool) -> Result<(), HostError> {
+        for pin in &self.pins {
+            if !roots.permits(&pin.anchor, write) {
+                return Err(HostRefusal::roots("forwarded roots exclude the named project").into());
+            }
+        }
+        Ok(())
+    }
     /// Errors stay typed in the reply; source retention loss is latched for the whole context.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "The same owned request boundary serves HTTP ingress and scoped observer callers"
     )]
-    pub fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+    fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+        let previous_snapshot_owner = self.snapshot_read_owner();
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {
             let write = !matches!(
                 command,
-                HostCommand::Attach
+                HostCommand::ListVersions
+                    | HostCommand::ListFeedback
+                    | HostCommand::ReadSnapshot { .. }
+                    | HostCommand::ReadFeedback { .. }
+                    | HostCommand::ResolveFeedback { .. }
+                    | HostCommand::ReadFeedbackView { .. }
+                    | HostCommand::ReadFeedbackEvidence { .. }
+                    | HostCommand::ReadSubmittedBatch { .. }
+                    | HostCommand::Attach
                     | HostCommand::CurrentAttachment
                     | HostCommand::SwitchReceipt { .. }
                     | HostCommand::Status
@@ -1256,13 +1420,7 @@ impl HostCommandOwner {
             }
             // Every named access honors the forwarded roots again. Its IO owner already holds
             // pinned descriptors; narrowed roots cannot retain an older wider authorization.
-            for pin in &self.pins {
-                if !roots.permits(&pin.anchor, write) {
-                    return Err(
-                        HostRefusal::roots("forwarded roots exclude the named project").into(),
-                    );
-                }
-            }
+            self.check_named_access(&roots, write)?;
             self.execute_inner(command, &roots, &mut reply)
         });
         if let Err(error) = result {
@@ -1279,6 +1437,12 @@ impl HostCommandOwner {
         {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
+        }
+        if reply.activation.is_some() || self.snapshot_read_owner() != previous_snapshot_owner {
+            for attachment in &mut self.attachments {
+                attachment.snapshot_leases.clear();
+            }
+            self.voice_jobs.clear();
         }
         if reply.activation.is_some()
             || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.project)) && !saved.root_sha256.is_empty())
@@ -1387,7 +1551,15 @@ impl HostCommandOwner {
     ) -> Result<(), HostError> {
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
         if self.recovering
-            && !manual::connector_command(&command)
+            && (!manual::connector_command(&command)
+                || matches!(
+                    command,
+                    HostCommand::Metadata { .. }
+                        | HostCommand::AdmitFeedbackEvidence { .. }
+                        | HostCommand::AcknowledgeVoice { .. }
+                        | HostCommand::StartTranscription { .. }
+                        | HostCommand::ChooseTranscript { .. }
+                ))
             && !matches!(
                 command,
                 HostCommand::BeginRecovery { .. }
@@ -1402,7 +1574,149 @@ impl HostCommandOwner {
             )
             .into());
         }
+        #[cfg(test)]
+        {
+            self.dispatches += 1;
+        }
         match command {
+            HostCommand::IssueMetadataIssuer { .. }
+            | HostCommand::DispatchOrchestration { .. }
+            | HostCommand::ObserveRun { .. }
+            | HostCommand::ResolveAttention { .. }
+            | HostCommand::DetachForContinuation
+            | HostCommand::ReviseCut { .. } => {
+                return Err(HostRefusal::new(
+                    "attachment_refused",
+                    "resolved attachment required for hook dispatch",
+                )
+                .into());
+            }
+            HostCommand::Metadata { envelope, update } => {
+                use kinewright_project::{
+                    receipts::ReceiptLookup,
+                    studio_records::{MetadataChange, MetadataScope, ReviseResult},
+                };
+                let scope = match &update.change {
+                    MetadataChange::PublishSnapshot(_) => MetadataScope::Snapshot,
+                    MetadataChange::SaveFeedback(_)
+                    | MetadataChange::SaveVoice(_)
+                    | MetadataChange::SubmitBatch { .. } => MetadataScope::Feedback,
+                    MetadataChange::Orchestration { .. }
+                    | MetadataChange::OrchestrationUpdate { .. } => {
+                        return Err(HostRefusal::new(
+                            "unsupported_command",
+                            "orchestration dispatch belongs to H3",
+                        )
+                        .into());
+                    }
+                };
+                let result = self
+                    .owner_mut()?
+                    .metadata_command(&envelope, scope, &update)?;
+                reply.metadata = Some(match result {
+                    ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => receipt,
+                    ReceiptLookup::IdPayloadConflict => {
+                        return Err(HostRefusal::new(
+                            "id_payload_conflict",
+                            "metadata retry changed the original payload",
+                        )
+                        .into());
+                    }
+                    _ => return Err(BundleError::Unsettled.into()),
+                });
+                if matches!(update.change, MetadataChange::SubmitBatch { .. }) {
+                    reply.revise_result = Some(ReviseResult::Waiting {
+                        reason: "Feedback is saved. Revise cut starts its run.".into(),
+                    });
+                }
+            }
+            command @ (HostCommand::VoiceReceipt { .. }
+            | HostCommand::AcknowledgeVoice { .. }
+            | HostCommand::StartTranscription { .. }
+            | HostCommand::VoiceStatus { .. }
+            | HostCommand::ChooseTranscript { .. }
+            | HostCommand::ReadVoiceRange { .. }) => self.voice_command(command, reply)?,
+            HostCommand::AdmitFeedbackEvidence { kind, bytes } => {
+                let sealed = self.owner_mut()?.admit_feedback_evidence(kind, &bytes)?;
+                reply.feedback_evidence = Some(sealed.reference.clone());
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: vec![sealed.reference.clone()],
+                    pin: sealed.into_pin(),
+                });
+            }
+            HostCommand::ListFeedback => {
+                reply.feedback_index = Some((*self.owner()?.feedback_index()?).clone());
+            }
+            HostCommand::ListVersions => {
+                reply.versions = self.owner()?.studio_versions()?;
+            }
+            HostCommand::LeaseSnapshot { .. }
+            | HostCommand::LeaseCurrentEdit { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. } => {
+                return Err(HostRefusal::new(
+                    "attachment_required",
+                    "snapshot lease requires attachment ownership",
+                )
+                .into());
+            }
+            HostCommand::ReadFeedbackView { revision } => {
+                reply.feedback = Some(self.owner()?.read_feedback(&revision)?.revision);
+            }
+            HostCommand::ReadFeedbackEvidence { revision, evidence } => {
+                let feedback = self.owner()?.read_feedback(&revision)?;
+                if ![
+                    &feedback.revision.original_text_ref,
+                    &feedback.revision.strokes_ref,
+                    &feedback.revision.frame_proof_ref,
+                ]
+                .contains(&&evidence)
+                {
+                    return Err(HostRefusal::new(
+                        "private_evidence",
+                        "only this revision's text, strokes and proof may be read",
+                    )
+                    .into());
+                }
+                reply.evidence_bytes =
+                    Some(self.owner()?.store()?.read_evidence(&evidence)?.to_vec());
+            }
+            HostCommand::ReadSnapshot { key } => {
+                let pinned = self.owner()?.read_snapshot(&key)?;
+                reply.snapshot = Some(pinned.descriptor);
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: pinned.roots,
+                    pin: pinned.pin,
+                });
+            }
+            HostCommand::ReadFeedback { reference } => {
+                let pinned = self.owner()?.read_feedback(&reference)?;
+                // The indexed revision's own bounded evidence, under its pin.
+                let store = self.owner()?.store()?;
+                reply.feedback_text =
+                    Some((*store.read_evidence(&pinned.revision.original_text_ref)?).clone());
+                reply.feedback_strokes =
+                    Some((*store.read_evidence(&pinned.revision.strokes_ref)?).clone());
+                reply.feedback = Some(pinned.revision);
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: pinned.roots,
+                    pin: pinned.pin,
+                });
+            }
+            HostCommand::ResolveFeedback { revision, onto } => {
+                let (mapping, pin) = self.resolve_feedback(&revision, &onto)?;
+                reply.feedback_mapping = Some(mapping);
+                self.pending_read_pin = Some(pin);
+            }
+            HostCommand::ReadSubmittedBatch { batch } => {
+                let pinned = self.owner()?.read_submitted_batch(&batch)?;
+                reply.submitted_batch = Some(pinned.batch);
+                reply.submitted_revisions = pinned.revisions;
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: pinned.roots,
+                    pin: pinned.pin,
+                });
+            }
             HostCommand::PrepareSwitch { target } => self.prepare_switch(target, reply)?,
             HostCommand::Switch { envelope } => self.publish_switch(&envelope, reply)?,
             HostCommand::SwitchReceipt { envelope } => self.lookup_switch(&envelope, reply)?,
@@ -1428,6 +1742,25 @@ impl HostCommandOwner {
                 let inputs = self.owner()?.manual_input_context()?;
                 reply.manual_lease = Some(self.acquire_manual(client)?);
                 reply.manual_inputs = Some(inputs);
+            }
+            HostCommand::PrepareOwnedMedia {
+                client,
+                path,
+                asset_id,
+                snapshot,
+            } => {
+                self.prepare_owned_media(&client, &path, asset_id, &snapshot, roots, reply)?;
+            }
+            HostCommand::PrepareMediaInterpretation {
+                client,
+                operation,
+                snapshot,
+            } => {
+                self.prepare_media_interpretation(&client, &operation, &snapshot, reply)?;
+            }
+            HostCommand::RefreshUnsavedInputs { binding, snapshot } => {
+                self.refresh_unsaved_inputs(binding, snapshot)?;
+                reply.unsaved_inputs_refreshed = true;
             }
             HostCommand::CommitHistory { client, messages } => {
                 self.commit_history(&client, &messages, reply)?;
@@ -1551,6 +1884,13 @@ impl HostCommandOwner {
                 self.message = format!("Saved {}.", destination.display());
             }
             HostCommand::Retry => {
+                if self.hooks.pending.is_some() {
+                    return Err(HostRefusal::new(
+                        "orchestration_refused",
+                        "original uncertain orchestration command must reconcile first",
+                    )
+                    .into());
+                }
                 if self.owner()?.has_prepared_selection() {
                     self.execute_inner(HostCommand::OpenRecovery, roots, reply)?;
                 } else {
@@ -1877,6 +2217,13 @@ impl HostCommandOwner {
                 reply.session = Some(self.session_status(session)?);
             }
             HostCommand::Shutdown => {
+                if self.hooks.runs.values().any(|run| run.continuable) {
+                    return Err(HostRefusal::new(
+                        "continuation_required",
+                        "detach the GUI or Stop and settle the run before closing its source",
+                    )
+                    .into());
+                }
                 for session in self.sessions.values_mut() {
                     session.stop();
                 }
@@ -1982,6 +2329,12 @@ impl HostCommandOwner {
     }
     fn status(&self) -> HostStatus {
         let mut status = HostStatus {
+            continuation_runs: self
+                .hooks
+                .runs
+                .values()
+                .filter(|run| run.continuable)
+                .count(),
             retention_proven: self.retention_proven,
             message: self.message.clone(),
             admitted_roots: self.admitted_roots(),
@@ -1993,6 +2346,12 @@ impl HostCommandOwner {
             ..HostStatus::default()
         };
         if let Some(owner) = &self.owner {
+            status.project_id = owner.project_id().ok();
+            status.playback_scope = owner
+                .store()
+                .ok()
+                .map(|store| (store.owner_epoch(), owner.current_inputs_ref().clone()));
+            status.manual_checkpoint = owner.manual_checkpoint_ref().ok();
             status.association = owner.association().map(|a| a.path().to_path_buf());
             status.saved_digest = owner
                 .association()
@@ -2065,6 +2424,9 @@ impl HostCommandOwner {
 }
 impl Drop for HostCommandOwner {
     fn drop(&mut self) {
+        for attachment in &self.attachments {
+            attachment.alive.store(false, Ordering::Release);
+        }
         for session in self.sessions.values_mut() {
             session.stop();
         }
@@ -2605,6 +2967,87 @@ pub(crate) async fn guard_mcp(
 mod tests {
     use super::*;
     #[test]
+    fn s3_portable_roles_revoke_and_refuse_before_manual_write_admission() {
+        let configuration = || HostConfig {
+            scheduler_settings: None,
+            project: "portable-s3-roles".into(),
+            path: None,
+            roots: SessionRoots::default(),
+            origin: HostOrigin::Headless,
+        };
+        let host = WriterHost::start(configuration()).unwrap();
+        let viewer = host
+            .attach(
+                "person-viewer".into(),
+                AttachmentRole::Viewer,
+                SessionRoots::default(),
+            )
+            .unwrap();
+        let old = viewer.bootstrap();
+        let producer = host
+            .attach(
+                "snapshot-producer".into(),
+                AttachmentRole::Producer,
+                SessionRoots::default(),
+            )
+            .unwrap();
+        let before = host
+            .client()
+            .request(HostCommand::ReadHistory)
+            .unwrap()
+            .history;
+        for client in [&viewer, &producer] {
+            let reply = client
+                .request(HostCommand::AcquireManual {
+                    client: "x".repeat(64),
+                })
+                .unwrap();
+            assert_eq!(reply.error.unwrap().code, "role_refused");
+            assert_eq!(
+                host.client()
+                    .request(HostCommand::ReadHistory)
+                    .unwrap()
+                    .history,
+                before
+            );
+        }
+        assert_eq!(
+            viewer
+                .request(HostCommand::Shutdown)
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "role_refused"
+        );
+        assert!(viewer.request(HostCommand::Detach).unwrap().error.is_none());
+        assert!(viewer.request(HostCommand::Status).is_err());
+        host.shutdown().unwrap();
+        let replacement = WriterHost::start(configuration()).unwrap();
+        let stale =
+            HostClient::connect(replacement.endpoint().clone(), old.auth, old.roots).unwrap();
+        assert!(stale.request(HostCommand::Status).is_err());
+        let fresh = replacement
+            .attach(
+                "person-viewer".into(),
+                AttachmentRole::Viewer,
+                SessionRoots::default(),
+            )
+            .unwrap();
+        assert!(fresh.request(HostCommand::Status).unwrap().error.is_none());
+        assert_eq!(
+            fresh
+                .request(HostCommand::Shutdown)
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "role_refused"
+        );
+        replacement.shutdown().unwrap();
+    }
+
+    #[test]
     fn protocol_refusals_preserve_native_error_and_do_not_disclose_credentials() {
         let error = HostRefusal::from(BundleError::Io(std::io::Error::from_raw_os_error(13)));
         assert_eq!(error.code, "io");
@@ -2626,6 +3069,7 @@ mod tests {
     #[test]
     fn ordinary_attachment_and_history_use_real_authenticated_loopback() {
         let host = WriterHost::start(HostConfig {
+            scheduler_settings: None,
             project: "unit-host".into(),
             path: None,
             roots: SessionRoots::default(),
@@ -2679,6 +3123,7 @@ mod tests {
                 snapshot.history_sha256 = "0".repeat(64);
             }
             let result = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "fu3-bootstrap".into(),
                 path: None,
                 roots: SessionRoots::default(),
@@ -2721,6 +3166,7 @@ mod tests {
         let mut snapshot = HostSnapshot::capture(&core).unwrap();
         snapshot.history_sha256 = "0".repeat(64);
         let mut owner = HostCommandOwner::open(HostConfig {
+            scheduler_settings: None,
             project: "unit-snapshot".into(),
             path: None,
             roots: SessionRoots::default(),
@@ -2735,5 +3181,7 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod c12_tests;
+#[cfg(test)]
+mod ja_s3_host;
 #[cfg(all(test, target_os = "linux"))]
 mod s2h_tests;

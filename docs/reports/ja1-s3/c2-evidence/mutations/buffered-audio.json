@@ -1,0 +1,36 @@
+{
+  "name": "buffered-audio",
+  "witness": "owned_io::tests::pf1::s3_pf1_latched_audio_rejects_buffered_output",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-media/src/audio.rs",
+      "        self.input.audio(&decoded)?;",
+      "        // mutation: accept decoded audio without receipt validation"
+    ]
+  ],
+  "expected_red": {
+    "text": "C2_PF1_BUFFERED_AUDIO_REJECTED",
+    "location": null
+  },
+  "baseline_manifest_sha256": "104722414cb9091a8f7b048fed5bee05bab478317f10a90e250fabe6d484cbc9",
+  "witness_sha256": "0bebd27556b03666b59fc661f861cd461aac0892f1312a831b13e0267401492d",
+  "source_sha256": {
+    "crates/kinewright-media/src/audio.rs": "a993c6bea1748e9d99a1cc8e5a27a9a6142135f50c5b0820131f89694e099161"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-media/src/audio.rs": "0131a0e4cf6e14da674f429b21787813c7b264fb664fe5b3148630c9712adbe5"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-c2/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-media --lib owned_io::tests::pf1::s3_pf1_latched_audio_rejects_buffered_output -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "c6f63048b0b1442d3c26152ddd941a010a69b7c3c4a65c69cd0ea89a592ed637",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1230 filtered out; finished in 0.18s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "6ff3afacdb6589a1ff24caebb5f9b31e5b98aa23b0d6d1277daed65a31b2d104",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1230 filtered out; finished in 0.14s"
+  ],
+  "restored": true
+}

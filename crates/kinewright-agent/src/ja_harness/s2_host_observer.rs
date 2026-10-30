@@ -14,6 +14,7 @@ pub(super) fn observe(root: &Path, revised: bool) -> Result<Value, String> {
         return Ok(json!({"control":local_control,"surface":"pending_baseline_witness"}));
     }
     let host = WriterHost::start(HostConfig {
+        scheduler_settings: None,
         project: "s0-c8-host-auth-control".into(),
         path: None,
         roots: SessionRoots {

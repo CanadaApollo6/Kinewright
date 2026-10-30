@@ -1461,9 +1461,9 @@ impl KinewrightApp {
         }
         let server = McpServer::start_investigator_session(
             branch.core(),
-            Arc::clone(&self.playback),
-            Arc::clone(&self.analysis),
-            Arc::clone(&self.exporter),
+            self.projects[project_index].media().playback,
+            self.projects[project_index].analysis(),
+            self.projects[project_index].media().exporter,
             Arc::clone(&self.projects[project_index].agent_project_path),
             Arc::clone(&self.projects[project_index].incidents),
             &INVESTIGATOR_CAPABILITY_DENYLIST,

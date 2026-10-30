@@ -338,7 +338,7 @@ fn seek_positions(duration_frames: i64, count: usize) -> Vec<TimeCode> {
 
 /// Request one frame and wait for its exact receipt, validating the evidence.
 fn timed_seek(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     frames: &crossbeam_channel::Receiver<kinewright_core::PreviewFrame>,
     at: TimeCode,
 ) -> Result<(Duration, (u32, u32)), Box<dyn Error>> {
@@ -392,7 +392,7 @@ struct PlaybackLaneSpec {
 
 #[allow(clippy::too_many_lines)]
 fn run_playback_lane(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     workdir: &Path,
     spec: &PlaybackLaneSpec,
     seek_override: Option<usize>,
@@ -573,7 +573,7 @@ fn expect_document_changed(event: Event, what: &str) -> Result<Arc<Document>, Bo
 
 #[allow(clippy::too_many_lines)]
 fn run_agent_lane(
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     workdir: &Path,
     plans: usize,
 ) -> Result<serde_json::Value, Box<dyn Error>> {
@@ -825,7 +825,15 @@ fn heavy_spec() -> PlaybackLaneSpec {
 fn run() -> Result<serde_json::Value, Box<dyn Error>> {
     let config = parse_args()?;
     fs::create_dir_all(&config.workdir)?;
-    let engine = FfmpegMediaEngine::new_with_data_dir(config.workdir.join("engine-cache"))?;
+    let backend = Arc::new(FfmpegMediaEngine::new_with_data_dir(
+        config.workdir.join("engine-cache"),
+    )?);
+    let engine = backend.legacy_media(
+        kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap(),
+        Arc::new(Document::default()),
+    );
     let mut lanes = serde_json::Map::new();
     for lane in &config.lanes {
         let value = match lane.as_str() {

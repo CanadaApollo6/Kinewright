@@ -22,7 +22,7 @@ use serde_json::json;
 #[tokio::test(flavor = "multi_thread")]
 async fn compact_runtime_applies_a_plan_and_rejects_direct_internal_tools() {
     let core = Core::spawn(Document::default()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -130,7 +130,7 @@ async fn compact_runtime_applies_a_plan_and_rejects_direct_internal_tools() {
 async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation() {
     let original = edit_plan_document();
     let core = Core::spawn(original.clone()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let client =
@@ -217,7 +217,7 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
         color_token: 0,
     });
     let core = Core::spawn(document).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -274,7 +274,7 @@ async fn a_cancelled_tool_call_cancels_its_waiting_frame_proof() {
     ];
     arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
     let generated = GeneratedMedia::ffmpeg("pf1-cancel", &arguments, "mp4");
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core, media.clone(), media.clone()).unwrap();
@@ -336,7 +336,7 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
     arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
     arguments.extend(["-c:a", "aac", "-shortest"]);
     let generated = GeneratedMedia::ffmpeg("m3", &arguments, "mp4");
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
     document.tracks[0].clips[0].effects.push(Effect {
@@ -552,7 +552,7 @@ fn two_shot_color_document(asset: &MediaAsset) -> Document {
 #[tokio::test(flavor = "multi_thread")]
 async fn cc1_color_context_plan_and_commit_advance_the_revision_exactly_once() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -643,7 +643,7 @@ async fn cc1_color_context_plan_and_commit_advance_the_revision_exactly_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mo1_plan_motion_push_in_applies() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let duration = asset.duration.0;
     let core = Core::spawn(single_clip_document(asset)).unwrap();
@@ -714,7 +714,7 @@ async fn mo1_plan_motion_push_in_applies() {
 #[allow(clippy::too_many_lines)]
 async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -993,7 +993,7 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
 #[allow(clippy::too_many_lines)]
 async fn cc3_color_wheels_plan_and_commit_create_the_ordered_node() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -1136,7 +1136,7 @@ async fn cc3_color_wheels_plan_and_commit_create_the_ordered_node() {
 #[allow(clippy::too_many_lines)]
 async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let warm = kinewright_media::BuiltinLook::Warm;
     let mut document = single_clip_document(asset);
@@ -1293,7 +1293,7 @@ async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
 #[allow(clippy::too_many_lines)]
 async fn cc4_convert_legacy_look_submits_the_batch_the_evidence_publishes() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
     let legacy_look = |id: u64, intensity: i64| Effect {
@@ -1457,7 +1457,7 @@ async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availa
     let imported = store.import_lut_asset(&source).unwrap();
 
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
     document.lut_assets = vec![imported.into_lut_asset(kinewright_core::LutAssetId(1))];
@@ -1528,7 +1528,7 @@ async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availa
 #[tokio::test(flavor = "multi_thread")]
 async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_renderer() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let warm = kinewright_media::BuiltinLook::Warm;
     let mut unpublished = warm.to_lut_asset(kinewright_core::LutAssetId(1));
@@ -1604,7 +1604,7 @@ async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_
 #[tokio::test(flavor = "multi_thread")]
 async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(two_shot_color_document(&asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -1698,7 +1698,7 @@ async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
 #[allow(clippy::too_many_lines)]
 async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let duration = asset.duration.0;
     let core = Core::spawn(single_clip_document(asset)).unwrap();
@@ -1968,7 +1968,7 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero() {
     let generated = managed_color_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -2584,7 +2584,7 @@ async fn cc7_prepare_commit_and_compare(
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let core = Core::spawn(Document::default()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -2768,7 +2768,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
 #[tokio::test(flavor = "multi_thread")]
 async fn au1_set_track_mix_round_trips_through_edit_plans_and_state() {
     let core = Core::spawn(edit_plan_document()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -2879,7 +2879,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
     arguments.extend(["-c:a", "aac", "-shortest"]);
     let generated = GeneratedMedia::ffmpeg("au1-levels", &arguments, "mp4");
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
 
     let mut document = single_clip_document(asset.clone());
@@ -3069,7 +3069,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
 #[allow(clippy::too_many_lines)]
 async fn au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_state() {
     let core = Core::spawn(edit_plan_document()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -3243,7 +3243,7 @@ fn rendered_curve(text: &str, key: &str) -> String {
 #[allow(clippy::too_many_lines)]
 async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit_plans_and_state() {
     let core = Core::spawn(edit_plan_document()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -3432,7 +3432,7 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
 #[allow(clippy::too_many_lines)]
 async fn au4_audio_bus_and_master_fader_curves_round_trip_and_clear_when_omitted() {
     let core = Core::spawn(edit_plan_document()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -3582,7 +3582,7 @@ async fn au4_audio_bus_and_master_fader_curves_round_trip_and_clear_when_omitted
 #[tokio::test(flavor = "multi_thread")]
 async fn au4_get_audio_levels_reports_both_track_automation_curves() {
     let generated = au3_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let duration = document.duration.0;
@@ -3718,7 +3718,7 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
     arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
     arguments.extend(["-c:a", "aac", "-shortest"]);
     let generated = GeneratedMedia::ffmpeg("au2-spectrum", &arguments, "mp4");
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let duration = document.duration.0;
@@ -4005,7 +4005,7 @@ fn assert_integer_leaves(path: &str, value: &serde_json::Value) {
 #[allow(clippy::too_many_lines)]
 async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
     let generated = au3_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let duration = document.duration.0;
@@ -4261,7 +4261,7 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
 #[allow(clippy::too_many_lines)]
 async fn au3_get_audio_qc_measures_the_real_mix() {
     let generated = au3_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let duration = document.duration.0;
@@ -4523,7 +4523,7 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
 #[allow(clippy::too_many_lines)]
 async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
     let generated = au3_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let duration = document.duration.0;
@@ -4837,7 +4837,7 @@ fn au5_effect_documentation_hatches_the_noise_profile() {
 #[allow(clippy::too_many_lines)]
 async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
     let generated = au3_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -4973,7 +4973,7 @@ async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
 #[allow(clippy::too_many_lines)]
 async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_material() {
     let generated = au3_hot_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -5210,7 +5210,7 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
 #[allow(clippy::too_many_lines)]
 async fn au3_queue_export_normalizes_and_verifies_audio() {
     let generated = au3_sine_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let directory = std::env::temp_dir().join(format!(
         "kinewright-au3-queue-{}-{:?}",
@@ -5385,7 +5385,7 @@ async fn au3_queue_export_normalizes_and_verifies_audio() {
 async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_grade() {
     let reference_media = cc7_camera_source(Cc7Camera::A);
     let candidate_media = cc7_camera_source(Cc7Camera::B);
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let reference = media.probe(reference_media.path()).unwrap();
     let candidate = media.probe(candidate_media.path()).unwrap();
     let candidate_start = reference.duration.0;
@@ -5675,7 +5675,7 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
     let reference_media = cc7_camera_source(Cc7Camera::A);
     let recoverable_media = cc7_camera_source(Cc7Camera::C1);
     let unrecoverable_media = cc7_camera_source(Cc7Camera::C2);
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
 
     let reference = media.probe(reference_media.path()).unwrap();
     let recoverable = media.probe(recoverable_media.path()).unwrap();
@@ -6067,7 +6067,7 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
     );
 
     let generated = cc7_log_source();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let carrier = media.probe(generated.path()).unwrap();
     let base = single_clip_document(carrier);
     let expected = cc7_canonical_document(
@@ -6301,7 +6301,7 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
 #[allow(clippy::too_many_lines)]
 async fn cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone() {
     let generated = cc7_camera_source(Cc7Camera::A);
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let base = single_clip_document(asset);
     let expected = cc7_canonical_document(
@@ -6603,7 +6603,7 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     let cube_sha = kinewright_media::sha256_bytes(&std::fs::read(&cube).unwrap());
 
     let generated = cc7_camera_source(Cc7Camera::A);
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let warm = kinewright_media::BuiltinLook::Warm;
     let mut base = single_clip_document(asset);
@@ -6930,7 +6930,7 @@ fn cc7_copy_directory(from: &std::path::Path, to: &std::path::Path) {
 #[allow(clippy::too_many_lines)]
 async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
     let generated = cc7_tracked_source();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let base = single_clip_document(asset);
     let expected = cc7_canonical_document(
@@ -7430,7 +7430,7 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cc7_f2_the_default_floor_does_not_refuse() {
     let generated = cc7_tracked_source();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let core = Core::spawn(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -7598,7 +7598,7 @@ const PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS: i64 = 50;
 async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
     let music_media = au4_music_media();
     let dialogue_media = au4_dialogue_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let music = media.probe(music_media.path()).unwrap();
     let dialogue = media.probe(dialogue_media.path()).unwrap();
     assert_eq!(music.duration, TimeCode(360), "12 s at 30 fps");
@@ -7782,7 +7782,7 @@ async fn au4_music_track_loudness(
 #[tokio::test(flavor = "multi_thread")]
 async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() {
     let generated = au4_music_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let mut document = single_clip_document(asset);
     // An editor-set fade-in the planner must not overwrite.
@@ -8020,7 +8020,7 @@ async fn au5_master_snr(client: &RunningService<RoleClient, ()>) -> i64 {
 #[allow(clippy::too_many_lines)]
 async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
     let noisy = au5_repair_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(noisy.path()).unwrap();
     assert_eq!(asset.kind, MediaKind::Audio);
     assert_eq!(asset.duration, TimeCode(90), "3 s at the 30 fps audio grid");
@@ -8119,7 +8119,7 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
     server.shutdown();
 
     let clean = au5_clean_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(clean.path()).unwrap();
     let core = Core::spawn(au5_audio_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -8264,7 +8264,7 @@ async fn au5_the_repair_and_normalization_planners_agree_in_either_order() {
     });
     for repair_first in [true, false] {
         let generated = au5_repair_media();
-        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
         let asset = media.probe(generated.path()).unwrap();
         let core = Core::spawn(au5_audio_document(asset)).unwrap();
         let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -8435,7 +8435,7 @@ async fn au5_approve_capture(broker: kinewright_agent::ConfirmationBroker, appro
 #[allow(clippy::too_many_lines)]
 async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
     let generated = au5_repair_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let clip = |id: u64, at: i64| Clip {
         enabled: true,
@@ -8685,7 +8685,7 @@ fn document_source_name(core: &Core, asset: AssetId) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
     let generated = au5_repair_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     assert_eq!(asset.fps, Rational::new(30, 1).unwrap());
     let clip = |id: u64, at: i64| Clip {
@@ -8831,7 +8831,7 @@ fn au5_room_tone_media_of(mono_samples: usize) -> GeneratedMedia {
 #[tokio::test(flavor = "multi_thread")]
 async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
     let generated = au5_long_room_tone_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     assert_eq!(
         asset.duration,
@@ -8941,7 +8941,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
 #[tokio::test(flavor = "multi_thread")]
 async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
     let generated = au5_ntsc_long_room_tone_media();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     assert_eq!(
         asset.duration,
@@ -9068,7 +9068,10 @@ struct Au6AgentScene {
 /// use. `FfmpegMediaEngine::probe` allocates `next_asset_id`; a throwaway
 /// engine would leave the server's counter at 1 and `capture_room_tone`'s
 /// `AddAsset` would collide with the dialogue asset.
-fn au6_agent_scene(engine: &FfmpegMediaEngine, scenario: Au6Scenario) -> Au6AgentScene {
+fn au6_agent_scene(
+    engine: &kinewright_media::SessionMedia,
+    scenario: Au6Scenario,
+) -> Au6AgentScene {
     let spec = au6_spec(scenario);
     let generated = au6_scenario_sources(scenario);
     let fps = Rational::new(AU6_SOURCE_FPS, 1).expect("25 fps");
@@ -9238,7 +9241,7 @@ async fn au6_decide_capture(broker: kinewright_agent::ConfirmationBroker, approv
 )]
 #[allow(clippy::too_many_lines)]
 async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -9327,7 +9330,7 @@ async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
 )]
 #[allow(clippy::too_many_lines)]
 async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -9452,7 +9455,7 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
 )]
 #[allow(clippy::too_many_lines)]
 async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::LocationDialogue);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let project = kinewright_media::test_support::TempDirectory::new("au6-a3");
@@ -9685,7 +9688,7 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
     server.shutdown();
 
     let unsaved = Core::spawn(scene.document.clone()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(unsaved, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -9717,7 +9720,7 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 async fn au6_a4_the_multicam_cuts_leave_the_master_audio_untouched() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Multicam);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -9820,7 +9823,7 @@ async fn au6_queue_and_poll(
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server =
@@ -9857,7 +9860,7 @@ async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
     let core = Core::spawn(scene.document.clone()).unwrap();
     let server =
@@ -9949,7 +9952,7 @@ async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn au6_b_a_clip_whose_head_window_is_silent_gets_no_fade() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
     let core = Core::spawn(scene.document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
@@ -10043,7 +10046,10 @@ fn in1_tagged_mp4_probe() -> kinewright_core::ColorDescription {
 /// The returned [`GeneratedMedia`] is the fixture's `Drop` guard (IN1 §3 rule
 /// 11): hold it for as long as the document is in use, or the file is removed
 /// from under the decoder.
-fn in1_document(media: &FfmpegMediaEngine, source: In1Source) -> (GeneratedMedia, Document) {
+fn in1_document(
+    media: &kinewright_media::SessionMedia,
+    source: In1Source,
+) -> (GeneratedMedia, Document) {
     let generated = in1_source(source);
     let asset = media
         .probe(generated.path())
@@ -10161,7 +10167,7 @@ fn in1_recovery_plan_operation(incident: &serde_json::Value) -> serde_json::Valu
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_none() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_untagged_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     assert_eq!(
         document.media_pool[0].color_description,
@@ -10234,7 +10240,7 @@ async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_no
     );
 
     // The tagged twin, decoded the same way and offered the same log.
-    let twin = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let twin = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_tagged_fixture, tagged) = in1_document(&twin, In1Source::TaggedMp4);
     assert_eq!(
         tagged.media_pool[0].color_description,
@@ -10283,7 +10289,7 @@ async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_no
 /// ordinary edit path, then records the outcome.
 #[tokio::test(flavor = "multi_thread")]
 async fn in1_the_agent_applies_the_recovery_and_records_the_outcome() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -10349,7 +10355,7 @@ async fn in1_the_agent_applies_the_recovery_and_records_the_outcome() {
 /// changes nothing, in the shape of `cc7_assert_stale_revision`.
 #[tokio::test(flavor = "multi_thread")]
 async fn in1_a_stale_resolve_is_refused_and_changes_nothing() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -10404,7 +10410,7 @@ async fn in1_a_stale_resolve_is_refused_and_changes_nothing() {
 /// byte for byte, provenance included, and clears the record.
 #[tokio::test(flavor = "multi_thread")]
 async fn in1_the_revert_restores_the_probed_description_and_clears_the_record() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -10472,7 +10478,7 @@ async fn in1_the_revert_restores_the_probed_description_and_clears_the_record() 
 /// claimed outcome and refuses by typed code when the two disagree.
 #[tokio::test(flavor = "multi_thread")]
 async fn in1_a_wrong_outcome_claim_is_refused_by_code() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
@@ -10554,7 +10560,7 @@ async fn in1_a_wrong_outcome_claim_is_refused_by_code() {
 /// IN1 §6.1 rule 3 and §7 rule 9: neither capability is callable as a tool.
 #[tokio::test(flavor = "multi_thread")]
 async fn in1_neither_capability_is_callable_as_a_tool() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
@@ -10615,7 +10621,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// `preview_solo` is registry-only too.
 #[tokio::test(flavor = "multi_thread")]
 async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
@@ -10741,7 +10747,7 @@ async fn in2_the_scripted_driver_and_the_pump_are_public_surface() {
     use kinewright_core::{AgentDriver, SessionConfig};
 
     let core = Core::spawn(Document::default()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core, media.clone(), media).unwrap();
 
     let call = |tool: &str| ScriptedCall {
@@ -10805,7 +10811,7 @@ async fn in2_the_scripted_driver_and_the_pump_are_public_surface() {
 #[tokio::test(flavor = "multi_thread")]
 async fn in2b_get_incidents_returns_the_observed_name() {
     let core = Core::spawn(Document::default()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10921,7 +10927,7 @@ fn mo2_solo_stack(mut document: Document, clips: Vec<Clip>) -> Document {
 }
 
 async fn mo2_solo_start(document: Document) -> (McpServer, RunningService<RoleClient, ()>) {
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(Core::spawn(document).unwrap(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -11132,7 +11138,7 @@ fn mo2_noise_media(width: u32, height: u32) -> GeneratedMedia {
 )]
 #[allow(clippy::too_many_lines)]
 async fn solo_strip_inside_byte_budget() {
-    let probe = FfmpegMediaEngine::new().unwrap();
+    let probe = FfmpegMediaEngine::legacy_fixture().unwrap();
     for (width, height) in [(1280_u32, 720_u32), (720, 1280)] {
         let media = mo2_noise_media(width, height);
         let asset = probe.probe(media.path()).unwrap();
@@ -11235,8 +11241,9 @@ fn r28_solo_peak_resources_and_elapsed() {
     use kinewright_agent::{SoloArgs, preview_solo};
     let gpu = kinewright_media::GpuContext::headless(true).unwrap();
     let data = kinewright_media::test_support::TempDirectory::new("mo2-r28-solo");
-    let engine =
-        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), data.path("data")).unwrap();
+    let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), data.path("data"))
+        .unwrap()
+        .into_legacy_fixture();
     let source = "testsrc2=size=1920x1080:rate=30";
     let mut arguments = vec!["-f", "lavfi", "-i", source, "-frames:v", "60"];
     arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
@@ -11700,7 +11707,7 @@ mod mo2_solo_review {
     #[test]
     fn oversized_thumbnail_is_typed() {
         let document = doc(8193, 1, 1, false);
-        let media = FfmpegMediaEngine::new().unwrap();
+        let media = FfmpegMediaEngine::legacy_fixture().unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             solo(&document, &args(false), &media)
         }));
@@ -11736,7 +11743,7 @@ mod mo2_solo_review {
             ],
             "mp4",
         );
-        let media = FfmpegMediaEngine::new().unwrap();
+        let media = FfmpegMediaEngine::legacy_fixture().unwrap();
         let mut asset = media.probe(fixture.path()).unwrap();
         asset.path = PathBuf::from(format!("/{}", "mo2-missing/".repeat(40_000)));
         let document = single_clip_document(asset);
@@ -12056,7 +12063,7 @@ mod mo2_solo_review {
     /// receives the strip, and both complete bodies obey the budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn new_wire_budget_includes_string_request_id() {
-        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
         let proof = Arc::new(ProofDouble {
             noise: true,
             ..ProofDouble::default()
@@ -12218,7 +12225,7 @@ mod mo2_solo_review {
     /// where the 2,000-byte payload used to pass R25.
     #[tokio::test(flavor = "multi_thread")]
     async fn final_panic_reply_is_fixed_and_bounded() {
-        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
         let proof = Arc::new(ProofDouble {
             panic_len: 2000,
             ..ProofDouble::default()
@@ -12250,7 +12257,7 @@ mod mo2_solo_review {
     /// (`import_media`'s probe) gets the same fixed text, never the payload.
     #[tokio::test(flavor = "multi_thread")]
     async fn final_non_solo_panic_is_fixed_text() {
-        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
         let proof = Arc::new(ProofDouble {
             panic_len: 2000,
             ..ProofDouble::default()

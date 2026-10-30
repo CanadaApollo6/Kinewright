@@ -314,7 +314,7 @@ impl SessionObserver for Observer<'_> {
 }
 fn drive(owner: &mut ContractOwner, steps: Vec<Step>) {
     let core = Core::spawn(Document::default()).unwrap();
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core, Arc::clone(&media) as _, media as _).unwrap();
     let script = (0..steps.len())
         .map(|i| ScriptedTurn::new(vec![], format!("intermediate-{i}")))

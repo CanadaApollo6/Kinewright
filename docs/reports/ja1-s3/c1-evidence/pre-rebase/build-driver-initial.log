@@ -1,0 +1,8 @@
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+   Compiling kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+   Compiling kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.62s

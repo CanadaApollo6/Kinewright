@@ -50,37 +50,54 @@ impl ProjectBundle {
         let reference = match selection {
             RecoverySelection::WorkingBranch(branch) => self.checkpoint_reference(branch)?,
             RecoverySelection::Checkpoint { root, branch } => {
-                if root.record_kind != RecordKind::RootCheckpoint {
-                    return Err(BundleError::Corrupt("recovery root kind".into()));
+                if root.record_kind == RecordKind::BranchCheckpoint {
+                    let versions = self.version_index()?;
+                    let descriptor = versions
+                        .snapshots
+                        .values()
+                        .find(|d| d.checkpoint_ref == *root)
+                        .ok_or_else(|| {
+                            BundleError::Identity("unindexed Studio checkpoint".into())
+                        })?;
+                    self.validate_snapshot(descriptor)?;
+                    let checkpoint = self.store.read_record::<BranchCheckpoint>(root)?;
+                    if checkpoint.branch_id != *branch {
+                        return Err(BundleError::Identity("Studio checkpoint branch".into()));
+                    }
+                    root.clone()
+                } else {
+                    if root.record_kind != RecordKind::RootCheckpoint {
+                        return Err(BundleError::Corrupt("recovery root kind".into()));
+                    }
+                    let bytes = self.store.read_checkpoint_bytes(root)?;
+                    let admission = BundleWriteAdmission::from_bytes_with_limits(
+                        None,
+                        bytes,
+                        self.store.usage_arc(),
+                        self.store.limits(),
+                    )?;
+                    admission.require_supported()?;
+                    let root = admission
+                        .data
+                        .file
+                        .as_ref()
+                        .and_then(|f| f.studio.as_ref())
+                        .ok_or(BundleError::Unsettled)?;
+                    if root.project_id != self.project_id
+                        && !self.origin_project_ids.contains(&root.project_id)
+                    {
+                        return Err(BundleError::Identity("recovery origin".into()));
+                    }
+                    let manifest = self
+                        .store
+                        .read_record::<StoreManifest>(&root.store_manifest_ref)?;
+                    super::validate_manifest_apis(&manifest, root.manual_switch_generation)?;
+                    self.store
+                        .read_record::<BTreeMap<BranchId, ObjectRef>>(&root.branch_index_ref)?
+                        .get(branch)
+                        .cloned()
+                        .ok_or_else(|| BundleError::Corrupt("recovery branch".into()))?
                 }
-                let bytes = self.store.read_checkpoint_bytes(root)?;
-                let admission = BundleWriteAdmission::from_bytes_with_limits(
-                    None,
-                    bytes,
-                    self.store.usage_arc(),
-                    self.store.limits(),
-                )?;
-                admission.require_supported()?;
-                let root = admission
-                    .data
-                    .file
-                    .as_ref()
-                    .and_then(|f| f.studio.as_ref())
-                    .ok_or(BundleError::Unsettled)?;
-                if root.project_id != self.project_id
-                    && !self.origin_project_ids.contains(&root.project_id)
-                {
-                    return Err(BundleError::Identity("recovery origin".into()));
-                }
-                let manifest = self
-                    .store
-                    .read_record::<StoreManifest>(&root.store_manifest_ref)?;
-                super::validate_manifest_apis(&manifest, root.manual_switch_generation)?;
-                self.store
-                    .read_record::<BTreeMap<BranchId, ObjectRef>>(&root.branch_index_ref)?
-                    .get(branch)
-                    .cloned()
-                    .ok_or_else(|| BundleError::Corrupt("recovery branch".into()))?
             }
         };
         let closure = self.store.closure(std::slice::from_ref(&reference))?;
@@ -232,14 +249,11 @@ impl ProjectBundle {
         if !changed {
             return Ok((source.clone(), origin));
         }
-        let roots = [
-            root.branch_index_ref.clone(),
-            root.input_manifest_ref.clone(),
-        ]
-        .into_iter()
-        .chain(root.receipt_index_ref.clone())
-        .chain(root.issuer_state_ref.clone())
-        .collect::<Vec<_>>();
+        let roots = root
+            .references()
+            .into_iter()
+            .filter(|reference| reference != &root.store_manifest_ref)
+            .collect::<Vec<_>>();
         let inventory = SupportInventory {
             required_fields: manifest.required_fields.clone(),
             required_kinds: manifest.required_kinds.clone(),
@@ -348,6 +362,10 @@ pub fn verify_projection_payloads(
     if before.inspection_document() != after.inspection_document()
         || left.branch_index_ref != right.branch_index_ref
         || left.input_manifest_ref != right.input_manifest_ref
+        || left.version_index_ref != right.version_index_ref
+        || left.feedback_index_ref != right.feedback_index_ref
+        || left.run_index_ref != right.run_index_ref
+        || left.claim_index_ref != right.claim_index_ref
         || left.receipt_index_ref != right.receipt_index_ref
         || left.issuer_state_ref != right.issuer_state_ref
     {
@@ -361,6 +379,16 @@ pub fn verify_projection_payloads(
     let rm = bundle
         .store
         .read_record::<StoreManifest>(&right.store_manifest_ref)?;
+    if right
+        .references()
+        .iter()
+        .filter(|reference| *reference != &right.store_manifest_ref)
+        .any(|reference| !rm.objects.contains(reference))
+    {
+        return Err(BundleError::Corrupt(
+            "L1 projected manifest omits root reference".into(),
+        ));
+    }
     let independent = |manifest: &StoreManifest| {
         manifest
             .durable_pins

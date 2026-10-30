@@ -3,7 +3,6 @@
 use crate::{LockfileHandle, bundle::BundleError};
 use std::path::{Component, Path, PathBuf};
 mod file_identity;
-#[cfg(unix)]
 pub(crate) use file_identity::FileIdentity;
 pub(crate) use file_identity::{file_matches_path, paths_match};
 #[cfg(target_os = "linux")]
@@ -244,6 +243,7 @@ pub struct ProjectNamespace {
     lock: Option<LockfileHandle>,
     uncertain: bool,
     read_only: bool,
+    read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
 }
 #[cfg(target_os = "linux")]
 type ProbeFailure = (
@@ -282,6 +282,22 @@ impl Drop for PreparedDestination {
     )
 )]
 impl ProjectNamespace {
+    pub(crate) fn lend_read_authority(
+        &mut self,
+        authority: kinewright_media::owned_io::ReadAuthority,
+    ) -> Result<(), BundleError> {
+        if !self.read_only || self.lock.is_some() {
+            return Err(BundleError::Identity(
+                "snapshot reader must be unclaimed".into(),
+            ));
+        }
+        self.read_authority = Some(authority);
+        self.verify_read_authority()
+    }
+    pub(crate) fn read_authority(&self) -> Option<kinewright_media::owned_io::ReadAuthority> {
+        self.read_authority.clone()
+    }
+
     pub(crate) fn probe_retained_namespace(&self) -> Result<(), BundleError> {
         #[cfg(target_os = "linux")]
         {
@@ -563,6 +579,9 @@ impl ProjectNamespace {
         }
     }
     pub fn verify(&self) -> Result<(), BundleError> {
+        if self.read_only {
+            return Err(BundleError::Identity("read-only namespace".into()));
+        }
         if self.uncertain {
             return Err(BundleError::Unsettled);
         }
@@ -573,7 +592,17 @@ impl ProjectNamespace {
     }
     pub(crate) fn verify_read_authority(&self) -> Result<(), BundleError> {
         if self.read_only {
-            return Err(BundleError::Identity("read-only namespace".into()));
+            self.read_authority
+                .as_ref()
+                .ok_or_else(|| BundleError::Identity("unleased read-only namespace".into()))?
+                .check()
+                .map_err(|e| BundleError::Identity(e.to_string()))?;
+            #[cfg(target_os = "linux")]
+            {
+                linux::verify_parent(self)?;
+                linux::verify_directories(self)?;
+            }
+            return Ok(());
         }
         if let Some(lock) = self.lock.as_ref() {
             lock.verify()
@@ -697,6 +726,7 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported.into())
         }
     }
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn publish_immutable(
         &mut self,
         name: &PortablePath,
@@ -755,6 +785,20 @@ impl ProjectNamespace {
     pub fn inspect_windows_parents(path: &Path) -> Result<Vec<std::fs::File>, BundleError> {
         windows::pin_parents(path)
     }
+    pub(crate) fn publish_hashed(
+        &mut self,
+        write: impl FnOnce(&mut std::fs::File) -> Result<crate::bundle_records::ObjectRef, BundleError>,
+    ) -> Result<crate::bundle_records::ObjectRef, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::publish_hashed(self, write)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = write;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn publish_with(
         &mut self,
         path: &PortablePath,
@@ -774,6 +818,9 @@ impl ProjectNamespace {
         &self,
         path: &PortablePath,
     ) -> Result<Option<std::fs::File>, BundleError> {
+        if self.read_authority.is_some() {
+            self.verify_read_authority()?;
+        }
         #[cfg(target_os = "linux")]
         {
             linux::open_relative(self, path)

@@ -1912,6 +1912,14 @@ pub struct SourceColorRefusal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
+    #[error(
+        "owned_media_admission_required: activate Studio to preview or analyse this project's owned media"
+    )]
+    MediaAdmissionRequired,
+    #[error("owned_media_temporarily_unavailable: waiting for renewed snapshot read authority")]
+    MediaReadTemporarilyUnavailable,
+    #[error("owned_media_operation_unavailable: this operation has no certified source route")]
+    OwnedMediaOperationUnavailable,
     #[error("media operation is not implemented")]
     NotImplemented,
     #[error("export was cancelled")]
@@ -2086,7 +2094,10 @@ impl MediaError {
             Self::MatteProof(error) => Some(error.code()),
             Self::MatteCoverage(error) => Some(error.code()),
             Self::Store { code, .. } => Some(code),
-            Self::NotImplemented
+            Self::MediaReadTemporarilyUnavailable => Some("owned_media_temporarily_unavailable"),
+            Self::MediaAdmissionRequired
+            | Self::OwnedMediaOperationUnavailable
+            | Self::NotImplemented
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
             | Self::MixLoudnessRangeTooShort { .. }
@@ -2589,6 +2600,9 @@ pub trait Analysis: Send + Sync {
     fn analysis_jobs(&self, asset: &MediaAsset) -> Vec<AnalysisJobStatus> {
         analysis_job_statuses(self, asset)
     }
+    /// Cancel all analysis owned by this session before its authority is revoked.
+    fn cancel_all_analysis(&self) {}
+
     /// Cooperatively cancel queued or running work. Repeated cancellation is harmless.
     fn cancel_analysis(&self, _asset: &MediaAsset, _kind: AnalysisKind) -> bool {
         false
@@ -2605,6 +2619,11 @@ pub trait Analysis: Send + Sync {
     ) -> bool;
     /// Bounded stream of ready waveform and thumbnail data.
     fn visual_asset_results(&self) -> Receiver<VisualAssetResult>;
+    /// Authority owning retained timeline visuals. Stateless backends return none.
+    /// A revoked session returns none so callers discard its cached pixels.
+    fn visual_cache_identity(&self) -> Option<crate::LegacyMediaIdentity> {
+        None
+    }
     /// Return inventory for the fixed media-cache families. The default is an
     /// empty inventory for stateless test backends.
     fn cache_inventory(&self) -> MediaCacheInventory {

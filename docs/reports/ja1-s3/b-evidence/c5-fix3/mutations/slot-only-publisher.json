@@ -1,0 +1,15 @@
+{
+  "case": "slot-only-publisher",
+  "source": "crates/kinewright-project/src/studio_store.rs",
+  "test": "s3_voice_fix3_direct_original_cannot_bypass_pending",
+  "marker": "S3_VOICE_SLOT_ONLY_PUBLISHER",
+  "original_sha256": "d6cdb93eefeba67dcb95af32c35c490deabdd52628950386fb2b022aab1bfe57",
+  "mutated_sha256": "dad717d5e37ba434492cc05540a14e54d23ccbdd99da4793bc7c940c4298db96",
+  "red_exit": 101,
+  "red_log_sha256": "00eea0556c21f035c0a508c64a4724e11a277c67f8947b5707657171c9641a62",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "0bf3cf25afd90227fc6e2682d307c68ff3ececacbb1eb996ccb8963e878c3257",
+  "runtime_green": true
+}

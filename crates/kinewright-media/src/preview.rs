@@ -36,7 +36,7 @@ use crate::{
     render::{
         DecodeStrategy, FRAME_CACHE_BYTE_BUDGET, FrameRenderer, FrameSizes, PREFETCH_FRAMES,
         ReaderDemand, RenderScale, SourceSpec, SuppliedFrames, TitleCacheKey, VideoSourceKey,
-        document_source_keys, reader_demand,
+        document_source_keys,
     },
     sched::{
         Admission, Next, PausedView, PermitBook, Planned, Poll, Posted, Readers, WaitStep,
@@ -49,6 +49,8 @@ use crate::{
 pub(crate) const AGENT_QUEUE_LIMIT: usize = 8;
 /// A playback hold re-reads the clock this often while it waits.
 const HOLD_POLL: Duration = Duration::from_millis(1);
+/// Revocation has no wakeup, so idle readers and permit waiters poll for it.
+const AUTHORITY_POLL: Duration = Duration::from_millis(50);
 
 /// Amendment R43 (RS-1): the longest a new document's first frame (or an
 /// agent's cache clear) waits for retired readers to close their files.
@@ -193,6 +195,8 @@ impl CachedFrame for Pinned {
 /// its stamp, bound by the worker when it posts (R-1).
 #[derive(Clone)]
 pub(crate) struct Scene {
+    pub(crate) inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+    pub(crate) legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     pub(crate) document: Arc<Document>,
     pub(crate) lut: Arc<LutLibrary>,
     /// Bumped by every `set_document`: the preview clears its caches.
@@ -216,6 +220,8 @@ pub(crate) struct TransportJob {
 
 pub(crate) enum AgentWork {
     Thumbnail {
+        inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+        legacy_media: Option<kinewright_core::LegacyMediaGrant>,
         document: Arc<Document>,
         lut: Arc<LutLibrary>,
         at: TimeCode,
@@ -331,6 +337,9 @@ impl DecodeRecord {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+type DecodeGate = (i64, Sender<()>, Receiver<()>);
+
 /// The worker/preview hand-off: one leaf lock and the `ready` condvar.
 pub(crate) struct Lane {
     state: Mutex<LaneState>,
@@ -353,6 +362,8 @@ pub(crate) struct Lane {
     /// sender is gone.
     #[cfg(test)]
     pub(crate) hold_at: Mutex<Option<(i64, Receiver<()>)>>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) decode_hold: Mutex<Option<DecodeGate>>,
     /// Amendment R53's ordering witness: signal the next applied reader
     /// plan's target and transport version, after releasing `Sched`.
     #[cfg(test)]
@@ -449,6 +460,8 @@ impl Lane {
             gate: Mutex::default(),
             #[cfg(test)]
             hold_at: Mutex::default(),
+            #[cfg(any(test, feature = "test-util"))]
+            decode_hold: Mutex::default(),
             #[cfg(test)]
             plan_posted: Mutex::default(),
             #[cfg(test)]
@@ -522,18 +535,23 @@ impl Lane {
 
     /// H-5 `PermitWait`: queue for `want` permits and wait at the FIFO; `None`
     /// once the request is cancelled or the lane stops.
-    fn acquire(&self, id: u64, want: usize) -> Option<usize> {
+    fn acquire(&self, id: u64, want: usize, source: Option<&SourceSpec>) -> Option<usize> {
         let mut book = self.book();
         book.enqueue(id, want);
         let granted = loop {
+            if source.is_some_and(|source| source.check_authority().is_err()) {
+                book.cancel(id);
+                break None;
+            }
             match book.poll(id) {
                 Poll::Granted(granted) => break Some(granted),
                 Poll::Cancelled => break None,
                 Poll::Wait => {
                     book = self
                         .permits_cv
-                        .wait(book)
-                        .unwrap_or_else(PoisonError::into_inner);
+                        .wait_timeout(book, AUTHORITY_POLL)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
                     #[cfg(test)]
                     {
                         let hook = self.woke.lock().expect("woke").clone();
@@ -913,22 +931,71 @@ thread_local! {
     pub(crate) static FAIL_READER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+struct ReaderThread {
+    thread: Option<JoinHandle<()>>,
+    work: Option<kinewright_core::LegacyMediaWork>,
+}
+impl ReaderThread {
+    fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+    fn join(mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.work.take();
+    }
+}
+struct JoinBeforeRelease(ReaderThread);
+impl Drop for JoinBeforeRelease {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.thread.take() {
+            let _ = thread.join();
+        }
+        self.0.work.take();
+    }
+}
+impl Drop for ReaderThread {
+    fn drop(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        if thread.is_finished() {
+            let _ = thread.join();
+        } else {
+            // A detached reader still fences activation until its thread is joined.
+            let joined = JoinBeforeRelease(Self {
+                thread: Some(thread),
+                work: self.work.take(),
+            });
+            let _ = thread::Builder::new()
+                .name("kinewright-reader-retire".into())
+                .spawn(move || drop(joined));
+        }
+    }
+}
+
 /// H-1: start reader `id`. E-2: a spawn failure is prefixed `decode-reader:`.
 fn spawn_reader(
     lane: &Arc<Lane>,
     (id, spec): (u64, SourceSpec),
     stop: &Arc<AtomicBool>,
-) -> Result<JoinHandle<()>, MediaError> {
+) -> Result<ReaderThread, MediaError> {
     #[cfg(test)]
     if FAIL_READER_SPAWN.with(std::cell::Cell::take) {
         return Err(MediaError::Backend(
             "decode-reader: spawn failed: injected".to_owned(),
         ));
     }
+    let work = spec.reader_work()?;
     let (lane, stop) = (Arc::clone(lane), Arc::clone(stop));
     let spawned = thread::Builder::new().name(format!("kinewright-decode-{id}"));
     spawned
         .spawn(move || read(&lane, id, &spec, &stop))
+        .map(|thread| ReaderThread {
+            thread: Some(thread),
+            work,
+        })
         .map_err(|error| MediaError::Backend(format!("decode-reader: spawn failed: {error}")))
 }
 
@@ -948,6 +1015,10 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     let mut state = lane.lock();
     loop {
         let now = lane.now();
+        if let Err(error) = spec.check_authority() {
+            state.readers.fail_start(id, &error);
+            break;
+        }
         let shutdown = state.shutdown;
         match state.readers.next(id, now, shutdown) {
             Next::Retire => {
@@ -963,7 +1034,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             Next::Wait { until } => {
                 #[cfg(test)]
                 crate::pf1_clock::waits(id);
-                state = state.wait_timeout(&lane.work, until.saturating_sub(now));
+                state =
+                    state.wait_timeout(&lane.work, until.saturating_sub(now).min(AUTHORITY_POLL));
             }
             // H-5: permits before a decoder exists (X-5), outside `Sched`.
             Next::Open { want } => {
@@ -972,7 +1044,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 lane.work.notify_all();
                 #[cfg(test)]
                 lane.notify(); // a test waiting for `PermitWait`
-                let granted = lane.acquire(id, want);
+                let granted = lane.acquire(id, want, Some(spec));
                 threads = granted.unwrap_or(0);
                 state = lane.lock();
                 state.readers.granted(id, granted, lane.now());
@@ -1015,6 +1087,14 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
                 lane.before_decode(id, at);
+                #[cfg(any(test, feature = "test-util"))]
+                {
+                    let gate = lane.decode_hold.lock().expect("decode gate").clone();
+                    if let Some((_, arrived, release)) = gate.filter(|(time, _, _)| *time == at) {
+                        let _ = arrived.try_send(());
+                        let _ = release.recv();
+                    }
+                }
                 #[cfg(test)]
                 if let Some(d13) = &lane.d13 {
                     d13.boundary(Some(at));
@@ -1276,11 +1356,16 @@ pub(crate) enum Attempt {
     Pending,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The bounded display handoff retains its non-cloneable lease inline"
+)]
 enum Image {
     Cpu(FrameTexture),
     Gpu(crate::DisplayFrame),
 }
 struct Rendered {
+    scene: Scene,
     at: TimeCode,
     stamp: FrameStamp,
     image: Image,
@@ -1320,7 +1405,7 @@ pub(crate) struct Preview {
     published: Option<(u64, i64)>,
     /// H-1: this preview's reader threads by id, joined when it goes
     /// (Amendment R47: within `RETIRE_DEADLINE`).
-    readers: Vec<(u64, JoinHandle<()>)>,
+    readers: Vec<(u64, ReaderThread)>,
     /// H-2/K-2: each reader's stop flag (a packet boundary): set for all
     /// when the preview goes, for one to stop its lookahead decode.
     stops: HashMap<u64, Arc<AtomicBool>>,
@@ -1379,7 +1464,7 @@ impl Drop for Preview {
             (self.readers.drain(..)).partition(|(id, _)| alive(&state, *id));
         drop(state);
         for (_, reader) in exited {
-            let _ = reader.join();
+            reader.join();
         }
         if !stuck.is_empty() {
             let detached = stuck.len() as u64;
@@ -1448,7 +1533,10 @@ impl Preview {
     /// back to back while no transport job is runnable.
     pub(crate) fn execute(&mut self, work: Work) {
         match work {
-            Work::Maintenance => self.renderer.maintain(),
+            Work::Maintenance => {
+                self.readers.retain(|(_, reader)| !reader.is_finished());
+                self.renderer.maintain();
+            }
             Work::Agent(job) => {
                 let playing = self.playback_running();
                 if playing {
@@ -1566,7 +1654,17 @@ impl Preview {
                 }
                 None if !wait => break None,
                 None => {
-                    if let Some(deadline) = self.renderer.maintenance_deadline() {
+                    let deadline = self.renderer.maintenance_deadline();
+                    if !self.readers.is_empty() {
+                        let due;
+                        (state, due) =
+                            Self::prune_readers((&self.lane, &mut self.readers), state, deadline);
+                        if due {
+                            break Some(Work::Maintenance);
+                        }
+                        continue;
+                    }
+                    if let Some(deadline) = deadline {
                         state = state.wait_timeout(
                             &self.lane.ready,
                             deadline.saturating_duration_since(Instant::now()),
@@ -1581,6 +1679,26 @@ impl Preview {
         // H-4: cancelled jobs' reply senders drop after unlock, unanswered.
         drop((discarded, superseded_jobs));
         work
+    }
+
+    /// A revoked reader exits by itself; drop its lease once it has. Returns
+    /// whether the renderer's maintenance deadline has passed.
+    fn prune_readers<'a>(
+        (lane, readers): (&Lane, &mut Vec<(u64, ReaderThread)>),
+        state: Sched<'a>,
+        deadline: Option<Instant>,
+    ) -> (Sched<'a>, bool) {
+        let poll = deadline.map_or(AUTHORITY_POLL, |deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(AUTHORITY_POLL)
+        });
+        let state = state.wait_timeout(&lane.ready, poll);
+        readers.retain(|(_, reader)| !reader.is_finished());
+        (
+            state,
+            deadline.is_some_and(|deadline| deadline <= Instant::now()),
+        )
     }
 
     fn bind(&mut self, generation: Option<u64>, lut: &Arc<LutLibrary>) {
@@ -1604,6 +1722,16 @@ impl Preview {
         at: TimeCode,
         wait: &FrameWait,
     ) -> Result<Option<Image>, Halt> {
+        self.renderer.set_inputs(scene.inputs.clone());
+        self.renderer.set_legacy_media(scene.legacy_media.clone());
+        if scene.inputs.is_none() && !scene.document.media_pool.is_empty() {
+            scene
+                .legacy_media
+                .as_ref()
+                .ok_or(Halt::Failed(MediaError::MediaAdmissionRequired))?
+                .check()
+                .map_err(Halt::Failed)?;
+        }
         let document = &*scene.document;
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
@@ -1637,9 +1765,18 @@ impl Preview {
             0
         };
         if self.generation != Some(scene.generation) {
-            self.forget_sources(document, scale, wait)?;
+            self.forget_sources(document, scale, wait, scene.inputs.is_some())?;
         }
-        let demand = reader_demand(document, at, resolution, scale, horizon, &mut self.sizes);
+        let demand = crate::render::reader_demand_with_inputs(
+            document,
+            at,
+            resolution,
+            scale,
+            horizon,
+            &mut self.sizes,
+            scene.inputs.as_deref(),
+            scene.legacy_media.as_ref(),
+        );
         let demand = demand.map_err(Halt::Failed)?;
         // Bound first: a new generation's cleared titles are not resident
         // when admission counts them (review B S2).
@@ -1812,8 +1949,13 @@ impl Preview {
         document: &Document,
         scale: RenderScale,
         wait: &FrameWait,
+        sealed: bool,
     ) -> Result<(), Halt> {
-        let keep = document_source_keys(document, scale);
+        let keep = if sealed {
+            std::collections::HashSet::new()
+        } else {
+            document_source_keys(document, scale, None, self.renderer.legacy_grant())
+        };
         self.sizes.retain(|key| keep.contains(key));
         let (retired, posted) = {
             let mut state = self.lane.lock();
@@ -2247,6 +2389,19 @@ impl Preview {
     }
 
     fn publish(&self, frame: Rendered) {
+        if let Some(inputs) = &frame.scene.inputs
+            && let Err(error) = inputs.check_read_authority()
+        {
+            self.fail(frame.stamp, error);
+            return;
+        }
+        let _access = match crate::locator::enter_retained(frame.scene.legacy_media.as_ref()) {
+            Ok(access) => access,
+            Err(error) => {
+                self.fail(frame.stamp, error);
+                return;
+            }
+        };
         match frame.image {
             Image::Cpu(texture) => send_latest(
                 &self.frames_tx,
@@ -2288,6 +2443,7 @@ impl Preview {
         };
         match self.render_transport(&job.scene, at, &wait) {
             Ok(Some(texture)) => self.publish(Rendered {
+                scene: job.scene.clone(),
                 at,
                 stamp: job.stamp,
                 image: texture,
@@ -2383,6 +2539,7 @@ impl Preview {
             }
         };
         let frame = Rendered {
+            scene: job.scene.clone(),
             at,
             stamp: job.stamp,
             image: texture,
@@ -2437,12 +2594,19 @@ impl Preview {
         }
         match work {
             AgentWork::Thumbnail {
+                inputs,
+                legacy_media,
                 document,
                 lut,
                 at,
                 max_width,
                 reply,
             } => {
+                // A paused wait suspended for this job resumes under its own
+                // authority: its demand's source keys carry that authority.
+                let resumed = self.renderer.authority();
+                self.renderer.set_inputs(inputs);
+                self.renderer.set_legacy_media(legacy_media);
                 self.bind(None, &lut);
                 let scale = RenderScale::Proxy { max_width };
                 let resolution = scale.output_resolution(document.resolution);
@@ -2455,6 +2619,7 @@ impl Preview {
                         pixels: (*frame.rgba).clone(),
                     });
                 self.settle_titles();
+                self.renderer.restore_authority(resumed);
                 #[cfg(test)]
                 let result = if self.faults.fail_render.swap(false, Ordering::AcqRel) {
                     Err(MediaError::Backend(
@@ -2545,6 +2710,7 @@ pub(crate) mod tests {
     use kinewright_core::Analysis;
 
     use super::*;
+    use crate::render::reader_demand;
     use crate::{
         cc1_fixtures::fallback_gpu, compositor::live_table_frames, engine::FfmpegMediaEngine,
         perf_fixtures::title_card, test_support::TempDirectory,
@@ -2612,7 +2778,7 @@ pub(crate) mod tests {
         clock: Arc<SharedClock>,
     ) -> (Preview, Receiver<PreviewFrame>) {
         let (frames_tx, frames_rx) = bounded(2);
-        let renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let preview = Preview::new(lane, renderer, clock, (frames_tx, frames_rx.clone()));
         (preview, frames_rx)
     }
@@ -2620,6 +2786,8 @@ pub(crate) mod tests {
     pub(crate) fn job(document: &Arc<Document>, kind: JobKind, stamp: FrameStamp) -> TransportJob {
         let lut = Arc::default();
         let scene = Scene {
+            inputs: None,
+            legacy_media: Some(crate::locator::fixture_grant()),
             document: Arc::clone(document),
             lut,
             generation: 1,
@@ -2676,6 +2844,8 @@ pub(crate) mod tests {
         preview.run_agent(
             AgentJob {
                 work: AgentWork::Thumbnail {
+                    inputs: None,
+                    legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                     document,
                     lut: Arc::default(),
                     at: TimeCode::ZERO,
@@ -2735,6 +2905,8 @@ pub(crate) mod tests {
         preview.run_agent(
             AgentJob {
                 work: AgentWork::Thumbnail {
+                    inputs: None,
+                    legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                     document: Arc::clone(&document),
                     lut: Arc::default(),
                     at: TimeCode(1),
@@ -2749,7 +2921,9 @@ pub(crate) mod tests {
         assert_eq!((thumbnail.width, thumbnail.height), (64, 64));
         let temp = TempDirectory::new("pf1-g1-routing");
         let gpu = fallback_gpu().context();
-        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into())
+            .unwrap()
+            .into_legacy_fixture();
         let proof = engine.monitor_proof_for_document(document, TimeCode(1));
         assert_eq!(proof.expect("a proof").image.width, 64);
         assert_eq!(live_table_frames(), before + 2, "thumbnail and proof: f32");
@@ -3266,7 +3440,7 @@ pub(crate) mod tests {
     fn scheduled_frames_match_the_synchronous_renderer() {
         let (document, _workload) = cut_document();
         let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
@@ -3323,7 +3497,7 @@ pub(crate) mod tests {
         let document = Arc::new(workload.0.clone());
         let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
         preview.lane.freeze_reader_clock();
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
@@ -3498,7 +3672,7 @@ pub(crate) mod tests {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         // A step: `Some(at)` a paused job, `None` an agent thumbnail at 35.
         // 59 (source 36) opens; 40 (17) is 19 below, beyond B = 16: it
         // seeks alone; 39 refills [7, 16]; 38 hits. With the agent: 40
@@ -3515,6 +3689,9 @@ pub(crate) mod tests {
                     let rings = preview.lane.lock().readers.ring_bytes();
                     let (reply, response) = bounded(1);
                     let work = AgentWork::Thumbnail {
+                        inputs: None,
+                        legacy_media: kinewright_core::MediaSourceOrigin::new_project()
+                            .legacy_media(),
                         document: Arc::clone(&document),
                         lut: Arc::default(),
                         at: TimeCode(35),
@@ -4563,7 +4740,7 @@ pub(crate) mod tests {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         reference.set_lut_library(Arc::clone(&lut));
         let mut synchronous = |document: &Document, at: i64| {
             let strategy = DecodeStrategy::Seek;
@@ -4723,7 +4900,7 @@ pub(crate) mod tests {
         *lane.woke.lock().expect("woke") = Some(barrier);
         let acquire = |id| {
             let (lane, (granted, grant)) = (Arc::clone(&lane), bounded(1));
-            thread::spawn(move || granted.send(lane.acquire(id, 1)));
+            thread::spawn(move || granted.send(lane.acquire(id, 1, None)));
             grant
         };
         let b = acquire(1);
@@ -4913,7 +5090,7 @@ pub(crate) mod tests {
         };
         let resolution = scale.output_resolution(a.resolution);
         let reference = |library: &Arc<LutLibrary>| {
-            let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+            let mut renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
             renderer.set_lut_library(Arc::clone(library));
             let frame =
                 renderer.render_live(&a, TimeCode(0), resolution, scale, DecodeStrategy::Seek);
@@ -4935,6 +5112,8 @@ pub(crate) mod tests {
         let (reply, response) = bounded(1);
         let thumbnail = AgentJob {
             work: AgentWork::Thumbnail {
+                inputs: None,
+                legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                 document: Arc::clone(&b),
                 lut: Arc::clone(&b_lut),
                 at: TimeCode(0),
@@ -5144,7 +5323,7 @@ pub(crate) mod tests {
             .values()
             .map(|(spec, _)| spec.frame_bytes)
             .max();
-        let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let frame = renderer.render_live(
             document,
             TimeCode(at),
@@ -6212,6 +6391,7 @@ pub(crate) mod tests {
     /// adopted with their charge while they fit, and dropped when they do
     /// not.
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one ledger lifetime witness")]
     fn thumbnail_rasters_are_charged_or_dropped() {
         use kinewright_core::{BlendMode, ClipContent, SolidColor, Track, TrackId, TrackKind};
         let n = 4u8;
@@ -6277,6 +6457,8 @@ pub(crate) mod tests {
         let thumbnail = |preview: &mut Preview| {
             let (reply, response) = bounded(1);
             let work = AgentWork::Thumbnail {
+                inputs: None,
+                legacy_media: kinewright_core::MediaSourceOrigin::new_project().legacy_media(),
                 document: Arc::clone(&document),
                 lut: Arc::default(),
                 at: TimeCode(5),

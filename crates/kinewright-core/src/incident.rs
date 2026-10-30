@@ -1720,6 +1720,9 @@ impl IncidentObservation {
             | MediaError::MatteCoverage(_)
             | MediaError::Scope(_)
             | MediaError::Store { .. }
+            | MediaError::MediaAdmissionRequired
+            | MediaError::MediaReadTemporarilyUnavailable
+            | MediaError::OwnedMediaOperationUnavailable
             | MediaError::NotImplemented
             | MediaError::Cancelled
             | MediaError::MixSpectrumRangeTooShort { .. }
@@ -1735,7 +1738,7 @@ impl IncidentObservation {
                     evidence: media_evidence(error, code),
                     revision,
                     name: None,
-                    transient: false,
+                    transient: matches!(error, MediaError::MediaReadTemporarilyUnavailable),
                 }
             }
         }

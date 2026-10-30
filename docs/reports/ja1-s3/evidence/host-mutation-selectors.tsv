@@ -1,0 +1,4 @@
+editor-binding	kinewright-agent	writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut
+exact-drained-cut	kinewright-agent	writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut
+unsaved-source-owner	kinewright-app	s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save
+forwarded-input-scope	kinewright-agent	writer_host::s2h_tests::s3_gui_owned_input_forwarded_scope_refuses_before_admission

@@ -22,6 +22,7 @@ use kinewright_core::{Core, HistorySaveTag};
 use std::path::{Path, PathBuf};
 mod durable;
 mod manual;
+mod owned_media;
 pub use manual::ManualRecoveryEndpoint;
 mod recovery;
 mod switch;
@@ -222,6 +223,7 @@ pub struct Ja1EditingSession {
     host_rescue_actors: Vec<Core>,
     host_source_admission: Option<crate::bundle_records::SessionId>,
     preliminary_save: Option<PreliminarySave>,
+    pending_import_source: Option<PreparedHostAttachment>,
 }
 
 /// One transient publisher receipt, backed by the surviving ordinary L branch.
@@ -838,6 +840,7 @@ impl Ja1EditingSession {
             host_rescue_actors: vec![],
             host_source_admission: None,
             preliminary_save: None,
+            pending_import_source: None,
         })
     }
 
@@ -878,6 +881,7 @@ impl Ja1EditingSession {
             host_rescue_actors: vec![],
             host_source_admission: None,
             preliminary_save: None,
+            pending_import_source: None,
         })
     }
     pub fn activate(
@@ -961,6 +965,7 @@ impl Ja1EditingSession {
             host_rescue_actors: vec![],
             host_source_admission: None,
             preliminary_save: None,
+            pending_import_source: None,
         })
     }
     #[must_use]

@@ -1,0 +1,1 @@
+{"actual":true,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"baseline_red","evidence_class":"baseline_property","expected":false,"id":"strict-write-no-in-place-fallback","observation":7,"oracle":"false","oracle_pointer":"","passed":false,"pointer":"/in_place_fallback_observed","positive_control":"fallback-full-bytes"}

@@ -4,6 +4,7 @@ use crate::{
     receipts::ReceiptLookup,
 };
 use kinewright_core::AcceptedHistory;
+
 impl Ja1EditingSession {
     pub fn active_manual_project(&self) -> Result<crate::bundle_records::ProjectId, BundleError> {
         Ok(self.active_bundle()?.project_id().clone())
@@ -121,6 +122,10 @@ impl Ja1EditingSession {
             &core,
             &lease.inputs,
         )?;
+        self.inputs = bundle
+            .checkpoint(bundle.manual_branch_id())?
+            .input_manifest_ref
+            .clone();
         if let Some(report) = &result.1 {
             self.association
                 .as_mut()
@@ -203,7 +208,11 @@ impl Ja1EditingSession {
             return Err(BundleError::HistoryChanged);
         }
         if !absent.is_empty() {
-            self.publish_absent_manual_suffix(client, &absent)?;
+            self.publish_absent_manual_suffix(
+                client,
+                &absent,
+                expected.ok_or(BundleError::HistoryChanged)?,
+            )?;
         }
         Ok(())
     }
@@ -216,6 +225,7 @@ impl Ja1EditingSession {
         &mut self,
         client: &str,
         originals: &[crate::receipts::CommandEnvelope],
+        expected: &kinewright_core::HistorySnapshot,
     ) -> Result<(), BundleError> {
         use kinewright_core::{AttachmentState, Command, Event};
         let bundle = self.active_bundle()?;
@@ -230,6 +240,28 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::Capacity("manual recovery receipts"));
         }
+        let inputs = originals
+            .first()
+            .and_then(|original| original.manual.as_ref())
+            .ok_or(BundleError::HistoryChanged)?
+            .binding
+            .inputs
+            .clone();
+        crate::bundle_commit::validate_manifest_extension(
+            &bundle.store,
+            &bundle
+                .checkpoint(bundle.manual_branch_id())?
+                .input_manifest_ref,
+            &inputs,
+        )?;
+        let manifest = bundle.store.read_input_manifest(&inputs)?;
+        crate::bundle_commit::validate_inputs(expected, &manifest)?;
+        for reference in bundle.store.closure(std::slice::from_ref(&inputs))? {
+            bundle.store.verify(&reference)?;
+        }
+        crate::store::BundleRecord::validate_admission(&*manifest, &bundle.store)?;
+        let _inputs_pin = bundle.store.pin(std::slice::from_ref(&inputs))?;
+        drop(manifest);
         if self
             .core
             .attachment_state()
@@ -244,7 +276,7 @@ impl Ja1EditingSession {
                 .resume(&cut)
                 .map_err(crate::bundle::history_error)?;
         }
-        let lease = self.issue_manual_lease(
+        let mut lease = self.issue_manual_lease(
             client.into(),
             format!(
                 "{}{}",
@@ -252,6 +284,7 @@ impl Ja1EditingSession {
                 crate::bundle_records::SessionId::fresh()?.as_str()
             ),
         )?;
+        lease.inputs = inputs;
         let before = self
             .core
             .export_history()
@@ -383,6 +416,7 @@ impl Ja1EditingSession {
         })();
         match outcome {
             Ok(report) => {
+                self.inputs.clone_from(&lease.inputs);
                 if let Some(association) = &mut self.association {
                     association.saved = Some(report.history_sha256);
                 }
@@ -445,6 +479,11 @@ impl Ja1EditingSession {
         self.active_bundle()?
             .store
             .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))
+    }
+    /// The manual branch's current checkpoint reference, without reading it.
+    pub fn manual_checkpoint_ref(&self) -> Result<crate::bundle_records::ObjectRef, BundleError> {
+        let bundle = self.active_bundle()?;
+        bundle.checkpoint_reference(bundle.manual_branch_id())
     }
     pub fn manual_checkpoint(
         &self,
@@ -657,6 +696,7 @@ impl ManualRecoveryEndpoint {
         if history_sha256(self.cut.history())? != lease.history_sha256 {
             return Err(BundleError::HistoryChanged);
         }
+        crate::bundle_commit::validate_inputs(self.cut.history(), &inputs)?;
         self.attachment
             .resume_manual(&self.cut, lease.into_encoder(inputs)?, live)
             .map_err(crate::bundle::history_error)
@@ -764,5 +804,176 @@ impl Ja1EditingSession {
             .root()
             .ok_or(BundleError::Unsettled)?
             .manual_switch_generation)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod c0_fix1_tests {
+    use super::*;
+    use crate::{
+        bundle::BundleWriteAdmission,
+        bundle_records::{ObjectRef, ProjectId, RecordKind},
+        store::BundleRecord,
+    };
+    use kinewright_core::{AssetId, Command, Core, Document, Operation};
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn s3_fix1_recovery_checks_inputs_before_replacement_authority() {
+        for fault in [
+            "owner",
+            "predecessor",
+            "fingerprint",
+            "interpretation",
+            "table",
+            "bytes",
+            "stream",
+        ] {
+            let temp =
+                TempDirectory::new_in(&workspace_target_dir(), "c0-fix1-recovery-validation");
+            let path = temp.path("validation.kinewright");
+            let core = Core::spawn(Document::default()).unwrap();
+            let mut owner = Ja1EditingSession::activate(
+                &path,
+                BundleWriteAdmission::new_document(),
+                &core,
+                None,
+            )
+            .unwrap();
+            let source = temp.path("source.wav");
+            std::fs::write(
+                &source,
+                kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+            )
+            .unwrap();
+            owner.import_owned_media(&source).unwrap();
+            std::fs::write(
+                &source,
+                kinewright_media::test_support::wav_f32(&vec![0.5; 4800], 48_000, 1),
+            )
+            .unwrap();
+            let prepared = owner.prepare_owned_media(&source, AssetId(2)).unwrap();
+            let lease = owner
+                .issue_manual_lease_for_inputs("r".repeat(64), "t".repeat(64), &prepared)
+                .unwrap();
+            let gui = Core::spawn(Document::default()).unwrap();
+            gui.restore_history(core.export_history().unwrap()).unwrap();
+            let replica = Ja1EditingSession::new(
+                temp.root(),
+                &gui,
+                crate::storage_budget::StorageLimits::default(),
+            )
+            .unwrap();
+            let permit = replica
+                .bind_manual_producer(lease, prepared.manifest.clone())
+                .unwrap();
+            permit
+                .request(Command::Do(Operation::AddAsset {
+                    asset: prepared.asset.clone(),
+                }))
+                .unwrap();
+            let mut original = AcceptedManualCommand::decode(&permit.pending().unwrap()[0])
+                .unwrap()
+                .envelope;
+            let mut expected = gui.export_history().unwrap();
+            let mut manifest = prepared.manifest.clone();
+            match fault {
+                "owner" => manifest.project_id = Some(ProjectId::fresh().unwrap()),
+                "predecessor" => manifest
+                    .entries
+                    .retain(|entry| entry.matches_media_asset(&prepared.asset)),
+                "fingerprint" => {
+                    std::sync::Arc::make_mut(&mut expected.document).media_pool[1]
+                        .source_fingerprint
+                        .content_sha256 = Some("0".repeat(64));
+                }
+                "interpretation" => {
+                    std::sync::Arc::make_mut(&mut expected.document).media_pool[1]
+                        .color_description
+                        .provenance = kinewright_core::ColorProvenance::UserOverride;
+                }
+                "table" => {
+                    let other = manifest
+                        .entries
+                        .iter()
+                        .find(|entry| !entry.matches_media_asset(&prepared.asset))
+                        .unwrap()
+                        .chunk_table_ref()
+                        .unwrap()
+                        .clone();
+                    manifest
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.matches_media_asset(&prepared.asset))
+                        .unwrap()
+                        .dependencies = vec![other];
+                }
+                "stream" => {
+                    let mut entry = manifest
+                        .entries
+                        .iter()
+                        .find(|entry| entry.matches_media_asset(&prepared.asset))
+                        .unwrap()
+                        .clone();
+                    let mut interpretation = entry.media_interpretation().unwrap();
+                    interpretation.audio.as_mut().unwrap().time_base = (1, 42);
+                    let profile = interpretation.canonical().unwrap();
+                    entry.entry_id = format!(
+                        "media:2:{}:{}:{}",
+                        entry.object.sha256,
+                        entry.object.byte_length,
+                        kinewright_media::sha256_bytes(profile.as_bytes())
+                    );
+                    entry.profile = Some(profile);
+                    manifest.entries.push(entry);
+                    manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
+                }
+                "bytes" => {
+                    use std::io::{Seek, SeekFrom, Write};
+                    let entry = manifest
+                        .entries
+                        .iter()
+                        .find(|entry| entry.matches_media_asset(&prepared.asset))
+                        .unwrap();
+                    let assets = path.with_extension("kinewright-assets");
+                    let mut writer = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(assets.join("studio/objects").join(&entry.object.sha256))
+                        .unwrap();
+                    writer.seek(SeekFrom::Start(1000)).unwrap();
+                    writer.write_all(&[99]).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let bundle = owner.destination.as_mut().unwrap().bundle_mut().unwrap();
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            let reference = ObjectRef {
+                sha256: kinewright_media::sha256_bytes(&bytes),
+                byte_length: bytes.len() as u64,
+                record_kind: RecordKind::InputManifest,
+            };
+            let _pin = bundle
+                .store
+                .admit_recovered(&mut bytes.as_slice(), &reference, &manifest.dependencies())
+                .unwrap();
+            original.manual.as_mut().unwrap().binding.inputs = reference;
+            let issuers = bundle.issuers.len();
+            let root = owner.root_sha256().unwrap();
+            let result =
+                owner.publish_absent_manual_suffix(&"r".repeat(64), &[original], &expected);
+            assert!(result.is_err(), "C0_FIX1_RECOVERY_INPUT_REFUSED {fault}");
+            assert_eq!(
+                owner.active_bundle().unwrap().issuers.len(),
+                issuers,
+                "C0_FIX1_NO_REPLACEMENT_AUTHORITY {fault}"
+            );
+            assert_eq!(owner.root_sha256().unwrap(), root, "{fault}");
+            assert_eq!(
+                core.export_history().unwrap().document.media_pool.len(),
+                1,
+                "{fault}"
+            );
+        }
     }
 }

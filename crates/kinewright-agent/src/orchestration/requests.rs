@@ -94,15 +94,58 @@ fn question_live(state: &RunProjection, id: &QuestionId) -> Result<usize, Refusa
     Ok(index)
 }
 
+pub(crate) struct LiveAttentionAdmission {
+    request: RuntimeRequest,
+}
+impl LiveAttentionAdmission {
+    pub(crate) fn from_host(request: RuntimeRequest) -> Self {
+        Self { request }
+    }
+}
 /// Applied only inside the same proposed cut as the command receipt.
+pub fn apply(state: &mut RunProjection, envelope: &OrchestrationEnvelope) -> Result<bool, Refusal> {
+    apply_authorized(state, envelope, None)
+}
 #[allow(
     clippy::too_many_lines,
     reason = "request transitions share one envelope boundary"
 )]
-pub fn apply(state: &mut RunProjection, envelope: &OrchestrationEnvelope) -> Result<bool, Refusal> {
+pub(crate) fn apply_authorized(
+    state: &mut RunProjection,
+    envelope: &OrchestrationEnvelope,
+    live: Option<&LiveAttentionAdmission>,
+) -> Result<bool, Refusal> {
     match &envelope.command {
-        OrchestrationCommand::Request(RuntimeRequest::Approval(_) | RuntimeRequest::Secret(_)) => {
-            return Err(Refusal::H3AttentionUnavailable);
+        OrchestrationCommand::Request(
+            request @ (RuntimeRequest::Approval(attention) | RuntimeRequest::Secret(attention)),
+        ) => {
+            if live.is_none_or(|live| &live.request != request) {
+                return Err(Refusal::H3AttentionUnavailable);
+            }
+            let turn = state
+                .tasks
+                .iter()
+                .find(|task| task.id == attention.task)
+                .and_then(|task| task.progress.turn.as_ref())
+                .ok_or(Refusal::InvalidState)?
+                .clone();
+            live_turn(state, &turn)?;
+            if turn.attempt != attention.attempt
+                || envelope.authority.attempt.as_ref() != Some(&attention.attempt)
+                || envelope.authority.owner_epoch != turn.owner_epoch
+                || state.requests.len() >= ITEM_LIMIT
+                || state.requests.contains(request)
+            {
+                return Err(Refusal::ScopeConflict);
+            }
+            state.requests.push(request.clone());
+            state.wait = super::orchestration_records::RunWait::Provider(
+                super::orchestration_records::WaitDetail {
+                    reason: attention.request_ref.clone(),
+                    missing: vec![],
+                    attempt: Some(attention.attempt.clone()),
+                },
+            );
         }
         OrchestrationCommand::Request(RuntimeRequest::Question(question)) => {
             live_turn(state, &question.origin)?;

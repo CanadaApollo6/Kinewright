@@ -1,0 +1,174 @@
+{
+  "agent-architecture": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.10s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.02s"
+    ],
+    "totals": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 1,
+    "log_sha256": "bf9449ef6e21e6b28bc8041f0d0df42e433417f68c115c2543e89817d307c7ff"
+  },
+  "app-architecture": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.02s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 0.02s"
+    ],
+    "totals": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 1,
+    "log_sha256": "a61acc2e50a7f8d185ff1c1e523e90aa967c0dbbe752a12826cda16121a8f658"
+  },
+  "app": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.85s",
+      "test result: ok. 81 passed; 0 failed; 1 ignored; 0 measured; 814 filtered out; finished in 328.64s"
+    ],
+    "totals": {
+      "passed": 81,
+      "failed": 0,
+      "ignored": 1
+    },
+    "test_binaries": 1,
+    "log_sha256": "7c53f247eae3b30cf68d394881de8639a47c027a4d86b12ebe73cb8bddc6628a"
+  },
+  "build": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.85s"
+    ],
+    "totals": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 0,
+    "log_sha256": "6651656c5c6396aa6517bba2e9383e3cc19c18e98500e7fc5ce4d0a4e57a54df"
+  },
+  "clippy": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.30s"
+    ],
+    "totals": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 0,
+    "log_sha256": "572bbdd77500c4a8d1684a50ea2954de8f12976c2963a0c0f186cd98e60303eb"
+  },
+  "fmt": {
+    "exit": 0,
+    "raw_summaries": [],
+    "totals": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 0,
+    "log_sha256": "415b436bf1192280d048022177e00df77e0ef6c546959239e13e882e57bd9744"
+  },
+  "focused": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.54s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.90s"
+    ],
+    "totals": {
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 1,
+    "log_sha256": "4f03a2bab7dafa4fa6a7200b5fe25985b4e87f753a1a829246bb15170959e3c7"
+  },
+  "host": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.48s",
+      "test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 654 filtered out; finished in 120.73s"
+    ],
+    "totals": {
+      "passed": 63,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 1,
+    "log_sha256": "fa8f78c1afcbc1008a96649d29a47c20998ae5fcdbee1d0cc822ec5acee0f32a"
+  },
+  "project": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.20s",
+      "test result: ok. 155 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 96.65s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.99s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 55.53s",
+      "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 105.74s",
+      "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.85s",
+      "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 188.44s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.02s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.94s",
+      "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.63s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.56s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.87s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.89s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.56s"
+    ],
+    "totals": {
+      "passed": 395,
+      "failed": 0,
+      "ignored": 2
+    },
+    "test_binaries": 14,
+    "log_sha256": "cf1e6aaeabd429259ae2521cb8d92fd55234f8cb5af4a6b4c072a6fc915e1f55"
+  },
+  "slow-lint": {
+    "exit": 0,
+    "raw_summaries": [
+      "slow-test manifest and markers agree: 89 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 56 allowlist entries well-formed"
+    ],
+    "totals": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 0,
+    "log_sha256": "a3b688c6972cdbac2ea828957086fad04c37b4d513861601e33a56d28a39e5b3"
+  },
+  "source-guard": {
+    "exit": 0,
+    "raw_summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.80s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1225 filtered out; finished in 0.99s"
+    ],
+    "totals": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 1,
+    "log_sha256": "79557e116ac918b86335f5c77b66a8262c266793ab2132fe1ca18df555c55818"
+  },
+  "windows": {
+    "exit": 101,
+    "raw_summaries": [],
+    "totals": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    "test_binaries": 0,
+    "log_sha256": "490ed3541ded915e1419ab34aa8a77efd685b8ccaf90d73fb48d225d5435e2ff"
+  }
+}

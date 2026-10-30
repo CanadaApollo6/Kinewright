@@ -9,9 +9,11 @@ use std::{
     },
 };
 
-pub(in crate::ja1_attachment) struct ReplyDropProxy {
+pub(crate) struct ReplyDropProxy {
     stop: Arc<AtomicBool>,
     pub dropped: Arc<AtomicBool>,
+    /// The commands dropped so far, in order; each is dropped at most once.
+    pub lost: Arc<std::sync::Mutex<Vec<&'static str>>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -44,7 +46,7 @@ impl ReplyDropProxy {
     fn install(
         client: &mut HostClient,
         identity: &str,
-        command: &'static str,
+        commands: Vec<&'static str>,
         before: bool,
     ) -> Self {
         let upstream = client.endpoint().address;
@@ -55,6 +57,8 @@ impl ReplyDropProxy {
         let dropped = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let observed = Arc::clone(&dropped);
+        let lost = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let losing = Arc::clone(&lost);
         let worker = std::thread::spawn(move || {
             while !stopping.load(Ordering::Acquire) {
                 let (mut downstream, _) = match listener.accept() {
@@ -65,28 +69,44 @@ impl ReplyDropProxy {
                     }
                     Err(error) => panic!("proxy accept: {error}"),
                 };
-                let request = packet(&mut downstream);
-                let header_end = request
-                    .windows(4)
-                    .position(|bytes| bytes == b"\r\n\r\n")
-                    .unwrap()
-                    + 4;
-                let value: serde_json::Value =
-                    serde_json::from_slice(&request[header_end..]).unwrap();
-                let dropping = value
-                    .pointer("/command/command")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(command)
-                    && !observed.swap(true, Ordering::AcqRel);
-                if dropping && before {
-                    continue;
-                }
-                let mut target = TcpStream::connect(upstream).unwrap();
-                target.write_all(&request).unwrap();
-                let response = packet(&mut target);
-                if !dropping {
-                    let _ = downstream.write_all(&response);
-                }
+                // Each exchange runs on its own thread, so a background request
+                // never waits behind another one.
+                let (commands, losing, observed) =
+                    (commands.clone(), Arc::clone(&losing), Arc::clone(&observed));
+                std::thread::spawn(move || {
+                    let request = packet(&mut downstream);
+                    let header_end = request
+                        .windows(4)
+                        .position(|bytes| bytes == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    let value: Option<serde_json::Value> =
+                        serde_json::from_slice(&request[header_end..]).ok();
+                    let named = value
+                        .as_ref()
+                        .and_then(|value| value.pointer("/command/command"))
+                        .and_then(serde_json::Value::as_str);
+                    let mut losing = losing.lock().unwrap();
+                    let dropping = commands
+                        .iter()
+                        .find(|command| Some(**command) == named && !losing.contains(*command))
+                        .copied();
+                    if let Some(command) = dropping {
+                        losing.push(command);
+                        observed.store(true, Ordering::Release);
+                    }
+                    drop(losing);
+                    let dropping = dropping.is_some();
+                    if dropping && before {
+                        return;
+                    }
+                    let mut target = TcpStream::connect(upstream).unwrap();
+                    target.write_all(&request).unwrap();
+                    let response = packet(&mut target);
+                    if !dropping {
+                        let _ = downstream.write_all(&response);
+                    }
+                });
             }
         });
         let mut bootstrap = client.bootstrap();
@@ -97,6 +117,7 @@ impl ReplyDropProxy {
         ReplyDropProxy {
             stop,
             dropped,
+            lost,
             worker: Some(worker),
         }
     }
@@ -109,13 +130,37 @@ impl Drop for ReplyDropProxy {
     }
 }
 
+impl Drop for HostAttachment {
+    fn drop(&mut self) {
+        // Test fixtures own every host they launch, including panic paths.
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl HostAttachment {
+    pub(in crate::ja1_attachment) fn take_child_for_test(&mut self) -> std::process::Child {
+        self.child.take().expect("owned fixture host")
+    }
+    pub(in crate::ja1_attachment) fn manual_identity_for_test(&self) -> String {
+        self.manual_client.clone()
+    }
+
     pub(in crate::ja1_attachment) fn drop_http_reply(
         &mut self,
         command: &'static str,
         before: bool,
     ) -> ReplyDropProxy {
-        ReplyDropProxy::install(&mut self.client, &self.manual_client, command, before)
+        self.drop_http_replies(vec![command], before)
+    }
+    pub(in crate::ja1_attachment) fn drop_http_replies(
+        &mut self,
+        commands: Vec<&'static str>,
+        before: bool,
+    ) -> ReplyDropProxy {
+        ReplyDropProxy::install(&mut self.client, &self.manual_client, commands, before)
     }
 }
 thread_local! {
@@ -128,7 +173,7 @@ pub(super) fn intercept_launch(mut client: HostClient, identity: &str) -> HostCl
             *slot = Some(ReplyDropProxy::install(
                 &mut client,
                 identity,
-                command,
+                vec![command],
                 false,
             ));
         });
@@ -145,4 +190,59 @@ pub(in crate::ja1_attachment) fn drop_launch_reply<T>(
         .with_borrow_mut(Option::take)
         .expect("launch proxy");
     (result, proxy)
+}
+
+impl crate::ja1_attachment::Ja1Attachment {
+    /// Drop one HTTP request or reply of `command` between this App and its host.
+    pub(crate) fn drop_host_reply(
+        &mut self,
+        command: &'static str,
+        before: bool,
+    ) -> ReplyDropProxy {
+        self.host
+            .as_mut()
+            .expect("launched host")
+            .drop_http_reply(command, before)
+    }
+    /// Drop one HTTP reply of each of `commands`, in whatever order they come.
+    pub(crate) fn drop_host_replies(&mut self, commands: Vec<&'static str>) -> ReplyDropProxy {
+        self.host
+            .as_mut()
+            .expect("launched host")
+            .drop_http_replies(commands, false)
+    }
+    /// Import media the way another editor of this host would: the host's
+    /// inputs move, and this App learns the new scope only from a later status
+    /// (S3 C11 fu1).
+    pub(crate) fn import_elsewhere(&self, path: &std::path::Path) -> HostReply {
+        let host = self.host.as_ref().expect("launched host");
+        let snapshot = HostSnapshot::capture(self.owner.core()).unwrap();
+        let asset_id = kinewright_core::AssetId(
+            snapshot
+                .history
+                .document
+                .media_pool
+                .iter()
+                .map(|asset| asset.id.0)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        host.client
+            .request(HostCommand::PrepareOwnedMedia {
+                client: host.manual_client.clone(),
+                path: path.into(),
+                asset_id,
+                snapshot,
+            })
+            .unwrap()
+    }
+    /// The launched host process, so a test can end exactly that child.
+    pub(crate) fn host_pid(&self) -> Option<u32> {
+        self.host
+            .as_ref()?
+            .child
+            .as_ref()
+            .map(std::process::Child::id)
+    }
 }

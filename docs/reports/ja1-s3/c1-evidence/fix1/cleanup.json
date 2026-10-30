@@ -1,0 +1,8 @@
+{
+  "fixture_worktree_removed": "target/ja-s1-predecessor/source; pinned HEAD and tracked-clean checked first",
+  "build_and_runtime_tree_trashed": "target; recoverable via gio trash",
+  "target_processes_before_cleanup": [],
+  "global_tmp_files_created": [],
+  "shared_cargo_lock_preserved": true,
+  "other_projects_untouched": true
+}

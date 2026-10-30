@@ -1,0 +1,52 @@
+{
+  "declared_ignores_per_stage": {
+    "merge": 66,
+    "followups": 66
+  },
+  "exact_inventory": [
+    "merge/ignored-tests.json",
+    "followups/ignored-tests.json"
+  ],
+  "not_run": [
+    {
+      "case": "C1F1-M3 ClaimIndex runtime and isolated ClaimIndex mutation",
+      "reason": "no ClaimIndex producer; nonempty refused at bundle.rs:156"
+    },
+    {
+      "case": "Native Windows tests and compilation past prerequisites",
+      "reason": "both extra MSVC checks stopped in native FFmpeg/aws-lc-sys prerequisites before touched code"
+    },
+    {
+      "case": "Slow tier and forced existing ignores",
+      "reason": "fast tier only; 2 Project, 63 Agent, 1 App declared ignores per source revision"
+    },
+    {
+      "case": "Full workspace and Core/Media/App tests beyond the requested package and attachment selections",
+      "reason": "brief scope"
+    },
+    {
+      "case": "Hosted CI",
+      "reason": "worker must not push"
+    },
+    {
+      "case": "Independent review rounds",
+      "reason": "brief explicitly excludes them"
+    },
+    {
+      "case": "S4 H1 bridge, H3 production authority/attention/run-start, H4 S4 continuation end to end",
+      "reason": "receiving contracts and partial overlap remain; not closed by the merge audit"
+    },
+    {
+      "case": "Equipped live-provider, GPU/model/media-pack and native acceptance beyond the selected controls",
+      "reason": "not explicitly forced or certified; ordinary fast-tier test counts are not subsystem certification"
+    },
+    {
+      "case": "AttachmentRole::Reviewer runtime",
+      "reason": "role does not exist at this head"
+    },
+    {
+      "case": "Assigned C0/C2 and H3-owned follow-ups",
+      "reason": "explicitly deferred by brief"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "parent": "0ea01f27b674682fad32cfa12be7deb97cdde0ed",
+  "branch": "ja1/s3",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "eceae9503eb823c03e36db08e3d4542888881aa73f489506b94b5d0b63e730fb",
+    "crates/kinewright-agent/src/writer_host/ja_s3_host.rs": "8ba200df9a02177442057fb0fdf23e58f2ceee9847599c5a7da767922166dad4",
+    "crates/kinewright-agent/tests/ja_s2_host.rs": "34752427576816de28f77dc750cc2684cde3d62ab371f73db263b5fe1a6164d0",
+    "scripts/ja1-s3-c1-fix1-mutation-cases.json": "93bba2d8264a46c470aaac77a03930dd1cc4f17745a728a9249adbfb5eec2225",
+    "scripts/ja1-s3-c1-fix2-mutation-cases.json": "9b54fce3f1f3c67c1cc152b248022a9eecc10d0341c93c1f3ab08a152955d1fa",
+    "scripts/ja1-s3-c1-fix3-mutation-cases.json": "bb0b021a9417d0911d90e4d936cbf971fabbc705c3775cb23f0471ce272d40a8",
+    "scripts/ja1-s3-c1-fix3-gate.sh": "8cf353a7344886089198073f5fe19c870915ec1c6217dd130770162ba6ff225b"
+  }
+}

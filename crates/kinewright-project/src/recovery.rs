@@ -24,6 +24,152 @@ pub fn default_recovery_directory() -> PathBuf {
         .join("recovery")
 }
 
+/// Where Studio feedback recovery state lives (S3 C3 fix 2): persistent
+/// per-user app state, never the temporary directory. `LOCALAPPDATA` wins
+/// when set (Windows, and the test harness); otherwise `XDG_STATE_HOME`, then
+/// `~/.local/state`. Without one of those, or when the result is under the
+/// temporary directory or on a RAM-backed file system, this refuses with a
+/// reason, and the caller must not promise that notes survive a restart.
+///
+/// # Errors
+/// The reason no persistent location is available.
+pub fn feedback_state_directory() -> Result<PathBuf, String> {
+    let directory =
+        feedback_state_directory_with(|name| std::env::var_os(name), &std::env::temp_dir())?;
+    refuse_volatile(&directory)?;
+    Ok(directory)
+}
+
+/// The environment-only half of [`feedback_state_directory`], separate so
+/// tests can drive it without changing the process environment.
+///
+/// # Errors
+/// The reason no persistent location is available.
+pub fn feedback_state_directory_with(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    temp: &Path,
+) -> Result<PathBuf, String> {
+    let absolute = |name: &str| {
+        env(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let directory = if let Some(base) = absolute("LOCALAPPDATA") {
+        base.join("Kinewright").join("feedback")
+    } else if let Some(base) = absolute("XDG_STATE_HOME") {
+        base.join("kinewright").join("feedback")
+    } else if let Some(home) = absolute("HOME") {
+        home.join(".local")
+            .join("state")
+            .join("kinewright")
+            .join("feedback")
+    } else {
+        return Err(
+            "no per-user state folder is set (LOCALAPPDATA, XDG_STATE_HOME or HOME)".to_owned(),
+        );
+    };
+    let temp = fs::canonicalize(temp).unwrap_or_else(|_| temp.to_path_buf());
+    if directory.starts_with(&temp)
+        || nearest_existing(&directory).is_some_and(|found| found.starts_with(&temp))
+    {
+        return Err(format!(
+            "{} is inside the temporary folder",
+            directory.display()
+        ));
+    }
+    Ok(directory)
+}
+
+fn nearest_existing(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find_map(|ancestor| fs::canonicalize(ancestor).ok())
+}
+
+#[cfg(target_os = "linux")]
+fn refuse_volatile(directory: &Path) -> Result<(), String> {
+    const TMPFS_MAGIC: u64 = 0x0102_1994;
+    const RAMFS_MAGIC: u64 = 0x8584_58f6;
+    let Some(existing) = nearest_existing(directory) else {
+        return Err(format!("no folder above {} exists", directory.display()));
+    };
+    let stat = rustix::fs::statfs(&existing)
+        .map_err(|error| format!("cannot inspect {}: {error}", existing.display()))?;
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "f_type is a magic number, not a count"
+    )]
+    let kind = stat.f_type as u64;
+    if kind == TMPFS_MAGIC || kind == RAMFS_MAGIC {
+        return Err(format!(
+            "{} is in memory and is lost on restart",
+            directory.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the Linux signature, which can refuse"
+)]
+fn refuse_volatile(_directory: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Exclusive ownership of one project's feedback state file (S3 C3 fix 3). Two
+/// copies of a project share a `ProjectId`, so they share the file: only the
+/// holder of this lock reads, merges or writes it. The lock is `flock` (or
+/// `LockFileEx` on Windows) on a handle of its own, so a second owner in the
+/// same process conflicts too. Dropping it releases it; the lock file is never
+/// removed, so no unlink can race a new owner.
+#[derive(Debug)]
+pub struct FeedbackStateLock {
+    _file: fs::File,
+}
+
+/// Why a feedback state lock was not taken.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FeedbackStateRefusal {
+    /// Another live session owns this project's notes.
+    Held,
+    /// The lock file could not be opened or locked.
+    Failed(String),
+}
+
+/// Take the exclusive lock on `<project>.lock` in `directory`, creating the
+/// folder (`0700`) and the lock file (`0600`) when needed. Never waits.
+///
+/// # Errors
+/// [`FeedbackStateRefusal::Held`] while another owner holds it; otherwise why
+/// the lock could not be taken.
+pub fn lock_feedback_state(
+    directory: &Path,
+    project: &str,
+) -> Result<FeedbackStateLock, FeedbackStateRefusal> {
+    use fs2::FileExt as _;
+    let failed = |error: io::Error| FeedbackStateRefusal::Failed(error.to_string());
+    let mut folder = fs::DirBuilder::new();
+    folder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
+    folder.create(directory).map_err(failed)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options
+        .open(directory.join(format!("{project}.lock")))
+        .map_err(failed)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(FeedbackStateLock { _file: file }),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(FeedbackStateRefusal::Held)
+        }
+        Err(error) => Err(failed(error)),
+    }
+}
+
 /// FNV-1a, chosen over the standard hasher because journal names must stay
 /// stable across builds and Rust versions to find their project again.
 ///
@@ -718,5 +864,60 @@ mod tests {
             None,
             "nothing pends after the retire"
         );
+    }
+
+    /// S3 C3 fix 2, invariant 1: with `LOCALAPPDATA` unset, feedback state
+    /// goes to per-user state, never under the temporary folder, and a
+    /// home inside the temporary folder is refused rather than used.
+    #[test]
+    fn s3_fix2_feedback_state_never_under_temp() {
+        let dir = TempDirectory::new("s3-fix2-state");
+        let temp = dir.path("tmp");
+        let home = dir.path("home");
+        fs::create_dir_all(&temp).expect("the temp stand-in creates");
+        fs::create_dir_all(&home).expect("the home stand-in creates");
+        let env = |pairs: Vec<(&'static str, PathBuf)>| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.clone().into_os_string())
+            }
+        };
+        let found = feedback_state_directory_with(env(vec![("HOME", home.clone())]), &temp)
+            .expect("a home gives a state folder");
+        assert_eq!(found, home.join(".local/state/kinewright/feedback"));
+        assert!(
+            !found.starts_with(&temp),
+            "never under the temporary folder"
+        );
+        let xdg = dir.path("xdg");
+        assert_eq!(
+            feedback_state_directory_with(
+                env(vec![
+                    ("HOME", home.clone()),
+                    ("XDG_STATE_HOME", xdg.clone())
+                ]),
+                &temp
+            )
+            .expect("XDG state wins over home"),
+            xdg.join("kinewright/feedback")
+        );
+        let refused = feedback_state_directory_with(env(vec![("HOME", temp.join("me"))]), &temp)
+            .expect_err("a home under temp refuses");
+        assert!(refused.contains("temporary"), "{refused}");
+        let refused = feedback_state_directory_with(env(vec![]), &temp)
+            .expect_err("no per-user folder refuses");
+        assert!(refused.contains("no per-user state folder"), "{refused}");
+        let relative = feedback_state_directory_with(
+            env(vec![
+                ("LOCALAPPDATA", PathBuf::from("relative")),
+                ("HOME", home.clone()),
+            ]),
+            &temp,
+        )
+        .expect("a relative LOCALAPPDATA is ignored");
+        assert!(relative.starts_with(&home));
+        assert!(!temp.join("me").exists(), "nothing was written under temp");
     }
 }

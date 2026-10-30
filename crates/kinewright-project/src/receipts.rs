@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(transparent)]
 pub struct IssuerId(pub(crate) String);
 impl IssuerId {
-    fn fresh() -> Result<Self, BundleError> {
+    pub(crate) fn fresh() -> Result<Self, BundleError> {
         Ok(Self(SessionId::fresh()?.as_str().to_owned()))
     }
     fn validate(&self) -> Result<(), BundleError> {
@@ -111,6 +111,19 @@ impl CommandEnvelope {
             ));
         }
         match self.action.as_str() {
+            "metadata"
+                if self.switch.is_none()
+                    && self.manual.is_none()
+                    && self.lease.is_none()
+                    && self.transition.is_none()
+                    && self.command.is_none()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.len() == 1
+                    && self.evidence[0].record_kind == RecordKind::OwnedEvidence =>
+            {
+                self.evidence[0].validate()?;
+            }
             "switch"
                 if self.switch.is_some()
                     && self.lease.is_some()
@@ -187,6 +200,9 @@ impl CommandEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReceiptResult {
+    Metadata {
+        result: crate::studio_records::MetadataResult,
+    },
     Switch {
         result: Box<crate::bundle_switch::SwitchResult>,
     },
@@ -205,6 +221,7 @@ pub enum ReceiptResult {
 impl ReceiptResult {
     fn dependencies(&self) -> Vec<ObjectRef> {
         match self {
+            Self::Metadata { result } => result.references(),
             Self::Switch { result } => {
                 vec![result.old.checkpoint.clone(), result.new.checkpoint.clone()]
             }
@@ -254,6 +271,8 @@ pub struct IssuerState {
     pub next_sequence: u64,
     pub reconciled_high_water: u64,
     pub retired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_subject: Option<String>,
 }
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -414,6 +433,13 @@ impl BundleRecord for BTreeMap<IssuerId, IssuerState> {
         }
         for (id, state) in self {
             id.validate()?;
+            if state
+                .metadata_subject
+                .as_ref()
+                .is_some_and(|subject| subject.is_empty() || subject.len() > 512)
+            {
+                return Err(BundleError::Capacity("metadata issuer subject"));
+            }
             if state.next_sequence == 0 || state.reconciled_high_water >= state.next_sequence {
                 return Err(BundleError::Corrupt("issuer sequence/high water".into()));
             }
@@ -462,6 +488,7 @@ impl ProjectBundle {
                 next_sequence: first_sequence,
                 reconciled_high_water: first_sequence - 1,
                 retired: false,
+                metadata_subject: None,
             },
         );
         let result = if let Some(cut) = cut {
@@ -652,6 +679,7 @@ impl ProjectBundle {
         self.reconcile_destination(Some(core))?;
         self.pending_command = None;
         self.pending_result = None;
+        self.pending_metadata = None;
         Ok(())
     }
     /// Explicit ordinary attachment operation, separate from destination reconciliation.
@@ -764,8 +792,18 @@ pub(crate) fn stage_comment(
     })
 }
 
-fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleError> {
+/// Strokes are bounded opaque point pairs: either a flat list (S1 observer comments) or
+/// a list of strokes, each a nonempty list of pairs (S3 drawn feedback).
+pub(crate) fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleError> {
     use serde::de::{Error, SeqAccess, Visitor};
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Element {
+        Point(
+            #[allow(dead_code, reason = "parsed only to bound the pair")] [serde_json::Number; 2],
+        ),
+        Stroke(Vec<[serde_json::Number; 2]>),
+    }
     struct Points<'a> {
         limit: u64,
         overflow: &'a std::cell::Cell<bool>,
@@ -773,15 +811,18 @@ fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleError> {
     impl<'de> Visitor<'de> for Points<'_> {
         type Value = ();
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("bounded opaque point pairs")
+            f.write_str("bounded opaque point pairs or strokes")
         }
         fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
             let mut count = 0_u64;
-            while sequence
-                .next_element::<[serde_json::Number; 2]>()?
-                .is_some()
-            {
-                count += 1;
+            while let Some(element) = sequence.next_element::<Element>()? {
+                count += match element {
+                    Element::Point(_) => 1,
+                    Element::Stroke(points) if points.is_empty() => {
+                        return Err(A::Error::custom("empty stroke"));
+                    }
+                    Element::Stroke(points) => points.len() as u64,
+                };
                 if count > self.limit {
                     self.overflow.set(true);
                     return Err(A::Error::custom("comment point capacity"));

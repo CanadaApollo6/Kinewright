@@ -46,7 +46,7 @@ impl KinewrightApp {
 
     /// (Re)run `preview_solo` with the dialog's arguments on a worker.
     fn render_solo(&mut self) {
-        let analysis = Arc::clone(&self.analysis);
+        let analysis = Arc::clone(&self.focused().analysis());
         let document = Arc::clone(&self.focused().document);
         let revision = self.focused().revision;
         let Some(dialog) = self.solo_dialog.as_mut() else {
@@ -328,7 +328,8 @@ pub(crate) mod tests {
     /// `preview_solo` — strip texture, report line, no refusal.
     #[test]
     fn mo2_the_solo_dialog_shows_the_strip_and_its_report() {
-        let engine = kinewright_media::FfmpegMediaEngine::new().expect("the engine starts");
+        let engine =
+            kinewright_media::FfmpegMediaEngine::legacy_fixture().expect("the engine starts");
         let fixture = in1_source(In1Source::TaggedMp4);
         let asset = engine.probe(fixture.path()).expect("the fixture probes");
         let (mut app, _engine) = crate::app::in1_tests::in1_harness(single_clip_document(asset));
@@ -517,7 +518,7 @@ pub(crate) mod tests {
                 full_res,
             };
             let agent = kinewright_agent::preview_solo(
-                &*app.analysis,
+                &*app.focused().analysis(),
                 app.focused().revision,
                 &app.focused().document,
                 &args,
@@ -604,7 +605,8 @@ pub(crate) mod tests {
         };
         let revision = app.focused().revision;
         let document = std::sync::Arc::clone(&app.focused().document);
-        let agent = kinewright_agent::preview_solo(&*app.analysis, revision, &document, &args);
+        let agent =
+            kinewright_agent::preview_solo(&*app.focused().analysis(), revision, &document, &args);
         assert!(strip.png == agent.unwrap().png, "the agent's exact strip");
         crate::app::in1_tests::in1_shutdown(&mut app);
     }
@@ -738,9 +740,13 @@ pub(crate) mod tests {
                     context,
                     full_res: false,
                 };
-                let agent =
-                    kinewright_agent::preview_solo(&*app.analysis, revision, &before, &args)
-                        .unwrap();
+                let agent = kinewright_agent::preview_solo(
+                    &*app.focused().analysis(),
+                    revision,
+                    &before,
+                    &args,
+                )
+                .unwrap();
                 assert_eq!(strip.report["requested"], count);
                 assert_eq!(strip.report["context"], agent.report["context"]);
                 assert_eq!(strip.png, agent.png, "{label} {count}");

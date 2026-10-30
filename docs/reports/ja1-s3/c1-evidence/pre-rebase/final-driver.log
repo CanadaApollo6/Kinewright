@@ -1,0 +1,64 @@
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling kinewright-media v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-media)
+   Compiling rmcp v3.1.2
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+   Compiling kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+   Compiling kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.97s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Checking eframe v0.35.0
+    Checking reqwest v0.13.4
+    Checking kinewright-media v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-media)
+    Checking rmcp v3.1.2
+    Checking kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+    Checking kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+    Checking kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.68s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+running 4 tests
+test linux::s3_indexes_survive_all_root_producers ... ok
+test linux::s3_metadata_retry_and_admission ... ok
+test linux::s3_orchestration_admission ... ok
+test s3_run_projection_contract ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.34s
+
+test bounded_store::failed_seal_and_last_reader_retire_charges_once ... ok
+test bounded_store::object_admission_checks_exact_bytes_and_dependency_closure ... ok
+test bounded_store::owned_input_tamper_invalidates_verified_identity ... ok
+test bounded_store::reservation_counts_unique_blobs_and_simultaneous_copies ... ok
+test bounded_store::storage_ingress_refuses_decoded_and_transient_overflow ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 0.41s
+
+test writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits ... ok
+test writer_host::tests::ordinary_attachment_and_history_use_real_authenticated_loopback ... ok
+test writer_host::tests::protocol_refusals_preserve_native_error_and_do_not_disclose_credentials ... ok
+test writer_host::tests::s3_portable_roles_revoke_and_refuse_before_manual_write_admission ... ok
+test writer_host::tests::snapshot_digest_refusal_precedes_any_owner_install ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 654 filtered out; finished in 107.45s
+
+
+failures:
+    ja1_attachment::tests::c9_fix1_unsaved_studio_activation_requires_first_save_before_manual_edit
+    ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence
+
+test result: FAILED. 77 passed; 2 failed; 1 ignored; 0 measured; 814 filtered out; finished in 311.52s
+
+error: test failed, to rerun pass `-p kinewright-app --bin kinewright-app`

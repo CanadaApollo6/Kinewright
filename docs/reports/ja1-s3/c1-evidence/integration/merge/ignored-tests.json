@@ -1,0 +1,332 @@
+[
+  {
+    "gate": "project",
+    "test": "lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed",
+    "reason": "historical uncooperative journal injection; C7 covers the real GUI writer"
+  },
+  {
+    "gate": "project",
+    "test": "project::tests::mo2_old_reader_corpus",
+    "reason": "manual pre-land check: scripts/mo2-old-reader-check.sh"
+  },
+  {
+    "gate": "agent",
+    "test": "server::tests::s4_editor_result_to_candidate",
+    "reason": "H3 resolved attachment dispatch and C2 contained connector integration are not merged"
+  },
+  {
+    "gate": "agent",
+    "test": "server::tests::served_tools_direct_vs_legacy_filtered_microbench",
+    "reason": "manual release performance measurement"
+  },
+  {
+    "gate": "agent",
+    "test": "tests::cc7_every_color_fixture_builds_a_valid_document",
+    "reason": "constructs a real media engine, whose process-exit teardown raises the known SIGSEGV"
+  },
+  {
+    "gate": "agent",
+    "test": "tests::v3_fixture_builds_with_authored_and_recognized_truth",
+    "reason": "requires local speech synthesis and Whisper analysis"
+  },
+  {
+    "gate": "agent",
+    "test": "tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels",
+    "reason": "requires the explicitly prepared M40 event fixture pack"
+  },
+  {
+    "gate": "agent",
+    "test": "tests::v5_fixture_builds_from_verified_real_media",
+    "reason": "requires the explicitly prepared M40 fixture pack and Whisper analysis"
+  },
+  {
+    "gate": "agent",
+    "test": "tests::v5_music_fixture_builds_with_real_media_and_pinned_beats",
+    "reason": "requires the explicitly prepared M40 music fixture pack and beat analysis"
+  },
+  {
+    "gate": "agent",
+    "test": "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "gate": "agent",
+    "test": "native_app_bridge_rejects_abnormal_exit_after_completed_report",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "gate": "agent",
+    "test": "native_app_bridge_retains_exercised_control_and_property_failures",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "gate": "agent",
+    "test": "s2_additive_app_fixture_observes_real_controls",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "gate": "agent",
+    "test": "c11_switch_gui_participant",
+    "reason": "on-demand C11 GUI process participant: private bootstrap required"
+  },
+  {
+    "gate": "agent",
+    "test": "g05a_switch_reply_drop_and_participant_death",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "g05l_host_death_recovers_absent_and_committed_drag_suffix",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "g05l_shared_floor_and_recovery_close_reply_drop",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "rescue_reopen_recopy_retention_stress",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_blocked_guardian_exits_and_manager_kills",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_init_reaps_and_exits_with_provider",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_launch_refuses_without_nsdelegate",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_launch_refuses_without_pid_namespace",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_launch_under_runtime_dir",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_migration_outside_service_refused",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_migration_to_service_root_refused",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_proc_shows_only_the_namespace",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_runtime_alias_refused",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_runtime_dir_masked",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_events_recovery",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_events_session",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_identity_refused",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_proof_recovery_live",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_proof_recovery_zombie",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_proof_session_live",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_c2_service_proof_session_zombie",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_cancel_tree_and_retire_once",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_deleted_cgroup_zombies_still_block_retirement",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_guardian_death_and_observation_loss",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_guardian_subreaps_real_orphans",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_lost_startup_acknowledgments",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_precommit_cannot_execute",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_real_host_death_skips_grace",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_reaped_guardian_and_identity_are_required",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_retained_inode_deletion_signal",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_startup_deadline_kills_a_contained_shim",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_durable_owner_lifecycle_reopen",
+    "reason": "H1 durable owner publication and reopen are not merged"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_person_holder_approval_and_secret",
+    "reason": "H3 person-facing holder and attachment roles are not merged"
+  },
+  {
+    "gate": "agent",
+    "test": "s4_usage_durable_reopen_h1",
+    "reason": "S3 H1 durable orchestration publisher/reopen is not integrated"
+  },
+  {
+    "gate": "agent",
+    "test": "au3_queue_export_normalizes_and_verifies_audio",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au4_plan_audio_ducking_converges_through_the_real_engine",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au5_the_repair_and_normalization_planners_agree_in_either_order",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au6_a1_the_interview_ducks_the_bed_and_matches_the_voices",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au6_a4_the_multicam_cuts_leave_the_master_audio_untouched",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "au6_a5a_the_delivery_lands_on_the_ebu_r128_target",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "r28_solo_peak_resources_and_elapsed",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "solo_strip_inside_byte_budget",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "gate": "agent",
+    "test": "copilot_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "agent",
+    "test": "devin_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "agent",
+    "test": "kimi_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "agent",
+    "test": "kiro_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "agent",
+    "test": "muse_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "agent",
+    "test": "opencode_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "agent",
+    "test": "qwen_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "gate": "app",
+    "test": "ja1_attachment::tests::rescue_complete_app_lifecycle_stress",
+    "reason": "slow tier: cargo test --features slow-tests"
+  }
+]

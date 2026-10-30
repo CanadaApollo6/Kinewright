@@ -13,9 +13,9 @@ use std::{
 use eframe::egui;
 use kinewright_core::{
     Analysis, AssetId, AudioChain, ClipContent, ClipId, Command, CommandToken, Document, Effect,
-    EffectId, Event, Export, Incident, IncidentCode, IncidentId, IncidentObservation,
-    IncidentOutcome, IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident,
-    LiveAudioChange, MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
+    EffectId, Event, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
+    IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange,
+    MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
     NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
     PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, PreviewFrame,
     Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
@@ -68,6 +68,7 @@ fn inspect_project_document(
     Ok((document, admission.read_version(), digest, admission))
 }
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
+const STUDIO_SOURCE_COLOUR_REFUSAL: &str = "Studio keeps source colour with the project's media, so this colour fix was not applied. Use Assume SDR Rec.709 metadata in the Media Bin.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectAction {
@@ -308,9 +309,9 @@ fn router_apply_accepted(
 pub(crate) type UiReply = Box<dyn FnOnce(&mut KinewrightApp, &egui::Context) + Send>;
 
 pub(crate) struct NativeDisplay {
-    session: kinewright_media::DisplaySession,
-    renderer: eframe::egui_wgpu::RenderState,
-    picture: Option<(egui::TextureId, egui::Vec2)>,
+    pub(crate) session: kinewright_media::DisplaySession,
+    pub(crate) renderer: eframe::egui_wgpu::RenderState,
+    pub(crate) picture: Option<(egui::TextureId, egui::Vec2)>,
 }
 impl NativeDisplay {
     fn clear(&mut self) {
@@ -351,8 +352,6 @@ pub(crate) struct KinewrightApp {
     /// correlation token from (`IN1b` §4 rule 6).
     next_command_token: u64,
     pub(crate) playback: Arc<dyn Playback>,
-    pub(crate) analysis: Arc<dyn Analysis>,
-    pub(crate) exporter: Arc<dyn Export>,
     /// The engine as itself, so the verified LUT library can be published
     /// (CC4 §2.4).
     ///
@@ -376,6 +375,8 @@ pub(crate) struct KinewrightApp {
         Option<crossbeam_channel::Receiver<crate::chat_ui::HarnessUpdate>>,
     pub(crate) show_thread_rail: bool,
     pub(crate) settings_open: bool,
+    /// The Settings window's Director section, read when the window opens.
+    pub(crate) director_setting: Option<crate::settings_ui::DirectorView>,
     pub(crate) probe_tx: mpsc::Sender<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) probe_rx: mpsc::Receiver<(u64, PathBuf, Result<MediaAsset, MediaError>)>,
     pub(crate) relink_probe_tx: mpsc::Sender<crate::media_workflow::RelinkProbeResponse>,
@@ -616,9 +617,8 @@ impl KinewrightApp {
         let (lut_restore_tx, lut_restore_rx) = mpsc::channel();
         let (media_status_tx, media_status_rx) = mpsc::channel();
         let (cache_clear_tx, cache_clear_rx) = mpsc::channel();
-        let playback: Arc<dyn Playback> = media.clone();
-        let analysis: Arc<dyn Analysis> = media.clone();
-        let exporter: Arc<dyn Export> = media.clone();
+        let controls = media.controls();
+        let playback: Arc<dyn Playback> = controls.clone();
         let lut_publisher = media;
         let sidecar_writer = SidecarWriter::new();
         let sidecar_mode = if project_path.is_some() {
@@ -632,15 +632,14 @@ impl KinewrightApp {
             document.clone(),
             source_admission,
             project_path.clone(),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&lut_publisher)),
             &sidecar_mode,
             Some(Arc::clone(&sidecar_writer)),
             format_version,
             None,
         )
         .expect("startup project session must be valid");
+        project.studio.mode = crate::studio::Mode::Studio;
         if project_path.is_some() {
             project.saved_document = Some(Arc::clone(&project.document));
         }
@@ -664,11 +663,15 @@ impl KinewrightApp {
         // and `devin auth status` is a network round trip, so an unreachable
         // endpoint held the first frame with no window to show for it.
         let (harness_update_tx, harness_update_rx) = crossbeam_channel::unbounded();
-        let harness_update_rx = std::thread::Builder::new()
-            .name("kinewright-harness-probes".to_owned())
-            .spawn(move || crate::chat_ui::probe_harnesses(&harness_update_tx))
-            .map(|_| harness_update_rx)
-            .ok();
+        let harness_update_rx = if screenshotting {
+            None
+        } else {
+            std::thread::Builder::new()
+                .name("kinewright-harness-probes".to_owned())
+                .spawn(move || crate::chat_ui::probe_harnesses(&harness_update_tx))
+                .map(|_| harness_update_rx)
+                .ok()
+        };
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
@@ -678,8 +681,6 @@ impl KinewrightApp {
             next_project_id: 2,
             next_command_token: 1,
             playback,
-            analysis,
-            exporter,
             lut_publisher,
             frames,
             media_events,
@@ -691,6 +692,7 @@ impl KinewrightApp {
                 std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref(),
                 Ok("settings")
             ),
+            director_setting: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,
@@ -802,10 +804,18 @@ impl KinewrightApp {
             look_ab_hold_seen: false,
             performance: None,
         };
-        app.publish_focused_lut_library();
-        app.playback
-            .set_document(Arc::clone(&app.focused().document));
-        app.playback.request_frame(TimeCode::ZERO);
+        if app.focused().source_admission.is_studio() {
+            if !screenshotting {
+                app.enable_ja1();
+            }
+        } else {
+            app.publish_focused_lut_library();
+            app.focused()
+                .media()
+                .playback
+                .set_document(Arc::clone(&app.focused().document));
+            app.playback.request_frame(TimeCode::ZERO);
+        }
         // The investigator settings file is read once at startup (IN2 §2.1
         // rule 6); a malformed file opens one incident and is left alone
         // until the person changes a setting (rule 3).
@@ -824,7 +834,9 @@ impl KinewrightApp {
         }
         if let Some(observation) = load_error {
             app.note_observation(observation);
-        } else if let Some(path) = opened_path {
+        } else if let Some(path) =
+            opened_path.filter(|_| !app.focused().source_admission.is_studio())
+        {
             let missing: Vec<String> = app
                 .focused()
                 .document
@@ -857,11 +869,13 @@ impl KinewrightApp {
             }
             if !screenshotting {
                 for asset in assets {
-                    app.request_asset_analysis(asset);
+                    app.focused().request_asset_analysis(asset);
                 }
             }
         }
-        app.queue_media_status_checks_for_project(0);
+        if !app.focused().source_admission.is_studio() {
+            app.queue_media_status_checks_for_project(0);
+        }
         app
     }
 
@@ -872,8 +886,20 @@ impl KinewrightApp {
     pub(crate) fn focused_mut(&mut self) -> &mut ProjectSession {
         &mut self.projects[self.focused_project]
     }
+    /// Refuse a transition that would drop project `index`'s spoken capture
+    /// while its binding is not durably kept (S3 stage fixes 1 and 2).
+    pub(crate) fn refuse_unkept_voice(&mut self, index: usize) -> bool {
+        let why = self.projects[index].studio.voice.unkept();
+        if let Some(why) = why {
+            self.status = why.into();
+        }
+        why.is_some()
+    }
     fn ja1_destination_change(&mut self) -> bool {
-        let error = if self.focused().ja1_job.is_some() {
+        if self.refuse_unkept_voice(self.focused_project) {
+            return false;
+        }
+        let error = if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             Some("A save or selection is in progress. Wait for its outcome before changing destination.".to_owned())
         } else {
             self.focused()
@@ -893,8 +919,8 @@ impl KinewrightApp {
         clippy::too_many_lines,
         reason = "one activation boundary stages the local owner and authenticated host together"
     )]
-    fn enable_ja1(&mut self) {
-        if self.focused().ja1_job.is_some() {
+    pub(crate) fn enable_ja1(&mut self) {
+        if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             return;
         }
         let was_legacy = !self.focused().source_admission.is_studio();
@@ -950,36 +976,12 @@ impl KinewrightApp {
         })();
         match result {
             Ok(attachment) => {
-                let session = self.focused_mut();
-                session.recovery.stop_for_studio();
-                session.sidecar.sidecar_suspended = true;
-                session.ja1 = Some(attachment);
-                session.install_ja1_view();
-                self.playback
-                    .set_document(Arc::clone(&self.focused().document));
-                let mut root_paths = Vec::new();
-                if let Some(home) =
-                    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-                {
-                    root_paths.push(PathBuf::from(home));
-                }
-                if let Ok(cwd) = std::env::current_dir() {
-                    root_paths.push(cwd);
-                }
-                if let Some(parent) = self
-                    .focused()
-                    .project_path
-                    .as_deref()
-                    .and_then(Path::parent)
-                {
-                    root_paths.push(parent.to_path_buf());
-                }
-                root_paths.sort();
-                root_paths.dedup();
-                let roots = kinewright_agent::writer_host::SessionRoots {
-                    read: root_paths.clone(),
-                    write: root_paths,
-                };
+                let grant = self.focused().source_admission.legacy_media();
+                self.focused().analysis().cancel_all_analysis();
+                self.focused().source_admission.revoke_legacy_media();
+                self.presenter.suspend();
+                self.playback.pause();
+                self.playing = false;
                 let session = self.focused_mut();
                 // Retire local execution before granting the host named write authority.
                 for thread in &mut session.threads {
@@ -998,10 +1000,12 @@ impl KinewrightApp {
                         server.shutdown();
                     }
                 }
-                let project = format!("gui-{}-{:?}", session.id, session.core.actor_identity());
-                let attachment = session.ja1.as_mut().expect("installed Studio source owner");
-                let _ = attachment.launch_host(project, roots);
-                self.status = attachment.message.clone();
+                if let Some(grant) = grant.filter(|grant| !grant.is_quiescent()) {
+                    self.focused_mut().ja1_activation = Some((grant, attachment));
+                    self.status = "Studio is waiting for legacy media work to stop.".into();
+                } else {
+                    self.finish_ja1_activation(self.focused_project, attachment);
+                }
             }
             Err(error) => {
                 if was_legacy {
@@ -1017,9 +1021,60 @@ impl KinewrightApp {
             }
         }
     }
-    fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
+    fn finish_ja1_activation(
+        &mut self,
+        index: usize,
+        attachment: crate::ja1_attachment::Ja1Attachment,
+    ) {
+        let session = &mut self.projects[index];
+        session.source_admission.revoke_legacy_media();
+        session.recovery.stop_for_studio();
+        session.sidecar.sidecar_suspended = true;
+        session.ja1 = Some(attachment);
+        session.install_ja1_view();
+        if index == self.focused_project {
+            self.presenter.suspend();
+            self.playback.pause();
+            self.playing = false;
+        }
+        self.projects[index].studio.manual_inputs = None;
+        let mut root_paths = Vec::new();
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            root_paths.push(PathBuf::from(home));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            root_paths.push(cwd);
+        }
+        if let Some(parent) = self
+            .projects
+            .get(index)
+            .expect("activation session")
+            .project_path
+            .as_deref()
+            .and_then(Path::parent)
+        {
+            root_paths.push(parent.to_path_buf());
+        }
+        root_paths.sort();
+        root_paths.dedup();
+        let roots = kinewright_agent::writer_host::SessionRoots {
+            read: root_paths.clone(),
+            write: root_paths,
+        };
+        let session = &mut self.projects[index];
+        let project = format!("gui-{}-{:?}", session.id, session.core.actor_identity());
+        let attachment = session.ja1.as_mut().expect("installed Studio source owner");
+        let _ = attachment.launch_host(project, roots);
+        if index == self.focused_project {
+            self.status = attachment.message.clone();
+        }
+    }
+    pub(crate) fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
         if let crate::ja1_attachment::Action::OpenCapture(path) = &action {
             self.open_project(path);
+            return;
+        }
+        if !action.keeps_identity() && self.refuse_unkept_voice(self.focused_project) {
             return;
         }
         let session = self.focused_mut();
@@ -1041,7 +1096,37 @@ impl KinewrightApp {
             attachment
         }));
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one attachment job completion transition"
+    )]
     fn poll_ja1(&mut self, ctx: &egui::Context) {
+        let ready: Vec<_> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| {
+                session
+                    .ja1_activation
+                    .as_ref()
+                    .is_some_and(|(grant, _)| grant.is_quiescent())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in ready {
+            let (_, attachment) = self.projects[index]
+                .ja1_activation
+                .take()
+                .expect("ready activation");
+            self.finish_ja1_activation(index, attachment);
+        }
+        if self
+            .projects
+            .iter()
+            .any(|session| session.ja1_activation.is_some())
+        {
+            ctx.request_repaint_after(Duration::from_millis(20));
+        }
         let focused = self.focused_project;
         let mut changed = false;
         for (index, session) in self.projects.iter_mut().enumerate() {
@@ -1075,10 +1160,13 @@ impl KinewrightApp {
             {
                 let job = session.ja1_job.take().expect("finished job");
                 match job.join() {
-                    Ok(attachment) => {
+                    Ok(mut attachment) => {
                         if index == focused {
                             self.status.clone_from(&attachment.message);
                             changed = true;
+                        }
+                        if let Some(asset) = attachment.imported_media.take() {
+                            session.pending_timeline_adds.push(asset);
                         }
                         session.ja1 = Some(attachment);
                         session.install_ja1_view();
@@ -1090,6 +1178,32 @@ impl KinewrightApp {
             } else if session.ja1_job.is_some() {
                 ctx.request_repaint_after(Duration::from_millis(20));
             }
+        }
+        let ready_imports: Vec<_> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| !project.ja1_read_only())
+            .flat_map(|(index, project)| {
+                project
+                    .pending_timeline_adds
+                    .iter()
+                    .filter(|id| {
+                        project
+                            .document
+                            .media_pool
+                            .iter()
+                            .any(|asset| asset.id == **id)
+                    })
+                    .map(move |id| (index, *id))
+            })
+            .collect();
+        for (index, asset) in ready_imports {
+            self.projects[index]
+                .pending_timeline_adds
+                .retain(|pending| *pending != asset);
+            self.projects[index].cue_source_asset(asset);
+            self.add_asset_to_timeline_for(index, asset);
         }
         if changed {
             let path = self.focused().project_path.clone();
@@ -1105,10 +1219,16 @@ impl KinewrightApp {
             );
             self.focused_mut().lut_library = Arc::new(library);
             self.focused_mut().lut_availability = statuses.into_iter().collect();
-            self.playback
-                .set_document(Arc::clone(&self.focused().document));
-            self.publish_focused_lut_library();
-            self.playback.request_frame(self.focused().position);
+            if self.focused().studio.selection.is_none() && self.focused().ja1.is_none() {
+                self.focused()
+                    .media()
+                    .playback
+                    .set_document(Arc::clone(&self.focused().document));
+                self.presenter
+                    .set_context(self.playback.stamp().epoch, None);
+                self.publish_focused_lut_library();
+                self.playback.request_frame(self.focused().position);
+            }
         }
     }
     fn show_ja1(&mut self, ctx: &egui::Context) {
@@ -1200,9 +1320,7 @@ impl KinewrightApp {
             document,
             source_admission,
             project_path,
-            &self.playback,
-            &self.analysis,
-            &self.exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&self.lut_publisher)),
             sidecar_mode,
             Some(writer),
             format_version,
@@ -1242,11 +1360,50 @@ impl KinewrightApp {
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
         self.mixer_selection = None;
         self.clear_preview();
+        self.focused().retire_media();
+        self.visual_cache = crate::visual_cache::VisualCache::new(crossbeam_channel::never());
         self.focused_project = index;
+        if let Some(context) = self.focused().studio.selection.clone() {
+            let position = self.focused().studio.position;
+            if let Err(error) = self.install_studio_context(context) {
+                self.presenter.suspend();
+                self.status = error;
+            } else {
+                self.focused_mut().studio.position = position;
+                self.playback.seek(position);
+                self.playback.request_frame(position);
+            }
+            return;
+        }
+        if self.focused().is_owned() {
+            if let Some(inputs) = self
+                .focused()
+                .studio
+                .manual_inputs
+                .clone()
+                .filter(|inputs| inputs.document() == &*self.focused().document)
+            {
+                let stamp = self.lut_publisher.set_certified_document(inputs);
+                self.presenter.set_context(stamp.epoch, None);
+                self.playback.seek(self.focused().position);
+                self.playback.request_frame(self.focused().position);
+            } else {
+                self.presenter.suspend();
+                self.focused()
+                    .media()
+                    .playback
+                    .set_document(Arc::clone(&self.focused().document));
+                self.status =
+                    "Activate Studio to preview and analyse this project's owned media.".into();
+            }
+            return;
+        }
+        self.presenter
+            .set_context(self.playback.stamp().epoch, None);
         let document = Arc::clone(&self.focused().document);
         let position = self.focused().position;
         self.publish_focused_lut_library();
-        self.playback.set_document(document);
+        self.focused().media().playback.set_document(document);
         self.playback.seek(position);
         self.playback.request_frame(position);
     }
@@ -1276,7 +1433,10 @@ impl KinewrightApp {
         &mut self,
         path: &Path,
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
-        if self.focused().ja1.is_some() || self.focused().ja1_job.is_some() {
+        if self.focused().ja1.is_some()
+            || self.focused().ja1_job.is_some()
+            || self.focused().ja1_activation.is_some()
+        {
             let notice = self.focused().ja1.as_ref().and_then(|j| j.destination_change().err()).map_or_else(|| "Use the Studio lifecycle save action; a document-only write cannot replace this project.".into(), |e| e.to_string());
             return Err(ProjectSaveError::UnsupportedBundle { notice });
         }
@@ -1495,11 +1655,12 @@ impl KinewrightApp {
             report.digest, new_digest,
             "one serialisation serves both files"
         );
-        self.focused_mut().source_admission =
+        self.focused_mut().set_source_admission(
             kinewright_project::bundle::BundleWriteAdmission::from_written_legacy(
                 writer.resolved_identity(),
                 json.as_bytes(),
-            )?;
+            )?,
+        );
         report.path = path.to_path_buf();
         self.adopt_saved_path(path, &new_digest, written_version);
         if let Some(reason) = &report.lut_store_error {
@@ -1517,7 +1678,12 @@ impl KinewrightApp {
     }
 
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
-        if self.focused().ja1_job.is_some() {
+        if self.focused().studio.selection.is_some() {
+            self.status =
+                "Choose Current edit or Edit a copy before saving a working branch.".into();
+            return false;
+        }
+        if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             self.status = "Saving or selection is still in progress; editing is read-only.".into();
             return false;
         }
@@ -1876,7 +2042,7 @@ impl KinewrightApp {
         }
         self.queue_media_status_checks_for_project(self.focused_project);
         for asset in assets {
-            self.request_asset_analysis(asset);
+            self.focused().request_asset_analysis(asset);
         }
         // Appendix B row 11, the second aggregate. The push is **lifted out**
         // of the `self.status = if …` expression before the status line is
@@ -1890,7 +2056,9 @@ impl KinewrightApp {
                 format!("Missing media after open: {}", missing.join(", ")),
             );
         }
-        self.status = if missing.is_empty() {
+        self.status = if self.focused().media().unavailable {
+            "Activate Studio to preview and analyse this project's owned media.".into()
+        } else if missing.is_empty() {
             format!("Opened {}", path.display())
         } else {
             format!(
@@ -1967,7 +2135,7 @@ impl KinewrightApp {
                 self.focus_project(self.projects.len() - 1);
                 self.queue_media_status_checks_for_project(self.focused_project);
                 for asset in assets {
-                    self.request_asset_analysis(asset);
+                    self.focused().request_asset_analysis(asset);
                 }
                 let owner = retirement_owner.unwrap_or(self.focused_project);
                 if owner == 0 {
@@ -2011,9 +2179,12 @@ impl KinewrightApp {
             return;
         }
         let id = self.projects[index].id;
-        if self.projects[index].ja1_job.is_some() {
+        if self.projects[index].ja1_job.is_some() || self.projects[index].ja1_activation.is_some() {
             self.status =
                 "Wait for this save or selection before closing the editing context.".into();
+            return;
+        }
+        if self.refuse_unkept_voice(index) {
             return;
         }
         if self.projects[index].is_dirty() || !self.projects[index].ja1_close_warning().is_empty() {
@@ -2029,6 +2200,10 @@ impl KinewrightApp {
             return;
         };
         if self.projects.len() <= 1 {
+            return;
+        }
+        // The confirmation's Discard never discards a live recording.
+        if self.refuse_unkept_voice(index) {
             return;
         }
         let closing_focused = index == self.focused_project;
@@ -2048,6 +2223,8 @@ impl KinewrightApp {
                 .move_pending_to(&mut remaining[0].recovery);
         }
         self.projects.remove(index);
+        // Preview cleanup during rebind reads the focused project's Studio state.
+        self.focused_project = next_focus;
         self.media_statuses.remove_session(id);
         if self
             .pending_source_edit
@@ -2067,9 +2244,36 @@ impl KinewrightApp {
         self.status = format!("Closed {name}");
     }
 
-    fn request_exit(&mut self, ctx: &egui::Context) {
-        if self.projects.iter().any(|p| p.ja1_job.is_some()) {
+    /// Whether an exit waits for the person's choice about unsaved work.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn exit_waits_for_choice(&self) -> bool {
+        matches!(self.pending_project_action, Some(ProjectAction::Exit(_)))
+    }
+
+    /// Whether an exit went ahead and asked the window to close.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn exit_allowed(&self) -> bool {
+        self.allow_close
+    }
+
+    pub(crate) fn request_exit(&mut self, ctx: &egui::Context) {
+        if self
+            .projects
+            .iter()
+            .any(|p| p.ja1_job.is_some() || p.ja1_activation.is_some())
+        {
             self.status = "Wait for the current Studio operation before closing.".into();
+            return;
+        }
+        if let Some(index) = self
+            .projects
+            .iter()
+            .position(|project| project.studio.voice.unkept().is_some())
+        {
+            self.pending_project_action = None;
+            self.exit_discarded_projects.clear();
+            self.focus_project(index);
+            self.refuse_unkept_voice(index);
             return;
         }
         if let Some(index) = self.projects.iter().position(|project| {
@@ -2290,6 +2494,14 @@ impl KinewrightApp {
 
     pub(crate) fn send_operation(&mut self, operation: Operation) {
         if self.refuse_ja1_manual_edit() {
+            return;
+        }
+        if matches!(&operation, Operation::SetAssetColorDescription { .. })
+            && self.focused().ja1.is_some()
+        {
+            self.start_ja1(crate::ja1_attachment::Action::ChangeMediaInterpretation(
+                Box::new(operation),
+            ));
             return;
         }
         // The operation names the narrowest subject the refusal is about, but
@@ -2539,6 +2751,9 @@ impl KinewrightApp {
         let Some(operation) = operation else {
             return;
         };
+        if self.studio_source_colour_refused(project_index, &operation) {
+            return;
+        }
         // `Command::DoIfRevision`, never `Command::Do`: the apply the router
         // planned against one revision must not land on another (rule 9).
         // The token is what the conflict is matched by (`IN1b` §4 rule 6).
@@ -2566,6 +2781,21 @@ impl KinewrightApp {
             });
             auto_applied.push(id);
         }
+    }
+
+    fn studio_source_colour_refused(
+        &mut self,
+        project_index: usize,
+        operation: &Operation,
+    ) -> bool {
+        let project = &self.projects[project_index];
+        if !matches!(operation, Operation::SetAssetColorDescription { .. })
+            || (project.ja1.is_none() && project.ja1_job.is_none())
+        {
+            return false;
+        }
+        STUDIO_SOURCE_COLOUR_REFUSAL.clone_into(&mut self.status);
+        true
     }
 
     /// Allocate the next correlation token (`IN1b` §4 rule 6).
@@ -2867,6 +3097,9 @@ impl KinewrightApp {
         operation: Operation,
         outcome: IncidentOutcome,
     ) {
+        if self.studio_source_colour_refused(project_index, &operation) {
+            return;
+        }
         let expected = self.projects[project_index].revision;
         let token = self.next_command_token();
         if self.projects[project_index]
@@ -2962,13 +3195,6 @@ impl KinewrightApp {
         }
     }
 
-    fn request_asset_analysis(&self, asset: MediaAsset) {
-        self.analysis.request_transcription(asset.clone());
-        self.analysis.request_silence_detection(asset.clone());
-        self.analysis.request_scene_detection(asset.clone());
-        self.analysis.request_beat_detection(asset);
-    }
-
     pub(crate) fn undo(&mut self) {
         if self.refuse_ja1_manual_edit() {
             return;
@@ -2995,7 +3221,7 @@ impl KinewrightApp {
 
     // Polling coordinates six independent channels and preserves their visible event ordering.
     #[allow(clippy::too_many_lines)]
-    fn poll_background(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_ja1(ctx);
         while let Ok(reply) = self.ui_replies.1.try_recv() {
             reply(self, ctx);
@@ -3022,6 +3248,7 @@ impl KinewrightApp {
         self.poll_noise_learn(ctx);
         self.poll_room_tone(ctx);
         self.poll_recording(ctx);
+        self.poll_voice_retention(ctx);
         self.poll_media_workflow(ctx);
         // Site 5 (`IN2B` §7 rule 3, N6/H11): transcript failures edge here,
         // per asset, whether the panel is open or not.
@@ -3036,7 +3263,8 @@ impl KinewrightApp {
         // dedup key collapses the repeats correctly (`IN1b` §5.1 rule 14).
         // `media_incomplete`, because the project is open and usable — only
         // its timeline pictures are missing.
-        for (asset, error) in self.visual_cache.poll(ctx) {
+        let analysis = self.focused().analysis();
+        for (asset, error) in self.visual_cache.poll_scoped(ctx, &*analysis) {
             self.note_label(
                 LabelIncident::MediaIncomplete,
                 IncidentSubject::Asset(asset),
@@ -3170,6 +3398,9 @@ impl KinewrightApp {
                             self.visual_cache.invalidate_and_unblock_path(&asset.path);
                         }
                     }
+                    self.projects[project_index]
+                        .studio
+                        .update_manual_document(Arc::clone(&doc));
                     self.projects[project_index].document = Arc::clone(&doc);
                     self.projects[project_index].revision = revision;
                     if previous_document.lut_assets != doc.lut_assets {
@@ -3206,17 +3437,21 @@ impl KinewrightApp {
                                 .clamp(0, doc.duration.0.saturating_sub(1)),
                         );
                     }
-                    if project_index == self.focused_project {
+                    if project_index == self.focused_project
+                        && self.projects[project_index].studio.selection.is_none()
+                    {
                         if !media_changed_assets.is_empty() {
                             self.clear_preview();
                         }
                         let position = self.projects[project_index].position;
-                        if !apply_live_audio_change(
-                            self.playback.as_ref(),
-                            live_audio,
-                            &doc,
-                            position,
-                        ) {
+                        if !self.update_owned_playback(Arc::clone(&doc), live_audio, position)
+                            && !apply_live_audio_change(
+                                self.projects[project_index].media().playback.as_ref(),
+                                live_audio,
+                                &doc,
+                                position,
+                            )
+                        {
                             self.playing = false;
                         }
                     }
@@ -3235,7 +3470,7 @@ impl KinewrightApp {
                         }
                     }
                     for asset in media_changed_assets {
-                        self.request_asset_analysis(asset);
+                        self.projects[project_index].request_asset_analysis(asset);
                     }
                     self.queue_media_status_checks_for_project(project_index);
                     if project_index == self.focused_project {
@@ -3302,9 +3537,9 @@ impl KinewrightApp {
 
         if self.projects.iter().any(|project| {
             project.document.media_pool.iter().any(|asset| {
-                self.analysis.silence_status(asset).is_running()
-                    || self.analysis.scene_status(asset).is_running()
-                    || self.analysis.beat_status(asset).is_running()
+                project.analysis().silence_status(asset).is_running()
+                    || project.analysis().scene_status(asset).is_running()
+                    || project.analysis().beat_status(asset).is_running()
             })
         }) {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -3314,7 +3549,7 @@ impl KinewrightApp {
             match event {
                 MediaEvent::Position(position) => {
                     if !self.resume_after_scrub {
-                        self.focused_mut().position = position;
+                        self.set_program_position(position);
                     }
                 }
                 MediaEvent::PlaybackStateChanged(state) => {
@@ -3322,8 +3557,23 @@ impl KinewrightApp {
                 }
                 MediaEvent::StampedError(stamp, _) if !stamp.is_current(self.playback.stamp()) => {}
                 MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
+                    if error == MediaError::MediaAdmissionRequired && self.focused().is_owned() {
+                        if self.focused().studio.manual_inputs.is_none() {
+                            self.presenter.suspend();
+                            self.clear_preview();
+                            self.status = "Activate Studio to preview and analyse this project's owned media.".into();
+                        }
+                        continue;
+                    }
                     self.playing = false;
                     self.pending_resume = None;
+                    if self.focused().studio.selection.is_some()
+                        || self.focused().studio.manual_inputs.is_some()
+                    {
+                        self.presenter.suspend();
+                        self.playback.pause();
+                        self.focused_mut().studio.failure = Some(error.to_string());
+                    }
                     let revision = self.focused().revision;
                     // `IN1b` §5.1 rule 12: the constructor is total after
                     // Part B, so both arms fold into one and IN1 §5.2 rule 6's
@@ -3354,9 +3604,10 @@ impl KinewrightApp {
 
         if self.playing {
             let position = self.playback.position();
-            self.focused_mut().position = position;
+            self.set_program_position(position);
             ctx.request_repaint_after(Duration::from_millis(10));
         }
+        self.sync_studio_selection();
     }
 
     /// Review B (UI blocking): run `work` (an agent-lane request, which may
@@ -3395,7 +3646,7 @@ impl KinewrightApp {
             && ack.stamp.epoch == self.playback.stamp().epoch
         {
             self.pending_resume = None;
-            self.playback.play(target);
+            self.play_program_from(target);
         }
     }
 
@@ -3420,13 +3671,15 @@ impl KinewrightApp {
             display.clear();
         }
         self.presenter.clear();
+        self.focused_mut().studio.cpu_frame = None;
+        self.focused_mut().studio.cpu_frame_id = None;
         self.pending_resume = None;
     }
 
     /// PF1 R-2: the last step of `ui`, after every transport call in the
     /// pass, binds the newest valid candidate and writes the display cell.
     #[allow(clippy::cast_precision_loss)]
-    fn finalize_preview(&mut self, ctx: &egui::Context) {
+    pub(crate) fn finalize_preview(&mut self, ctx: &egui::Context) {
         // Review A F2: the CPU image is prepared before the final stamp and
         // clock check; the cell and the texture then bind together. The
         // check and the binding cannot be one step against the free-running
@@ -3434,6 +3687,7 @@ impl KinewrightApp {
         // its paint is acked expired (`PaintMarker::record`).
         let now = self.paint_clock();
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        self.presenter.advance(epoch);
         debug_assert_eq!(ctx.viewport_id(), egui::ViewportId::ROOT);
         if let Some(display) = &mut self.native_display
             && let Some(frame) = display.session.reserve()
@@ -3473,7 +3727,7 @@ impl KinewrightApp {
                     display.session.bind(epoch, frame);
                     // Keep the CPU id: this pass may have laid it out before the route switch.
                     if !self.resume_after_scrub && !self.playing {
-                        self.focused_mut().position = at;
+                        self.set_program_position(at);
                     }
                 } else if let Some(prepared) = prepared {
                     renderer.free_texture(&prepared);
@@ -3488,7 +3742,11 @@ impl KinewrightApp {
                 .map(|side| usize::try_from(side).unwrap_or_default());
             egui::ColorImage::from_rgba_unmultiplied(size, texture.rgba.as_slice())
         };
-        if let Some((PreviewFrame { at, .. }, image)) = self.presenter.finalize(now, prepare) {
+        if let Some((frame, image)) = self.presenter.finalize(now, prepare) {
+            let at = frame.at;
+            self.focused_mut().studio.cpu_frame = Some(frame.texture);
+            self.focused_mut().studio.cpu_frame_id =
+                self.presenter.bound().map(|cell| cell.frame_id);
             // Keep the native id and its Bound lease through a laid-out GPU paint.
             // The next GPU rebind retires it under the normal root-epoch fence.
             if let Some(texture) = &mut self.texture {
@@ -3501,7 +3759,7 @@ impl KinewrightApp {
                 ));
             }
             if !self.resume_after_scrub && !self.playing {
-                self.focused_mut().position = at;
+                self.set_program_position(at);
             }
         }
         if let Some((painter, slot, image_rect)) = self.stale_caption.take()
@@ -3680,6 +3938,7 @@ impl eframe::App for KinewrightApp {
         if let Some(display) = &mut self.native_display {
             display.session.advance(epoch);
         }
+        self.presenter.advance(epoch);
         self.acknowledge_paint(epoch);
     }
 
@@ -3717,8 +3976,22 @@ impl eframe::App for KinewrightApp {
             }
         }
 
-        self.app_top_bar(ui);
-        self.panel_layout(ui);
+        self.sync_studio_selection();
+        if self.focused().is_owned()
+            && self.focused().studio.manual_inputs.is_none()
+            && self.focused().studio.selection.is_none()
+        {
+            ui.label("Owned media is not ready for preview or analysis. Activate Studio or wait for the current operation to finish.");
+        }
+        if self.focused().studio.mode == crate::studio::Mode::Studio
+            || self.focused().studio.selection.is_some()
+            || ui.available_width() < 1000.0
+        {
+            self.studio_layout(ui);
+        } else {
+            self.app_top_bar(ui);
+            self.panel_layout(ui);
+        }
         self.show_export_dialog(ui.ctx());
         self.show_record_dialog(ui.ctx());
         self.show_settings_dialog(ui.ctx());
@@ -3735,7 +4008,20 @@ impl eframe::App for KinewrightApp {
         self.show_ja1(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
-        self.screenshot.update(ui.ctx());
+        if self.screenshot.update(ui.ctx()) {
+            // Attached screenshots own a child host; close its leases and reap it
+            // before the capture process exits.
+            let closed = self.projects.iter_mut().all(|project| {
+                project
+                    .ja1
+                    .as_mut()
+                    .is_none_or(crate::ja1_attachment::Ja1Attachment::close)
+            });
+            if closed {
+                std::process::exit(0);
+            }
+            ui.ctx().request_repaint();
+        }
         self.finalize_preview(ui.ctx());
         let picture_present = self.program_picture().is_some();
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
@@ -3764,6 +4050,9 @@ impl KinewrightApp {
                 ui.horizontal_centered(|ui| {
                     ui.label(theme::wordmark("KINEWRIGHT", color::TEXT_SECONDARY));
                     ui.separator();
+                    if ui.selectable_label(false, "Studio").clicked() {
+                        self.focused_mut().studio.mode = crate::studio::Mode::Studio;
+                    }
                     self.file_menu(ui);
                     self.view_menu(ui);
                     self.look_menu(ui);
@@ -4415,7 +4704,22 @@ pub(crate) fn run() -> eframe::Result {
     let started = std::time::Instant::now();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
-        .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]);
+        .with_min_inner_size([360.0, size::WINDOW_MIN_HEIGHT]);
+    if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+        && let Some((width, height)) =
+            std::env::var("KINEWRIGHT_SCREENSHOT_SIZE")
+                .ok()
+                .and_then(|size| {
+                    let (width, height) = size.split_once('x')?;
+                    Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
+                })
+    {
+        viewport = viewport
+            .with_inner_size([width, height])
+            .with_min_inner_size([width, height])
+            .with_max_inner_size([width, height])
+            .with_resizable(false);
+    }
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -4456,6 +4760,12 @@ pub(crate) fn run() -> eframe::Result {
                 renderer: render_state.clone(),
                 picture: None,
             });
+            if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+                && let Some(path) = std::env::var_os("KINEWRIGHT_SCREENSHOT_STUDIO_BUNDLE")
+                && let Err(error) = app.prepare_studio_screenshot(std::path::Path::new(&path))
+            {
+                eprintln!("Studio screenshot preparation failed: {error}");
+            }
             app.performance = crate::performance::PerformanceProbe::from_environment(started);
             Ok(Box::new(app))
         }),
@@ -4756,7 +5066,7 @@ impl KinewrightApp {
         }
         let mut minimum_source_frames = u64::MAX;
         for asset in &assets {
-            let status = self.analysis.silence_status(asset);
+            let status = self.focused().analysis().silence_status(asset);
             match status {
                 SilenceStatus::Ready(_) => {}
                 SilenceStatus::NoAudio | SilenceStatus::Failed(_) | SilenceStatus::Cancelled => {
@@ -4767,7 +5077,9 @@ impl KinewrightApp {
                 | SilenceStatus::Hashing
                 | SilenceStatus::Analyzing => {
                     if matches!(status, SilenceStatus::NotRequested) {
-                        self.analysis.request_silence_detection(asset.clone());
+                        self.focused()
+                            .analysis()
+                            .request_silence_detection(asset.clone());
                     }
                     return NoiseLearnRange::Analysing;
                 }
@@ -4778,7 +5090,7 @@ impl KinewrightApp {
         if minimum_source_frames == u64::MAX {
             return NoiseLearnRange::NoSilence;
         }
-        let Ok(spans) = self.analysis.timeline_silences(
+        let Ok(spans) = self.focused().analysis().timeline_silences(
             document,
             None,
             TimeCode(i64::try_from(minimum_source_frames).unwrap_or(i64::MAX)),
@@ -4815,7 +5127,7 @@ impl KinewrightApp {
             session: session.id,
             chain,
             effect,
-            analysis: Arc::clone(&self.analysis),
+            analysis: Arc::clone(&self.focused().analysis()),
             document: Arc::clone(&session.document),
             request: MixNoiseProfileRequest {
                 range: Some(start..end),
@@ -6212,7 +6524,7 @@ pub(crate) mod in1_tests {
     /// `in1_untagged.mp4` probed through the ordinary probe path. The
     /// returned guard must be held for as long as the document is in use, or
     /// the fixture file is removed from under the decoder (IN1 §3 rule 11).
-    fn in1_untagged(engine: &FfmpegMediaEngine) -> (GeneratedMedia, Document) {
+    fn in1_untagged(engine: &kinewright_media::SessionMedia) -> (GeneratedMedia, Document) {
         let generated = in1_source(In1Source::UntaggedMp4);
         let asset = engine.probe(generated.path()).expect("the fixture probes");
         (generated, single_clip_document(asset))
@@ -6221,7 +6533,13 @@ pub(crate) mod in1_tests {
     /// Drive the real decoder until a `MediaEvent::Error` arrives or the
     /// deadline expires. `set_document` plus one `request_frame`, never
     /// `play` (IN1 §7 rule 3).
-    fn in1_playback_error(engine: &FfmpegMediaEngine, document: &Document) -> MediaError {
+    fn in1_playback_error(backend: &Arc<FfmpegMediaEngine>, document: &Document) -> MediaError {
+        let engine = backend.legacy_media(
+            kinewright_core::MediaSourceOrigin::new_project()
+                .legacy_media()
+                .unwrap(),
+            Arc::new(document.clone()),
+        );
         engine.set_document(Arc::new(document.clone()));
         engine.request_frame(TimeCode::ZERO);
         let events = engine.events();
@@ -6244,10 +6562,12 @@ pub(crate) mod in1_tests {
 
     /// The smallest real app that can tick: one project session on a real
     /// `Core` actor, a real engine behind the trait arcs, and default UI
-    /// state everywhere else. There is deliberately no window, no model, and
-    /// no audio device — the same terms §9 lays down.
+    /// state everywhere else. There is no window or model. Tests that play
+    /// audio supply a paced engine through `in1_harness_with_engine`.
     pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
-        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let gpu = FfmpegMediaEngine::test_gpu_context().expect("the test GPU starts");
+        let engine =
+            Arc::new(FfmpegMediaEngine::new_with_gpu(gpu).expect("the test engine starts"));
         in1_harness_with_engine(document, engine)
     }
 
@@ -6256,18 +6576,15 @@ pub(crate) mod in1_tests {
         document: Document,
         engine: Arc<FfmpegMediaEngine>,
     ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
-        let playback: Arc<dyn Playback> = engine.clone();
-        let analysis: Arc<dyn Analysis> = engine.clone();
-        let exporter: Arc<dyn Export> = engine.clone();
+        let controls = engine.controls();
+        let playback: Arc<dyn Playback> = controls.clone();
         let project = ProjectSession::create(
             1,
             "IN1",
             document,
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&engine)),
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
@@ -6289,8 +6606,6 @@ pub(crate) mod in1_tests {
             next_project_id: 2,
             next_command_token: 1,
             playback,
-            analysis,
-            exporter,
             lut_publisher: Arc::clone(&engine),
             frames,
             media_events,
@@ -6299,6 +6614,7 @@ pub(crate) mod in1_tests {
             harness_update_rx: None,
             show_thread_rail: true,
             settings_open: false,
+            director_setting: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,
@@ -6924,8 +7240,15 @@ pub(crate) mod in1_tests {
     /// private to that module, and a test that reaches them has to be written
     /// there (review-app-2 S3).
     pub(crate) fn in1b_app() -> (GeneratedMedia, KinewrightApp) {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
+        let finished = probe_engine.teardown_observer();
         let (fixture, document) = in1_untagged(&probe_engine);
+        drop(probe_engine);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "the probe worker releases its native renderer before fixture teardown"
+        );
         let (app, _engine) = in1_harness(document);
         (fixture, app)
     }
@@ -7222,7 +7545,7 @@ pub(crate) mod in1_tests {
         // incident with no `else` branch left to take (Appendix B row 27,
         // merged by `IN1b` §5.1 rule 12). The channel is replaced so the
         // delivery is deterministic; everything after it is production's.
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_driven_fixture, driven_document) = in1_untagged(&probe_engine);
         let (mut driven, engine) = in1_harness(driven_document);
         let document = driven.projects[0].document.as_ref().clone();
@@ -7672,7 +7995,8 @@ pub(crate) mod in1_tests {
     fn in1b_n_visual_cache_failures_open_n_asset_incidents() {
         let (_fixture, mut app) = in1b_app();
         let (results_tx, results_rx) = crossbeam_channel::unbounded();
-        app.visual_cache = crate::visual_cache::VisualCache::new(results_rx);
+        app.visual_cache =
+            crate::visual_cache::VisualCache::new(results_rx).bound_to(&*app.focused().analysis());
         for (asset, name) in [
             (kinewright_core::AssetId(1), "one.mov"),
             (kinewright_core::AssetId(2), "two.mov"),
@@ -7741,7 +8065,14 @@ pub(crate) mod in1_tests {
             3,
             "one audit line per opened incident, not per failure"
         );
+        let finished = app.lut_publisher.teardown_observer();
         in1_shutdown(&mut app);
+        drop(app);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "the app worker releases its native renderer before process exit"
+        );
     }
 
     /// The third aggregate of `IN1b` §5.1 rule 14, which shares item 22's
@@ -8037,9 +8368,9 @@ pub(crate) mod in1_tests {
     /// `in1_the_assumed_description_decodes_managed`.
     #[test]
     fn in1_the_person_path_opens_one_auto_apply_incident_with_the_pinned_headline() {
-        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let engine = Arc::new(FfmpegMediaEngine::legacy_fixture().expect("the test engine starts"));
         let (_fixture, document) = in1_untagged(&engine);
-        let error = in1_playback_error(&engine, &document);
+        let error = in1_playback_error(&engine.engine(), &document);
         let mut log = IncidentLog::default();
         let observation = IncidentObservation::from_media_error(
             &error,
@@ -8107,7 +8438,7 @@ pub(crate) mod in1_tests {
     /// (IN1 §11.1 limit 1).
     #[test]
     fn in1_the_fixture_errors_open_exactly_one_incident() {
-        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let engine = Arc::new(FfmpegMediaEngine::legacy_fixture().expect("the test engine starts"));
         let (_fixture, document) = in1_untagged(&engine);
         engine.set_document(Arc::new(document));
         engine.request_frame(TimeCode::ZERO);
@@ -8158,7 +8489,7 @@ pub(crate) mod in1_tests {
     /// it — and the error itself is a real decode refusal.
     #[test]
     fn in1_a_stale_router_apply_leaves_the_incident_open_without_reapplying() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -8289,7 +8620,7 @@ pub(crate) mod in1_tests {
     /// two `AutoApply` incidents at one revision, not two decodes.
     #[test]
     fn in1b_a_conflict_is_matched_to_the_refused_send_by_token() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, mut document) = in1_untagged(&probe_engine);
         let first_asset = document.media_pool.first().expect("one asset").clone();
         let second_id = kinewright_core::AssetId(first_asset.id.0 + 1);
@@ -8428,7 +8759,7 @@ pub(crate) mod in1_tests {
     /// incident, so nothing else about rule 10 moves.
     #[test]
     fn in1b_the_routers_own_refused_send_opens_no_second_incident() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -8561,7 +8892,7 @@ pub(crate) mod in1_tests {
     /// already covers; this test needs the gate to **pass**.
     #[test]
     fn in1b_the_routers_own_rejected_send_is_dropped_not_left_outstanding() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -8713,7 +9044,7 @@ pub(crate) mod in1_tests {
     /// card, and that card is where the answer belongs.
     #[test]
     fn in1b_a_refused_card_press_is_reported_where_an_auto_apply_is_not() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -8819,7 +9150,7 @@ pub(crate) mod in1_tests {
     /// drop a correlation rather than a silencing.
     #[test]
     fn in1b_a_foreign_rejection_still_opens_its_card() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, _engine) = in1_harness(probed);
         app.projects[0]
@@ -8872,7 +9203,7 @@ pub(crate) mod in1_tests {
     /// cannot pass by doing nothing at all.
     #[test]
     fn in1b_a_foreign_conflict_leaves_every_router_send_outstanding() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -8956,7 +9287,7 @@ pub(crate) mod in1_tests {
     /// field is honestly empty.
     #[test]
     fn in1b_the_badge_counts_open_incidents_not_log_lines() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -9011,7 +9342,7 @@ pub(crate) mod in1_tests {
     /// out — rather than being re-applied.
     #[test]
     fn in1_the_undo_sticks_and_the_reopen_is_suppressed() {
-        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
         let (_fixture, probed) = in1_untagged(&probe_engine);
         let (mut app, engine) = in1_harness(probed);
         let document = app.projects[0].document.as_ref().clone();
@@ -9566,9 +9897,7 @@ pub(crate) mod in1_tests {
             Document::default(),
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
-            &app.playback,
-            &app.analysis,
-            &app.exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
@@ -11073,6 +11402,9 @@ pub(crate) mod in1_tests {
         );
         in2_cleanup(&mut app);
     }
+
+    #[path = "c0_studio_owned.rs"]
+    mod c0_studio_owned;
 }
 
 /// `IN2B` §12 items over the real save/close/reopen paths, headless.
@@ -11397,9 +11729,8 @@ mod in2b_tests {
         project_path: Option<PathBuf>,
     ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
-        let playback: Arc<dyn Playback> = engine.clone();
-        let analysis: Arc<dyn Analysis> = engine.clone();
-        let exporter: Arc<dyn Export> = engine.clone();
+        let controls = engine.controls();
+        let playback: Arc<dyn Playback> = controls.clone();
         let writer = SidecarWriter::new();
         // The digest `load_document` would have read: the file rarely exists
         // yet at harness time, and an `Absent` sidecar needs no gate.
@@ -11417,9 +11748,7 @@ mod in2b_tests {
             document,
             fixture_source_admission((project_path).as_deref()),
             project_path,
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&engine)),
             &mode,
             Some(Arc::clone(&writer)),
             PROJECT_FORMAT_VERSION,
@@ -11441,8 +11770,6 @@ mod in2b_tests {
             next_project_id: 2,
             next_command_token: 1,
             playback,
-            analysis,
-            exporter,
             lut_publisher: Arc::clone(&engine),
             frames,
             media_events,
@@ -11451,6 +11778,7 @@ mod in2b_tests {
             harness_update_rx: None,
             show_thread_rail: true,
             settings_open: false,
+            director_setting: None,
             probe_tx,
             probe_rx,
             relink_probe_tx,
@@ -11605,7 +11933,17 @@ mod in2b_tests {
     /// quiescence: the sentinel's frame arrives only after every earlier
     /// render finished, and nothing after this function renders again.
     /// Tests that never focus (C1's) need no quiesce.
-    pub(crate) fn in2b_quiesce_engine(engine: &FfmpegMediaEngine) {
+    pub(crate) fn in2b_quiesce_engine(backend: &Arc<FfmpegMediaEngine>) {
+        // The sentinel owns an independent empty scene. A raw or unadmitted
+        // project correctly refuses frames, so it cannot serve as this barrier.
+        let document = Arc::new(Document::default());
+        let engine = backend.legacy_media(
+            kinewright_core::MediaSourceOrigin::new_project()
+                .legacy_media()
+                .unwrap(),
+            Arc::clone(&document),
+        );
+        engine.set_document(document);
         let frames = engine.frames();
         while frames.try_recv().is_ok() {}
         // Every focus in these tests requests `ZERO` (no test scrubs), so a
@@ -11787,9 +12125,6 @@ mod in2b_tests {
         let (document, version, digest) =
             load_document(&project_path).expect("the project re-reads");
         assert_eq!(version, 1);
-        let playback = Arc::clone(&app.playback);
-        let analysis = Arc::clone(&app.analysis);
-        let exporter = Arc::clone(&app.exporter);
         let writer = Arc::clone(&app.sidecar_writer);
         let mut reopened = ProjectSession::create(
             7,
@@ -11797,9 +12132,7 @@ mod in2b_tests {
             document,
             fixture_source_admission((Some(project_path.clone())).as_deref()),
             Some(project_path.clone()),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
             &SidecarMode::Load {
                 project_digest: digest,
             },
@@ -11943,9 +12276,6 @@ mod in2b_tests {
         let c_path = temp.path("c.kinewright");
         let id = app.next_project_id;
         app.next_project_id += 1;
-        let playback = Arc::clone(&app.playback);
-        let analysis = Arc::clone(&app.analysis);
-        let exporter = Arc::clone(&app.exporter);
         let writer = Arc::clone(&app.sidecar_writer);
         let second = ProjectSession::create(
             id,
@@ -11953,9 +12283,7 @@ mod in2b_tests {
             Document::default(),
             fixture_source_admission((Some(c_path.clone())).as_deref()),
             Some(c_path.clone()),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
             &SidecarMode::Load {
                 project_digest: String::new(),
             },
@@ -11990,9 +12318,6 @@ mod in2b_tests {
         }
         let (document, version, digest) = load_document(&d_path).expect("the copy re-reads");
         assert_eq!(version, 1, "Save As writes current-version bytes");
-        let playback = Arc::clone(&app.playback);
-        let analysis = Arc::clone(&app.analysis);
-        let exporter = Arc::clone(&app.exporter);
         let writer = Arc::clone(&app.sidecar_writer);
         let mut reopened = ProjectSession::create(
             9,
@@ -12000,9 +12325,7 @@ mod in2b_tests {
             document,
             fixture_source_admission((Some(d_path.clone())).as_deref()),
             Some(d_path),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
             &SidecarMode::Load {
                 project_digest: digest,
             },
@@ -16231,7 +16554,7 @@ mod in2b_tests {
 }
 
 #[cfg(test)]
-mod s3a_tests {
+pub(crate) mod s3a_tests {
     use super::*;
     #[test]
     fn i1b_every_premultiply_pair_matches_color32() {
@@ -16249,13 +16572,13 @@ mod s3a_tests {
     }
     type DisplayFixture = (
         KinewrightApp,
-        Arc<FfmpegMediaEngine>,
+        Arc<kinewright_media::SessionMedia>,
         GpuContext,
         egui::Context,
         kinewright_media::test_support::TempDirectory,
     );
     #[allow(clippy::too_many_lines)]
-    fn display_app() -> DisplayFixture {
+    pub(crate) fn display_app() -> DisplayFixture {
         let mut descriptor =
             eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         descriptor.backends = eframe::wgpu::Backends::PRIMARY;
@@ -16316,7 +16639,11 @@ mod s3a_tests {
             op.apply(&mut document).unwrap();
         }
         document.validate().unwrap();
-        let (mut app, engine) = in1_tests::in1_harness_with_engine(document.clone(), engine);
+        let (mut app, backend) = in1_tests::in1_harness_with_engine(document.clone(), engine);
+        let engine = backend.legacy_media(
+            app.focused().legacy_media().unwrap(),
+            Arc::clone(&app.focused().document),
+        );
         app.frames = engine.frames();
         app.media_events = engine.events();
         app.native_display = Some(NativeDisplay {
@@ -16352,7 +16679,7 @@ mod s3a_tests {
         println!("S3A_APP route=Gpu");
         (app, engine, gpu, context, temp)
     }
-    fn finish(app: KinewrightApp, engine: Arc<FfmpegMediaEngine>, gpu: &GpuContext) {
+    fn finish(app: KinewrightApp, engine: Arc<kinewright_media::SessionMedia>, gpu: &GpuContext) {
         let display = app.native_display.as_ref().unwrap();
         let renderer = Arc::clone(&display.renderer.renderer);
         let id = display.picture.map(|picture| picture.0);
@@ -16429,7 +16756,7 @@ mod s3a_tests {
         assert_eq!(gpu.full_frame_readbacks() - before, 0, "full-frame copies");
         finish(app, engine, &gpu);
     }
-    mod r71 {
+    pub(crate) mod r71 {
         include!("display_r71_tests.rs");
     }
 }
@@ -16461,31 +16788,38 @@ pub(crate) mod ja_observe {
         {
             return Err("App control raster/gesture quota".into());
         }
-        let engine = Arc::new(
+        let backend = Arc::new(
             FfmpegMediaEngine::new_with_data_dir(report.root.join("app-media-cache"))
                 .map_err(|e| format!("GPU/media prerequisite NOT RUN: {e}"))?,
         );
-        let finished = engine.teardown_observer();
+        let finished = backend.teardown_observer();
         let (mut app, _) =
             crate::recovery::with_ja_directory(report.root.join("gui-recovery"), || {
-                in1_tests::in1_harness_with_engine(document, Arc::clone(&engine))
+                in1_tests::in1_harness_with_engine(document, Arc::clone(&backend))
             });
+        let engine = backend.controls();
+        drop(backend);
         let mut manual_path: Option<PathBuf> = None;
         if manual_stream && report.mode == kinewright_agent::ja_harness::protocol::Mode::Revised {
             let core = app.focused().core.clone();
-            let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+            let owner = kinewright_project::editing_session::Ja1EditingSession::new(
                 &report.root,
                 &core,
                 kinewright_project::storage_budget::StorageLimits::default(),
             )
             .map_err(|e| format!("manual App storage prerequisite NOT RUN: {e}"))?;
             let path = report.root.join("manual-stream.kinewright");
-            owner
-                .first_save(
-                    &path,
-                    kinewright_project::storage_budget::StorageLimits::default(),
-                )
-                .map_err(|e| format!("manual App storage prerequisite NOT RUN: {e}"))?;
+            // An unsaved handoff retains this GUI source and its readers.
+            // A named-writer handoff must instead relinquish all local readers.
+            let inputs = owner
+                .store()
+                .and_then(|store| {
+                    store.manual_playback_inputs(
+                        Arc::clone(&app.focused().document),
+                        owner.current_inputs_ref(),
+                    )
+                })
+                .map_err(|e| format!("manual App input admission prerequisite NOT RUN: {e}"))?;
             let mut attachment =
                 crate::ja1_attachment::Ja1Attachment::new(owner).map_err(|e| e.to_string())?;
             attachment
@@ -16497,8 +16831,22 @@ pub(crate) mod ja_observe {
                     },
                 )
                 .map_err(|e| e.to_string())?;
+            attachment
+                .apply(crate::ja1_attachment::Action::FirstSave(path.clone()))
+                .map_err(|e| format!("manual App first save prerequisite NOT RUN: {e}"))?;
             app.focused_mut().recovery.stop_for_studio();
             app.focused_mut().ja1 = Some(attachment);
+            app.focused_mut().install_ja1_view();
+            // Later polling deliberately withholds the attachment's disk ack.
+            // Retain its admitted inputs across that fence, as a real owned App does.
+            let inputs = Arc::new(
+                inputs
+                    .with_document(Arc::clone(&app.focused().document))
+                    .map_err(|e| e.to_string())?,
+            );
+            app.focused_mut().studio.manual_inputs = Some(Arc::clone(&inputs));
+            let stamp = app.lut_publisher.set_certified_document(inputs);
+            app.presenter.set_context(stamp.epoch, None);
             manual_path = Some(path);
         }
         let result: Result<serde_json::Value, String> = (|| {
@@ -16653,7 +17001,7 @@ pub(crate) mod ja_observe {
                 json!({"manual_stream":manual_observation,"input_events":inputs,"core_accepted_observed_ns":accepted_observed_ns,
                 "core_history":{"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history},
                 "app_pending_revision":pending_revision,"issued_stamp":stamp(issued),"returned_stamp":stamp(returned),
-                "bound_display_cell":bound.map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
+                "bound_display_cell":bound.as_ref().map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
                 "bound_matches_returned":bound.is_some_and(|c| c.stamp == returned && c.at == at),
                 "paint_callback_observed":mark.is_some(),"paint_mark":mark.map(|m| json!({"stamp":stamp(m.cell.stamp),"at":m.cell.at,"frame_id":m.cell.frame_id,"epoch":m.epoch,"expired":m.expired,"elapsed_ns":m.painted.duration_since(started).as_nanos().to_string()})),
                 "discarded_has_no_mark":discarded_has_no_mark,"ack_consumed_once":ack_consumed_once,
@@ -16677,7 +17025,7 @@ pub(crate) mod ja_observe {
     }
     fn manual_frame(
         app: &mut KinewrightApp,
-        engine: &FfmpegMediaEngine,
+        engine: &kinewright_media::SessionMedia,
         painter: &mut crate::presenter::paint_support::Painted,
         at: TimeCode,
         report: &mut kinewright_agent::ja_harness::report::Report,
@@ -17311,6 +17659,10 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         assert_eq!(core.export_history().unwrap(), before);
         app.status.clear();
         app.poll_background(&ctx);
+        assert!(
+            app.focused().ja1.is_some(),
+            "C2_BOOTSTRAP_SAVE_UI_REMAINS_AVAILABLE"
+        );
         assert!(app.status.contains("Save once"), "{}", app.status);
         assert_eq!(core.export_history().unwrap(), before);
 
@@ -17636,3 +17988,15 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
     app.focused_mut()
         .stop_threads("S2-H legacy activation witness");
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "app/c2_fix2_tests.rs"]
+mod c2_fix2_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "app/c2_fix3_tests.rs"]
+mod c2_fix3_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "app/c2_fix4_tests.rs"]
+mod c2_fix4_tests;

@@ -1,5 +1,6 @@
 use kinewright_core::Analysis;
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_media::SessionMedia;
 
 #[path = "../src/test_support.rs"]
 pub mod test_support;

@@ -4,7 +4,7 @@
 //! 5d91ab1117ad51ef1288a94717d85c70e7af09fe, apps/server/src/orchestration-v2/
 //! {EventSink,CommandReceiptStore,Orchestrator}.ts. Notice: LICENSES/t3code-MIT.txt.
 //! Kinewright validates scope after reservation and at returned-result admission.
-//! This module never writes a root or bypasses the sealed store registry.
+//! Publication uses the existing metadata owner and sealed store registry.
 #![allow(clippy::missing_errors_doc)]
 
 use super::{
@@ -18,6 +18,10 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+
+#[path = "orchestration_store.rs"]
+mod store;
+pub use store::{PublishedRunCut, RegisteredRunIndex, commit_orchestration};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,7 +84,7 @@ pub fn checked_receipt(
     Ok(status)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ValidatedRunUpdate {
     envelope: OrchestrationEnvelope,
     projection: RunProjection,

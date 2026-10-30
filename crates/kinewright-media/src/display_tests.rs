@@ -285,7 +285,7 @@ fn g6_broken_table_falls_back_and_completion_releases_scratch() {
         BlendMode::Normal,
         vec![],
     )]);
-    let mut renderer = FrameRenderer::new(gpu.clone());
+    let mut renderer = FrameRenderer::legacy_fixture(gpu.clone());
     let render = |r: &mut FrameRenderer| {
         r.render_live(
             &doc,
@@ -344,7 +344,7 @@ fn i5_production_workloads_match_ten_frames_exactly() {
             max_width: monitor_max_width(document.resolution),
         };
         let dims = scale.output_resolution(document.resolution);
-        let mut renderer = FrameRenderer::new(gpu.clone());
+        let mut renderer = FrameRenderer::legacy_fixture(gpu.clone());
         for i in 0..10 {
             let at = TimeCode(i * (document.duration.0 - 1) / 9);
             let cpu = renderer
@@ -490,8 +490,9 @@ fn i6_transport_gpu_failure_keeps_the_issued_stamp() {
     use kinewright_core::{MediaEvent, Playback};
     let gpu = gpu();
     let temp = TempDirectory::new("s3a-refusal");
-    let engine =
-        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into()).unwrap();
+    let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into())
+        .unwrap()
+        .into_legacy_fixture();
     let session = engine.enable_display(config());
     let boosts = (1..=4)
         .map(|id| effect(id, "primary_correction", &[("exposure_milli_stops", 5000)]))
@@ -550,8 +551,9 @@ fn i16_receiver_disconnect_retires_display_and_continues_cpu_preview() {
     use kinewright_core::{Document, Playback};
     let gpu = gpu();
     let temp = TempDirectory::new("s3a-disconnect");
-    let engine =
-        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into()).unwrap();
+    let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into())
+        .unwrap()
+        .into_legacy_fixture();
     let mut session = engine.enable_display(config());
     let document = Document {
         resolution: (64, 64),
@@ -593,8 +595,9 @@ fn i16_paused_starvation_retries_after_a_real_lease_release() {
     use kinewright_core::Playback;
     let gpu = gpu();
     let temp = TempDirectory::new("s3a-starvation");
-    let engine =
-        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into()).unwrap();
+    let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into())
+        .unwrap()
+        .into_legacy_fixture();
     let mut session = engine.enable_display(config());
     let mut document = crate::mo2_fixtures::document(vec![crate::mo2_fixtures::solid(
         1,
@@ -750,7 +753,7 @@ fn s3a_g7b_play_timing() {
     use kinewright_core::{MediaEvent, Playback, PlaybackState};
     fn consume(
         session: &mut DisplaySession,
-        engine: &FfmpegMediaEngine,
+        engine: &crate::SessionMedia,
         epoch: &mut u64,
     ) -> Option<(TimeCode, TimeCode, Instant)> {
         session.advance(*epoch);
@@ -807,7 +810,8 @@ fn s3a_g7b_play_timing() {
             Arc::default(),
             Arc::new(AudioDiagnostics::default()),
         )
-        .unwrap();
+        .unwrap()
+        .into_legacy_fixture();
         let mut session = engine.enable_display(config());
         engine.set_document(Arc::new(document.clone()));
         let initialize = Instant::now();
@@ -956,8 +960,9 @@ fn r71_paused_starvation_yields_to_agent_before_release() {
     use kinewright_core::Playback;
     let gpu = gpu();
     let temp = TempDirectory::new("s3a-starvation");
-    let engine =
-        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into()).unwrap();
+    let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into())
+        .unwrap()
+        .into_legacy_fixture();
     let mut session = engine.enable_display(config());
     let mut document = crate::mo2_fixtures::document(vec![crate::mo2_fixtures::solid(
         1,

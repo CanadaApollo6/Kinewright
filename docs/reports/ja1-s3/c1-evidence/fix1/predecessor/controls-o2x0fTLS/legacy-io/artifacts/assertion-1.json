@@ -1,0 +1,1 @@
+{"actual":"temp_write_and_file_sync","assertion":"actual == independently frozen expected","comparison":"equal","disposition":"pass_control","evidence_class":"control","expected":"temp_write_and_file_sync","id":"actual-temp-sync-observed","observation":2,"oracle":"temp","oracle_pointer":"","passed":true,"pointer":"/io/events/0/operation","positive_control":null}

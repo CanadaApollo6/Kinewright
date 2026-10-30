@@ -1,0 +1,161 @@
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling kinewright-media v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-media)
+   Compiling rmcp v3.1.2
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+   Compiling kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+   Compiling kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 37.13s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Checking reqwest v0.13.4
+    Checking eframe v0.35.0
+    Checking kinewright-media v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-media)
+    Checking rmcp v3.1.2
+    Checking kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+    Checking kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+    Checking kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.82s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+running 4 tests
+test linux::s3_indexes_survive_all_root_producers ... ok
+test linux::s3_metadata_retry_and_admission ... ok
+test linux::s3_orchestration_admission ... ok
+test s3_run_projection_contract ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.44s
+
+test bounded_store::failed_seal_and_last_reader_retire_charges_once ... ok
+test bounded_store::object_admission_checks_exact_bytes_and_dependency_closure ... ok
+test bounded_store::owned_input_tamper_invalidates_verified_identity ... ok
+test bounded_store::reservation_counts_unique_blobs_and_simultaneous_copies ... ok
+test bounded_store::storage_ingress_refuses_decoded_and_transient_overflow ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 0.45s
+
+test writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits ... ok
+test writer_host::tests::ordinary_attachment_and_history_use_real_authenticated_loopback ... ok
+test writer_host::tests::protocol_refusals_preserve_native_error_and_do_not_disclose_credentials ... ok
+test writer_host::tests::s3_portable_roles_revoke_and_refuse_before_manual_write_admission ... ok
+test writer_host::tests::snapshot_digest_refusal_precedes_any_owner_install ... ok
+
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 654 filtered out; finished in 112.12s
+
+test ja1_attachment::tests::w13_owner_reported_blockers_render_save_and_close_routes ... ok
+test ja1_attachment::tests::w13_preview_close_and_every_destination_disclose_session_pin_loss ... ok
+test ja1_attachment::tests::w14_unsupported_rescue_refuses_before_session_mutation ... ok
+test ja1_attachment::tests::w15_completed_capture_release_keeps_sources_and_active_c_exact ... ok
+test ja1_attachment::tests::w15_late_rescue_is_capture_only_and_release_is_explicit ... ok
+
+test result: ok. 81 passed; 0 failed; 1 ignored; 0 measured; 814 filtered out; finished in 327.47s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+test host_owns_scripted_session_after_gui_detach ... ok
+test rescue_and_switch_share_one_owner_after_restart ... ok
+test roots_and_forwarded_roots_cover_all_file_surfaces ... ok
+test stdio_proxy_preserves_auth_roots_and_protocol_stdout ... ok
+test w14_headless_and_agent_admission_precedes_mutation ... ok
+
+test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 37.51s
+
+test equal_bytes_new_head_and_equal_counter_other_head_conflict ... ok
+test floored_specialist_reopens_original_full_delta_and_merges_once ... ok
+test merge_lost_reply_preserves_one_undo_entry ... ok
+test reopened_exact_base_merges_once_with_fresh_runtime_revision ... ok
+test restored_lineage_tracks_siblings_reuse_and_undone_splits ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.11s
+
+test presenter::tests::a_marker_that_never_paints_is_never_acked ... ok
+test presenter::tests::playback_binds_only_the_clocks_frame ... ok
+test presenter::tests::seeded_interleavings_bind_and_ack_only_current_frames ... ok
+test presenter::tests::the_marker_marks_what_is_bound_when_it_paints ... ok
+test presenter::tests::the_real_paint_callback_acks_only_painted_images ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 889 filtered out; finished in 0.18s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.40s
+     Running tests/ja_s2_host.rs (target/debug/deps/ja_s2_host-b64326489c64d352)
+
+running 1 test
+test g05l_host_death_recovers_absent_and_committed_drag_suffix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 14.97s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests/ja_s2_host.rs (target/debug/deps/ja_s2_host-b64326489c64d352)
+
+running 1 test
+test g05l_shared_floor_and_recovery_close_reply_drop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 13.90s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests/ja_s2_host.rs (target/debug/deps/ja_s2_host-b64326489c64d352)
+
+running 1 test
+test g05a_switch_reply_drop_and_participant_death ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.64s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_agent-6bb796ebd1b6717c)
+
+running 1 test
+test session::tests::in2_the_agent_crate_has_one_agent_event_loop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.02s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/main.rs (target/debug/deps/kinewright_app-ff739c02a286c15e)
+
+running 1 test
+test investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 0.02s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.83s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_media-0a16c1f81b5caf04)
+
+running 1 test
+test au6_fixtures::au6_declared_test_names_exist_in_their_source_files ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1225 filtered out; finished in 0.85s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+slow-test manifest and markers agree: 89 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 56 allowlist entries well-formed
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.

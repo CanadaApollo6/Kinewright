@@ -1,0 +1,36 @@
+{
+  "name": "store-floor-feedback-index",
+  "witness": "linux::s3_indexes_survive_all_root_producers",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-project/src/bundle_commit.rs",
+      "        let mut metadata_root = bundle.root.clone();",
+      "        let mut metadata_root = bundle.root.clone();\n        if explicit_floor {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+    ]
+  ],
+  "expected_red": {
+    "text": "S3_FLOOR_FEEDBACK_PRESERVATION",
+    "location": null
+  },
+  "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+  "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+  "source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "10f5f444ed6186033f6f7c576004750979877a2af4e3da9ae5f41cb5dca949d8"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "3263275b02b1e148d86d5a475d143b63d60c14f0c9cb6e7d3504cefa5bb3f267",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.63s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "b30c494c9e0bbac89d08bce37125fa4e7f9634bc57281a7e8838e17934a650f1",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.01s"
+  ],
+  "restored": true
+}

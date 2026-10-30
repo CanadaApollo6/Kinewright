@@ -1,0 +1,34 @@
+[
+  {
+    "name": "requesting-reader-authority",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "app::c2_fix4_tests::tests::c2_r4_equal_sources_never_reuse_another_projects_reader_authority",
+    "witness_source": "crates/kinewright-app/src/app/c2_fix4_tests.rs",
+    "red_text": "C2_R4_REQUESTING_AUTHORITY_DRAINS_BEFORE_PUBLICATION",
+    "changes": [
+      [
+        "crates/kinewright-media/src/render.rs",
+        "self.legacy_authority = legacy.map(kinewright_core::LegacyMediaGrant::identity);",
+        "self.legacy_authority = legacy.and(None);"
+      ]
+    ]
+  },
+  {
+    "name": "ui-visual-cache-authority",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "visual_cache::tests::c2_r4_visual_cache_rebinds_equal_paths_and_drops_revoked_pixels",
+    "witness_source": "crates/kinewright-app/src/visual_cache.rs",
+    "red_text": "C2_R4_UI_CACHE_NEVER_SHARES_ANOTHER_AUTHORITYS_PIXELS",
+    "changes": [
+      [
+        "crates/kinewright-app/src/visual_cache.rs",
+        "let authority = media.visual_cache_identity();",
+        "let authority = self.authority;"
+      ]
+    ]
+  }
+]

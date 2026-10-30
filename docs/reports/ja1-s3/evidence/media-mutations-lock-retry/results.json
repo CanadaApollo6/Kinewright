@@ -1,0 +1,76 @@
+{
+  "source": "crates/kinewright-media/src/owned_io.rs",
+  "source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+  "command": "nice -n 19 python3 -I scripts/ja1-s3-c0-media-mutations.py",
+  "results": [
+    {
+      "guard": "selected-video-interpretation",
+      "selector": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+      "red_marker": "C0_SELECTED_VIDEO_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2323,
+        "marker_macro_lines": [
+          2323
+        ],
+        "witness_source_sha256": "bfcedd8e317bbf9393d1e30bd3fb91de46e84205ef0d134faaceada742c23257"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "selected-audio-interpretation",
+      "selector": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+      "red_marker": "C0_SELECTED_AUDIO_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2339,
+        "marker_macro_lines": [
+          2339
+        ],
+        "witness_source_sha256": "4d51e74de0f8093c485e9bc2cde860883e11c7d8df31d5d46b3761ca35dcca00"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "nested-protocol-inheritance",
+      "selector": "owned_io::tests::s3_certified_nested_protocol_policy_is_inherited_by_concat",
+      "red_marker": "C0_PROTOCOL_OUTPUT_ZERO",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_nested_protocol_policy_is_inherited_by_concat",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2204,
+        "marker_macro_lines": [
+          2204
+        ],
+        "witness_source_sha256": "1876bc96b54975f35be4fff266d9cca8109109b9900f2cd8da673635e6c42bd4"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "nested-format-policy",
+      "selector": "owned_io::tests::s3_certified_nested_format_policy_precedes_concat_and_hls_opens",
+      "red_marker": "C0_FORMAT_OUTPUT_ZERO",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_nested_format_policy_precedes_concat_and_hls_opens",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2218,
+        "marker_macro_lines": [
+          2218
+        ],
+        "witness_source_sha256": "cab0f695eb5eba89dd3e3a97ca2ec06ddb0d03009e8262720eb7a463c71c9cfb"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    }
+  ],
+  "restored": true
+}

@@ -1,0 +1,281 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "format-corpus",
+  "gate_ids": [
+    "JA1.G3"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {
+    "edit": {
+      "relative_file": "command-add-track.json",
+      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
+      "byte_length": 157,
+      "kind": "current-command"
+    },
+    "legacy": {
+      "relative_file": "legacy-input.kinewright",
+      "sha256": "480be4dc59cbfec90acbfd1830fb204c3875bc2b45f5f8c4848a937ef0935de9",
+      "byte_length": 634,
+      "kind": "project"
+    },
+    "adjustment": {
+      "relative_file": "command-adjustment.json",
+      "sha256": "ad1fafd92abd6983710a2381156ea3be56f89b4dbd8f35e05dcf4294043c6c86",
+      "byte_length": 139,
+      "kind": "current-command"
+    },
+    "v3-studio": {
+      "relative_file": "unsupported-v3-studio.kinewright",
+      "sha256": "9f28a9d1d91973806e1b4245860c8853ac00962c54bdb58465079efd17a768aa",
+      "byte_length": 1165,
+      "kind": "opaque-future-project"
+    },
+    "v3-code": {
+      "relative_file": "unsupported-v3-code.kinewright",
+      "sha256": "e6496b3ef8304e6c3dfb53574e36b4ad9f65fe2482df7eb959e6ddc1ddbb5c32",
+      "byte_length": 1385,
+      "kind": "opaque-future-project"
+    }
+  },
+  "initial": {
+    "revision": 37,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "project_serialize",
+      "args": {}
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v1-empty-full-bytes",
+        "observation": 2,
+        "pointer": "/serialized",
+        "oracle": "v1-empty",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "project_load",
+      "args": {
+        "input": "legacy"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "project_serialize",
+      "args": {}
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v1-legacy-full-bytes",
+        "observation": 5,
+        "pointer": "/serialized",
+        "oracle": "v1-legacy",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "edit"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "adjustment"
+      }
+    },
+    {
+      "id": 10,
+      "participant": "main",
+      "action": "project_serialize",
+      "args": {}
+    },
+    {
+      "id": 11,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v2-full-bytes",
+        "observation": 10,
+        "pointer": "/serialized",
+        "oracle": "v2",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 12,
+      "participant": "main",
+      "action": "project_save",
+      "args": {
+        "path": "v2.kinewright"
+      }
+    },
+    {
+      "id": 13,
+      "participant": "main",
+      "action": "project_reopen",
+      "args": {
+        "path": "v2.kinewright"
+      }
+    },
+    {
+      "id": 14,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v2-reopen-bytes",
+        "observation": 13,
+        "pointer": "/writer_round_trip_equal",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 15,
+      "participant": "main",
+      "action": "project_load",
+      "args": {
+        "input": "v3-studio"
+      }
+    },
+    {
+      "id": 16,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v3-studio-loads-advisory",
+        "observation": 15,
+        "pointer": "/loaded",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 17,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v3-studio-overwrite-refused-by-ceiling",
+        "observation": 15,
+        "pointer": "/can_overwrite",
+        "oracle": "false",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 18,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "v3-studio-original-bytes-preserved",
+        "observation": 15,
+        "pointer": "/original_bytes_unchanged",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 19,
+      "participant": "main",
+      "action": "project_load",
+      "args": {
+        "input": "v3-code"
+      }
+    },
+    {
+      "id": 20,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "unsupported-code-parse-refused",
+        "observation": 19,
+        "pointer": "/loaded",
+        "oracle": "false",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 21,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "unsupported-code-original-preserved",
+        "observation": 19,
+        "pointer": "/original_bytes_unchanged",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "v1-empty": {
+      "relative_file": "writer-v1-empty.kinewright",
+      "sha256": "59611abbbf40aed579dda09a9f7d4900904dc06af7badd96cd475df200062326",
+      "byte_length": 1017,
+      "kind": "writer-bytes"
+    },
+    "v1-legacy": {
+      "relative_file": "writer-v1-legacy.kinewright",
+      "sha256": "1c7d54a934331bdd929d65b2ff21d9a5d3ced41796ed243ce34efb5ddec8fb55",
+      "byte_length": 1891,
+      "kind": "writer-bytes"
+    },
+    "v2": {
+      "relative_file": "writer-v2-adjustment.kinewright",
+      "sha256": "b8edf112cd0483a3f2b15a2045d00fbaa30e77c4af025dd6437c77afcb65031c",
+      "byte_length": 1391,
+      "kind": "writer-bytes"
+    },
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    },
+    "false": {
+      "relative_file": "oracle-false.json",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+      "byte_length": 6,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

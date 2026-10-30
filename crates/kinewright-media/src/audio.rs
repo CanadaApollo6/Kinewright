@@ -3684,11 +3684,13 @@ fn smooth_gain(
 }
 
 struct AudioMixSource {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     track: TrackId,
     /// AU4 §3.8 rule 73: the clip this segment came from, so a live shaping
     /// update can match the segment layout before rebuilding in place.
     clip: ClipId,
     path: PathBuf,
+    certified: Option<crate::owned_io::CertifiedSource>,
     output_rate: u32,
     output_channels: u16,
     source_sample_start: u64,
@@ -3715,17 +3717,20 @@ impl AudioMixSource {
             self.finished = true;
             return Ok(());
         }
-        self.decoder = Some(AudioDecoder::open(
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
+        self.decoder = Some(AudioDecoder::open_with_source(
             &self.path,
             self.output_rate,
             self.output_channels,
             self.source_sample_start,
             self.source_sample_end,
+            self.certified.as_ref(),
         )?);
         Ok(())
     }
 
     fn add_samples(&mut self, destination: &mut [f32]) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if self.finished {
             return Ok(());
         }
@@ -3783,6 +3788,7 @@ fn needs_seek_preroll(document: &Document, project_from: TimeCode) -> bool {
 }
 
 struct AudioMixer {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     sources: Vec<AudioMixSource>,
     output_channels: usize,
     cursor_sample: u64,
@@ -3798,13 +3804,47 @@ struct AudioMixer {
     output_rate: u32,
 }
 
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn test_certified_mix_samples(
+    inputs: &crate::owned_io::PlaybackInputs,
+) -> Result<Vec<f32>, MediaError> {
+    AudioMixer::open_with_inputs(
+        inputs.document(),
+        TimeCode::ZERO,
+        48_000,
+        2,
+        None,
+        Some(inputs),
+    )?
+    .next_chunk_limited(4_800)
+    .map(Option::unwrap_or_default)
+}
+
 impl AudioMixer {
+    #[cfg(test)]
     fn open(
         document: &Document,
         project_from: TimeCode,
         output_rate: u32,
         output_channels: u16,
         meter: Option<Arc<MeterState>>,
+    ) -> Result<Self, MediaError> {
+        Self::open_with_inputs(
+            document,
+            project_from,
+            output_rate,
+            output_channels,
+            meter,
+            None,
+        )
+    }
+    fn open_with_inputs(
+        document: &Document,
+        project_from: TimeCode,
+        output_rate: u32,
+        output_channels: u16,
+        meter: Option<Arc<MeterState>>,
+        inputs: Option<&crate::owned_io::PlaybackInputs>,
     ) -> Result<Self, MediaError> {
         let project_end = document.duration;
         let needs_preroll = needs_seek_preroll(document, project_from);
@@ -3837,9 +3877,11 @@ impl AudioMixer {
                 .clip_duration(clip)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
             sources.push(AudioMixSource {
+                legacy_media: crate::locator::capture(),
                 track: segment.track,
                 clip: segment.clip,
                 path: asset.path.clone(),
+                certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,
                 output_rate,
                 output_channels,
                 source_sample_start,
@@ -3863,6 +3905,7 @@ impl AudioMixer {
         ))
         .unwrap_or(0);
         let mut mixer = Self {
+            legacy_media: crate::locator::capture(),
             processor: AudioMixProcessor::new(
                 document,
                 output_rate,
@@ -3992,6 +4035,7 @@ impl AudioMixer {
         &mut self,
         maximum_sample_frames: usize,
     ) -> Result<Option<Vec<f32>>, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if self.cursor_sample >= self.end_sample {
             return Ok(None);
         }
@@ -4123,6 +4167,8 @@ enum AudioOutput {
 /// record: samples and the clock are unchanged (R22).
 #[derive(Debug)]
 pub(crate) struct AudioDiagnostics {
+    #[cfg(any(test, feature = "test-util"))]
+    owners: [AtomicU64; 3],
     /// Frames whose samples a callback failed to pop (an `unwrap_or(0.0)`
     /// in [`render_output`]), counted as they happen.
     underrun_frames: AtomicU64,
@@ -4157,6 +4203,8 @@ impl Default for AudioDiagnostics {
     /// No programme yet: every underrun is in the programme.
     fn default() -> Self {
         Self {
+            #[cfg(any(test, feature = "test-util"))]
+            owners: std::array::from_fn(|_| AtomicU64::new(0)),
             underrun_frames: AtomicU64::default(),
             underrun_events: AtomicU64::default(),
             post_end_frames: AtomicU64::default(),
@@ -4173,7 +4221,19 @@ impl Default for AudioDiagnostics {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+struct AudioOwner(Arc<AudioDiagnostics>);
+#[cfg(any(test, feature = "test-util"))]
+impl Drop for AudioOwner {
+    fn drop(&mut self) {
+        self.0.owners[0].fetch_sub(1, Ordering::AcqRel);
+    }
+}
 impl AudioDiagnostics {
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn owner_counts(&self) -> [u64; 3] {
+        std::array::from_fn(|index| self.owners[index].load(Ordering::Acquire))
+    }
     /// `consumed` is the programme sample the callback has consumed through,
     /// after its pops: a failed pop once it reached the programme end is the
     /// post-end straddle; one before it is an underrun in the programme.
@@ -4279,6 +4339,8 @@ impl AudioDiagnostics {
 }
 
 pub(crate) struct AudioRuntime {
+    read_authority: Option<crate::owned_io::ReadAuthority>,
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     output: AudioOutput,
     producer: Producer<f32>,
     mixer: AudioMixer,
@@ -4291,6 +4353,8 @@ pub(crate) struct AudioRuntime {
     /// PF1 V-2: `fill_ring` has reported the mixer exhausted.
     exhausted: bool,
     pub(crate) error_flag: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "test-util"))]
+    _owner: AudioOwner,
 }
 
 impl AudioRuntime {
@@ -4307,6 +4371,7 @@ impl AudioRuntime {
         monitor_gain_tenth_db: Arc<AtomicI32>,
         output: &OutputDevice,
         diagnostics: &Arc<AudioDiagnostics>,
+        inputs: Option<&crate::owned_io::PlaybackInputs>,
     ) -> Result<Self, MediaError> {
         let sink = match output {
             OutputDevice::Default => {
@@ -4336,6 +4401,14 @@ impl AudioRuntime {
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
         let error_flag = Arc::new(AtomicBool::new(false));
+        let read_authority = inputs.and_then(|inputs| inputs.read_authority.clone());
+        if let Some(authority) = &read_authority {
+            authority.check()?;
+        }
+        let callback_authority = read_authority
+            .as_ref()
+            .map(crate::owned_io::ReadAuthority::local_grant)
+            .or_else(crate::locator::capture);
         let output = match sink {
             Sink::Cpal(device, sample_format, config) => AudioOutput::Cpal(build_stream(
                 &device,
@@ -4347,17 +4420,32 @@ impl AudioRuntime {
                 Arc::clone(&error_flag),
                 monitor_gain_tenth_db,
                 Arc::clone(diagnostics),
+                callback_authority.clone(),
             )?),
             #[cfg(any(test, feature = "test-util"))]
-            Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach(
+            Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach_with_authority(
                 consumer,
                 Arc::clone(position_samples),
                 monitor_gain_tenth_db,
                 Arc::clone(diagnostics),
+                callback_authority,
             )),
         };
-        let mut mixer =
-            AudioMixer::open(document, project_from, sample_rate, channels, Some(meter))?;
+        #[cfg(any(test, feature = "test-util"))]
+        let owner = {
+            let live = diagnostics.owners[0].fetch_add(1, Ordering::AcqRel) + 1;
+            diagnostics.owners[1].fetch_max(live, Ordering::AcqRel);
+            diagnostics.owners[2].fetch_add(1, Ordering::AcqRel);
+            AudioOwner(Arc::clone(diagnostics))
+        };
+        let mut mixer = AudioMixer::open_with_inputs(
+            document,
+            project_from,
+            sample_rate,
+            channels,
+            Some(meter),
+            inputs,
+        )?;
         mixer.attach_mix_meters(mix_meters);
         let target_samples = usize::try_from(sample_rate)
             .unwrap_or(48_000)
@@ -4366,6 +4454,8 @@ impl AudioRuntime {
             .saturating_div(1_000)
             .max(1);
         Ok(Self {
+            read_authority,
+            legacy_media: crate::locator::capture(),
             output,
             producer,
             mixer,
@@ -4376,6 +4466,8 @@ impl AudioRuntime {
             channels,
             exhausted: false,
             error_flag,
+            #[cfg(any(test, feature = "test-util"))]
+            _owner: owner,
         })
     }
 
@@ -4454,6 +4546,10 @@ impl AudioRuntime {
     /// AU1 §5.3: top the ring up to the live target, metering as it goes
     /// (AU3 §3.9).
     pub(crate) fn fill(&mut self, meter: &mut LiveLoudnessMeter) -> Result<(), MediaError> {
+        if let Some(authority) = &self.read_authority {
+            authority.check()?;
+        }
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         self.exhausted |= !fill_ring(
             &mut self.producer,
             &mut self.pending,
@@ -4483,6 +4579,7 @@ fn build_stream(
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
     diagnostics: Arc<AudioDiagnostics>,
+    authority: Option<kinewright_core::LegacyMediaGrant>,
 ) -> Result<cpal::Stream, MediaError> {
     match format {
         cpal::SampleFormat::F32 => build_typed_stream::<f32>(
@@ -4494,6 +4591,7 @@ fn build_stream(
             error_flag,
             monitor_gain_tenth_db,
             diagnostics,
+            authority,
         ),
         cpal::SampleFormat::I16 => build_typed_stream::<i16>(
             device,
@@ -4504,6 +4602,7 @@ fn build_stream(
             error_flag,
             monitor_gain_tenth_db,
             diagnostics,
+            authority,
         ),
         cpal::SampleFormat::U16 => build_typed_stream::<u16>(
             device,
@@ -4514,6 +4613,7 @@ fn build_stream(
             error_flag,
             monitor_gain_tenth_db,
             diagnostics,
+            authority,
         ),
         unsupported => Err(MediaError::Backend(format!(
             "unsupported audio device sample format {unsupported}"
@@ -4531,6 +4631,7 @@ fn build_typed_stream<T>(
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
     diagnostics: Arc<AudioDiagnostics>,
+    authority: Option<kinewright_core::LegacyMediaGrant>,
 ) -> Result<cpal::Stream, MediaError>
 where
     T: cpal::SizedSample + cpal::Sample + cpal::FromSample<f32>,
@@ -4542,13 +4643,14 @@ where
             move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
                 let stamp = info.timestamp();
                 diagnostics.record_latency(stamp.playback.duration_since(stamp.callback));
-                render_output(
+                render_authorized_output(
                     &mut consumer,
                     output,
                     callback_channels,
                     &position,
                     monitor_gain_tenth_db.load(Ordering::Relaxed),
                     &diagnostics,
+                    authority.as_ref(),
                 );
             },
             move |_error| {
@@ -4581,6 +4683,34 @@ pub(crate) mod simulated;
 /// in the programme or after its end by the sample this callback consumed
 /// through (`position` is written only here and before the stream exists),
 /// never by a flag the producer set: atomics only, no lock or allocation.
+fn render_authorized_output<T>(
+    consumer: &mut Consumer<f32>,
+    output: &mut [T],
+    channels: usize,
+    position: &AtomicU64,
+    monitor_gain_tenth_db: i32,
+    diagnostics: &AudioDiagnostics,
+    authority: Option<&kinewright_core::LegacyMediaGrant>,
+) -> usize
+where
+    T: cpal::Sample + cpal::FromSample<f32>,
+{
+    if authority.is_some_and(|grant| grant.check().is_err()) {
+        for sample in output.iter_mut() {
+            *sample = T::from_sample(0.0);
+        }
+        return output.len();
+    }
+    render_output(
+        consumer,
+        output,
+        channels,
+        position,
+        monitor_gain_tenth_db,
+        diagnostics,
+    )
+}
+
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
@@ -4617,10 +4747,11 @@ where
 }
 
 pub(crate) struct AudioDecoder {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     path: PathBuf,
-    input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Audio,
     resampler: Option<ffmpeg::software::resampling::Context>,
+    input: crate::owned_io::DecodeInput,
     stream_index: usize,
     stream_time_base: ffmpeg::Rational,
     stream_start: i64,
@@ -4641,7 +4772,28 @@ impl AudioDecoder {
         target_sample: u64,
         end_sample: u64,
     ) -> Result<Self, MediaError> {
-        let mut input = media_input(path)?;
+        Self::open_with_source(
+            path,
+            output_rate,
+            output_channels,
+            target_sample,
+            end_sample,
+            None,
+        )
+    }
+    pub(crate) fn open_with_source(
+        path: &Path,
+        output_rate: u32,
+        output_channels: u16,
+        target_sample: u64,
+        end_sample: u64,
+        source: Option<&crate::owned_io::CertifiedSource>,
+    ) -> Result<Self, MediaError> {
+        let mut input = if let Some(source) = source {
+            crate::owned_io::DecodeInput::open(source, Arc::new(AtomicBool::new(false)))?
+        } else {
+            crate::owned_io::DecodeInput::Legacy(media_input(path)?)
+        };
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Audio)
@@ -4652,8 +4804,14 @@ impl AudioDecoder {
         let stream_time_base = stream.time_base();
         let stream_start = normalized_start(stream.start_time());
         ensure_decoder(&stream, "audio", path)?;
-        let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .map_err(|error| media_error(path, "could not read audio codec parameters", error))?;
+        let context = if let Some(source) = source {
+            input.context(source, stream_index, false)?
+        } else {
+            ffmpeg::codec::context::Context::from_parameters(stream.parameters()).map_err(
+                |error| media_error(path, "could not read audio codec parameters", error),
+            )?
+        };
+        crate::locator::check()?;
         let decoder = context
             .decoder()
             .audio()
@@ -4668,6 +4826,7 @@ impl AudioDecoder {
             .seek(target_us, ..target_us)
             .map_err(|error| media_error(path, "audio seek failed", error))?;
         Ok(Self {
+            legacy_media: crate::locator::capture(),
             path: path.to_path_buf(),
             input,
             decoder,
@@ -4685,8 +4844,27 @@ impl AudioDecoder {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn check_certified(&mut self) -> Result<(), MediaError> {
+        self.input.check()
+    }
+    #[cfg(test)]
+    pub(crate) fn buffer_certified_packet(&mut self) {
+        let (_, packet) = self
+            .input
+            .packets()
+            .find(|(stream, _)| stream.index() == self.stream_index)
+            .unwrap();
+        self.decoder.send_packet(&packet).unwrap();
+    }
+    #[cfg(test)]
+    pub(crate) fn receive_certified_buffered(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+        self.receive_frame()
+    }
     pub(crate) fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         loop {
+            self.input.check()?;
             if self.finished {
                 return Ok(None);
             }
@@ -4698,23 +4876,23 @@ impl AudioDecoder {
             if self.finished || self.eof_sent {
                 return Ok(None);
             }
-            let next = self
-                .input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), packet));
-            if let Some((stream_index, packet)) = next {
-                if stream_index != self.stream_index {
-                    continue;
+            let mut packet = ffmpeg::Packet::empty();
+            match packet.read(&mut self.input) {
+                Ok(()) => {
+                    if packet.stream() != self.stream_index {
+                        continue;
+                    }
+                    self.decoder
+                        .send_packet(&packet)
+                        .map_err(|error| media_error(&self.path, "audio decode failed", error))?;
                 }
-                self.decoder
-                    .send_packet(&packet)
-                    .map_err(|error| media_error(&self.path, "audio decode failed", error))?;
-            } else {
-                self.decoder.send_eof().map_err(|error| {
-                    media_error(&self.path, "audio decoder flush failed", error)
-                })?;
-                self.eof_sent = true;
+                Err(ffmpeg::Error::Eof) => {
+                    self.decoder.send_eof().map_err(|error| {
+                        media_error(&self.path, "audio decoder flush failed", error)
+                    })?;
+                    self.eof_sent = true;
+                }
+                Err(_) => {}
             }
         }
     }
@@ -4723,9 +4901,12 @@ impl AudioDecoder {
     #[allow(clippy::too_many_lines)]
     fn receive_frame(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
         let mut decoded = ffmpeg::frame::Audio::empty();
-        if self.decoder.receive_frame(&mut decoded).is_err() {
+        let received = self.decoder.receive_frame(&mut decoded);
+        if received.is_err() {
+            self.input.check()?;
             return Ok(None);
         }
+        self.input.audio(&decoded)?;
         let pts = decoded.timestamp();
         let decoded_format = decoded.format();
         let mut decoded_layout = decoded.channel_layout();
@@ -4861,6 +5042,77 @@ mod tests {
     use crate::test_support::{GeneratedMedia, pseudo_random_amplitude, rms, tone, wav_f32};
 
     use super::*;
+
+    #[test]
+    fn c2_r4_retained_pcm_mixer_and_output_ring_keep_their_authority() {
+        crate::initialize_ffmpeg().unwrap();
+        let source =
+            GeneratedMedia::from_bytes("c2-r4-pcm", "wav", &wav_f32(&vec![0.25; 4800], 48_000, 2));
+        let document = one_clip_document(source.path(), Rational::new(30, 1).unwrap(), 1);
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        let scope = crate::locator::LocatorAccess::enter(&grant).unwrap();
+        let mut mixer =
+            AudioMixer::open_with_inputs(&document, TimeCode::ZERO, 48_000, 2, None, None).unwrap();
+        assert!(mixer.next_chunk_limited(1).unwrap().is_some());
+        assert!(
+            mixer
+                .sources
+                .iter()
+                .any(|source| source.pending.len() > source.pending_index),
+            "decoded PCM remains cached"
+        );
+        let (mut producer, mut consumer) = RingBuffer::new(8);
+        producer.push(0.25).unwrap();
+        producer.push(0.5).unwrap();
+        let position = AtomicU64::new(0);
+        let diagnostics = AudioDiagnostics::default();
+        let mut output = [0.0_f32; 2];
+        assert_eq!(
+            render_authorized_output(
+                &mut consumer,
+                &mut output,
+                2,
+                &position,
+                0,
+                &diagnostics,
+                Some(&grant)
+            ),
+            0
+        );
+        assert_eq!(output, [0.25, 0.5]);
+        producer.push(0.75).unwrap();
+        producer.push(1.0).unwrap();
+        drop(scope);
+        origin.revoke_legacy_media();
+        assert_eq!(
+            mixer.next_chunk_limited(1).unwrap_err(),
+            MediaError::MediaAdmissionRequired
+        );
+        assert_eq!(
+            mixer.sources[0].add_samples(&mut [0.0; 2]).unwrap_err(),
+            MediaError::MediaAdmissionRequired
+        );
+        assert_eq!(
+            render_authorized_output(
+                &mut consumer,
+                &mut output,
+                2,
+                &position,
+                0,
+                &diagnostics,
+                Some(&grant)
+            ),
+            2
+        );
+        assert_eq!(output, [0.0, 0.0]);
+        assert_eq!(
+            position.load(Ordering::Acquire),
+            1,
+            "revoked ring did not advance"
+        );
+        assert_eq!(consumer.slots(), 2, "revoked ring samples were not served");
+    }
 
     fn audio_effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
         Effect {

@@ -83,6 +83,8 @@ FFMPEG_PROBE_MESSAGE = re.compile(FFMPEG_LOG + r" Could not find codec parameter
 FFMPEG_PROBE_ADVICE = re.compile(
     r"Consider increasing the value for the 'analyzeduration' \(\d+\) and 'probesize' \(\d+\) options"
 )
+# The HLS demuxer's format policy also writes this exact unprefixed advisory.
+FFMPEG_HLS_ADVICE = "Not detecting m3u8/hls with non standard extension and non standard mime type"
 OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
 # FFmpeg's lowercase "deprecated pixel format used" warning can also glue on (Windows run 39003986680),
 # as can h264's lowercase "mmco: unref short failure" (Linux run 40486022371).
@@ -156,7 +158,7 @@ def result_lines(log: str):
             outcome = OUTCOME.match(line)
             if outcome:
                 line = line[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", line[outcome.end():])
-            if probe_advice or (re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line)):
+            if probe_advice or raw == FFMPEG_HLS_ADVICE or (re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line)):
                 continue
             if OUTCOME_LINE.match(line):
                 yield pending[0], pending[1] + line
@@ -170,6 +172,9 @@ def result_lines(log: str):
         # elsewhere on the line is not recognised, and the line keeps its non-outcome.
         head, sep, rest = FFMPEG_LOG_PREFIX.sub("", raw).partition(" ... ")
         if sep and head.startswith("test ") and not rest:
+            pending = (number, head + sep)
+            continue
+        if sep and head.startswith("test ") and rest == FFMPEG_HLS_ADVICE:
             pending = (number, head + sep)
             continue
         if (

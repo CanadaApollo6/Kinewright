@@ -984,7 +984,7 @@ impl KinewrightApp {
         }
         let session_id = self.focused().id;
         let expected_revision = self.focused().revision;
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.relink_probe_tx.clone();
         self.relink_probe_pending = self.relink_probe_pending.saturating_add(1);
         self.status = format!("Checking replacement {}…", path.display());
@@ -1009,7 +1009,14 @@ impl KinewrightApp {
         asset: &MediaAsset,
         request_id: u64,
     ) -> bool {
-        let media = Arc::clone(&self.analysis);
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == session_id)
+        else {
+            return false;
+        };
+        let media = project.analysis();
         let status_tx = self.media_status_tx.clone();
         let path = asset.path.clone();
         let fingerprint = asset.source_fingerprint.clone();
@@ -1608,7 +1615,7 @@ impl KinewrightApp {
     pub(crate) fn refresh_cache_inventory(&mut self, ctx: &egui::Context) {
         self.cache_inventory_generation += 1;
         let generation = self.cache_inventory_generation;
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         self.off_ui(
             ctx,
             move || media.cache_inventory(),
@@ -1624,7 +1631,7 @@ impl KinewrightApp {
         if self.media_cache_clear_pending.is_some() {
             return;
         }
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.cache_clear_tx.clone();
         self.media_cache_clear_pending = Some(family);
         thread::Builder::new()
@@ -2959,20 +2966,106 @@ mod tests {
     )]
     fn s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects() {
         use kinewright_project::{
-            bundle_records::{ObjectRef, RecordKind},
-            editing_session::Ja1EditingSession,
-            owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+            editing_session::Ja1EditingSession, owned_inputs::OwnedInputManifest,
             storage_budget::StorageLimits,
         };
         let root = kinewright_media::test_support::workspace_target_dir();
         let temp = TempDirectory::new_in(&root, "s2h-producers");
-        let media = asset(fingerprint(&"a".repeat(64), 4));
-        let mut av = media.clone();
-        av.id = AssetId(8);
-        av.kind = MediaKind::AudioVideo;
-        let mut still = media.clone();
-        still.id = AssetId(9);
-        still.kind = MediaKind::Image;
+        let video = kinewright_media::test_support::GeneratedMedia::ffmpeg(
+            "s2h-video",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=32x24:r=24:d=1",
+                "-c:v",
+                "libx264",
+                "-qp",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                "-pix_fmt",
+                "yuv420p",
+                "-colorspace",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+            ],
+            "mkv",
+        );
+        let av_source = kinewright_media::test_support::GeneratedMedia::ffmpeg(
+            "s2h-av",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=32x24:r=24:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=sample_rate=48000:duration=1",
+                "-c:v",
+                "libx264",
+                "-qp",
+                "0",
+                "-preset",
+                "ultrafast",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                "-c:a",
+                "pcm_s16le",
+                "-pix_fmt",
+                "yuv420p",
+                "-colorspace",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-shortest",
+            ],
+            "mkv",
+        );
+        let audio = temp.path("audio.wav");
+        std::fs::write(
+            &audio,
+            kinewright_media::test_support::wav_f32(
+                &vec![0.25; 48_000].into_boxed_slice(),
+                48_000,
+                1,
+            ),
+        )
+        .unwrap();
+        let sources = [video.path(), av_source.path(), audio.as_path()];
+        let mut staging = kinewright_project::bundle_copy::SessionStore::create(
+            temp.root(),
+            StorageLimits::default(),
+        )
+        .unwrap();
+        let mut assets = Vec::new();
+        let mut staged_pins = Vec::new();
+        for (id, path) in (7..=9).zip(sources) {
+            let (asset, _, pins) = staging
+                .store_mut()
+                .import_media(
+                    &mut std::fs::File::open(path).unwrap(),
+                    std::fs::metadata(path).unwrap().len(),
+                    AssetId(id),
+                    path,
+                    None,
+                )
+                .unwrap();
+            assets.push(asset);
+            staged_pins.extend(pins);
+        }
+        assert_eq!(assets[0].kind, MediaKind::Video);
+        assert_eq!(assets[1].kind, MediaKind::AudioVideo);
+        assert_eq!(assets[2].kind, MediaKind::Audio);
+        let media = assets[0].clone();
         let solid = serde_json::from_value(serde_json::json!({
             "id":10000,"asset":0,"source_range":{"start":0,"end":90},
             "content":{"solid":{"r":20,"g":40,"b":60}},"timeline_start":0,
@@ -2980,7 +3073,7 @@ mod tests {
         })).unwrap();
         let document = Document {
             duration: TimeCode(90),
-            media_pool: vec![media.clone(), av, still],
+            media_pool: assets.clone(),
             tracks: vec![
                 kinewright_core::Track {
                     id: TrackId(1),
@@ -3002,42 +3095,41 @@ mod tests {
         let core = app.projects[0].core.clone();
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
-        let bytes = b"test owned media; this is an admission witness, not decoder certification";
-        let object = ObjectRef {
-            sha256: kinewright_media::sha256_bytes(bytes),
-            byte_length: bytes.len() as u64,
-            record_kind: RecordKind::OwnedMedia,
-        };
-        let blob = owner
-            .source_mut()
-            .unwrap()
-            .store_mut()
-            .admit_blob(&mut &bytes[..], &object, &[])
-            .unwrap();
+        let mut entries = Vec::new();
+        let mut pins = Vec::new();
+        for (asset, path) in assets.iter().zip(sources) {
+            let (imported, entry, held) = owner
+                .source_mut()
+                .unwrap()
+                .store_mut()
+                .import_media(
+                    &mut std::fs::File::open(path).unwrap(),
+                    std::fs::metadata(path).unwrap().len(),
+                    asset.id,
+                    path,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(&imported, asset);
+            entries.push(entry);
+            pins.extend(held);
+        }
         let source = owner.source_mut().unwrap();
         let inputs = source
             .admit_inputs(&OwnedInputManifest {
                 project_id: None,
                 session_id: Some(source.session_id().clone()),
                 owner_epoch: source.store().owner_epoch(),
-                entries: (7..=9)
-                    .map(|id| OwnedInputEntry {
-                        entry_id: format!("media:{id}"),
-                        object: object.clone(),
-                        dependencies: vec![],
-                        selected_stream: None,
-                        time_base: None,
-                        origin: None,
-                        profile: None,
-                    })
-                    .collect(),
+                entries,
             })
             .unwrap();
         owner.set_unsaved_inputs(inputs.reference.clone()).unwrap();
         let path = temp.path("a.kinewright");
         owner.first_save(&path, StorageLimits::default()).unwrap();
         drop(inputs);
-        drop(blob);
+        drop(pins);
+        drop(staged_pins);
+        drop(staging);
         let mut attachment = crate::ja1_attachment::Ja1Attachment::new(owner).unwrap();
         attachment
             .launch_host(

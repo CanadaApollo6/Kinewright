@@ -2335,6 +2335,7 @@ dependencies = [
 name = "kinewright-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "crossbeam-channel",
  "eframe",
  "egui_extras",
@@ -2346,8 +2347,10 @@ dependencies = [
  "pollster",
  "proptest",
  "rfd",
+ "rmcp",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2399,6 +2402,7 @@ dependencies = [
  "serde_json",
  "wgpu",
  "whisper-rs",
+ "winapi-util",
 ]
 
 [[package]]
@@ -2411,6 +2415,7 @@ dependencies = [
  "gethostname",
  "getrandom 0.3.4",
  "kinewright-core",
+ "kinewright-hash",
  "kinewright-media",
  "libc",
  "rustix 1.1.4",

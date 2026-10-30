@@ -1,0 +1,41 @@
+{
+  "rows": [
+    {
+      "guard": "editor-binding",
+      "thread": "writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut",
+      "file": "crates/kinewright-agent/src/writer_host/s2h_tests.rs",
+      "line": 97,
+      "expected_refusal": "manual_lease",
+      "witness_sha256": "ed49be16bc86ac939af16b0f73317a3afe28bde4ded6bde6748fd2084905b0c8",
+      "red_log_sha256": "2e40c86ffa94a57b8316a8038f89c9bd2a1ddc5f8f1d7ce36d2806122bf7c62e"
+    },
+    {
+      "guard": "exact-drained-cut",
+      "thread": "writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut",
+      "file": "crates/kinewright-agent/src/writer_host/s2h_tests.rs",
+      "line": 97,
+      "expected_refusal": "history_changed",
+      "witness_sha256": "ed49be16bc86ac939af16b0f73317a3afe28bde4ded6bde6748fd2084905b0c8",
+      "red_log_sha256": "c89115268d857b91dc36876747b3282cddc15fd4347ca2b38e3898c31a49a0a8"
+    },
+    {
+      "guard": "unsaved-source-owner",
+      "thread": "ja1_attachment::tests::s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save",
+      "file": "crates/kinewright-app/src/ja1_attachment_tests.rs",
+      "line": 314,
+      "expected_refusal": "unsaved_input_context",
+      "witness_sha256": "b480c8fdf98b5c3df671ca16e9db856062ece034ce3690074f51173bb3f3588d",
+      "red_log_sha256": "405dcf4df10ffccf63f4e79be11442ea8483f93b2cd8e32bfa5029f9edffba54"
+    },
+    {
+      "guard": "forwarded-input-scope",
+      "thread": "writer_host::s2h_tests::s3_gui_owned_input_forwarded_scope_refuses_before_admission",
+      "file": "crates/kinewright-agent/src/writer_host/s2h_tests.rs",
+      "line": 227,
+      "expected_refusal": "root_refused",
+      "witness_sha256": "ed49be16bc86ac939af16b0f73317a3afe28bde4ded6bde6748fd2084905b0c8",
+      "red_log_sha256": "2d34edf0fcbdbedcb0d6a6ecc77165fe0e169666a8f7ea83f27d45a798875822"
+    }
+  ],
+  "restored_reviewed_files": 49
+}

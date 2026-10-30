@@ -83,6 +83,7 @@ impl HostSession {
             write: vec![durable_test_root().into()],
         };
         let mut host = HostCommandOwner::open(HostConfig {
+            scheduler_settings: None,
             project: "c12-final-owning-host".into(),
             path: None,
             roots,
@@ -402,6 +403,83 @@ fn w12_host_cleanup_only_fresh_copy_keeps_exact_charge_and_history() {
     let fresh = Core::spawn(Document::default()).unwrap();
     loaded.restore_manual(&fresh).unwrap();
     assert_eq!(fresh.export_history().unwrap(), expected);
+}
+/// S3 C11: a rescue moves the playback scope. The old current-edit lease ends
+/// with the old owner, and a lease on the new scope plays from the rescue copy.
+#[test]
+fn c11_rescue_moves_the_scope_and_the_new_lease_plays() {
+    use kinewright_media::owned_io::ReadAuthority;
+    use kinewright_project::{
+        io_observer,
+        store::snapshot_reader::{CurrentEditLease, SnapshotReadSession},
+    };
+    let (root, mut host, _) = evidence_fixture("c11-rescue-host");
+    let roots = host.0.config.roots.clone();
+    host.0
+        .issue_attachment("c11-viewer".into(), AttachmentRole::Viewer, roots.clone())
+        .unwrap();
+    let index = host.0.attachments.len() - 1;
+    let lease = |host: &mut HostSession| {
+        let scope = host.0.status().playback_scope.expect("C11_SCOPE");
+        let lease = refusal(host.0.execute_snapshot_lease(
+            index,
+            HostCommand::LeaseCurrentEdit {
+                inputs: scope.1.clone(),
+            },
+            &roots,
+        ))
+        .unwrap()
+        .current_edit_lease
+        .unwrap();
+        assert_eq!((lease.owner_epoch, &lease.inputs), (scope.0, &scope.1));
+        (scope, lease)
+    };
+    let status = |host: &mut HostSession, lease: &CurrentEditLease| {
+        host.0
+            .execute_snapshot_lease(
+                index,
+                HostCommand::SnapshotLeaseStatus {
+                    id: lease.id.clone(),
+                    payload_sha256: lease.payload_sha256.clone(),
+                },
+                &roots,
+            )
+            .error
+            .map(|error| error.code)
+    };
+    let (before, old) = lease(&mut host);
+    assert_eq!(status(&mut host, &old), None);
+    assert!(io_observer::fail_once("root_parent_sync", || host.save_active()).is_err());
+    std::fs::rename(root.path("drive"), root.path("hidden")).unwrap();
+    refusal(host.run(HostCommand::PreviewRescue {
+        snapshot: HostSnapshot::capture(host.core()).unwrap(),
+    }))
+    .unwrap();
+    let destination = root.path("rescued/a.kinewright");
+    let rescued = refusal(host.run(HostCommand::RescueTo {
+        destination: destination.clone(),
+    }))
+    .unwrap();
+    assert!(rescued.activation.is_some());
+    assert_eq!(
+        status(&mut host, &old).as_deref(),
+        Some("lease_revoked"),
+        "C11_RESCUE_ENDS_OLD_LEASE"
+    );
+    let (after, renewed) = lease(&mut host);
+    assert_ne!(after, before, "C11_RESCUE_MOVES_SCOPE");
+    let origin = Arc::new(kinewright_core::MediaSourceOrigin::new_project());
+    let authority = ReadAuthority::new(
+        origin.legacy_media().unwrap(),
+        renewed.payload_sha256.clone(),
+        Arc::new(|| Ok(())),
+    );
+    let reader = SnapshotReadSession::new(StorageLimits::default())
+        .unwrap()
+        .open_current(&destination, &renewed, authority)
+        .unwrap();
+    let document = host.core().export_history().unwrap().document;
+    reader.playback_inputs(document).expect("C11_RESCUE_PLAYS");
 }
 #[path = "../../../kinewright-project/tests/support/ja_s2_c3.rs"]
 mod source_cases;

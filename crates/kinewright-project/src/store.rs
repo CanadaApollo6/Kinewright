@@ -65,6 +65,10 @@ pub struct CollectionFailure {
 }
 
 struct Ledger {
+    // A leased reader receives the host's authenticated graph declarations.
+    // This admits graph traversal only: local byte reads still hash the object
+    // or certify its complete media fingerprint and chunks before exposure.
+    authenticated_read_graph: bool,
     collection: CollectionStatus,
     objects: BTreeMap<String, (ObjectRef, Vec<ObjectRef>)>,
     pins: BTreeMap<String, u64>,
@@ -83,9 +87,26 @@ struct Ledger {
     temporaries: Vec<crate::namespace::PhysicalFile>,
 }
 
+struct WeakCacheEntry<T> {
+    value: std::sync::Weak<T>,
+    _charge: StorageReservation,
+}
+
+struct MediaAdmission {
+    binding: kinewright_media::owned_io::SourceAdmissionMemo,
+    _charge: StorageReservation,
+}
+
 struct StoreInner {
+    read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
+    read_graph_charge: Option<snapshot_reader::GraphCharge>,
     namespace: Mutex<ProjectNamespace>,
     verified_memo: Mutex<crate::bundle_recovery::VerifiedIdentityMemo>,
+    chunk_tables:
+        Mutex<BTreeMap<ObjectRef, WeakCacheEntry<crate::owned_media::CertifiedChunkTable>>>,
+    resources:
+        Mutex<BTreeMap<ObjectRef, WeakCacheEntry<crate::certified_resources::ResourceBytes>>>,
+    media_admissions: Mutex<BTreeMap<(ObjectRef, ObjectRef, String), MediaAdmission>>,
     ledger: Mutex<Ledger>,
     usage: Arc<Mutex<StorageUsage>>,
     limits: StorageLimits,
@@ -510,6 +531,7 @@ impl ProjectStore {
             .lock()
             .map_err(|_| BundleError::Capacity("usage poisoned"))?;
         usage.peak_decoded_bytes = usage.decoded_bytes;
+        usage.peak_decoder_bytes = usage.decoder_bytes;
         usage.peak_live_history_bytes = usage.live_history_bytes;
         Ok(())
     }
@@ -534,26 +556,45 @@ impl ProjectStore {
                 "exactly one project/session owner is required".into(),
             ));
         }
-        namespace.verify()?;
+        let read_authority = namespace.read_authority();
+        if read_authority.is_some() {
+            namespace.verify_read_authority()?;
+        } else {
+            namespace.verify()?;
+        }
         let mut epoch_bytes = [0_u8; 8];
         getrandom::fill(&mut epoch_bytes).map_err(|e| BundleError::Identity(e.to_string()))?;
         let owner_epoch = u64::from_le_bytes(epoch_bytes).max(1);
-        let root_bytes = namespace.read_root()?.map_or(0, |b| b.len() as u64);
-        let inventory_bytes = namespace
-            .read(
-                &crate::bundle_recovery::inventory_path()?,
-                limits.control_bytes,
-            )?
-            .map_or(0, |b| b.len() as u64);
+        let root_bytes = if read_authority.is_some() {
+            0
+        } else {
+            namespace.read_root()?.map_or(0, |b| b.len() as u64)
+        };
+        let inventory_bytes = if read_authority.is_some() {
+            0
+        } else {
+            namespace
+                .read(
+                    &crate::bundle_recovery::inventory_path()?,
+                    limits.control_bytes,
+                )?
+                .map_or(0, |b| b.len() as u64)
+        };
         let control_bytes = root_bytes
             .checked_add(inventory_bytes)
             .ok_or(BundleError::Capacity("control files"))?;
-        let can_collect = root_bytes == 0;
+        let can_collect = read_authority.is_none() && root_bytes == 0;
         Ok(Self {
             inner: Arc::new(StoreInner {
+                read_authority,
+                read_graph_charge: None,
                 namespace: Mutex::new(namespace),
                 verified_memo: Mutex::new(crate::bundle_recovery::VerifiedIdentityMemo::default()),
+                chunk_tables: Mutex::new(BTreeMap::new()),
+                resources: Mutex::new(BTreeMap::new()),
+                media_admissions: Mutex::new(BTreeMap::new()),
                 ledger: Mutex::new(Ledger {
+                    authenticated_read_graph: false,
                     collection: CollectionStatus::default(),
                     objects: BTreeMap::new(),
                     pins: BTreeMap::new(),
@@ -824,7 +865,9 @@ impl ProjectStore {
                 if usage
                     .metadata_bytes
                     .checked_add(metadata_charge)
-                    .and_then(|n| n.checked_add(usage.decoded_bytes))
+                    .and_then(|n| {
+                        n.checked_add(usage.decoded_bytes.checked_sub(usage.decoder_bytes)?)
+                    })
                     .is_none_or(|n| n > self.inner.limits.metadata_bytes)
                     || (reference.record_kind.is_owned_bytes()
                         && usage
@@ -950,6 +993,15 @@ impl ProjectStore {
             }
             return Err(error);
         }
+        self.register_published(reference, &dependencies, reservation, unclassified)
+    }
+    fn register_published(
+        &self,
+        reference: &ObjectRef,
+        dependencies: &[ObjectRef],
+        reservation: StorageReservation,
+        unclassified: Option<u64>,
+    ) -> Result<SealedObject, BundleError> {
         reservation.seal(if unclassified.is_some() {
             0
         } else {
@@ -963,7 +1015,7 @@ impl ProjectStore {
                 .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
             ledger.objects.insert(
                 reference.sha256.clone(),
-                (reference.clone(), dependencies.clone()),
+                (reference.clone(), dependencies.to_vec()),
             );
             ledger.verified.insert(reference.sha256.clone());
             if unclassified.is_some() {
@@ -1034,6 +1086,336 @@ impl ProjectStore {
             pin: self.pin(std::slice::from_ref(reference))?,
         })
     }
+    pub(crate) fn admit_measured_media(
+        &mut self,
+        reader: &mut impl Read,
+        length: u64,
+    ) -> Result<(SealedObject, crate::owned_inputs::InputChunkTable), BundleError> {
+        let count = crate::owned_inputs::InputChunkTable::checked_count(length, self.limits())?;
+        let _scratch = self.reserve(0, (1 << 20) + count * 32 + 1024, 0, false)?;
+        let usage = self.usage()?;
+        if usage.objects >= self.limits().objects
+            || usage
+                .owned_bytes
+                .checked_add(length)
+                .is_none_or(|n| n > self.limits().owned_bytes)
+            || usage
+                .metadata_bytes
+                .checked_add(256)
+                .is_none_or(|n| n > self.limits().metadata_bytes)
+        {
+            return Err(BundleError::Capacity("import object admission"));
+        }
+        let reservation = self.reserve(length, 0, 0, false)?;
+        let mut table = None;
+        let published = self.with_namespace(|namespace| {
+            namespace.publish_hashed(|file| {
+                let result = crate::owned_media::stream_media(reader, file, length, count)?;
+                let reference = ObjectRef {
+                    sha256: result.source_sha256.clone(),
+                    byte_length: length,
+                    record_kind: RecordKind::OwnedMedia,
+                };
+                table = Some(result);
+                Ok(reference)
+            })
+        });
+        let reference = match published {
+            Ok(reference) => reference,
+            Err(error) => {
+                if self.with_namespace(|n| Ok(n.is_uncertain()))? {
+                    self.inner
+                        .ledger
+                        .lock()
+                        .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                        .pending
+                        .push(reservation);
+                    self.inner
+                        .usage
+                        .lock()
+                        .map_err(|_| BundleError::Capacity("usage poisoned"))?
+                        .unsettled = true;
+                }
+                return Err(error);
+            }
+        };
+        let existing = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .objects
+            .get(&reference.sha256)
+            .cloned();
+        let sealed = if let Some((known, dependencies)) = existing {
+            if known != reference || !dependencies.is_empty() {
+                return Err(BundleError::Corrupt(
+                    "import object identity conflict".into(),
+                ));
+            }
+            drop(reservation);
+            SealedObject {
+                reference: reference.clone(),
+                pin: self.pin(std::slice::from_ref(&reference))?,
+            }
+        } else {
+            let unclassified = self
+                .inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                .unclassified
+                .get(&reference.sha256)
+                .copied();
+            if unclassified.is_some_and(|length| length != reference.byte_length) {
+                return Err(BundleError::Corrupt(
+                    "unclassified import length differs".into(),
+                ));
+            }
+            self.register_published(&reference, &[], reservation, unclassified)?
+        };
+        Ok((sealed, table.ok_or(BundleError::HistoryBarrierInvariant)?))
+    }
+
+    pub(crate) fn open_input_descriptor(&self, reference: &ObjectRef) -> Result<File, BundleError> {
+        self.closure_with_inventory(std::slice::from_ref(reference), false)?;
+        let file = self
+            .with_namespace(|n| n.open_owned(&Self::object_path(reference)?))?
+            .ok_or_else(|| BundleError::Corrupt("missing owned source".into()))?;
+        if !file.metadata()?.is_file() || file.metadata()?.len() != reference.byte_length {
+            return Err(BundleError::Corrupt("owned source length changed".into()));
+        }
+        Ok(file)
+    }
+
+    pub(crate) fn shared_chunk_table(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<Arc<crate::owned_media::CertifiedChunkTable>, BundleError> {
+        let mut cache = self
+            .inner
+            .chunk_tables
+            .lock()
+            .map_err(|_| BundleError::Capacity("table cache poisoned"))?;
+        cache.retain(|_, entry| entry.value.strong_count() != 0);
+        if let Some(table) = cache.get(reference).and_then(|entry| entry.value.upgrade()) {
+            return Ok(table);
+        }
+        let table =
+            self.read_copy_record::<crate::owned_inputs::InputChunkTable>(reference, true)?;
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, true)?;
+        let canonical =
+            serde_json::to_vec(&*table).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        if canonical.len() as u64 != reference.byte_length
+            || kinewright_media::sha256_bytes(&canonical) != reference.sha256
+        {
+            return Err(BundleError::Corrupt(
+                "noncanonical chunk table object".into(),
+            ));
+        }
+        let charge = self.reserve_copy_read(
+            0,
+            (table.chunk_sha256.len() as u64)
+                .checked_mul(32)
+                .ok_or(BundleError::Capacity("table allocation"))?,
+            0,
+            false,
+            true,
+        )?;
+        let chunks = Arc::from(table.chunk_sha256.as_slice());
+        let value = Arc::new(crate::owned_media::CertifiedChunkTable {
+            chunks,
+            table,
+            _copy_charge: charge,
+            _pin: self.pin(std::slice::from_ref(reference))?,
+        });
+        if cache.len() as u64 >= self.limits().objects {
+            return Err(BundleError::Capacity("table cache entries"));
+        }
+        cache.insert(
+            reference.clone(),
+            WeakCacheEntry {
+                value: Arc::downgrade(&value),
+                _charge: self.reserve_copy_read(0, 256, 0, false, true)?,
+            },
+        );
+        Ok(value)
+    }
+
+    pub(crate) fn shared_resource(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<Arc<crate::certified_resources::ResourceBytes>, BundleError> {
+        if !matches!(
+            reference.record_kind,
+            RecordKind::OwnedLut | RecordKind::OwnedFont
+        ) {
+            return Err(BundleError::Unsupported(
+                "resource has no certified private-copy reader".into(),
+            ));
+        }
+        if reference.byte_length > self.limits().decoded_record_bytes {
+            return Err(BundleError::Capacity("private resource bytes"));
+        }
+        let mut cache = self
+            .inner
+            .resources
+            .lock()
+            .map_err(|_| BundleError::Capacity("resource cache poisoned"))?;
+        cache.retain(|_, entry| entry.value.strong_count() != 0);
+        if let Some(value) = cache.get(reference).and_then(|entry| entry.value.upgrade()) {
+            return Ok(value);
+        }
+        let charge = self.reserve_copy_read(
+            0,
+            reference
+                .byte_length
+                .checked_add(256)
+                .ok_or(BundleError::Capacity("resource charge"))?,
+            0,
+            false,
+            true,
+        )?;
+        let mut file = self.open_input_descriptor(reference)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(
+                usize::try_from(reference.byte_length)
+                    .map_err(|_| BundleError::Capacity("resource address space"))?,
+            )
+            .map_err(|_| BundleError::Capacity("resource allocation"))?;
+        bytes.resize(
+            usize::try_from(reference.byte_length)
+                .map_err(|_| BundleError::Capacity("resource address space"))?,
+            0,
+        );
+        file.read_exact(&mut bytes)?;
+        let mut extra = [0];
+        if file.read(&mut extra)? != 0
+            || file.metadata()?.len() != reference.byte_length
+            || kinewright_media::sha256_bytes(&bytes) != reference.sha256
+        {
+            return Err(BundleError::Corrupt(
+                "private resource identity changed".into(),
+            ));
+        }
+        let value = Arc::new(crate::certified_resources::ResourceBytes {
+            bytes: charge.hold(bytes),
+            _pin: self.pin(std::slice::from_ref(reference))?,
+        });
+        if cache.len() as u64 >= self.limits().objects {
+            return Err(BundleError::Capacity("resource cache entries"));
+        }
+        cache.insert(
+            reference.clone(),
+            WeakCacheEntry {
+                value: Arc::downgrade(&value),
+                _charge: self.reserve_copy_read(0, 256, 0, false, true)?,
+            },
+        );
+        Ok(value)
+    }
+
+    pub(crate) fn metadata_reserver(&self) -> Arc<kinewright_media::owned_io::CursorReservation> {
+        let store = Self {
+            inner: Arc::clone(&self.inner),
+        };
+        Arc::new(move |bytes| {
+            store
+                .reserve_copy_read(0, bytes, 0, false, true)
+                .map(|charge| Arc::new(charge) as kinewright_media::owned_io::LifetimeGuard)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub(crate) fn decoder_reserver(&self) -> Arc<kinewright_media::owned_io::CursorReservation> {
+        let store = Self {
+            inner: Arc::clone(&self.inner),
+        };
+        Arc::new(move |bytes| {
+            store.check_read_authority().map_err(|e| e.to_string())?;
+            if store
+                .inner
+                .session_closing
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err("originating source is closing".into());
+            }
+            StorageReservation::reserve_decoder(&store.inner.usage, store.limits(), bytes, 0)
+                .map(|charge| Arc::new(charge) as kinewright_media::owned_io::LifetimeGuard)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    pub(crate) fn media_admission_verified(
+        &self,
+        entry: &crate::owned_inputs::OwnedInputEntry,
+    ) -> Result<bool, BundleError> {
+        Ok(self.media_admission_memo(entry)?.is_some())
+    }
+
+    pub(crate) fn media_admission_memo(
+        &self,
+        entry: &crate::owned_inputs::OwnedInputEntry,
+    ) -> Result<Option<kinewright_media::owned_io::SourceAdmissionMemo>, BundleError> {
+        let memo = self
+            .inner
+            .media_admissions
+            .lock()
+            .map_err(|_| BundleError::Capacity("media admission memo poisoned"))?;
+        Ok(memo
+            .get(&(
+                entry.object.clone(),
+                entry.chunk_table_ref()?.clone(),
+                entry
+                    .profile
+                    .clone()
+                    .ok_or_else(|| BundleError::Corrupt("missing media interpretation".into()))?,
+            ))
+            .map(|admission| admission.binding.clone()))
+    }
+
+    pub(crate) fn remember_media_admission(
+        &self,
+        entry: &crate::owned_inputs::OwnedInputEntry,
+        binding: kinewright_media::owned_io::SourceAdmissionMemo,
+    ) -> Result<(), BundleError> {
+        let mut memo = self
+            .inner
+            .media_admissions
+            .lock()
+            .map_err(|_| BundleError::Capacity("media admission memo poisoned"))?;
+        let profile = entry
+            .profile
+            .as_deref()
+            .ok_or_else(|| BundleError::Corrupt("missing media interpretation".into()))?;
+        let charge = (profile.len() as u64)
+            .checked_add(1024)
+            .ok_or(BundleError::Capacity("media admission memo charge"))?;
+        let key = (
+            entry.object.clone(),
+            entry.chunk_table_ref()?.clone(),
+            profile.to_owned(),
+        );
+        if memo.contains_key(&key) {
+            return Ok(());
+        }
+        if self.limits().objects == 0 {
+            return Err(BundleError::Capacity("media admission memo entries"));
+        }
+        if memo.len() as u64 >= self.limits().objects {
+            memo.pop_first();
+        }
+        memo.insert(
+            key,
+            MediaAdmission {
+                binding,
+                _charge: self.reserve_copy_read(0, charge, 0, false, true)?,
+            },
+        );
+        Ok(())
+    }
+
     pub fn closure(&self, roots: &[ObjectRef]) -> Result<Vec<ObjectRef>, BundleError> {
         self.closure_with_inventory(roots, true)
     }
@@ -1176,7 +1558,40 @@ impl ProjectStore {
         }
     }
     pub fn collect_unpublished(&mut self) -> Result<u64, BundleError> {
-        collect(&self.inner)
+        if self.inner.read_authority.is_some() {
+            return Err(BundleError::Identity("read-only snapshot".into()));
+        }
+        self.inner
+            .chunk_tables
+            .lock()
+            .map_err(|_| BundleError::Capacity("table cache poisoned"))?
+            .retain(|_, entry| entry.value.strong_count() != 0);
+        self.inner
+            .resources
+            .lock()
+            .map_err(|_| BundleError::Capacity("resource cache poisoned"))?
+            .retain(|_, entry| entry.value.strong_count() != 0);
+        let collected = collect(&self.inner)?;
+        let ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        self.inner
+            .media_admissions
+            .lock()
+            .map_err(|_| BundleError::Capacity("media admission memo poisoned"))?
+            .retain(|(source, table, _), _| {
+                ledger
+                    .objects
+                    .get(&source.sha256)
+                    .is_some_and(|(reference, _)| reference == source)
+                    && ledger
+                        .objects
+                        .get(&table.sha256)
+                        .is_some_and(|(reference, _)| reference == table)
+            });
+        Ok(collected)
     }
     pub fn manifest(&self) -> Result<StoreManifest, BundleError> {
         let ledger = self
@@ -1244,7 +1659,9 @@ fn walk(
     let (known, dependencies) = ledger.objects.get(&reference.sha256).ok_or_else(|| {
         BundleError::Corrupt(format!("missing dependency declaration: {reference:?}"))
     })?;
-    if known != reference || !ledger.verified.contains(&reference.sha256) {
+    if known != reference
+        || (!ledger.authenticated_read_graph && !ledger.verified.contains(&reference.sha256))
+    {
         return Err(BundleError::Corrupt(
             "unverified dependency identity".into(),
         ));
@@ -1304,6 +1721,13 @@ impl<R: Read> Read for CountingReader<'_, R> {
         Ok(count)
     }
 }
+impl StorePin {
+    /// Pins may be shared only within the same IO owner's ledger.
+    #[must_use]
+    pub fn shares_owner_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
 impl Drop for StorePin {
     fn drop(&mut self) {
         if let Ok(mut ledger) = self.inner.ledger.lock() {
@@ -1354,11 +1778,12 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
                       length: u64,
                       run: &mut dyn FnMut() -> Result<(), BundleError>|
      -> Result<bool, BundleError> {
-        let result = (|| {
-            #[cfg(any(test, feature = "test-util"))]
-            crate::io_observer::check_failure("gc_before_unlink", path)?;
-            run()
-        })();
+        #[cfg(any(test, feature = "test-util"))]
+        let result = crate::io_observer::check_failure("gc_before_unlink", path)
+            .map_err(BundleError::from)
+            .and_then(|()| run());
+        #[cfg(not(any(test, feature = "test-util")))]
+        let result = run();
         match result {
             Ok(()) => Ok(true),
             Err(error) => {
@@ -1561,6 +1986,13 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         .unclassified
         .clone();
     for (hash, length) in orphans {
+        let mut ledger = inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        if ledger.objects.contains_key(&hash) || ledger.pins.get(&hash).copied().unwrap_or(0) != 0 {
+            continue;
+        }
         let path = PortablePath::new(&Path::new("studio/objects").join(&hash))?;
         if !retire(path.as_path(), length, &mut || {
             inner
@@ -1571,10 +2003,6 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         })? {
             continue;
         }
-        let mut ledger = inner
-            .ledger
-            .lock()
-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
         let mut usage = inner
             .usage
             .lock()
@@ -1614,8 +2042,12 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
     }
     Ok(retired)
 }
+
 impl Drop for StoreInner {
     fn drop(&mut self) {
+        if self.read_authority.is_some() {
+            return;
+        }
         if self
             .session_closed
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -1685,6 +2117,12 @@ pub trait BundleRecord: record_sealed::Sealed + Serialize + serde::de::Deseriali
     fn validate(&self, _limits: &StorageLimits) -> Result<(), BundleError> {
         Ok(())
     }
+    fn validate_store(&self, _store: &ProjectStore) -> Result<(), BundleError> {
+        Ok(())
+    }
+    fn validate_admission(&self, store: &ProjectStore) -> Result<(), BundleError> {
+        self.validate_store(store)
+    }
 }
 macro_rules! record {
     ($ty:ty, $kind:ident) => {
@@ -1741,8 +2179,34 @@ impl BundleRecord for crate::owned_inputs::OwnedInputManifest {
                 return Err(BundleError::Corrupt("invalid input entry".into()));
             }
             entry.object.validate()?;
+            if entry.object.record_kind == RecordKind::OwnedMedia {
+                entry.media_interpretation()?;
+                entry.chunk_table_ref()?;
+            }
             for dep in &entry.dependencies {
                 dep.validate()?;
+            }
+        }
+        Ok(())
+    }
+    fn validate_store(&self, store: &ProjectStore) -> Result<(), BundleError> {
+        for entry in &self.entries {
+            if entry.object.record_kind == RecordKind::OwnedMedia {
+                let table = store.shared_chunk_table(entry.chunk_table_ref()?)?;
+                table
+                    .table
+                    .validate_binding(&entry.object, store.limits())?;
+            }
+        }
+        Ok(())
+    }
+    fn validate_admission(&self, store: &ProjectStore) -> Result<(), BundleError> {
+        self.validate_store(store)?;
+        for entry in &self.entries {
+            if entry.object.record_kind == RecordKind::OwnedMedia
+                && !store.media_admission_verified(entry)?
+            {
+                store.certify_media_entry(entry)?;
             }
         }
         Ok(())
@@ -1867,6 +2331,15 @@ impl BundleRecord for StoreManifest {
 }
 
 impl ProjectStore {
+    /// Uses typed admission for projected-manifest oracle fixtures.
+    #[cfg(feature = "test-util")]
+    pub fn admit_manifest_probe(
+        &mut self,
+        manifest: &StoreManifest,
+    ) -> Result<SealedObject, BundleError> {
+        self.admit_record(manifest)
+    }
+
     pub fn admit_document(
         &mut self,
         document: &kinewright_core::Document,
@@ -1884,6 +2357,7 @@ impl ProjectStore {
         record: &T,
     ) -> Result<SealedObject, BundleError> {
         record.validate(self.limits())?;
+        record.validate_admission(self)?;
         if !T::KIND.supported() {
             return Err(BundleError::Unsupported("inactive record kind".into()));
         }
@@ -1974,7 +2448,9 @@ impl ProjectStore {
         let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, cleanup_only)?;
         let mut file = self.open_copy_source(reference, cleanup_only)?;
         let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
-        if bytes.len() as u64 != reference.byte_length {
+        if bytes.len() as u64 != reference.byte_length
+            || kinewright_media::sha256_bytes(&bytes) != reference.sha256
+        {
             return Err(BundleError::Corrupt("record changed while decoding".into()));
         }
         let preflight = self.reserve_copy_read(
@@ -2003,11 +2479,13 @@ impl ProjectStore {
         let value: T =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         value.validate(self.limits())?;
+        value.validate_store(self)?;
         self.inner
             .verified_memo
             .lock()
             .map_err(|_| BundleError::Capacity("memo poisoned"))?
             .remember(reference, &value, decoded, None, self.limits());
+        self.check_read_authority()?;
         Ok(decoded_reservation.hold(value))
     }
 }
@@ -2845,8 +3323,10 @@ impl ProjectStore {
         }
         if state
             .decoded_bytes
-            .checked_add(prior.metadata_bytes)
+            .checked_sub(state.decoder_bytes)
+            .and_then(|bytes| bytes.checked_add(prior.metadata_bytes))
             .is_none_or(|n| n > inner.limits.metadata_bytes)
+            || state.decoder_bytes > inner.limits.decoder_bytes
         {
             return Err(BundleError::Capacity("admission/store overlap"));
         }
@@ -2871,6 +3351,11 @@ impl ProjectStore {
         reference: &ObjectRef,
         retained: bool,
     ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
+        if self.inner.read_authority.is_some() {
+            return Err(BundleError::Identity(
+                "private evidence requires the host evidence route".into(),
+            ));
+        }
         if reference.record_kind != RecordKind::OwnedEvidence
             || reference.byte_length > self.limits().control_bytes
         {
@@ -3427,8 +3912,14 @@ impl ProjectStore {
             || usage.owned_bytes > limits.owned_bytes
             || usage
                 .metadata_bytes
-                .checked_add(usage.decoded_bytes)
+                .checked_add(
+                    usage
+                        .decoded_bytes
+                        .checked_sub(usage.decoder_bytes)
+                        .ok_or(BundleError::Capacity("decoder accounting subset"))?,
+                )
                 .is_none_or(|n| n > limits.metadata_bytes)
+            || usage.decoder_bytes > limits.decoder_bytes
             || usage.live_history_bytes > limits.live_history_bytes
         {
             return Err(BundleError::Capacity("destination quota"));
@@ -3499,5 +3990,144 @@ impl ProjectStore {
         // the exact prior inventory that rollback just restored.
         ledger.can_collect = false;
         result.map(|_| ())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod c0_fix1_tests {
+    use super::*;
+
+    #[test]
+    fn s3_fix1_reclassification_refuses_a_different_orphan_length_before_registration() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c0-fix1-orphan-length",
+        );
+        let mut session =
+            crate::bundle_copy::SessionStore::create(temp.root(), StorageLimits::default())
+                .unwrap();
+        let bytes = vec![17; 4096];
+        let (sealed, _) = session
+            .store_mut()
+            .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64)
+            .unwrap();
+        let reference = sealed.reference.clone();
+        {
+            let mut ledger = session.store().inner.ledger.lock().unwrap();
+            ledger.objects.remove(&reference.sha256);
+            ledger
+                .unclassified
+                .insert(reference.sha256.clone(), reference.byte_length + 1);
+        }
+        let before = session.store().usage().unwrap();
+        let result = session
+            .store_mut()
+            .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64);
+        assert!(result.is_err(), "C0_FIX1_ORPHAN_LENGTH_REFUSED");
+        let mut ledger = session.store().inner.ledger.lock().unwrap();
+        assert!(
+            !ledger.objects.contains_key(&reference.sha256),
+            "C0_FIX1_NO_INVALID_REGISTRATION"
+        );
+        assert_eq!(
+            ledger.unclassified.get(&reference.sha256),
+            Some(&(reference.byte_length + 1))
+        );
+        ledger.unclassified.remove(&reference.sha256);
+        ledger
+            .objects
+            .insert(reference.sha256.clone(), (reference, vec![]));
+        drop(ledger);
+        let after = session.store().usage().unwrap();
+        assert_eq!(before.physical_bytes, after.physical_bytes);
+        assert_eq!(after.reserved_bytes, 0);
+        drop(sealed);
+    }
+
+    #[test]
+    fn s3_fix1_orphan_cleanup_preserves_admitted_and_pinned_identities() {
+        for admitted in [true, false] {
+            let temp = kinewright_media::test_support::TempDirectory::new_in(
+                &kinewright_media::test_support::workspace_target_dir(),
+                "c0-fix1-orphan-guard",
+            );
+            let mut session =
+                crate::bundle_copy::SessionStore::create(temp.root(), StorageLimits::default())
+                    .unwrap();
+            let bytes = vec![17; 4096];
+            let (sealed, _) = session
+                .store_mut()
+                .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64)
+                .unwrap();
+            let reference = sealed.reference.clone();
+            {
+                let mut ledger = session.store().inner.ledger.lock().unwrap();
+                ledger
+                    .unclassified
+                    .insert(reference.sha256.clone(), reference.byte_length);
+                if admitted {
+                    ledger.pins.remove(&reference.sha256);
+                    ledger.committed.push(reference.clone());
+                } else {
+                    ledger.objects.remove(&reference.sha256);
+                }
+            }
+            // Model the stale dual classification left by the pre-fix reuse path.
+            let result = session.store_mut().collect_unpublished();
+            let actual = session.store().with_namespace(|namespace| {
+                namespace.read(
+                    &ProjectStore::object_path(&reference)?,
+                    reference.byte_length,
+                )
+            });
+            assert_eq!(
+                actual.unwrap().unwrap_or_default(),
+                bytes,
+                "C0_FIX1_ORPHAN_CLEANUP_GUARD"
+            );
+            result.unwrap();
+            let mut ledger = session.store().inner.ledger.lock().unwrap();
+            ledger.unclassified.remove(&reference.sha256);
+            if admitted {
+                ledger.pins.insert(reference.sha256, 1);
+                ledger.committed.clear();
+            } else {
+                ledger
+                    .objects
+                    .insert(reference.sha256.clone(), (reference, vec![]));
+            }
+            drop(ledger);
+            drop(sealed);
+        }
+    }
+}
+
+#[path = "snapshot_reader.rs"]
+pub mod snapshot_reader;
+impl ProjectStore {
+    pub(crate) fn read_authority(&self) -> Option<kinewright_media::owned_io::ReadAuthority> {
+        self.inner.read_authority.clone()
+    }
+    pub(crate) fn check_read_authority(&self) -> Result<(), BundleError> {
+        self.inner.read_authority.as_ref().map_or(Ok(()), |a| {
+            a.check().map_err(|e| BundleError::Identity(e.to_string()))
+        })
+    }
+}
+impl StorePin {
+    pub(crate) fn read_store(&self) -> ProjectStore {
+        ProjectStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl ProjectStore {
+    pub(crate) fn snapshot_project_id(&self) -> Result<ProjectId, BundleError> {
+        self.check_read_authority()?;
+        self.inner
+            .project_id
+            .clone()
+            .ok_or_else(|| BundleError::Identity("snapshot has no named owner".into()))
     }
 }

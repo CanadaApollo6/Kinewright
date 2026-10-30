@@ -1,5 +1,10 @@
-//! Owner-bound byte admission. Decoder stability certification remains unavailable.
+//! Owner-bound byte admission and chunk-verified decoder certification.
 #![allow(clippy::missing_errors_doc)]
+pub use crate::certified_resources::CertifiedResource;
+pub use crate::owned_media::{
+    CertifiedMediaInput, INPUT_CHUNK_BYTES, InputChunkTable, MediaInterpretation,
+    PreparedOwnedMedia, StreamInterpretation,
+};
 use crate::{
     bundle::BundleError,
     bundle_records::{ObjectRef, ProjectId, SessionId},
@@ -55,18 +60,45 @@ pub struct OwnedInputRef {
 /// Retains the actual store authority and physical charge. It grants no decoder certification.
 pub struct OwnedInputLease {
     file: File,
-    _pin: StorePin,
+    pin: StorePin,
     identity: OwnedInputRef,
     owner_epoch: u64,
+    source: Option<CertifiedMediaInput>,
+    cursor: Option<kinewright_media::owned_io::VerifiedCursor>,
 }
 impl Read for OwnedInputLease {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buffer)
+        self.pin
+            .read_store()
+            .check_read_authority()
+            .map_err(std::io::Error::other)?;
+        if self.source.is_some() {
+            self.verified_cursor()?
+                .read(buffer)
+                .map_err(std::io::Error::other)
+        } else {
+            let count = self.file.read(buffer)?;
+            if let Err(error) = self.pin.read_store().check_read_authority() {
+                buffer[..count].fill(0);
+                return Err(std::io::Error::other(error));
+            }
+            Ok(count)
+        }
     }
 }
 impl Seek for OwnedInputLease {
     fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(position)
+        self.pin
+            .read_store()
+            .check_read_authority()
+            .map_err(std::io::Error::other)?;
+        if self.source.is_some() {
+            self.verified_cursor()?
+                .seek(position)
+                .map_err(std::io::Error::other)
+        } else {
+            self.file.seek(position)
+        }
     }
 }
 impl OwnedInputLease {
@@ -84,21 +116,59 @@ impl OwnedInputLease {
         pin: StorePin,
         identity: OwnedInputRef,
         owner_epoch: u64,
+        source: Option<CertifiedMediaInput>,
     ) -> Self {
         Self {
             file,
-            _pin: pin,
+            pin,
             identity,
             owner_epoch,
+            source,
+            cursor: None,
         }
     }
     pub fn certify_decoder_open(&self) -> Result<DecoderOpenReceipt, BundleError> {
-        Err(BundleError::Unsupported(
-            "decoder-open byte stability is not certified".into(),
-        ))
+        self.certified_source()?;
+        let entry = &self.identity.entry;
+        Ok(DecoderOpenReceipt {
+            manifest_ref: self.identity.manifest_ref.clone(),
+            entry_id: entry.entry_id.clone(),
+            opened_object: entry.object.clone(),
+            selected_stream: entry.selected_stream.clone(),
+            time_base: entry.time_base,
+            origin: entry.origin,
+            profile: entry.profile.clone(),
+            use_outcome: "chunk-verified-through-use".into(),
+        })
+    }
+    pub fn certified_source(&self) -> Result<CertifiedMediaInput, BundleError> {
+        self.pin.read_store().check_read_authority()?;
+        self.source
+            .clone()
+            .ok_or_else(|| BundleError::Unsupported("input is not certified media".into()))
+    }
+    fn verified_cursor(
+        &mut self,
+    ) -> std::io::Result<&mut kinewright_media::owned_io::VerifiedCursor> {
+        if self.cursor.is_none() {
+            let source = self
+                .source
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("missing media certificate"))?;
+            self.cursor = Some(
+                source
+                    .cursor(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                        false,
+                    )))
+                    .map_err(std::io::Error::other)?,
+            );
+        }
+        self.cursor
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("missing verified cursor"))
     }
 }
-/// Shared boundary value. S1 has no successful receipt constructor.
+/// A receipt describes certification. Actual reads require the retained capability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecoderOpenReceipt {
@@ -198,12 +268,24 @@ impl ProjectStore {
             ));
         }
         let pin = self.pin(std::slice::from_ref(&reference.manifest_ref))?;
-        let file = self.open_verified(&reference.entry.object)?;
+        let source = if reference.entry.object.record_kind
+            == crate::bundle_records::RecordKind::OwnedMedia
+        {
+            Some(self.certify_media_input(reference)?)
+        } else {
+            None
+        };
+        let file = if source.is_some() {
+            self.open_input_descriptor(&reference.entry.object)?
+        } else {
+            self.open_verified(&reference.entry.object)?
+        };
         Ok(OwnedInputLease::new(
             file,
             pin,
             reference.clone(),
             self.owner_epoch(),
+            source,
         ))
     }
 }

@@ -43,11 +43,25 @@ where
         })
 }
 
-/// Derived-data state keyed by the asset's PATH, never its id: asset ids are
-/// per-document, so with several projects open the same id can name
-/// different files. Content identity is what derived data belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MediaPath {
+    authority: Option<kinewright_core::LegacyMediaIdentity>,
+    path: PathBuf,
+}
+impl MediaPath {
+    fn current(path: &Path) -> Self {
+        Self {
+            authority: crate::locator::capture()
+                .as_ref()
+                .map(kinewright_core::LegacyMediaGrant::identity),
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+/// Analysis metadata belongs to the requesting authority and source path.
 pub(crate) struct StatusReporter<S> {
-    states: Arc<RwLock<HashMap<PathBuf, S>>>,
+    states: Arc<RwLock<HashMap<MediaPath, S>>>,
 }
 
 impl<S> Clone for StatusReporter<S> {
@@ -67,13 +81,28 @@ impl<S> StatusReporter<S> {
 
     pub(crate) fn update(&self, path: &Path, status: S) {
         if let Ok(mut states) = self.states.write() {
-            states.insert(path.to_path_buf(), status);
+            let key = MediaPath::current(path);
+            if states.len() >= 4096
+                && !states.contains_key(&key)
+                && let Some(oldest) = states.keys().next().cloned()
+            {
+                states.remove(&oldest);
+            }
+            states.insert(key, status);
+        }
+    }
+
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        if let Ok(mut states) = self.states.write() {
+            states.retain(|key, _| key.authority != Some(authority));
         }
     }
 
     pub(crate) fn should_queue(&self, path: &Path, blocks_queue: impl FnOnce(&S) -> bool) -> bool {
         self.states.read().map_or(true, |states| {
-            states.get(path).is_none_or(|status| !blocks_queue(status))
+            states
+                .get(&MediaPath::current(path))
+                .is_none_or(|status| !blocks_queue(status))
         })
     }
 }
@@ -83,7 +112,7 @@ impl<S: Clone> StatusReporter<S> {
         self.states
             .read()
             .ok()
-            .and_then(|states| states.get(path).cloned())
+            .and_then(|states| states.get(&MediaPath::current(path)).cloned())
             .unwrap_or(default)
     }
 }
@@ -91,37 +120,65 @@ impl<S: Clone> StatusReporter<S> {
 /// Cooperative cancellation tokens for one analysis family, keyed by media path.
 #[derive(Clone, Default)]
 pub(crate) struct CancellationRegistry {
-    active: Arc<Mutex<HashMap<PathBuf, ExportCancellation>>>,
+    active: Arc<Mutex<HashMap<MediaPath, ExportCancellation>>>,
 }
 
 impl CancellationRegistry {
     /// Start one job unless the same asset is already queued or running.
     pub(crate) fn start(&self, path: &Path) -> Option<ExportCancellation> {
         let mut active = self.active.lock().ok()?;
-        if active.contains_key(path) {
+        if active.contains_key(&MediaPath::current(path)) {
             return None;
         }
         let cancellation = ExportCancellation::default();
-        active.insert(path.to_path_buf(), cancellation.clone());
+        active.insert(MediaPath::current(path), cancellation.clone());
         Some(cancellation)
     }
 
     pub(crate) fn cancel(&self, path: &Path) -> bool {
         self.active.lock().is_ok_and(|active| {
-            active.get(path).is_some_and(|cancellation| {
-                cancellation.cancel();
-                true
-            })
+            active
+                .get(&MediaPath::current(path))
+                .is_some_and(|cancellation| {
+                    cancellation.cancel();
+                    true
+                })
         })
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        let authority = crate::locator::capture()
+            .as_ref()
+            .map(kinewright_core::LegacyMediaGrant::identity);
+        if let Ok(active) = self.active.lock() {
+            for (key, cancellation) in active.iter() {
+                if key.authority == authority {
+                    cancellation.cancel();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        if let Ok(mut active) = self.active.lock() {
+            active.retain(|key, cancellation| {
+                if key.authority == Some(authority) {
+                    cancellation.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 
     pub(crate) fn finish(&self, path: &Path, cancellation: &ExportCancellation) {
         if let Ok(mut active) = self.active.lock()
             && active
-                .get(path)
+                .get(&MediaPath::current(path))
                 .is_some_and(|current| current == cancellation)
         {
-            active.remove(path);
+            active.remove(&MediaPath::current(path));
         }
     }
 }
@@ -424,6 +481,38 @@ fn cache_error(action: &str, error: &std::io::Error) -> MediaError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn c6a_retire_analysis_cancels_only_inactive_authority() {
+        let reporter = super::StatusReporter::new();
+        let registry = super::CancellationRegistry::default();
+        let origin_a = kinewright_core::MediaSourceOrigin::new_project();
+        let a = origin_a.legacy_media().unwrap();
+        let origin_b = kinewright_core::MediaSourceOrigin::new_project();
+        let b = origin_b.legacy_media().unwrap();
+        let path = std::path::Path::new("same-path.wav");
+        let token_a = {
+            let _scope = crate::locator::LocatorAuthority::enter(&a);
+            reporter.update(path, 1);
+            registry.start(path).unwrap()
+        };
+        let token_b = {
+            let _scope = crate::locator::LocatorAuthority::enter(&b);
+            reporter.update(path, 2);
+            registry.start(path).unwrap()
+        };
+        registry.retire(a.identity());
+        reporter.retire(a.identity());
+        assert!(token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
+        {
+            let _scope = crate::locator::LocatorAuthority::enter(&a);
+            assert_eq!(reporter.get_or(path, 0), 0);
+            assert!(registry.start(path).is_some(), "focus can request again");
+        }
+        let _scope = crate::locator::LocatorAuthority::enter(&b);
+        assert_eq!(reporter.get_or(path, 0), 2);
+    }
+
     use std::fs;
 
     use super::*;

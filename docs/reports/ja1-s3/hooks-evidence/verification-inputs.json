@@ -1,0 +1,18 @@
+{
+  "baseline_manifest_sha256": "04bfeae939c2030791f7291fb3b258ce9623b5d4a57e8a360ba6e6887243d7cc",
+  "changes": [
+    {
+      "path": "scripts/ja1-s3-hooks-mutation-cases.json",
+      "before_sha256": "3fda780075062095d898ca61fd7931ac1f2e4a79da1dd78d39283720154fab23",
+      "after_sha256": "3bbd675738d101cf148a1437aab52f81768055a584c301b3ab427bc9850d1e7d",
+      "reason": "Mutation expectations only; Cargo producer/witness sources unchanged. h1-registry correctly fails at fresh reopen, not the earlier acknowledgment.",
+      "amendments": [
+        {
+          "case": "h1-registry",
+          "expected_red": "unknown field `payload`, expected one of `version`, `runs`, `orchestration`",
+          "expected_site": "hooks_tests.rs:358"
+        }
+      ]
+    }
+  ]
+}

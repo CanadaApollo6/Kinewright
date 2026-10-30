@@ -1,0 +1,8 @@
+2c1134a23c075415da3bcbfc892de8ff41d709feebd827e4c1c7e8300a93e1fa  crates/kinewright-app/src/recording.rs
+92e4b554bb4ddf2cce47094931d5b77530e4c8a957905e12c7f0b61f26d7e410  crates/kinewright-media/src/voice_note.rs
+0f0ac0dbd8bf7e7c4aad8320a6c032224bf0544906b28962230ed91c168558cf  crates/kinewright-project/src/feedback_mapping.rs
+cc6924ef4ed4400771e6a69830917b1179308dd6c3d815e6d953e4e799bd83d8  crates/kinewright-project/tests/ja_s3_lineage.rs
+0b7525a9c3d9dcb6a4942a6cad65b42ad19feccd9fa079e2e85868589ef34937  crates/kinewright-media/src/transcript.rs
+b26aab563634cf1de261ec0e9d63833c43d46783bd19373ac273179542979183  docs/reports/ja1-s3/b-evidence/c5/mutations.py
+3094b497f9fc160e986f60faedeb10e884708fdcc9bbafa3c0112917e62c18fa  docs/reports/ja1-s3/b-evidence/c5-fix1/mutations.py
+e7d1e31c07939f8c64c3be9bc1e44999621de5573aca0211dfea3e7cdcb2e80d  docs/reports/ja1-s3/b-evidence/c5-fix1/gate.sh

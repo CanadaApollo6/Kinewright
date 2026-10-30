@@ -1,0 +1,781 @@
+[
+  {
+    "name": "completed-switch-keeps-pending-state",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "        self.switch_envelope = None;\n        self.switch_state = SwitchState::Complete;",
+        "        self.switch_envelope = None;"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_completed_switch_then_lost_save_uses_c10_on_same_actor",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "red_text": "HistoryChanged",
+    "red_location": "crates/kinewright-app/src/ja1_attachment_tests.rs:2843:30:",
+    "red_reason": "Removing switch-state retirement misroutes the later lost Save retry and refuses at the protected C10 retry call before the final composed-history assertion.",
+    "witness_source": "crates/kinewright-app/src/ja1_attachment_tests.rs"
+  },
+  {
+    "name": "c1-attach-role-binding",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            role,\n            roots,",
+        "            role: super::AttachmentRole::Editor,\n            roots,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_attachment_role_binding",
+    "red_text": "C1_ATTACH_ROLE_BINDING",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-acquiremanual",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "HostCommand::AcquireManual { .. } => self.role == AttachmentRole::Editor,",
+        "HostCommand::AcquireManual { .. } => true,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_MANUAL_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-commithistory",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "HostCommand::CommitHistory { .. } => self.role == AttachmentRole::Editor,",
+        "HostCommand::CommitHistory { .. } => true,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_MANUAL_STREAM_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-prepareswitch",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "HostCommand::PrepareSwitch { .. } => self.role == AttachmentRole::Editor,",
+        "HostCommand::PrepareSwitch { .. } => true,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_PREPARE_SWITCH_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-switch",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "HostCommand::Switch { .. } => self.role == AttachmentRole::Editor,",
+        "HostCommand::Switch { .. } => true,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SWITCH_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-switchreceipt",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "HostCommand::SwitchReceipt { .. } => self.role == AttachmentRole::Editor,",
+        "HostCommand::SwitchReceipt { .. } => true,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SWITCH_REPLAY_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-confirmswitch",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "HostCommand::ConfirmSwitch { .. } => self.role == AttachmentRole::Editor,",
+        "HostCommand::ConfirmSwitch { .. } => true,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_CONFIRM_SWITCH_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-snapshot-new",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "self.role == AttachmentRole::Producer",
+        "true"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SNAPSHOT_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-role-snapshot-replay",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "self.role == AttachmentRole::Producer",
+        "true"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_snapshot_replay",
+    "red_text": "C1_SNAPSHOT_REPLAY_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-default-deny-save",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "_ => self.role == AttachmentRole::Editor,",
+        "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::Save { .. }),"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SAVE_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-default-deny-scripted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "_ => self.role == AttachmentRole::Editor,",
+        "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::StartScripted { .. }),"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SESSION_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-default-deny-session",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "_ => self.role == AttachmentRole::Editor,",
+        "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::StartSession { .. }),"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SESSION_START_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-default-deny-session-control",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "_ => self.role == AttachmentRole::Editor,",
+        "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::SendMessage { .. }),"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SESSION_CONTROL_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-default-deny-shutdown",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "_ => self.role == AttachmentRole::Editor,",
+        "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::Shutdown),"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_SHUTDOWN_ROLE",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-narrowed-request-roots",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "Self::check_narrowed_roots(&command_roots, &roots)?;",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+    "red_text": "C1_ROOT_NARROWING",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-narrowed-issued-roots",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "Self::check_narrowed_roots(&self.config.roots, &roots)?;",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+    "red_text": "C1_ISSUANCE_ROOTS",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-bearer-resolution",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "grant.auth.accepts(bearer)",
+        "true"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+    "red_text": "C1_UNKNOWN_CREDENTIAL",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-detach-revocation",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "let removed = self.attachments.remove(index);",
+        "let removed = &self.attachments[index];"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_DETACH_REVOKES",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-active-credential-cap",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "self.attachments.len() >= ATTACHMENT_CAPACITY",
+        "self.attachments.len() > ATTACHMENT_CAPACITY"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+    "red_text": "C1_ATTACHMENT_CAP",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-request-project-binding",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "request.project != grant.project || request.protocol != super::HOST_PROTOCOL",
+        "request.protocol != super::HOST_PROTOCOL"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+    "red_text": "C1_PROJECT_BINDING",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-foreground-subject-before-replay",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                    if !permitted {",
+        "                    if false && !permitted {"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_is_attachment_subject_bound",
+    "red_text": "C1_FOREGROUND_SUBJECT_REPLAY",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-source-admission-private-bootstrap",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "if grant.bootstrap\n                && grant.role == super::AttachmentRole::Editor",
+        "if grant.role == super::AttachmentRole::Editor"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_gui_source_admission_stays_private_and_command_bound",
+    "red_text": "C1_GUI_SOURCE_SCOPE",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "store-candidate-version-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.version_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_VERSION_ONLY_CANDIDATE_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-candidate-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_CANDIDATE_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-candidate-run-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.run_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_RUN_ONLY_CANDIDATE_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-floor-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if explicit_floor {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_FLOOR_FEEDBACK_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-switch-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if selection.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_EXACT_FEEDBACK_INDEX",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-a1-acknowledged-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if rescue_source.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_EXACT_FEEDBACK_INDEX",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-copy-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();",
+        "            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();\n            root.feedback_index_ref = None;"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_EXACT_FEEDBACK_INDEX",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-feedback-proof-dependency",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_records.rs",
+        "            self.frame_proof_ref.clone(),\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_FRAME_PROOF_RETAINED",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-run-reader-dependency",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_records.rs",
+        "        let mut refs = self.review_state.evidence_refs.clone();",
+        "        let mut refs = Vec::new();"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_READER_DEPENDENCY_PIN",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-atomic-batch-consumption",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "                    submitted.consumed_by = Some(run.clone());",
+        "                    let _ = run;"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_ATOMIC_RUN_BATCH",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-orchestration-support-declaration",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "            apis.insert(\"orchestration\".into(), 1);",
+        "            let _ = &apis;"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_ORCHESTRATION_REQUIRED_SUPPORT",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-scope",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "        if !allowed || envelope.project_id != self.project_id {",
+        "        if false && !allowed || envelope.project_id != self.project_id {"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_SCOPE",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-project",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "        if !allowed || envelope.project_id != self.project_id {",
+        "        if !allowed {"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_PROJECT",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-epoch",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "            || envelope.owner_epoch != self.store.owner_epoch()\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let issuer = self",
+        "        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let issuer = self"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_EPOCH",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-generation",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "        if update.expected_root_generation != self.generation\n            || envelope.target_branch != self.manual_branch_id",
+        "        if envelope.target_branch != self.manual_branch_id"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_GENERATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-typed-metadata-ingress",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        if envelope.action == \"metadata\" {\n            return Err(BundleError::Unsupported(\n                \"metadata requires typed owner ingress\".into(),\n            ));\n        }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_TYPED_METADATA_INGRESS",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-digest",
+    "changes": [
+      [
+        "crates/kinewright-project/src/receipts.rs",
+        "                return if expected != digest {",
+        "                return if false && expected != digest {"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_DIGEST",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-text-limit",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "        if v.original_text_ref.byte_length > l.comment_text_bytes\n            || v.strokes_ref.byte_length > l.command_bytes",
+        "        if v.strokes_ref.byte_length > l.command_bytes"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_TEXT_LIMIT",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-point-limit",
+    "changes": [
+      [
+        "crates/kinewright-project/src/receipts.rs",
+        "                if count > self.limit {",
+        "                if false && count > self.limit {"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_POINTS_LIMIT",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-metadata-comment-count",
+    "changes": [
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "                if previous.is_none()\n                    && feedback.revisions.len() as u64 >= self.store.limits().comments",
+        "                if false"
+      ],
+      [
+        "crates/kinewright-project/src/studio_store.rs",
+        "        if v.revisions.len() as u64 > l.comments\n            || v.batches.len() as u64 > l.comments",
+        "        if v.batches.len() as u64 > l.comments"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_metadata_retry_and_admission",
+    "red_text": "S3_METADATA_COMMENT_LIMIT",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  }
+]

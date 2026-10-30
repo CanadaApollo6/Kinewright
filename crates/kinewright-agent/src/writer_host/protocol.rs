@@ -16,6 +16,15 @@ pub const HOST_BODY_BYTES: usize = 40 * 1024 * 1024;
 pub const HOST_COMMAND_CAPACITY: usize = 64;
 pub const RETENTION_LOST: &str = "The host could not re-establish this session's retained data. Your edits remain here. Saving and rescue are paused, including saving elsewhere. Close this editing context explicitly to end it.";
 
+/// Resolved only from a privately issued attachment, never from request fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentRole {
+    Viewer,
+    Editor,
+    Producer,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRoots {
@@ -29,6 +38,10 @@ pub struct HostConfig {
     pub path: Option<PathBuf>,
     pub roots: SessionRoots,
     pub origin: HostOrigin,
+    /// Where S4 reads the person's Director setting. `None` is the per-user
+    /// scheduler folder; tests name their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_settings: Option<PathBuf>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
@@ -164,6 +177,98 @@ pub struct RecoveryBarrier {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    IssueMetadataIssuer {
+        issuer: Option<kinewright_project::receipts::IssuerId>,
+    },
+    DispatchOrchestration {
+        request: Box<super::ScopedOrchestrationRequest>,
+    },
+    ObserveRun {
+        run: kinewright_project::orchestration_records::RunId,
+        after_sequence: u64,
+    },
+    ResolveAttention {
+        response: super::LiveAttentionResponse,
+    },
+    DetachForContinuation,
+    /// S4: start the Director run for one submitted batch, exactly once per
+    /// request. Replies with `revise_result`.
+    ReviseCut {
+        request: kinewright_project::studio_records::ReviseRequest,
+    },
+    Metadata {
+        envelope: kinewright_project::studio_records::MetadataEnvelope,
+        update: kinewright_project::studio_records::MetadataUpdate,
+    },
+    /// S3 C3: seal one bounded typed/drawn feedback evidence object for a later
+    /// `SaveFeedback`. The attachment keeps its pin until detach.
+    AdmitFeedbackEvidence {
+        kind: kinewright_project::studio_records::FeedbackEvidenceKind,
+        bytes: Vec<u8>,
+    },
+    /// S3 C3: the person's private feedback index (saved revisions and batches).
+    ListFeedback,
+    VoiceReceipt {
+        upload: kinewright_project::voice_ingress::VoiceUpload,
+    },
+    AcknowledgeVoice {
+        upload: kinewright_project::voice_ingress::VoiceUpload,
+    },
+    StartTranscription {
+        note: kinewright_project::studio_records::NoteId,
+    },
+    VoiceStatus {
+        note: kinewright_project::studio_records::NoteId,
+    },
+    ChooseTranscript {
+        envelope: kinewright_project::studio_records::MetadataEnvelope,
+        note: kinewright_project::studio_records::NoteId,
+        text_ref: ObjectRef,
+    },
+    ReadVoiceRange {
+        revision: ObjectRef,
+        start_micros: u64,
+        end_micros: u64,
+    },
+    LeaseSnapshot {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    /// Lease the current edit's input graph for Current-edit playback. Only
+    /// the host's current inputs can be leased (S3 C11).
+    LeaseCurrentEdit {
+        inputs: ObjectRef,
+    },
+    SnapshotLeaseStatus {
+        id: String,
+        payload_sha256: String,
+    },
+    ReleaseSnapshot {
+        id: String,
+        payload_sha256: String,
+    },
+    ReadFeedbackView {
+        revision: ObjectRef,
+    },
+    ReadFeedbackEvidence {
+        revision: ObjectRef,
+        evidence: ObjectRef,
+    },
+    ListVersions,
+    ReadSnapshot {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    ReadFeedback {
+        reference: ObjectRef,
+    },
+    /// Map one indexed note onto a version or the saved current edit. Read-only;
+    /// nothing is kept, so a reopened App asks again (S3 C10).
+    ResolveFeedback {
+        revision: ObjectRef,
+        onto: MapTarget,
+    },
+    ReadSubmittedBatch {
+        batch: kinewright_project::studio_records::FeedbackBatchId,
+    },
     PrepareSwitch {
         target: kinewright_project::bundle_switch::SwitchTarget,
     },
@@ -193,6 +298,21 @@ pub enum HostCommand {
     },
     AcquireManual {
         client: String,
+    },
+    PrepareOwnedMedia {
+        client: String,
+        path: PathBuf,
+        asset_id: kinewright_core::AssetId,
+        snapshot: HostSnapshot,
+    },
+    PrepareMediaInterpretation {
+        client: String,
+        operation: kinewright_core::Operation,
+        snapshot: HostSnapshot,
+    },
+    RefreshUnsavedInputs {
+        binding: HostSourceBinding,
+        snapshot: HostSnapshot,
     },
     CommitHistory {
         client: String,
@@ -407,6 +527,18 @@ pub enum HostChoiceKind {
     reason = "Independent wire observations and explicit consent flags reflect the existing authoritative owner states"
 )]
 pub struct HostStatus {
+    #[serde(default)]
+    pub project_id: Option<kinewright_project::bundle_records::ProjectId>,
+    #[serde(default)]
+    pub continuation_runs: usize,
+    /// The owner epoch and input manifest Current-edit playback leases. A
+    /// change means the GUI renews its lease (S3 C11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_scope: Option<(u64, ObjectRef)>,
+    /// The manual branch's saved checkpoint, which Current-edit mappings are
+    /// made on. A change means those mappings are recomputed (S3 C11 fu1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_checkpoint: Option<ObjectRef>,
     pub choice: Option<HostChoiceKind>,
     pub rescue_trim_required: bool,
     pub rescue_trim_accepted: bool,
@@ -459,8 +591,64 @@ pub struct HostActivation {
     pub kind: HostActivationKind,
     pub history_sha256: String,
 }
+/// What a note is mapped onto: a published version, or the manual branch's
+/// saved checkpoint. The host chooses the checkpoint; the App never names one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "onto", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MapTarget {
+    Version {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    CurrentEdit,
+}
+/// One note's mapping, as `ProjectBundle::resolve_feedback` computes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackMapping {
+    pub resolution: kinewright_project::studio_records::CommentResolution,
+    /// Candidate frames on the target, at most the mapper's 512.
+    pub candidates: Vec<(kinewright_core::ClipId, i64)>,
+    pub original_frame: i64,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_edit_lease: Option<kinewright_project::store::snapshot_reader::CurrentEditLease>,
+    pub evidence_bytes: Option<Vec<u8>>,
+    pub voice: Option<super::voice::VoiceStatus>,
+    pub voice_audio: Option<Vec<u8>>,
+    pub voice_receipt: Option<super::voice::VoiceReceipt>,
+    pub metadata_issuer: Option<super::MetadataIssuer>,
+    pub orchestration: Option<kinewright_project::orchestration_commit::OrchestrationReceipt>,
+    pub run_view: Option<super::RunViewPage>,
+    pub attention_outcome: Option<super::AttentionOutcome>,
+    pub detached: Option<super::DetachOutcome>,
+    #[serde(default)]
+    pub attention: Vec<super::AttentionPrompt>,
+    pub metadata: Option<kinewright_project::receipts::CommandReceipt>,
+    pub revise_result: Option<kinewright_project::studio_records::ReviseResult>,
+    #[serde(default)]
+    pub submitted_revisions: Vec<kinewright_project::studio_records::FeedbackRevision>,
+    #[serde(default)]
+    pub versions: Vec<kinewright_project::studio_records::SnapshotKey>,
+    pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
+    pub feedback: Option<kinewright_project::studio_records::FeedbackRevision>,
+    /// `ReadFeedback`: the revision's exact text and strokes evidence, so a
+    /// GUI whose bundle the host holds can show the saved note (S3 C7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_text: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_strokes: Option<Vec<u8>>,
+    pub feedback_evidence: Option<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_mapping: Option<FeedbackMapping>,
+    pub feedback_index: Option<kinewright_project::studio_records::FeedbackIndex>,
+    pub submitted_batch: Option<kinewright_project::studio_records::FeedbackBatch>,
+    #[serde(default)]
+    pub unsaved_inputs_refreshed: bool,
+    pub owned_media: Option<kinewright_core::MediaAsset>,
+    pub owned_media_edit: Option<kinewright_core::Operation>,
     pub switch_preview: Option<kinewright_project::bundle_switch::SwitchPayload>,
     pub switch_envelope: Option<kinewright_project::receipts::CommandEnvelope>,
     pub switch_result: Option<kinewright_project::bundle_switch::SwitchResult>,

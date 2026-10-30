@@ -1,0 +1,22 @@
+{
+  "case": "project-copy-context",
+  "source": "crates/kinewright-app/src/recording.rs",
+  "original_sha256": "88c9043b480b8476e797aecc5b4bfbb200a8aad49e29469d5660d6371ca79890",
+  "mutated_sha256": "ecd50dfc4aa7ce4d8c884cb234506d537a4ffa2df14a78db325c0b9308025561",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_job_identity",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "red_exit": 101,
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "runtime_green": true
+}

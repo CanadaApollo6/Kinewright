@@ -61,6 +61,551 @@ impl<'de> Deserialize<'de> for HostAuth {
     }
 }
 
+pub(super) const ATTACHMENT_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(super) struct AttachmentId(u64);
+
+pub(super) struct ReadPin {
+    pub roots: Vec<kinewright_project::bundle_records::ObjectRef>,
+    pub pin: kinewright_project::store::StorePin,
+}
+impl ReadPin {
+    fn same_reference(&self, other: &Self) -> bool {
+        self.pin.shares_owner_with(&other.pin) && self.roots == other.roots
+    }
+}
+
+pub(super) struct Attachment {
+    pub alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub producer_scope: Option<super::orchestration::ProducerScope>,
+    pub person_facing: bool,
+    pub id: AttachmentId,
+    pub auth: HostAuth,
+    pub incarnation: String,
+    pub project: String,
+    #[allow(
+        dead_code,
+        reason = "subject provenance is retained, never used as foreground authority"
+    )]
+    pub subject: String,
+    pub role: super::AttachmentRole,
+    pub roots: SessionRoots,
+    pub bootstrap: bool,
+    pub read_pins: Vec<ReadPin>,
+    pub snapshot_leases: std::collections::BTreeMap<String, super::snapshot_lease::LeasePin>,
+}
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        self.alive
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Attachment {
+    #[expect(
+        clippy::match_same_arms,
+        reason = "Manual and switch phases have explicit authority rules and independent refusal witnesses"
+    )]
+    pub fn permits(&self, command: &super::HostCommand) -> bool {
+        use super::{AttachmentRole, HostCommand};
+        match command {
+            HostCommand::IssueMetadataIssuer { .. } | HostCommand::ObserveRun { .. } => true,
+            HostCommand::DispatchOrchestration { .. }
+            | HostCommand::ResolveAttention { .. }
+            | HostCommand::DetachForContinuation => true,
+            // Viewers get Waiting; Producers are refused inside the hook.
+            HostCommand::ReviseCut { .. } => true,
+            HostCommand::Metadata { update, .. } => match &update.change {
+                kinewright_project::studio_records::MetadataChange::PublishSnapshot(_) => {
+                    self.role == AttachmentRole::Producer
+                }
+                kinewright_project::studio_records::MetadataChange::SaveFeedback(_)
+                | kinewright_project::studio_records::MetadataChange::SaveVoice(_)
+                | kinewright_project::studio_records::MetadataChange::SubmitBatch { .. } => {
+                    matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+                }
+                kinewright_project::studio_records::MetadataChange::Orchestration { .. }
+                | kinewright_project::studio_records::MetadataChange::OrchestrationUpdate {
+                    ..
+                } => false,
+            },
+            HostCommand::AdmitFeedbackEvidence { .. }
+            | HostCommand::VoiceReceipt { .. }
+            | HostCommand::AcknowledgeVoice { .. }
+            | HostCommand::StartTranscription { .. }
+            | HostCommand::VoiceStatus { .. }
+            | HostCommand::ChooseTranscript { .. }
+            | HostCommand::ReadVoiceRange { .. }
+            | HostCommand::ReadFeedbackEvidence { .. }
+            | HostCommand::ReadFeedbackView { .. } => {
+                matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+            }
+            HostCommand::ListVersions
+            | HostCommand::LeaseSnapshot { .. }
+            | HostCommand::SnapshotLeaseStatus { .. }
+            | HostCommand::ReleaseSnapshot { .. }
+            | HostCommand::ReadSnapshot { .. }
+            | HostCommand::ReadSubmittedBatch { .. } => true,
+            HostCommand::ReadFeedback { .. }
+            | HostCommand::ResolveFeedback { .. }
+            | HostCommand::ListFeedback => self.role != AttachmentRole::Producer,
+            HostCommand::LeaseCurrentEdit { .. } => {
+                matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+            }
+            HostCommand::Attach
+            | HostCommand::Status
+            | HostCommand::ReadHistory
+            | HostCommand::CurrentAttachment
+            | HostCommand::Detach => true,
+            HostCommand::AcquireManual { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::CommitHistory { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::PrepareSwitch { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::Switch { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::SwitchReceipt { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::ConfirmSwitch { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::AdmitDestination { .. } => {
+                self.role == AttachmentRole::Editor && self.bootstrap
+            }
+            _ => self.role == AttachmentRole::Editor,
+        }
+    }
+}
+
+impl super::HostCommandOwner {
+    /// The local owner is the trusted issuer. No request may call this port.
+    pub fn issue_attachment(
+        &mut self,
+        subject: String,
+        role: super::AttachmentRole,
+        roots: SessionRoots,
+    ) -> Result<HostAuth, HostError> {
+        let auth = HostAuth::generate()?;
+        self.register_attachment(auth.clone(), subject, role, roots, false)?;
+        Ok(auth)
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Issuance owns the submitted scope before retaining its canonical form"
+    )]
+    pub(super) fn register_attachment(
+        &mut self,
+        auth: HostAuth,
+        subject: String,
+        role: super::AttachmentRole,
+        roots: SessionRoots,
+        bootstrap: bool,
+    ) -> Result<(), HostError> {
+        if role == super::AttachmentRole::Editor
+            && self
+                .attachments
+                .iter()
+                .any(|grant| grant.role == super::AttachmentRole::Editor)
+        {
+            return Err(HostRefusal::new("attachment_role", "one live Editor attachment").into());
+        }
+        if self.attachments.len() >= ATTACHMENT_CAPACITY {
+            return Err(
+                HostRefusal::new("attachment_capacity", "64 active attachments maximum").into(),
+            );
+        }
+        if subject.is_empty() || subject.len() > 256 {
+            return Err(HostRefusal::new(
+                "attachment_subject",
+                "bounded nonempty subject required",
+            )
+            .into());
+        }
+        let roots = roots.canonicalize()?;
+        Self::check_narrowed_roots(&self.config.roots, &roots)?;
+        let next = self.next_attachment_id.checked_add(1).ok_or_else(|| {
+            HostRefusal::new("attachment_capacity", "attachment identifiers exhausted")
+        })?;
+        let id = AttachmentId(self.next_attachment_id);
+        self.next_attachment_id = next;
+        self.attachments.push(Attachment {
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            producer_scope: None,
+            person_facing: bootstrap && matches!(self.config.origin, super::HostOrigin::Gui { .. }),
+            id,
+            auth,
+            incarnation: self.instance.clone(),
+            project: self.config.project.clone(),
+            subject,
+            role,
+            roots,
+            bootstrap,
+            read_pins: Vec::new(),
+            snapshot_leases: std::collections::BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    fn detached_handoff_client(&self) -> Option<&str> {
+        if self.manual.is_some() {
+            return None;
+        }
+        let owner = self.foreground_owner.as_ref()?;
+        let (_, _, _, reply) = self.foreground_reply.as_ref()?;
+        (owner.attachment.is_none() && (reply.saved.is_some() || reply.switch_result.is_some()))
+            .then_some(owner.client.as_str())
+    }
+
+    /// Trusted local issuance port. No HTTP or MCP request exposes this action.
+    pub fn discard_detached_handoff(&mut self, expected_client: &str) -> Result<(), HostError> {
+        let retained = self.detached_handoff_client().ok_or_else(|| {
+            HostRefusal::new(
+                "handoff_changed",
+                "no detached handoff without a live lease",
+            )
+        })?;
+        if retained != expected_client {
+            return Err(
+                HostRefusal::new("handoff_changed", "detached handoff client changed").into(),
+            );
+        }
+        self.foreground_reply = None;
+        self.foreground_owner = None;
+        Ok(())
+    }
+
+    pub(super) fn resolve_attachment(&self, bearer: Option<&str>) -> Result<usize, HostError> {
+        self.attachments
+            .iter()
+            .position(|grant| {
+                grant.auth.accepts(bearer)
+                    && grant.alive.load(std::sync::atomic::Ordering::Acquire)
+                    && grant.incarnation == self.instance
+                    && grant.project == self.config.project
+            })
+            .ok_or_else(|| {
+                HostRefusal::new(
+                    "attachment_refused",
+                    "attachment is unknown, revoked or expired",
+                )
+                .into()
+            })
+    }
+
+    fn check_narrowed_roots(
+        admitted: &SessionRoots,
+        roots: &SessionRoots,
+    ) -> Result<(), HostError> {
+        if roots.read.iter().any(|root| !admitted.permits(root, false))
+            || roots.write.iter().any(|root| !admitted.permits(root, true))
+        {
+            return Err(
+                HostRefusal::roots("attachment roots cannot widen their admitted scope").into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Direct-owner ingress uses exactly the HTTP/MCP authorization boundary.
+    pub fn execute_attached(
+        &mut self,
+        auth: &HostAuth,
+        request: super::HostRequest,
+    ) -> super::HostReply {
+        self.execute_bearer(Some(&auth.bearer()), request)
+    }
+
+    pub(super) fn authorize_request(
+        &self,
+        bearer: Option<&str>,
+        request: &super::HostRequest,
+    ) -> Result<(usize, AttachmentId, SessionRoots), HostError> {
+        (|| -> Result<_, HostError> {
+            let index = self.resolve_attachment(bearer)?;
+            let grant = &self.attachments[index];
+            if request.project != grant.project || request.protocol != super::HOST_PROTOCOL {
+                return Err(HostRefusal::new(
+                    "project_refused",
+                    "exact attachment project and protocol required",
+                )
+                .into());
+            }
+            if request.operation.is_some() && grant.role != super::AttachmentRole::Editor {
+                return Err(HostRefusal::new(
+                    "role_refused",
+                    "foreground operations require an Editor attachment",
+                )
+                .into());
+            }
+            if !grant.permits(&request.command) {
+                return Err(HostRefusal::new(
+                    "role_refused",
+                    "command is outside this attachment role",
+                )
+                .into());
+            }
+            if let Some(retained) = self.detached_handoff_client()
+                && (request.operation.is_some()
+                    || !super::manual::connector_command(&request.command))
+                && super::manual::command_client(&request.command).or(request.editor.as_deref())
+                    != Some(retained)
+            {
+                return Err(HostRefusal::new(
+                    "handoff_pending",
+                    "trusted issuer must discard the detached handoff before changing client",
+                )
+                .into());
+            }
+            if request.operation.is_some() {
+                let client = self.operation_client(&request.command, request.editor.as_deref())?;
+                if let Some(owner) = &self.foreground_owner {
+                    let permitted = if self.manual.is_some() {
+                        owner.attachment.is_none() || owner.attachment == Some(grant.id)
+                    } else {
+                        ((owner.attachment.is_none() || owner.attachment == Some(grant.id))
+                            && owner.client == client)
+                            || matches!(request.command, super::HostCommand::AcquireManual { .. })
+                    };
+                    if !permitted {
+                        return Err(HostRefusal::new(
+                            "operation_changed",
+                            "foreground reply belongs to another attachment instance",
+                        )
+                        .into());
+                    }
+                }
+            }
+            if let super::HostCommand::Metadata { envelope, .. }
+            | super::HostCommand::ChooseTranscript { envelope, .. } = &request.command
+            {
+                self.require_metadata_issuer(index, &envelope.id.issuer)?;
+            }
+            if let super::HostCommand::AcknowledgeVoice { upload }
+            | super::HostCommand::VoiceReceipt { upload } = &request.command
+            {
+                self.require_metadata_issuer(index, &upload.envelope.id.issuer)?;
+            }
+            // Expiry cannot prevent an attachment from releasing its own lease.
+            // Release checks the attachment-owned id and digest and grants no reads.
+            if !matches!(request.command, super::HostCommand::ReleaseSnapshot { .. }) {
+                self.check_producer_attachment(index, &request.command)?;
+            }
+            let roots = request.roots.canonicalize()?;
+            let mut command_roots = grant.roots.clone();
+            if grant.bootstrap
+                && grant.role == super::AttachmentRole::Editor
+                && matches!(self.config.origin, super::HostOrigin::Gui { .. })
+                && let super::HostCommand::PrepareOwnedMedia { path, .. } = &request.command
+            {
+                // The private GUI's file picker admits this command's source parent only.
+                // It grants no persistent root and no authority to a delegated attachment.
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| HostRefusal::roots("chosen source parent"))?;
+                command_roots.read.push(parent.canonicalize()?);
+            }
+            Self::check_narrowed_roots(&command_roots, &roots)?;
+            if grant.read_pins.len() >= 64 {
+                let read_roots = match &request.command {
+                    super::HostCommand::ReadSnapshot { key } => {
+                        let pinned = self.owner()?.read_snapshot(key)?;
+                        Some(ReadPin {
+                            roots: pinned.roots,
+                            pin: pinned.pin,
+                        })
+                    }
+                    super::HostCommand::ReadFeedback { reference } => {
+                        let pinned = self.owner()?.read_feedback(reference)?;
+                        Some(ReadPin {
+                            roots: pinned.roots,
+                            pin: pinned.pin,
+                        })
+                    }
+                    super::HostCommand::ResolveFeedback { revision, onto } => {
+                        let roots = self.feedback_target_roots(revision, onto)?;
+                        Some(ReadPin {
+                            pin: self.owner()?.store()?.pin(&roots)?,
+                            roots,
+                        })
+                    }
+                    super::HostCommand::ReadSubmittedBatch { batch } => {
+                        let pinned = self.owner()?.read_submitted_batch(batch)?;
+                        Some(ReadPin {
+                            roots: pinned.roots,
+                            pin: pinned.pin,
+                        })
+                    }
+                    super::HostCommand::AdmitFeedbackEvidence { bytes, .. } => {
+                        let sha256 = kinewright_media::sha256_bytes(bytes);
+                        if !grant
+                            .read_pins
+                            .iter()
+                            .any(|pin| pin.roots.len() == 1 && pin.roots[0].sha256 == sha256)
+                        {
+                            return Err(HostRefusal::new(
+                                "attachment_capacity",
+                                "64 distinct pinned reads per attachment maximum",
+                            )
+                            .into());
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(read_roots) = read_roots
+                    && !grant
+                        .read_pins
+                        .iter()
+                        .any(|pin| pin.same_reference(&read_roots))
+                {
+                    return Err(HostRefusal::new(
+                        "attachment_capacity",
+                        "64 distinct pinned reads per attachment maximum",
+                    )
+                    .into());
+                }
+            }
+            if request.operation.is_none()
+                && self.manual.is_some()
+                && matches!(
+                    request.command,
+                    super::HostCommand::ConfirmSwitch { .. }
+                        | super::HostCommand::PrepareOwnedMedia { .. }
+                        | super::HostCommand::PrepareMediaInterpretation { .. }
+                        | super::HostCommand::ConfirmBarrier { .. }
+                )
+                && self
+                    .foreground_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.attachment.is_some_and(|id| id != grant.id))
+            {
+                return Err(HostRefusal::new(
+                    "operation_changed",
+                    "manual lease renewal belongs to another attachment instance",
+                )
+                .into());
+            }
+            Ok((index, grant.id, roots))
+        })()
+    }
+    pub(super) fn execute_bearer(
+        &mut self,
+        bearer: Option<&str>,
+        request: super::HostRequest,
+    ) -> super::HostReply {
+        let checked = self.authorize_request(bearer, &request);
+        let (index, attachment, roots) = match checked {
+            Ok(value) => value,
+            Err(error) => {
+                return super::HostReply {
+                    status: self.status(),
+                    error: Some(error.refusal()),
+                    ..super::HostReply::default()
+                };
+            }
+        };
+        let detach = matches!(
+            request.command,
+            super::HostCommand::Detach | super::HostCommand::DetachForContinuation
+        );
+        let admit = matches!(request.command, super::HostCommand::AdmitDestination { .. });
+        let operation = request.operation;
+        // A published revision's evidence is durable through the feedback index; its
+        // admission pin is released so it does not occupy the attachment's slots.
+        let published_evidence = match &request.command {
+            super::HostCommand::Metadata { update, .. } => match &update.change {
+                kinewright_project::studio_records::MetadataChange::SaveFeedback(revision) => vec![
+                    revision.original_text_ref.clone(),
+                    revision.strokes_ref.clone(),
+                    revision.frame_proof_ref.clone(),
+                ],
+                kinewright_project::studio_records::MetadataChange::SaveVoice(voice) => {
+                    voice.chosen_transcript_revision.iter().cloned().collect()
+                }
+                _ => vec![],
+            },
+            super::HostCommand::ChooseTranscript { text_ref, .. } => vec![text_ref.clone()],
+            _ => vec![],
+        };
+        let reply = if super::snapshot_lease::is_lease_command(&request.command) {
+            self.execute_snapshot_lease(index, request.command, &roots)
+        } else if super::orchestration::is_hook(&request.command) {
+            self.execute_hook(index, request.command, &roots)
+        } else if detach {
+            super::HostReply::default()
+        } else {
+            self.execute_operation(request.command, roots, request.editor.as_deref(), operation)
+        };
+        if let Some(pin) = self.pending_read_pin.take()
+            && !self.attachments[index]
+                .read_pins
+                .iter()
+                .any(|held| held.same_reference(&pin))
+        {
+            self.attachments[index].read_pins.push(pin);
+        }
+        if reply.error.is_none()
+            && (reply.metadata.is_some() || reply.voice.is_some())
+            && !published_evidence.is_empty()
+        {
+            self.attachments[index].read_pins.retain(|pin| {
+                !(pin.roots.len() == 1 && published_evidence.contains(&pin.roots[0]))
+            });
+        }
+        if reply.error.is_none() {
+            if let Some(lease) = &reply.manual_lease {
+                if operation.is_none() {
+                    self.foreground_reply = None;
+                }
+                self.foreground_owner = Some(super::manual::ForegroundOwner {
+                    attachment: Some(attachment),
+                    client: lease.client.clone(),
+                });
+            } else if operation.is_some()
+                && let Some((client, _, _, _)) = &self.foreground_reply
+            {
+                self.foreground_owner = Some(super::manual::ForegroundOwner {
+                    attachment: Some(attachment),
+                    client: client.clone(),
+                });
+            } else if !detach
+                && self.attachments[index].role == super::AttachmentRole::Editor
+                && let Some(lease) = &self.manual
+                && request.editor.as_deref() == Some(lease.client.as_str())
+                && self
+                    .foreground_owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.attachment.is_none())
+            {
+                self.foreground_owner = Some(super::manual::ForegroundOwner {
+                    attachment: Some(attachment),
+                    client: lease.client.clone(),
+                });
+            }
+            if admit {
+                self.attachments[index].roots = reply.status.admitted_roots.clone();
+            }
+            if detach {
+                let retained_handoff =
+                    self.foreground_reply
+                        .as_ref()
+                        .is_some_and(|(_, _, _, reply)| {
+                            reply.saved.is_some() || reply.switch_result.is_some()
+                        });
+                let removed = self.attachments.remove(index);
+                self.revoke_task_endpoints(removed.producer_scope.as_ref());
+                if let Some(owner) = &mut self.foreground_owner
+                    && owner.attachment == Some(removed.id)
+                {
+                    if self.manual.is_some() || retained_handoff {
+                        owner.attachment = None;
+                    } else {
+                        self.foreground_reply = None;
+                        self.foreground_owner = None;
+                    }
+                }
+            }
+        }
+        reply
+    }
+}
+
 impl SessionRoots {
     /// JSON stays ASCII in HTTP headers; decoding restores each exact Unicode path.
     pub(crate) fn wire_header(&self) -> Result<String, HostError> {

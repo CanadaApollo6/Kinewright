@@ -1,0 +1,25 @@
+{
+  "total": 1,
+  "new": 1,
+  "rerun": 0,
+  "source_commit": "70d1f4a18c947ff5046a0442ddf136d8d18d84d0",
+  "all_source_and_log_bindings_verified": true,
+  "rows": [
+    {
+      "name": "merge-s4-candidate-index-preservation",
+      "new": true,
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.32s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.99s"
+      ],
+      "record_sha256": "1bde05d810332bbbe274e30fddc2fab18d8da87326f7258e8462ef85d5934737"
+    }
+  ]
+}

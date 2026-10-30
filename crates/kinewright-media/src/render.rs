@@ -148,6 +148,8 @@ pub(crate) struct MatteCoverage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct VideoSourceKey {
+    legacy_authority: Option<kinewright_core::LegacyMediaIdentity>,
+    certified_authority: Option<crate::owned_io::PlaybackAuthority>,
     asset: AssetId,
     /// The path is part of the decoder identity even when two paths currently
     /// point at the same bytes. A relink is a runtime input and must not
@@ -208,6 +210,15 @@ impl From<&ColorDescription> for ColorDescriptionKey {
 }
 
 impl VideoSourceKey {
+    fn with_authority(
+        mut self,
+        inputs: Option<&crate::owned_io::PlaybackInputs>,
+        legacy: Option<&kinewright_core::LegacyMediaGrant>,
+    ) -> Self {
+        self.legacy_authority = legacy.map(kinewright_core::LegacyMediaGrant::identity);
+        self.certified_authority = inputs.map(|inputs| inputs.authority.clone());
+        self
+    }
     /// The asset this key reads (a test's witness).
     #[cfg(test)]
     pub(crate) const fn asset(&self) -> AssetId {
@@ -224,6 +235,8 @@ impl VideoSourceKey {
         max_width: Option<u32>,
     ) -> Self {
         Self {
+            legacy_authority: None,
+            certified_authority: None,
             asset,
             path: path.to_path_buf(),
             fingerprint: fingerprint.into(),
@@ -257,7 +270,12 @@ enum Video<'a> {
     Supplied(&'a SuppliedFrames),
 }
 
-fn source_key(asset: &kinewright_core::MediaAsset, scale: RenderScale) -> VideoSourceKey {
+fn source_key(
+    asset: &kinewright_core::MediaAsset,
+    scale: RenderScale,
+    inputs: Option<&crate::owned_io::PlaybackInputs>,
+    legacy: Option<&kinewright_core::LegacyMediaGrant>,
+) -> VideoSourceKey {
     let description = &asset.color_description;
     let assumption = d65_assumption(description);
     let (fingerprint, max_width) = (&asset.source_fingerprint, scale.max_width());
@@ -271,6 +289,7 @@ fn source_key(asset: &kinewright_core::MediaAsset, scale: RenderScale) -> VideoS
         assumption,
         max_width,
     )
+    .with_authority(inputs, legacy)
 }
 
 fn no_frame(asset: AssetId, at: TimeCode) -> MediaError {
@@ -307,6 +326,8 @@ fn open_managed(
 pub(crate) struct SourceSpec {
     asset: AssetId,
     path: std::path::PathBuf,
+    certified: Option<crate::owned_io::CertifiedSource>,
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     fps: Rational,
     description: ColorDescription,
     max_width: Option<u32>,
@@ -317,6 +338,22 @@ pub(crate) struct SourceSpec {
 }
 
 impl SourceSpec {
+    pub(crate) fn check_authority(&self) -> Result<(), MediaError> {
+        if let Some(source) = &self.certified {
+            source.check_read_authority()?;
+        }
+        self.legacy_media
+            .as_ref()
+            .map_or(Ok(()), kinewright_core::LegacyMediaGrant::check)
+    }
+    pub(crate) fn reader_work(
+        &self,
+    ) -> Result<Option<kinewright_core::LegacyMediaWork>, MediaError> {
+        self.legacy_media
+            .as_ref()
+            .map(kinewright_core::LegacyMediaGrant::begin)
+            .transpose()
+    }
     /// Open with `threads` frame threads; errors as the renderer's open.
     /// Amendment R43 (RS-1, note 1): a reader's open. A set `stop` flag
     /// cancels it before the file opens, interrupts its IO (and every later
@@ -331,19 +368,43 @@ impl SourceSpec {
         if stopped() {
             return Err(MediaError::Cancelled);
         }
+        let opened = self.open_decoder(threads, Some(stop));
+        if stopped() {
+            return Err(MediaError::Cancelled);
+        }
+        opened
+    }
+
+    fn open_decoder(
+        &self,
+        threads: usize,
+        stop: Option<&Arc<AtomicBool>>,
+    ) -> Result<VideoDecoder, MediaError> {
         let (path, description) = (&self.path, &self.description);
-        let opened = open_managed(
+        if let Some(source) = &self.certified {
+            return VideoDecoder::open_certified(
+                path,
+                self.fps,
+                self.max_width,
+                description,
+                d65_assumption(description),
+                source,
+                stop,
+            );
+        }
+        let _access = crate::locator::LocatorAccess::enter(
+            self.legacy_media
+                .as_ref()
+                .ok_or(MediaError::MediaAdmissionRequired)?,
+        )?;
+        open_managed(
             self.asset,
             path,
             self.fps,
             self.max_width,
             description,
-            (threads, Some(stop)),
-        );
-        if stopped() {
-            return Err(MediaError::Cancelled);
-        }
-        opened
+            (threads, stop),
+        )
     }
 
     /// K-1 (review B F1): the size this source's frames convert to, read
@@ -357,16 +418,7 @@ impl SourceSpec {
         if let Some(size) = sizes.get(key) {
             return Ok(*size);
         }
-        // The preview thread's open: no reader flag to interrupt it.
-        let (path, description) = (&self.path, &self.description);
-        let opened = open_managed(
-            self.asset,
-            path,
-            self.fps,
-            self.max_width,
-            description,
-            (1, None),
-        );
+        let opened = self.open_decoder(1, None);
         let opened = opened?;
         let size = (opened.frame_size(), opened.decoded_frame_bytes());
         sizes.insert(key.clone(), size);
@@ -389,6 +441,9 @@ impl SourceSpec {
         paused: bool,
         (refill, discard): (Option<Refill>, Option<(i64, i64)>),
     ) -> Result<WorkingFrame, MediaError> {
+        self.check_authority()?;
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
+        decoder.check_certified()?;
         if let Some(keep) = discard {
             decoder.discard_kept_outside(keep);
         }
@@ -454,9 +509,11 @@ pub(crate) type FrameSizes = crate::sched::SourceMemory<VideoSourceKey, ((u32, u
 pub(crate) fn document_source_keys(
     document: &Document,
     scale: RenderScale,
+    inputs: Option<&crate::owned_io::PlaybackInputs>,
+    legacy: Option<&kinewright_core::LegacyMediaGrant>,
 ) -> HashSet<VideoSourceKey> {
     (document.media_pool.iter())
-        .map(|asset| source_key(asset, scale))
+        .map(|asset| source_key(asset, scale, inputs, legacy))
         .collect()
 }
 
@@ -469,6 +526,7 @@ pub(crate) fn document_source_keys(
 /// measured into `sizes`; the asset's optional resolution is never
 /// trusted, so a missing or mismatched one charges the actual bytes. A
 /// source that cannot be opened fails the job with the open's error.
+#[cfg(test)]
 pub(crate) fn reader_demand(
     document: &Document,
     at: TimeCode,
@@ -477,6 +535,41 @@ pub(crate) fn reader_demand(
     horizon: i64,
     sizes: &mut FrameSizes,
 ) -> Result<ReaderDemand, MediaError> {
+    reader_demand_with_inputs(
+        document,
+        at,
+        resolution,
+        scale,
+        horizon,
+        sizes,
+        None,
+        Some(&crate::locator::fixture_grant()),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one demand admission keeps authority, source measurement and cache budgeting together"
+)]
+pub(crate) fn reader_demand_with_inputs(
+    document: &Document,
+    at: TimeCode,
+    resolution: (u32, u32),
+    scale: RenderScale,
+    horizon: i64,
+    sizes: &mut FrameSizes,
+    inputs: Option<&crate::owned_io::PlaybackInputs>,
+    legacy_media: Option<&kinewright_core::LegacyMediaGrant>,
+) -> Result<ReaderDemand, MediaError> {
+    if let Some(inputs) = inputs {
+        inputs.check_read_authority()?;
+    }
+    if inputs.is_none() {
+        legacy_media
+            .ok_or(MediaError::MediaAdmissionRequired)?
+            .check()?;
+    }
     let mut demand = ReaderDemand::default();
     let mut generated = 0usize;
     let mut ahead: Vec<(VideoSourceKey, i64)> = Vec::new();
@@ -510,7 +603,7 @@ pub(crate) fn reader_demand(
             let Some(asset) = document.asset(video.source.asset) else {
                 continue;
             };
-            let key = source_key(asset, scale);
+            let key = source_key(asset, scale, inputs, legacy_media);
             let max_width = key.max_width;
             if unmeasured.contains(&key) {
                 continue;
@@ -519,6 +612,8 @@ pub(crate) fn reader_demand(
                 let mut spec = SourceSpec {
                     asset: asset.id,
                     path: asset.path.clone(),
+                    certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,
+                    legacy_media: legacy_media.cloned(),
                     fps: asset.fps,
                     description: asset.color_description.clone(),
                     max_width,
@@ -702,11 +797,57 @@ pub(crate) struct FrameRenderer {
     /// a document with an active LUT node then fails the render with
     /// `missing_lut_asset` instead of quietly dropping the look.
     lut_library: Arc<LutLibrary>,
+    inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     /// The engine gauge current when this renderer was built, if any.
     decoders: Option<DecoderGauge>,
 }
 
 impl FrameRenderer {
+    #[cfg(test)]
+    pub(crate) fn legacy_preview_fixture(gpu: GpuContext) -> Self {
+        let mut renderer = Self::new_preview(gpu);
+        renderer.set_legacy_media(Some(crate::locator::fixture_grant()));
+        renderer
+    }
+    #[cfg(test)]
+    pub(crate) fn legacy_fixture(gpu: GpuContext) -> Self {
+        let mut renderer = Self::new(gpu);
+        renderer.set_legacy_media(Some(crate::locator::fixture_grant()));
+        renderer
+    }
+    pub(crate) fn legacy_grant(&self) -> Option<&kinewright_core::LegacyMediaGrant> {
+        self.legacy_media.as_ref()
+    }
+    /// The authority this renderer serves, to restore after a borrowed render.
+    pub(crate) fn authority(
+        &self,
+    ) -> (
+        Option<Arc<crate::owned_io::PlaybackInputs>>,
+        Option<kinewright_core::LegacyMediaGrant>,
+    ) {
+        (self.inputs.clone(), self.legacy_media.clone())
+    }
+    pub(crate) fn restore_authority(
+        &mut self,
+        (inputs, legacy): (
+            Option<Arc<crate::owned_io::PlaybackInputs>>,
+            Option<kinewright_core::LegacyMediaGrant>,
+        ),
+    ) {
+        if inputs.is_some() {
+            self.set_inputs(inputs);
+        } else {
+            self.set_inputs(None);
+            self.set_legacy_media(legacy);
+        }
+    }
+    pub(crate) fn set_legacy_media(&mut self, grant: Option<kinewright_core::LegacyMediaGrant>) {
+        if grant.is_some() {
+            self.set_inputs(None);
+        }
+        self.legacy_media = grant;
+    }
     pub(crate) fn new(gpu: GpuContext) -> Self {
         Self {
             decoders: DECODER_GAUGE.with(|gauge| gauge.borrow().clone()),
@@ -722,6 +863,8 @@ impl FrameRenderer {
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
             preview: None,
             lut_library: Arc::new(LutLibrary::default()),
+            inputs: None,
+            legacy_media: None,
         }
     }
 
@@ -743,6 +886,20 @@ impl FrameRenderer {
     /// from a stale atlas. An unchanged library that hands back the same
     /// lattices still hits, which is what keeps steady-state playback from
     /// re-uploading the atlas every frame.
+    pub(crate) fn set_inputs(&mut self, inputs: Option<Arc<crate::owned_io::PlaybackInputs>>) {
+        if inputs.is_some() {
+            self.legacy_media = None;
+        }
+        let same = match (&self.inputs, &inputs) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.clear();
+            self.inputs = inputs;
+        }
+    }
     pub(crate) fn set_lut_library(&mut self, library: Arc<LutLibrary>) {
         self.lut_library = library;
     }
@@ -1158,6 +1315,10 @@ impl FrameRenderer {
 
     /// Decode and stage every visual layer for one project frame, in
     /// production z-order, before any output transform is selected.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one render boundary checks authority before staging every visual layer"
+    )]
     fn decoded_layers(
         &mut self,
         document: &Document,
@@ -1166,6 +1327,10 @@ impl FrameRenderer {
         scale: RenderScale,
         video: Video<'_>,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
+        if let Some(inputs) = &self.inputs {
+            inputs.check_read_authority()?;
+        }
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         validate_managed_context(document)?;
         // MO2 R8 (review-1 B1): every render root refuses an invalid
         // document defensively, disabled clips included, before resolving.
@@ -1186,6 +1351,12 @@ impl FrameRenderer {
                             layer.source.asset
                         ))
                     })?;
+                    let key = source_key(
+                        asset,
+                        scale,
+                        self.inputs.as_deref(),
+                        self.legacy_media.as_ref(),
+                    );
                     let frame = match video {
                         Video::Decode(strategy) => self.decode_video_frame(
                             asset.id,
@@ -1201,16 +1372,15 @@ impl FrameRenderer {
                         )?,
                         Video::Supplied(frames) => {
                             let at = layer.source.source_at;
-                            let key = (source_key(asset, scale), at.0);
                             frames
-                                .get(&key)
+                                .get(&(key.clone(), at.0))
                                 .cloned()
                                 .unwrap_or_else(|| Err(no_frame(asset.id, at)))?
                         }
                     };
                     decoded_layers.push(DecodedLayer {
                         identity: Some((
-                            ResidentContent::Video(Arc::new(source_key(asset, scale))),
+                            ResidentContent::Video(Arc::new(key)),
                             layer.source.source_at,
                         )),
                         clip: layer.source.clip,
@@ -1299,7 +1469,11 @@ impl FrameRenderer {
         Ok(frame)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "One source key covers opening, decoding and caching"
+    )]
     fn decode_video_frame(
         &mut self,
         asset: AssetId,
@@ -1313,6 +1487,15 @@ impl FrameRenderer {
         fingerprint: &MediaSourceFingerprint,
         description: &ColorDescription,
     ) -> Result<WorkingFrame, MediaError> {
+        let _access = if self.inputs.is_none() {
+            Some(crate::locator::LocatorAccess::enter(
+                self.legacy_media
+                    .as_ref()
+                    .ok_or(MediaError::MediaAdmissionRequired)?,
+            )?)
+        } else {
+            None
+        };
         let assumption = d65_assumption(description);
         let key = VideoSourceKey::new(
             asset,
@@ -1322,19 +1505,37 @@ impl FrameRenderer {
             description,
             assumption,
             scale.max_width(),
-        );
+        )
+        .with_authority(self.inputs.as_deref(), self.legacy_media.as_ref());
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.video_sources.entry(key.clone())
         {
             let threads = crate::decode::default_threads();
-            let decoder = open_managed(
-                asset,
-                path,
-                fps,
-                key.max_width,
-                description,
-                (threads, None),
-            )?;
+            let decoder = if let Some(inputs) = &self.inputs {
+                let certified = inputs.source(asset)?;
+                VideoDecoder::open_certified(
+                    path,
+                    fps,
+                    scale.max_width(),
+                    description,
+                    d65_assumption(description),
+                    &certified,
+                    None,
+                )?
+            } else {
+                self.legacy_media
+                    .as_ref()
+                    .ok_or(MediaError::MediaAdmissionRequired)?
+                    .check()?;
+                open_managed(
+                    asset,
+                    path,
+                    fps,
+                    key.max_width,
+                    description,
+                    (threads, None),
+                )?
+            };
             let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
             let demand = self
                 .preview
@@ -1350,6 +1551,11 @@ impl FrameRenderer {
             });
         }
 
+        self.video_sources
+            .get_mut(&key)
+            .expect("opened source")
+            .decoder
+            .check_certified()?;
         let cache_miss = !self
             .video_sources
             .get(&key)
@@ -1425,7 +1631,12 @@ impl FrameRenderer {
                         let Some(asset) = document.asset(layer.source.asset) else {
                             continue;
                         };
-                        let key = source_key(asset, scale);
+                        let key = source_key(
+                            asset,
+                            scale,
+                            self.inputs.as_deref(),
+                            self.legacy_media.as_ref(),
+                        );
                         let points = demand.sources.entry(key).or_default();
                         points.push(layer.source.source_at);
                     }
@@ -1901,7 +2112,7 @@ mod tests {
     }
 
     fn test_renderer() -> Option<FrameRenderer> {
-        Some(FrameRenderer::new(fixture_gpu_or_skip()?))
+        Some(FrameRenderer::legacy_fixture(fixture_gpu_or_skip()?))
     }
 
     impl FrameRenderer {
@@ -2431,7 +2642,8 @@ mod tests {
         let red_document = Arc::new(single_clip_document(red_asset));
         let blue_document = Arc::new(single_clip_document(blue_asset));
         let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for relink identity fixture");
+            .expect("media engine should start for relink identity fixture")
+            .into_legacy_fixture();
 
         let red_thumbnail = engine
             .thumbnail_for_document(Arc::clone(&red_document), TimeCode::ZERO, 16)
@@ -2671,7 +2883,7 @@ mod tests {
         let (_media, asset) = small_source("pf1-pins", "testsrc2", 1, 8);
         let document = three_demands_on_one_source(asset);
         let frame = working_bytes((64, 36));
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         renderer.set_cache_budget(64 * frame);
         let scale = RenderScale::Proxy { max_width: 1280 };
         let strategy = DecodeStrategy::Sequential;
@@ -2703,7 +2915,7 @@ mod tests {
         let (_media, asset) = small_source("pf1-overshoot", "testsrc2", 1, 8);
         let document = three_demands_on_one_source(asset);
         let frame = working_bytes((64, 36));
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         renderer.set_cache_budget(frame);
         let scale = RenderScale::Proxy { max_width: 1280 };
         for at in [0, 1, 2] {
@@ -2739,7 +2951,7 @@ mod tests {
         document.tracks.push(track);
         document.media_pool.push(b);
         let frame = working_bytes((64, 36));
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         renderer.set_cache_budget(4 * frame);
         let scale = RenderScale::Proxy { max_width: 1280 };
         let strategy = DecodeStrategy::Sequential;
@@ -2792,7 +3004,7 @@ mod tests {
         let (_media, asset) = small_source("pf1-thumb", "testsrc2", 1, 2);
         let document = single_clip_document(asset);
         let scale = RenderScale::Proxy { max_width: 1280 };
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         let strategy = DecodeStrategy::Sequential;
         let live = renderer.render_live(&document, TimeCode(5), (64, 36), scale, strategy);
         live.expect("a preview frame");
@@ -2856,11 +3068,11 @@ mod tests {
             renderer.video_seek_count() - warm
         };
         assert_eq!(
-            seeks_after_warm_up(FrameRenderer::new_preview(gpu.clone())),
+            seeks_after_warm_up(FrameRenderer::legacy_preview_fixture(gpu.clone())),
             0
         );
         assert!(
-            seeks_after_warm_up(FrameRenderer::new(gpu)) > 0,
+            seeks_after_warm_up(FrameRenderer::legacy_fixture(gpu)) > 0,
             "the control"
         );
     }
@@ -2951,7 +3163,7 @@ mod k1_allocation {
         let sizes = &mut FrameSizes::default();
         let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0, sizes);
         let demand = demand.expect("the demand");
-        let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let supplied = SuppliedFrames::new();
         let video = Video::Supplied(&supplied);
         let layers = (renderer.decoded_layers(&document, TimeCode(0), resolution, scale, video))

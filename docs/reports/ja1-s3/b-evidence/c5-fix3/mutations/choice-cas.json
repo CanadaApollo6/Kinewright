@@ -1,0 +1,15 @@
+{
+  "case": "choice-cas",
+  "source": "crates/kinewright-project/src/voice_store.rs",
+  "test": "s3_voice_fix3_choice_retry_preserves_newer_choice",
+  "marker": "S3_VOICE_CHOICE_RETRY_CAS",
+  "original_sha256": "9cb41067ea29028c0e64f745e429aa307a215d4ab12923116d6a0bd1c8e2dc71",
+  "mutated_sha256": "9a484c23726b862d39a402638573e39560d917fa8793901c15d8dd6364aeb821",
+  "red_exit": 101,
+  "red_log_sha256": "479956d72e7bf552b78dcbb9ac64c308469ffcfcd79e97ec58054eca68db8948",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "69cf86e2cd4a87760af3d42035ea61839126ff6ae55e88acc21f32e68c14d8c2",
+  "runtime_green": true
+}

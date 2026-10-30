@@ -1,0 +1,11 @@
+{
+  "worktree": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5",
+  "target": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target",
+  "target_executables_before_cleanup": [],
+  "action": "recoverable gio trash",
+  "shared_cargo_lock_preserved": true,
+  "other_processes_and_projects_touched": false,
+  "exit": 0,
+  "target_absent": true,
+  "shared_cargo_lock_exists": true
+}

@@ -1320,6 +1320,7 @@ impl KinewrightApp {
         clippy::cast_possible_truncation
     )]
     pub(crate) fn timeline(&mut self, ui: &mut egui::Ui) {
+        let analysis = self.focused().analysis();
         let project_index = self.focused_project;
         let old_zoom_target = self.focused().timeline_zoom_target;
         let mut zoom_target = old_zoom_target;
@@ -2175,7 +2176,7 @@ impl KinewrightApp {
                                     &painter,
                                     ui.clip_rect(),
                                     &mut self.visual_cache,
-                                    self.analysis.as_ref(),
+                                    analysis.as_ref(),
                                     asset,
                                     clip.source_range.clone(),
                                     draw_rect,
@@ -2205,7 +2206,7 @@ impl KinewrightApp {
                                     &painter,
                                     ui.clip_rect(),
                                     &mut self.visual_cache,
-                                    self.analysis.as_ref(),
+                                    analysis.as_ref(),
                                     asset,
                                     freeze.source_frame,
                                     draw_rect,
@@ -4323,7 +4324,8 @@ impl KinewrightApp {
     ) -> Option<(MediaAsset, std::ops::Range<TimeCode>)> {
         let document = &self.focused().document;
         let spans = self
-            .analysis
+            .focused()
+            .analysis()
             .timeline_silences(document, None, TimeCode(1))
             .ok()?;
         let span = spans
@@ -4349,7 +4351,7 @@ impl KinewrightApp {
         } = job;
         let session = self.focused();
         let (session_id, revision) = (session.id, session.revision);
-        let analysis = Arc::clone(&self.analysis);
+        let analysis = Arc::clone(&self.focused().analysis());
         let result_tx = self.room_tone_tx.clone();
         let capped = capped_capture_range(&source, asset.fps);
         let spawned = std::thread::Builder::new()

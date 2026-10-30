@@ -1,0 +1,36 @@
+{
+  "name": "certified-audio-route",
+  "witness": "studio::tests::s3_bound_ab_identity",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-media/src/audio.rs",
+      "                certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,",
+      "                certified: None,"
+    ]
+  ],
+  "expected_red": {
+    "text": "C2_AUDIO_A_LANDMARK",
+    "location": null
+  },
+  "baseline_manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+  "witness_sha256": "daab2a49120e544117633e48dee779204d265d9784867a5f245f7357b00c5d9d",
+  "source_sha256": {
+    "crates/kinewright-media/src/audio.rs": "a993c6bea1748e9d99a1cc8e5a27a9a6142135f50c5b0820131f89694e099161"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-media/src/audio.rs": "97f4275d41fd05cc75d886bdafc1437cfbab8650b8d0c4893860fd3cc4ad2f4e"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-c2/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-app --bin kinewright-app studio::tests::s3_bound_ab_identity -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "3c1c85e2e65f75407593ef0b0dcae502b2446176696e2da54b65e75188c2c867",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 901 filtered out; finished in 6.03s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "b8b613547358398737806ba344cd836ce3ee7a5ccab539967eae688777ba2583",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 901 filtered out; finished in 6.99s"
+  ],
+  "restored": true
+}

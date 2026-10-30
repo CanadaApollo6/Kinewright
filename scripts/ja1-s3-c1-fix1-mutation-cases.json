@@ -1,0 +1,242 @@
+[
+  {
+    "name": "c1-detach-revocation",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "let removed = self.attachments.remove(index);",
+        "let removed = &self.attachments[index];"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+    "red_text": "C1_DETACH_REVOKES",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "store-candidate-version-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.version_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_VERSION_ONLY_CANDIDATE_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-candidate-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_CANDIDATE_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-candidate-run-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.run_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_RUN_ONLY_CANDIDATE_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-floor-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if explicit_floor {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_FLOOR_FEEDBACK_PRESERVATION",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-switch-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if selection.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_EXACT_FEEDBACK_INDEX",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-a1-acknowledged-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut metadata_root = bundle.root.clone();",
+        "        let mut metadata_root = bundle.root.clone();\n        if rescue_source.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_EXACT_FEEDBACK_INDEX",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "store-copy-feedback-index",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();",
+        "            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();\n            root.feedback_index_ref = None;"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_EXACT_FEEDBACK_INDEX",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "fix1-rescue-projected-index-roots",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        ".filter(|reference| reference != &root.store_manifest_ref)",
+        ".filter(|reference| reference != &root.store_manifest_ref && ![root.version_index_ref.as_ref(), root.feedback_index_ref.as_ref(), root.run_index_ref.as_ref(), root.claim_index_ref.as_ref()].into_iter().flatten().any(|index| index == reference))"
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_RESCUE_PROJECTED_INDEX_DECLARED",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "fix1-rescue-index-oracle",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "        || left.version_index_ref != right.version_index_ref\n        || left.feedback_index_ref != right.feedback_index_ref\n        || left.run_index_ref != right.run_index_ref\n        || left.claim_index_ref != right.claim_index_ref\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "features": "test-util",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "red_text": "S3_RESCUE_INDEX_ORACLE",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+  },
+  {
+    "name": "fix1-foreground-editor-guard-http",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            if request.operation.is_some() && grant.role != super::AttachmentRole::Editor {\n                return Err(HostRefusal::new(\n                    \"role_refused\",\n                    \"foreground operations require an Editor attachment\",\n                )\n                .into());\n            }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_rejects_non_editor_http_before_lease",
+    "red_text": "C1_FOREGROUND_ROLE_REFUSED",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix1-foreground-editor-guard-direct",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            if request.operation.is_some() && grant.role != super::AttachmentRole::Editor {\n                return Err(HostRefusal::new(\n                    \"role_refused\",\n                    \"foreground operations require an Editor attachment\",\n                )\n                .into());\n            }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_rejects_non_editor_direct_before_lease",
+    "red_text": "C1_FOREGROUND_ROLE_REFUSED",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix1-foreground-detach-only_owned_slot",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() || retained_handoff {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                let _ = removed;"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_detach_clears_only_owned_slot",
+    "red_text": "C1_FOREGROUND_DETACH_CLEARS_OWNED_SLOT",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix1-foreground-detach-stale_non_editor_slot",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() || retained_handoff {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                let _ = removed;"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_detach_clears_stale_non_editor_slot",
+    "red_text": "C1_FOREGROUND_DETACH_CLEARS_STALE_NON_EDITOR_SLOT",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  }
+]

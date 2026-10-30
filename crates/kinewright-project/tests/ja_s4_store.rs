@@ -9,11 +9,7 @@
     reason = "project contracts compile in isolation pending S3 H1 registration"
 )]
 
-use kinewright_project::{bundle_records, editing_session, receipts};
-#[path = "../src/orchestration_commit.rs"]
-mod orchestration_commit;
-#[path = "../src/orchestration_records.rs"]
-mod orchestration_records;
+use kinewright_project::{bundle_records, orchestration_commit, orchestration_records, receipts};
 
 use bundle_records::{ObjectRef, RecordKind};
 use orchestration_commit::{CommandDecision, ReceiptStatus, ValidatedRunUpdate, checked_receipt};

@@ -1,0 +1,36 @@
+{
+  "name": "fix2-unnumbered-renewal-instance",
+  "witness": "writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/auth.rs",
+      "            if request.operation.is_none()\n                && self.manual.is_some()\n                && matches!(\n                    request.command,\n                    super::HostCommand::ConfirmSwitch { .. }\n                        | super::HostCommand::PrepareOwnedMedia { .. }\n                        | super::HostCommand::PrepareMediaInterpretation { .. }\n                        | super::HostCommand::ConfirmBarrier { .. }\n                )\n                && self\n                    .foreground_owner\n                    .as_ref()\n                    .is_some_and(|owner| owner.attachment.is_some_and(|id| id != grant.id))\n            {\n                return Err(HostRefusal::new(\n                    \"operation_changed\",\n                    \"manual lease renewal belongs to another attachment instance\",\n                )\n                .into());\n            }\n",
+      ""
+    ]
+  ],
+  "expected_red": {
+    "text": "C2_LEASE_RENEWAL_INSTANCE",
+    "location": null
+  },
+  "baseline_manifest_sha256": "dc03d061d077d5a89eb53f0b5812eb660c275f52fc1791d8275d3c9fa4b54e86",
+  "witness_sha256": "5fa9368f8b8594e98f53e2f86afa85fc7708c5a01523efa59e43f333934b789d",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "917713766e5c228fe748d929c544ad5a6b3f2ebd8fdd1dd8e06282d9008cfeb1"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "420e43228cb8f3397c65c8d79821739b18d959fdebc0163e7fd8156d901f5665"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "12ffe8779f6037301a332232f18271604cc341973f550bfe8bf4c79f58f11eb9",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.48s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "ab40386f56dbad899b67947c7f550d8f6eb461f2ea28cafe27cb28221956cbb3",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.07s"
+  ],
+  "restored": true
+}

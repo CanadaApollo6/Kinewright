@@ -45,6 +45,23 @@ use crate::{
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u16 = 2;
 
+pub(crate) struct LegacyRenderContext {
+    pub(crate) library: Arc<LutLibrary>,
+    pub(crate) grant: kinewright_core::LegacyMediaGrant,
+}
+
+#[cfg(test)]
+impl LegacyRenderContext {
+    pub(crate) fn fixture(library: Arc<LutLibrary>) -> Self {
+        Self {
+            library,
+            grant: kinewright_core::MediaSourceOrigin::new_project()
+                .legacy_media()
+                .unwrap(),
+        }
+    }
+}
+
 /// Export with no LUT library.
 ///
 /// Test-only: the production `Export` impl always publishes the engine's
@@ -64,7 +81,7 @@ pub(crate) fn export_document(
         settings,
         progress,
         gpu,
-        Arc::new(LutLibrary::default()),
+        LegacyRenderContext::fixture(Arc::new(LutLibrary::default())),
     )
     .map(|_| ())
 }
@@ -87,7 +104,7 @@ pub(crate) fn export_document_with_luts(
     settings: &ExportSettings,
     progress: &ProgressSink,
     gpu: GpuContext,
-    library: Arc<LutLibrary>,
+    context: LegacyRenderContext,
 ) -> Result<ExportReport, MediaError> {
     export_document_inner(
         document,
@@ -95,7 +112,7 @@ pub(crate) fn export_document_with_luts(
         settings,
         progress,
         gpu,
-        library,
+        context,
         VideoPacketDuration::OneFrame,
     )
 }
@@ -121,7 +138,7 @@ pub(crate) fn export_document_with_zero_packet_durations(
         settings,
         progress,
         gpu,
-        Arc::new(LutLibrary::default()),
+        LegacyRenderContext::fixture(Arc::new(LutLibrary::default())),
         VideoPacketDuration::Zero,
     )
     .map(|_| ())
@@ -133,9 +150,10 @@ fn export_document_inner(
     settings: &ExportSettings,
     progress: &ProgressSink,
     gpu: GpuContext,
-    library: Arc<LutLibrary>,
+    context: LegacyRenderContext,
     packet_duration: VideoPacketDuration,
 ) -> Result<ExportReport, MediaError> {
+    context.grant.check()?;
     validate_settings(document, out, settings)?;
     let temporary = temporary_output(out);
     if temporary.exists() {
@@ -147,7 +165,7 @@ fn export_document_inner(
         settings,
         progress,
         gpu,
-        library,
+        context,
         packet_duration,
     );
     let report = match result {
@@ -355,7 +373,7 @@ fn export_to_temporary(
     settings: &ExportSettings,
     progress: &ProgressSink,
     gpu: GpuContext,
-    library: Arc<LutLibrary>,
+    context: LegacyRenderContext,
     packet_duration: VideoPacketDuration,
 ) -> Result<ExportReport, MediaError> {
     check_cancelled(settings)?;
@@ -486,7 +504,8 @@ fn export_to_temporary(
         .time_base();
 
     let mut renderer = FrameRenderer::new(gpu);
-    renderer.set_lut_library(library);
+    renderer.set_legacy_media(Some(context.grant));
+    renderer.set_lut_library(context.library);
     let mut delivery_filter = delivery_filter_graph(settings.resolution, delivery_depth)?;
     for output_frame in 0..total_frames {
         check_cancelled(settings)?;

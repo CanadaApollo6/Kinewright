@@ -1,0 +1,12 @@
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+     );
+     drop(loaded);
+-    let mut b =
+-        ProjectBundle::activate(path, BundleWriteAdmission::read(path).unwrap()).unwrap();
++    let mut b = ProjectBundle::activate(path, BundleWriteAdmission::read(path).unwrap()).unwrap();
+     assert_eq!(
+         b.read_snapshot(key).unwrap().descriptor.key,
+         *key,

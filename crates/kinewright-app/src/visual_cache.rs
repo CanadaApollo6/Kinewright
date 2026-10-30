@@ -6,17 +6,16 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    Analysis, AssetId, MediaAsset, TimeCode, VisualAssetResult, VisualRequestKind, WaveformData,
+    Analysis, AssetId, LegacyMediaIdentity, MediaAsset, TimeCode, VisualAssetResult,
+    VisualRequestKind, WaveformData,
 };
 use kinewright_media::{MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_FILES};
 
-/// Cache keys are the asset's PATH, never its id: asset ids are per-document,
-/// so with several projects open the same id can name different files, and an
-/// id-keyed cache would paint one project's pixels on another's clips. As a
-/// bonus, projects sharing media share cached visuals.
+/// Paths distinguish sources within one authority-bound cache instance.
 type ThumbKey = (PathBuf, TimeCode, u32);
 
 pub(crate) struct VisualCache {
+    authority: Option<LegacyMediaIdentity>,
     results: crossbeam_channel::Receiver<VisualAssetResult>,
     waveforms: HashMap<PathBuf, Arc<WaveformData>>,
     requested_waveforms: HashSet<PathBuf>,
@@ -38,6 +37,7 @@ struct CachedTexture {
 impl VisualCache {
     pub(crate) fn new(results: crossbeam_channel::Receiver<VisualAssetResult>) -> Self {
         Self {
+            authority: None,
             results,
             waveforms: HashMap::new(),
             requested_waveforms: HashSet::new(),
@@ -49,6 +49,21 @@ impl VisualCache {
             thumbnail_bytes: 0,
             blocked_paths: HashSet::new(),
             path_generations: HashMap::new(),
+        }
+    }
+
+    /// A cache already bound to `media`'s authority (a test's own channel).
+    #[cfg(test)]
+    pub(crate) fn bound_to(mut self, media: &dyn Analysis) -> Self {
+        self.authority = media.visual_cache_identity();
+        self
+    }
+
+    fn bind(&mut self, media: &dyn Analysis) {
+        let authority = media.visual_cache_identity();
+        if self.authority != authority {
+            *self = Self::new(media.visual_asset_results());
+            self.authority = authority;
         }
     }
 
@@ -68,6 +83,7 @@ impl VisualCache {
         media: &dyn Analysis,
         asset: &MediaAsset,
     ) -> Option<Arc<WaveformData>> {
+        self.bind(media);
         if self.blocked_paths.contains(&asset.path) {
             return None;
         }
@@ -90,6 +106,7 @@ impl VisualCache {
         source_at: TimeCode,
         max_width: u32,
     ) -> Option<egui::TextureHandle> {
+        self.bind(media);
         if self.blocked_paths.contains(&asset.path) {
             return None;
         }
@@ -119,7 +136,16 @@ impl VisualCache {
         None
     }
 
-    pub(crate) fn poll(&mut self, ctx: &egui::Context) -> Vec<(AssetId, String)> {
+    pub(crate) fn poll_scoped(
+        &mut self,
+        ctx: &egui::Context,
+        media: &dyn Analysis,
+    ) -> Vec<(AssetId, String)> {
+        self.bind(media);
+        self.poll(ctx)
+    }
+
+    fn poll(&mut self, ctx: &egui::Context) -> Vec<(AssetId, String)> {
         let mut failures = Vec::new();
         let mut changed = false;
         while let Ok(result) = self.results.try_recv() {
@@ -280,6 +306,72 @@ impl VisualCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn c2_r4_visual_cache_rebinds_equal_paths_and_drops_revoked_pixels() {
+        use kinewright_core::{Document, MediaSourceOrigin};
+        use kinewright_media::{FfmpegMediaEngine, test_support::GeneratedMedia};
+        use std::time::{Duration, Instant};
+
+        let source = GeneratedMedia::ffmpeg(
+            "c2-r4-ui-cache",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x64:r=30",
+                "-t",
+                "0.2",
+                "-c:v",
+                "mpeg4",
+            ],
+            "avi",
+        );
+        let engine = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let origin_a = MediaSourceOrigin::new_project();
+        let origin_b = MediaSourceOrigin::new_project();
+        let a = engine.legacy_media(
+            origin_a.legacy_media().unwrap(),
+            Arc::new(Document::default()),
+        );
+        let grant_b = origin_b.legacy_media().unwrap();
+        let b = engine.legacy_media(grant_b.clone(), Arc::new(Document::default()));
+        let asset = a.probe(source.path()).unwrap();
+        let ctx = egui::Context::default();
+        let mut cache = VisualCache::new(a.visual_asset_results());
+        for media in [&*a, &*b] {
+            assert!(
+                cache.thumbnail(media, &asset, TimeCode::ZERO, 64).is_none(),
+                "C2_R4_UI_CACHE_NEVER_SHARES_ANOTHER_AUTHORITYS_PIXELS"
+            );
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                assert!(cache.poll(&ctx).is_empty());
+                if cache.thumbnail(media, &asset, TimeCode::ZERO, 64).is_some() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "native thumbnail did not arrive");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(cache.thumbnail(&*b, &asset, TimeCode(1), 64).is_none());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while cache.results.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "queued native thumbnail did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        origin_b.revoke_legacy_media();
+        assert!(cache.poll_scoped(&ctx, &*b).is_empty());
+        assert!(
+            cache.thumbnail(&*b, &asset, TimeCode::ZERO, 64).is_none(),
+            "revoked authority cannot serve retained UI pixels"
+        );
+        assert!(cache.thumbnails.is_empty());
+        assert!(cache.waveforms.is_empty());
+    }
 
     fn texture(ctx: &egui::Context, name: &str) -> egui::TextureHandle {
         ctx.load_texture(

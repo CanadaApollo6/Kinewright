@@ -89,12 +89,12 @@
     "red_text": "Retry must complete recovery"
   },
   {
-    "name": "completed-switch-keeps-original-envelope",
+    "name": "completed-switch-keeps-pending-state",
     "changes": [
       [
         "crates/kinewright-app/src/ja1_host.rs",
         "        self.switch_envelope = None;\n        self.switch_state = SwitchState::Complete;",
-        "        self.switch_state = SwitchState::Complete;"
+        "        self.switch_envelope = None;"
       ]
     ],
     "witness": "ja1_attachment::tests::s2h_completed_switch_then_lost_save_uses_c10_on_same_actor",
@@ -104,7 +104,7 @@
     "production": false,
     "features": "",
     "build_host": false,
-    "red_text": "completed switch envelope must retire"
+    "red_text": "completed switch must route a later lost Save through C10"
   },
   {
     "name": "status-thaws-unknown-operation",
@@ -287,8 +287,8 @@
     "changes": [
       [
         "crates/kinewright-app/src/ja1_attachment.rs",
-        "            Err(error) => {\n                self.host_request_failed(&error);\n                return Err(error);\n            }",
-        "            Err(error) => {\n                return Err(error);\n            }"
+        "|host| host.unknown_operation || host.pending_foreground()",
+        "|_host| false"
       ]
     ],
     "witness": "ja1_attachment::tests::s2h_lost_initial_manual_grant_keeps_original_request_for_retry",

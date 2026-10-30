@@ -1,0 +1,18 @@
+{
+  "guarded_sources_match_commit1_pairs": [
+    {
+      "mutation": "second-owner-save",
+      "guarded_source_sha256": "2376ed61dfe9e9128bc3678cf5b062231f85bfc78c7afeaa2d0b93e7d625afcf"
+    },
+    {
+      "mutation": "second-owner-submit",
+      "guarded_source_sha256": "2376ed61dfe9e9128bc3678cf5b062231f85bfc78c7afeaa2d0b93e7d625afcf"
+    },
+    {
+      "mutation": "frozen-manual-trim",
+      "guarded_source_sha256": "fe9b46a84033e7dacc97034c784965dd2243ec1a9aab97c333d989aaa2794177"
+    }
+  ],
+  "all_archived_log_hashes_verified": true,
+  "suites_still_running": false
+}

@@ -100,6 +100,9 @@ impl HostCommandOwner {
                 self.switch_frozen = true;
                 self.lookup_switch(envelope, reply)?;
                 self.pending_switch = None;
+                for attachment in &mut self.attachments {
+                    attachment.snapshot_leases.clear();
+                }
                 self.message = "Working edit selected. Editing stays read-only until the current checkpoint and resources are restored.".into();
                 Ok(())
             }
@@ -260,6 +263,7 @@ mod tests {
                 write: vec![root.root().into()],
             };
             let mut host = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "c11-pin-host".into(),
                 path: Some(path.clone()),
                 roots: roots.clone(),
@@ -492,6 +496,7 @@ mod tests {
                 write: vec![root.root().into()],
             };
             let mut host = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "c11-target-host".into(),
                 path: Some(path),
                 roots: roots.clone(),
@@ -675,6 +680,7 @@ mod tests {
                 write: vec![root.root().into()],
             };
             let mut host = HostCommandOwner::open(HostConfig {
+                scheduler_settings: None,
                 project: "c11-frozen-host".into(),
                 path: Some(path.clone()),
                 roots: roots.clone(),
@@ -853,6 +859,7 @@ mod tests {
             write: vec![root.root().into()],
         };
         let mut host = HostCommandOwner::open(HostConfig {
+            scheduler_settings: None,
             project: "c11-registered-host".into(),
             path: Some(path.clone()),
             roots: roots.clone(),

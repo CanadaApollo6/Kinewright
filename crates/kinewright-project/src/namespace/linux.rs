@@ -4,7 +4,7 @@ use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags};
 use std::{
     fmt::Write as _,
     fs::File,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path},
     time::Duration,
 };
@@ -480,6 +480,7 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         batch_objects: false,
         uncertain: false,
         read_only: true,
+        read_authority: None,
     };
     verify_parent(&namespace)?;
     Ok(namespace)
@@ -881,6 +882,85 @@ pub(super) fn verify_directories(namespace: &ProjectNamespace) -> Result<(), Bun
     Ok(())
 }
 
+pub(super) fn publish_hashed(
+    namespace: &mut ProjectNamespace,
+    write: impl FnOnce(&mut File) -> Result<crate::bundle_records::ObjectRef, BundleError>,
+) -> Result<crate::bundle_records::ObjectRef, BundleError> {
+    namespace.verify()?;
+    let path = Path::new("studio/objects");
+    let dir = directory(namespace, path, true)?;
+    let (temp_name, mut file) = temp(namespace, &dir)?;
+    let result = (|| {
+        let reference = write(&mut file)?;
+        reference.validate()?;
+        sync_file(&file, "object_file_sync", path)?;
+        namespace.verify()?;
+        match fs::renameat_with(
+            &dir,
+            &temp_name,
+            &dir,
+            &reference.sha256,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => note("object_rename", &path.join(&reference.sha256)),
+            Err(rustix::io::Errno::EXIST) => {
+                let mut existing = File::from(fs::openat(
+                    &dir,
+                    &reference.sha256,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?);
+                let metadata = existing.metadata()?;
+                if !metadata.is_file() || metadata.len() != reference.byte_length {
+                    return Err(BundleError::Corrupt(
+                        "existing source object length/type conflict".into(),
+                    ));
+                }
+                let mut digest = kinewright_hash::Sha256::new();
+                let mut scratch = Vec::new();
+                scratch
+                    .try_reserve_exact(64 * 1024)
+                    .map_err(|_| BundleError::Capacity("duplicate hash scratch"))?;
+                scratch.resize(64 * 1024, 0);
+                let mut remaining = reference.byte_length;
+                while remaining != 0 {
+                    let length = usize::try_from(remaining.min(scratch.len() as u64))
+                        .map_err(|_| BundleError::Capacity("duplicate hash scratch"))?;
+                    existing.read_exact(&mut scratch[..length])?;
+                    digest.update(&scratch[..length]);
+                    remaining -= length as u64;
+                }
+                let mut extra = [0];
+                if existing.read(&mut extra)? != 0
+                    || existing.metadata()?.len() != reference.byte_length
+                    || crate::owned_media::hex_digest(digest.finalize()) != reference.sha256
+                {
+                    return Err(BundleError::Corrupt(
+                        "existing source object digest conflict".into(),
+                    ));
+                }
+                fs::unlinkat(&dir, &temp_name, AtFlags::empty())?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        sync_object_directory(namespace, dir.try_clone()?, path)?;
+        Ok(reference)
+    })();
+    if result.is_err() && !namespace.uncertain {
+        match fs::unlinkat(&dir, &temp_name, AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => namespace.uncertain = true,
+        }
+        if sync_directory(&dir, path).is_err() {
+            namespace.uncertain = true;
+        }
+        if namespace.uncertain {
+            return Err(BundleError::DurabilityUnknown);
+        }
+    }
+    result
+}
+
 pub(super) fn publish_with(
     namespace: &mut ProjectNamespace,
     path: &PortablePath,
@@ -1151,6 +1231,7 @@ pub(super) fn create_session(
         batch_objects: false,
         uncertain: false,
         read_only: false,
+        read_authority: None,
         session: Some((base, name)),
         session_unlinked: false,
     })

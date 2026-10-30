@@ -1,0 +1,24 @@
+{
+  "case": "commentary-log-retention",
+  "source": "crates/kinewright-app/src/recording.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_commentary_retention",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "5c0dbf6ca831b169fce37f15a9c831d31eacb2c982fdff1fc18d728d2affc020",
+  "mutated_sha256": "edf5bdc741599fa9b18600ab8f9d37ed4fae8ebc5e5594954d7ee7dc87add14c",
+  "red_exit": 101,
+  "red_log_sha256": "f521d8ca33c81796406f3e89fa27ab6abaaf60df0c37a6abb749e24a491b4be2",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "ea595d990097df71ab400f335a9f0b35d85fe9460eb85b57fed5d1b5bccb6330",
+  "runtime_green": true
+}

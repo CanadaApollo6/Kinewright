@@ -1,0 +1,35 @@
+{
+  "source": "crates/kinewright-agent/src/writer_host/owned_media.rs",
+  "source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5",
+  "results": [
+    {
+      "guard": "editor-binding",
+      "selector": "writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+    },
+    {
+      "guard": "exact-drained-cut",
+      "selector": "writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+    },
+    {
+      "guard": "unsaved-source-owner",
+      "selector": "s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+    },
+    {
+      "guard": "forwarded-input-scope",
+      "selector": "writer_host::s2h_tests::s3_gui_owned_input_forwarded_scope_refuses_before_admission",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+    }
+  ],
+  "restored": true
+}

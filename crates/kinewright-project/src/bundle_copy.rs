@@ -964,6 +964,11 @@ impl SessionStore {
         Ok(descriptor)
     }
 
+    pub(crate) fn release_unpublished_borrowed_source(&mut self, admission: &SessionId) {
+        self.borrowed_sources
+            .retain(|source| source.descriptor.admission_id() != admission);
+    }
+
     /// GUI-side verified reader lease. Only bytes from this reader cross the protocol.
     /// An outstanding lease keeps all actual source charges alive after Close.
     pub fn open_borrowed_source(

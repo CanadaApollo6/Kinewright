@@ -1,0 +1,7 @@
+{
+  "source_head": "076a96c922b2f05984df4bb839ad7cf0900e6183",
+  "source_clean": true,
+  "sealed_binary_sha256": "6eddb69649a68eda76d89ad187d1b9fddf511ae116549a504de37edc1a8cedab",
+  "max2_binary_sha256": "839f28b867ebe90fa91f1f3ed3f90c47cfb848ce6fe34fc1218e25a54e486606",
+  "scope": "Restored the exact missing fixture checkout; reused existing hash-verified sealed binaries. No predecessor rebuild or source change."
+}

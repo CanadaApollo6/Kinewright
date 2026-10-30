@@ -50,7 +50,8 @@ impl KinewrightApp {
             return;
         };
         let words = match self
-            .analysis
+            .focused()
+            .analysis()
             .timeline_transcript(&self.focused().document, None)
         {
             Ok(words) => dedup_linked_timeline_words(words),
@@ -91,7 +92,7 @@ impl KinewrightApp {
     fn transcription_in_progress(&self) -> bool {
         self.focused().document.media_pool.iter().any(|asset| {
             matches!(
-                self.analysis.transcript_status(asset),
+                self.focused().analysis().transcript_status(asset),
                 TranscriptStatus::Queued
                     | TranscriptStatus::Hashing
                     | TranscriptStatus::DownloadingModel { .. }
@@ -102,7 +103,8 @@ impl KinewrightApp {
 
     pub(crate) fn remove_filler_words(&mut self) {
         let words = match self
-            .analysis
+            .focused()
+            .analysis()
             .timeline_transcript(&self.focused().document, None)
         {
             Ok(words) => dedup_linked_timeline_words(words),

@@ -1,0 +1,218 @@
+{
+  "setup": "source scripts/setup-ffmpeg.sh in same shell",
+  "minimum_available_memory_bytes": 6442450944,
+  "cargo_wrapper": "flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo",
+  "cargo_arguments": {
+    "build": [
+      "build",
+      "--workspace"
+    ],
+    "clippy": [
+      "clippy",
+      "--workspace",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "media": [
+      "test",
+      "-p",
+      "kinewright-media",
+      "owned_io",
+      "--",
+      "--test-threads=1"
+    ],
+    "project": [
+      "test",
+      "-p",
+      "kinewright-project",
+      "--features",
+      "test-util",
+      "s3_",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "host": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "writer_host::s2h_tests::s3_",
+      "--",
+      "--test-threads=1"
+    ],
+    "app": [
+      "test",
+      "-p",
+      "kinewright-app",
+      "s3_owned_",
+      "--",
+      "--test-threads=1"
+    ],
+    "agent-architecture": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "in2_the_agent_crate_has_one_agent_event_loop",
+      "--",
+      "--test-threads=1"
+    ],
+    "app-architecture": [
+      "test",
+      "-p",
+      "kinewright-app",
+      "in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-copy": [
+      "test",
+      "-p",
+      "kinewright-project",
+      "--features",
+      "test-util",
+      "--test",
+      "ja_s1_copy",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-storage": [
+      "test",
+      "-p",
+      "kinewright-project",
+      "--features",
+      "test-util",
+      "--test",
+      "ja_s1_storage",
+      "bounded_store::",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-project-switch": [
+      "test",
+      "-p",
+      "kinewright-project",
+      "--features",
+      "test-util",
+      "--test",
+      "ja_s2_switch",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-orientation": [
+      "test",
+      "-p",
+      "kinewright-media",
+      "still_orientation::tests::",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-manual-inputs": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s2_host",
+      "g05l_input_context_is_admitted_before_local_acceptance",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-c11-switch": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s2_host",
+      "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-c12-composed": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s2_host",
+      "rescue_and_switch_share_one_owner_after_restart",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-manual-ingress": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s2_host",
+      "g05l_two_clients_one_editor_ordered_history",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-manual-restart": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s2_host",
+      "g05l_fast_",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-n2": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "writer_host::c12_tests::n2_committed_capture_never_acknowledges_sealed_a",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-operation-replay": [
+      "test",
+      "-p",
+      "kinewright-agent",
+      "writer_host::s2h_tests::s2h_foreground_result_replay_is_exact_bounded_and_client_bound",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-unknown-status": [
+      "test",
+      "-p",
+      "kinewright-app",
+      "s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-recovery-retry": [
+      "test",
+      "-p",
+      "kinewright-app",
+      "s2h_begin_recovery_reply_loss_retries_original_plan",
+      "--",
+      "--test-threads=1"
+    ],
+    "regression-switch-confirm": [
+      "test",
+      "-p",
+      "kinewright-app",
+      "s2h_confirm_reply_loss_retries_installed_b_without_reinstallation",
+      "--",
+      "--test-threads=1"
+    ],
+    "incident-controls": [
+      "test",
+      "-p",
+      "kinewright-app",
+      "--bin",
+      "kinewright-app",
+      "--",
+      "app::in1_tests::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+      "app::in1_tests::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+      "app::in1_tests::in1_the_undo_sticks_and_the_reopen_is_suppressed",
+      "app::in1_tests::in1b_a_refused_card_press_is_reported_where_an_auto_apply_is_not",
+      "--exact",
+      "--test-threads=1"
+    ]
+  },
+  "fmt": "bash scripts/ja1-s3-c0-gate.sh fmt (touched files, skip_children=true)",
+  "lint": "nice -n 19 python3 -I scripts/slow_tests.py lint"
+}

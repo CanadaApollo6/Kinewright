@@ -1,0 +1,48 @@
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling kinewright-media v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-media)
+   Compiling rmcp v3.1.2
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+   Compiling kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+   Compiling kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.51s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Checking reqwest v0.13.4
+    Checking eframe v0.35.0
+    Checking kinewright-media v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-media)
+    Checking rmcp v3.1.2
+    Checking kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-project)
+    Checking kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+    Checking kinewright-app v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.47s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+test ja1_attachment::tests::w13_owner_reported_blockers_render_save_and_close_routes ... ok
+test ja1_attachment::tests::w13_preview_close_and_every_destination_disclose_session_pin_loss ... ok
+test ja1_attachment::tests::w14_unsupported_rescue_refuses_before_session_mutation ... ok
+test ja1_attachment::tests::w15_completed_capture_release_keeps_sources_and_active_c_exact ... ok
+test ja1_attachment::tests::w15_late_rescue_is_capture_only_and_release_is_explicit ... ok
+
+test result: ok. 79 passed; 0 failed; 1 ignored; 0 measured; 814 filtered out; finished in 321.21s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+
+failures:
+    host_failure_preserves_originating_context_or_refuses_recovery
+    host_owns_scripted_session_after_gui_detach
+
+test result: FAILED. 15 passed; 2 failed; 4 ignored; 0 measured; 0 filtered out; finished in 41.08s
+
+error: test failed, to rerun pass `-p kinewright-agent --test ja_s2_host`

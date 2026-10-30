@@ -44,5 +44,16 @@ kinewright-media = { path = ".", features = ["test-util"] }
 # counters as an independent witness.
 wgpu = { workspace = true, features = ["counters"] }
 
-[lints]
-workspace = true
+[target.'cfg(windows)'.dependencies]
+winapi-util = "=0.1.11"
+
+# Follow ../kinewright-hash/Cargo.toml: deny permits the local AVIO FFI allowance;
+# Cargo cannot override an inherited forbid.
+[lints.rust]
+unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+assert_is_empty = "allow"

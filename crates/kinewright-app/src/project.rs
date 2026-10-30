@@ -8,11 +8,13 @@ use std::{
 };
 
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, Export, IncidentId, IncidentLog,
+    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, IncidentId, IncidentLog,
     IncidentState, IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus,
-    MarkerId, MediaKind, Operation, Playback, RunningInvestigation, TimeCode, TimelineRevision,
-    TrackId, TrackKind,
+    MarkerId, MediaKind, Operation, RunningInvestigation, TimeCode, TimelineRevision, TrackId,
+    TrackKind,
 };
+#[cfg(test)]
+use kinewright_core::{Export, Playback};
 use kinewright_media::{LutLibrary, LutStore};
 use kinewright_project::{
     FlushOutcome, RefuseRename, SidecarMode, SidecarSession, SidecarWriter, derive_lut_store,
@@ -115,7 +117,14 @@ pub(crate) struct ProjectSession {
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
+    media_backend: crate::media_access::MediaBackend,
+    media_retirement: Option<kinewright_core::LegacyMediaGrant>,
+    pub(crate) studio: crate::studio::Studio,
     pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
+    pub(crate) ja1_activation: Option<(
+        kinewright_core::LegacyMediaGrant,
+        crate::ja1_attachment::Ja1Attachment,
+    )>,
     pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
     pub(crate) retired_agent_threads: BTreeSet<u64>,
     /// The project-relative LUT store, derived from `project_path` at runtime
@@ -338,9 +347,7 @@ impl ProjectSession {
         document: Document,
         source_admission: kinewright_project::bundle::BundleWriteAdmission,
         project_path: Option<PathBuf>,
-        playback: &Arc<dyn Playback>,
-        analysis: &Arc<dyn Analysis>,
-        exporter: &Arc<dyn Export>,
+        media_backend: crate::media_access::MediaBackend,
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
         format_version: u32,
@@ -413,7 +420,7 @@ impl ProjectSession {
         // present is one.
         let (loaded_ids, loaded_open_ids, subject_missing) =
             capture_loaded_sets(&incidents, &document);
-        let session = Self {
+        let mut session = Self {
             id,
             name,
             core,
@@ -421,8 +428,12 @@ impl ProjectSession {
             document: Arc::clone(&document),
             revision: TimelineRevision::default(),
             project_path,
+            media_retirement: source_admission.legacy_media(),
             source_admission,
+            media_backend,
+            studio: crate::studio::Studio::default(),
             ja1: None,
+            ja1_activation: None,
             ja1_job: None,
             retired_agent_threads: BTreeSet::new(),
             lut_store,
@@ -446,18 +457,7 @@ impl ProjectSession {
             saved_document: None,
             dirty_cache: RefCell::new(None),
             recovery,
-            threads: vec![AgentThread::new(
-                "Thread 1",
-                agent_harness,
-                chat,
-                TimelineRevision::default(),
-                &document,
-                playback,
-                analysis,
-                exporter,
-                &agent_project_path,
-                &incidents,
-            )?],
+            threads: Vec::new(),
             active_thread: 0,
             next_thread_number: 2,
             pending_timeline_adds: Vec::new(),
@@ -488,14 +488,91 @@ impl ProjectSession {
                     .unwrap_or_default(),
             )),
         };
+        let ports = session.media();
+        session.threads.push(AgentThread::new(
+            "Thread 1",
+            agent_harness,
+            chat,
+            TimelineRevision::default(),
+            &document,
+            &ports.playback,
+            &ports.analysis,
+            &ports.exporter,
+            &agent_project_path,
+            &incidents,
+        )?);
         session.publish_project_path_to_agents();
         Ok(session)
     }
 
+    pub(crate) fn is_owned(&self) -> bool {
+        self.source_admission.is_studio()
+            || self.ja1.is_some()
+            || self.ja1_job.is_some()
+            || self.studio.manual_inputs.is_some()
+            || self.studio.selection.is_some()
+    }
+
+    pub(crate) fn legacy_media(&self) -> Option<kinewright_core::LegacyMediaGrant> {
+        if self.is_owned() {
+            self.source_admission.revoke_legacy_media();
+            None
+        } else {
+            self.source_admission.legacy_media()
+        }
+    }
+
+    pub(crate) fn media(&self) -> crate::media_access::MediaPorts {
+        self.media_backend.scoped(
+            Arc::clone(&self.document),
+            self.legacy_media(),
+            self.studio.manual_inputs.clone(),
+        )
+    }
+
+    pub(crate) fn set_source_admission(
+        &mut self,
+        admission: kinewright_project::bundle::BundleWriteAdmission,
+    ) {
+        self.retire_media();
+        self.media_retirement = admission.legacy_media();
+        self.source_admission = admission;
+    }
+
+    pub(crate) fn retire_media(&self) {
+        if let Some(grant) = &self.media_retirement {
+            match &self.media_backend {
+                crate::media_access::MediaBackend::Engine(engine) => engine.retire_media(grant),
+                #[cfg(test)]
+                crate::media_access::MediaBackend::Stub { .. } => {}
+            }
+        }
+    }
+
+    pub(crate) fn analysis(&self) -> Arc<dyn Analysis> {
+        self.media().analysis
+    }
+
+    pub(crate) fn request_asset_analysis(&self, asset: kinewright_core::MediaAsset) {
+        let analysis = self.analysis();
+        analysis.request_transcription(asset.clone());
+        analysis.request_silence_detection(asset.clone());
+        analysis.request_scene_detection(asset.clone());
+        analysis.request_beat_detection(asset);
+    }
+
+    /// Whether closing now would leave unsaved work: an edit (see
+    /// [`Self::edit_dirty`]), Studio notes the person typed or drew that are not
+    /// saved yet (S3 C3 fix 1), or a spoken note not durably kept yet (S3 stage
+    /// fixes 1 and 2).
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.edit_dirty() || self.studio.feedback.unsaved() || self.studio.voice.unkept().is_some()
+    }
+
     /// Whether the project differs from the last save: the live document
     /// differs structurally, or the investigator mutes changed since the save.
-    pub(crate) fn is_dirty(&self) -> bool {
-        if self.ja1_job.is_some() {
+    pub(crate) fn edit_dirty(&self) -> bool {
+        if self.ja1_job.is_some() || self.ja1_activation.is_some() {
             return true;
         }
         if let Some(ja1) = &self.ja1 {
@@ -703,6 +780,9 @@ impl ProjectSession {
         &self,
         command: kinewright_core::Command,
     ) -> Result<(), kinewright_core::CoreDisconnected> {
+        if self.ja1_activation.is_some() || self.studio.selection.is_some() {
+            return Err(kinewright_core::CoreDisconnected);
+        }
         if let Some(attachment) = &self.ja1 {
             attachment.send_manual(command)
         } else {
@@ -710,7 +790,9 @@ impl ProjectSession {
         }
     }
     pub(crate) fn ja1_read_only(&self) -> bool {
-        self.ja1_job.is_some()
+        self.ja1_activation.is_some()
+            || self.studio.selection.is_some()
+            || self.ja1_job.is_some()
             || self
                 .ja1
                 .as_ref()
@@ -727,15 +809,31 @@ impl ProjectSession {
     }
 
     pub(crate) fn ja1_close_warning(&self) -> String {
-        self.ja1
+        let mut text = self
+            .ja1
             .as_ref()
             .map(crate::ja1_attachment::Ja1Attachment::close_text)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let notes = self.studio.feedback.close_text();
+        if !notes.is_empty() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&notes);
+        }
+        if let Some(voice) = self.studio.voice.close_text() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(voice);
+        }
+        text
     }
     pub(crate) fn install_ja1_view(&mut self) {
         let Some(ja1) = &mut self.ja1 else {
             return;
         };
+        self.source_admission.revoke_legacy_media();
         if let Some(view) = ja1.view.take() {
             if self.core.actor_identity() != view.core.actor_identity() {
                 self.retired_agent_threads
@@ -755,10 +853,23 @@ impl ProjectSession {
     }
 
     pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
+        // S3 C3 fix 1: what the person typed or drew is kept before closing.
+        if self.studio.feedback.changed {
+            let _ = self.studio.feedback.persist();
+        }
         let source_closed = self
             .ja1
             .as_mut()
             .is_none_or(crate::ja1_attachment::Ja1Attachment::close);
+        if !source_closed
+            && self
+                .ja1
+                .as_ref()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::continuation_pending)
+        {
+            return false;
+        }
+        self.retire_media();
         // Cloned before the investigator borrow: `incidents` now resolves
         // through the sidecar deref, which borrows the whole session.
         let incidents = std::sync::Arc::clone(&self.incidents);
@@ -1929,9 +2040,11 @@ mod tests {
             document,
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Stub {
+                playback: Arc::clone(&playback),
+                analysis: Arc::clone(&analysis),
+                exporter: Arc::clone(&exporter),
+            },
             &SidecarMode::None,
             None,
             PROJECT_FORMAT_VERSION,
@@ -2141,9 +2254,11 @@ mod tests {
             Document::default(),
             crate::app::fixture_source_admission((Some(path.to_path_buf())).as_deref()),
             Some(path.to_path_buf()),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Stub {
+                playback: Arc::clone(&playback),
+                analysis: Arc::clone(&analysis),
+                exporter: Arc::clone(&exporter),
+            },
             &SidecarMode::Load {
                 project_digest: project_digest_of(path),
             },
@@ -2802,9 +2917,11 @@ mod tests {
             Document::default(),
             crate::app::fixture_source_admission((Some(project.clone())).as_deref()),
             Some(project.clone()),
-            &playback,
-            &analysis,
-            &exporter,
+            crate::media_access::MediaBackend::Stub {
+                playback: Arc::clone(&playback),
+                analysis: Arc::clone(&analysis),
+                exporter: Arc::clone(&exporter),
+            },
             &SidecarMode::Load {
                 project_digest: digest.clone(),
             },

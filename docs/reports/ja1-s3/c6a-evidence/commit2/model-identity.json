@@ -1,0 +1,8 @@
+{
+  "path": "target/ja1-s3-c6a/model-data/models/whisper/ggml-small.bin",
+  "bytes": 487601967,
+  "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+  "fetch": "transcript::ensure_model only",
+  "controls_log": "model-equipped-controls.log",
+  "scope": "CPU Whisper backend tests; Studio UI and allocation/accounting acceptance NOT RUN"
+}

@@ -9,8 +9,25 @@ use crate::{
 };
 
 impl KinewrightApp {
+    fn program_playback_ready(&self) -> bool {
+        !(self.focused().studio.failure.is_some()
+            || (self.focused().is_owned()
+                && self.focused().studio.selection.is_none()
+                && self.focused().studio.manual_inputs.is_none()))
+    }
+
+    /// All GUI play requests share the admitted namespace's readiness fence.
+    pub(crate) fn play_program_from(&mut self, position: TimeCode) {
+        if self.program_playback_ready() {
+            self.playback.play(position);
+        }
+    }
+
     pub(crate) fn toggle_playback(&mut self) {
-        if self.focused().document.duration <= TimeCode::ZERO {
+        if !self.playing && !self.program_playback_ready() {
+            return;
+        }
+        if self.program_document().duration <= TimeCode::ZERO {
             // Appendix B row 132.
             self.note_label(
                 LabelIncident::Media,
@@ -23,11 +40,11 @@ impl KinewrightApp {
         if self.playing {
             self.playback.pause();
         } else {
-            if self.focused().position >= self.focused().document.duration {
-                self.focused_mut().position = TimeCode::ZERO;
+            if self.program_position() >= self.program_document().duration {
+                self.set_program_position(TimeCode::ZERO);
             }
-            let position = self.focused().position;
-            self.playback.play(position);
+            let position = self.program_position();
+            self.play_program_from(position);
         }
     }
 
@@ -47,9 +64,9 @@ impl KinewrightApp {
 
     pub(crate) fn seek_to(&mut self, position: TimeCode) {
         self.pending_resume = None;
-        let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
+        let maximum = self.program_document().duration.0.saturating_sub(1).max(0);
         let position = TimeCode(position.0.clamp(0, maximum));
-        self.focused_mut().position = position;
+        self.set_program_position(position);
         self.playback.seek(position);
         self.playback.request_frame(position);
     }
@@ -62,7 +79,7 @@ impl KinewrightApp {
                 let leading_space = ((ui.available_width() - 430.0) / 2.0).max(0.0);
                 ui.add_space(leading_space);
                 if icons::transport_button(ui, Icon::StepBack, "Previous frame", false).clicked() {
-                    let position = self.focused().position;
+                    let position = self.program_position();
                     self.seek_to(TimeCode(position.0.saturating_sub(1)));
                 }
                 let playback_icon = if self.playing {
@@ -77,12 +94,12 @@ impl KinewrightApp {
                     self.toggle_playback();
                 }
                 if icons::transport_button(ui, Icon::StepForward, "Next frame", false).clicked() {
-                    let position = self.focused().position;
+                    let position = self.program_position();
                     self.seek_to(TimeCode(position.0.saturating_add(1)));
                 }
                 ui.add_space(space::TWO);
-                let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
-                let mut slider_position = self.focused().position.0.clamp(0, maximum);
+                let maximum = self.program_document().duration.0.saturating_sub(1).max(0);
+                let mut slider_position = self.program_position().0.clamp(0, maximum);
                 let response = ui.add_sized(
                     [150.0, size::CONTROL_HEIGHT],
                     egui::Slider::new(&mut slider_position, 0..=maximum)
@@ -99,16 +116,16 @@ impl KinewrightApp {
                 }
                 if response.changed() {
                     let position = TimeCode(slider_position);
-                    self.focused_mut().position = position;
+                    self.set_program_position(position);
                     self.playback.request_frame(position);
                 }
                 if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                    let position = self.focused().position;
+                    let position = self.program_position();
                     self.release_scrub(position);
                 }
                 ui.add_space(space::TWO);
-                let position = self.focused().position;
-                let fps = self.focused().document.fps;
+                let position = self.program_position();
+                let fps = self.program_document().fps;
                 ui.label(
                     egui::RichText::new(format_timecode(position, fps))
                         .font(theme::timecode_font())

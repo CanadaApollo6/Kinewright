@@ -16,6 +16,10 @@ use kinewright_project::{
 use std::fmt::Write as _;
 #[path = "ja1_host.rs"]
 mod host;
+#[cfg(test)]
+pub(crate) use host::SCHEDULER_SETTINGS;
+#[path = "host_snapshot.rs"]
+mod host_snapshot;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -62,6 +66,12 @@ impl PreparedView {
 }
 
 pub(crate) enum Action {
+    StudioVersions,
+    StudioManualPlayback(Arc<Document>),
+    StudioSelect(kinewright_project::studio_records::SnapshotKey),
+    StudioEditCopy(kinewright_project::studio_records::SnapshotKey),
+    ImportMedia(PathBuf),
+    ChangeMediaInterpretation(Box<kinewright_core::Operation>),
     Save,
     ConfirmSuccessorSave,
     SaveAs(PathBuf),
@@ -85,6 +95,30 @@ pub(crate) enum Action {
     SaveSession(BranchId),
     CloseSession(BranchId),
     OpenCapture(PathBuf),
+}
+impl Action {
+    /// Whether this action keeps the project's identity and session, so it may
+    /// run while a spoken note is recording. Anything else can move the
+    /// project (Save As, recovery, rescue, a retried switch, a Save that
+    /// completes a confirmed successor Save As) or end a session.
+    pub(crate) fn keeps_identity(&self) -> bool {
+        matches!(
+            self,
+            Self::StudioVersions
+                | Self::StudioManualPlayback(_)
+                | Self::StudioSelect(_)
+                | Self::ImportMedia(_)
+                | Self::ChangeMediaInterpretation(_)
+                | Self::PreviewRecovery(_)
+                | Self::PreviewRescue
+                | Self::PreviewRetirement(_)
+                | Self::PreviewForget
+                | Self::PreviewRelease(_)
+                | Self::ConsentTrim
+                | Self::ConsentOmission
+                | Self::Cancel
+        )
+    }
 }
 enum Choice {
     SuccessorSave(Option<PathBuf>),
@@ -118,9 +152,28 @@ impl ManualProducerGate {
     }
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent attachment and UI lifecycle flags"
+)]
 pub(crate) struct Ja1Attachment {
+    pub(crate) imported_media: Option<kinewright_core::AssetId>,
     pub owner: Ja1EditingSession,
     pub message: String,
+    pub(crate) studio_ready: Option<Arc<kinewright_project::studio_store::FrozenContext>>,
+    pub(crate) studio_versions_ready: Option<Vec<kinewright_project::studio_records::SnapshotKey>>,
+    pub(crate) studio_edit_pending: bool,
+    pub(crate) studio_error_ready: Option<String>,
+    /// The scope a failed Current-edit acquisition tried, and whether the
+    /// failure is temporary (S3 C11 fu1).
+    pub(crate) studio_manual_failed: Option<(
+        Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
+        bool,
+    )>,
+    pub(crate) studio_manual_ready: Option<(
+        (u64, kinewright_project::bundle_records::ObjectRef),
+        Arc<kinewright_media::owned_io::PlaybackInputs>,
+    )>,
     choice: Option<Choice>,
     offer: Option<RescueProbe>,
     pub view: Option<PreparedView>,
@@ -132,6 +185,7 @@ pub(crate) struct Ja1Attachment {
     pub panel_open: bool,
     retention_lost: bool,
     originating_context: Arc<std::sync::atomic::AtomicBool>,
+    snapshot_readers: host_snapshot::SnapshotReaders,
     host: Option<host::HostAttachment>,
     host_history_digest: std::cell::RefCell<
         Option<(
@@ -158,6 +212,13 @@ impl Ja1Attachment {
     pub fn new(owner: Ja1EditingSession) -> Result<Self, BundleError> {
         let view = Some(PreparedView::prepare(owner.core())?);
         let mut this = Self {
+            imported_media: None,
+            studio_ready: None,
+            studio_versions_ready: None,
+            studio_edit_pending: false,
+            studio_error_ready: None,
+            studio_manual_failed: None,
+            studio_manual_ready: None,
             owner,
             message: "Studio editing. Saved means a verified durable save.".into(),
             choice: None,
@@ -171,6 +232,7 @@ impl Ja1Attachment {
             panel_open: true,
             retention_lost: false,
             originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            snapshot_readers: host_snapshot::SnapshotReaders::new()?,
             host: None,
             host_history_digest: std::cell::RefCell::new(None),
             known_agent_effects: std::collections::BTreeSet::new(),
@@ -290,8 +352,121 @@ impl Ja1Attachment {
             || self.frozen
             || self.choice.is_some()
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one attachment action dispatch and result boundary"
+    )]
     pub fn apply(&mut self, action: Action) -> Result<(), BundleError> {
         self.require_retention()?;
+        match &action {
+            Action::StudioManualPlayback(document) => {
+                // A failure is reported once, with the scope it tried: an
+                // unreported one would be retried every frame (S3 C10). While a
+                // host holds the bundle, the inputs come from a host lease on its
+                // current edit (S3 C11).
+                let scope = self.studio_playback_scope();
+                let attempted = scope.as_ref().ok().cloned();
+                let inputs = scope.and_then(|scope| {
+                    let inputs = if self.host.is_some() {
+                        self.studio_current_reader(&scope)?
+                            .playback_inputs(Arc::clone(document))?
+                    } else {
+                        self.owner
+                            .store()?
+                            .manual_playback_inputs(Arc::clone(document), &scope.1)?
+                    };
+                    Ok((scope, inputs))
+                });
+                match inputs {
+                    Ok((scope, inputs)) => {
+                        self.studio_manual_ready = Some((scope, inputs));
+                        self.panel_open = false;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        self.message = format!("Playback input unavailable: {error}");
+                        self.studio_error_ready = Some(self.message.clone());
+                        let temporary = matches!(
+                            error,
+                            BundleError::HistoryChanged
+                                | BundleError::Unsettled
+                                | BundleError::SaveInProgress
+                        );
+                        self.studio_manual_failed = Some((attempted, temporary));
+                        return Err(error);
+                    }
+                }
+            }
+            Action::StudioVersions => {
+                self.studio_versions_ready = Some(self.studio_versions()?);
+                return Ok(());
+            }
+            Action::StudioSelect(key) => match self.studio_context(key) {
+                Ok(context) => {
+                    self.studio_ready = Some(Arc::new(context));
+                    self.panel_open = false;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.message = format!("Version damaged or unavailable: {error}");
+                    self.studio_error_ready = Some(self.message.clone());
+                    return Err(error);
+                }
+            },
+            Action::StudioEditCopy(key) => {
+                self.studio_edit_pending = false;
+                let before = self.owner.core().actor_identity();
+                let prior_view = self.view.take();
+                let result = self.studio_edit_copy(key);
+                self.studio_edit_pending = result.is_ok()
+                    && self.view.as_ref().is_some_and(|view| {
+                        view.core.actor_identity() != before
+                            && serde_json::to_vec(&*view.document).is_ok_and(|bytes| {
+                                kinewright_media::sha256_bytes(&bytes) == key.document_hash
+                            })
+                    });
+                if self.view.is_none() && self.owner.core().actor_identity() == before {
+                    self.view = prior_view;
+                }
+                if let Err(error) = &result {
+                    self.message = format!(
+                        "The copy was not opened. Your selected version remains unchanged. {error}"
+                    );
+                    self.studio_error_ready = Some(self.message.clone());
+                }
+                return result;
+            }
+            _ => {}
+        }
+        if let Action::ImportMedia(path) = &action
+            && self.host.is_some()
+            && self.owner.association().is_none()
+        {
+            let result = self
+                .host
+                .as_mut()
+                .expect("attached host")
+                .import_unsaved_media(&mut self.owner, path);
+            return match result {
+                Ok((id, reply)) => {
+                    self.imported_media = Some(id);
+                    self.view = Some(PreparedView::prepare(self.owner.core())?);
+                    self.accept_host_reply(reply)
+                }
+                Err(error) => {
+                    if self
+                        .host
+                        .as_ref()
+                        .is_some_and(host::HostAttachment::unsaved_import_pending)
+                    {
+                        self.host_request_failed(&error);
+                    } else {
+                        self.message = error.to_string();
+                    }
+                    Err(error)
+                }
+            };
+        }
         if self.host.is_some() {
             return self.apply_host(action);
         }
@@ -409,7 +584,16 @@ impl Ja1Attachment {
         let view = match outcome {
             Ok(view) => view,
             Err(error) => {
-                self.host_request_failed(&error);
+                if self
+                    .host
+                    .as_ref()
+                    .is_some_and(|host| host.unknown_operation || host.pending_foreground())
+                {
+                    self.host_request_failed(&error);
+                } else {
+                    self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
+                    self.message = error.to_string();
+                }
                 return Err(error);
             }
         };
@@ -460,6 +644,142 @@ impl Ja1Attachment {
             .pending()
             .map_err(|e| e.to_string())
     }
+    /// The saved checkpoint Current-edit mappings are made on: the host's,
+    /// from its status, or this session's own (S3 C11 fu1).
+    pub(crate) fn studio_map_checkpoint(
+        &self,
+    ) -> Option<kinewright_project::bundle_records::ObjectRef> {
+        match &self.host {
+            Some(host) => host.status.manual_checkpoint.clone(),
+            None => self.owner.manual_checkpoint_ref().ok(),
+        }
+    }
+    /// The owner epoch and inputs Current-edit playback reads. While a host
+    /// holds the bundle, only its status names them; a change renews the lease.
+    pub(crate) fn studio_playback_scope(
+        &self,
+    ) -> Result<(u64, kinewright_project::bundle_records::ObjectRef), BundleError> {
+        match &self.host {
+            Some(host) => host
+                .status
+                .playback_scope
+                .clone()
+                .ok_or(BundleError::Unsettled),
+            None => Ok((
+                self.owner.store()?.owner_epoch(),
+                self.owner.current_inputs_ref().clone(),
+            )),
+        }
+    }
+    pub(crate) fn studio_current_reader(
+        &self,
+        scope: &(u64, kinewright_project::bundle_records::ObjectRef),
+    ) -> Result<kinewright_project::store::snapshot_reader::CurrentEditReader, BundleError> {
+        let host = self.host.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let path = self.project_path().ok_or(BundleError::HistoryChanged)?;
+        self.snapshot_readers.open_current(
+            &host.client,
+            &path,
+            Arc::downgrade(&self.originating_context),
+            scope,
+        )
+    }
+    pub(crate) fn studio_versions(
+        &self,
+    ) -> Result<Vec<kinewright_project::studio_records::SnapshotKey>, BundleError> {
+        if let Some(host) = &self.host {
+            let reply = host
+                .client
+                .request(kinewright_agent::writer_host::HostCommand::ListVersions)
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if let Some(error) = reply.error {
+                return Err(BundleError::Corrupt(error.message));
+            }
+            return Ok(reply.versions);
+        }
+        self.owner.studio_versions()
+    }
+    pub(crate) fn studio_project_id(
+        &self,
+    ) -> Result<kinewright_project::bundle_records::ProjectId, BundleError> {
+        // One source: while a host holds the bundle, only its authenticated
+        // status names the project, refreshed by every reply. First Save, Save
+        // As and rescue change it there; a launch-time copy would file B's
+        // notes under A (S3 C7 fix 1).
+        match &self.host {
+            Some(host) => host.status.project_id.clone().ok_or(BundleError::Unsettled),
+            None => self.owner.project_id(),
+        }
+    }
+    pub(crate) fn studio_context(
+        &self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<kinewright_project::studio_store::FrozenContext, BundleError> {
+        if self.host.is_some() {
+            return self.studio_snapshot_reader(key)?.frozen_context();
+        }
+        self.owner.frozen_context(key)
+    }
+    pub(crate) fn studio_snapshot_reader(
+        &self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<kinewright_project::store::snapshot_reader::HostSnapshotReader, BundleError> {
+        let host = self.host.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let path = self.project_path().ok_or(BundleError::HistoryChanged)?;
+        self.snapshot_readers.open(
+            &host.client,
+            &path,
+            Arc::downgrade(&self.originating_context),
+            key,
+        )
+    }
+    /// The occurrence lineage of one published version, read-only.
+    pub(crate) fn studio_lineage(
+        &self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<kinewright_project::bundle_records::LineageRecord, BundleError> {
+        if self.host.is_some() {
+            let reader = self.studio_snapshot_reader(key)?;
+            let lineage = reader.descriptor().lineage_ref.clone();
+            Ok((*reader
+                .read_record::<kinewright_project::bundle_records::LineageRecord>(&lineage)?)
+            .clone())
+        } else {
+            let snapshot = self.owner.read_snapshot(key)?;
+            Ok((*self
+                .owner
+                .store()?
+                .read_record::<kinewright_project::bundle_records::LineageRecord>(
+                    &snapshot.descriptor.lineage_ref,
+                )?)
+            .clone())
+        }
+    }
+    pub(crate) fn studio_edit_copy(
+        &mut self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<(), BundleError> {
+        let context = self.studio_context(key)?;
+        let descriptor = &context.snapshot.descriptor;
+        let checkpoint = if self.host.is_some() {
+            self.studio_snapshot_reader(key)?
+                .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                    &descriptor.checkpoint_ref,
+                )?
+        } else {
+            self.owner
+                .store()?
+                .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                    &descriptor.checkpoint_ref,
+                )?
+        };
+        self.apply(Action::PreviewRecovery(RecoverySelection::Checkpoint {
+            root: descriptor.checkpoint_ref.clone(),
+            branch: checkpoint.branch_id.clone(),
+        }))?;
+        self.apply(Action::OpenRecovery)
+    }
+
     pub fn host_client(&self) -> Option<kinewright_agent::writer_host::HostClient> {
         if self.retention_lost {
             return None;
@@ -482,10 +802,15 @@ impl Ja1Attachment {
                 .as_ref()
                 .is_some_and(host::HostAttachment::needs_manual_recovery)
         {
-            self.host
+            if let Err(error) = self
+                .host
                 .as_mut()
                 .expect("attached host")
-                .begin_manual_recovery(&mut self.owner)?;
+                .begin_manual_recovery(&mut self.owner)
+            {
+                self.host_request_failed(&error);
+                return Err(error);
+            }
             self.frozen = true;
             self.message = "Editing is read-only while accepted history is recovered.".into();
             return Ok(());
@@ -539,7 +864,7 @@ impl Ja1Attachment {
     )]
     fn accept_host_reply(
         &mut self,
-        reply: kinewright_agent::writer_host::HostReply,
+        mut reply: kinewright_agent::writer_host::HostReply,
     ) -> Result<(), BundleError> {
         if !reply.status.retention_proven
             || reply
@@ -551,6 +876,54 @@ impl Ja1Attachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         let host = self.host.as_mut().expect("attached host");
+        if reply.unsaved_inputs_refreshed && reply.error.is_none() {
+            self.imported_media = host.accept_unsaved_inputs()?;
+        }
+        if let Some(asset) = reply.owned_media.take() {
+            let media_edit = reply.owned_media_edit.take();
+            let is_import = media_edit.is_none();
+            if reply.error.is_some() || host.unknown_operation {
+                return Err(BundleError::HistoryChanged);
+            }
+            let cut = host.cut.as_ref().ok_or(BundleError::HistoryChanged)?;
+            let lease = reply
+                .manual_lease
+                .take()
+                .ok_or(BundleError::HistoryChanged)?;
+            let inputs = reply
+                .manual_inputs
+                .take()
+                .ok_or(BundleError::HistoryChanged)?;
+            let digest = lease.history_sha256.clone();
+            let endpoint = self.owner.manual_recovery_endpoint(cut, vec![])?;
+            let permit = endpoint.finish(lease, inputs, Arc::clone(&self.originating_context))?;
+            self.owner.finish_host_manual_recovery(&digest)?;
+            host.manual = Some(ManualProducerGate {
+                actor: self.owner.core().actor_identity(),
+                permit,
+            });
+            host.cut = None;
+            host.accept_status(reply.status);
+            host.manual
+                .as_ref()
+                .ok_or(BundleError::HistoryChanged)?
+                .send(Command::Do(media_edit.unwrap_or_else(|| {
+                    kinewright_core::Operation::AddAsset {
+                        asset: asset.clone(),
+                    }
+                })))
+                .map_err(|_| BundleError::HistoryChanged)?;
+            if is_import {
+                self.imported_media = Some(asset.id);
+            }
+            self.frozen = false;
+            self.message = if is_import {
+                format!("Imported {}. Saving is pending.", asset.name)
+            } else {
+                "Colour interpretation changed. Saving is pending.".into()
+            };
+            return Ok(());
+        }
         if let Some(committed) = &reply.switch_attachment {
             if reply.error.is_some()
                 && host.cut.as_ref().is_some_and(|cut| {
@@ -734,11 +1107,6 @@ impl Ja1Attachment {
     }
 
     pub fn close(&mut self) -> bool {
-        self.originating_context
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.retention_lost = true;
-        self.frozen = true;
-        let _ = self.owner.host_lost();
         if let Some(host) = &mut self.host {
             if host.recovery_running() {
                 let _ = host.poll(&mut self.owner);
@@ -747,8 +1115,17 @@ impl Ja1Attachment {
                     return false;
                 }
             }
-            host.close();
+            if !host.close() {
+                self.message = "The host is checking continuation readiness. This attachment and its source stay here until detach is confirmed.".into();
+                return false;
+            }
         }
+        self.snapshot_readers.revoke_all();
+        self.originating_context
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.retention_lost = true;
+        self.frozen = true;
+        let _ = self.owner.host_lost();
         match self.owner.close_originating_source() {
             Ok(true) => true,
             Ok(false) => {
@@ -763,10 +1140,80 @@ impl Ja1Attachment {
             }
         }
     }
+    pub(crate) fn continuation_pending(&self) -> bool {
+        self.host
+            .as_ref()
+            .is_some_and(host::HostAttachment::continuation_pending)
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 wires these controls into Studio; the hook uses the existing completed-work poll"
+    )]
+    pub(crate) fn request_orchestration(
+        &mut self,
+        command: kinewright_agent::writer_host::HostCommand,
+    ) -> Result<(), BundleError> {
+        self.host
+            .as_mut()
+            .ok_or(BundleError::HistoryChanged)?
+            .request_hook(command)
+    }
+    #[allow(dead_code, reason = "C6 consumes run, issuer and attention replies")]
+    pub(crate) fn take_orchestration_reply(
+        &mut self,
+    ) -> Option<kinewright_agent::writer_host::HostReply> {
+        self.host.as_mut()?.take_hook_reply()
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 owns the continuation UI and retains the issuer before the project view is dropped"
+    )]
+    pub(crate) fn continuation_issuer(&self) -> Option<kinewright_agent::writer_host::HostIssuer> {
+        self.host.as_ref()?.continuation_issuer()
+    }
 
     #[allow(clippy::too_many_lines)]
     fn apply_inner(&mut self, action: Action) -> Result<(), BundleError> {
         match action {
+            Action::StudioVersions
+            | Action::StudioManualPlayback(_)
+            | Action::StudioSelect(_)
+            | Action::StudioEditCopy(_) => {
+                return Err(BundleError::HistoryChanged);
+            }
+            Action::ChangeMediaInterpretation(operation) => {
+                let kinewright_core::Operation::SetAssetColorDescription { asset: id, .. } =
+                    operation.as_ref()
+                else {
+                    return Err(BundleError::Unsupported(
+                        "media interpretation operation".into(),
+                    ));
+                };
+                let mut document = self
+                    .owner
+                    .core()
+                    .export_history()
+                    .map_err(|_| BundleError::HistoryChanged)?
+                    .document;
+                let document = std::sync::Arc::make_mut(&mut document);
+                operation
+                    .apply(document)
+                    .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                let asset = document
+                    .media_pool
+                    .iter()
+                    .find(|asset| asset.id == *id)
+                    .ok_or(BundleError::HistoryChanged)?;
+                self.owner.apply_owned_media_interpretation(asset)?;
+                self.view = Some(PreparedView::prepare(self.owner.core())?);
+                self.message = "Colour interpretation changed.".into();
+            }
+            Action::ImportMedia(path) => {
+                let (asset, _) = self.owner.import_owned_media(&path)?;
+                self.imported_media = Some(asset.id);
+                self.view = Some(PreparedView::prepare(self.owner.core())?);
+                self.message = format!("Imported {}.", asset.name);
+            }
             Action::Save => {
                 if self
                     .owner

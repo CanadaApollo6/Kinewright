@@ -15,6 +15,7 @@ pub struct StorageLimits {
     pub graph_depth: u64,
     pub decoded_record_bytes: u64,
     pub metadata_bytes: u64,
+    pub decoder_bytes: u64,
     pub comments: u64,
     pub comment_text_bytes: u64,
     pub comment_points: u64,
@@ -37,6 +38,7 @@ impl Default for StorageLimits {
             graph_depth: 32,
             decoded_record_bytes: 64 << 20,
             metadata_bytes: 512 << 20,
+            decoder_bytes: 4 << 30,
             comments: 2_000,
             comment_text_bytes: 16 << 10,
             comment_points: 512,
@@ -62,6 +64,7 @@ impl StorageLimits {
             || self.graph_depth > ceiling.graph_depth
             || self.decoded_record_bytes > ceiling.decoded_record_bytes
             || self.metadata_bytes > ceiling.metadata_bytes
+            || self.decoder_bytes > ceiling.decoder_bytes
             || self.comments > ceiling.comments
             || self.comment_text_bytes > ceiling.comment_text_bytes
             || self.comment_points > ceiling.comment_points
@@ -109,6 +112,8 @@ pub struct StorageUsage {
     pub reserved_bytes: u64,
     pub reserved_copy_bytes: u64,
     pub decoded_bytes: u64,
+    /// Subset of `decoded_bytes` retained by cursors, format probing, and codecs.
+    pub decoder_bytes: u64,
     pub live_history_bytes: u64,
     pub objects: u64,
     pub edges: u64,
@@ -118,9 +123,16 @@ pub struct StorageUsage {
     pub peak_physical_bytes: u64,
     pub peak_reserved_bytes: u64,
     pub peak_decoded_bytes: u64,
+    pub peak_decoder_bytes: u64,
     pub peak_live_history_bytes: u64,
     pub damaged_accounting: bool,
     pub unsettled: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ReservationKind {
+    Record,
+    TransientDecoder,
 }
 
 pub struct StorageReservation<T = ()> {
@@ -128,6 +140,7 @@ pub struct StorageReservation<T = ()> {
     usage: Arc<Mutex<StorageUsage>>,
     bytes: u64,
     decoded: u64,
+    decoder: u64,
     history: u64,
     copy: bool,
     active: bool,
@@ -227,6 +240,52 @@ impl StorageReservation {
         free: u64,
         cleanup_only: bool,
     ) -> Result<Self, BundleError> {
+        Self::reserve_kind(
+            usage,
+            limits,
+            bytes,
+            decoded,
+            history,
+            copy,
+            free,
+            cleanup_only,
+            ReservationKind::Record,
+        )
+    }
+    pub(crate) fn reserve_decoder(
+        usage: &Arc<Mutex<StorageUsage>>,
+        limits: &StorageLimits,
+        decoded: u64,
+        free: u64,
+    ) -> Result<Self, BundleError> {
+        Self::reserve_kind(
+            usage,
+            limits,
+            0,
+            decoded,
+            0,
+            false,
+            free,
+            true,
+            ReservationKind::TransientDecoder,
+        )
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one ledger applies unchanged aggregate limits to typed record and decoder reservations"
+    )]
+    fn reserve_kind(
+        usage: &Arc<Mutex<StorageUsage>>,
+        limits: &StorageLimits,
+        bytes: u64,
+        decoded: u64,
+        history: u64,
+        copy: bool,
+        free: u64,
+        cleanup_only: bool,
+        kind: ReservationKind,
+    ) -> Result<Self, BundleError> {
         let mut state = usage
             .lock()
             .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
@@ -255,25 +314,43 @@ impl StorageReservation {
             .decoded_bytes
             .checked_add(decoded)
             .ok_or(BundleError::Capacity("decoded overflow"))?;
+        let codec_charge = if matches!(kind, ReservationKind::TransientDecoder) {
+            decoded
+        } else {
+            0
+        };
+        let codec_total = state
+            .decoder_bytes
+            .checked_add(codec_charge)
+            .ok_or(BundleError::Capacity("decoder overflow"))?;
+        let metadata_decoded =
+            decoded_total
+                .checked_sub(codec_total)
+                .ok_or(BundleError::Capacity(
+                    "decoder subset exceeds decoded bytes",
+                ))?;
         let history_total = state
             .live_history_bytes
             .checked_add(history)
             .ok_or(BundleError::Capacity("history overflow"))?;
-        if reserved > free {
+        if matches!(kind, ReservationKind::Record) && reserved > free {
             return Err(BundleError::Capacity("disk reserve"));
         }
         if physical > allowance {
             return Err(BundleError::Capacity("physical overlap bytes"));
         }
-        if decoded > limits.decoded_record_bytes {
+        if matches!(kind, ReservationKind::Record) && decoded > limits.decoded_record_bytes {
             return Err(BundleError::Capacity("decoded record bytes"));
         }
         if state
             .metadata_bytes
-            .checked_add(decoded_total)
+            .checked_add(metadata_decoded)
             .is_none_or(|n| n > limits.metadata_bytes)
         {
             return Err(BundleError::Capacity("metadata and decoded bytes"));
+        }
+        if codec_total > limits.decoder_bytes {
+            return Err(BundleError::Capacity("decoder bytes"));
         }
         if history_total > limits.live_history_bytes {
             return Err(BundleError::Capacity("live history bytes"));
@@ -311,15 +388,18 @@ impl StorageReservation {
         state.reserved_bytes = reserved;
         state.reserved_copy_bytes = reserved_copies;
         state.decoded_bytes = decoded_total;
+        state.decoder_bytes = codec_total;
         state.live_history_bytes = history_total;
         state.peak_live_history_bytes = state.peak_live_history_bytes.max(history_total);
         state.peak_reserved_bytes = state.peak_reserved_bytes.max(reserved);
         state.peak_decoded_bytes = state.peak_decoded_bytes.max(decoded_total);
+        state.peak_decoder_bytes = state.peak_decoder_bytes.max(codec_total);
         Ok(Self {
             value: Some(()),
             usage: Arc::clone(usage),
             bytes,
             decoded,
+            decoder: codec_charge,
             history,
             copy,
             active: true,
@@ -340,6 +420,7 @@ impl StorageReservation {
             usage: Arc::clone(&self.usage),
             bytes: self.bytes,
             decoded: self.decoded,
+            decoder: self.decoder,
             history: self.history,
             copy: self.copy,
             active: self.active,
@@ -404,6 +485,7 @@ impl<T> StorageReservation<T> {
             usage: Arc::clone(&self.usage),
             bytes: self.bytes,
             decoded: self.decoded,
+            decoder: self.decoder,
             history: self.history,
             copy: self.copy,
             active: self.active,
@@ -431,9 +513,10 @@ impl<T> Drop for StorageReservation<T> {
             return;
         }
         if let Ok(mut state) = self.usage.lock() {
-            if let (Some(bytes), Some(decoded), Some(history), Some(copies)) = (
+            if let (Some(bytes), Some(decoded), Some(decoder), Some(history), Some(copies)) = (
                 state.reserved_bytes.checked_sub(self.bytes),
                 state.decoded_bytes.checked_sub(self.decoded),
+                state.decoder_bytes.checked_sub(self.decoder),
                 state.live_history_bytes.checked_sub(self.history),
                 state
                     .reserved_copy_bytes
@@ -441,11 +524,106 @@ impl<T> Drop for StorageReservation<T> {
             ) {
                 state.reserved_bytes = bytes;
                 state.decoded_bytes = decoded;
+                state.decoder_bytes = decoder;
                 state.live_history_bytes = history;
                 state.reserved_copy_bytes = copies;
             } else {
                 state.damaged_accounting = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s3_decoder_budget_exact_limit_one_beyond_is_atomic_and_separate() {
+        let limits = StorageLimits::default();
+        assert_eq!(limits.metadata_bytes, 512 << 20);
+        assert_eq!(limits.decoded_record_bytes, 64 << 20);
+        let usage = Arc::new(Mutex::new(StorageUsage {
+            metadata_bytes: limits.metadata_bytes,
+            ..StorageUsage::default()
+        }));
+        let exact = StorageReservation::reserve_decoder(&usage, &limits, limits.decoder_bytes, 0)
+            .expect("C0_DECODER_EXACT_LIMIT_ADMITTED");
+        let before = usage.lock().unwrap().clone();
+        assert_eq!(before.decoded_bytes, limits.decoder_bytes);
+        assert_eq!(before.decoder_bytes, limits.decoder_bytes);
+        assert_eq!(before.reserved_bytes, 0, "C0_DECODER_IS_NOT_DISK_BYTES");
+        assert!(
+            matches!(
+                StorageReservation::reserve_decoder(&usage, &limits, 1, 0),
+                Err(BundleError::Capacity("decoder bytes"))
+            ),
+            "C0_DECODER_ONE_BEYOND_REFUSED"
+        );
+        assert_eq!(*usage.lock().unwrap(), before, "C0_DECODER_REFUSAL_ATOMIC");
+        assert!(
+            matches!(
+                StorageReservation::reserve(&usage, &limits, 0, 1, 0, false, u64::MAX),
+                Err(BundleError::Capacity("metadata and decoded bytes"))
+            ),
+            "C0_METADATA_LIMIT_PRESERVED"
+        );
+        assert!(
+            matches!(
+                StorageReservation::reserve(
+                    &usage,
+                    &limits,
+                    0,
+                    limits.decoded_record_bytes + 1,
+                    0,
+                    false,
+                    u64::MAX
+                ),
+                Err(BundleError::Capacity("decoded record bytes"))
+            ),
+            "C0_RECORD_LIMIT_PRESERVED"
+        );
+        drop(exact);
+        let after = usage.lock().unwrap();
+        assert_eq!(after.decoder_bytes, 0);
+        assert_eq!(after.decoded_bytes, 0);
+        assert!(!after.damaged_accounting);
+    }
+
+    #[test]
+    fn s3_decoder_budget_hold_map_and_final_resource_drop_retain_same_charge() {
+        struct Resource {
+            usage: Arc<Mutex<StorageUsage>>,
+        }
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                let usage = self.usage.lock().unwrap();
+                assert_eq!(
+                    usage.decoder_bytes, 123,
+                    "C0_DECODER_CHARGE_THROUGH_RESOURCE_DROP"
+                );
+                assert_eq!(usage.decoded_bytes, 130);
+            }
+        }
+        let limits = StorageLimits::default();
+        let usage = Arc::new(Mutex::new(StorageUsage::default()));
+        let disk = StorageReservation::reserve(&usage, &limits, 1024, 7, 0, false, 1024).unwrap();
+        let decoder = StorageReservation::reserve_decoder(&usage, &limits, 123, 0).unwrap();
+        let resource = decoder.hold(Resource {
+            usage: Arc::clone(&usage),
+        });
+        let mapped = resource.map(|resource| (resource, 17));
+        assert_eq!(usage.lock().unwrap().decoder_bytes, 123);
+        assert_eq!(
+            usage.lock().unwrap().reserved_bytes,
+            1024,
+            "C0_DECODER_IGNORES_DISK_RESERVATION"
+        );
+        drop(mapped);
+        assert_eq!(usage.lock().unwrap().decoder_bytes, 0);
+        assert_eq!(usage.lock().unwrap().decoded_bytes, 7);
+        drop(disk);
+        assert_eq!(usage.lock().unwrap().decoded_bytes, 0);
+        assert!(!usage.lock().unwrap().damaged_accounting);
     }
 }

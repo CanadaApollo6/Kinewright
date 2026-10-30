@@ -1,0 +1,1 @@
+{"actual":false,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"pass_control","evidence_class":"control","expected":false,"id":"unsupported-code-parse-refused","observation":19,"oracle":"false","oracle_pointer":"","passed":true,"pointer":"/loaded","positive_control":null}

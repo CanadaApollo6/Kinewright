@@ -1,0 +1,100 @@
+{
+  "binary": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/debug/kinewright-app",
+  "binary_sha256": "c07e45649faa70388d4885004f66821d2330e63de7652a417305029df8ee6ef2",
+  "screenshots": [
+    {
+      "path": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja1-s3-c2/studio-1232x862.png",
+      "dimensions": [
+        1232,
+        862
+      ],
+      "sha256": "64626a5a58c9de94d765448b6d4274a28b9ecd1bd0b6a7078edfc8b111c24da0"
+    },
+    {
+      "path": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja1-s3-c2/studio-1600x1000.png",
+      "dimensions": [
+        1600,
+        1000
+      ],
+      "sha256": "0cb85fe6cf6c12eae1abdad145f18e09de50dfad179990388f5653a3f16cacfa"
+    },
+    {
+      "path": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja1-s3-c2/studio-600x900.png",
+      "dimensions": [
+        600,
+        900
+      ],
+      "sha256": "88f44f7f0de6159a7c1514ba430fd1476d67239d6b75b7d65d6fb33b699697e2"
+    }
+  ],
+  "fixture_sha256": {
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright": "4f494528dd48543765f921bf7e873b20d3863ece689b18096d73915e829b17cf",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright": "59c99ad350f209c4071010b98d2276cba1c146f5599207443a39b2abfd67d752",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/recovery/inventory": "4c7b5d7b2112318699c2eb6aeb262d413c80004159bdaad605c8a081d6807f29",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/3ff72d6e50714d7e66479400cca4830b46714c936c99e26e6633b6fae0e02876": "3ff72d6e50714d7e66479400cca4830b46714c936c99e26e6633b6fae0e02876",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/a014cd75d5b620a07a4506d152d7d19e99276ce5f2b35aead5cd9ff4332a3285": "a014cd75d5b620a07a4506d152d7d19e99276ce5f2b35aead5cd9ff4332a3285",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/78c528f7e12267db6c7f568babeea25768cddeede7de281526be5823b3d98d6a": "78c528f7e12267db6c7f568babeea25768cddeede7de281526be5823b3d98d6a",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/be3f6d7fc0df5c44092b7abdf56dc7bd276998c25b1948d77af94ad1eb5850d9": "be3f6d7fc0df5c44092b7abdf56dc7bd276998c25b1948d77af94ad1eb5850d9",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/0bf2efe48ca0d3bb45d7ab87a228d77cca7f7056f76e2874af69702d9d64e4f5": "0bf2efe48ca0d3bb45d7ab87a228d77cca7f7056f76e2874af69702d9d64e4f5",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/8916cd7d60ebac112ae79fff14579bb886ffcf92ad7c48fe7103d46d38785b75": "8916cd7d60ebac112ae79fff14579bb886ffcf92ad7c48fe7103d46d38785b75",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/a6556527c02d148027517d67c2ff5379f5237929e31677874a6b8725651972ff": "a6556527c02d148027517d67c2ff5379f5237929e31677874a6b8725651972ff",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/06e1c19b3c3ec4ef3f04f7bb3dc609a83d61dd995ec3c1245c19389ab2536292": "06e1c19b3c3ec4ef3f04f7bb3dc609a83d61dd995ec3c1245c19389ab2536292",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/aca725d08cbea7cc3ccdb9009bf292f155f1df9629ef26edacc4d9c03d19400a": "aca725d08cbea7cc3ccdb9009bf292f155f1df9629ef26edacc4d9c03d19400a",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/806ed102312a42132a9068da75e13947086df1b50ed0dc56033bc5be8588b38a": "806ed102312a42132a9068da75e13947086df1b50ed0dc56033bc5be8588b38a",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/d3baba357678c02a7d2be9fbac518e6dc5637f64d4773b1982963774af89b2d2": "d3baba357678c02a7d2be9fbac518e6dc5637f64d4773b1982963774af89b2d2",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/16e6dec70e7cfee1db536a375ead54fa3d70caace54dab5cd470b67c3d561607": "16e6dec70e7cfee1db536a375ead54fa3d70caace54dab5cd470b67c3d561607",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/633c5514ea87aacaeb91e894893cf8d4d68644e1d2a8cf1856d48b7fc8abbbf5": "633c5514ea87aacaeb91e894893cf8d4d68644e1d2a8cf1856d48b7fc8abbbf5",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/092d5cb14e3fe0096f063e348b802852b0080da685ad8e2a1962abf0067db82d": "092d5cb14e3fe0096f063e348b802852b0080da685ad8e2a1962abf0067db82d",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/711b2e81f734e103b5ad213c97f1a007e4b063e9bde8117c78054982b0f1e8f3": "711b2e81f734e103b5ad213c97f1a007e4b063e9bde8117c78054982b0f1e8f3",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/5cc5785295465fe98c9f58d43c593c9f0b6d26e3e3efde109640af49e5e3d384": "5cc5785295465fe98c9f58d43c593c9f0b6d26e3e3efde109640af49e5e3d384",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/968c54f0f2c6ff210da9b0092a5d4de586d524068cca4642ae83d97c73a68352": "968c54f0f2c6ff210da9b0092a5d4de586d524068cca4642ae83d97c73a68352",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/13974e13c4cc84f7e5019a543756d7516751b734fd31b09c9572e55913fd58df": "13974e13c4cc84f7e5019a543756d7516751b734fd31b09c9572e55913fd58df",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/a32367c8e00174d8d50c430b5c2ec5fc2a6526bad02778b201f045458c67f853": "a32367c8e00174d8d50c430b5c2ec5fc2a6526bad02778b201f045458c67f853",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/0525aca6fc28897843a4caae88d7627559d9ca458a87dc1856f7283e1791f57f": "0525aca6fc28897843a4caae88d7627559d9ca458a87dc1856f7283e1791f57f",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/ee569102baacd71ce4a235df675271532732df721bc19a2db8245be8ee6bbdbd": "ee569102baacd71ce4a235df675271532732df721bc19a2db8245be8ee6bbdbd",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/f604b06414ed5bc30effe2c3c21df19f411854ab259423765c733645360d6a34": "f604b06414ed5bc30effe2c3c21df19f411854ab259423765c733645360d6a34",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/0d778d274bdf280bee10f7e25bbb8428f189cf2349be7a63475d9ca6e4c2791a": "0d778d274bdf280bee10f7e25bbb8428f189cf2349be7a63475d9ca6e4c2791a",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/00beb31193b77335f84f6efe5ce7ff1822cf8bcaba67e3b641917de48db052e5": "00beb31193b77335f84f6efe5ce7ff1822cf8bcaba67e3b641917de48db052e5",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/b5e18f8b1faf7c52ef9018bf85bed0f75e24d9425e1b84506bf054aa4871940f": "b5e18f8b1faf7c52ef9018bf85bed0f75e24d9425e1b84506bf054aa4871940f",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/7a2b705c942f756787fe88ae6dc6c361cbad90f2902443144eb4f6beeb275ef1": "7a2b705c942f756787fe88ae6dc6c361cbad90f2902443144eb4f6beeb275ef1",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/227442f4502dd625142f8efbe4b9dbda4ade07b3c6a769706d8a81af60e0611a": "227442f4502dd625142f8efbe4b9dbda4ade07b3c6a769706d8a81af60e0611a",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/ba7acb54031c2f93707ba6ae41fcdda8d00b8f8e4ead9b6feb322b2d1eaf2d4b": "ba7acb54031c2f93707ba6ae41fcdda8d00b8f8e4ead9b6feb322b2d1eaf2d4b",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/a4eecfa771671ecc4d0d0a7847bbbd295aba85ea3cb940920a9c5721032495ec": "a4eecfa771671ecc4d0d0a7847bbbd295aba85ea3cb940920a9c5721032495ec",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/e8b105b683bebef0c98516542e03c098c4fe3574879b1b39dfbb75cca136526f": "e8b105b683bebef0c98516542e03c098c4fe3574879b1b39dfbb75cca136526f",
+    "target/ja1-s3-c2/fixtures/c0-blue.kinewright-assets/studio/objects/007ef081086aa89a2a51da64ac9bb5b5f4e55cd50988f5bac04354c5a256fd0e": "007ef081086aa89a2a51da64ac9bb5b5f4e55cd50988f5bac04354c5a256fd0e",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/recovery/inventory": "a9b291bd271c5dd4636582a0e4e77f0ce1db8df54cbf64429d0366de34e9e07d",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/aa31bdd2c4568fd19e74da134147301c029e42b50d61e66b3b3b2159790e9d95": "aa31bdd2c4568fd19e74da134147301c029e42b50d61e66b3b3b2159790e9d95",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/eaf453d692c40f12d511fdb1119a274dde03d98d7b290d0d24bd108c0413cbcf": "eaf453d692c40f12d511fdb1119a274dde03d98d7b290d0d24bd108c0413cbcf",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/0bd7782da42a804b97af6f9c75582b0337bd35dd4bd848eab016aeb836b51523": "0bd7782da42a804b97af6f9c75582b0337bd35dd4bd848eab016aeb836b51523",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/a937e71301e85b656c0631cd7932696bce05e0d9dfa7ea01c4323540f963a809": "a937e71301e85b656c0631cd7932696bce05e0d9dfa7ea01c4323540f963a809",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/6f6bb595468e0e2ce53d0b0039615a1e993c61305463feff4e71bc2208e92db4": "6f6bb595468e0e2ce53d0b0039615a1e993c61305463feff4e71bc2208e92db4",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/0ccfe7328fd641d3b660b79b269b95a8899be46450d254c0cd22a0160e348e80": "0ccfe7328fd641d3b660b79b269b95a8899be46450d254c0cd22a0160e348e80",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/bb91dca3e68fa94d898f815f7abde2e38e3c73fea0c892fdfaf86c528eb70f9c": "bb91dca3e68fa94d898f815f7abde2e38e3c73fea0c892fdfaf86c528eb70f9c",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/2e43e0070dcac055f9c6c6b17d165dac2ba5587f552928c9aef93c84847ca3a6": "2e43e0070dcac055f9c6c6b17d165dac2ba5587f552928c9aef93c84847ca3a6",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/f7ff13d20afab88486ed16b186c88391a6c49d58aa4e1641c859ebf7d17890ac": "f7ff13d20afab88486ed16b186c88391a6c49d58aa4e1641c859ebf7d17890ac",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/47eeb24fda82fc6b9b9b6e5a9844cb63e847806bcd08408141bfd261b6e9b43c": "47eeb24fda82fc6b9b9b6e5a9844cb63e847806bcd08408141bfd261b6e9b43c",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/afd5986ee22e1f42884c894c7216c2fbf35a797e91b96cbda84d19dc2f761ea7": "afd5986ee22e1f42884c894c7216c2fbf35a797e91b96cbda84d19dc2f761ea7",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/a744e2f85ffdcd2bd0413499bcd16d5fc05723c39881bcd102946ba7fe1ccd9e": "a744e2f85ffdcd2bd0413499bcd16d5fc05723c39881bcd102946ba7fe1ccd9e",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/ddeb426dc0e15bf6ff6bdf3e41ce300ef5f9f9036728661bff2a373e16c3d525": "ddeb426dc0e15bf6ff6bdf3e41ce300ef5f9f9036728661bff2a373e16c3d525",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/940b0c154dfdc3f91211acdbc5ecb60205327dfd497fe96e6188f72589daba27": "940b0c154dfdc3f91211acdbc5ecb60205327dfd497fe96e6188f72589daba27",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/362645b6f092f56150071a0fba0507867c63f3483db046f972c8ab97544f45a0": "362645b6f092f56150071a0fba0507867c63f3483db046f972c8ab97544f45a0",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/004e71a9ce5b2227f183e7247a439a5b7bd615391a110f946c0316ecc4f42b06": "004e71a9ce5b2227f183e7247a439a5b7bd615391a110f946c0316ecc4f42b06",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/be0b4cb41125195fc46031af82a2ed50984f8eab860b6ce8e589eee8b86b3a2f": "be0b4cb41125195fc46031af82a2ed50984f8eab860b6ce8e589eee8b86b3a2f",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/2d38dbf6074b9a8010b502c47cb67f31e5ba9e763422718bcd9e75446c06e0d8": "2d38dbf6074b9a8010b502c47cb67f31e5ba9e763422718bcd9e75446c06e0d8",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/653ac1333b017ae3a0edf0f65e1d52c72c2c914ee598e4bb9b589a557b4e7955": "653ac1333b017ae3a0edf0f65e1d52c72c2c914ee598e4bb9b589a557b4e7955",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/6a6584b6f18b6701a66c5b989c5e6b7a4638eae59c080a50bbb56f8ab61af0bb": "6a6584b6f18b6701a66c5b989c5e6b7a4638eae59c080a50bbb56f8ab61af0bb",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/ec9e01cf250f571b7447c88dd87bde17169e53afb4dfb8373df74939709011a9": "ec9e01cf250f571b7447c88dd87bde17169e53afb4dfb8373df74939709011a9",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/e4581c15171ef437753a2c2fa7c350fc6158c8dac73f2cecdaec2d89ec15547c": "e4581c15171ef437753a2c2fa7c350fc6158c8dac73f2cecdaec2d89ec15547c",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/426e29f6ec78ad6c840639f8172fb4b5dae1cbf47ee56ee8e3be62a48dd4725d": "426e29f6ec78ad6c840639f8172fb4b5dae1cbf47ee56ee8e3be62a48dd4725d",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/48d8e6253dca6ce518b5e9488c1df07b0fae27fb907ed36f225dcd2e83854d48": "48d8e6253dca6ce518b5e9488c1df07b0fae27fb907ed36f225dcd2e83854d48",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/bbc8232da4b7cda0fab971e03584c84ab7ad4175a73594b4d00d24552775d55f": "bbc8232da4b7cda0fab971e03584c84ab7ad4175a73594b4d00d24552775d55f",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/1ff05f4bbb99bc21dfb5000d130ff62ae0722891a9b69ed890a17775f0c5ea14": "1ff05f4bbb99bc21dfb5000d130ff62ae0722891a9b69ed890a17775f0c5ea14",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/6bea0f014ddbb7da77142eff80e344aa0933ed660c0984b7bd3eeafa0e15709b": "6bea0f014ddbb7da77142eff80e344aa0933ed660c0984b7bd3eeafa0e15709b",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/47895d3b8d6e381acada00e3ff1dc136d4b1412b3522da544a2734667949f5b7": "47895d3b8d6e381acada00e3ff1dc136d4b1412b3522da544a2734667949f5b7",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/d29fac80ea181a71d1db55f5bca6f4534339d184290f0d9bdd40faf355f167ae": "d29fac80ea181a71d1db55f5bca6f4534339d184290f0d9bdd40faf355f167ae",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/0c377c9937cffe20f05b71bc1dcedf55cc517a826e9deb33ac94b5d777627dc7": "0c377c9937cffe20f05b71bc1dcedf55cc517a826e9deb33ac94b5d777627dc7",
+    "target/ja1-s3-c2/fixtures/c0-red.kinewright-assets/studio/objects/8ae3797b5507c6981a7b90a79f5d47c991e6f0df5e1c08a34c72bcdb934f3346": "8ae3797b5507c6981a7b90a79f5d47c991e6f0df5e1c08a34c72bcdb934f3346"
+  }
+}

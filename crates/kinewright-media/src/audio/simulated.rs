@@ -13,7 +13,7 @@ use std::{
 
 use rtrb::Consumer;
 
-use super::{AudioDiagnostics, render_output};
+use super::{AudioDiagnostics, render_authorized_output};
 
 pub(crate) const RATE: u32 = 48_000;
 pub(crate) const CHANNELS: u16 = 2;
@@ -37,6 +37,7 @@ struct Shared {
 }
 
 struct Stream {
+    authority: Option<kinewright_core::LegacyMediaGrant>,
     id: u64,
     consumer: Consumer<f32>,
     position: Arc<AtomicU64>,
@@ -91,13 +92,14 @@ impl SimulatedAudio {
         let channels = usize::from(CHANNELS);
         let mut output = vec![0.0_f32; frames * channels];
         let gain = stream.gain.load(Ordering::Relaxed);
-        render_output(
+        render_authorized_output(
             &mut stream.consumer,
             &mut output,
             channels,
             &stream.position,
             gain,
             &stream.diagnostics,
+            stream.authority.as_ref(),
         );
         if let Some((pacer, clock)) = pacer.as_mut() {
             let missed = pacer.finish(clock());
@@ -120,6 +122,7 @@ impl SimulatedAudio {
         *lock(&self.0.frozen_until) = Some(Instant::now() + duration);
     }
 
+    #[cfg(test)]
     pub(super) fn attach(
         &self,
         consumer: Consumer<f32>,
@@ -127,8 +130,25 @@ impl SimulatedAudio {
         gain: Arc<AtomicI32>,
         diagnostics: Arc<AudioDiagnostics>,
     ) -> SimulatedOutput {
+        self.attach_with_authority(
+            consumer,
+            position,
+            gain,
+            diagnostics,
+            crate::locator::capture(),
+        )
+    }
+    pub(super) fn attach_with_authority(
+        &self,
+        consumer: Consumer<f32>,
+        position: Arc<AtomicU64>,
+        gain: Arc<AtomicI32>,
+        diagnostics: Arc<AudioDiagnostics>,
+        authority: Option<kinewright_core::LegacyMediaGrant>,
+    ) -> SimulatedOutput {
         let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
         *lock(&self.0.stream) = Some(Stream {
+            authority,
             id,
             consumer,
             position,
@@ -264,6 +284,7 @@ impl Drop for SimulatedOutput {
 
 #[cfg(test)]
 mod tests {
+    use super::super::render_output;
     use rtrb::RingBuffer;
 
     use super::{super::BUFFER_SECONDS, super::LIVE_FILL_MILLISECONDS, *};

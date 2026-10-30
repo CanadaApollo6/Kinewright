@@ -57,7 +57,7 @@ use kinewright_core::{
     map_frames_with_rounding, map_source_range_to_project, project_format_version,
 };
 use kinewright_media::{
-    FfmpegMediaEngine,
+    SessionMedia,
     au6_sources::{au6_scenario_sources, au6_stamp_on_project_grid},
     cc7_sources::{
         cc7_camera_source, cc7_log_source, cc7_tracked_source, write_log_like_inverse_cube,
@@ -2519,7 +2519,7 @@ fn cc7_timeline_document(assets: Vec<MediaAsset>) -> Result<Document, EvalError>
 
 /// Probe every generated CC7 source, alias it, and build its document.
 fn cc7_fixture_from_sources(
-    media: &Arc<FfmpegMediaEngine>,
+    media: &Arc<SessionMedia>,
     sources: &[(&str, &GeneratedMedia)],
 ) -> Result<(Document, FixtureContext), EvalError> {
     let mut assets = Vec::with_capacity(sources.len());
@@ -2909,7 +2909,7 @@ fn audio_workflow_suite() -> Vec<EvalDefinition> {
 /// Probe every generated AU6 source, stamp it onto the project grid, and
 /// build the scenario document the same way `au6_agent_scene` does.
 fn au6_fixture_from_sources(
-    media: &Arc<FfmpegMediaEngine>,
+    media: &Arc<SessionMedia>,
     scenario: Au6Scenario,
 ) -> Result<(Document, FixtureContext, Vec<GeneratedMedia>), EvalError> {
     let spec = au6_spec(scenario);
@@ -4827,7 +4827,7 @@ fn fixture_distinct_timeline(
     PreparedFixture::new(document, media, context, None, resources)
 }
 
-fn eval_engine() -> Arc<FfmpegMediaEngine> {
+fn eval_engine() -> Arc<SessionMedia> {
     Arc::new(test_engine("KINEWRIGHT_EVAL_DATA_DIR"))
 }
 
@@ -4896,11 +4896,7 @@ fn patterned_speech(
     )
 }
 
-fn probe_named(
-    media: &FfmpegMediaEngine,
-    path: &Path,
-    name: &str,
-) -> Result<MediaAsset, EvalError> {
+fn probe_named(media: &SessionMedia, path: &Path, name: &str) -> Result<MediaAsset, EvalError> {
     let mut asset = media
         .probe(path)
         .map_err(|error| EvalError::Fixture(error.to_string()))?;
@@ -8392,7 +8388,7 @@ mod tests {
     /// generated raster (~11 s on the software lane).
     ///
     /// Ignored for the same reason every other fixture-build test in this file
-    /// is: it constructs a real `FfmpegMediaEngine`, and this binary carries
+    /// is: it constructs a real `SessionMedia`, and this binary carries
     /// none otherwise. The engine's process-exit teardown raises the known
     /// SIGSEGV that `tests/mcp_server.rs` already lives with, *after* every
     /// test has reported ok, which would make the default lane red on a

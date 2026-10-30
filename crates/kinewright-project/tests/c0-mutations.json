@@ -1,0 +1,348 @@
+[
+  {
+    "id": "fingerprint-digest",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            && asset.source_fingerprint.content_sha256.as_deref()\n                == Some(self.object.sha256.as_str())\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_SOURCE_DIGEST_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "fingerprint-length",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            && asset.source_fingerprint.byte_len == Some(self.object.byte_length)\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_SOURCE_LENGTH_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "document-interpretation",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            && interpretation.matches_asset(asset)\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_SOURCE_INTERPRETATION_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "probe-origin",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            && self.audio == selected(probe.audio_stream)?\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_PROBE_ORIGIN_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "unknown-video-profile",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "        if video {\n            kinewright_core::classify_source_with_assumption(\n                &self.effective_color,\n                self.source_profile_assumption,\n            )\n            .map_err(|error| {\n                BundleError::Unsupported(format!(\"unusable video colour interpretation: {error:?}\"))\n            })?;\n        }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_UNKNOWN_VIDEO_PROFILE_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "table-source-binding",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "        if source.record_kind != RecordKind::OwnedMedia\n            || self.source_sha256 != source.sha256\n            || self.source_length != source.byte_length\n",
+        "new": "        if false\n"
+      }
+    ],
+    "expected_panic": "C0_CONFLICTING_TABLE_BINDING_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "import-short-read",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_import_refuses_short_growing_and_overflow_without_leaked_charges",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "        reader.read_exact(&mut buffer[..size])?;",
+        "new": "        let _ = reader.read(&mut buffer[..size])?;"
+      }
+    ],
+    "expected_panic": "C0_IMPORT_SHORT_READ_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs",
+    "panic_anchor": "            assert!(\n                owner\n                    .store_mut()\n                    .admit_measured_media(&mut bytes.as_slice(), length)\n                    .is_err(),\n                \"{marker}\"\n            );"
+  },
+  {
+    "id": "import-growth",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_import_refuses_short_growing_and_overflow_without_leaked_charges",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "    if reader.read(&mut extra)? != 0 {\n        return Err(BundleError::Corrupt(\"source grew during import\".into()));\n    }\n",
+        "new": "    let _ = reader.read(&mut extra)?;\n"
+      }
+    ],
+    "expected_panic": "C0_IMPORT_GROWTH_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs",
+    "panic_anchor": "            assert!(\n                owner\n                    .store_mut()\n                    .admit_measured_media(&mut bytes.as_slice(), length)\n                    .is_err(),\n                \"{marker}\"\n            );"
+  },
+  {
+    "id": "source-pin-lifetime",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            Arc::new((pin, table)),",
+        "new": "            { drop(pin); Arc::new(table) },"
+      }
+    ],
+    "expected_panic": "C0_SOURCE_PIN_THROUGH_LAST_CURSOR",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "manifest-table-edge",
+    "file": "crates/kinewright-project/src/store.rs",
+    "selector": "s3_manifest_chunk_table_dependency_survives_collection",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            .flat_map(|e| std::iter::once(e.object.clone()).chain(e.dependencies.clone()))",
+        "new": "            .map(|e| e.object.clone())"
+      }
+    ],
+    "expected_panic": "C0_MANIFEST_TABLE_EDGE_PRESERVED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "import-nofollow",
+    "file": "crates/kinewright-project/src/editing_session/owned_media.rs",
+    "selector": "s3_nofollow_import_refuses_alias_and_preserves_document",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_NOFOLLOW_SOURCE_REFUSED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "historical-complete-identity",
+    "file": "crates/kinewright-project/src/bundle_commit.rs",
+    "selector": "s3_historical_same_asset_id_preserves_complete_input_identity",
+    "target": "lib",
+    "edits": [
+      {
+        "old": ".any(|a| entry.matches_media_asset(a))",
+        "new": ".any(|a| entry.entry_id == format!(\"media:{}\", a.id.0))"
+      }
+    ],
+    "expected_panic": "C0_HISTORICAL_COMPLETE_IDENTITY_PRESERVED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "unsaved-admission-before-install",
+    "file": "crates/kinewright-project/src/editing_session/owned_media.rs",
+    "selector": "s3_unsaved_source_capacity_refuses_before_document_install",
+    "target": "lib",
+    "edits": [
+      {
+        "old": "        let mut transfer = if self.host_attached && self.destination.is_none() {\n            let source = self\n                .source\n                .as_mut()\n                .ok_or(BundleError::HistoryBarrierInvariant)?;\n            let descriptor = source.retain_borrowed_source(\n                std::slice::from_ref(&prepared.inputs_ref),\n                after\n                    .encoded_bytes()\n                    .map_err(crate::bundle::history_error)?,\n            )?;\n            let admitted: Result<super::PreparedHostAttachment, BundleError> = (|| {\n                source.ensure_borrowed_snapshot(descriptor.admission_id(), &after)?;\n                let service = source.borrowed_source_service(&descriptor)?;\n                Ok(super::PreparedHostAttachment {\n                    named_path: None,\n                    expected_root_sha256: None,\n                    project_id: None,\n                    history: after.clone(),\n                    inputs: prepared.inputs_ref.clone(),\n                    source: Some(descriptor.clone()),\n                    source_service: Some(service),\n                })\n            })();\n            if admitted.is_err() {\n                source.release_unpublished_borrowed_source(descriptor.admission_id());\n            }\n            Some(admitted?)\n        } else {\n            None\n        };\n",
+        "new": "        let mut transfer: Option<super::PreparedHostAttachment> = None;\n"
+      },
+      {
+        "old": "        };\n        self.inputs.clone_from(&prepared.inputs_ref);\n        self.pending_import_source = transfer;\n",
+        "new": "        };\n        transfer = if self.host_attached && self.destination.is_none() {\n            let source = self\n                .source\n                .as_mut()\n                .ok_or(BundleError::HistoryBarrierInvariant)?;\n            let descriptor = source.retain_borrowed_source(\n                std::slice::from_ref(&prepared.inputs_ref),\n                after\n                    .encoded_bytes()\n                    .map_err(crate::bundle::history_error)?,\n            )?;\n            let admitted: Result<super::PreparedHostAttachment, BundleError> = (|| {\n                source.ensure_borrowed_snapshot(descriptor.admission_id(), &after)?;\n                let service = source.borrowed_source_service(&descriptor)?;\n                Ok(super::PreparedHostAttachment {\n                    named_path: None,\n                    expected_root_sha256: None,\n                    project_id: None,\n                    history: after.clone(),\n                    inputs: prepared.inputs_ref.clone(),\n                    source: Some(descriptor.clone()),\n                    source_service: Some(service),\n                })\n            })();\n            if admitted.is_err() {\n                source.release_unpublished_borrowed_source(descriptor.admission_id());\n            }\n            Some(admitted?)\n        } else {\n            None\n        };\n        self.inputs.clone_from(&prepared.inputs_ref);\n        self.pending_import_source = transfer;\n"
+      },
+      {
+        "old": "            let installed = self\n                .attachment\n                .install_checkpoint(before, after)\n",
+        "new": "            let installed = self\n                .attachment\n                .install_checkpoint(before.clone(), after.clone())\n"
+      }
+    ],
+    "expected_panic": "C0_CAPACITY_DOCUMENT_PRESERVED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "readonly-source-full-digest",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_source_digest_and_length_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "        if hash.finalize() != parse_digest(&self.reference.sha256)? {\n            return Err(BundleError::Corrupt(\"read-only source digest\".into()));\n        }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_SOURCE_DIGEST_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-record-digest",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_record_digest_and_canonical_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "    if hash.finalize() != parse_digest(&object.reference.sha256)? {\n        return Err(BundleError::Corrupt(\"read-only record digest\".into()));\n    }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_RECORD_DIGEST_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-record-canonical",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_record_digest_and_canonical_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "    if serde_json::to_vec(&value).map_err(|error| BundleError::Corrupt(error.to_string()))? != bytes\n    {\n        return Err(BundleError::Corrupt(\"read-only noncanonical record\".into()));\n    }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_RECORD_CANONICAL_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-manifest-epoch",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "            || manifest_value.owner_epoch != binding.owner_epoch\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_MANIFEST_EPOCH_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-manifest-owner",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "            || manifest_value.session_id != binding.session_id\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_MANIFEST_OWNER_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-manifest-membership",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "            || !manifest_value.entries.contains(&binding.input.entry)\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_MANIFEST_MEMBERSHIP_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-selected-document-membership",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_document_fingerprint_and_interpretation_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "        if !document_value\n            .media_pool\n            .iter()\n            .any(|asset| binding.input.entry.matches_media_asset(asset))\n        {\n            return Err(BundleError::Identity(\n                \"read-only document input binding\".into(),\n            ));\n        }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_DOCUMENT_MEMBERSHIP_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-table-binding",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_table_binding_and_probe_interpretation_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "        table_value.validate_binding(&media.reference, limits)?;\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_TABLE_BINDING_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-owned-native-identity",
+    "file": "crates/kinewright-project/src/read_only_inputs.rs",
+    "selector": "s3_read_only_production_fixture_and_store_identity_ledger",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "            if FileIdentity::of_file(&owned)? != FileIdentity::of_file(file)? {\n                return Err(BundleError::Identity(\n                    \"read-only owned handle mismatch\".into(),\n                ));\n            }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_NATIVE_IDENTITY_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "readonly-probe-interpretation",
+    "file": "crates/kinewright-project/src/owned_media.rs",
+    "selector": "s3_read_only_table_binding_and_probe_interpretation_refuse",
+    "target": "ja_s3_read_only_inputs",
+    "edits": [
+      {
+        "old": "        if !interpretation.matches_probe(&probe)? {\n            return Err(BundleError::Corrupt(\"probe/interpretation conflict\".into()));\n        }\n",
+        "new": ""
+      }
+    ],
+    "expected_panic": "C0_READONLY_PROBE_INTERPRETATION_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs"
+  },
+  {
+    "id": "duplicate-publication-full-digest",
+    "file": "crates/kinewright-project/src/namespace/linux.rs",
+    "edits": [
+      {
+        "old": "                    || crate::owned_media::hex_digest(digest.finalize()) != reference.sha256\n",
+        "new": ""
+      }
+    ],
+    "selector": "s3_duplicate_publication_full_digest_refuses_late_corruption_with_warm_memo",
+    "target": "ja_s3_owned_inputs",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs",
+    "expected_panic": "C0_DUPLICATE_FULL_DIGEST_REFUSED"
+  }
+]

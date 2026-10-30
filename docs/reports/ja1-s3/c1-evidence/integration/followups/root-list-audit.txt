@@ -1,0 +1,945 @@
+crates/kinewright-agent/src/durable_branch.rs:64:            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
+crates/kinewright-agent/src/durable_branch.rs-65-        let branch_id = bundle.fork_branch(&source)?;
+crates/kinewright-agent/src/durable_branch.rs-66-        let (revision, _) = snapshot(live)?;
+crates/kinewright-agent/src/durable_branch.rs-67-        let branch = TimelineBranch::new(name, revision, std::sync::Arc::clone(&frozen.document))
+crates/kinewright-agent/src/durable_branch.rs-68-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+crates/kinewright-agent/src/durable_branch.rs-69-        bundle.attach_core(&branch.core())?;
+crates/kinewright-agent/src/durable_branch.rs-70-        Ok(Self {
+crates/kinewright-agent/src/durable_branch.rs-71-            branch_id,
+crates/kinewright-agent/src/durable_branch.rs-72-            branch,
+--
+crates/kinewright-agent/src/durable_branch.rs:130:        self.pin = Some(bundle.store().pin(&[
+crates/kinewright-agent/src/durable_branch.rs-131-            reference.clone(),
+crates/kinewright-agent/src/durable_branch.rs-132-            bundle.checkpoint_reference(&self.branch_id)?,
+crates/kinewright-agent/src/durable_branch.rs-133-        ])?);
+crates/kinewright-agent/src/durable_branch.rs-134-        Ok(reference)
+crates/kinewright-agent/src/durable_branch.rs-135-    }
+crates/kinewright-agent/src/durable_branch.rs-136-    #[cfg(any(test, feature = "eval-harness"))]
+crates/kinewright-agent/src/durable_branch.rs-137-    pub(crate) fn reopen(
+crates/kinewright-agent/src/durable_branch.rs-138-        bundle: &ProjectBundle,
+--
+crates/kinewright-agent/src/durable_branch.rs:173:            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch_id)?])?;
+crates/kinewright-agent/src/durable_branch.rs-174-        Ok(Self {
+crates/kinewright-agent/src/durable_branch.rs-175-            branch_id,
+crates/kinewright-agent/src/durable_branch.rs-176-            branch,
+crates/kinewright-agent/src/durable_branch.rs-177-            base: (*base).clone(),
+crates/kinewright-agent/src/durable_branch.rs-178-            baseline_delta,
+crates/kinewright-agent/src/durable_branch.rs-179-            pin: Some(pin),
+crates/kinewright-agent/src/durable_branch.rs-180-            registration: None,
+crates/kinewright-agent/src/durable_branch.rs-181-        })
+--
+crates/kinewright-project/src/orchestration_commit.rs:113:        let mut dependencies = snapshot.dependencies()?;
+crates/kinewright-project/src/orchestration_commit.rs-114-        let event_record = OrchestrationRecord {
+crates/kinewright-project/src/orchestration_commit.rs-115-            version: 1,
+crates/kinewright-project/src/orchestration_commit.rs-116-            payload: OrchestrationPayload::EventSegment(segment.clone()),
+crates/kinewright-project/src/orchestration_commit.rs-117-        };
+crates/kinewright-project/src/orchestration_commit.rs-118-        dependencies.extend(event_record.dependencies()?);
+crates/kinewright-project/src/orchestration_commit.rs-119-        dependencies.push(envelope.authority.grant_ref.clone());
+crates/kinewright-project/src/orchestration_commit.rs-120-        if segment.run != projection.run
+crates/kinewright-project/src/orchestration_commit.rs-121-            || segment
+--
+crates/kinewright-project/src/orchestration_accounting.rs:1034:            .closure(&[contract_ref(current.record_reference().unwrap())])
+crates/kinewright-project/src/orchestration_accounting.rs-1035-            .unwrap();
+crates/kinewright-project/src/orchestration_accounting.rs-1036-        for (reference, (original, bytes)) in current.history.iter().zip(&exact_history) {
+crates/kinewright-project/src/orchestration_accounting.rs-1037-            let mut archive_bytes = vec![];
+crates/kinewright-project/src/orchestration_accounting.rs-1038-            store
+crates/kinewright-project/src/orchestration_accounting.rs-1039-                .open_verified(&contract_ref(reference.clone()))
+crates/kinewright-project/src/orchestration_accounting.rs-1040-                .unwrap()
+crates/kinewright-project/src/orchestration_accounting.rs-1041-                .read_to_end(&mut archive_bytes)
+crates/kinewright-project/src/orchestration_accounting.rs-1042-                .unwrap();
+--
+crates/kinewright-project/src/owned_inputs.rs:256:        let pin = self.pin(std::slice::from_ref(&reference.manifest_ref))?;
+crates/kinewright-project/src/owned_inputs.rs-257-        let source = if reference.entry.object.record_kind
+crates/kinewright-project/src/owned_inputs.rs-258-            == crate::bundle_records::RecordKind::OwnedMedia
+crates/kinewright-project/src/owned_inputs.rs-259-        {
+crates/kinewright-project/src/owned_inputs.rs-260-            Some(self.certify_media_input(reference)?)
+crates/kinewright-project/src/owned_inputs.rs-261-        } else {
+crates/kinewright-project/src/owned_inputs.rs-262-            None
+crates/kinewright-project/src/owned_inputs.rs-263-        };
+crates/kinewright-project/src/owned_inputs.rs-264-        let file = if source.is_some() {
+--
+crates/kinewright-project/src/bundle_switch.rs:221:        let closure = self.store.closure(std::slice::from_ref(&reference))?;
+crates/kinewright-project/src/bundle_switch.rs-222-        let charge = self.store.reserve(
+crates/kinewright-project/src/bundle_switch.rs-223-            0,
+crates/kinewright-project/src/bundle_switch.rs-224-            (closure.len() as u64)
+crates/kinewright-project/src/bundle_switch.rs-225-                .checked_mul(128)
+crates/kinewright-project/src/bundle_switch.rs-226-                .ok_or(BundleError::Capacity("selection pin metadata"))?,
+crates/kinewright-project/src/bundle_switch.rs-227-            0,
+crates/kinewright-project/src/bundle_switch.rs-228-            false,
+crates/kinewright-project/src/bundle_switch.rs-229-        )?;
+--
+crates/kinewright-project/src/bundle_switch.rs:233:        let pin = self.store.pin(std::slice::from_ref(&reference))?;
+crates/kinewright-project/src/bundle_switch.rs-234-        let restore = self.prepare_checkpoint_restore(&target)?;
+crates/kinewright-project/src/bundle_switch.rs-235-        let existing_head = match &target {
+crates/kinewright-project/src/bundle_switch.rs-236-            RecoverySelection::WorkingBranch(id) => Some(self.checkpoint(id)?.head_id.clone()),
+crates/kinewright-project/src/bundle_switch.rs-237-            RecoverySelection::Checkpoint { .. } => None,
+crates/kinewright-project/src/bundle_switch.rs-238-        };
+crates/kinewright-project/src/bundle_switch.rs-239-        let target_branch = if let RecoverySelection::WorkingBranch(id) = &target {
+crates/kinewright-project/src/bundle_switch.rs-240-            id.clone()
+crates/kinewright-project/src/bundle_switch.rs-241-        } else {
+--
+crates/kinewright-project/src/bundle_switch.rs:383:            for object in self.store.closure(std::slice::from_ref(&target_ref))? {
+crates/kinewright-project/src/bundle_switch.rs-384-                self.store.verify(&object)?;
+crates/kinewright-project/src/bundle_switch.rs-385-            }
+crates/kinewright-project/src/bundle_switch.rs-386-            if self
+crates/kinewright-project/src/bundle_switch.rs-387-                .attach_core(&prepared.restore.core)?
+crates/kinewright-project/src/bundle_switch.rs-388-                .capture()
+crates/kinewright-project/src/bundle_switch.rs-389-                .map_err(crate::bundle::history_error)?
+crates/kinewright-project/src/bundle_switch.rs-390-                != prepared.restore.cut
+crates/kinewright-project/src/bundle_switch.rs-391-            {
+--
+crates/kinewright-project/src/editing_session.rs:1169:        let roots = Self::rescue_required_roots(bundle)?
+crates/kinewright-project/src/editing_session.rs-1170-            .into_iter()
+crates/kinewright-project/src/editing_session.rs-1171-            .map(|r| (r, MissingOwnedUse::Manifest))
+crates/kinewright-project/src/editing_session.rs-1172-            .collect();
+crates/kinewright-project/src/editing_session.rs-1173-        Ok((&bundle.store, roots))
+crates/kinewright-project/src/editing_session.rs-1174-    }
+crates/kinewright-project/src/editing_session.rs-1175-    pub fn first_save(
+crates/kinewright-project/src/editing_session.rs-1176-        &mut self,
+crates/kinewright-project/src/editing_session.rs-1177-        path: &Path,
+--
+crates/kinewright-project/src/studio_store.rs:209:    |v: &RunSnapshotRecord| v.view.references(),
+crates/kinewright-project/src/studio_store.rs-210-    |v: &RunSnapshotRecord, _: &StorageLimits| {
+crates/kinewright-project/src/studio_store.rs-211-        schema(v.version)?;
+crates/kinewright-project/src/studio_store.rs-212-        v.view.validate()
+crates/kinewright-project/src/studio_store.rs-213-    }
+crates/kinewright-project/src/studio_store.rs-214-);
+crates/kinewright-project/src/studio_store.rs-215-record!(
+crates/kinewright-project/src/studio_store.rs-216-    RunEventSegment,
+crates/kinewright-project/src/studio_store.rs-217-    RunEventSegment,
+--
+crates/kinewright-project/src/studio_store.rs:221:        .flat_map(|e| e.delta.view.references())
+crates/kinewright-project/src/studio_store.rs-222-        .collect(),
+crates/kinewright-project/src/studio_store.rs-223-    |v: &RunEventSegment, _: &StorageLimits| {
+crates/kinewright-project/src/studio_store.rs-224-        schema(v.version)?;
+crates/kinewright-project/src/studio_store.rs-225-        if v.events.len() > 200 {
+crates/kinewright-project/src/studio_store.rs-226-            return Err(BundleError::Capacity("run event segment"));
+crates/kinewright-project/src/studio_store.rs-227-        }
+crates/kinewright-project/src/studio_store.rs-228-        let mut previous = None;
+crates/kinewright-project/src/studio_store.rs-229-        for e in &v.events {
+--
+crates/kinewright-project/src/studio_store.rs:433:        let roots = descriptor.references();
+crates/kinewright-project/src/studio_store.rs:434:        let pin = self.store.pin(&roots)?;
+crates/kinewright-project/src/studio_store.rs-435-        Ok(PinnedSnapshot {
+crates/kinewright-project/src/studio_store.rs-436-            descriptor,
+crates/kinewright-project/src/studio_store.rs-437-            pin,
+crates/kinewright-project/src/studio_store.rs-438-            roots,
+crates/kinewright-project/src/studio_store.rs-439-            _charges: charges,
+crates/kinewright-project/src/studio_store.rs-440-        })
+crates/kinewright-project/src/studio_store.rs-441-    }
+crates/kinewright-project/src/studio_store.rs-442-    fn validate_snapshot(&self, d: &SnapshotDescriptor) -> Result<(), BundleError> {
+--
+crates/kinewright-project/src/studio_store.rs:472:        let pin = self.store.pin(std::slice::from_ref(reference))?;
+crates/kinewright-project/src/studio_store.rs-473-        Ok(PinnedFeedback {
+crates/kinewright-project/src/studio_store.rs-474-            revision,
+crates/kinewright-project/src/studio_store.rs-475-            pin,
+crates/kinewright-project/src/studio_store.rs-476-            roots: vec![reference.clone()],
+crates/kinewright-project/src/studio_store.rs-477-            charges,
+crates/kinewright-project/src/studio_store.rs-478-        })
+crates/kinewright-project/src/studio_store.rs-479-    }
+crates/kinewright-project/src/studio_store.rs-480-    pub fn read_submitted_batch(
+--
+crates/kinewright-project/src/studio_store.rs:493:        let pin = self.store.pin(std::slice::from_ref(&b.batch_ref))?;
+crates/kinewright-project/src/studio_store.rs-494-        let mut charges = vec![
+crates/kinewright-project/src/studio_store.rs-495-            charge_value(&self.store, &batch)?,
+crates/kinewright-project/src/studio_store.rs-496-            charge_value(&self.store, &*index)?,
+crates/kinewright-project/src/studio_store.rs-497-        ];
+crates/kinewright-project/src/studio_store.rs-498-        let mut revisions = Vec::new();
+crates/kinewright-project/src/studio_store.rs-499-        for reference in &batch.revision_refs {
+crates/kinewright-project/src/studio_store.rs-500-            let revision = self.read_feedback(reference)?;
+crates/kinewright-project/src/studio_store.rs-501-            revisions.push(revision.revision);
+--
+crates/kinewright-project/src/studio_store.rs:781:                        let old: BTreeSet<_> = previous.references().into_iter().collect();
+crates/kinewright-project/src/studio_store.rs:782:                        let new: BTreeSet<_> = run.references().into_iter().collect();
+crates/kinewright-project/src/studio_store.rs-783-                        if !old.is_subset(&new) {
+crates/kinewright-project/src/studio_store.rs-784-                            return Err(BundleError::Identity(
+crates/kinewright-project/src/studio_store.rs-785-                                "orchestration evidence removal".into(),
+crates/kinewright-project/src/studio_store.rs-786-                            ));
+crates/kinewright-project/src/studio_store.rs-787-                        }
+crates/kinewright-project/src/studio_store.rs-788-                    }
+crates/kinewright-project/src/studio_store.rs-789-                    self.validate_run_bindings(run)?;
+crates/kinewright-project/src/studio_store.rs-790-                    index.runs.insert(run.run_id.clone(), run.clone());
+--
+crates/kinewright-project/src/bundle_copy.rs:283:        let _inputs = destination.store.pin(std::slice::from_ref(inputs))?;
+crates/kinewright-project/src/bundle_copy.rs-284-        let result = destination.save(core, inputs);
+crates/kinewright-project/src/bundle_copy.rs-285-        match &result {
+crates/kinewright-project/src/bundle_copy.rs-286-            Ok(report) => self.status = CopyStatus::Committed(report.clone()),
+crates/kinewright-project/src/bundle_copy.rs-287-            Err(_)
+crates/kinewright-project/src/bundle_copy.rs-288-                if destination.publication_state() == crate::bundle::PublicationState::Unknown =>
+crates/kinewright-project/src/bundle_copy.rs-289-            {
+crates/kinewright-project/src/bundle_copy.rs-290-                self.tag.clone_from(&destination.publication_tag);
+crates/kinewright-project/src/bundle_copy.rs-291-                self.source.mark_uncertain()?;
+--
+crates/kinewright-project/src/bundle_copy.rs:678:    store.closure(roots)?.iter().try_fold(extra, |sum, r| {
+crates/kinewright-project/src/bundle_copy.rs-679-        sum.checked_add(r.byte_length)
+crates/kinewright-project/src/bundle_copy.rs-680-            .ok_or(BundleError::Capacity("copy size overflow"))
+crates/kinewright-project/src/bundle_copy.rs-681-    })
+crates/kinewright-project/src/bundle_copy.rs-682-}
+crates/kinewright-project/src/bundle_copy.rs-683-impl ProjectBundle {
+crates/kinewright-project/src/bundle_copy.rs-684-    pub fn save_as(&mut self, path: &Path) -> Result<SaveAsOutcome, BundleError> {
+crates/kinewright-project/src/bundle_copy.rs-685-        self.save_as_with_limits(path, StorageLimits::default())
+crates/kinewright-project/src/bundle_copy.rs-686-    }
+--
+crates/kinewright-project/src/bundle_copy.rs:799:        let roots = self.root_references()?;
+crates/kinewright-project/src/bundle_copy.rs-800-        let source = self.store.begin_copy_source(
+crates/kinewright-project/src/bundle_copy.rs-801-            &roots,
+crates/kinewright-project/src/bundle_copy.rs-802-            frozen_size(&self.store, &roots, self.admission.raw_bytes().len() as u64)?,
+crates/kinewright-project/src/bundle_copy.rs-803-            cleanup_only,
+crates/kinewright-project/src/bundle_copy.rs-804-        )?;
+crates/kinewright-project/src/bundle_copy.rs-805-        let (mut target, before, prepared) = if let Some(inspection) = inspection {
+crates/kinewright-project/src/bundle_copy.rs-806-            ProjectStore::revalidate_rescue_destination(inspection, &[&self.store])?;
+crates/kinewright-project/src/bundle_copy.rs-807-            destination_admitted(path, limits, Some(inspection), &mut || {
+--
+crates/kinewright-project/src/bundle_copy.rs:892:            for reference in target.store.closure(&roots)? {
+crates/kinewright-project/src/bundle_copy.rs-893-                target.store.verify(&reference)?;
+crates/kinewright-project/src/bundle_copy.rs-894-            }
+crates/kinewright-project/src/bundle_copy.rs-895-            let history = self
+crates/kinewright-project/src/bundle_copy.rs-896-                .store
+crates/kinewright-project/src/bundle_copy.rs-897-                .read_copy_record::<kinewright_core::HistorySnapshot>(
+crates/kinewright-project/src/bundle_copy.rs-898-                    &self.branches[&self.manual_branch_id].history_ref,
+crates/kinewright-project/src/bundle_copy.rs-899-                    cleanup_only,
+crates/kinewright-project/src/bundle_copy.rs-900-                )?;
+--
+crates/kinewright-project/src/bundle_copy.rs:1108:        let roots = [inputs.clone()];
+crates/kinewright-project/src/bundle_copy.rs-1109-        let source = self.store.begin_copy(
+crates/kinewright-project/src/bundle_copy.rs-1110-            &roots,
+crates/kinewright-project/src/bundle_copy.rs-1111-            frozen_size(
+crates/kinewright-project/src/bundle_copy.rs-1112-                &self.store,
+crates/kinewright-project/src/bundle_copy.rs-1113-                &roots,
+crates/kinewright-project/src/bundle_copy.rs-1114-                history
+crates/kinewright-project/src/bundle_copy.rs-1115-                    .encoded_bytes()
+crates/kinewright-project/src/bundle_copy.rs-1116-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+--
+crates/kinewright-project/src/bundle_copy.rs:1141:            for reference in target.store.closure(&roots)? {
+crates/kinewright-project/src/bundle_copy.rs-1142-                target.store.verify(&reference)?;
+crates/kinewright-project/src/bundle_copy.rs-1143-            }
+crates/kinewright-project/src/bundle_copy.rs-1144-            let id = target.manual_branch_id.clone();
+crates/kinewright-project/src/bundle_copy.rs-1145-            let report = target.publish_pending(&frozen, history, &rebound, &id)?;
+crates/kinewright-project/src/bundle_copy.rs-1146-            Ok(report)
+crates/kinewright-project/src/bundle_copy.rs-1147-        })();
+crates/kinewright-project/src/bundle_copy.rs-1148-        let copy = result(target, before, prepared, source, map, publication)?;
+crates/kinewright-project/src/bundle_copy.rs-1149-        self.pending_copy_source = copy.pending_source();
+--
+crates/kinewright-project/src/bundle_copy.rs:1339:                    &original.root_references()?,
+crates/kinewright-project/src/bundle_copy.rs-1340-                )?;
+crates/kinewright-project/src/bundle_copy.rs-1341-                let (projected, origin) = target.project_recovery_root(&ack.reference)?;
+crates/kinewright-project/src/bundle_copy.rs-1342-                record.acknowledged_root = Some(projected);
+crates/kinewright-project/src/bundle_copy.rs-1343-                record.acknowledged_absence = None;
+crates/kinewright-project/src/bundle_copy.rs-1344-                record.recovery_origin = Some(origin);
+crates/kinewright-project/src/bundle_copy.rs-1345-            }
+crates/kinewright-project/src/bundle_copy.rs-1346-        }
+crates/kinewright-project/src/bundle_copy.rs-1347-        target.retain_rescue_record(&record)?;
+--
+crates/kinewright-project/src/studio_records.rs:628:        refs.extend(self.projection.references());
+crates/kinewright-project/src/studio_records.rs-629-        refs
+crates/kinewright-project/src/studio_records.rs-630-    }
+crates/kinewright-project/src/studio_records.rs-631-}
+crates/kinewright-project/src/studio_records.rs-632-impl RunView {
+crates/kinewright-project/src/studio_records.rs-633-    /// Shape and resource validation only. S4 owns lifecycle and action eligibility.
+crates/kinewright-project/src/studio_records.rs-634-    pub fn validate(&self) -> Result<(), BundleError> {
+crates/kinewright-project/src/studio_records.rs-635-        if self.sequence == 0
+crates/kinewright-project/src/studio_records.rs-636-            || self.control_revision.0.is_empty()
+--
+crates/kinewright-project/src/editing_session/durable.rs:200:        let pin = bundle.store.pin(std::slice::from_ref(&base.checkpoint))?;
+crates/kinewright-project/src/editing_session/durable.rs-201-        let encoded =
+crates/kinewright-project/src/editing_session/durable.rs-202-            serde_json::to_vec(&specialist).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+crates/kinewright-project/src/editing_session/durable.rs-203-        let specialist = Arc::new(
+crates/kinewright-project/src/editing_session/durable.rs-204-            bundle
+crates/kinewright-project/src/editing_session/durable.rs-205-                .store
+crates/kinewright-project/src/editing_session/durable.rs-206-                .reserve_retained_capture(&encoded)?
+crates/kinewright-project/src/editing_session/durable.rs-207-                .hold(specialist),
+crates/kinewright-project/src/editing_session/durable.rs-208-        );
+--
+crates/kinewright-project/src/editing_session/durable.rs:441:            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
+crates/kinewright-project/src/editing_session/durable.rs-442-        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+crates/kinewright-project/src/editing_session/durable.rs-443-        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));
+crates/kinewright-project/src/editing_session/durable.rs-444-        let attachment = bundle.attach_core(&core)?;
+crates/kinewright-project/src/editing_session/durable.rs-445-        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+crates/kinewright-project/src/editing_session/durable.rs-446-        if !candidate_cut.history().batches.is_empty() {
+crates/kinewright-project/src/editing_session/durable.rs-447-            attachment
+crates/kinewright-project/src/editing_session/durable.rs-448-                .resume(&candidate_cut)
+crates/kinewright-project/src/editing_session/durable.rs-449-                .map_err(crate::bundle::history_error)?;
+--
+crates/kinewright-project/src/editing_session/durable.rs:538:            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;
+crates/kinewright-project/src/editing_session/durable.rs-539-        let encoded = serde_json::to_vec(candidate_cut.history())
+crates/kinewright-project/src/editing_session/durable.rs-540-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+crates/kinewright-project/src/editing_session/durable.rs-541-        let floor_source = Arc::new(
+crates/kinewright-project/src/editing_session/durable.rs-542-            bundle
+crates/kinewright-project/src/editing_session/durable.rs-543-                .store
+crates/kinewright-project/src/editing_session/durable.rs-544-                .reserve_retained_capture(&encoded)?
+crates/kinewright-project/src/editing_session/durable.rs-545-                .hold(candidate_cut.history().clone()),
+crates/kinewright-project/src/editing_session/durable.rs-546-        );
+--
+crates/kinewright-project/src/editing_session/durable.rs:685:            let pin = bundle.store.pin(&[
+crates/kinewright-project/src/editing_session/durable.rs-686-                reference.clone(),
+crates/kinewright-project/src/editing_session/durable.rs-687-                bundle.checkpoint_reference(&guard.branch)?,
+crates/kinewright-project/src/editing_session/durable.rs-688-            ])?;
+crates/kinewright-project/src/editing_session/durable.rs-689-            self.durable_sessions[index].pin = pin;
+crates/kinewright-project/src/editing_session/durable.rs-690-            Ok(reference)
+crates/kinewright-project/src/editing_session/durable.rs-691-        })();
+crates/kinewright-project/src/editing_session/durable.rs-692-        let current = owner.capture().map_err(crate::bundle::history_error)?;
+crates/kinewright-project/src/editing_session/durable.rs-693-        if resume || result.is_err() {
+--
+crates/kinewright-project/src/read_only_inputs.rs:215:        let roots = [
+crates/kinewright-project/src/read_only_inputs.rs-216-            binding.document_ref.clone(),
+crates/kinewright-project/src/read_only_inputs.rs-217-            binding.input.manifest_ref.clone(),
+crates/kinewright-project/src/read_only_inputs.rs-218-        ];
+crates/kinewright-project/src/read_only_inputs.rs:219:        let pin = self.pin(&roots)?;
+crates/kinewright-project/src/read_only_inputs.rs-220-        for (reference, file) in [
+crates/kinewright-project/src/read_only_inputs.rs-221-            (&binding.document_ref, &files.document),
+crates/kinewright-project/src/read_only_inputs.rs-222-            (&binding.input.manifest_ref, &files.manifest),
+crates/kinewright-project/src/read_only_inputs.rs-223-            (&binding.input.entry.object, &files.media),
+crates/kinewright-project/src/read_only_inputs.rs-224-            (binding.input.entry.chunk_table_ref()?, &files.table),
+crates/kinewright-project/src/read_only_inputs.rs-225-        ] {
+crates/kinewright-project/src/read_only_inputs.rs-226-            let owned = self.open_input_descriptor(reference)?;
+crates/kinewright-project/src/read_only_inputs.rs-227-            if FileIdentity::of_file(&owned)? != FileIdentity::of_file(file)? {
+--
+crates/kinewright-project/src/bundle_commit.rs:1082:            let deps = bundle
+crates/kinewright-project/src/bundle_commit.rs-1083-                .admission
+crates/kinewright-project/src/bundle_commit.rs-1084-                .data
+crates/kinewright-project/src/bundle_commit.rs-1085-                .file
+crates/kinewright-project/src/bundle_commit.rs-1086-                .as_ref()
+crates/kinewright-project/src/bundle_commit.rs-1087-                .and_then(|f| f.studio.as_ref())
+crates/kinewright-project/src/bundle_commit.rs-1088-                .map_or_else(Vec::new, super::bundle::StudioRoot::references);
+crates/kinewright-project/src/bundle_commit.rs-1089-            let previous = bundle
+crates/kinewright-project/src/bundle_commit.rs-1090-                .admit_root_checkpoint(bundle.admission.raw_bytes().to_vec().as_slice(), &deps)?;
+--
+crates/kinewright-project/src/bundle_commit.rs:1190:        let mut roots = vec![
+crates/kinewright-project/src/bundle_commit.rs-1191-            branch_index_ref.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1192-            branches[&manual_branch_id].input_manifest_ref.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1193-        ];
+crates/kinewright-project/src/bundle_commit.rs-1194-        let mut metadata_root = bundle.root.clone();
+crates/kinewright-project/src/bundle_commit.rs-1195-        if let Some(pending) = &bundle.pending_metadata {
+crates/kinewright-project/src/bundle_commit.rs-1196-            pending.apply(metadata_root.as_mut().ok_or(BundleError::Unsettled)?);
+crates/kinewright-project/src/bundle_commit.rs-1197-        }
+crates/kinewright-project/src/bundle_commit.rs-1198-        if let Some(root) = &metadata_root {
+--
+crates/kinewright-project/src/bundle_commit.rs:1213:        retained.extend(recovery.references());
+crates/kinewright-project/src/bundle_commit.rs-1214-        inventory.required_fields = bundle.store.support_fields(&retained)?;
+crates/kinewright-project/src/bundle_commit.rs:1215:        let closure = bundle.store.closure(&retained)?;
+crates/kinewright-project/src/bundle_commit.rs-1216-        let roles = bundle.store.evidence_roles(&closure)?;
+crates/kinewright-project/src/bundle_commit.rs-1217-        let requires_switch =
+crates/kinewright-project/src/bundle_commit.rs-1218-            switch_generation != 0 || bundle.store.has_archived_manual_switch(&closure)?;
+crates/kinewright-project/src/bundle_commit.rs-1219-        inventory.required_apis =
+crates/kinewright-project/src/bundle_commit.rs-1220-            crate::rescue_record::required_apis(u64::from(requires_switch), !roles.is_empty());
+crates/kinewright-project/src/bundle_commit.rs-1221-        if bundle.store.has_host_switch_receipts(&closure)? {
+crates/kinewright-project/src/bundle_commit.rs-1222-            inventory.required_apis.insert("host-switch".into(), 1);
+crates/kinewright-project/src/bundle_commit.rs-1223-        }
+--
+crates/kinewright-project/src/bundle_commit.rs:1228:        let store_manifest = bundle.store.selected_manifest(
+crates/kinewright-project/src/bundle_commit.rs-1229-            &roots,
+crates/kinewright-project/src/bundle_commit.rs-1230-            &evidence,
+crates/kinewright-project/src/bundle_commit.rs-1231-            recovery.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1232-            &inventory,
+crates/kinewright-project/src/bundle_commit.rs-1233-            generation,
+crates/kinewright-project/src/bundle_commit.rs-1234-        )?;
+crates/kinewright-project/src/bundle_commit.rs-1235-        let store_manifest_ref = seal!(&store_manifest);
+crates/kinewright-project/src/bundle_commit.rs:1236:        let root = StudioRoot {
+crates/kinewright-project/src/bundle_commit.rs-1237-            project_id: bundle.project_id.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1238-            origin_project_ids: bundle.origin_project_ids.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1239-            origin_session_ids: bundle.origin_session_ids.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1240-            generation,
+crates/kinewright-project/src/bundle_commit.rs-1241-            creation_brief_ref: None,
+crates/kinewright-project/src/bundle_commit.rs-1242-            manual_branch_id: manual_branch_id.clone(),
+crates/kinewright-project/src/bundle_commit.rs-1243-            manual_switch_generation: switch_generation,
+crates/kinewright-project/src/bundle_commit.rs-1244-            candidate_branch_ids: branches
+--
+crates/kinewright-project/src/bundle_commit.rs:1294:        bundle.store.closure(&root.references())?;
+crates/kinewright-project/src/bundle_commit.rs-1295-        #[cfg(any(test, feature = "test-util"))]
+crates/kinewright-project/src/bundle_commit.rs-1296-        crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
+crates/kinewright-project/src/bundle_commit.rs-1297-        let saved_path = bundle.store.resolved_root()?;
+crates/kinewright-project/src/bundle_commit.rs-1298-        let collection = bundle.store.collection_status()?;
+crates/kinewright-project/src/bundle_commit.rs-1299-        let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
+crates/kinewright-project/src/bundle_commit.rs-1300-        let tag = kinewright_core::HistorySaveTag {
+crates/kinewright-project/src/bundle_commit.rs-1301-            destination: identity.resolved_root,
+crates/kinewright-project/src/bundle_commit.rs-1302-            parent_device: identity.parent_device,
+--
+crates/kinewright-project/src/bundle_commit.rs:1367:            bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
+crates/kinewright-project/src/bundle_commit.rs-1368-            barrier(bundle, CommitBarrier::B5)?;
+crates/kinewright-project/src/bundle_commit.rs-1369-            bundle.pending_evidence.clear();
+crates/kinewright-project/src/bundle_commit.rs-1370-            Ok(())
+crates/kinewright-project/src/bundle_commit.rs-1371-        })();
+crates/kinewright-project/src/bundle_commit.rs-1372-        if tail.is_err() {
+crates/kinewright-project/src/bundle_commit.rs-1373-            return Err(BundleError::DurabilityUnknown);
+crates/kinewright-project/src/bundle_commit.rs-1374-        }
+crates/kinewright-project/src/bundle_commit.rs-1375-        bundle.unsettled = false;
+--
+crates/kinewright-project/src/certified_resources.rs:40:        let context = self.pin(std::slice::from_ref(&reference.manifest_ref))?;
+crates/kinewright-project/src/certified_resources.rs-41-        Ok(CertifiedResource {
+crates/kinewright-project/src/certified_resources.rs-42-            shared,
+crates/kinewright-project/src/certified_resources.rs-43-            identity: reference.clone(),
+crates/kinewright-project/src/certified_resources.rs-44-            _context: Arc::new(context),
+crates/kinewright-project/src/certified_resources.rs-45-        })
+crates/kinewright-project/src/certified_resources.rs-46-    }
+crates/kinewright-project/src/certified_resources.rs-47-}
+--
+crates/kinewright-project/src/editing_session/recovery.rs:272:                    .closure(&bundle.root_references()?)?
+crates/kinewright-project/src/editing_session/recovery.rs-273-                    .contains(root);
+crates/kinewright-project/src/editing_session/recovery.rs-274-                if !reachable {
+crates/kinewright-project/src/editing_session/recovery.rs-275-                    "This recovery point is no longer in the project's automatic list. It is kept only for this selection in this session. Abandoning the selection lets it go.".to_owned()
+crates/kinewright-project/src/editing_session/recovery.rs-276-                } else if self.dirty()?
+crates/kinewright-project/src/editing_session/recovery.rs-277-                    && bundle.recovery.predecessors.last() == Some(root)
+crates/kinewright-project/src/editing_session/recovery.rs-278-                    && bundle.recovery.predecessors.len() == 2
+crates/kinewright-project/src/editing_session/recovery.rs-279-                {
+crates/kinewright-project/src/editing_session/recovery.rs-280-                    "Saving your current work will remove this recovery point from the project's automatic list. It will be kept only for this selection in this session until opened. Abandoning the selection lets it go; a crash can lose it.".to_owned()
+--
+crates/kinewright-project/src/editing_session/recovery.rs:433:        let roots = bundle
+crates/kinewright-project/src/editing_session/recovery.rs-434-            .rescue_records()?
+crates/kinewright-project/src/editing_session/recovery.rs-435-            .into_iter()
+crates/kinewright-project/src/editing_session/recovery.rs-436-            .filter_map(|r| r.acknowledged_root)
+crates/kinewright-project/src/editing_session/recovery.rs-437-            .chain(bundle.recovery.predecessors.iter().cloned());
+crates/kinewright-project/src/editing_session/recovery.rs-438-        roots
+crates/kinewright-project/src/editing_session/recovery.rs-439-            .map(|reference| {
+crates/kinewright-project/src/editing_session/recovery.rs-440-                let bytes = bundle.store.read_checkpoint_bytes(&reference)?;
+crates/kinewright-project/src/editing_session/recovery.rs-441-                let admission = BundleWriteAdmission::from_bytes(None, bytes)?;
+--
+crates/kinewright-project/src/editing_session/recovery.rs:491:            .closure(&[bundle.checkpoint_reference(branch)?])?
+crates/kinewright-project/src/editing_session/recovery.rs-492-            .iter()
+crates/kinewright-project/src/editing_session/recovery.rs-493-            .map(|r| r.byte_length)
+crates/kinewright-project/src/editing_session/recovery.rs-494-            .sum::<u64>();
+crates/kinewright-project/src/editing_session/recovery.rs-495-        Ok(format!(
+crates/kinewright-project/src/editing_session/recovery.rs-496-            "Remove working branch {} at head {}: its content {} and {} Undo / {} Redo entries leave the current branch index. Current-history residency relief: {relief} bytes. Its closure contains {retained} bytes; immediate reclaimable bytes: 0, because this publication retains the previous root. Automatic recovery, independent evidence and readers may keep these bytes after later saves. {}",
+crates/kinewright-project/src/editing_session/recovery.rs-497-            branch.as_str(),
+crates/kinewright-project/src/editing_session/recovery.rs-498-            checkpoint.head_id.as_str(),
+crates/kinewright-project/src/editing_session/recovery.rs-499-            checkpoint.document_hash,
+--
+crates/kinewright-project/src/receipts.rs:224:            Self::Metadata { result } => result.references(),
+crates/kinewright-project/src/receipts.rs-225-            Self::Switch { result } => {
+crates/kinewright-project/src/receipts.rs-226-                vec![result.old.checkpoint.clone(), result.new.checkpoint.clone()]
+crates/kinewright-project/src/receipts.rs-227-            }
+crates/kinewright-project/src/receipts.rs-228-            Self::Edit { checkpoint_ref, .. } => vec![checkpoint_ref.clone()],
+crates/kinewright-project/src/receipts.rs-229-            Self::Comment {
+crates/kinewright-project/src/receipts.rs-230-                record_ref,
+crates/kinewright-project/src/receipts.rs-231-                text,
+crates/kinewright-project/src/receipts.rs-232-                strokes,
+--
+crates/kinewright-project/src/receipts.rs:768:    let mut dependencies = vec![text.clone(), strokes.clone()];
+crates/kinewright-project/src/receipts.rs-769-    dependencies.extend(envelope.evidence.clone());
+crates/kinewright-project/src/receipts.rs-770-    let record = bundle
+crates/kinewright-project/src/receipts.rs-771-        .store
+crates/kinewright-project/src/receipts.rs-772-        .admit_blob(&mut bytes.as_slice(), &record_ref, &dependencies)?;
+crates/kinewright-project/src/receipts.rs-773-    bundle.retain_evidence(&record_ref)?;
+crates/kinewright-project/src/receipts.rs-774-    drop(record);
+crates/kinewright-project/src/receipts.rs-775-    drop(seals);
+crates/kinewright-project/src/receipts.rs-776-    Ok(ReceiptResult::Comment {
+--
+crates/kinewright-project/src/editing_session/manual.rs:259:        for reference in bundle.store.closure(std::slice::from_ref(&inputs))? {
+crates/kinewright-project/src/editing_session/manual.rs-260-            bundle.store.verify(&reference)?;
+crates/kinewright-project/src/editing_session/manual.rs-261-        }
+crates/kinewright-project/src/editing_session/manual.rs-262-        crate::store::BundleRecord::validate_admission(&*manifest, &bundle.store)?;
+crates/kinewright-project/src/editing_session/manual.rs:263:        let _inputs_pin = bundle.store.pin(std::slice::from_ref(&inputs))?;
+crates/kinewright-project/src/editing_session/manual.rs-264-        drop(manifest);
+crates/kinewright-project/src/editing_session/manual.rs-265-        if self
+crates/kinewright-project/src/editing_session/manual.rs-266-            .core
+crates/kinewright-project/src/editing_session/manual.rs-267-            .attachment_state()
+crates/kinewright-project/src/editing_session/manual.rs-268-            .map_err(crate::bundle::history_error)?
+crates/kinewright-project/src/editing_session/manual.rs-269-            == AttachmentState::Frozen
+crates/kinewright-project/src/editing_session/manual.rs-270-        {
+crates/kinewright-project/src/editing_session/manual.rs-271-            let cut = self
+--
+crates/kinewright-project/src/editing_session/rescue_selection.rs:17:        let mut roots = root.references();
+crates/kinewright-project/src/editing_session/rescue_selection.rs-18-        roots.retain(|r| {
+crates/kinewright-project/src/editing_session/rescue_selection.rs-19-            r != &root.branch_index_ref
+crates/kinewright-project/src/editing_session/rescue_selection.rs-20-                && r != &root.store_manifest_ref
+crates/kinewright-project/src/editing_session/rescue_selection.rs-21-                && r != &root.input_manifest_ref
+crates/kinewright-project/src/editing_session/rescue_selection.rs-22-        });
+crates/kinewright-project/src/editing_session/rescue_selection.rs-23-        let index = bundle.store.read_copy_record::<std::collections::BTreeMap<
+crates/kinewright-project/src/editing_session/rescue_selection.rs-24-            crate::bundle_records::BranchId,
+crates/kinewright-project/src/editing_session/rescue_selection.rs-25-            ObjectRef,
+--
+crates/kinewright-project/src/editing_session/rescue_selection.rs:81:            bundle.root_references()?,
+crates/kinewright-project/src/editing_session/rescue_selection.rs-82-        ));
+crates/kinewright-project/src/editing_session/rescue_selection.rs-83-        let mut unavailable = vec![];
+crates/kinewright-project/src/editing_session/rescue_selection.rs-84-        for (role, root, refs) in candidates {
+crates/kinewright-project/src/editing_session/rescue_selection.rs:85:            let roots = refs
+crates/kinewright-project/src/editing_session/rescue_selection.rs-86-                .into_iter()
+crates/kinewright-project/src/editing_session/rescue_selection.rs-87-                .map(|r| {
+crates/kinewright-project/src/editing_session/rescue_selection.rs-88-                    (
+crates/kinewright-project/src/editing_session/rescue_selection.rs-89-                        r,
+crates/kinewright-project/src/editing_session/rescue_selection.rs-90-                        MissingOwnedUse::Recovery {
+crates/kinewright-project/src/editing_session/rescue_selection.rs-91-                            root_sha256: root.sha256.clone(),
+crates/kinewright-project/src/editing_session/rescue_selection.rs-92-                        },
+crates/kinewright-project/src/editing_session/rescue_selection.rs-93-                    )
+--
+crates/kinewright-project/src/editing_session/rescue_selection.rs:119:        let mut roots = base.into_iter().map(|(r, _)| r).collect::<Vec<_>>();
+crates/kinewright-project/src/editing_session/rescue_selection.rs-120-        let inputs = self.rescue_source_inputs()?;
+crates/kinewright-project/src/editing_session/rescue_selection.rs-121-        let mut retained = (*source.read_copy_record::<OwnedInputManifest>(&inputs, true)?).clone();
+crates/kinewright-project/src/editing_session/rescue_selection.rs-122-        let named =
+crates/kinewright-project/src/editing_session/rescue_selection.rs-123-            self.association.as_ref().is_some_and(|a| a.saved.is_some()) || self.source.is_none();
+crates/kinewright-project/src/editing_session/rescue_selection.rs-124-        if named {
+crates/kinewright-project/src/editing_session/rescue_selection.rs-125-            let bundle = self.active_bundle()?;
+crates/kinewright-project/src/editing_session/rescue_selection.rs-126-            let prior = bundle.checkpoint(&bundle.manual_branch_id)?;
+crates/kinewright-project/src/editing_session/rescue_selection.rs-127-            for reference in &prior.history_input_manifest_refs {
+--
+crates/kinewright-project/src/editing_session/rescue_selection.rs:155:                roots.extend(bundle.root_references()?);
+crates/kinewright-project/src/editing_session/rescue_selection.rs-156-            }
+crates/kinewright-project/src/editing_session/rescue_selection.rs-157-        }
+crates/kinewright-project/src/editing_session/rescue_selection.rs-158-        crate::bundle_commit::retain_history_inputs(history, &mut retained);
+crates/kinewright-project/src/editing_session/rescue_selection.rs-159-        crate::bundle_commit::validate_inputs(history, &retained)?;
+crates/kinewright-project/src/editing_session/rescue_selection.rs-160-        for entry in &retained.entries {
+crates/kinewright-project/src/editing_session/rescue_selection.rs-161-            roots.push(entry.object.clone());
+crates/kinewright-project/src/editing_session/rescue_selection.rs-162-            roots.extend(entry.dependencies.iter().cloned());
+crates/kinewright-project/src/editing_session/rescue_selection.rs-163-        }
+--
+crates/kinewright-project/src/editing_session/rescue_selection.rs:267:            let roots = self.rescue_graph(&selected, &unavailable, &limits)?;
+crates/kinewright-project/src/editing_session/rescue_selection.rs-268-            (selected, unavailable, roots)
+crates/kinewright-project/src/editing_session/rescue_selection.rs-269-        };
+crates/kinewright-project/src/editing_session/rescue_selection.rs-270-        let removed_undo = before
+crates/kinewright-project/src/editing_session/rescue_selection.rs-271-            .cursor
+crates/kinewright-project/src/editing_session/rescue_selection.rs-272-            .undo
+crates/kinewright-project/src/editing_session/rescue_selection.rs-273-            .len()
+crates/kinewright-project/src/editing_session/rescue_selection.rs-274-            .saturating_sub(history.cursor.undo.len()) as u64;
+crates/kinewright-project/src/editing_session/rescue_selection.rs-275-        let selected_digest = kinewright_media::sha256_bytes(
+--
+crates/kinewright-project/src/bundle.rs:98:pub struct StudioRoot {
+crates/kinewright-project/src/bundle.rs-99-    pub project_id: crate::bundle_records::ProjectId,
+crates/kinewright-project/src/bundle.rs-100-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+crates/kinewright-project/src/bundle.rs-101-    pub origin_project_ids: Vec<crate::bundle_records::ProjectId>,
+crates/kinewright-project/src/bundle.rs-102-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+crates/kinewright-project/src/bundle.rs-103-    pub origin_session_ids: Vec<crate::bundle_records::SessionId>,
+crates/kinewright-project/src/bundle.rs-104-    pub generation: u64,
+crates/kinewright-project/src/bundle.rs-105-    #[serde(default, skip_serializing_if = "Option::is_none")]
+crates/kinewright-project/src/bundle.rs-106-    pub creation_brief_ref: Option<ObjectRef>,
+--
+crates/kinewright-project/src/bundle.rs:127:impl StudioRoot {
+crates/kinewright-project/src/bundle.rs-128-    pub(crate) fn admit(&self) -> Result<(), BundleError> {
+crates/kinewright-project/src/bundle.rs-129-        if self
+crates/kinewright-project/src/bundle.rs-130-            .origin_project_ids
+crates/kinewright-project/src/bundle.rs-131-            .len()
+crates/kinewright-project/src/bundle.rs-132-            .checked_add(self.origin_session_ids.len())
+crates/kinewright-project/src/bundle.rs-133-            .ok_or(BundleError::Capacity("project origins overflow"))? as u64
+crates/kinewright-project/src/bundle.rs-134-            > StorageLimits::default().versions
+crates/kinewright-project/src/bundle.rs-135-            || self
+--
+crates/kinewright-project/src/bundle.rs:751:        bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
+crates/kinewright-project/src/bundle.rs-752-        Ok(bundle)
+crates/kinewright-project/src/bundle.rs-753-    }
+crates/kinewright-project/src/bundle.rs-754-}
+crates/kinewright-project/src/bundle.rs-755-
+crates/kinewright-project/src/bundle.rs-756-/// A verified history bound to the immutable checkpoint object it came from.
+crates/kinewright-project/src/bundle.rs-757-pub(crate) struct CachedHistory {
+crates/kinewright-project/src/bundle.rs-758-    pub(crate) reference: ObjectRef,
+crates/kinewright-project/src/bundle.rs-759-    pub(crate) history: Arc<StorageReservation<HistorySnapshot>>,
+--
+crates/kinewright-project/src/bundle.rs:1052:            self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
+crates/kinewright-project/src/bundle.rs-1053-        }
+crates/kinewright-project/src/bundle.rs-1054-        result
+crates/kinewright-project/src/bundle.rs-1055-    }
+crates/kinewright-project/src/bundle.rs-1056-    #[must_use]
+crates/kinewright-project/src/bundle.rs-1057-    pub fn manual_branch_id(&self) -> &BranchId {
+crates/kinewright-project/src/bundle.rs-1058-        &self.manual_branch_id
+crates/kinewright-project/src/bundle.rs-1059-    }
+crates/kinewright-project/src/bundle.rs-1060-    #[must_use]
+--
+crates/kinewright-project/src/bundle.rs:1071:    pub(crate) fn root_references(&self) -> Result<Vec<ObjectRef>, BundleError> {
+crates/kinewright-project/src/bundle.rs-1072-        let root = self
+crates/kinewright-project/src/bundle.rs-1073-            .root
+crates/kinewright-project/src/bundle.rs-1074-            .as_ref()
+crates/kinewright-project/src/bundle.rs-1075-            .ok_or_else(|| BundleError::Corrupt("no root".into()))?;
+crates/kinewright-project/src/bundle.rs-1076-        let mut refs = vec![
+crates/kinewright-project/src/bundle.rs-1077-            root.branch_index_ref.clone(),
+crates/kinewright-project/src/bundle.rs-1078-            root.input_manifest_ref.clone(),
+crates/kinewright-project/src/bundle.rs-1079-            root.store_manifest_ref.clone(),
+--
+crates/kinewright-project/src/bundle.rs:1124:            .push(self.store.pin(std::slice::from_ref(reference))?);
+crates/kinewright-project/src/bundle.rs-1125-        self.evidence.push(reference.clone());
+crates/kinewright-project/src/bundle.rs-1126-        Ok(())
+crates/kinewright-project/src/bundle.rs-1127-    }
+crates/kinewright-project/src/bundle.rs-1128-    pub fn admit_inputs(
+crates/kinewright-project/src/bundle.rs-1129-        &mut self,
+crates/kinewright-project/src/bundle.rs-1130-        manifest: &crate::owned_inputs::OwnedInputManifest,
+crates/kinewright-project/src/bundle.rs-1131-    ) -> Result<SealedObject, BundleError> {
+crates/kinewright-project/src/bundle.rs-1132-        self.store_mut()?.admit_record(manifest)
+--
+crates/kinewright-project/src/bundle.rs:1212:        self.store.closure(&[
+crates/kinewright-project/src/bundle.rs-1213-            root.branch_index_ref.clone(),
+crates/kinewright-project/src/bundle.rs-1214-            root.input_manifest_ref.clone(),
+crates/kinewright-project/src/bundle.rs-1215-            root.store_manifest_ref.clone(),
+crates/kinewright-project/src/bundle.rs-1216-        ])?;
+crates/kinewright-project/src/bundle.rs-1217-        self.store
+crates/kinewright-project/src/bundle.rs-1218-            .with_namespace(|n| n.reconcile(loaded.admission.raw_bytes()))?;
+crates/kinewright-project/src/bundle.rs-1219-        self.store.settle_controls()?;
+crates/kinewright-project/src/bundle.rs-1220-        self.receipts = loaded
+--
+crates/kinewright-project/src/bundle.rs:1256:        self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
+crates/kinewright-project/src/bundle.rs-1257-        self.store.publish_inventory(&self.recovery)?;
+crates/kinewright-project/src/bundle.rs-1258-        self.store.allow_collection()?;
+crates/kinewright-project/src/bundle.rs-1259-        let observed_own = self.publication_tag.as_ref().is_some_and(|tag| {
+crates/kinewright-project/src/bundle.rs-1260-            tag.root_sha256 == kinewright_media::sha256_bytes(self.admission.raw_bytes())
+crates/kinewright-project/src/bundle.rs-1261-        });
+crates/kinewright-project/src/bundle.rs-1262-        if observed_own {
+crates/kinewright-project/src/bundle.rs-1263-            self.publication_state = PublicationState::Committed;
+crates/kinewright-project/src/bundle.rs-1264-        } else if self.publication_state == PublicationState::Unknown {
+--
+crates/kinewright-project/src/bundle_recovery.rs:66:    for reference in inventory.references() {
+crates/kinewright-project/src/bundle_recovery.rs-67-        if verified.contains(&reference.sha256) {
+crates/kinewright-project/src/bundle_recovery.rs-68-            continue;
+crates/kinewright-project/src/bundle_recovery.rs-69-        }
+crates/kinewright-project/src/bundle_recovery.rs-70-        let (bytes, _charge) = read_bytes(namespace, &reference, usage, limits)?;
+crates/kinewright-project/src/bundle_recovery.rs-71-        let admission =
+crates/kinewright-project/src/bundle_recovery.rs-72-            BundleWriteAdmission::from_bytes_with_limits(None, bytes, Arc::clone(usage), limits)?;
+crates/kinewright-project/src/bundle_recovery.rs-73-        admission.require_supported()?;
+crates/kinewright-project/src/bundle_recovery.rs-74-        let Some(root) = admission.data.file.as_ref().and_then(|f| f.studio.as_ref()) else {
+--
+crates/kinewright-project/src/bundle_recovery.rs:100:        for child in root.references() {
+crates/kinewright-project/src/bundle_recovery.rs-101-            walk(
+crates/kinewright-project/src/bundle_recovery.rs-102-                &child,
+crates/kinewright-project/src/bundle_recovery.rs-103-                &objects,
+crates/kinewright-project/src/bundle_recovery.rs-104-                &manifest,
+crates/kinewright-project/src/bundle_recovery.rs-105-                &mut BTreeSet::new(),
+crates/kinewright-project/src/bundle_recovery.rs-106-                &mut BTreeSet::new(),
+crates/kinewright-project/src/bundle_recovery.rs-107-                &mut found,
+crates/kinewright-project/src/bundle_recovery.rs-108-                false,
+--
+crates/kinewright-project/src/bundle_recovery.rs:131:            let dependencies = if *object == root.store_manifest_ref {
+crates/kinewright-project/src/bundle_recovery.rs-132-                manifest.durable_pins.clone()
+crates/kinewright-project/src/bundle_recovery.rs-133-            } else {
+crates/kinewright-project/src/bundle_recovery.rs-134-                manifest
+crates/kinewright-project/src/bundle_recovery.rs-135-                    .dependencies
+crates/kinewright-project/src/bundle_recovery.rs-136-                    .get(&hash)
+crates/kinewright-project/src/bundle_recovery.rs-137-                    .cloned()
+crates/kinewright-project/src/bundle_recovery.rs-138-                    .ok_or_else(|| BundleError::Corrupt("inventory content edge row".into()))?
+crates/kinewright-project/src/bundle_recovery.rs-139-            };
+--
+crates/kinewright-project/src/bundle_recovery.rs:142:                manifest.recovery.references()
+crates/kinewright-project/src/bundle_recovery.rs-143-            } else {
+crates/kinewright-project/src/bundle_recovery.rs-144-                manifest
+crates/kinewright-project/src/bundle_recovery.rs-145-                    .inventory_dependencies
+crates/kinewright-project/src/bundle_recovery.rs-146-                    .get(&hash)
+crates/kinewright-project/src/bundle_recovery.rs-147-                    .cloned()
+crates/kinewright-project/src/bundle_recovery.rs-148-                    .unwrap_or_default()
+crates/kinewright-project/src/bundle_recovery.rs-149-            };
+crates/kinewright-project/src/bundle_recovery.rs-150-            if !inventory_edges.is_empty() {
+--
+crates/kinewright-project/src/bundle_recovery.rs:160:            .insert(reference.sha256.clone(), root.references());
+crates/kinewright-project/src/bundle_recovery.rs-161-        retained.objects.push(reference.clone());
+crates/kinewright-project/src/bundle_recovery.rs-162-        verified.insert(reference.sha256);
+crates/kinewright-project/src/bundle_recovery.rs-163-    }
+crates/kinewright-project/src/bundle_recovery.rs-164-    Ok(())
+crates/kinewright-project/src/bundle_recovery.rs-165-}
+crates/kinewright-project/src/bundle_recovery.rs-166-pub(crate) fn base_apis() -> BTreeMap<String, u32> {
+crates/kinewright-project/src/bundle_recovery.rs-167-    [("bundle", 1), ("core-history", 1), ("owned-inputs", 1)]
+crates/kinewright-project/src/bundle_recovery.rs-168-        .into_iter()
+--
+crates/kinewright-project/src/bundle_recovery.rs:523:            manifest.recovery.references()
+crates/kinewright-project/src/bundle_recovery.rs-524-        } else {
+crates/kinewright-project/src/bundle_recovery.rs-525-            manifest
+crates/kinewright-project/src/bundle_recovery.rs-526-                .inventory_dependencies
+crates/kinewright-project/src/bundle_recovery.rs-527-                .get(&reference.sha256)
+crates/kinewright-project/src/bundle_recovery.rs-528-                .cloned()
+crates/kinewright-project/src/bundle_recovery.rs-529-                .unwrap_or_default()
+crates/kinewright-project/src/bundle_recovery.rs-530-        };
+crates/kinewright-project/src/bundle_recovery.rs-531-        for edge in edges {
+--
+crates/kinewright-project/src/bundle_recovery.rs:812:    for reference in &root.references() {
+crates/kinewright-project/src/bundle_recovery.rs-813-        walk(
+crates/kinewright-project/src/bundle_recovery.rs-814-            reference,
+crates/kinewright-project/src/bundle_recovery.rs-815-            &objects,
+crates/kinewright-project/src/bundle_recovery.rs-816-            &manifest,
+crates/kinewright-project/src/bundle_recovery.rs-817-            &mut visited,
+crates/kinewright-project/src/bundle_recovery.rs-818-            &mut active,
+crates/kinewright-project/src/bundle_recovery.rs-819-            &mut found,
+crates/kinewright-project/src/bundle_recovery.rs-820-            true,
+--
+crates/kinewright-project/src/bundle_recovery/restore.rs:86:        let closure = self.store.closure(std::slice::from_ref(&reference))?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-87-        for object in &closure {
+crates/kinewright-project/src/bundle_recovery/restore.rs-88-            self.store.verify(object)?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-89-        }
+crates/kinewright-project/src/bundle_recovery/restore.rs-90-        let checkpoint = self.store.read_record::<BranchCheckpoint>(&reference)?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-91-        let history = self
+crates/kinewright-project/src/bundle_recovery/restore.rs-92-            .store
+crates/kinewright-project/src/bundle_recovery/restore.rs-93-            .read_record::<HistorySnapshot>(&checkpoint.history_ref)?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-94-        let document = self
+--
+crates/kinewright-project/src/bundle_recovery/restore.rs:235:        let roots = root
+crates/kinewright-project/src/bundle_recovery/restore.rs:236:            .references()
+crates/kinewright-project/src/bundle_recovery/restore.rs-237-            .into_iter()
+crates/kinewright-project/src/bundle_recovery/restore.rs-238-            .filter(|reference| reference != &root.store_manifest_ref)
+crates/kinewright-project/src/bundle_recovery/restore.rs-239-            .collect::<Vec<_>>();
+crates/kinewright-project/src/bundle_recovery/restore.rs-240-        let inventory = SupportInventory {
+crates/kinewright-project/src/bundle_recovery/restore.rs-241-            required_fields: manifest.required_fields.clone(),
+crates/kinewright-project/src/bundle_recovery/restore.rs-242-            required_kinds: manifest.required_kinds.clone(),
+crates/kinewright-project/src/bundle_recovery/restore.rs-243-            required_apis: manifest.required_apis.clone(),
+crates/kinewright-project/src/bundle_recovery/restore.rs-244-        };
+crates/kinewright-project/src/bundle_recovery/restore.rs:245:        let mut projected = self.store.selected_manifest(
+crates/kinewright-project/src/bundle_recovery/restore.rs-246-            &roots,
+crates/kinewright-project/src/bundle_recovery/restore.rs-247-            &pins,
+crates/kinewright-project/src/bundle_recovery/restore.rs-248-            crate::store::RecoveryInventory::default(),
+crates/kinewright-project/src/bundle_recovery/restore.rs-249-            &inventory,
+crates/kinewright-project/src/bundle_recovery/restore.rs-250-            root.generation,
+crates/kinewright-project/src/bundle_recovery/restore.rs-251-        )?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-252-        projected.project_id.clone_from(&manifest.project_id);
+crates/kinewright-project/src/bundle_recovery/restore.rs-253-        projected.session_id.clone_from(&manifest.session_id);
+--
+crates/kinewright-project/src/bundle_recovery/restore.rs:261:        let sealed = self.admit_root_checkpoint(&bytes, &root.references())?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-262-        let reference = sealed.reference.clone();
+crates/kinewright-project/src/bundle_recovery/restore.rs-263-        // Carry the new root's complete closure until the caller attaches its rescue record.
+crates/kinewright-project/src/bundle_recovery/restore.rs-264-        self.pending_evidence.push(sealed.into_pin());
+crates/kinewright-project/src/bundle_recovery/restore.rs-265-        drop(seals);
+crates/kinewright-project/src/bundle_recovery/restore.rs-266-        verify_projection_payloads(self, source, &reference)?;
+crates/kinewright-project/src/bundle_recovery/restore.rs-267-        Ok((reference, origin))
+crates/kinewright-project/src/bundle_recovery/restore.rs-268-    }
+crates/kinewright-project/src/bundle_recovery/restore.rs-269-}
+--
+crates/kinewright-project/src/bundle_recovery/restore.rs:295:            .references();
+crates/kinewright-project/src/bundle_recovery/restore.rs-296-        expected.sort();
+crates/kinewright-project/src/bundle_recovery/restore.rs-297-        expected.dedup();
+crates/kinewright-project/src/bundle_recovery/restore.rs-298-        let mut actual = self
+crates/kinewright-project/src/bundle_recovery/restore.rs-299-            .manifest()?
+crates/kinewright-project/src/bundle_recovery/restore.rs-300-            .dependencies
+crates/kinewright-project/src/bundle_recovery/restore.rs-301-            .get(&reference.sha256)
+crates/kinewright-project/src/bundle_recovery/restore.rs-302-            .cloned()
+crates/kinewright-project/src/bundle_recovery/restore.rs-303-            .ok_or_else(|| BundleError::Corrupt("checkpoint declaration".into()))?;
+--
+crates/kinewright-project/src/bundle_recovery/restore.rs:366:        .references()
+crates/kinewright-project/src/bundle_recovery/restore.rs-367-        .iter()
+crates/kinewright-project/src/bundle_recovery/restore.rs-368-        .filter(|reference| *reference != &right.store_manifest_ref)
+crates/kinewright-project/src/bundle_recovery/restore.rs-369-        .any(|reference| !rm.objects.contains(reference))
+crates/kinewright-project/src/bundle_recovery/restore.rs-370-    {
+crates/kinewright-project/src/bundle_recovery/restore.rs-371-        return Err(BundleError::Corrupt(
+crates/kinewright-project/src/bundle_recovery/restore.rs-372-            "L1 projected manifest omits root reference".into(),
+crates/kinewright-project/src/bundle_recovery/restore.rs-373-        ));
+crates/kinewright-project/src/bundle_recovery/restore.rs-374-    }
+--
+crates/kinewright-project/src/bundle_recovery/publication.rs:332:    for reference in root.references() {
+crates/kinewright-project/src/bundle_recovery/publication.rs-333-        walk(
+crates/kinewright-project/src/bundle_recovery/publication.rs-334-            &reference,
+crates/kinewright-project/src/bundle_recovery/publication.rs-335-            &objects,
+crates/kinewright-project/src/bundle_recovery/publication.rs-336-            &manifest,
+crates/kinewright-project/src/bundle_recovery/publication.rs-337-            &mut visited,
+crates/kinewright-project/src/bundle_recovery/publication.rs-338-            &mut BTreeSet::new(),
+crates/kinewright-project/src/bundle_recovery/publication.rs-339-            &mut found,
+crates/kinewright-project/src/bundle_recovery/publication.rs-340-            true,
+--
+crates/kinewright-project/src/owned_media.rs:682:        let mut roots = vec![source.clone(), table_ref.clone()];
+crates/kinewright-project/src/owned_media.rs-683-        roots.extend(context.cloned());
+crates/kinewright-project/src/owned_media.rs:684:        let pin = self.pin(&roots)?;
+crates/kinewright-project/src/owned_media.rs-685-        CertifiedSource::new(
+crates/kinewright-project/src/owned_media.rs-686-            file,
+crates/kinewright-project/src/owned_media.rs-687-            parse_digest(&source.sha256)?,
+crates/kinewright-project/src/owned_media.rs-688-            source.byte_length,
+crates/kinewright-project/src/owned_media.rs-689-            parse_digest(&table_ref.sha256)?,
+crates/kinewright-project/src/owned_media.rs-690-            Arc::clone(&table.chunks),
+crates/kinewright-project/src/owned_media.rs-691-            Arc::new((pin, table)),
+crates/kinewright-project/src/owned_media.rs-692-            self.decoder_reserver(),
+--
+crates/kinewright-project/src/owned_media.rs:1201:                .closure(std::slice::from_ref(&sealed.reference))
+crates/kinewright-project/src/owned_media.rs-1202-                .unwrap()
+crates/kinewright-project/src/owned_media.rs-1203-                .contains(&table),
+crates/kinewright-project/src/owned_media.rs-1204-            "C0_MANIFEST_TABLE_GRAPH_PRESERVED"
+crates/kinewright-project/src/owned_media.rs-1205-        );
+crates/kinewright-project/src/owned_media.rs-1206-    }
+crates/kinewright-project/src/owned_media.rs-1207-
+crates/kinewright-project/src/owned_media.rs-1208-    #[test]
+crates/kinewright-project/src/owned_media.rs-1209-    fn s3_unsaved_local_colour_override_preserves_undo_interpretation() {
+--
+crates/kinewright-project/src/store.rs:491:        let roots = roots.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+crates/kinewright-project/src/store.rs-492-        let objects = self.closure_with_inventory(&roots, inventory)?;
+crates/kinewright-project/src/store.rs-493-        let bytes = objects.iter().try_fold(0_u64, |n, r| {
+crates/kinewright-project/src/store.rs-494-            n.checked_add(r.byte_length)
+crates/kinewright-project/src/store.rs-495-                .ok_or(BundleError::Capacity("retained source bytes"))
+crates/kinewright-project/src/store.rs-496-        })?;
+crates/kinewright-project/src/store.rs-497-        let objects = self
+crates/kinewright-project/src/store.rs-498-            .reserve_copy_read(0, objects.len() as u64 * 256, 0, false, true)?
+crates/kinewright-project/src/store.rs-499-            .hold(objects);
+--
+crates/kinewright-project/src/store.rs:774:        let mut dependencies = dependencies.to_vec();
+crates/kinewright-project/src/store.rs-775-        dependencies.sort();
+crates/kinewright-project/src/store.rs-776-        dependencies.dedup();
+crates/kinewright-project/src/store.rs-777-        self.closure_at(
+crates/kinewright-project/src/store.rs-778-            &dependencies,
+crates/kinewright-project/src/store.rs-779-            reference.record_kind != RecordKind::RootCheckpoint,
+crates/kinewright-project/src/store.rs-780-            1,
+crates/kinewright-project/src/store.rs-781-        )?;
+crates/kinewright-project/src/store.rs-782-        let unclassified = self
+--
+crates/kinewright-project/src/store.rs:875:                pin: self.pin(std::slice::from_ref(reference))?,
+crates/kinewright-project/src/store.rs-876-            });
+crates/kinewright-project/src/store.rs-877-        }
+crates/kinewright-project/src/store.rs-878-        let reservation = self.reserve(
+crates/kinewright-project/src/store.rs-879-            if unclassified.is_some() {
+crates/kinewright-project/src/store.rs-880-                0
+crates/kinewright-project/src/store.rs-881-            } else {
+crates/kinewright-project/src/store.rs-882-                reference.byte_length
+crates/kinewright-project/src/store.rs-883-            },
+--
+crates/kinewright-project/src/store.rs:1059:            pin: self.pin(std::slice::from_ref(reference))?,
+crates/kinewright-project/src/store.rs-1060-        })
+crates/kinewright-project/src/store.rs-1061-    }
+crates/kinewright-project/src/store.rs-1062-    pub(crate) fn admit_measured_media(
+crates/kinewright-project/src/store.rs-1063-        &mut self,
+crates/kinewright-project/src/store.rs-1064-        reader: &mut impl Read,
+crates/kinewright-project/src/store.rs-1065-        length: u64,
+crates/kinewright-project/src/store.rs-1066-    ) -> Result<(SealedObject, crate::owned_inputs::InputChunkTable), BundleError> {
+crates/kinewright-project/src/store.rs-1067-        let count = crate::owned_inputs::InputChunkTable::checked_count(length, self.limits())?;
+--
+crates/kinewright-project/src/store.rs:1132:                pin: self.pin(std::slice::from_ref(&reference))?,
+crates/kinewright-project/src/store.rs-1133-            }
+crates/kinewright-project/src/store.rs-1134-        } else {
+crates/kinewright-project/src/store.rs-1135-            let unclassified = self
+crates/kinewright-project/src/store.rs-1136-                .inner
+crates/kinewright-project/src/store.rs-1137-                .ledger
+crates/kinewright-project/src/store.rs-1138-                .lock()
+crates/kinewright-project/src/store.rs-1139-                .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+crates/kinewright-project/src/store.rs-1140-                .unclassified
+--
+crates/kinewright-project/src/store.rs:1203:            _pin: self.pin(std::slice::from_ref(reference))?,
+crates/kinewright-project/src/store.rs-1204-        });
+crates/kinewright-project/src/store.rs-1205-        if cache.len() as u64 >= self.limits().objects {
+crates/kinewright-project/src/store.rs-1206-            return Err(BundleError::Capacity("table cache entries"));
+crates/kinewright-project/src/store.rs-1207-        }
+crates/kinewright-project/src/store.rs-1208-        cache.insert(
+crates/kinewright-project/src/store.rs-1209-            reference.clone(),
+crates/kinewright-project/src/store.rs-1210-            WeakCacheEntry {
+crates/kinewright-project/src/store.rs-1211-                value: Arc::downgrade(&value),
+--
+crates/kinewright-project/src/store.rs:1277:            _pin: self.pin(std::slice::from_ref(reference))?,
+crates/kinewright-project/src/store.rs-1278-        });
+crates/kinewright-project/src/store.rs-1279-        if cache.len() as u64 >= self.limits().objects {
+crates/kinewright-project/src/store.rs-1280-            return Err(BundleError::Capacity("resource cache entries"));
+crates/kinewright-project/src/store.rs-1281-        }
+crates/kinewright-project/src/store.rs-1282-        cache.insert(
+crates/kinewright-project/src/store.rs-1283-            reference.clone(),
+crates/kinewright-project/src/store.rs-1284-            WeakCacheEntry {
+crates/kinewright-project/src/store.rs-1285-                value: Arc::downgrade(&value),
+--
+crates/kinewright-project/src/store.rs:1414:        let objects = self.closure(roots)?;
+crates/kinewright-project/src/store.rs-1415-        let mut ledger = self
+crates/kinewright-project/src/store.rs-1416-            .inner
+crates/kinewright-project/src/store.rs-1417-            .ledger
+crates/kinewright-project/src/store.rs-1418-            .lock()
+crates/kinewright-project/src/store.rs-1419-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+crates/kinewright-project/src/store.rs-1420-        for object in &objects {
+crates/kinewright-project/src/store.rs-1421-            if ledger.pins.get(&object.sha256).copied().unwrap_or(0) == u64::MAX {
+crates/kinewright-project/src/store.rs-1422-                return Err(BundleError::Capacity("pin overflow"));
+--
+crates/kinewright-project/src/store.rs:2265:        self.recovery.references()
+crates/kinewright-project/src/store.rs-2266-    }
+crates/kinewright-project/src/store.rs-2267-    fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
+crates/kinewright-project/src/store.rs-2268-        self.recovery.validate()?;
+crates/kinewright-project/src/store.rs-2269-        if !self.mirrors.is_empty() {
+crates/kinewright-project/src/store.rs-2270-            return Err(BundleError::Unsupported(
+crates/kinewright-project/src/store.rs-2271-                "inactive physical mirror producer".into(),
+crates/kinewright-project/src/store.rs-2272-            ));
+crates/kinewright-project/src/store.rs-2273-        }
+--
+crates/kinewright-project/src/store.rs:2351:        self.closure(&inventory_dependencies)?;
+crates/kinewright-project/src/store.rs-2352-        let mut sealed =
+crates/kinewright-project/src/store.rs-2353-            self.admit_recovered(&mut bytes.as_slice(), &reference, &record.dependencies())?;
+crates/kinewright-project/src/store.rs-2354-        if !inventory_dependencies.is_empty() {
+crates/kinewright-project/src/store.rs-2355-            self.inner
+crates/kinewright-project/src/store.rs-2356-                .ledger
+crates/kinewright-project/src/store.rs-2357-                .lock()
+crates/kinewright-project/src/store.rs-2358-                .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+crates/kinewright-project/src/store.rs-2359-                .inventory_dependencies
+--
+crates/kinewright-project/src/store.rs:2362:        sealed.pin = self.pin(std::slice::from_ref(&sealed.reference))?;
+crates/kinewright-project/src/store.rs-2363-        self.inner
+crates/kinewright-project/src/store.rs-2364-            .verified_memo
+crates/kinewright-project/src/store.rs-2365-            .lock()
+crates/kinewright-project/src/store.rs-2366-            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+crates/kinewright-project/src/store.rs-2367-            .remember(&sealed.reference, record, decoded, None, self.limits());
+crates/kinewright-project/src/store.rs-2368-        Ok(sealed)
+crates/kinewright-project/src/store.rs-2369-    }
+crates/kinewright-project/src/store.rs-2370-    pub fn read_record<T: BundleRecord>(
+--
+crates/kinewright-project/src/store.rs:2674:            let dependencies = if reference == *manifest_ref {
+crates/kinewright-project/src/store.rs-2675-                manifest.durable_pins.clone()
+crates/kinewright-project/src/store.rs-2676-            } else {
+crates/kinewright-project/src/store.rs-2677-                manifest
+crates/kinewright-project/src/store.rs-2678-                    .dependencies
+crates/kinewright-project/src/store.rs-2679-                    .get(&reference.sha256)
+crates/kinewright-project/src/store.rs-2680-                    .cloned()
+crates/kinewright-project/src/store.rs-2681-                    .ok_or_else(|| BundleError::Corrupt("missing dependency row".into()))?
+crates/kinewright-project/src/store.rs-2682-            };
+--
+crates/kinewright-project/src/store.rs:2713:            .insert(manifest_ref.sha256.clone(), manifest.recovery.references());
+crates/kinewright-project/src/store.rs-2714-        ledger.mirrors.clone_from(&manifest.mirrors);
+crates/kinewright-project/src/store.rs-2715-        let mut state = inner
+crates/kinewright-project/src/store.rs-2716-            .usage
+crates/kinewright-project/src/store.rs-2717-            .lock()
+crates/kinewright-project/src/store.rs-2718-            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+crates/kinewright-project/src/store.rs-2719-        if state.physical_bytes != 0 {
+crates/kinewright-project/src/store.rs-2720-            return Err(BundleError::Identity(
+crates/kinewright-project/src/store.rs-2721-                "physical accounting already adopted".into(),
+--
+crates/kinewright-project/src/store.rs:2801:    pub(crate) fn selected_manifest(
+crates/kinewright-project/src/store.rs-2802-        &self,
+crates/kinewright-project/src/store.rs-2803-        roots: &[ObjectRef],
+crates/kinewright-project/src/store.rs-2804-        pins: &[ObjectRef],
+crates/kinewright-project/src/store.rs-2805-        recovery: RecoveryInventory,
+crates/kinewright-project/src/store.rs-2806-        inventory: &crate::bundle::SupportInventory,
+crates/kinewright-project/src/store.rs-2807-        generation: u64,
+crates/kinewright-project/src/store.rs-2808-    ) -> Result<StoreManifest, BundleError> {
+crates/kinewright-project/src/store.rs-2809-        let mut all = roots.to_vec();
+--
+crates/kinewright-project/src/store.rs:2811:        all.extend(recovery.references());
+crates/kinewright-project/src/store.rs:2812:        let objects = self.closure(&all)?;
+crates/kinewright-project/src/store.rs-2813-        let evidence_roles = self.evidence_roles(&objects)?;
+crates/kinewright-project/src/store.rs-2814-        let ledger = self
+crates/kinewright-project/src/store.rs-2815-            .inner
+crates/kinewright-project/src/store.rs-2816-            .ledger
+crates/kinewright-project/src/store.rs-2817-            .lock()
+crates/kinewright-project/src/store.rs-2818-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+crates/kinewright-project/src/store.rs-2819-        let hashes: BTreeSet<_> = objects.iter().map(|r| r.sha256.as_str()).collect();
+crates/kinewright-project/src/store.rs-2820-        Ok(StoreManifest {
+--
+crates/kinewright-project/src/store.rs:2865:        let pin = self.pin(roots)?;
+crates/kinewright-project/src/store.rs-2866-        let mut ledger = self
+crates/kinewright-project/src/store.rs-2867-            .inner
+crates/kinewright-project/src/store.rs-2868-            .ledger
+crates/kinewright-project/src/store.rs-2869-            .lock()
+crates/kinewright-project/src/store.rs-2870-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+crates/kinewright-project/src/store.rs-2871-        ledger.committed = roots.to_vec();
+crates/kinewright-project/src/store.rs-2872-        ledger.acknowledged_objects = ledger
+crates/kinewright-project/src/store.rs-2873-            .objects
+--
+crates/kinewright-project/src/store.rs:2904:        for reference in self.references() {
+crates/kinewright-project/src/store.rs-2905-            reference.validate()?;
+crates/kinewright-project/src/store.rs-2906-            if reference.record_kind != RecordKind::RootCheckpoint {
+crates/kinewright-project/src/store.rs-2907-                return Err(BundleError::Corrupt(
+crates/kinewright-project/src/store.rs-2908-                    "recovery reference is not exact root bytes".into(),
+crates/kinewright-project/src/store.rs-2909-                ));
+crates/kinewright-project/src/store.rs-2910-            }
+crates/kinewright-project/src/store.rs-2911-        }
+crates/kinewright-project/src/store.rs-2912-        Ok(())
+--
+crates/kinewright-project/src/store.rs:3079:        for reference in self.closure(roots)? {
+crates/kinewright-project/src/store.rs-3080-            if !matches!(
+crates/kinewright-project/src/store.rs-3081-                reference.record_kind,
+crates/kinewright-project/src/store.rs-3082-                RecordKind::Document
+crates/kinewright-project/src/store.rs-3083-                    | RecordKind::SpecialistBase
+crates/kinewright-project/src/store.rs-3084-                    | RecordKind::History
+crates/kinewright-project/src/store.rs-3085-                    | RecordKind::Lineage
+crates/kinewright-project/src/store.rs-3086-                    | RecordKind::RootCheckpoint
+crates/kinewright-project/src/store.rs-3087-            ) {
+--
+crates/kinewright-project/src/store.rs:3304:        let _pin = self.pin(std::slice::from_ref(reference))?;
+crates/kinewright-project/src/store.rs-3305-        let charge = self.reserve_copy_read(0, reference.byte_length, 0, false, retained)?;
+crates/kinewright-project/src/store.rs-3306-        let file = self.open_copy_source(reference, retained)?;
+crates/kinewright-project/src/store.rs-3307-        let bytes = crate::bundle_recovery::bounded_bytes(file, reference.byte_length)?;
+crates/kinewright-project/src/store.rs-3308-        if bytes.len() as u64 != reference.byte_length {
+crates/kinewright-project/src/store.rs-3309-            return Err(BundleError::Corrupt(
+crates/kinewright-project/src/store.rs-3310-                "evidence changed while reading".into(),
+crates/kinewright-project/src/store.rs-3311-            ));
+crates/kinewright-project/src/store.rs-3312-        }
+--
+crates/kinewright-project/src/store.rs:3519:        let pin = self.pin(roots)?;
+crates/kinewright-project/src/store.rs-3520-        let mut ledger = self
+crates/kinewright-project/src/store.rs-3521-            .inner
+crates/kinewright-project/src/store.rs-3522-            .ledger
+crates/kinewright-project/src/store.rs-3523-            .lock()
+crates/kinewright-project/src/store.rs-3524-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+crates/kinewright-project/src/store.rs-3525-        let previous_collection = ledger.can_collect;
+crates/kinewright-project/src/store.rs-3526-        ledger.copy_holds = ledger
+crates/kinewright-project/src/store.rs-3527-            .copy_holds
+--
+crates/kinewright-project/src/store.rs:3636:                let dependencies = &manifest.dependencies[&hash];
+crates/kinewright-project/src/store.rs-3637-                let mut file = source.open_copy_source(&reference, cleanup_only)?;
+crates/kinewright-project/src/store.rs-3638-                #[cfg(any(test, feature = "test-util"))]
+crates/kinewright-project/src/store.rs-3639-                crate::io_observer::check_failure(
+crates/kinewright-project/src/store.rs-3640-                    "copy_object",
+crates/kinewright-project/src/store.rs-3641-                    Self::object_path(&reference)?.as_path(),
+crates/kinewright-project/src/store.rs-3642-                )?;
+crates/kinewright-project/src/store.rs-3643-                let object = self.admit_recovered(&mut file, &reference, dependencies)?;
+crates/kinewright-project/src/store.rs-3644-                if let Some(inventory) = manifest.inventory_dependencies.get(&hash) {

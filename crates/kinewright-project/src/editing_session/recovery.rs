@@ -24,13 +24,13 @@ impl Ja1EditingSession {
         saved.pending = false;
         Some(saved.report.clone())
     }
-    pub(super) fn active_bundle(&self) -> Result<&ProjectBundle, BundleError> {
+    pub(crate) fn active_bundle(&self) -> Result<&ProjectBundle, BundleError> {
         self.destination
             .as_ref()
             .ok_or(BundleError::Unsettled)?
             .bundle()
     }
-    pub(super) fn active_bundle_mut(&mut self) -> Result<&mut ProjectBundle, BundleError> {
+    pub(crate) fn active_bundle_mut(&mut self) -> Result<&mut ProjectBundle, BundleError> {
         self.require_local_writer()?;
         self.destination
             .as_mut()

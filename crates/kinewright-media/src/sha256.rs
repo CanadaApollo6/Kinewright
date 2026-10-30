@@ -10,6 +10,7 @@ pub(crate) use kinewright_hash::Sha256;
 pub use kinewright_hash::{sha256_bytes, sha256_reader};
 
 fn open_regular_file(path: &Path) -> Result<(File, Metadata), MediaError> {
+    crate::locator::check()?;
     let path_metadata = fs::metadata(path).map_err(|error| {
         MediaError::Backend(format!(
             "could not inspect {} before hashing: {error}",

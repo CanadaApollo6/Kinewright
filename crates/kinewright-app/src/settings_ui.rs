@@ -6,7 +6,12 @@
 //! they never interrupt a session that is already running.
 
 use eframe::egui;
+use kinewright_agent::{
+    orchestration::orchestration_records::ProviderSelectionRecord,
+    writer_host::{DirectorStatus, director_choices, director_status, write_director_setting},
+};
 use kinewright_core::HarnessInfo;
+use std::path::{Path, PathBuf};
 
 use crate::{
     app::KinewrightApp,
@@ -16,6 +21,35 @@ use crate::{
     },
     theme::{self, color, radius, size, space, type_size},
 };
+
+/// What the Settings window shows of S4's Director setting.
+#[derive(Clone, Debug)]
+pub(crate) struct DirectorView {
+    pub(crate) choices: Vec<ProviderSelectionRecord>,
+    pub(crate) status: DirectorStatus,
+    pub(crate) error: Option<String>,
+}
+impl DirectorView {
+    fn read(folder: Option<&Path>) -> Self {
+        Self {
+            choices: director_choices(),
+            status: director_status(folder),
+            error: None,
+        }
+    }
+}
+
+/// The per-user scheduler folder; App tests name their own.
+fn director_folder() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        crate::ja1_attachment::SCHEDULER_SETTINGS.with(|folder| folder.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
 
 const fn provider_memory_id(harness: AgentHarnessChoice) -> &'static str {
     match harness {
@@ -53,6 +87,11 @@ impl KinewrightApp {
             return;
         }
         let was_open = self.settings_open;
+        // The Director section reads S4's setting once per opening; nothing
+        // here detects, launches or calls a provider.
+        if self.director_setting.is_none() {
+            self.refresh_director_setting();
+        }
         let mut open = true;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -61,6 +100,8 @@ impl KinewrightApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_width(440.0);
+                self.show_director_settings(ui);
+                ui.add_space(space::TWO);
                 self.show_investigator_settings(ui);
                 ui.add_space(space::TWO);
                 ui.label(theme::caps_label("PROVIDERS", color::TEXT_MUTED));
@@ -82,7 +123,109 @@ impl KinewrightApp {
             });
         self.settings_open = open;
         if was_open && !open {
+            self.director_setting = None;
             self.commit_investigator_settings();
+        }
+    }
+
+    pub(crate) fn refresh_director_setting(&mut self) {
+        self.director_setting = Some(DirectorView::read(director_folder().as_deref()));
+    }
+
+    /// Write the person's Director choice through S4, then read it back.
+    pub(crate) fn choose_director(&mut self, choice: &ProviderSelectionRecord) {
+        let folder = director_folder();
+        let error = write_director_setting(folder.as_deref(), choice).err();
+        let mut view = DirectorView::read(folder.as_deref());
+        view.error = error;
+        self.director_setting = Some(view);
+    }
+
+    /// The Director section (JA-1 S3 C10): the certified connectors S4 offers,
+    /// and the one Revise cut runs start with.
+    pub(crate) fn show_director_settings(&mut self, ui: &mut egui::Ui) {
+        let Some(view) = self.director_setting.clone() else {
+            return;
+        };
+        ui.label(theme::caps_label("DIRECTOR", color::TEXT_MUTED));
+        ui.add_space(space::ONE);
+        let mut chosen = None;
+        if view.choices.is_empty() {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                "No Director is available on this computer yet. Your notes still save.",
+            );
+        } else {
+            let current = match &view.status {
+                DirectorStatus::Set(director) => Some(director),
+                _ => None,
+            };
+            let mut connectors: Vec<&str> = Vec::new();
+            for choice in &view.choices {
+                if !connectors.contains(&choice.connector.as_str()) {
+                    connectors.push(&choice.connector);
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.label("Provider");
+                egui::ComboBox::from_id_salt("director-provider")
+                    .selected_text(current.map_or("Not chosen", |d| d.connector.as_str()))
+                    .show_ui(ui, |ui| {
+                        for connector in &connectors {
+                            let selected =
+                                current.is_some_and(|d| d.connector.as_str() == *connector);
+                            if ui.selectable_label(selected, *connector).clicked() && !selected {
+                                chosen = view
+                                    .choices
+                                    .iter()
+                                    .find(|choice| choice.connector.as_str() == *connector)
+                                    .cloned();
+                            }
+                        }
+                    });
+            });
+            if let Some(current) = current {
+                ui.horizontal(|ui| {
+                    ui.label("Model");
+                    egui::ComboBox::from_id_salt("director-model")
+                        .selected_text(current.model.as_str())
+                        .show_ui(ui, |ui| {
+                            for choice in view
+                                .choices
+                                .iter()
+                                .filter(|choice| choice.connector == current.connector)
+                            {
+                                let selected = choice == current;
+                                if ui.selectable_label(selected, &choice.model).clicked()
+                                    && !selected
+                                {
+                                    chosen = Some(choice.clone());
+                                }
+                            }
+                        });
+                });
+            }
+        }
+        let status = match &view.status {
+            DirectorStatus::Set(_) => "Revise cut runs start with this Director.".to_owned(),
+            DirectorStatus::Missing if view.choices.is_empty() => String::new(),
+            DirectorStatus::Missing => "Choose a Director to start Revise cut runs.".to_owned(),
+            DirectorStatus::NoLongerOffered(director) => format!(
+                "Your earlier choice ({} · {}) is no longer available. Revise cut waits until you choose another.",
+                director.connector, director.model
+            ),
+            DirectorStatus::Unreadable(why) => {
+                format!("{why} Choose a Director to replace it.")
+            }
+        };
+        if !status.is_empty() {
+            ui.colored_label(color::TEXT_MUTED, status);
+        }
+        if let Some(error) = &view.error {
+            ui.colored_label(color::TEXT_MUTED, error);
+        }
+        if let Some(choice) = chosen {
+            self.choose_director(&choice);
         }
     }
 

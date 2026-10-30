@@ -1,0 +1,140 @@
+[
+  {
+    "id": "recovery-exact-extension",
+    "file": "crates/kinewright-project/src/editing_session/manual.rs",
+    "old": "        lease.inputs = inputs;\n",
+    "new": "",
+    "crate": "kinewright-project",
+    "target": "ja_s3_owned_inputs",
+    "selector": "s3_fix1_recovery_carries_the_exact_unpublished_extension",
+    "marker": "C0_FIX1_EXACT_EXTENSION_RECOVERED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs"
+  },
+  {
+    "id": "recovery-input-pin",
+    "file": "crates/kinewright-project/src/editing_session/manual.rs",
+    "old": "        let _inputs_pin = bundle.store.pin(std::slice::from_ref(&inputs))?;\n",
+    "new": "",
+    "crate": "kinewright-project",
+    "target": "ja_s3_owned_inputs",
+    "selector": "s3_fix1_recovery_carries_the_exact_unpublished_extension",
+    "marker": "C0_FIX1_EXACT_EXTENSION_RECOVERED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs"
+  },
+  {
+    "id": "extension-survives-restart",
+    "file": "crates/kinewright-project/src/editing_session/owned_media.rs",
+    "old": "        // Issuer publication must retain this extension before the GUI can accept it.\n        let previous = std::mem::replace(&mut self.inputs, prepared.inputs_ref.clone());\n        let lease = self.issue_manual_lease(client, token);\n        if lease.is_err() {\n            self.inputs = previous;\n        }\n        lease",
+    "new": "        let mut lease = self.issue_manual_lease(client, token)?;\n        lease.inputs.clone_from(&prepared.inputs_ref);\n        Ok(lease)",
+    "crate": "kinewright-agent",
+    "target": "lib",
+    "selector": "s3_fix1_admitted_extension_recovers_after_host_restart",
+    "marker": "C0_FIX1_RESTART_EXTENSION",
+    "witness_file": "crates/kinewright-agent/src/writer_host/s2h_tests.rs"
+  },
+  {
+    "id": "recovery-owner-predecessor",
+    "file": "crates/kinewright-project/src/editing_session/manual.rs",
+    "old": "        crate::bundle_commit::validate_manifest_extension(\n            &bundle.store,\n            &bundle\n                .checkpoint(bundle.manual_branch_id())?\n                .input_manifest_ref,\n            &inputs,\n        )?;\n",
+    "new": "",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_recovery_checks_inputs_before_replacement_authority",
+    "marker": "C0_FIX1_NO_REPLACEMENT_AUTHORITY owner",
+    "witness_file": "crates/kinewright-project/src/editing_session/manual.rs"
+  },
+  {
+    "id": "recovery-fingerprint-interpretation",
+    "file": "crates/kinewright-project/src/editing_session/manual.rs",
+    "old": "        crate::bundle_commit::validate_inputs(expected, &manifest)?;\n",
+    "new": "        let _ = expected;\n",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_recovery_checks_inputs_before_replacement_authority",
+    "marker": "C0_FIX1_RECOVERY_INPUT_REFUSED fingerprint",
+    "witness_file": "crates/kinewright-project/src/editing_session/manual.rs"
+  },
+  {
+    "id": "recovery-retained-bytes",
+    "file": "crates/kinewright-project/src/editing_session/manual.rs",
+    "old": "            bundle.store.verify(&reference)?;",
+    "new": "            let _ = reference;",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_recovery_checks_inputs_before_replacement_authority",
+    "marker": "C0_FIX1_NO_REPLACEMENT_AUTHORITY bytes",
+    "alternate_markers": [
+      "C0_FIX1_RECOVERY_INPUT_REFUSED bytes"
+    ],
+    "witness_file": "crates/kinewright-project/src/editing_session/manual.rs"
+  },
+  {
+    "id": "recovery-stream-certification",
+    "file": "crates/kinewright-project/src/editing_session/manual.rs",
+    "old": "        crate::store::BundleRecord::validate_admission(&*manifest, &bundle.store)?;\n",
+    "new": "",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_recovery_checks_inputs_before_replacement_authority",
+    "marker": "C0_FIX1_RECOVERY_INPUT_REFUSED stream",
+    "alternate_markers": [
+      "C0_FIX1_NO_REPLACEMENT_AUTHORITY stream"
+    ],
+    "witness_file": "crates/kinewright-project/src/editing_session/manual.rs"
+  },
+  {
+    "id": "reuse-orphan-reclassification",
+    "file": "crates/kinewright-project/src/store.rs",
+    "old": "            self.register_published(&reference, &[], reservation, unclassified)?",
+    "new": "            self.register_published(&reference, &[], reservation, None)?",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_reused_crash_residue_keeps_bytes_and_one_charge",
+    "marker": "C0_FIX1_ORPHAN_RECLASSIFIED",
+    "witness_file": "crates/kinewright-project/src/owned_media.rs"
+  },
+  {
+    "id": "reuse-verified-length",
+    "file": "crates/kinewright-project/src/store.rs",
+    "old": "            if unclassified.is_some_and(|length| length != reference.byte_length) {\n                return Err(BundleError::Corrupt(\n                    \"unclassified import length differs\".into(),\n                ));\n            }\n",
+    "new": "",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_reclassification_refuses_a_different_orphan_length_before_registration",
+    "marker": "C0_FIX1_NO_INVALID_REGISTRATION",
+    "witness_file": "crates/kinewright-project/src/store.rs"
+  },
+  {
+    "id": "orphan-cleanup-admitted",
+    "file": "crates/kinewright-project/src/store.rs",
+    "old": "        if ledger.objects.contains_key(&hash) || ledger.pins.get(&hash).copied().unwrap_or(0) != 0 {",
+    "new": "        if ledger.pins.get(&hash).copied().unwrap_or(0) != 0 {",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_orphan_cleanup_preserves_admitted_and_pinned_identities",
+    "marker": "C0_FIX1_ORPHAN_CLEANUP_GUARD",
+    "witness_file": "crates/kinewright-project/src/store.rs"
+  },
+  {
+    "id": "orphan-cleanup-pinned",
+    "file": "crates/kinewright-project/src/store.rs",
+    "old": "        if ledger.objects.contains_key(&hash) || ledger.pins.get(&hash).copied().unwrap_or(0) != 0 {",
+    "new": "        if ledger.objects.contains_key(&hash) {",
+    "crate": "kinewright-project",
+    "target": "lib",
+    "selector": "s3_fix1_orphan_cleanup_preserves_admitted_and_pinned_identities",
+    "marker": "C0_FIX1_ORPHAN_CLEANUP_GUARD",
+    "witness_file": "crates/kinewright-project/src/store.rs"
+  },
+  {
+    "id": "torn-import-stamp",
+    "file": "crates/kinewright-project/src/editing_session/owned_media.rs",
+    "old": "    if crate::namespace::FileIdentity::of_file(&file)? != identity\n        || crate::namespace::FileIdentity::of_file(&current)? != identity\n        || after.len() != metadata.len()\n        || current_metadata.len() != metadata.len()\n        || after.modified()? != modified\n        || current_metadata.modified()? != modified\n    {\n        return Err(BundleError::Corrupt(\n            \"source identity, size or modification time changed during import\".into(),\n        ));\n    }\n",
+    "new": "    let _ = (identity, modified, after, current_metadata);\n",
+    "crate": "kinewright-project",
+    "target": "ja_s3_owned_inputs",
+    "selector": "s3_fix1_same_length_torn_import_refuses",
+    "marker": "C0_FIX1_TORN_IMPORT_REFUSED",
+    "witness_file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs"
+  }
+]

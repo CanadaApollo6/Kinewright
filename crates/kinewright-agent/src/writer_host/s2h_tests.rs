@@ -29,6 +29,7 @@ fn fixture() -> (
         .first_save(&temp.path("a.kinewright"), StorageLimits::default())
         .unwrap();
     let mut host = HostCommandOwner::open(HostConfig {
+        scheduler_settings: None,
         project: "s2h-review".into(),
         path: None,
         roots: SessionRoots {
@@ -50,6 +51,310 @@ fn checked(host: &mut HostCommandOwner, command: HostCommand) -> HostReply {
     assert!(reply.error.is_none(), "{:?}", reply.error);
     reply
 }
+
+#[test]
+fn s3_fix1_admitted_extension_recovers_after_host_restart() {
+    for colour in [false, true] {
+        let (temp, mut host) = fixture();
+        let path = temp.path("restart.wav");
+        std::fs::write(
+            &path,
+            kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+        )
+        .unwrap();
+        let client = "e".repeat(64);
+        checked(
+            &mut host,
+            HostCommand::AcquireManual {
+                client: client.clone(),
+            },
+        );
+        if colour {
+            host.owner_mut().unwrap().import_owned_media(&path).unwrap();
+            host.manual = None;
+            checked(
+                &mut host,
+                HostCommand::AcquireManual {
+                    client: client.clone(),
+                },
+            );
+        }
+        let before = HostSnapshot::capture(host.core()).unwrap();
+        let command = if colour {
+            HostCommand::PrepareMediaInterpretation {
+                client: client.clone(),
+                operation: kinewright_core::assume_rec709_operation(
+                    kinewright_core::AssetId(1),
+                    &before.history.document.media_pool[0].color_description,
+                ),
+                snapshot: before.clone(),
+            }
+        } else {
+            HostCommand::PrepareOwnedMedia {
+                client: client.clone(),
+                path: path.clone(),
+                asset_id: kinewright_core::AssetId(1),
+                snapshot: before.clone(),
+            }
+        };
+        let prepared = checked(&mut host, command);
+        let gui = Core::spawn(Document::default()).unwrap();
+        gui.restore_history(before.history).unwrap();
+        let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+        let permit = replica
+            .bind_manual_producer(
+                prepared.manual_lease.unwrap(),
+                prepared.manual_inputs.unwrap(),
+            )
+            .unwrap();
+        let operation = prepared
+            .owned_media_edit
+            .unwrap_or_else(|| Operation::AddAsset {
+                asset: prepared.owned_media.unwrap(),
+            });
+        assert!(matches!(
+            permit.request(CoreCommand::Do(operation)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let pending = permit.pending().unwrap();
+        let frozen = HostSnapshot::capture(&gui).unwrap();
+        let mut config = host.config.clone();
+        config.path = Some(temp.path("a.kinewright"));
+        drop(host);
+        std::fs::remove_file(path).unwrap();
+        let mut host = HostCommandOwner::open(config).unwrap();
+        let recovered = run(
+            &mut host,
+            HostCommand::BeginRecovery {
+                client,
+                frozen: Some(frozen.clone()),
+                pending,
+                discard_batches: None,
+            },
+        );
+        assert!(
+            recovered.error.is_none(),
+            "C0_FIX1_RESTART_EXTENSION: {:?}",
+            recovered.error
+        );
+        let barrier = recovered.recovery.unwrap();
+        checked(
+            &mut host,
+            HostCommand::PublishBarrier {
+                barrier: Box::new(barrier),
+            },
+        );
+        let restored = Core::spawn(Document::default()).unwrap();
+        kinewright_project::bundle::LoadedBundle::read(&temp.path("a.kinewright"))
+            .unwrap()
+            .restore_manual(&restored)
+            .unwrap();
+        assert_eq!(
+            restored.export_history().unwrap(),
+            frozen.history,
+            "C0_FIX1_RESTART_SUFFIX"
+        );
+    }
+}
+
+#[test]
+fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
+    let (temp, mut host) = fixture();
+    let path = temp.path("owned.wav");
+    std::fs::write(
+        &path,
+        kinewright_media::test_support::wav_f32(
+            &kinewright_media::test_support::tone(440.0, 0.25, 48_000, 48_000),
+            48_000,
+            1,
+        ),
+    )
+    .unwrap();
+    let client = "p".repeat(64);
+    checked(
+        &mut host,
+        HostCommand::AcquireManual {
+            client: client.clone(),
+        },
+    );
+    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let original_lease = host.manual.clone();
+    let before_refusal_root = host.owner().unwrap().root_sha256().unwrap();
+    let altered = Core::spawn(Document::default()).unwrap();
+    altered.restore_history(snapshot.history.clone()).unwrap();
+    edit(&altered, false);
+    for (request_client, request_snapshot, code) in [
+        ("x".repeat(64), snapshot.clone(), "manual_lease"),
+        (
+            client.clone(),
+            HostSnapshot::capture(&altered).unwrap(),
+            "history_changed",
+        ),
+    ] {
+        let refused = run(
+            &mut host,
+            HostCommand::PrepareOwnedMedia {
+                client: request_client,
+                path: path.clone(),
+                asset_id: kinewright_core::AssetId(1),
+                snapshot: request_snapshot,
+            },
+        );
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code.as_str()),
+            Some(code)
+        );
+        assert_eq!(host.manual, original_lease);
+        assert_eq!(
+            host.owner().unwrap().root_sha256().unwrap(),
+            before_refusal_root
+        );
+    }
+    let command = HostCommand::PrepareOwnedMedia {
+        client: client.clone(),
+        path: path.clone(),
+        asset_id: kinewright_core::AssetId(1),
+        snapshot: snapshot.clone(),
+    };
+    let roots = host.config.roots.clone();
+    let prepared = host.execute_operation(command.clone(), roots.clone(), Some(&client), Some(1));
+    assert!(prepared.error.is_none(), "{:?}", prepared.error);
+    assert_eq!(
+        HostSnapshot::capture(host.core()).unwrap(),
+        snapshot,
+        "admission cannot publish the asset"
+    );
+    let root = host.owner().unwrap().root_sha256().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let replay = host.execute_operation(command, roots, Some(&client), Some(1));
+    assert_eq!(
+        serde_json::to_vec(&prepared).unwrap(),
+        serde_json::to_vec(&replay).unwrap()
+    );
+    assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
+    let replica_core = Core::spawn(Document::default()).unwrap();
+    replica_core
+        .restore_history(snapshot.history.clone())
+        .unwrap();
+    let replica =
+        Ja1EditingSession::new(temp.root(), &replica_core, StorageLimits::default()).unwrap();
+    let permit = replica
+        .bind_manual_producer(
+            prepared.manual_lease.unwrap(),
+            prepared.manual_inputs.unwrap(),
+        )
+        .unwrap();
+    let asset = prepared.owned_media.unwrap();
+    assert!(matches!(
+        permit
+            .request(CoreCommand::Do(Operation::AddAsset {
+                asset: asset.clone()
+            }))
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    checked(
+        &mut host,
+        HostCommand::CommitHistory {
+            client,
+            messages: permit.pending().unwrap(),
+        },
+    );
+    assert_eq!(
+        HostSnapshot::capture(host.core())
+            .unwrap()
+            .history
+            .document
+            .media_pool,
+        vec![asset]
+    );
+    assert!(
+        run(
+            &mut host,
+            HostCommand::PrepareOwnedMedia {
+                client: "x".repeat(64),
+                path,
+                asset_id: kinewright_core::AssetId(2),
+                snapshot
+            }
+        )
+        .error
+        .is_some()
+    );
+}
+#[test]
+fn s3_gui_owned_input_forwarded_scope_refuses_before_admission() {
+    let (temp, mut host) = fixture();
+    let path = temp.path("chosen.wav");
+    std::fs::write(
+        &path,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800].into_boxed_slice(), 48_000, 1),
+    )
+    .unwrap();
+    let client = "g".repeat(64);
+    checked(
+        &mut host,
+        HostCommand::AcquireManual {
+            client: client.clone(),
+        },
+    );
+    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    host.config.origin = HostOrigin::Gui {
+        initial_snapshot: snapshot.clone(),
+        retention: HostSourceBinding {
+            source: None,
+            inputs: None,
+            callback: HostBootstrap {
+                endpoint: HostEndpoint {
+                    address: "127.0.0.1:1".parse().unwrap(),
+                    project: "unused".into(),
+                    protocol: HOST_PROTOCOL,
+                },
+                auth: HostAuth::generate().unwrap(),
+                roots: SessionRoots::default(),
+            },
+        },
+        expected_root_sha256: None,
+        expected_project_id: None,
+    };
+    let before = host.owner().unwrap().root_sha256().unwrap();
+    let lease = host.manual.clone();
+    let refusal = host
+        .prepare_owned_media(
+            &client,
+            &path,
+            kinewright_core::AssetId(1),
+            &snapshot,
+            &SessionRoots::default(),
+            &mut HostReply::default(),
+        )
+        .err()
+        .map(|error| error.refusal().code);
+    assert_eq!(
+        refusal.as_deref(),
+        Some("root_refused"),
+        "forwarded input scope must refuse before admission"
+    );
+    assert_eq!(host.owner().unwrap().root_sha256().unwrap(), before);
+    assert_eq!(host.manual, lease);
+    assert!(host.prepared_owned_media.is_none());
+    let mut reply = HostReply::default();
+    host.prepare_owned_media(
+        &client,
+        &path,
+        kinewright_core::AssetId(1),
+        &snapshot,
+        &SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![],
+        },
+        &mut reply,
+    )
+    .unwrap();
+    assert!(reply.owned_media.is_some());
+    assert_eq!(HostSnapshot::capture(host.core()).unwrap(), snapshot);
+}
+
 fn edit(core: &Core, locked: bool) {
     assert!(matches!(
         core.request(CoreCommand::Do(Operation::SetTrackSyncLock {
@@ -367,6 +672,36 @@ fn s2h_foreground_result_replay_is_exact_bounded_and_client_bound() {
         serde_json::to_vec(&repeated).unwrap()
     );
     assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
+    let branch = host
+        .owner_mut()
+        .unwrap()
+        .fork_durable_branch("M3-interleaved-session")
+        .unwrap()
+        .branch_id()
+        .clone();
+    let interleaved = run(&mut host, HostCommand::SaveSession { branch });
+    assert!(interleaved.error.is_none(), "{:?}", interleaved.error);
+    let current_status = serde_json::to_value(host.status()).unwrap();
+    let cached_result = host.execute_operation(
+        HostCommand::Save {
+            snapshot: HostSnapshot::capture(host.core()).unwrap(),
+        },
+        roots.clone(),
+        Some(&client),
+        Some(1),
+    );
+    assert!(cached_result.error.is_none(), "{:?}", cached_result.error);
+    assert_eq!(
+        serde_json::to_value(&cached_result.status).unwrap(),
+        current_status,
+        "M3_REPLAY_CURRENT_STATUS"
+    );
+    let mut exact = cached_result;
+    exact.status = reply.status.clone();
+    assert_eq!(
+        serde_json::to_value(exact).unwrap(),
+        serde_json::to_value(reply).unwrap()
+    );
     for (identity, operation) in [
         (client.clone(), 0),
         ("x".repeat(64), 1),
@@ -418,6 +753,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
         write: vec![temp.root().into()],
     };
     let mut host = HostCommandOwner::open(HostConfig {
+        scheduler_settings: None,
         project: "fix3-rescue-result".into(),
         path: None,
         roots: roots.clone(),
@@ -462,4 +798,75 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
         .restore_manual(&restored)
         .unwrap();
     assert_eq!(restored.export_history().unwrap(), lost.history.unwrap());
+}
+
+/// S3 C7 fix 1: the reply that confirms a rescue names the rescue copy's
+/// project. Studio keys feedback recovery by that status, so notes typed after
+/// a rescue are never filed under the original project.
+#[test]
+fn c7_fix1_rescue_status_names_the_rescue_copy() {
+    let parent = kinewright_media::test_support::workspace_target_dir();
+    let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "c7-fix1-rescue");
+    let drive = temp.path("drive");
+    std::fs::create_dir(&drive).unwrap();
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut owner = Ja1EditingSession::new(&drive, &core, StorageLimits::default()).unwrap();
+    owner
+        .first_save(&drive.join("a.kinewright"), StorageLimits::default())
+        .unwrap();
+    let original = owner.project_id().unwrap();
+    edit(&core, false);
+    assert!(io_observer::fail_once("root_parent_sync", || owner.save_active()).is_err());
+    std::fs::rename(&drive, temp.path("hidden-drive")).unwrap();
+    let roots = SessionRoots {
+        read: vec![temp.root().into()],
+        write: vec![temp.root().into()],
+    };
+    let mut host = HostCommandOwner::open(HostConfig {
+        scheduler_settings: None,
+        project: "c7-fix1-rescue".into(),
+        path: None,
+        roots: roots.clone(),
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    host.initial_core = core.clone();
+    host.owner = Some(owner);
+    checked(
+        &mut host,
+        HostCommand::PreviewRescue {
+            snapshot: HostSnapshot::capture(&core).unwrap(),
+        },
+    );
+    let destination = temp.path("rescue.kinewright");
+    let reply = host.execute_operation(
+        HostCommand::RescueTo {
+            destination: destination.clone(),
+        },
+        roots,
+        Some(&"s".repeat(64)),
+        Some(1),
+    );
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    drop(host);
+    let rescued = Ja1EditingSession::open(&destination)
+        .unwrap()
+        .project_id()
+        .unwrap();
+    println!(
+        "C7_RESCUE_IDENTITY original={} rescued={} status={:?}",
+        original.as_str(),
+        rescued.as_str(),
+        reply.status.project_id
+    );
+    assert_eq!(reply.status.project_id, Some(rescued), "C7_RESCUE_IDENTITY");
 }

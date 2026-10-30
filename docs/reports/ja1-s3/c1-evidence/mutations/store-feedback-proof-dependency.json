@@ -1,0 +1,36 @@
+{
+  "name": "store-feedback-proof-dependency",
+  "witness": "linux::s3_indexes_survive_all_root_producers",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-project/src/studio_records.rs",
+      "            self.frame_proof_ref.clone(),\n",
+      ""
+    ]
+  ],
+  "expected_red": {
+    "text": "S3_FRAME_PROOF_RETAINED",
+    "location": null
+  },
+  "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+  "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+  "source_sha256": {
+    "crates/kinewright-project/src/studio_records.rs": "96b2be77256b6ed871cbf8481f285a884c660e317a4de009de0308b6eee42d0e"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-project/src/studio_records.rs": "2a63f527a971ec48467a840bb21d5593da9d8a3d5833baaa3dc82bebf9713257"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "5c17fda4afe6a4c06dcb4342505d51dcbc9a6e9ab22ef598d1456739232aedf2",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.29s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "d5bf7db47e2806ca5e942e4f2278b4c579e97939692575d9f0e2c680c93e2b8e",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 4.95s"
+  ],
+  "restored": true
+}

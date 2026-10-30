@@ -212,6 +212,8 @@ impl RuntimeRequest {
 pub enum RuntimeResponse {
     Pending,
     QuestionAnswer(String),
+    ApprovalDecision(bool),
+    SecretReference(String),
     Unsupported,
     H3AttentionUnavailable,
     Expired,
@@ -220,6 +222,20 @@ impl RuntimeResponse {
     /// # Errors
     /// A question answer cannot stand in for approval or contain an unbounded payload.
     pub fn validate(&self, request: &RuntimeRequest) -> Result<(), AgentError> {
+        if matches!(self, Self::ApprovalDecision(_)) && request.kind != RuntimeRequestKind::Approval
+            || matches!(self, Self::SecretReference(_))
+                && request.kind != RuntimeRequestKind::Secret
+        {
+            return Err(AgentError::Protocol("runtime_response_kind".into()));
+        }
+        if let Self::SecretReference(reference) = self
+            && (reference.len() != 32
+                || !reference
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+        {
+            return Err(AgentError::Protocol("private_secret_reference".into()));
+        }
         if *self == Self::Pending {
             return Err(AgentError::Protocol(
                 "pending_is_not_a_final_response".into(),
@@ -240,13 +256,58 @@ impl RuntimeResponse {
 pub struct RuntimeResponseControl {
     request: RuntimeRequest,
     response: RuntimeResponse,
+    authority: Option<RuntimeControlAuthority>,
 }
+#[derive(Debug, Clone)]
+struct RuntimeControlAuthority {
+    holder: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    expires: std::time::Instant,
+}
+impl PartialEq for RuntimeControlAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.holder, &other.holder)
+            && std::sync::Arc::ptr_eq(&self.revoked, &other.revoked)
+            && self.expires == other.expires
+    }
+}
+impl Eq for RuntimeControlAuthority {}
 impl RuntimeResponseControl {
     /// # Errors
     /// Refuses a response with the wrong type or size before queue admission.
     pub fn new(request: RuntimeRequest, response: RuntimeResponse) -> Result<Self, AgentError> {
         response.validate(&request)?;
-        Ok(Self { request, response })
+        Ok(Self {
+            request,
+            response,
+            authority: None,
+        })
+    }
+    /// Bind consent to its holder, exact host request grant, and delivery deadline.
+    #[must_use]
+    pub fn with_live_authority(
+        mut self,
+        holder: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        expires: std::time::Instant,
+    ) -> Self {
+        self.authority = Some(RuntimeControlAuthority {
+            holder,
+            revoked,
+            expires,
+        });
+        self
+    }
+    #[must_use]
+    pub fn authority_live(&self) -> bool {
+        !matches!(
+            self.response,
+            RuntimeResponse::ApprovalDecision(_) | RuntimeResponse::SecretReference(_)
+        ) || self.authority.as_ref().is_some_and(|authority| {
+            authority.holder.load(std::sync::atomic::Ordering::Acquire)
+                && !authority.revoked.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < authority.expires
+        })
     }
     #[must_use]
     pub const fn request(&self) -> &RuntimeRequest {

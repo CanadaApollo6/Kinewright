@@ -1,0 +1,8 @@
+......................................../home/riels/.t3/worktrees/Kinewright/t3-0fe63804/scripts/slow_tests_selftest.py:577: ResourceWarning: unclosed file <_io.TextIOWrapper name=3 encoding='utf-8'>
+  code, captured = st.run_cargo(
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..
+----------------------------------------------------------------------
+Ran 42 tests in 1.154s
+
+OK

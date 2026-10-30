@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -32,43 +32,57 @@ const MAX_WAVEFORM_FILES: usize = 128;
 const MAX_WAVEFORM_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAGIC: &[u8; 8] = b"ORTH0001";
 
+type VisualJob = crate::locator::LocatorJob<(Job, Sender<VisualAssetResult>)>;
+type VisualInFlight =
+    Arc<Mutex<HashMap<(kinewright_core::LegacyMediaIdentity, JobKey), Sender<VisualAssetResult>>>>;
+type VisualReply = (Sender<VisualAssetResult>, Receiver<VisualAssetResult>);
+type VisualAuthorities =
+    HashMap<kinewright_core::LegacyMediaIdentity, (kinewright_core::LegacyMediaGrant, VisualReply)>;
+
 pub(crate) struct VisualAssetService {
-    jobs: Sender<Job>,
-    results: Receiver<VisualAssetResult>,
-    in_flight: Arc<Mutex<HashSet<JobKey>>>,
+    jobs: Sender<VisualJob>,
+    results: Mutex<VisualAuthorities>,
+    in_flight: VisualInFlight,
     root: PathBuf,
 }
 
 impl VisualAssetService {
     pub(crate) fn new(data_dir: &Path) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = bounded(JOB_CAPACITY);
-        let (results_tx, results) = bounded(RESULT_CAPACITY);
-        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let worker_in_flight = Arc::clone(&in_flight);
         let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
-        let mut worker = VisualAssetWorker::new(root.clone(), results_tx, worker_in_flight);
+        let mut worker = VisualAssetWorker::new(root.clone(), worker_in_flight);
         spawn_worker(
             "kinewright-visual-assets",
             "visual asset",
             jobs_rx,
-            move |job| worker.handle(job),
+            move |job| worker.handle_scoped(job),
         )?;
         Ok(Self {
             jobs,
-            results,
+            results: Mutex::new(HashMap::new()),
             in_flight,
             root,
         })
     }
 
-    pub(crate) fn request_waveform(&self, asset: MediaAsset, request_generation: u64) -> bool {
+    pub(crate) fn request_waveform(
+        &self,
+        asset: MediaAsset,
+        request_generation: u64,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) -> bool {
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             return false;
         }
-        self.request(Job::Waveform {
-            asset,
-            request_generation,
-        })
+        self.request(
+            grant,
+            Job::Waveform {
+                asset,
+                request_generation,
+            },
+        )
     }
 
     pub(crate) fn request_thumbnail(
@@ -77,6 +91,7 @@ impl VisualAssetService {
         source_at: TimeCode,
         max_width: u32,
         request_generation: u64,
+        grant: kinewright_core::LegacyMediaGrant,
     ) -> bool {
         if !matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo) {
             return false;
@@ -86,16 +101,43 @@ impl VisualAssetService {
                 .0
                 .clamp(0, asset.duration.0.saturating_sub(1).max(0)),
         );
-        self.request(Job::Thumbnail {
-            asset,
-            source_at,
-            max_width: max_width.clamp(1, 512),
-            request_generation,
-        })
+        self.request(
+            grant,
+            Job::Thumbnail {
+                asset,
+                source_at,
+                max_width: max_width.clamp(1, 512),
+                request_generation,
+            },
+        )
     }
 
-    pub(crate) fn results(&self) -> Receiver<VisualAssetResult> {
-        self.results.clone()
+    pub(crate) fn results(
+        &self,
+        grant: &kinewright_core::LegacyMediaGrant,
+    ) -> Receiver<VisualAssetResult> {
+        self.result_channel(grant)
+            .map_or_else(crossbeam_channel::never, |(_, receiver)| receiver)
+    }
+    fn result_channel(&self, grant: &kinewright_core::LegacyMediaGrant) -> Option<VisualReply> {
+        let mut results = self.results.lock().ok()?;
+        results.retain(|_, (authority, _)| authority.check().is_ok());
+        if !results.contains_key(&grant.identity()) && results.len() >= 64 {
+            return None;
+        }
+        Some(
+            results
+                .entry(grant.identity())
+                .or_insert_with(|| (grant.clone(), bounded(RESULT_CAPACITY)))
+                .1
+                .clone(),
+        )
+    }
+
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        if let Ok(mut results) = self.results.lock() {
+            results.remove(&authority);
+        }
     }
 
     pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
@@ -106,21 +148,34 @@ impl VisualAssetService {
         clear_cache_root(&self.root)
     }
 
-    fn request(&self, job: Job) -> bool {
-        let key = job.key();
-        let inserted = self
-            .in_flight
-            .lock()
-            .is_ok_and(|mut in_flight| in_flight.insert(key.clone()));
-        if !inserted {
-            return true;
+    fn request(&self, grant: kinewright_core::LegacyMediaGrant, job: Job) -> bool {
+        let key = (grant.identity(), job.key());
+        let Some((reply, _)) = self.result_channel(&grant) else {
+            return false;
+        };
+        let Ok(mut in_flight) = self.in_flight.lock() else {
+            return false;
+        };
+        if let Some(pending) = in_flight.get(&key) {
+            return pending.same_channel(&reply);
         }
-        if let Ok(()) = self.jobs.try_send(job) {
+        if reply.len()
+            + in_flight
+                .iter()
+                .filter(|((authority, _), _)| *authority == key.0)
+                .count()
+            >= RESULT_CAPACITY
+        {
+            return false;
+        }
+        in_flight.insert(key.clone(), reply.clone());
+        if let Ok(()) = self
+            .jobs
+            .try_send(crate::locator::LocatorJob::new(grant, (job, reply)))
+        {
             true
         } else {
-            if let Ok(mut in_flight) = self.in_flight.lock() {
-                in_flight.remove(&key);
-            }
+            in_flight.remove(&key);
             false
         }
     }
@@ -187,32 +242,78 @@ enum JobKey {
 
 struct VisualAssetWorker {
     root: PathBuf,
-    results: Sender<VisualAssetResult>,
-    in_flight: Arc<Mutex<HashSet<JobKey>>>,
+    in_flight: VisualInFlight,
     hashes: ContentHashes,
 }
 
 impl VisualAssetWorker {
-    fn new(
-        root: PathBuf,
-        results: Sender<VisualAssetResult>,
-        in_flight: Arc<Mutex<HashSet<JobKey>>>,
-    ) -> Self {
+    fn new(root: PathBuf, in_flight: VisualInFlight) -> Self {
         Self {
             root,
-            results,
             in_flight,
             hashes: ContentHashes,
         }
     }
 
-    fn handle(&mut self, job: Job) -> bool {
-        let key = job.key();
-        let result = self.process(job);
+    fn handle_scoped(&mut self, job: VisualJob) -> bool {
+        // Result backpressure from an inactive project must not stop shared work.
+        let (key, result, reply) = job.run(
+            self,
+            |worker, (job, reply)| {
+                (
+                    (
+                        crate::locator::capture()
+                            .expect("visual job authority")
+                            .identity(),
+                        job.key(),
+                    ),
+                    worker.process(job),
+                    reply,
+                )
+            },
+            |_, (job, reply), error| {
+                let key = (
+                    crate::locator::capture()
+                        .expect("visual job authority")
+                        .identity(),
+                    job.key(),
+                );
+                let result = match job {
+                    Job::Waveform {
+                        asset,
+                        request_generation,
+                    } => VisualAssetResult::Failed {
+                        asset: asset.id,
+                        path: asset.path,
+                        request_generation,
+                        request: VisualRequestKind::Waveform,
+                        message: error.to_string(),
+                    },
+                    Job::Thumbnail {
+                        asset,
+                        source_at,
+                        max_width,
+                        request_generation,
+                    } => VisualAssetResult::Failed {
+                        asset: asset.id,
+                        path: asset.path,
+                        request_generation,
+                        request: VisualRequestKind::Thumbnail(ThumbnailKey {
+                            asset: asset.id,
+                            source_at,
+                            max_width,
+                        }),
+                        message: error.to_string(),
+                    },
+                };
+                (key, result, reply)
+            },
+        );
         if let Ok(mut in_flight) = self.in_flight.lock() {
+            let _ = reply.try_send(result);
             in_flight.remove(&key);
         }
-        self.results.send(result).is_ok()
+        true
     }
 
     fn process(&mut self, job: Job) -> VisualAssetResult {
@@ -296,13 +397,14 @@ impl VisualAssetWorker {
     ) -> Result<VisualAssetResult, MediaError> {
         let hash = self.content_hash(&asset.path)?;
         let store = ThumbnailStore::new(self.root.join("thumbnails"));
-        let image = if let Some(cached) = store.load(&hash, key.source_at, key.max_width)? {
-            cached
-        } else {
-            let decoded = thumbnail(&asset.path, asset.fps, key.source_at, key.max_width)?;
-            store.save(&hash, key.source_at, key.max_width, &decoded)?;
-            decoded
-        };
+        let image =
+            if let Some(cached) = store.load(&hash, asset.fps, key.source_at, key.max_width)? {
+                cached
+            } else {
+                let decoded = thumbnail(&asset.path, asset.fps, key.source_at, key.max_width)?;
+                store.save(&hash, asset.fps, key.source_at, key.max_width, &decoded)?;
+                decoded
+            };
         Ok(VisualAssetResult::Thumbnail(ThumbnailFrame {
             key,
             request_generation,
@@ -374,10 +476,11 @@ impl ThumbnailStore {
     fn load(
         &self,
         hash: &str,
+        fps: Rational,
         source_at: TimeCode,
         max_width: u32,
     ) -> Result<Option<RgbaImage>, MediaError> {
-        let Some(bytes) = read_cache(&self.path_for(hash, source_at, max_width), "thumbnail")?
+        let Some(bytes) = read_cache(&self.path_for(hash, fps, source_at, max_width), "thumbnail")?
         else {
             return Ok(None);
         };
@@ -387,6 +490,7 @@ impl ThumbnailStore {
     fn save(
         &self,
         hash: &str,
+        fps: Rational,
         source_at: TimeCode,
         max_width: u32,
         image: &RgbaImage,
@@ -394,7 +498,7 @@ impl ThumbnailStore {
         create_cache_dir(&self.root, "thumbnail")?;
         let bytes = encode_thumbnail_cache(image)?;
         atomic_write(
-            &self.path_for(hash, source_at, max_width),
+            &self.path_for(hash, fps, source_at, max_width),
             &bytes,
             "visual asset",
             TempFileStyle::ReplaceExtension,
@@ -403,11 +507,16 @@ impl ThumbnailStore {
         Ok(())
     }
 
-    fn path_for(&self, hash: &str, source_at: TimeCode, max_width: u32) -> PathBuf {
+    fn path_for(&self, hash: &str, fps: Rational, source_at: TimeCode, max_width: u32) -> PathBuf {
         cache_path(
             &self.root,
             hash,
-            &format!("-{}-{max_width}", source_at.0),
+            &format!(
+                "-{}-{}-{}-{max_width}",
+                fps.numerator(),
+                fps.denominator(),
+                source_at.0
+            ),
             "rgba",
         )
     }
@@ -496,31 +605,232 @@ mod tests {
     }
 
     #[test]
-    fn a_full_job_queue_is_reported_without_leaking_in_flight_keys() {
-        let (jobs, _jobs_rx) = bounded(1);
-        let (_results_tx, results) = bounded(1);
-        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+    fn c6b_thumbnail_cache_misses_when_fps_changes() {
+        let directory = TempDirectory::new("c6b-thumbnail-recipe");
+        let store = ThumbnailStore::new(directory.root().into());
+        let image = RgbaImage {
+            width: 1,
+            height: 1,
+            pixels: vec![12, 34, 56, 255],
+        };
+        let hash = crate::sha256::sha256_bytes(b"the same source bytes");
+        let fps = Rational::new(24, 1).unwrap();
+        store.save(&hash, fps, TimeCode(24), 32, &image).unwrap();
+        assert_eq!(
+            store
+                .load(&hash, fps, TimeCode(24), 32)
+                .unwrap()
+                .unwrap()
+                .pixels,
+            image.pixels
+        );
+        assert!(
+            store
+                .load(&hash, Rational::new(30, 1).unwrap(), TimeCode(24), 32)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn c6a_retire_visual_channel_releases_registry_and_preserves_other_project() {
+        let directory = TempDirectory::new("c6a-visual-retire");
+        let (jobs, receiver) = bounded(JOB_CAPACITY);
         let service = VisualAssetService {
             jobs,
-            results,
+            results: Mutex::default(),
+            in_flight: Arc::default(),
+            root: directory.root().into(),
+        };
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let old = service.results(&a);
+        let other = service.results(&b);
+        assert!(service.request_waveform(asset(1), 1, a.clone()));
+        let pending = receiver.recv().unwrap();
+        service.retire(a.identity());
+        assert_eq!(service.results.lock().unwrap().len(), 1);
+        let fresh = service.results(&a);
+        assert!(
+            !service.request_waveform(asset(1), 1, a.clone()),
+            "C6A_RETIRED_REPLY_REFUSES_DUPLICATE_UNTIL_COMPLETION"
+        );
+        let mut worker =
+            VisualAssetWorker::new(directory.root().into(), Arc::clone(&service.in_flight));
+        assert!(worker.handle_scoped(pending));
+        assert!(
+            old.try_recv().is_ok(),
+            "accepted work keeps its original channel"
+        );
+        assert!(fresh.is_empty(), "focus gets a fresh channel");
+        assert!(service.request_waveform(asset(1), 1, a));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(
+            fresh.try_recv().is_ok(),
+            "C6A_FRESH_CHANNEL_RETRY_RECEIVES_REPLY"
+        );
+        assert!(service.request_waveform(asset(2), 1, b));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(other.try_recv().is_ok());
+    }
+
+    #[test]
+    fn c6b_full_inactive_visual_channel_preserves_active_progress() {
+        let directory = TempDirectory::new("c6b-visual-backpressure");
+        let (jobs, receiver) = bounded(JOB_CAPACITY);
+        let service = VisualAssetService {
+            jobs,
+            results: Mutex::default(),
+            in_flight: Arc::default(),
+            root: directory.root().into(),
+        };
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let a_results = service.results(&a);
+        let b_results = service.results(&b);
+        let mut worker =
+            VisualAssetWorker::new(directory.root().into(), Arc::clone(&service.in_flight));
+        for generation in 0..RESULT_CAPACITY as u64 {
+            assert!(service.request_waveform(asset(1), generation, a.clone()));
+            assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        }
+        assert_eq!(a_results.len(), RESULT_CAPACITY);
+        assert!(
+            !service.request_waveform(asset(1), RESULT_CAPACITY as u64, a.clone()),
+            "a full authority refuses before accepting work"
+        );
+        assert!(service.request_waveform(asset(2), 0, b));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(matches!(
+            b_results.try_recv().unwrap(),
+            VisualAssetResult::Failed {
+                asset: AssetId(2),
+                ..
+            }
+        ));
+        for _ in 0..RESULT_CAPACITY {
+            a_results.try_recv().unwrap();
+        }
+        assert!(service.request_waveform(asset(1), RESULT_CAPACITY as u64, a));
+        assert!(worker.handle_scoped(receiver.recv().unwrap()));
+        assert!(
+            a_results.try_recv().is_ok(),
+            "A retries after draining without losing accepted results"
+        );
+    }
+
+    #[test]
+    fn c2_r4_equal_visual_jobs_and_results_are_partitioned_by_authority() {
+        let (jobs, jobs_rx) = bounded(4);
+        let service = VisualAssetService {
+            jobs,
+            results: Mutex::default(),
+            in_flight: Arc::default(),
+            root: PathBuf::new(),
+        };
+        let a = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let b = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let request = || Job::Waveform {
+            asset: asset(1),
+            request_generation: 1,
+        };
+        assert!(service.request(a.clone(), request()));
+        assert!(service.request(b.clone(), request()));
+        assert_eq!(
+            jobs_rx.len(),
+            2,
+            "equal sources still run under both requesting authorities"
+        );
+        let a_results = service.results(&a);
+        let b_results = service.results(&b);
+        service
+            .result_channel(&a)
+            .unwrap()
+            .0
+            .send(VisualAssetResult::Failed {
+                asset: AssetId(1),
+                path: PathBuf::from("same.wav"),
+                request_generation: 1,
+                request: VisualRequestKind::Waveform,
+                message: "A result".into(),
+            })
+            .unwrap();
+        assert!(
+            b_results.try_recv().is_err(),
+            "B cannot consume A's retained result"
+        );
+        assert!(
+            matches!(a_results.try_recv().unwrap(), VisualAssetResult::Failed { message, .. } if message == "A result")
+        );
+    }
+
+    #[test]
+    fn c2_r4_a_closed_authority_result_channel_keeps_the_shared_worker_running() {
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        origin.revoke_legacy_media();
+        let (reply, receiver) = bounded(1);
+        drop(receiver);
+        let mut worker = VisualAssetWorker::new(PathBuf::new(), Arc::default());
+        let job = Job::Waveform {
+            asset: asset(1),
+            request_generation: 1,
+        };
+        assert!(
+            worker.handle_scoped(crate::locator::LocatorJob::new(grant, (job, reply))),
+            "one closed project's reply cannot terminate every other project's worker"
+        );
+    }
+
+    #[test]
+    fn a_full_job_queue_is_reported_without_leaking_in_flight_keys() {
+        let (jobs, _jobs_rx) = bounded(1);
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let service = VisualAssetService {
+            jobs,
+            results: Mutex::default(),
             in_flight: Arc::clone(&in_flight),
             root: PathBuf::from("visual-assets/v1"),
         };
 
-        assert!(service.request(Job::Waveform {
-            asset: asset(1),
-            request_generation: 1,
-        }));
-        assert!(!service.request(Job::Waveform {
-            asset: asset(2),
-            request_generation: 1,
-        }));
+        let grant = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        assert!(service.request(
+            grant.clone(),
+            Job::Waveform {
+                asset: asset(1),
+                request_generation: 1,
+            }
+        ));
+        assert!(!service.request(
+            grant.clone(),
+            Job::Waveform {
+                asset: asset(2),
+                request_generation: 1,
+            }
+        ));
         assert_eq!(in_flight.lock().unwrap().len(), 1);
-        assert!(in_flight.lock().unwrap().contains(&JobKey::Waveform {
-            asset: AssetId(1),
-            path: asset(1).path,
-            request_generation: 1,
-        }));
+        assert!(in_flight.lock().unwrap().contains_key(&(
+            grant.identity(),
+            JobKey::Waveform {
+                asset: AssetId(1),
+                path: asset(1).path,
+                request_generation: 1,
+            }
+        )));
     }
 
     #[test]

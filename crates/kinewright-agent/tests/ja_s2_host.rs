@@ -2,8 +2,9 @@
 use kinewright_agent::{
     ScriptedCall, ScriptedTurn,
     writer_host::{
-        HOST_PROTOCOL, HostAuth, HostClient, HostCommand, HostCommandOwner, HostConfig, HostError,
-        HostOrigin, HostRequest, HostSnapshot, SessionRoots, WriterHost,
+        AttachmentRole, HOST_PROTOCOL, HostAuth, HostClient, HostCommand,
+        HostCommandOwner as RawHostCommandOwner, HostConfig, HostError, HostOrigin, HostRequest,
+        HostSnapshot, SessionRoots, WriterHost,
     },
 };
 use kinewright_core::{Core, Document};
@@ -17,11 +18,123 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct HostCommandOwner {
+    owner: RawHostCommandOwner,
+    auth: HostAuth,
+    project: String,
+    editor: Option<String>,
+}
+
+impl HostCommandOwner {
+    fn open(configuration: HostConfig) -> Result<Self, HostError> {
+        let project = configuration.project.clone();
+        let roots = configuration.roots.clone();
+        let mut owner = RawHostCommandOwner::open(configuration)?;
+        let auth =
+            owner.issue_attachment("s2-direct-fixture".into(), AttachmentRole::Editor, roots)?;
+        Ok(Self {
+            owner,
+            auth,
+            project,
+            editor: None,
+        })
+    }
+
+    fn execute(
+        &mut self,
+        command: HostCommand,
+        roots: SessionRoots,
+    ) -> kinewright_agent::writer_host::HostReply {
+        let editor = match &command {
+            HostCommand::AcquireManual { client }
+            | HostCommand::CommitHistory { client, .. }
+            | HostCommand::BeginRecovery { client, .. }
+            | HostCommand::ConfirmSwitch { client, .. } => Some(client.clone()),
+            HostCommand::PublishBarrier { barrier }
+            | HostCommand::ConfirmBarrier { barrier, .. } => Some(barrier.client.clone()),
+            _ => self.editor.clone(),
+        };
+        let reply = self.owner.execute_attached(
+            &self.auth,
+            HostRequest {
+                editor,
+                operation: None,
+                protocol: HOST_PROTOCOL,
+                project: self.project.clone(),
+                roots,
+                command,
+            },
+        );
+        if let Some(lease) = &reply.manual_lease {
+            self.editor = Some(lease.client.clone());
+        }
+        reply
+    }
+}
+
+impl std::ops::Deref for HostCommandOwner {
+    type Target = RawHostCommandOwner;
+    fn deref(&self) -> &Self::Target {
+        &self.owner
+    }
+}
+impl std::ops::DerefMut for HostCommandOwner {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.owner
+    }
+}
+
 fn durable_test_root() -> &'static Path {
     Path::new(env!("CARGO_TARGET_TMPDIR"))
 }
 fn temp(label: &str) -> TempDirectory {
     TempDirectory::new_in(durable_test_root(), label)
+}
+#[cfg(target_os = "linux")]
+fn known_wav_f32(tone: f32) -> Vec<u8> {
+    let data_length = 4_800_u32 * 4;
+    let mut bytes = Vec::new();
+    bytes.extend(b"RIFF");
+    bytes.extend((data_length + 36).to_le_bytes());
+    bytes.extend(b"WAVEfmt ");
+    bytes.extend(16_u32.to_le_bytes());
+    bytes.extend(3_u16.to_le_bytes());
+    bytes.extend(1_u16.to_le_bytes());
+    bytes.extend(48_000_u32.to_le_bytes());
+    bytes.extend(192_000_u32.to_le_bytes());
+    bytes.extend(4_u16.to_le_bytes());
+    bytes.extend(32_u16.to_le_bytes());
+    bytes.extend(b"data");
+    bytes.extend(data_length.to_le_bytes());
+    for sample in 0..4_800_u16 {
+        let value = 0.25 * (std::f32::consts::TAU * tone * f32::from(sample) / 48_000.0).sin();
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes
+}
+#[cfg(target_os = "linux")]
+fn import_known_wav(
+    store: &mut kinewright_project::store::ProjectStore,
+    id: u64,
+    locator: &Path,
+    tone: f32,
+) -> (
+    kinewright_core::MediaAsset,
+    kinewright_project::owned_inputs::OwnedInputEntry,
+    Vec<kinewright_project::store::SealedObject>,
+    Vec<u8>,
+) {
+    let bytes = known_wav_f32(tone);
+    let (asset, entry, pins) = store
+        .import_media(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            kinewright_core::AssetId(id),
+            locator,
+            None,
+        )
+        .unwrap();
+    (asset, entry, pins, bytes)
 }
 fn roots(path: &Path) -> SessionRoots {
     SessionRoots {
@@ -31,6 +144,7 @@ fn roots(path: &Path) -> SessionRoots {
 }
 fn config(path: &Path, named: Option<PathBuf>) -> HostConfig {
     HostConfig {
+        scheduler_settings: None,
         project: "c8-exact-originating-context".into(),
         path: named,
         roots: roots(path),
@@ -402,9 +516,10 @@ fn host_owns_scripted_session_after_gui_detach() {
     let root = temp("c8-session");
     let directory = root.path("source-电影-🎬");
     std::fs::create_dir(&directory).unwrap();
-    let mut host = ProcessHost::start(config(&directory, None));
+    let host = WriterHost::start(config(&directory, None)).unwrap();
+    let gui = host.client();
     let reply = successful(
-        &host.client,
+        &gui,
         HostCommand::StartScripted {
             turns: vec![ScriptedTurn::new(
                 vec![ScriptedCall {
@@ -417,17 +532,19 @@ fn host_owns_scripted_session_after_gui_detach() {
         },
     );
     let session = reply.session.expect("host assigned a session").id;
-    successful(&host.client, HostCommand::Detach);
-    let viewer = HostClient::connect(
-        host.client.endpoint().clone(),
-        host.client.bootstrap().auth,
-        roots(&directory),
-    )
-    .unwrap();
+    successful(&gui, HostCommand::Detach);
+    assert!(gui.request(HostCommand::SessionStatus { session }).is_err());
+    let observer = host
+        .attach(
+            "gui-editor".into(),
+            AttachmentRole::Editor,
+            roots(&directory),
+        )
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut events = Vec::new();
     loop {
-        let status = successful(&viewer, HostCommand::SessionStatus { session })
+        let status = successful(&observer, HostCommand::SessionStatus { session })
             .session
             .unwrap();
         assert_eq!(status.id, session);
@@ -453,7 +570,7 @@ fn host_owns_scripted_session_after_gui_detach() {
         );
         std::thread::park_timeout(Duration::from_millis(5));
     }
-    host.orderly();
+    host.shutdown().unwrap();
 }
 
 fn lifetime_participant() {
@@ -649,6 +766,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
             private_pipe,
             "{}",
             serde_json::to_string(&HostLaunch {
+                issuer: None,
                 config: configuration,
                 auth: auth.clone()
             })
@@ -1034,11 +1152,16 @@ fn lost_callback_refuses_all_host_publication_routes() {
         HostCommand::CloseSession { branch },
     ];
     for command in commands {
+        let expected = if matches!(command, HostCommand::AdmitDestination { .. }) {
+            "role_refused"
+        } else {
+            "retention_lost"
+        };
         let reply = host.execute(command, roots(root.root()));
         assert_eq!(
             reply.error.as_ref().map(|e| e.code.as_str()),
-            Some("retention_lost"),
-            "all publication routes must refuse at ownership admission before their ordinary preconditions"
+            Some(expected),
+            "role admission precedes ownership proof; authorized publication routes refuse before ordinary preconditions"
         );
         assert!(!reply.status.retention_proven);
         assert_eq!(admission::tree(root.root()), before);
@@ -1795,45 +1918,22 @@ fn g05l_ack_prefix_is_the_independently_reopened_history() {
     reason = "Input admission and refusal share the same actor, manifest and publisher"
 )]
 fn g05l_input_context_is_admitted_before_local_acceptance() {
-    use kinewright_core::{
-        AssetId, Command as Edit, CoreMutationRefusal, Event, MediaAsset, MediaKind, Operation,
-        Rational, TimeCode,
-    };
+    use kinewright_core::{AssetId, Command as Edit, CoreMutationRefusal, Event, Operation};
     use kinewright_project::{
-        bundle_records::{ObjectRef, RecordKind},
-        editing_session::Ja1EditingSession,
-        owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+        editing_session::Ja1EditingSession, owned_inputs::OwnedInputManifest,
         storage_budget::StorageLimits,
     };
     let root = temp("c9-input-context");
     let gui = Core::spawn(Document::default()).unwrap();
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
-    let bytes = b"C9 independently retained owned-media bytes; no decoder certification";
-    let object = ObjectRef {
-        sha256: kinewright_media::sha256_bytes(bytes),
-        byte_length: bytes.len() as u64,
-        record_kind: RecordKind::OwnedMedia,
-    };
-    let media = source
-        .source_mut()
-        .unwrap()
-        .store_mut()
-        .admit_blob(&mut &bytes[..], &object, &[])
-        .unwrap();
     let store = source.source_mut().unwrap();
+    let (asset, entry, media, _expected_bytes) =
+        import_known_wav(store.store_mut(), 700, &root.path("source.wav"), 440.0);
     let manifest = OwnedInputManifest {
         project_id: None,
         session_id: Some(store.session_id().clone()),
         owner_epoch: store.store().owner_epoch(),
-        entries: vec![OwnedInputEntry {
-            entry_id: "media:700".into(),
-            object,
-            dependencies: vec![],
-            selected_stream: None,
-            time_base: None,
-            origin: None,
-            profile: None,
-        }],
+        entries: vec![entry],
     };
     let inputs = store.admit_inputs(&manifest).unwrap();
     source.set_unsaved_inputs(inputs.reference.clone()).unwrap();
@@ -1859,24 +1959,15 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
         "input context must match the exact admitted record bytes"
     );
     let permit = source.bind_manual_producer(lease, input_context).unwrap();
-    let asset = |id| MediaAsset {
-        id: AssetId(id),
-        path: root.path("source.wav"),
-        name: "source".into(),
-        duration: TimeCode(30),
-        fps: Rational::new(30, 1).unwrap(),
-        kind: MediaKind::Audio,
-        resolution: None,
-        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
-        color_description: kinewright_core::ColorDescription::default(),
-        assumed_from: None,
-    };
+    let mut unadmitted = asset.clone();
+    unadmitted.id = AssetId(701);
     let before = gui.export_history().unwrap();
+    assert!(before.document.media_pool.is_empty());
     let root_before = std::fs::read(&path).unwrap();
     assert!(
         matches!(
             permit
-                .request(Edit::Do(Operation::AddAsset { asset: asset(701) }))
+                .request(Edit::Do(Operation::AddAsset { asset: unadmitted }))
                 .unwrap(),
             Event::MutationRefused {
                 reason: CoreMutationRefusal::ManualInputRequired,
@@ -1891,7 +1982,7 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
     assert!(
         matches!(
             permit
-                .request(Edit::Do(Operation::AddAsset { asset: asset(700) }))
+                .request(Edit::Do(Operation::AddAsset { asset }))
                 .unwrap(),
             Event::DocumentChanged { .. }
         ),

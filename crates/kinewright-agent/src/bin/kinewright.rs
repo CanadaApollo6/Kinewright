@@ -18,7 +18,7 @@ fn run() -> Result<(), HostError> {
     match mode.as_str() {
         "host" => {
             let launch: HostLaunch = serde_json::from_str(&bootstrap)?;
-            let host = WriterHost::start_with_auth(launch.config, launch.auth)?;
+            let host = WriterHost::start_with_issuer(launch.config, launch.auth, launch.issuer)?;
             let mut output = std::io::stdout().lock();
             serde_json::to_writer(&mut output, host.endpoint())?;
             output.write_all(b"\n")?;

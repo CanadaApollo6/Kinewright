@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+start=$(date +%s%N)
+/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja-s1-predecessor/source/third_party/ffmpeg/bin/ffmpeg "$@"
+result=$?
+end=$(date +%s%N)
+printf '{"probe":"ffmpeg","start_ns":%s,"end_ns":%s,"exit":%s}\n' "$start" "$end" "$result" >> "$JA_S1_SETUP_PROBES"
+exit "$result"

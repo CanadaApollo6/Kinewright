@@ -1,0 +1,12 @@
+{
+  "baseline_manifest_sha256": "aa0e5712c616e3534a93ff4bf2011467bfd65340fee9e4c14c2d805c784c4ce2",
+  "accepted_runtime_pairs": [
+    "HF1-major1-consent-consumption",
+    "HF1-major2-mcp-consumption"
+  ],
+  "runtime_red_witnesses": 5,
+  "restored_green_witnesses": 5,
+  "all_source_inputs_match": true,
+  "studio_ui_unchanged": true,
+  "known_app_failures_exactly_match": true
+}

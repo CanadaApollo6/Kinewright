@@ -27,7 +27,7 @@ pub(crate) enum VideoRotation {
 }
 
 impl VideoRotation {
-    fn display_dimensions(self, width: u32, height: u32) -> (u32, u32) {
+    pub(crate) fn display_dimensions(self, width: u32, height: u32) -> (u32, u32) {
         match self {
             Self::Clockwise90 | Self::Clockwise270 => (height, width),
             Self::None | Self::HalfTurn => (width, height),
@@ -80,6 +80,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
         })?;
         let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .map_err(|error| media_error(path, "could not read video codec parameters", error))?;
+        crate::locator::check()?;
         let decoder = context
             .decoder()
             .video()
@@ -179,7 +180,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
     })
 }
 
-fn color_description_from_decoder(
+pub(crate) fn color_description_from_decoder(
     decoder: &ffmpeg::codec::decoder::Video,
     negotiated_pixel_format: Option<ffmpeg::format::Pixel>,
 ) -> ColorDescription {
@@ -634,7 +635,7 @@ fn valid_rate(rate: ffmpeg::Rational) -> Option<Rational> {
     Rational::new(numerator, denominator).ok()
 }
 
-fn duration_us_to_frames(duration: i64, fps: Rational) -> i64 {
+pub(crate) fn duration_us_to_frames(duration: i64, fps: Rational) -> i64 {
     if duration <= 0 {
         return 0;
     }
@@ -754,7 +755,11 @@ fn timing_values_differ(lhs: i64, rhs: i64) -> bool {
     lhs.abs_diff(rhs) > u64::try_from(tolerance).unwrap_or(u64::MAX)
 }
 
-fn timestamp_to_grid_ceil(timestamp: i64, time_base: ffmpeg::Rational, fps: Rational) -> i64 {
+pub(crate) fn timestamp_to_grid_ceil(
+    timestamp: i64,
+    time_base: ffmpeg::Rational,
+    fps: Rational,
+) -> i64 {
     if timestamp <= 0 {
         return 0;
     }
@@ -797,6 +802,7 @@ pub(crate) fn stream_timestamp_to_global(timestamp: i64, time_base: ffmpeg::Rati
 }
 
 pub(crate) fn media_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
+    crate::locator::before_decoder_open()?;
     crate::quiet_ffmpeg_log();
     ffmpeg::format::input(path).map_err(|error| {
         MediaError::Backend(format!(
@@ -851,6 +857,7 @@ fn reader_input(
         #[cfg(test)]
         path: path.to_path_buf(),
     }));
+    crate::locator::before_decoder_open()?;
     ffmpeg::format::input_with_interrupt(path, reader_interrupted).map_err(|error| {
         #[cfg(test)]
         interrupt_seam::exited(path, error);
@@ -1044,7 +1051,7 @@ pub(crate) fn ensure_decoder(
     Ok(())
 }
 
-fn stream_rotation(stream: &ffmpeg::Stream<'_>) -> Result<VideoRotation, MediaError> {
+pub(crate) fn stream_rotation(stream: &ffmpeg::Stream<'_>) -> Result<VideoRotation, MediaError> {
     let side_data_rotation = stream.side_data().find_map(|side_data| {
         (side_data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
             .then(|| rotation_from_display_matrix(side_data.data()))
@@ -1275,6 +1282,9 @@ fn unfragmented_mov(path: &Path) -> bool {
             size => (u64::from(size), 8),
         };
         (size >= header && size <= end - at).then_some((size, kind, header))
+    }
+    if crate::locator::before_decoder_open().is_err() {
+        return false;
     }
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
@@ -1800,10 +1810,11 @@ mod s4_cpu {
 }
 
 pub(crate) struct VideoDecoder {
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     path: std::path::PathBuf,
-    input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
     converter: VideoConverter,
+    input: crate::owned_io::DecodeInput,
     managed_source: Option<ManagedSource>,
     stream_index: usize,
     stream_time_base: ffmpeg::Rational,
@@ -1860,6 +1871,9 @@ struct KeptFrame {
 }
 
 impl VideoDecoder {
+    pub(crate) fn check_certified(&mut self) -> Result<(), MediaError> {
+        self.input.check()
+    }
     #[cfg(test)]
     pub(crate) fn open(path: &Path, fps: Rational) -> Result<Self, MediaError> {
         Self::open_scaled(path, fps, None)
@@ -1870,7 +1884,7 @@ impl VideoDecoder {
         fps: Rational,
         max_width: Option<u32>,
     ) -> Result<Self, MediaError> {
-        Self::open_scaled_internal(path, fps, max_width, None, default_threads(), None)
+        Self::open_scaled_internal(path, fps, max_width, None, default_threads(), None, None)
     }
 
     #[cfg(test)]
@@ -1905,6 +1919,36 @@ impl VideoDecoder {
         threads: usize,
         stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Self, MediaError> {
+        let managed = Self::admit_managed_source(path, description, assumption)?;
+        Self::open_scaled_internal(
+            path,
+            fps,
+            max_width,
+            Some(managed),
+            threads.max(1),
+            stop,
+            None,
+        )
+    }
+
+    pub(crate) fn open_certified(
+        path: &Path,
+        fps: Rational,
+        max_width: Option<u32>,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+        source: &crate::owned_io::CertifiedSource,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Self, MediaError> {
+        let managed = Self::admit_managed_source(path, description, assumption)?;
+        Self::open_scaled_internal(path, fps, max_width, Some(managed), 1, stop, Some(source))
+    }
+
+    fn admit_managed_source(
+        path: &Path,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+    ) -> Result<ManagedSource, MediaError> {
         // IN1 §4.2 rule 8: the typed refusal leaves the decoder intact. The
         // contextual sentence this site used to build by hand is rebuilt by
         // `SourceColorRefusal`'s `#[error(...)]` template once
@@ -1921,11 +1965,10 @@ impl VideoDecoder {
                 format!("managed source depth rejected: {error}"),
             )
         })?;
-        let managed = Some(source);
-        Self::open_scaled_internal(path, fps, max_width, managed, threads.max(1), stop)
+        Ok(source)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn open_scaled_internal(
         path: &Path,
         fps: Rational,
@@ -1933,10 +1976,19 @@ impl VideoDecoder {
         managed_source: Option<ManagedSource>,
         threads: usize,
         stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        certified: Option<&crate::owned_io::CertifiedSource>,
     ) -> Result<Self, MediaError> {
-        let input = match stop {
-            Some(stop) => reader_input(path, stop)?,
-            None => media_input(path)?,
+        let mut input = if let Some(source) = certified {
+            crate::owned_io::DecodeInput::open(
+                source,
+                stop.cloned()
+                    .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false))),
+            )?
+        } else {
+            crate::owned_io::DecodeInput::Legacy(match stop {
+                Some(stop) => reader_input(path, stop)?,
+                None => media_input(path)?,
+            })
         };
         let stream = input
             .streams()
@@ -1954,12 +2006,18 @@ impl VideoDecoder {
                 path.display()
             ))
         })?;
-        let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .map_err(|error| media_error(path, "could not read video codec parameters", error))?;
+        let mut context = if let Some(source) = certified {
+            input.context(source, stream_index, true)?
+        } else {
+            ffmpeg::codec::context::Context::from_parameters(stream.parameters()).map_err(
+                |error| media_error(path, "could not read video codec parameters", error),
+            )?
+        };
         context.set_threading(ffmpeg::codec::threading::Config {
             kind: ffmpeg::codec::threading::Type::Frame,
             count: threads,
         });
+        crate::locator::check()?;
         let decoder = context
             .decoder()
             .video()
@@ -1978,12 +2036,19 @@ impl VideoDecoder {
         let s2 = Continuation {
             pair: input.format().name().split(',').any(|name| name == "mov")
                 && decoder.id() == ffmpeg::codec::Id::H264
+                && certified.is_none()
                 && unfragmented_mov(path),
             stream: selects_stream(&input, stream_index),
             ..Continuation::default()
         };
         let flip_horizontal = if is_still_image_codec(decoder.id()) && no_audio {
-            if let Some(orientation) = crate::still_orientation::still_file_orientation(path) {
+            if let Some(orientation) = if let Some(source) = certified {
+                source
+                    .still_orientation()
+                    .map_err(|error| MediaError::Backend(error.to_string()))?
+            } else {
+                crate::still_orientation::still_file_orientation(path)
+            } {
                 rotation = orientation.rotation;
                 orientation.flip_horizontal
             } else {
@@ -2045,6 +2110,7 @@ impl VideoDecoder {
         };
 
         Ok(Self {
+            legacy_media: crate::locator::capture(),
             path: path.to_path_buf(),
             input,
             decoder,
@@ -2113,6 +2179,7 @@ impl VideoDecoder {
     /// Seek to the global `timestamp` for a window from `start`, and reset
     /// the decode state (a failed seek resets the decoder).
     fn seek_to(&mut self, timestamp: i64, start: TimeCode) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if let Err(error) = self.input.seek(timestamp, ..timestamp) {
             // Amendment R43 (RS-1): the reader's interrupt ended the seek.
             #[cfg(test)]
@@ -2195,6 +2262,34 @@ impl VideoDecoder {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn certified_chunks(&self) -> Vec<u64> {
+        self.input.cached_chunks()
+    }
+    #[cfg(test)]
+    pub(crate) fn buffer_certified_packet(&mut self) {
+        let (_, packet) = self
+            .input
+            .packets()
+            .find(|(stream, _)| stream.index() == self.stream_index)
+            .unwrap();
+        self.decoder.send_packet(&packet).unwrap();
+        let mut cache = FrameCache::<crate::frame::WorkingFrame>::new(2);
+        self.receive_frames(TimeCode::ZERO, TimeCode(100), &mut cache)
+            .unwrap();
+        let (_, packet) = self
+            .input
+            .packets()
+            .find(|(stream, _)| stream.index() == self.stream_index)
+            .unwrap();
+        self.decoder.send_packet(&packet).unwrap();
+    }
+    #[cfg(test)]
+    pub(crate) fn receive_certified_buffered(&mut self) -> Result<bool, MediaError> {
+        let mut cache = FrameCache::<crate::frame::WorkingFrame>::new(2);
+        self.receive_frames(TimeCode::ZERO, TimeCode::ZERO, &mut cache)
+            .map(|_| cache.len() > 0)
+    }
     #[cfg(test)]
     pub(crate) fn probe(&self) -> &DecoderProbe {
         &self.probe
@@ -2359,6 +2454,13 @@ impl VideoDecoder {
         &mut self,
         at: i64,
     ) -> Option<Result<T, MediaError>> {
+        let _access = match crate::locator::enter_retained(self.legacy_media.as_ref()) {
+            Ok(access) => access,
+            Err(error) => return Some(Err(error)),
+        };
+        if let Err(error) = self.check_certified() {
+            return Some(Err(error));
+        }
         let kept = self.retained.take(at)?;
         #[cfg(test)]
         {
@@ -2487,6 +2589,7 @@ impl VideoDecoder {
     /// PF1 S2c S-2 rule 1: A(t), the first packet of the selected stream
     /// after today's seek to `t` on the shadow context (`None`: unknown).
     fn shadow_anchor(&mut self, t: TimeCode, at_seek: bool) -> Option<Anchor> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref()).ok()?;
         #[cfg(test)]
         if matches!(
             self.s2.fault,
@@ -2519,6 +2622,7 @@ impl VideoDecoder {
         shadow.seek(timestamp, ..timestamp).ok()?;
         // One read per turn (Amendment R43): an error ends the lookup.
         let anchor = loop {
+            crate::locator::check().ok()?;
             let mut packet = ffmpeg::Packet::empty();
             packet.read(shadow).ok()?;
             if packet.stream() == self.stream_index {
@@ -2563,6 +2667,7 @@ impl VideoDecoder {
         end: TimeCode,
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         if end < start {
             self.continuation_at = Some(start);
             return Ok(());
@@ -2574,6 +2679,7 @@ impl VideoDecoder {
         }
 
         loop {
+            crate::locator::check()?;
             // Amendment R43 (RS-1): checked first, so no frame is taken
             // after a read the reader's interrupt ended.
             if self.stopped() {
@@ -2649,9 +2755,12 @@ impl VideoDecoder {
     ) -> Result<bool, MediaError> {
         loop {
             let mut decoded = ffmpeg::frame::Video::empty();
-            if self.decoder.receive_frame(&mut decoded).is_err() {
+            let received = self.decoder.receive_frame(&mut decoded);
+            if received.is_err() {
+                self.input.check()?;
                 break;
             }
+            self.input.video(&decoded)?;
             #[cfg(test)]
             crate::pf1_clock::add(crate::pf1_clock::DECODED, 1);
             // PF1 S2c C-4: test builds may inject a timestamp fault (`Tamper`).
@@ -3204,7 +3313,7 @@ pub(crate) const MAX_STILL_DIMENSION: u32 = 8192;
 
 /// MO1 R7: the still-image codec set — PNG and JPEG, per the design's
 /// parenthetical. Other image codecs probe exactly as before (video).
-fn is_still_image_codec(id: ffmpeg::codec::Id) -> bool {
+pub(crate) fn is_still_image_codec(id: ffmpeg::codec::Id) -> bool {
     matches!(id, ffmpeg::codec::Id::PNG | ffmpeg::codec::Id::MJPEG)
 }
 
@@ -3938,7 +4047,7 @@ mod tests {
             let fps = Rational::new(30, 1).expect("fps");
             let flag = Some(&reader_stop);
             let decoder =
-                VideoDecoder::open_scaled_internal(&reader_path, fps, None, None, 1, flag);
+                VideoDecoder::open_scaled_internal(&reader_path, fps, None, None, 1, flag, None);
             let mut decoder = decoder.expect("the source opens");
             opened.send(()).expect("opened");
             went.recv().expect("go");
@@ -4029,7 +4138,7 @@ mod tests {
             let args: Vec<&str> = args.split_whitespace().collect();
             let media = crate::test_support::GeneratedMedia::ffmpeg(label, &args, ext);
             let decoder =
-                VideoDecoder::open_scaled_internal(media.path(), fps, None, None, 1, None);
+                VideoDecoder::open_scaled_internal(media.path(), fps, None, None, 1, None, None);
             let mut decoder = decoder.expect("the source opens");
             assert_eq!((decoder.s2.pair, decoder.s2.stream), known, "{label}");
             let mut cache: FrameCache<FrameTexture> = FrameCache::new(1);

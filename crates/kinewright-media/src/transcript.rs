@@ -25,7 +25,7 @@ use crate::{
     sha256::sha256_file,
 };
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 /// `OpenAI` Whisper `small`, converted to GGML by the whisper.cpp project. The
@@ -37,11 +37,34 @@ pub const WHISPER_MODEL_SHA256: &str =
     "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b";
 pub const WHISPER_MODEL_LICENSE: &str = "MIT";
 
+#[cfg(any(test, feature = "test-util"))]
+type InferenceGate = Arc<std::sync::Mutex<Option<(Sender<()>, crossbeam_channel::Receiver<()>)>>>;
+
+/// A transcript job held after audio decode, without loading a model.
+#[cfg(any(test, feature = "test-util"))]
+pub struct TranscriptInferenceHold {
+    arrived: crossbeam_channel::Receiver<()>,
+    _release: Sender<()>,
+}
+#[cfg(any(test, feature = "test-util"))]
+impl TranscriptInferenceHold {
+    /// Wait until the real transcript worker reaches inference.
+    /// # Panics
+    /// Panics if the worker does not arrive within thirty seconds.
+    pub fn wait(&self) {
+        self.arrived
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("transcript reached inference");
+    }
+}
+
 pub(crate) struct TranscriptService {
-    jobs: Sender<TranscriptJob>,
+    jobs: Sender<crate::locator::LocatorJob<TranscriptJob>>,
     states: StatusReporter<TranscriptStatus>,
     cancellations: CancellationRegistry,
     root: PathBuf,
+    #[cfg(any(test, feature = "test-util"))]
+    inference_gate: InferenceGate,
 }
 
 struct TranscriptJob {
@@ -57,18 +80,54 @@ impl TranscriptService {
         let cancellations = CancellationRegistry::default();
         let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
         let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
-        spawn_worker("kinewright-transcript", "transcript", jobs_rx, move |job| {
-            worker.handle(&job)
-        })?;
+        #[cfg(any(test, feature = "test-util"))]
+        let inference_gate = Arc::clone(&worker.inference_gate);
+        spawn_worker(
+            "kinewright-transcript",
+            "transcript",
+            jobs_rx,
+            move |job: crate::locator::LocatorJob<TranscriptJob>| {
+                job.run(
+                    &mut worker,
+                    |worker, job| worker.handle(&job),
+                    |worker, job, error| {
+                        worker.update(&job.asset.path, TranscriptStatus::Failed(error.to_string()));
+                        worker
+                            .cancellations
+                            .finish(&job.asset.path, &job.cancellation);
+                        true
+                    },
+                )
+            },
+        )?;
         Ok(Self {
             jobs,
             states,
             cancellations,
             root,
+            #[cfg(any(test, feature = "test-util"))]
+            inference_gate,
         })
     }
 
-    pub(crate) fn request(&self, asset: MediaAsset, language: Option<String>) {
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn hold_inference(&self) -> TranscriptInferenceHold {
+        let (arrived, arrival) = crossbeam_channel::bounded(1);
+        let (release, released) = crossbeam_channel::bounded(1);
+        *self.inference_gate.lock().expect("inference gate") = Some((arrived, released));
+        TranscriptInferenceHold {
+            arrived: arrival,
+            _release: release,
+        }
+    }
+
+    pub(crate) fn request(
+        &self,
+        asset: MediaAsset,
+        language: Option<String>,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
             self.update(&asset.path, TranscriptStatus::NoSpeech);
             return;
@@ -94,11 +153,14 @@ impl TranscriptService {
         let path = asset.path.clone();
         if self
             .jobs
-            .send(TranscriptJob {
-                asset,
-                language,
-                cancellation: cancellation.clone(),
-            })
+            .send(crate::locator::LocatorJob::new(
+                grant,
+                TranscriptJob {
+                    asset,
+                    language,
+                    cancellation: cancellation.clone(),
+                },
+            ))
             .is_err()
         {
             self.cancellations.finish(&path, &cancellation);
@@ -111,6 +173,15 @@ impl TranscriptService {
 
     pub(crate) fn status(&self, path: &Path) -> TranscriptStatus {
         self.states.get_or(path, TranscriptStatus::NotRequested)
+    }
+
+    pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
+        self.cancellations.retire(authority);
+        self.states.retire(authority);
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        self.cancellations.cancel_all();
     }
 
     pub(crate) fn cancel(&self, path: &Path) -> bool {
@@ -157,7 +228,8 @@ struct TranscriptWorker {
     data_dir: PathBuf,
     states: StatusReporter<TranscriptStatus>,
     store: TranscriptStore,
-    model: Option<WhisperContext>,
+    #[cfg(any(test, feature = "test-util"))]
+    inference_gate: InferenceGate,
     cancellations: CancellationRegistry,
 }
 
@@ -171,7 +243,8 @@ impl TranscriptWorker {
             store: TranscriptStore::new(cache_root(&data_dir, "transcripts", CACHE_VERSION)),
             data_dir,
             states,
-            model: None,
+            #[cfg(any(test, feature = "test-util"))]
+            inference_gate: Arc::default(),
             cancellations,
         }
     }
@@ -202,17 +275,47 @@ impl TranscriptWorker {
         self.update(&asset.path, TranscriptStatus::Hashing);
         let content_sha256 = sha256_file(&asset.path)?;
         cancelled(cancellation)?;
-        if let Some(cached) = self.store.load(&content_sha256, asset.id)? {
+        if let Some(cached) = self.store.load(
+            &content_sha256,
+            asset.id,
+            asset.fps,
+            asset.duration,
+            language,
+        )? {
             cancelled(cancellation)?;
             self.finish(&asset.path, cached);
             return Ok(());
         }
 
-        if self.model.is_none() {
-            let model_path = ensure_model(&self.data_dir, &asset.path, &self.states, cancellation)?;
-            cancelled(cancellation)?;
-            self.model = Some(load_whisper_context(&model_path)?);
+        #[cfg(any(test, feature = "test-util"))]
+        {
+            let gate = self.inference_gate.lock().expect("inference gate").take();
+            if let Some((arrived, released)) = gate {
+                let samples = decode_audio_range(
+                    &asset.path,
+                    asset.fps,
+                    TimeCode::ZERO,
+                    asset.duration,
+                    WHISPER_SAMPLE_RATE,
+                    1,
+                    cancellation,
+                )?;
+                assert!(!samples.is_empty(), "held transcript decoded real audio");
+                let _ = arrived.send(());
+                let mut abort = inference_abort(cancellation);
+                loop {
+                    if abort() {
+                        return Err(MediaError::Cancelled);
+                    }
+                    match released.recv_timeout(std::time::Duration::from_millis(5)) {
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        _ => return Err(MediaError::Cancelled),
+                    }
+                }
+            }
         }
+
+        let model_path = ensure_model(&self.data_dir, &asset.path, &self.states, cancellation)?;
 
         self.update(
             &asset.path,
@@ -230,12 +333,13 @@ impl TranscriptWorker {
             cancellation,
         )?;
         cancelled(cancellation)?;
-        let context = self
-            .model
-            .as_ref()
-            .ok_or_else(|| MediaError::Backend("Whisper model was not loaded".to_owned()))?;
+        let _model_permit = WHISPER_CONTEXT
+            .lock()
+            .map_err(|_| MediaError::Backend("Whisper model lock poisoned".into()))?;
+        cancelled(cancellation)?;
+        let context = load_whisper_context(&model_path)?;
         let transcript = run_whisper(
-            context,
+            &context,
             &samples,
             asset,
             content_sha256,
@@ -244,7 +348,7 @@ impl TranscriptWorker {
             language,
         )?;
         cancelled(cancellation)?;
-        self.store.save(&transcript)?;
+        self.store.save(&transcript, asset.duration, language)?;
         cancelled(cancellation)?;
         self.finish(&asset.path, transcript);
         Ok(())
@@ -261,6 +365,18 @@ impl TranscriptWorker {
     fn update(&self, path: &Path, status: TranscriptStatus) {
         self.states.update(path, status);
     }
+}
+
+fn inference_abort(cancellation: &ExportCancellation) -> Box<dyn FnMut() -> bool> {
+    let cancellation = cancellation.clone();
+    let authority = crate::locator::capture();
+    // whisper-rs 0.16's erased trampoline expects a boxed callback value.
+    Box::new(move || {
+        cancellation.is_cancelled()
+            || authority
+                .as_ref()
+                .is_some_and(|grant| grant.check().is_err())
+    })
 }
 
 fn run_whisper(
@@ -283,6 +399,7 @@ fn run_whisper(
         .map_or(4, std::num::NonZeroUsize::get)
         .min(8);
     params.set_n_threads(i32::try_from(threads).unwrap_or(4));
+    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(inference_abort(cancellation));
     params.set_translate(false);
     params.set_language(language);
     params.set_print_special(false);
@@ -292,9 +409,13 @@ fn run_whisper(
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
     params.set_max_len(1);
+    let progress_authority = crate::locator::capture();
     let progress_path = asset.path.clone();
     let progress_cancellation = cancellation.clone();
     params.set_progress_callback_safe(move |progress: i32| {
+        let _authority = progress_authority
+            .as_ref()
+            .map(crate::locator::LocatorAuthority::enter);
         if progress_cancellation.is_cancelled() {
             return;
         }
@@ -330,6 +451,8 @@ fn run_whisper(
     })
 }
 
+// Asset and note inference share the permit for the whole native context lifetime.
+static WHISPER_CONTEXT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn load_whisper_context(model_path: &Path) -> Result<WhisperContext, MediaError> {
     let model_path = model_path.to_string_lossy();
     WhisperContext::new_with_params(model_path.as_ref(), WhisperContextParameters::default())
@@ -627,6 +750,8 @@ struct StoredTranscript {
     model_sha256: String,
     source_fps: Rational,
     words: Vec<TranscriptWord>,
+    source_frames: TimeCode,
+    language: Option<String>,
 }
 
 struct TranscriptStore {
@@ -640,21 +765,41 @@ impl TranscriptStore {
         }
     }
 
-    #[cfg(test)]
-    fn path_for(&self, content_sha256: &str) -> PathBuf {
-        self.cache.path_for(content_sha256, "")
+    fn path_for(
+        &self,
+        content_sha256: &str,
+        fps: Rational,
+        frames: TimeCode,
+        language: Option<&str>,
+    ) -> PathBuf {
+        let language_key = crate::sha256::sha256_bytes(format!("{language:?}").as_bytes());
+        self.cache.path_for(
+            content_sha256,
+            &format!(
+                "-{}-{}-{}-{language_key}",
+                fps.numerator(),
+                fps.denominator(),
+                frames.0
+            ),
+        )
     }
 
     fn load(
         &self,
         content_sha256: &str,
         asset: AssetId,
+        fps: Rational,
+        frames: TimeCode,
+        language: Option<&str>,
     ) -> Result<Option<AssetTranscript>, MediaError> {
         self.cache.load(
-            &self.cache.path_for(content_sha256, ""),
+            &self.path_for(content_sha256, fps, frames, language),
             |stored: StoredTranscript| {
                 (stored.content_sha256 == content_sha256
-                    && stored.model_sha256 == WHISPER_MODEL_SHA256)
+                    && stored.model_sha256 == WHISPER_MODEL_SHA256
+                    && stored.source_fps == fps
+                    && stored.source_frames == frames
+                    && stored.language.as_deref() == language)
                     .then_some(AssetTranscript {
                         asset,
                         content_sha256: stored.content_sha256,
@@ -665,17 +810,45 @@ impl TranscriptStore {
         )
     }
 
-    fn save(&self, transcript: &AssetTranscript) -> Result<(), MediaError> {
+    fn save(
+        &self,
+        transcript: &AssetTranscript,
+        frames: TimeCode,
+        language: Option<&str>,
+    ) -> Result<(), MediaError> {
         self.cache.save(
-            &self.cache.path_for(&transcript.content_sha256, ""),
+            &self.path_for(
+                &transcript.content_sha256,
+                transcript.source_fps,
+                frames,
+                language,
+            ),
             &StoredTranscript {
                 content_sha256: transcript.content_sha256.clone(),
                 model_sha256: WHISPER_MODEL_SHA256.to_owned(),
                 source_fps: transcript.source_fps,
                 words: transcript.words.clone(),
+                source_frames: frames,
+                language: language.map(str::to_owned),
             },
         )
     }
+}
+
+/// Provision the same pinned, hash-checked model used by asset transcription.
+///
+/// # Errors
+/// Returns the normal model download, verification, installation or cancellation error.
+pub fn provision_voice_model(
+    data_dir: &Path,
+    cancellation: &ExportCancellation,
+) -> Result<PathBuf, MediaError> {
+    ensure_model(
+        data_dir,
+        Path::new("voice-control"),
+        &StatusReporter::new(),
+        cancellation,
+    )
 }
 
 fn ensure_model(
@@ -780,6 +953,108 @@ pub fn default_data_dir() -> PathBuf {
     )
 }
 
+/// Bounded, CPU-only note inference. Missing models are never downloaded here.
+pub(crate) fn transcribe_voice_wav(
+    data_dir: &Path,
+    content_sha256: &str,
+    audio: &[u8],
+    cancellation: &ExportCancellation,
+) -> Result<crate::voice_note::VoiceTranscript, MediaError> {
+    use crate::voice_note::{VoiceTranscript, VoiceWord};
+    cancelled(cancellation)?;
+    let (samples, duration) = crate::voice_note::voice_pcm(audio)?;
+    if samples.iter().all(|sample| sample.abs() < 0.001) {
+        return Ok(VoiceTranscript::NoSpeech);
+    }
+    let store = TranscriptStore::new(cache_root(data_dir, "voice-transcripts", CACHE_VERSION));
+    let fps = Rational::new(1_000_000, 1).map_err(|e| MediaError::Backend(e.to_string()))?;
+    let frames = TimeCode(i64::try_from(duration).map_err(|e| MediaError::Backend(e.to_string()))?);
+    let cached = store.load(content_sha256, AssetId(0), fps, frames, Some("en"))?;
+    let transcript = if let Some(cached) = cached {
+        cached
+    } else {
+        let path = data_dir
+            .join("models")
+            .join("whisper")
+            .join(WHISPER_MODEL_NAME);
+        if !path.is_file() || sha256_file(&path)? != WHISPER_MODEL_SHA256 {
+            return Ok(VoiceTranscript::AwaitingModel);
+        }
+        let path = provision_voice_model(data_dir, cancellation)?;
+        let _model_permit = WHISPER_CONTEXT
+            .lock()
+            .map_err(|_| MediaError::Backend("Whisper model lock poisoned".into()))?;
+        cancelled(cancellation)?;
+        let mut parameters = WhisperContextParameters::default();
+        parameters.use_gpu(false);
+        let context = WhisperContext::new_with_params(path.to_string_lossy().as_ref(), parameters)
+            .map_err(|e| MediaError::Backend(format!("could not load CPU Whisper small: {e}")))?;
+        let mut state = context
+            .create_state()
+            .map_err(|e| MediaError::Backend(e.to_string()))?;
+        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: -1.0,
+        });
+        params.set_n_threads(4);
+        params.set_language(Some("en"));
+        params.set_translate(false);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_token_timestamps(true);
+        params.set_split_on_word(true);
+        params.set_max_len(1);
+        cancelled(cancellation)?;
+        state
+            .full(params, &samples)
+            .map_err(|e| MediaError::Backend(format!("voice inference failed: {e}")))?;
+        cancelled(cancellation)?;
+        AssetTranscript {
+            asset: AssetId(0),
+            content_sha256: content_sha256.into(),
+            source_fps: fps,
+            words: extract_words(&state.as_iter().collect::<Vec<_>>(), fps, frames)?,
+        }
+    };
+    cancelled(cancellation)?;
+    let words: Vec<_> = transcript
+        .words
+        .iter()
+        .map(|word| {
+            Ok(VoiceWord {
+                text: word.text.clone(),
+                start_micros: u64::try_from(word.source_start.0)
+                    .map_err(|e| MediaError::Backend(e.to_string()))?,
+                end_micros: u64::try_from(word.source_end.0)
+                    .map_err(|e| MediaError::Backend(e.to_string()))?,
+            })
+        })
+        .collect::<Result<_, MediaError>>()?;
+    if words.len() > 4096
+        || words.iter().map(|w| w.text.len()).sum::<usize>()
+            > crate::voice_note::MAX_VOICE_TEXT_BYTES
+        || words
+            .iter()
+            .any(|w| w.start_micros >= w.end_micros || w.end_micros > duration)
+        || words
+            .windows(2)
+            .any(|w| w[0].end_micros > w[1].start_micros)
+    {
+        return Err(MediaError::Backend(
+            "Whisper returned invalid voice timing or text bounds".into(),
+        ));
+    }
+    store.save(&transcript, frames, Some("en"))?;
+    cancelled(cancellation)?;
+    Ok(if words.is_empty() {
+        VoiceTranscript::NoSpeech
+    } else {
+        VoiceTranscript::Ready(words)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use kinewright_core::{Clip, ClipContent, ClipId, Track, TrackId, TrackKind};
@@ -802,6 +1077,77 @@ mod tests {
     }
 
     #[test]
+    fn c6b_transcript_cache_requires_the_requested_recipe() {
+        let directory = TempDirectory::new("c6b-transcript-recipe");
+        let store = TranscriptStore::new(directory.root().into());
+        let transcript = fixture_transcript(
+            AssetId(1),
+            &crate::sha256::sha256_bytes(b"same audio"),
+            Rational::new(24, 1).unwrap(),
+        );
+        store.save(&transcript, TimeCode(240), Some("en")).unwrap();
+        let load = |fps, frames, language| {
+            store
+                .load(
+                    &transcript.content_sha256,
+                    AssetId(2),
+                    fps,
+                    frames,
+                    language,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            load(transcript.source_fps, TimeCode(240), Some("en"))
+                .unwrap()
+                .words,
+            transcript.words
+        );
+        assert!(load(transcript.source_fps, TimeCode(240), Some("fr")).is_none());
+        assert!(load(transcript.source_fps, TimeCode(240), None).is_none());
+        assert!(load(Rational::new(30, 1).unwrap(), TimeCode(240), Some("en")).is_none());
+        assert!(load(transcript.source_fps, TimeCode(120), Some("en")).is_none());
+    }
+
+    #[test]
+    fn c6b_inference_admitted_after_cancellation_aborts_on_revocation() {
+        let origin = kinewright_core::MediaSourceOrigin::new_project();
+        let grant = origin.legacy_media().unwrap();
+        let registry = CancellationRegistry::default();
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        registry.cancel_all();
+        let token = registry
+            .start(Path::new("admitted-after-sweep.wav"))
+            .unwrap();
+        let worker_token = token.clone();
+        let worker_grant = grant.clone();
+        let (arrived, ready) = crossbeam_channel::bounded(0);
+        let (release, released) = crossbeam_channel::bounded(0);
+        let worker = std::thread::spawn(move || {
+            let _access = crate::locator::LocatorAccess::enter(&worker_grant).unwrap();
+            let mut abort = inference_abort(&worker_token);
+            assert!(!abort());
+            arrived.send(()).unwrap();
+            released.recv().unwrap();
+            abort()
+        });
+        ready
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        origin.revoke_legacy_media();
+        assert!(
+            !token.is_cancelled(),
+            "the first sweep could not see this later token"
+        );
+        release.send(()).unwrap();
+        assert!(
+            worker.join().unwrap(),
+            "C6B_LATE_ADMISSION_ABORTS_ON_REVOCATION"
+        );
+        assert!(grant.is_quiescent());
+    }
+
+    #[test]
     fn transcript_cache_round_trips_and_rebinds_asset_id() {
         let directory = TempDirectory::new("transcript-cache-roundtrip");
         let store = TranscriptStore::new(directory.root().to_path_buf());
@@ -810,10 +1156,16 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             Rational::new(24, 1).unwrap(),
         );
-        store.save(&transcript).unwrap();
+        store.save(&transcript, TimeCode(300), None).unwrap();
 
         let loaded = store
-            .load(&transcript.content_sha256, AssetId(99))
+            .load(
+                &transcript.content_sha256,
+                AssetId(99),
+                transcript.source_fps,
+                TimeCode(300),
+                None,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(loaded.asset, AssetId(99));
@@ -847,16 +1199,51 @@ mod tests {
         let first_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let second_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         store
-            .save(&fixture_transcript(
-                AssetId(1),
-                first_hash,
-                Rational::new(30, 1).unwrap(),
-            ))
+            .save(
+                &fixture_transcript(AssetId(1), first_hash, Rational::new(30, 1).unwrap()),
+                TimeCode(300),
+                None,
+            )
             .unwrap();
 
-        assert!(store.load(first_hash, AssetId(2)).unwrap().is_some());
-        assert!(store.load(second_hash, AssetId(2)).unwrap().is_none());
-        assert_ne!(store.path_for(first_hash), store.path_for(second_hash));
+        assert!(
+            store
+                .load(
+                    first_hash,
+                    AssetId(2),
+                    Rational::new(30, 1).unwrap(),
+                    TimeCode(300),
+                    None
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .load(
+                    second_hash,
+                    AssetId(2),
+                    Rational::new(30, 1).unwrap(),
+                    TimeCode(300),
+                    None
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_ne!(
+            store.path_for(
+                first_hash,
+                Rational::new(30, 1).unwrap(),
+                TimeCode(300),
+                None
+            ),
+            store.path_for(
+                second_hash,
+                Rational::new(30, 1).unwrap(),
+                TimeCode(300),
+                None
+            )
+        );
     }
 
     #[test]
@@ -865,9 +1252,24 @@ mod tests {
         let store = TranscriptStore::new(directory.root().to_path_buf());
         let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         fs::create_dir_all(directory.root()).unwrap();
-        fs::write(store.path_for(hash), b"not json").unwrap();
+        fs::write(
+            store.path_for(hash, Rational::new(30, 1).unwrap(), TimeCode(300), None),
+            b"not json",
+        )
+        .unwrap();
 
-        assert!(store.load(hash, AssetId(1)).unwrap().is_none());
+        assert!(
+            store
+                .load(
+                    hash,
+                    AssetId(1),
+                    Rational::new(30, 1).unwrap(),
+                    TimeCode(300),
+                    None
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

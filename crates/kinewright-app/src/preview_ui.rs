@@ -916,7 +916,7 @@ impl KinewrightApp {
         let source_texture = if source_access_allowed
             && matches!(asset.kind, MediaKind::Video | MediaKind::AudioVideo)
         {
-            let analysis = std::sync::Arc::clone(&self.analysis);
+            let analysis = std::sync::Arc::clone(&self.focused().analysis());
             self.visual_cache
                 .thumbnail(analysis.as_ref(), &asset, TimeCode(source_position), 512)
         } else {
@@ -1191,7 +1191,7 @@ impl KinewrightApp {
         let key = self.qc_mask_key();
         let cache = Arc::clone(&self.working_proof_cache);
         let source = Arc::new(AnalysisColorQcSource::new(
-            Arc::clone(&self.analysis),
+            Arc::clone(&self.focused().analysis()),
             Arc::clone(&cache),
         ));
         let document = Arc::clone(&self.focused().document);
@@ -1402,7 +1402,9 @@ impl KinewrightApp {
             return None;
         }
         let key = context.key;
-        let source = Arc::new(AnalysisMatteProofSource(Arc::clone(&self.analysis)));
+        let source = Arc::new(AnalysisMatteProofSource(Arc::clone(
+            &self.focused().analysis(),
+        )));
         let document = Arc::clone(&self.focused().document);
         self.matte_overlay
             .request_view_if_needed(blocked, source, document, key);
@@ -3200,7 +3202,8 @@ pub(crate) mod mo2_tests {
             let ctx = egui::Context::default();
             crate::theme::install(&ctx);
             let proof = app
-                .analysis
+                .focused()
+                .analysis()
                 .monitor_proof_for_document(Arc::new(doc.clone()), TimeCode(25))
                 .unwrap();
             let texture = ctx.load_texture(

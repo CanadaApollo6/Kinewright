@@ -23,6 +23,13 @@ mod recovery;
 #[path = "ja1_host_transport_tests.rs"]
 pub(super) mod transport_tests;
 
+#[cfg(test)]
+thread_local! {
+    /// The scheduler settings folder hosts launched on this test thread read.
+    pub(crate) static SCHEDULER_SETTINGS: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SwitchState {
     Complete,
@@ -30,6 +37,10 @@ enum SwitchState {
 }
 
 pub(super) struct HostAttachment {
+    issuer: Option<kinewright_agent::writer_host::HostIssuer>,
+    hook_inflight: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
+    hook_reply: Option<HostReply>,
+    continuation_detached: bool,
     installed_switch: Option<(
         kinewright_project::bundle_switch::SwitchAttachment,
         super::PreparedView,
@@ -54,6 +65,8 @@ pub(super) struct HostAttachment {
     inputs: ObjectRef,
     // Callback execution borrows the real GUI admission; it has no source Close callback.
     source_server: Option<SourceServer>,
+    pending_source_server: Option<SourceServer>,
+    pending_imported_media: Option<kinewright_core::AssetId>,
     child: Option<Child>,
     pub cut: Option<AcceptedCut>,
     heartbeat: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
@@ -65,6 +78,74 @@ pub(super) struct HostAttachment {
 }
 
 impl HostAttachment {
+    pub fn import_unsaved_media(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+        path: &Path,
+    ) -> Result<(kinewright_core::AssetId, HostReply), BundleError> {
+        if self.unknown_operation || self.pending_source_server.is_some() || self.recovery.is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let (asset, _) = owner.import_owned_media(path)?;
+        let transfer = owner.refresh_unsaved_host_source()?;
+        self.cut = Some(owner.recapture_host_recovery_cut()?);
+        self.source = transfer.source;
+        self.inputs = transfer.inputs;
+        self.pending_imported_media = Some(asset.id);
+        self.unknown_operation = true;
+        let reply = self.resume_unsaved_import(owner)?;
+        Ok((asset.id, reply))
+    }
+
+    pub fn unsaved_import_pending(&self) -> bool {
+        self.pending_imported_media.is_some()
+    }
+
+    fn resume_unsaved_import(
+        &mut self,
+        owner: &Ja1EditingSession,
+    ) -> Result<HostReply, BundleError> {
+        let source = self.source.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let service = owner
+            .source()
+            .ok_or(BundleError::HistoryChanged)?
+            .borrowed_source_service(source)?;
+        let server = SourceServer::start(service).map_err(host_error)?;
+        let binding = HostSourceBinding {
+            source: Some(source.clone()),
+            inputs: Some(self.inputs.clone()),
+            callback: server.bootstrap(),
+        };
+        self.pending_source_server = Some(server);
+        let snapshot = HostSnapshot::from_history(
+            self.cut
+                .as_ref()
+                .ok_or(BundleError::HistoryChanged)?
+                .history()
+                .clone(),
+        )
+        .map_err(host_error)?;
+        let reply =
+            self.foreground_request(HostCommand::RefreshUnsavedInputs { binding, snapshot })?;
+        if reply.error.is_none() {
+            self.pending_operation = None;
+            self.unknown_operation = false;
+        }
+        Ok(reply)
+    }
+
+    pub fn accept_unsaved_inputs(
+        &mut self,
+    ) -> Result<Option<kinewright_core::AssetId>, BundleError> {
+        let server = self
+            .pending_source_server
+            .take()
+            .ok_or(BundleError::HistoryChanged)?;
+        self.source_server = Some(server);
+        Ok(self.pending_imported_media.take())
+    }
+
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn prepared_switch_probe(&self) -> Option<kinewright_core::Core> {
         self.prepared_switch
@@ -204,9 +285,14 @@ impl HostAttachment {
                 .expect("GUI source service")
                 .bootstrap(),
         };
-        let launched = HostClient::launch(
+        let launched = HostClient::launch_with_issuer(
             executable,
             HostConfig {
+                // Production hosts read the person's scheduler settings folder.
+                #[cfg(test)]
+                scheduler_settings: SCHEDULER_SETTINGS.with(|folder| folder.borrow().clone()),
+                #[cfg(not(test))]
+                scheduler_settings: None,
                 project,
                 path: transfer.named_path,
                 roots,
@@ -227,7 +313,7 @@ impl HostAttachment {
                 },
             },
         );
-        let (client, mut child) = match launched {
+        let (client, mut child, issuer) = match launched {
             Ok(launched) => launched,
             Err(error) => {
                 if let Err(cause) =
@@ -273,6 +359,10 @@ impl HostAttachment {
             None
         };
         Ok(Self {
+            issuer: Some(issuer),
+            hook_inflight: None,
+            hook_reply: None,
+            continuation_detached: false,
             unknown_operation: unknown,
             switch_state: SwitchState::Complete,
             next_operation: if unknown { 2 } else { 1 },
@@ -290,6 +380,8 @@ impl HostAttachment {
             source: transfer.source,
             inputs: transfer.inputs,
             source_server,
+            pending_source_server: None,
+            pending_imported_media: None,
             child: Some(child),
             cut,
             heartbeat: None,
@@ -332,6 +424,10 @@ impl HostAttachment {
         }
         Ok(Self {
             unknown_operation: false,
+            issuer: None,
+            hook_inflight: None,
+            hook_reply: None,
+            continuation_detached: false,
             switch_state: SwitchState::Complete,
             next_operation: 1,
             pending_operation: None,
@@ -348,6 +444,8 @@ impl HostAttachment {
             source,
             inputs,
             source_server: Some(source_server),
+            pending_source_server: None,
+            pending_imported_media: None,
             child: None,
             cut: None,
             heartbeat: None,
@@ -536,6 +634,10 @@ impl HostAttachment {
         self.switch_state == SwitchState::Pending
     }
 
+    pub(super) fn pending_foreground(&self) -> bool {
+        self.pending_operation.is_some()
+    }
+
     fn foreground_request(&mut self, command: HostCommand) -> Result<HostReply, BundleError> {
         let operation = self.next_operation;
         self.next_operation = operation
@@ -552,6 +654,13 @@ impl HostAttachment {
     ) -> Result<HostReply, BundleError> {
         let client = self.client.with_manual_editor(self.manual_client.clone());
         let client = match &command {
+            HostCommand::PrepareOwnedMedia { path, .. } => {
+                let mut roots = client.bootstrap().roots;
+                roots
+                    .read
+                    .push(path.parent().ok_or(BundleError::HistoryChanged)?.into());
+                client.with_roots(roots)
+            }
             HostCommand::FirstSave { destination, .. }
             | HostCommand::SaveAs { destination, .. }
             | HostCommand::RescueTo { destination } => {
@@ -573,6 +682,12 @@ impl HostAttachment {
         action: Action,
         owner: &mut Ja1EditingSession,
     ) -> Result<HostReply, BundleError> {
+        if matches!(action, Action::Retry)
+            && self.unsaved_import_pending()
+            && self.pending_operation.is_none()
+        {
+            return self.resume_unsaved_import(owner);
+        }
         if matches!(action, Action::Retry)
             && let Some((installed, _)) = &self.installed_switch
         {
@@ -613,7 +728,9 @@ impl HostAttachment {
             && self.status.prepared_selection)
             || matches!(
                 &action,
-                Action::Save
+                Action::ImportMedia(_)
+                    | Action::ChangeMediaInterpretation(_)
+                    | Action::Save
                     | Action::ConfirmSuccessorSave
                     | Action::SaveAs(_)
                     | Action::FirstSave(_)
@@ -660,6 +777,39 @@ impl HostAttachment {
             })
         };
         let command = match action {
+            Action::StudioVersions
+            | Action::StudioManualPlayback(_)
+            | Action::StudioSelect(_)
+            | Action::StudioEditCopy(_) => {
+                return Err(BundleError::HistoryChanged);
+            }
+            Action::ChangeMediaInterpretation(operation) => {
+                HostCommand::PrepareMediaInterpretation {
+                    client: self.manual_client.clone(),
+                    operation: *operation,
+                    snapshot: snapshot()?,
+                }
+            }
+            Action::ImportMedia(path) => {
+                let asset_id = kinewright_core::AssetId(
+                    snapshot()?
+                        .history
+                        .document
+                        .media_pool
+                        .iter()
+                        .map(|asset| asset.id.0)
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(BundleError::Capacity("media asset identity"))?,
+                );
+                HostCommand::PrepareOwnedMedia {
+                    client: self.manual_client.clone(),
+                    path,
+                    asset_id,
+                    snapshot: snapshot()?,
+                }
+            }
             Action::Save | Action::ConfirmSuccessorSave => HostCommand::Save {
                 snapshot: snapshot()?,
             },
@@ -791,6 +941,28 @@ impl HostAttachment {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<Option<HostReply>, BundleError> {
+        if self
+            .hook_inflight
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            let reply = self
+                .hook_inflight
+                .take()
+                .expect("finished hook request")
+                .join()
+                .map_err(|_| BundleError::HistoryChanged)?
+                .map_err(host_error)?;
+            if reply.error.is_none() && reply.detached.is_some() {
+                self.continuation_detached = true;
+                self.heartbeat = None;
+            }
+            self.hook_reply = Some(reply.clone());
+            return Ok(Some(reply));
+        }
+        if self.continuation_detached {
+            return Ok(None);
+        }
         if self.recovery.is_some() {
             return self.poll_manual_recovery(owner);
         }
@@ -867,14 +1039,43 @@ impl HostAttachment {
             .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self) -> bool {
+        if self.continuation_detached {
+            self.source_server = None;
+            if let Some(mut child) = self.child.take() {
+                // The retained host outlives this view; reap its eventual exit.
+                drop(std::thread::spawn(move || {
+                    let _ = child.wait();
+                }));
+            }
+            return true;
+        }
+        if self.status.continuation_runs > 0 {
+            if self.hook_inflight.is_none()
+                && self
+                    .hook_reply
+                    .as_ref()
+                    .is_none_or(|reply| reply.detached.is_none())
+            {
+                let _ = self.request_hook(HostCommand::DetachForContinuation);
+            }
+            return false;
+        }
         // Explicit originating Close, as distinct from closing/dropping a chat client.
         if !self
             .child
             .as_mut()
             .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
         {
-            let _ = self.client.request(HostCommand::Shutdown);
+            match self.client.request(HostCommand::Shutdown) {
+                Ok(reply) if reply.error.is_none() => {}
+                Ok(reply) => {
+                    self.status = reply.status.clone();
+                    self.hook_reply = Some(reply);
+                    return false;
+                }
+                Err(_) => return false,
+            }
         }
         self.source_server = None;
         if let Some(child) = &mut self.child {
@@ -893,6 +1094,40 @@ impl HostAttachment {
                 }
             }
         }
+        true
+    }
+
+    pub(super) fn request_hook(&mut self, command: HostCommand) -> Result<(), BundleError> {
+        if self.hook_inflight.is_some()
+            || self.unknown_operation
+            || self.recovery.is_some()
+            || self.manual_inflight.is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let client = self.client.clone();
+        self.hook_reply = None;
+        self.heartbeat = None;
+        self.last_heartbeat = Instant::now();
+        self.hook_inflight = Some(std::thread::spawn(move || client.request(command)));
+        Ok(())
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 consumes the sequenced run and attention reply without a second event loop"
+    )]
+    pub(super) fn take_hook_reply(&mut self) -> Option<HostReply> {
+        self.hook_reply.take()
+    }
+    pub(super) fn continuation_pending(&self) -> bool {
+        self.status.continuation_runs > 0 && !self.continuation_detached
+    }
+    #[allow(
+        dead_code,
+        reason = "C6 keeps this private capability outside the closing project and uses it for reattach"
+    )]
+    pub(super) fn continuation_issuer(&self) -> Option<kinewright_agent::writer_host::HostIssuer> {
+        self.issuer.clone()
     }
 
     #[allow(clippy::too_many_lines)]

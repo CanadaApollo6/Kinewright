@@ -1,0 +1,26 @@
+completed-switch-keeps-pending-state: runtime red 101; restored green 0
+c1-attach-role-binding: runtime red 101; restored green 0
+c1-role-acquiremanual: runtime red 101; restored green 0
+c1-role-commithistory: runtime red 101; restored green 0
+c1-role-prepareswitch: runtime red 101; restored green 0
+c1-role-switch: runtime red 101; restored green 0
+c1-role-switchreceipt: runtime red 101; restored green 0
+c1-role-confirmswitch: runtime red 101; restored green 0
+Traceback (most recent call last):
+  File "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/scripts/ja1-s3-c1-mutations.py", line 130, in <module>
+    main()
+    ~~~~^^
+  File "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/scripts/ja1-s3-c1-mutations.py", line 112, in main
+    code, green, _command = run(case, evidence / f"{case['name']}-green.log.gz")
+                            ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/scripts/ja1-s3-c1-mutations.py", line 48, in run
+    raw = process.communicate()[0]
+          ~~~~~~~~~~~~~~~~~~~^^
+  File "/home/riels/.local/share/mise/installs/python/3.15.1/lib/python3.15/subprocess.py", line 1382, in communicate
+    stdout = self.stdout.read()
+  File "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/scripts/ja1-s3-c1-mutations.py", line 129, in <lambda>
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+                                             ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/scripts/ja1-s3-c1-mutations.py", line 129, in <genexpr>
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+KeyboardInterrupt

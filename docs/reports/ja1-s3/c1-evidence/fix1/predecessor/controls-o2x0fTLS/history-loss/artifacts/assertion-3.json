@@ -1,0 +1,1 @@
+{"actual":0,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"baseline_red","evidence_class":"baseline_property","expected":1,"id":"history-survives-reopen","observation":6,"oracle":"one","oracle_pointer":"","passed":false,"pointer":"/history/undo_count","positive_control":"reopened-document-equal"}

@@ -1,5 +1,5 @@
 //! Studio kernel, scoped task lifecycle, and guardian receiving ports.
-//! H1/H3 and native C2 integration are required before production execution.
+//! The writer host owns H1 publication and H3 attachment admission.
 //!
 //! Rust adaptation of <https://github.com/pingdotgg/t3code> at
 //! 5d91ab1117ad51ef1288a94717d85c70e7af09fe, apps/server/src/orchestration-v2/
@@ -7,20 +7,12 @@
 //! Notice: LICENSES/t3code-MIT.txt. Kinewright uses the existing Studio owner,
 //! explicit project/task/epoch binding, and acknowledgment-gated effects.
 //!
-//! H1 belongs to S3. Until project lib.rs registers these project-owned modules,
-//! compile their exact sources here for the contract handoff. H1 replaces these
-//! path declarations with reexports from `kinewright_project`. No opaque-blob or
-//! alternative persistence adapter is provided.
-
-use kinewright_project::{bundle_records, editing_session, receipts};
-
-#[path = "../../../kinewright-project/src/orchestration_commit.rs"]
-pub mod orchestration_commit;
-#[path = "../../../kinewright-project/src/orchestration_records.rs"]
-pub mod orchestration_records;
+use kinewright_project::bundle_records;
+pub use kinewright_project::{orchestration_commit, orchestration_records};
 
 pub mod adapters;
 pub mod context;
+pub mod director_setting;
 pub mod machine;
 pub mod mailbox;
 pub mod outbox;
@@ -54,12 +46,7 @@ impl AdmittedAttempt {
 }
 
 /// H1 calls this only after B5, while it still owns the exact committed cut.
-/// There is no production caller until S3 integrates H1. Unknown publication
-/// must reconcile the original envelope and never reaches this function.
-#[allow(
-    dead_code,
-    reason = "receiving H1 owner port; production publication is not integrated yet"
-)]
+/// Unknown publication must reconcile the original envelope before admission.
 pub(crate) fn acknowledge_attempt_reservation(
     update: &orchestration_commit::ValidatedRunUpdate,
     returned: &orchestration_commit::OrchestrationReceipt,

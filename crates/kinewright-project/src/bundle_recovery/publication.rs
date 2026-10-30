@@ -103,6 +103,7 @@ impl VerifiedIdentityMemo {
             RecordKind::BranchIndex
                 | RecordKind::BranchCheckpoint
                 | RecordKind::InputManifest
+                | RecordKind::InputChunkTable
                 | RecordKind::StoreManifest
                 | RecordKind::RootCheckpoint
         ) {
@@ -354,6 +355,7 @@ pub(super) fn validate(
     let mut checkpoints = BTreeMap::new();
     let mut indexes = BTreeMap::new();
     let mut inputs = Vec::new();
+    let mut tables = BTreeMap::new();
     for reference in &manifest.objects {
         macro_rules! payload {
             ($ty:ty) => {
@@ -375,6 +377,42 @@ pub(super) fn validate(
             }};
         }
         match reference.record_kind {
+            RecordKind::VersionIndex => {
+                control!(crate::studio_records::VersionIndex);
+            }
+            RecordKind::FeedbackIndex => {
+                control!(crate::studio_records::FeedbackIndex);
+            }
+            RecordKind::FeedbackRevision => {
+                control!(crate::studio_records::FeedbackRevision);
+            }
+            RecordKind::FeedbackBatch => {
+                control!(crate::studio_records::FeedbackBatch);
+            }
+            RecordKind::RunIndex => {
+                control!(crate::orchestration_commit::RegisteredRunIndex);
+            }
+            RecordKind::RunSnapshot => {
+                control!(crate::studio_records::RunSnapshotRecord);
+            }
+            RecordKind::RunEventSegment => {
+                control!(crate::studio_records::RunEventSegment);
+            }
+            RecordKind::RunEffect => {
+                control!(crate::studio_records::RunEffectRecord);
+            }
+            RecordKind::RunRequest => {
+                control!(crate::studio_records::RunRequestRecord);
+            }
+            RecordKind::RunDelivery => {
+                control!(crate::studio_records::RunDeliveryRecord);
+            }
+            RecordKind::RunResult => {
+                control!(crate::studio_records::RunResultRecord);
+            }
+            RecordKind::RunUsage => {
+                control!(crate::studio_records::RunUsageRecord);
+            }
             RecordKind::Document => {
                 payload!(Document);
             }
@@ -419,6 +457,26 @@ pub(super) fn validate(
             RecordKind::InputManifest => {
                 inputs.push(control!(OwnedInputManifest));
             }
+            RecordKind::InputChunkTable => {
+                let value = control!(crate::owned_inputs::InputChunkTable);
+                let _encoded = StorageReservation::reserve(
+                    usage,
+                    limits,
+                    0,
+                    reference.byte_length,
+                    0,
+                    false,
+                    u64::MAX,
+                )?;
+                let canonical =
+                    serde_json::to_vec(&*value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                if canonical.len() as u64 != reference.byte_length
+                    || kinewright_media::sha256_bytes(&canonical) != reference.sha256
+                {
+                    return Err(BundleError::Corrupt("noncanonical chunk table".into()));
+                }
+                tables.insert(reference.clone(), value);
+            }
             RecordKind::StoreManifest => {
                 let value = control!(StoreManifest);
                 validate_manifest_apis(&value, 0)?;
@@ -442,6 +500,17 @@ pub(super) fn validate(
             _ => return Err(BundleError::Unsupported("inactive record producer".into())),
         }
     }
+    for input in &inputs {
+        for entry in &input.entries {
+            if entry.object.record_kind == RecordKind::OwnedMedia {
+                tables
+                    .get(entry.chunk_table_ref()?)
+                    .ok_or_else(|| BundleError::Corrupt("missing bound chunk table".into()))?
+                    .validate_binding(&entry.object, limits)?;
+            }
+        }
+    }
+    super::validate_studio_records(namespace, root, usage, limits)?;
     if fields != manifest.required_fields {
         return Err(BundleError::Unsupported(
             "raw field inventory differs from declaration".into(),

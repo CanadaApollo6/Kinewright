@@ -69,7 +69,6 @@ pub(crate) mod radius {
 pub(crate) mod size {
     pub const WINDOW_WIDTH: f32 = 1_440.0;
     pub const WINDOW_HEIGHT: f32 = 900.0;
-    pub const WINDOW_MIN_WIDTH: f32 = 1_100.0;
     pub const WINDOW_MIN_HEIGHT: f32 = 700.0;
     pub const CONTROL_HEIGHT: f32 = 26.0;
     pub const ICON_SM: f32 = 14.0;

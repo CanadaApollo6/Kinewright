@@ -1,0 +1,15 @@
+{
+  "executed_once_after_both_source_commits": true,
+  "inputs_identical_in_merge_and_followups": true,
+  "inputs": {
+    ".github/workflows/ci.yml": "bb543642c5a422fe7a75a0c5f6020ffa2e7fba7d563fa45f1d98a65cd3f07921",
+    "scripts/slow_tests.py": "c4716ceb836d6962747608e3f9ef3909bac0bdb86eb6c691000aab39dca6827a",
+    "scripts/slow_tests_selftest.py": "019e7e34dd99288c108dca47d0e42a12aaf4dbbcb15e2726c47290c641ebc5a8",
+    "ci/slow-tests.txt": "fc40f08d212e084de088a486076c416cea180a34441fad1c7592c10cb871d0ab",
+    "ci/ignored-tests.txt": "b1c8729909f90edcc4a0ea1239f2e96e888c60a6dddfa764bf8401cac6f864e6"
+  },
+  "commands": [
+    "nice -n 19 python3 -I scripts/slow_tests_selftest.py",
+    "nice -n 19 actionlint .github/workflows/ci.yml"
+  ]
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "test": "s3_voice_fix1_asr_admission_retry",
+    "scope": "recording-setup focused diagnostic",
+    "cause": "Deferred transcript text lost its caller pin after the new pending-slot guard refused the edit; fixture now retains its sealed text until selection.",
+    "c7224d8b": "Witness is absent; cannot run this exact fixture there. Old App handle-path reproducer reaches the competing-job assertion at c722.",
+    "protected_mutation_credit": false
+  },
+  {
+    "test": "s3_voice_fix2_owner_slot_blocks_competing_handle",
+    "scope": "recording-setup focused diagnostic",
+    "cause": "Fixture issued another metadata issuer while intentionally exhausting the physical allowance; it now reuses the existing envelope for the refusal checks.",
+    "c7224d8b": "Witness is absent; cannot run this exact fixture there. Old App handle-path reproducer reaches the competing-job assertion at c722.",
+    "protected_mutation_credit": false
+  }
+]

@@ -1,0 +1,16 @@
+{
+  "commit": "70d1f4a18c947ff5046a0442ddf136d8d18d84d0",
+  "parents": [
+    "32d5a13cdba4e1846c63280fa7b9392902c6263e",
+    "1b8b23c06f0890f872ea27d6b0daac23b7d45df6"
+  ],
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "ca50648676733e7029e86caa8d584790bb145ce8e67c1219d1039b15f85e1d1c",
+    "crates/kinewright-project/src/lib.rs": "a3d521b39bda6bb46a3e720511ce8ddadd4cf42ddde6e56d4cdd35d9a6cda049",
+    "crates/kinewright-project/tests/support/ja_s3_store_linux.rs": "272ecc67f98406d351472771ff22b0501bc156e6e7998b4215150648de41dcd2",
+    "scripts/ja1-s3-c1-merge-mutation-cases.json": "fb89912ac255a0637f91536efb78c7c371e7dc3e433f55d6f7c9e300df4ff9f2",
+    "scripts/ja1-s3-c1-integration-gate.sh": "5318432eea46a699eb5bf2ad22dd1496341fce09105abda0430762935682e662",
+    "Cargo.lock": "a049eba4cdd06d46623c38f5fa3075622bdae49279ec043f251a737f03d4b30b"
+  }
+}

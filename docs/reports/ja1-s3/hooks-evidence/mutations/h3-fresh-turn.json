@@ -1,0 +1,36 @@
+{
+  "name": "h3-fresh-turn",
+  "witness": "writer_host::hooks_tests::tests::h3_live_attention_refused_after_turn_changes",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/attention.rs",
+      "            || !projection.tasks.iter().any(|task| {\n                task.id.0.as_str() == binding.task\n                    && !task.progress.expired\n                    && task.progress.turn.as_ref().is_some_and(|turn| {\n                        crate::orchestration::requests::live_turn(&projection, turn).is_ok()\n                            && turn.session.as_str() == binding.session\n                            && turn.ordinal == binding.turn\n                            && turn.owner_epoch == binding.owner_epoch\n                            && turn.attempt.0.as_str() == binding.attempt\n                    })\n            })",
+      ""
+    ]
+  ],
+  "expected_red": {
+    "text": "H3_FRESH_LIVE_REQUEST",
+    "location": null
+  },
+  "baseline_manifest_sha256": "04bfeae939c2030791f7291fb3b258ce9623b5d4a57e8a360ba6e6887243d7cc",
+  "witness_sha256": "68bbc2cfc05242c3f421c455052bab97339bdf820498d2a2497ef7046645f234",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/attention.rs": "0d3529a7cbaff06dec3856d31c14323269288302628dae0d54efac29999ffe71"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/attention.rs": "c31050630a38433a9ce096f9c3c896576af36e1de9c7745051964132279a432a"
+  },
+  "red_exit": 101,
+  "command": "set -e\npython3() { command nice -n 19 python3 -I \"$@\"; }\nexport -f python3\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-hooks/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::hooks_tests::tests::h3_live_attention_refused_after_turn_changes -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "968522a65050991b73a533941d53aeb89e55f3ae6ab25bb07c0149c4007da3a0",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 790 filtered out; finished in 1.69s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "a59e8c90d5987006fa225d64604e5db50c25d042e54a1993cd748854c511ac42",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 790 filtered out; finished in 1.76s"
+  ],
+  "restored": true
+}

@@ -275,14 +275,15 @@ fn cc7_target_frame(scenario: Cc7Scenario) -> TimeCode {
 }
 
 /// The production media engine on one lane.
-fn cc7_engine(gpu: &FixtureGpu) -> crate::engine::FfmpegMediaEngine {
+fn cc7_engine(gpu: &FixtureGpu) -> crate::SessionMedia {
     crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
         .expect("the production media engine should start on the fixture adapter")
+        .into_legacy_fixture()
 }
 
 /// One full-resolution managed monitor proof, asserted full-raster.
 fn cc7_monitor_raster(
-    engine: &crate::engine::FfmpegMediaEngine,
+    engine: &crate::SessionMedia,
     document: &Arc<Document>,
     at: TimeCode,
     label: &str,
@@ -303,7 +304,7 @@ fn cc7_monitor_raster(
 
 /// One full-resolution scene-linear working proof.
 fn cc7_working_proof(
-    engine: &crate::engine::FfmpegMediaEngine,
+    engine: &crate::SessionMedia,
     document: &Arc<Document>,
     at: TimeCode,
     label: &str,
@@ -586,7 +587,7 @@ struct Cc7CanonicalPlan {
     _store: Option<TempDirectory>,
     document: Arc<Document>,
     library: Arc<LutLibrary>,
-    engine: crate::engine::FfmpegMediaEngine,
+    engine: crate::SessionMedia,
 }
 
 /// The raster each scenario's canonical document sits on (§2.3.4-§2.3.6).
@@ -1276,7 +1277,7 @@ struct Cc7RangeAttribution {
 }
 
 fn cc7_range_attribution(
-    engine: &crate::engine::FfmpegMediaEngine,
+    engine: &crate::SessionMedia,
     scene: &Cc7Scene,
     committed: &Arc<Document>,
     at: TimeCode,
@@ -1748,7 +1749,7 @@ struct Cc7MatteMeasurement {
 }
 
 fn cc7_measure_matte(
-    engine: &crate::engine::FfmpegMediaEngine,
+    engine: &crate::SessionMedia,
     committed: &Arc<Document>,
     label: &str,
 ) -> Cc7MatteMeasurement {
@@ -2460,7 +2461,7 @@ fn cc7_export_and_verify(
         &settings,
         &progress_tx,
         gpu.context(),
-        Arc::clone(&plan.library),
+        crate::export::LegacyRenderContext::fixture(Arc::clone(&plan.library)),
     )
     .expect("the production export path must write the CC7 delivery lane");
     let export_seconds = started.elapsed().as_secs_f64();

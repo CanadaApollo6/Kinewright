@@ -1,0 +1,36 @@
+{
+  "name": "h4-private-issuer",
+  "witness": "writer_host::hooks_tests::tests::h4_private_issuer_refuses_viewer_and_role_spoofing",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/issuer.rs",
+      "if !state\n        .issuer\n        .as_ref()\n        .is_some_and(|issuer| issuer.accepts(credential))\n    ",
+      "if false && (!state\n        .issuer\n        .as_ref()\n        .is_some_and(|issuer| issuer.accepts(credential)))\n        "
+    ]
+  ],
+  "expected_red": {
+    "text": "H4_ISSUER_PRIVATE",
+    "location": null
+  },
+  "baseline_manifest_sha256": "04bfeae939c2030791f7291fb3b258ce9623b5d4a57e8a360ba6e6887243d7cc",
+  "witness_sha256": "b9e071e00dd7ba31345f77be5932edd59fcdbff39961e07b4990c0f01a95f2ad",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/issuer.rs": "539b6cbaf6c6db8d5d18c49ef218bc04c61fc5cd16ed27eb1ec78f4842b1eac5"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/issuer.rs": "e8798f399505452ee65f9f9492f7b7877055318d39df33c6cbeed8da70b1bc0e"
+  },
+  "red_exit": 101,
+  "command": "set -e\npython3() { command nice -n 19 python3 -I \"$@\"; }\nexport -f python3\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/ja1-s3-hooks/runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1fix-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::hooks_tests::tests::h4_private_issuer_refuses_viewer_and_role_spoofing -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "2baf18ecf4470f09ac33df291c309844a30d0024da02c231665f6a195b2ef380",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 790 filtered out; finished in 0.48s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "7c22c22b4d74d427d6bb2697e85e78e7c1de37f768bc6ab860766c11c7e9bdf5",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 790 filtered out; finished in 0.55s"
+  ],
+  "restored": true
+}

@@ -1,0 +1,220 @@
+{
+  "accepted": 14,
+  "new_pairs": 6,
+  "rerun_pairs": 8,
+  "source_restored": true,
+  "log_and_witness_hashes_verified": true,
+  "baseline_manifest_sha256": "c06b0125d3fdbc76c50f50a511cb1462abc8a92abddceaabd2636b556121eabf",
+  "pairs": [
+    {
+      "name": "c1-detach-revocation",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 716 filtered out; finished in 7.95s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 10.91s"
+      ],
+      "expected_red": {
+        "text": "C1_DETACH_REVOKES",
+        "location": null
+      }
+    },
+    {
+      "name": "store-candidate-version-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.46s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.21s"
+      ],
+      "expected_red": {
+        "text": "S3_VERSION_ONLY_CANDIDATE_PRESERVATION",
+        "location": null
+      }
+    },
+    {
+      "name": "store-candidate-feedback-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.29s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.83s"
+      ],
+      "expected_red": {
+        "text": "S3_CANDIDATE_PRESERVATION",
+        "location": null
+      }
+    },
+    {
+      "name": "store-candidate-run-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.02s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.91s"
+      ],
+      "expected_red": {
+        "text": "S3_RUN_ONLY_CANDIDATE_PRESERVATION",
+        "location": null
+      }
+    },
+    {
+      "name": "store-floor-feedback-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.68s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.29s"
+      ],
+      "expected_red": {
+        "text": "S3_FLOOR_FEEDBACK_PRESERVATION",
+        "location": null
+      }
+    },
+    {
+      "name": "store-switch-feedback-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.18s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.98s"
+      ],
+      "expected_red": {
+        "text": "S3_EXACT_FEEDBACK_INDEX",
+        "location": null
+      }
+    },
+    {
+      "name": "store-a1-acknowledged-feedback-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 5.08s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.20s"
+      ],
+      "expected_red": {
+        "text": "S3_EXACT_FEEDBACK_INDEX",
+        "location": null
+      }
+    },
+    {
+      "name": "store-copy-feedback-index",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 3.57s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.86s"
+      ],
+      "expected_red": {
+        "text": "S3_EXACT_FEEDBACK_INDEX",
+        "location": null
+      }
+    },
+    {
+      "name": "fix1-rescue-projected-index-roots",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.13s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.96s"
+      ],
+      "expected_red": {
+        "text": "S3_RESCUE_PROJECTED_INDEX_DECLARED",
+        "location": null
+      }
+    },
+    {
+      "name": "fix1-rescue-index-oracle",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 7.03s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.43s"
+      ],
+      "expected_red": {
+        "text": "S3_RESCUE_INDEX_ORACLE",
+        "location": null
+      }
+    },
+    {
+      "name": "fix1-foreground-editor-guard-http",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.30s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.69s"
+      ],
+      "expected_red": {
+        "text": "C1_FOREGROUND_ROLE_REFUSED",
+        "location": null
+      }
+    },
+    {
+      "name": "fix1-foreground-editor-guard-direct",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.25s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.42s"
+      ],
+      "expected_red": {
+        "text": "C1_FOREGROUND_ROLE_REFUSED",
+        "location": null
+      }
+    },
+    {
+      "name": "fix1-foreground-detach-only_owned_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.24s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 1.14s"
+      ],
+      "expected_red": {
+        "text": "C1_FOREGROUND_DETACH_CLEARS_OWNED_SLOT",
+        "location": null
+      }
+    },
+    {
+      "name": "fix1-foreground-detach-stale_non_editor_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.26s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.89s"
+      ],
+      "expected_red": {
+        "text": "C1_FOREGROUND_DETACH_CLEARS_STALE_NON_EDITOR_SLOT",
+        "location": null
+      }
+    }
+  ]
+}

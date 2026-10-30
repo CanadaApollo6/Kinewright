@@ -1,0 +1,24 @@
+{
+  "case": "audio-before-asr",
+  "source": "crates/kinewright-app/src/recording.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_audio_retention",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "2c1134a23c075415da3bcbfc892de8ff41d709feebd827e4c1c7e8300a93e1fa",
+  "mutated_sha256": "5281e839b367dfe8985405508cddc1fa21078aa594bcc30418092a634cc19d6e",
+  "red_exit": 101,
+  "red_log_sha256": "0216badd3c1e678e3aac637d9d458672fe26adc2985eb5133d1f2de179a24da8",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "58801dc376b3cdd498a4c30d0f640ef54bd0764310b01d44e568fe2439493f66",
+  "runtime_green": true
+}

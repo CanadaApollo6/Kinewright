@@ -1,0 +1,22 @@
+{
+  "source_commit": "7832625b750d849c6e13374f211a9f130f21aac7",
+  "parent": "70d1f4a18c947ff5046a0442ddf136d8d18d84d0",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "ee679e0d329952061956b5f3f59f8e97652c49af2d112073973247d0ac3cb39f",
+    "crates/kinewright-agent/src/writer_host/manual.rs": "8bb22402fd93a64de6c0e50ca01e604aa5a22f902d4d349f294c917b9b853f31",
+    "crates/kinewright-agent/src/writer_host/mod.rs": "5f021e291690406ae6a5b883d1b2e4bfe4f9b382dc38487925f8936e7cd4d42e",
+    "crates/kinewright-agent/src/writer_host/ja_s3_host.rs": "a593eb01c910f17b407db3a3c919028c763980023f9656b3203f6fca6095afe4",
+    "crates/kinewright-project/src/studio_records.rs": "9222cbef0c0a963fc30e033116ecab063d39e375bc1382d51dad06692003a317",
+    "crates/kinewright-project/src/studio_store.rs": "d3eeefc6d35419843309ec1ec8605aabb49af3c580f3187cbb3e02ba45b5d470",
+    "crates/kinewright-project/src/store.rs": "89d14fd9d262fd8696d76bf5d4f43a566f84acbe9f6a6a4bce59e92e604be3d3",
+    "crates/kinewright-project/src/bundle_recovery/restore.rs": "104a6eaefae640f002962958ab15abfe42a193306cd09b10c503928df7b6f9c6",
+    "crates/kinewright-project/src/bundle_commit.rs": "ca50648676733e7029e86caa8d584790bb145ce8e67c1219d1039b15f85e1d1c",
+    "crates/kinewright-project/src/lib.rs": "a3d521b39bda6bb46a3e720511ce8ddadd4cf42ddde6e56d4cdd35d9a6cda049",
+    "crates/kinewright-project/tests/support/ja_s3_store_linux.rs": "b38aed248fa291b6de9ba7a54871dda87509811401e9bc3aeed2efedb81efdfb",
+    "scripts/ja1-s3-c1-integration-gate.sh": "987550cf8807409b2e50c8ad5b26c6402caf82f0db14e138d38110716cd59146",
+    "scripts/ja1-s3-c1-followups-mutation-cases.json": "fda5821898f8ec0624c529d2c0de5a0ac59c360ffe4ba91a88af927e930cc812",
+    "scripts/ja1-s3-c1-merge-mutation-cases.json": "fb89912ac255a0637f91536efb78c7c371e7dc3e433f55d6f7c9e300df4ff9f2",
+    "Cargo.lock": "a049eba4cdd06d46623c38f5fa3075622bdae49279ec043f251a737f03d4b30b"
+  }
+}

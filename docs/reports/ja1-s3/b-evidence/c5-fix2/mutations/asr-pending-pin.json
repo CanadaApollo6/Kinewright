@@ -1,0 +1,24 @@
+{
+  "case": "asr-pending-pin",
+  "source": "crates/kinewright-project/src/voice_store.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_fix1_asr_refusal_collection_retry",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "ac083b138900bb10495066abb048a730b7febfb242597163cd64ad45c1072eb6",
+  "mutated_sha256": "4a99ff979f79192dc620f0c343dfe3925c87b247b25213a86b3e91a76ea46540",
+  "red_exit": 101,
+  "red_log_sha256": "8ad45ff9e54cf0d5eace94c5d2c5cb943b6c95d41d6b7124d66bbd00b213eb86",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "5302cc25f0e5f8bde7089ef6377a74fbfd142dec86a7174b1190926988389ab2",
+  "runtime_green": true
+}

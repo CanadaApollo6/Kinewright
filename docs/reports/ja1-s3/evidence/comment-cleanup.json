@@ -1,0 +1,105 @@
+{
+  "removed_lines": 25,
+  "removed": [
+    {
+      "file": "crates/kinewright-agent/src/writer_host/s2h_tests.rs",
+      "comment": "// This owner already has the named writer. The callback is unused by input admission."
+    },
+    {
+      "file": "crates/kinewright-project/src/bundle_commit.rs",
+      "comment": "// Only byte-for-byte identical admission records collapse across historical contexts."
+    },
+    {
+      "file": "crates/kinewright-project/src/bundle_commit.rs",
+      "comment": "/// A staged manual manifest can only add complete identities to its acknowledged context."
+    },
+    {
+      "file": "crates/kinewright-agent/src/writer_host/owned_media.rs",
+      "comment": "// The private GUI request names the person's chosen file. This read"
+    },
+    {
+      "file": "crates/kinewright-agent/src/writer_host/owned_media.rs",
+      "comment": "// capability is used once and never widens connector roots."
+    },
+    {
+      "file": "crates/kinewright-project/src/owned_media.rs",
+      "comment": "// JSON arrays take at most 129 bytes per digest; decoded serde values are bounded too."
+    },
+    {
+      "file": "crates/kinewright-project/src/owned_media.rs",
+      "comment": "// A small independent source makes missing-table refusal independent of the symlink guard."
+    },
+    {
+      "file": "crates/kinewright-project/src/owned_media.rs",
+      "comment": "// Resolve the owned namespace only in this test; production returns immutable bytes."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// C0 selected-stream guard. Validate both before the video branch consumes input."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// C0 format policy. Single-object formats used by import and owned fixtures."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// Playlist, sequence and network demuxers require authority this port cannot lend."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// Each pointer is owned here until transferred to its corresponding RAII owner."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// The label bounds AVIO growth; it grants no protocol authority or locator."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// C0 secondary-callback guard, independent of inherited context options."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// Isolate inherited protocol denial while admitting a nested demuxer in tests only."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// Isolate demuxer denial while permitting an existing local test payload in tests only."
+    },
+    {
+      "file": "crates/kinewright-media/src/owned_io.rs",
+      "comment": "// No process-global chdir or real provenance path is supplied to AVIO."
+    },
+    {
+      "file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs",
+      "comment": "// The generated Rec.709 raw recording has no container colour tags. This is an explicit fixture override."
+    },
+    {
+      "file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs",
+      "comment": "// Exact RIFF PCM bytes and interpretation, without a platform writer admission."
+    },
+    {
+      "file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs",
+      "comment": "// This temporary media source authors metadata only. The actual test certificate"
+    },
+    {
+      "file": "crates/kinewright-project/tests/ja_s3_read_only_inputs.rs",
+      "comment": "// below comes exclusively from project-owned admission of these exact object files."
+    },
+    {
+      "file": "scripts/ja1-s3-c0-media-mutations.py",
+      "comment": "# Only named protection assertions count. Fixture setup, unwraps, barriers and"
+    },
+    {
+      "file": "scripts/ja1-s3-c0-media-mutations.py",
+      "comment": "# compilation failures cannot earn a behavioral red."
+    },
+    {
+      "file": "scripts/ja1-s3-c0-media-mutations.py",
+      "comment": "# Check every anchor before changing source or starting a gate."
+    },
+    {
+      "file": "crates/kinewright-media/Cargo.toml",
+      "comment": "# Keep these tables in sync with ../../Cargo.toml [workspace.lints]."
+    }
+  ]
+}

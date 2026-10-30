@@ -1,0 +1,36 @@
+{
+  "name": "fix2-lease-client-guard",
+  "witness": "writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/manual.rs",
+      "        if self\n            .manual\n            .as_ref()\n            .is_some_and(|lease| lease.client != client)\n        {\n            return Err(HostRefusal::new(\n                \"manual_busy\",\n                \"foreground operation belongs to the active manual lease client\",\n            )\n            .into());\n        }\n",
+      ""
+    ]
+  ],
+  "expected_red": {
+    "text": "C2_LEASE_CLIENT_GUARD",
+    "location": null
+  },
+  "baseline_manifest_sha256": "dc03d061d077d5a89eb53f0b5812eb660c275f52fc1791d8275d3c9fa4b54e86",
+  "witness_sha256": "5fa9368f8b8594e98f53e2f86afa85fc7708c5a01523efa59e43f333934b789d",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/manual.rs": "9b538efa0fd1a61c72e26766688025d549c919a2389e9e68bf0f28f12c5aa0a2"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/manual.rs": "277c5d801da18a98bdaefc5a4f459ff4babbd96650fadee7ce24bd29c6ed24d9"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "cf12437c881931e624558359f0ed226a995751545c01a113fc93cb0504b4151c",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.35s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "a49a10eff1e37cf64e27391ca9145335a1bcb042659a0a9a790ae36d0d1811a7",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.04s"
+  ],
+  "restored": true
+}

@@ -1,0 +1,19 @@
+crates/kinewright-project/src/read_only_inputs.rs:215:        let roots = [
+crates/kinewright-project/src/store.rs:491:        let roots = roots.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+crates/kinewright-project/src/store.rs:2785:    pub(crate) fn selected_manifest(
+crates/kinewright-project/src/store.rs:2876:    pub(crate) fn references(&self) -> Vec<ObjectRef> {
+crates/kinewright-project/src/editing_session/rescue_selection.rs:17:        let mut roots = root.references();
+crates/kinewright-project/src/editing_session/rescue_selection.rs:85:            let roots = refs
+crates/kinewright-project/src/editing_session/rescue_selection.rs:119:        let mut roots = base.into_iter().map(|(r, _)| r).collect::<Vec<_>>();
+crates/kinewright-project/src/editing_session/rescue_selection.rs:267:            let roots = self.rescue_graph(&selected, &unavailable, &limits)?;
+crates/kinewright-project/src/editing_session/recovery.rs:433:        let roots = bundle
+crates/kinewright-project/src/owned_media.rs:682:        let mut roots = vec![source.clone(), table_ref.clone()];
+crates/kinewright-project/src/editing_session.rs:1162:        let roots = Self::rescue_required_roots(bundle)?
+crates/kinewright-project/src/bundle_recovery/restore.rs:235:        let roots = root
+crates/kinewright-project/src/bundle_recovery/restore.rs:245:        let mut projected = self.store.selected_manifest(
+crates/kinewright-project/src/bundle.rs:208:    pub(crate) fn references(&self) -> Vec<ObjectRef> {
+crates/kinewright-project/src/bundle.rs:1071:    pub(crate) fn root_references(&self) -> Result<Vec<ObjectRef>, BundleError> {
+crates/kinewright-project/src/bundle_commit.rs:1179:        let mut roots = vec![
+crates/kinewright-project/src/bundle_commit.rs:1217:        let store_manifest = bundle.store.selected_manifest(
+crates/kinewright-project/src/bundle_copy.rs:799:        let roots = self.root_references()?;
+crates/kinewright-project/src/bundle_copy.rs:1108:        let roots = [inputs.clone()];

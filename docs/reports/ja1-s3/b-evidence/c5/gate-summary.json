@@ -1,0 +1,228 @@
+{
+  "base": "7f73f9c8",
+  "c4_commit": "137e9ee5",
+  "source_sha256": {
+    "crates/kinewright-app/src/recording.rs": "88c9043b480b8476e797aecc5b4bfbb200a8aad49e29469d5660d6371ca79890",
+    "crates/kinewright-media/src/voice_note.rs": "81b2a19676c4ea2fa39a2bf37acec0663b6a70e12814f9d309d5bf725ace67dc",
+    "crates/kinewright-media/src/transcript.rs": "0b7525a9c3d9dcb6a4942a6cad65b42ad19feccd9fa079e2e85868589ef34937",
+    "crates/kinewright-media/src/lib.rs": "7ba3de665680360df0745ae631018cb8998991447ff38860448104ab33180420",
+    "docs/reports/ja1-s3/b-evidence/c5/mutations.py": "b26aab563634cf1de261ec0e9d63833c43d46783bd19373ac273179542979183"
+  },
+  "gates": {
+    "build-final": {
+      "command": "build --workspace",
+      "exit": 0,
+      "log": "build-final.log.gz",
+      "summaries": []
+    },
+    "clippy-final": {
+      "command": "clippy --workspace --all-targets -- -D warnings",
+      "exit": 0,
+      "log": "clippy-final.log.gz",
+      "summaries": []
+    },
+    "media-final": {
+      "command": "test -p kinewright-media",
+      "exit": 101,
+      "log": "media-final.log.gz",
+      "summaries": [
+        {
+          "target": "Running unittests src/lib.rs (target/debug/deps/kinewright_media-d3b3fce673611395)",
+          "raw": "test result: FAILED. 1165 passed; 1 failed; 65 ignored; 0 measured; 0 filtered out; finished in 747.96s",
+          "passed": 1165,
+          "failed": 1,
+          "ignored": 65
+        }
+      ],
+      "totals": {
+        "passed": 1165,
+        "failed": 1,
+        "ignored": 65
+      }
+    },
+    "media-readback-rerun": {
+      "command": "test -p kinewright-media --lib compositor::ledger_probes::rev3_concurrent_readbacks_never_refuse -- --exact --nocapture",
+      "exit": 0,
+      "log": "media-readback-rerun.log.gz",
+      "summaries": [
+        {
+          "target": "Running unittests src/lib.rs (target/debug/deps/kinewright_media-d3b3fce673611395)",
+          "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1230 filtered out; finished in 9.18s",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "totals": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "media-remaining": {
+      "command": "test -p kinewright-media --test au3_fixtures --test au5_fixtures --test generated_media --test transcript_e2e",
+      "exit": 0,
+      "log": "media-remaining.log.gz",
+      "summaries": [
+        {
+          "target": "Running tests/au3_fixtures.rs (target/debug/deps/au3_fixtures-668b67ee525bf23c)",
+          "raw": "test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 41.96s",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "target": "Running tests/au5_fixtures.rs (target/debug/deps/au5_fixtures-427061326a9225eb)",
+          "raw": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.28s",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "target": "Running tests/generated_media.rs (target/debug/deps/generated_media-b0eb72bee85564e0)",
+          "raw": "test result: ok. 14 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 2.51s",
+          "passed": 14,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "target": "Running tests/transcript_e2e.rs (target/debug/deps/transcript_e2e-296723ce4e5cfa66)",
+          "raw": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "totals": {
+        "passed": 31,
+        "failed": 0,
+        "ignored": 5
+      }
+    },
+    "media-doc": {
+      "command": "test -p kinewright-media --doc",
+      "exit": 0,
+      "log": "media-doc.log.gz",
+      "summaries": [
+        {
+          "target": "Doc-tests kinewright_media",
+          "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "totals": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "app": {
+      "command": "test -p kinewright-app",
+      "exit": 0,
+      "log": "app.log.gz",
+      "summaries": [
+        {
+          "target": "Running unittests src/main.rs (target/debug/deps/kinewright_app-45054198156c72b2)",
+          "raw": "test result: ok. 896 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 343.39s",
+          "passed": 896,
+          "failed": 0,
+          "ignored": 6
+        }
+      ],
+      "totals": {
+        "passed": 896,
+        "failed": 0,
+        "ignored": 6
+      }
+    },
+    "c4-regression": {
+      "command": "test -p kinewright-project --features test-util --test ja_s3_lineage",
+      "exit": 0,
+      "log": "c4-regression.log.gz",
+      "summaries": [
+        {
+          "target": "Running tests/ja_s3_lineage.rs (target/debug/deps/ja_s3_lineage-a06187e7809e787c)",
+          "raw": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.29s",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "totals": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "agent-architecture": {
+      "command": "test -p kinewright-agent --lib in2_the_agent_crate_has_one_agent_event_loop",
+      "exit": 0,
+      "log": "agent-architecture.log.gz",
+      "summaries": [
+        {
+          "target": "Running unittests src/lib.rs (target/debug/deps/kinewright_agent-62a012ec6e57681d)",
+          "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 761 filtered out; finished in 0.03s",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "totals": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "windows": {
+      "command": "check --target x86_64-pc-windows-msvc -p kinewright-media -p kinewright-app",
+      "exit": 101,
+      "log": "windows.log.gz",
+      "summaries": []
+    },
+    "fmt": {
+      "command": "fmt -- --check",
+      "exit": 0,
+      "log": "fmt.log.gz",
+      "summaries": []
+    }
+  },
+  "media_coverage_note": "Full lib command was RED in unchanged compositor::ledger_probes::rev3_concurrent_readbacks_never_refuse. Its exact isolated rerun passed; remaining integration/doctest targets passed separately. Do not call the full media aggregate green. All five new voice witnesses passed in the full lib run.",
+  "mutations": {
+    "literal_red_restored_green_pairs": 10,
+    "all_exactly_restored": true,
+    "details": "mutations/summary.json"
+  },
+  "lint": "slow-test manifest and markers agree: 117 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 60 allowlist entries well-formed; 27 equipped-session skip sites counted",
+  "selftest": "42 passed; see slow-selftest.log (also contains an existing ResourceWarning)",
+  "native_model_controls": {
+    "spoken_note": "NOT RUN",
+    "commentary": "NOT RUN",
+    "reason": "Pinned Whisper small absent from existing cache. No downloads.",
+    "raw": "real-controls.log.gz",
+    "reported_libtest_passes_are_not_control_acceptance": true
+  },
+  "diagnostics": {
+    "media.log.gz": "Interrupted full attempt, no libtest result; no coverage credit. Parent command returned 143.",
+    "focused-app-r2.log.gz": "Copied-project root comparison included issuer creation; corrected fixture ordering. No mutation-red credit.",
+    "clippy.log.gz": "Initial owned-source lint diagnostics, corrected before final gate.",
+    "focused-app.log.gz": "Initial owned test initializer missed the new project field; corrected before accepted gates."
+  },
+  "not_run": [
+    "real spoken-note and real commentary Whisper controls",
+    "actual microphone/device capture",
+    "actual presenter-displayed frame/audio clock synchronization",
+    "native model/workspace and capture-staging residue accounting",
+    "Studio/C6 shared-host streamed upload composition and G11 App closure",
+    "native Windows runtime and compilation beyond native aws-lc-sys prerequisite failure",
+    "workspace-wide test aggregate",
+    "slow tier",
+    "forced ignores (listed in not-run-ignores.txt)",
+    "equipped GPU/provider/model/media-pack controls, including tests that return without equipment",
+    "live S4 specialist",
+    "hosted CI",
+    "laptop offload (Tailscale authentication required)",
+    "independent review rounds (excluded by brief)"
+  ]
+}

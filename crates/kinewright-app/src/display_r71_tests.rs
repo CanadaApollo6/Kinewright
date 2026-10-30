@@ -1,8 +1,25 @@
 use super::*;
 use eframe::egui_wgpu::wgpu;
 
+pub(crate) fn rendered(app: &mut KinewrightApp, ctx: &egui::Context) -> Vec<u8> {
+    rendered_image(app, ctx, None)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn rendered_still(
+    app: &mut KinewrightApp,
+    ctx: &egui::Context,
+    id: egui::TextureId,
+) -> Vec<u8> {
+    rendered_image(app, ctx, Some(id))
+}
+
 #[allow(clippy::too_many_lines)]
-fn rendered(app: &mut KinewrightApp, ctx: &egui::Context) -> Vec<u8> {
+fn rendered_image(
+    app: &mut KinewrightApp,
+    ctx: &egui::Context,
+    still: Option<egui::TextureId>,
+) -> Vec<u8> {
     let state = app.native_display.as_ref().unwrap().renderer.clone();
     let target = state.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("R71 rendered transition"),
@@ -27,17 +44,19 @@ fn rendered(app: &mut KinewrightApp, ctx: &egui::Context) -> Vec<u8> {
         |ui| {
             let epoch = ui.ctx().cumulative_frame_nr_for(egui::ViewportId::ROOT);
             app.native_display.as_mut().unwrap().session.advance(epoch);
-            let (id, _) = app.program_picture().unwrap();
+            let id = still.unwrap_or_else(|| app.program_picture().unwrap().0);
             ui.painter().image(
                 id,
                 rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            app.presenter
-                .marker(epoch, app.paint_clock())
-                .add_to(ui.painter(), rect);
-            app.finalize_preview(ui.ctx());
+            if still.is_none() {
+                app.presenter
+                    .marker(epoch, app.paint_clock())
+                    .add_to(ui.painter(), rect);
+                app.finalize_preview(ui.ctx());
+            }
         },
     );
     let descriptor = eframe::egui_wgpu::ScreenDescriptor {
@@ -118,7 +137,7 @@ fn rendered(app: &mut KinewrightApp, ctx: &egui::Context) -> Vec<u8> {
 
 fn route_candidate(
     app: &mut KinewrightApp,
-    engine: &FfmpegMediaEngine,
+    engine: &kinewright_media::SessionMedia,
     gpu_route: bool,
     color: [u8; 3],
     at: i64,

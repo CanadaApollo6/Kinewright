@@ -256,6 +256,26 @@ class PartialParse(unittest.TestCase):
             code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
             self.assertEqual(code, 0, out)
 
+    def test_literal_hls_advice_keeps_the_real_outcome(self):
+        advice = "Not detecting m3u8/hls with non standard extension and non standard mime type"
+        for windows in (False, True):
+            for first in (advice, "[concat @ 0x1] Format not on whitelist 'avi,mov'"):
+                with self.subTest(windows=windows, first=first):
+                    lines = self.lines(windows)
+                    at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+                    lines[at: at + 1] = [lines[at][:-len("ok")] + first, advice, advice, "ok"]
+                    code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
+                    self.assertEqual(code, 0, out)
+
+    def test_hls_advice_does_not_swallow_unrelated_text_or_replace_an_outcome(self):
+        advice = "Not detecting m3u8/hls with non standard extension and non standard mime type"
+        for messages in ([advice + " trailing garbage", "ok"], ["arbitrary text", "ok"], [advice]):
+            with self.subTest(messages=messages):
+                lines = self.lines()
+                at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+                lines[at: at + 1] = [lines[at][:-len("ok")] + advice, *messages]
+                self.assert_unparsable(lines, "summary says")
+
     def test_r79_continuations_require_the_exact_message_and_immediate_context(self):
         advice = R79_PROBE_LOG.splitlines()[2]
         for text in (

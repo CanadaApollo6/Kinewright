@@ -3145,11 +3145,12 @@ fn cc3_proof_parity_renders_all_three_node_kinds_identically() {
 
     let gpu = fallback_gpu();
     let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("media engine should start on the fixture adapter");
+        .expect("media engine should start on the fixture adapter")
+        .into_legacy_fixture();
     let proof = engine
         .monitor_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
         .expect("full-raster monitor proof");
-    let mut renderer = crate::render::FrameRenderer::new(gpu.context());
+    let mut renderer = crate::render::FrameRenderer::legacy_fixture(gpu.context());
     let preview = renderer
         .render(
             &document,

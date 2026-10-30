@@ -47,7 +47,7 @@ fn run_split_delete(driver: &dyn AgentDriver, label: &str, model: Option<String>
         return;
     }
 
-    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
     let core = Core::spawn(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();

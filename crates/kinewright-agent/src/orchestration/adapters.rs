@@ -37,6 +37,34 @@ impl CertifiedConnectorProfile {
     }
 }
 
+/// Every connector profile this build certifies: the one list S4 offers for the
+/// Director setting. Certification registers each shipping profile here; none is
+/// certified yet. Fixture builds also certify the scripted Director, which no
+/// shipping launcher can start.
+#[must_use]
+pub fn certified_connectors() -> Vec<CertifiedConnectorProfile> {
+    let shipping: [CertifiedConnectorProfile; 0] = [];
+    shipping.into_iter().chain(fixture_connectors()).collect()
+}
+#[cfg(any(test, feature = "eval-harness"))]
+fn fixture_connectors() -> Vec<CertifiedConnectorProfile> {
+    vec![CertifiedConnectorProfile {
+        selection: ProviderSelectionRecord {
+            connector: "scripted".into(),
+            model: "fixture".into(),
+            options: vec![],
+        },
+        config: SessionConfig {
+            model: Some("fixture".into()),
+            ..SessionConfig::default()
+        },
+    }]
+}
+#[cfg(not(any(test, feature = "eval-harness")))]
+fn fixture_connectors() -> Vec<CertifiedConnectorProfile> {
+    Vec::new()
+}
+
 #[derive(Debug)]
 pub struct LaunchError(pub String);
 

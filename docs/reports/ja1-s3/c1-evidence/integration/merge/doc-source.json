@@ -1,0 +1,16 @@
+{
+  "source_commit": "70d1f4a18c947ff5046a0442ddf136d8d18d84d0",
+  "execution_head": "7832625b750d849c6e13374f211a9f130f21aac7",
+  "all_crate_source_matches_source_commit": true,
+  "changed_file_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "eceae9503eb823c03e36db08e3d4542888881aa73f489506b94b5d0b63e730fb",
+    "crates/kinewright-agent/src/writer_host/ja_s3_host.rs": "97125c0208cad8add8b17961a2e11e8e897678de973232a329c0d1745e26b93d",
+    "crates/kinewright-agent/src/writer_host/manual.rs": "9b538efa0fd1a61c72e26766688025d549c919a2389e9e68bf0f28f12c5aa0a2",
+    "crates/kinewright-agent/src/writer_host/mod.rs": "7241326d5b4a114ad9855106c941d75a0a41f75b49996f97ff5ef810fc48d9c2",
+    "crates/kinewright-project/src/bundle_recovery/restore.rs": "cb33bf8d23202a538390ab094fad42756b653849b65aab4a456496e3ce0ca49c",
+    "crates/kinewright-project/src/store.rs": "be63d9047b2ee1bff92793fd660418695d6f6bb16b92062906f728c7bd7b3c95",
+    "crates/kinewright-project/src/studio_records.rs": "7d88a2973cbd00cabeaaefee2d0783202edd1ab6abdd3a21792f7aa000a91cc0",
+    "crates/kinewright-project/src/studio_store.rs": "8cd2cdd39779ea5c6cc111e1ca7ce2a027800879ad4ad43a70a3c74f86544408",
+    "crates/kinewright-project/tests/support/ja_s3_store_linux.rs": "272ecc67f98406d351472771ff22b0501bc156e6e7998b4215150648de41dcd2"
+  }
+}

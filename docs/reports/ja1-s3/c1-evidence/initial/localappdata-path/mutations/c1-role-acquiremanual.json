@@ -1,0 +1,30 @@
+{
+  "name": "c1-role-acquiremanual",
+  "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+  "accepted": false,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/auth.rs",
+      "HostCommand::AcquireManual { .. } => self.role == AttachmentRole::Editor,",
+      "HostCommand::AcquireManual { .. } => true,"
+    ]
+  ],
+  "expected_red": {
+    "text": "C1_MANUAL_ROLE",
+    "location": null
+  },
+  "baseline_manifest_sha256": "29e896bb497826d8be633c28b271f81f570b63067032e747856dee2cb85ef100",
+  "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "68c21492147ea953162686e5250d93b3907b5564a10ddd5840fdd4a15e80ec1c"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$c1_runtime/local-app\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "e03f6d55f66097d0a394573e9ddd6b45e796a0ee36d9d1b3f060ae933820201a",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.49s"
+  ]
+}

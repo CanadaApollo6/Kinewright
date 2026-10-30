@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+start=$(date +%s%N)
+/usr/bin/git "$@"
+result=$?
+end=$(date +%s%N)
+printf '{"probe":"git","start_ns":%s,"end_ns":%s,"exit":%s}\n' "$start" "$end" "$result" >> "$JA_S1_SETUP_PROBES"
+exit "$result"

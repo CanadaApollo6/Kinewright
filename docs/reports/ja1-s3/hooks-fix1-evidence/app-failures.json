@@ -1,0 +1,30 @@
+{
+  "current_failures": [
+    "app::in1_tests::c0_studio_owned::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+    "app::in1_tests::c0_studio_owned::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+    "app::in2b_tests::f1_save_as_occupied_preserve_and_replace_pairs",
+    "app::in2b_tests::f1_second_save_pairs_and_reopen_finds_no_bak",
+    "app::in2b_tests::in2b_failed_save_restores_the_close_flush_baseline",
+    "app::in2b_tests::in2b_opening_an_already_open_path_focuses_it",
+    "app::in2b_tests::in2b_recovery_seeds_saved_digest_from_the_file_on_disk",
+    "app::in2b_tests::in2b_recovery_without_a_sidecar_seeds_from_the_disk_file",
+    "app::in2b_tests::in2b_refuse_suspension_blocks_sidecar_writes_not_project_save",
+    "app::in2b_tests::in2b_restore_does_not_clear_a_refuse_suspension"
+  ],
+  "approved_c2_failures_match": true,
+  "archived_parent_head": "4bd37517bfa2c7043f38592a1ef7bd200f3a7d18",
+  "archived_parent_log_sha256": "9c4f4a4fed2baf3444ab3b114d2954f285e4d63f72f1ba4f05e23e3aa785d52d",
+  "archived_parent_failures": [
+    "app::in1_tests::c0_studio_owned::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+    "app::in1_tests::c0_studio_owned::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+    "app::in2b_tests::f1_save_as_occupied_preserve_and_replace_pairs",
+    "app::in2b_tests::f1_second_save_pairs_and_reopen_finds_no_bak",
+    "app::in2b_tests::in2b_failed_save_restores_the_close_flush_baseline",
+    "app::in2b_tests::in2b_opening_an_already_open_path_focuses_it",
+    "app::in2b_tests::in2b_recovery_seeds_saved_digest_from_the_file_on_disk",
+    "app::in2b_tests::in2b_recovery_without_a_sidecar_seeds_from_the_disk_file",
+    "app::in2b_tests::in2b_refuse_suspension_blocks_sidecar_writes_not_project_save",
+    "app::in2b_tests::in2b_restore_does_not_clear_a_refuse_suspension"
+  ],
+  "fresh_parent_rerun": false
+}

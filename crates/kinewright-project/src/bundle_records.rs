@@ -60,6 +60,7 @@ pub enum RecordKind {
     Lineage,
     StoreManifest,
     InputManifest,
+    InputChunkTable,
     OwnedMedia,
     OwnedFont,
     OwnedNotice,
@@ -74,7 +75,16 @@ pub enum RecordKind {
     CreationBrief,
     VersionIndex,
     FeedbackIndex,
+    FeedbackRevision,
+    FeedbackBatch,
     RunIndex,
+    RunSnapshot,
+    RunEventSegment,
+    RunEffect,
+    RunRequest,
+    RunDelivery,
+    RunResult,
+    RunUsage,
     ClaimIndex,
     TakeMap,
     TakeEvidence,
@@ -98,8 +108,21 @@ impl RecordKind {
                 | Self::RecoveryClose
                 | Self::StoreManifest
                 | Self::InputManifest
+                | Self::InputChunkTable
                 | Self::ReceiptIndex
                 | Self::IssuerState
+                | Self::VersionIndex
+                | Self::FeedbackIndex
+                | Self::FeedbackRevision
+                | Self::FeedbackBatch
+                | Self::RunIndex
+                | Self::RunSnapshot
+                | Self::RunEventSegment
+                | Self::RunEffect
+                | Self::RunRequest
+                | Self::RunDelivery
+                | Self::RunResult
+                | Self::RunUsage
                 | Self::OwnedMedia
                 | Self::OwnedFont
                 | Self::OwnedNotice

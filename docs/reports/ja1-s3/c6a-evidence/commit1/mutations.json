@@ -1,0 +1,50 @@
+[
+  {
+    "name": "second-owner-save",
+    "source": "crates/kinewright-app/src/studio_feedback.rs",
+    "selector": "s3_fix3_one_owner_per_recovery_file",
+    "assertion": "C6A_SECOND_OWNER_NO_ADMISSION",
+    "red": {
+      "exit": 101,
+      "sha256": "c7e7b32f537b9a43a41dbd8fec6a537b431248978ee3d849225e2a59c21c316a",
+      "log": "second-owner-save-red.log.gz"
+    },
+    "green": {
+      "exit": 0,
+      "sha256": "2376ed61dfe9e9128bc3678cf5b062231f85bfc78c7afeaa2d0b93e7d625afcf",
+      "log": "second-owner-save-green.log.gz"
+    }
+  },
+  {
+    "name": "second-owner-submit",
+    "source": "crates/kinewright-app/src/studio_feedback.rs",
+    "selector": "s3_fix3_one_owner_per_recovery_file",
+    "assertion": "C6A_SECOND_OWNER_NO_ISSUER",
+    "red": {
+      "exit": 101,
+      "sha256": "0b8aafe5a7351220ea1cd73d1a7699e5e3440d9e817c3fa80a409b1f38062051",
+      "log": "second-owner-submit-red.log.gz"
+    },
+    "green": {
+      "exit": 0,
+      "sha256": "2376ed61dfe9e9128bc3678cf5b062231f85bfc78c7afeaa2d0b93e7d625afcf",
+      "log": "second-owner-submit-green.log.gz"
+    }
+  },
+  {
+    "name": "frozen-manual-trim",
+    "source": "crates/kinewright-app/src/app.rs",
+    "selector": "s3_current_edit_refreshes_trim_while_frozen",
+    "assertion": "C6A_MANUAL_TRIM_REFRESHED",
+    "red": {
+      "exit": 101,
+      "sha256": "3c742ec85cc3f86ca33d1f3490309b97011552f7054c3854cd78ab7d76f70961",
+      "log": "frozen-manual-trim-red.log.gz"
+    },
+    "green": {
+      "exit": 0,
+      "sha256": "fe9b46a84033e7dacc97034c784965dd2243ec1a9aab97c333d989aaa2794177",
+      "log": "frozen-manual-trim-green.log.gz"
+    }
+  }
+]

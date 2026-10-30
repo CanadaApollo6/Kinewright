@@ -1,3 +1,4 @@
+use kinewright_media::SessionMedia;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -37,13 +38,13 @@ struct TemporaryFile(PathBuf);
 /// The native pin's process must outlive the real media worker and renderer.
 /// This waits on the existing test-util observation; it changes no engine work.
 struct TeardownObservedEngine {
-    engine: Option<FfmpegMediaEngine>,
+    engine: Option<kinewright_media::SessionMedia>,
     finished: crossbeam_channel::Receiver<()>,
 }
 
 impl TeardownObservedEngine {
     fn new() -> Self {
-        let engine = FfmpegMediaEngine::new().unwrap();
+        let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
         let finished = engine.teardown_observer();
         Self {
             engine: Some(engine),
@@ -62,7 +63,7 @@ impl TeardownObservedEngine {
 }
 
 impl std::ops::Deref for TeardownObservedEngine {
-    type Target = FfmpegMediaEngine;
+    type Target = SessionMedia;
     fn deref(&self) -> &Self::Target {
         self.engine.as_ref().unwrap()
     }
@@ -338,7 +339,7 @@ fn reference_sha256_matches_the_published_test_vectors() {
 #[test]
 fn probe_records_the_source_sha256_and_byte_length() {
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let asset = engine.probe(clip.path()).unwrap();
     let bytes = std::fs::read(clip.path()).unwrap();
     assert_eq!(
@@ -366,7 +367,9 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     let source = directory.path("source.mp4");
     std::fs::write(&source, b"source-media").unwrap();
 
-    let engine = FfmpegMediaEngine::new_with_data_dir(directory.root().to_path_buf()).unwrap();
+    let engine = FfmpegMediaEngine::new_with_data_dir(directory.root().to_path_buf())
+        .unwrap()
+        .into_legacy_fixture();
     let inventory = engine.cache_inventory();
     assert_eq!(inventory.families.len(), 5);
     let visual = inventory
@@ -377,7 +380,7 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     assert!(visual.supported);
     assert_eq!(visual.file_count, 1);
     assert_eq!(visual.bytes, 12);
-    let transcript_root = directory.root().join("transcripts/v2");
+    let transcript_root = directory.root().join("transcripts/v3");
     let transcripts = inventory
         .families
         .iter()
@@ -786,7 +789,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
 #[test]
 fn freeze_export_pixels_match_preview_after_h264_redecode() {
     let input = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let asset = engine.probe(&input.0).unwrap();
     let document = Document {
         investigator: None,
@@ -861,7 +864,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
         )
         .unwrap();
 
-    let decode_engine = FfmpegMediaEngine::new().unwrap();
+    let decode_engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let exported_asset = decode_engine.probe(&output.0).unwrap();
     let exported_document = full_timeline(exported_asset);
     let exported_frames = decode_engine.frames();
@@ -1036,7 +1039,7 @@ fn assert_frame_center_close(
 #[test]
 fn probe_reports_generated_asset_metadata_exactly() {
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
 
     let asset = engine.probe(&clip.0).unwrap();
 
@@ -1049,7 +1052,7 @@ fn probe_reports_generated_asset_metadata_exactly() {
 #[test]
 fn frame_requests_decode_exact_requested_frames_without_an_audio_device() {
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
     let document = full_timeline(asset);
     let frames = engine.frames();
@@ -1069,7 +1072,7 @@ fn frame_requests_decode_exact_requested_frames_without_an_audio_device() {
 #[test]
 fn relinked_moved_source_round_trip_renders_identical_frame() {
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let original_asset = engine.probe(clip.path()).unwrap();
     let document = full_timeline(original_asset.clone());
     let frames = engine.frames();
@@ -1134,7 +1137,7 @@ fn relinked_moved_source_round_trip_renders_identical_frame() {
 #[test]
 fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
         investigator: None,
@@ -1239,7 +1242,7 @@ fn audio_device_play_pause_and_seek_smoke_test() {
     require_audio_device_opt_in();
 
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
     let document = full_timeline(asset);
     let events = engine.events();
@@ -1270,7 +1273,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
 
     let voice = generate_solid("device-voice", "navy", "440");
     let bed = generate_solid("device-bed", "black", "660");
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let voice_asset = engine.probe(&voice.0).unwrap();
     let bed_asset = engine.probe(&bed.0).unwrap();
     let duration = voice_asset.duration.min(bed_asset.duration);
@@ -1366,7 +1369,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     require_audio_device_opt_in();
 
     let clip = TestClip::generate();
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = FfmpegMediaEngine::legacy_fixture().unwrap();
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
         investigator: None,
