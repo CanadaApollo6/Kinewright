@@ -41,12 +41,12 @@ pub fn scheduler_settings_directory() -> Result<PathBuf, String> {
     .with_file_name("scheduler"))
 }
 
-/// Every Director the person may choose: one per certified connector profile.
+/// Every Director the person may choose: one per qualified release specification.
 #[must_use]
 pub fn director_choices() -> Vec<ProviderSelectionRecord> {
     certified_connectors()
         .iter()
-        .map(|profile| profile.selection().clone())
+        .map(|specification| specification.selection())
         .collect()
 }
 

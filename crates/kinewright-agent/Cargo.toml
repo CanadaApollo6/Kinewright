@@ -20,10 +20,12 @@ default = ["eval-harness"]
 # MO2 R7: the harness saves its project fixtures through the shared project
 # writer, so they stamp the same minimum-required format version.
 eval-harness = [
+    "test-util",
     "kinewright-core/test-util",
     "kinewright-media/test-util",
     "kinewright-project/test-util",
 ]
+test-util = []
 # Slow tier (docs/BUILDING.md, ci/slow-tests.txt): tests marked with
 # `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this
 # feature, which CI's slow tier and a full local run enable.

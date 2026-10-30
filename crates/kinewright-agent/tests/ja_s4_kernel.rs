@@ -393,7 +393,7 @@ fn s4_stop_retains_cleanup_and_never_continues_failed_work_contract() {
 }
 
 fn check_guardian_injection(attempt: orchestration::AdmittedAttempt) {
-    use kinewright_core::{AgentDriver, SessionConfig};
+    use kinewright_core::AgentDriver;
     use orchestration::adapters::*;
     struct Launcher(
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -403,38 +403,57 @@ fn check_guardian_injection(attempt: orchestration::AdmittedAttempt) {
         fn launch(
             &self,
             attempt: orchestration::AdmittedAttempt,
-            profile: CertifiedConnectorProfile,
+            invocation: AuthorizedInvocation,
         ) -> Result<ContainedSession, LaunchError> {
             assert_eq!(attempt.identity(), &self.1);
-            assert_eq!(profile.selection().connector, "scripted");
+            assert_eq!(invocation.profile().selection().connector, "scripted");
+            invocation
+                .verify_payload(invocation.invocation().manifest(), b"fixture prompt")
+                .unwrap();
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(LaunchError("fixture containment refused".into()))
         }
     }
-    let cfg = SessionConfig {
-        model: Some("fixture".into()),
-        ..SessionConfig::default()
-    };
-    let profile = CertifiedConnectorProfile::fixture(
-        ProviderSelectionRecord {
-            connector: "scripted".into(),
-            model: "fixture".into(),
-            options: vec![],
-        },
-        cfg.clone(),
-    );
+    let profile = CertifiedConnectorProfile::fixture(&attempt);
+    let cfg = profile.session_config().clone();
+    for kind in [
+        SendKind::OpeningAssignment,
+        SendKind::SpecialistStart,
+        SendKind::QueuedSteering,
+        SendKind::AutomaticResultWake,
+    ] {
+        let authorization = AuthorizedInvocation::fixture(profile.clone(), &attempt, kind);
+        authorization.validate(&cfg, &attempt).unwrap();
+        assert_eq!(authorization.invocation().kind(), kind);
+        assert!(
+            authorization
+                .verify_payload(authorization.invocation().manifest(), b"different prompt")
+                .is_err()
+        );
+        let mut other_manifest = authorization.invocation().manifest().clone();
+        other_manifest.sha256 = "0".repeat(64);
+        assert!(
+            authorization
+                .verify_payload(&other_manifest, b"fixture prompt")
+                .is_err()
+        );
+    }
+    let invocation = AuthorizedInvocation::fixture(profile, &attempt, SendKind::OpeningAssignment);
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let identity = attempt.identity().clone();
     let scripted = kinewright_agent::ScriptedDriver::new(vec![]);
     let driver = ContainedDriver::new(
         Launcher(calls.clone(), identity),
         attempt,
-        profile,
+        invocation,
         scripted.detect().unwrap(),
     );
     let mut wrong = cfg.clone();
     wrong.model = Some("other".into());
     assert!(driver.start_session(wrong).is_err());
+    let mut changed_binding = cfg.clone();
+    changed_binding.mcp_url = Some("http://127.0.0.1:23456/mcp".into());
+    assert!(driver.start_session(changed_binding).is_err());
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(driver.start_session(cfg.clone()).is_err());
     assert!(driver.start_session(cfg).is_err());

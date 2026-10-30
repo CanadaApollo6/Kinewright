@@ -6,64 +6,18 @@
 //! Notice: LICENSES/t3code-MIT.txt. Kinewright requires the original durable
 //! reservation and native containment before a driver can create a session.
 #![allow(clippy::missing_errors_doc)]
-use super::{AdmittedAttempt, orchestration_records::ProviderSelectionRecord};
+use super::AdmittedAttempt;
 use kinewright_core::{
     AgentDriver, AgentError, AgentSession, HarnessId, HarnessInfo, SessionConfig,
 };
 use std::sync::Mutex;
 
-/// No deserializer or public constructor can turn CLI installation into certification.
-#[derive(Clone)]
-pub struct CertifiedConnectorProfile {
-    selection: ProviderSelectionRecord,
-    config: SessionConfig,
-}
-impl CertifiedConnectorProfile {
-    #[must_use]
-    pub fn selection(&self) -> &ProviderSelectionRecord {
-        &self.selection
-    }
-    #[must_use]
-    pub fn session_config(&self) -> &SessionConfig {
-        &self.config
-    }
-    #[cfg(test)]
-    #[allow(
-        dead_code,
-        reason = "integration fixture compiles the exact module through its isolated kernel"
-    )]
-    pub(crate) fn fixture(selection: ProviderSelectionRecord, config: SessionConfig) -> Self {
-        Self { selection, config }
-    }
-}
-
-/// Every connector profile this build certifies: the one list S4 offers for the
-/// Director setting. Certification registers each shipping profile here; none is
-/// certified yet. Fixture builds also certify the scripted Director, which no
-/// shipping launcher can start.
-#[must_use]
-pub fn certified_connectors() -> Vec<CertifiedConnectorProfile> {
-    let shipping: [CertifiedConnectorProfile; 0] = [];
-    shipping.into_iter().chain(fixture_connectors()).collect()
-}
-#[cfg(any(test, feature = "eval-harness"))]
-fn fixture_connectors() -> Vec<CertifiedConnectorProfile> {
-    vec![CertifiedConnectorProfile {
-        selection: ProviderSelectionRecord {
-            connector: "scripted".into(),
-            model: "fixture".into(),
-            options: vec![],
-        },
-        config: SessionConfig {
-            model: Some("fixture".into()),
-            ..SessionConfig::default()
-        },
-    }]
-}
-#[cfg(not(any(test, feature = "eval-harness")))]
-fn fixture_connectors() -> Vec<CertifiedConnectorProfile> {
-    Vec::new()
-}
+mod certification;
+pub use certification::*;
+mod authentication;
+pub use authentication::*;
+mod invocation;
+pub use invocation::*;
 
 #[derive(Debug)]
 pub struct LaunchError(pub String);
@@ -84,14 +38,13 @@ pub trait GuardianLauncher: Send + Sync {
     fn launch(
         &self,
         attempt: AdmittedAttempt,
-        profile: CertifiedConnectorProfile,
+        invocation: AuthorizedInvocation,
     ) -> Result<ContainedSession, LaunchError>;
 }
 
 pub struct ContainedDriver<L> {
     launcher: L,
-    profile: CertifiedConnectorProfile,
-    attempt: Mutex<Option<AdmittedAttempt>>,
+    reservation: Mutex<Option<(AdmittedAttempt, AuthorizedInvocation)>>,
     info: HarnessInfo,
 }
 impl<L: GuardianLauncher> ContainedDriver<L> {
@@ -99,13 +52,12 @@ impl<L: GuardianLauncher> ContainedDriver<L> {
     pub fn new(
         launcher: L,
         attempt: AdmittedAttempt,
-        profile: CertifiedConnectorProfile,
+        invocation: AuthorizedInvocation,
         info: HarnessInfo,
     ) -> Self {
         Self {
             launcher,
-            attempt: Mutex::new(Some(attempt)),
-            profile,
+            reservation: Mutex::new(Some((attempt, invocation))),
             info,
         }
     }
@@ -118,23 +70,20 @@ impl<L: GuardianLauncher> AgentDriver for ContainedDriver<L> {
         Some(self.info.clone())
     }
     fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
-        if cfg != self.profile.config
-            || cfg.model.as_deref() != Some(self.profile.selection.model.as_str())
-        {
-            return Err(AgentError::Unavailable(
-                "session differs from certified connector profile".into(),
-            ));
-        }
-        let attempt = self
-            .attempt
+        let mut reservation = self
+            .reservation
             .lock()
-            .map_err(|_| AgentError::Unavailable("guardian reservation poisoned".into()))?
-            .take()
-            .ok_or_else(|| {
-                AgentError::Unavailable("guardian reservation already consumed".into())
-            })?;
+            .map_err(|_| AgentError::Unavailable("guardian reservation poisoned".into()))?;
+        let (attempt, invocation) = reservation.as_ref().ok_or_else(|| {
+            AgentError::Unavailable("guardian reservation already consumed".into())
+        })?;
+        invocation
+            .validate(&cfg, attempt)
+            .map_err(|refusal| AgentError::Unavailable(refusal.to_string()))?;
+        let (attempt, invocation) = reservation.take().expect("validated reservation");
+        drop(reservation);
         self.launcher
-            .launch(attempt, self.profile.clone())
+            .launch(attempt, invocation)
             .map(|contained| contained.session)
             .map_err(|error| AgentError::Unavailable(error.0))
     }
