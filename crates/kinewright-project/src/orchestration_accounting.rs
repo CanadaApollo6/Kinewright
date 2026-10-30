@@ -152,6 +152,8 @@ pub struct TaskAccounting {
     pub last_failure: Option<String>,
     pub repeated_failures: u8,
     pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_until_unix_ms: Option<u64>,
     pub pause: Option<AccountingRefusal>,
 }
 
@@ -310,6 +312,7 @@ impl AccountingRecord {
                 return Err(AccountingRefusal::Invalid);
             }
             if task.token_limit == Some(0)
+                || (task.wait_until_unix_ms.is_some() && task.wait_reason.is_none())
                 || task.wait_reason.as_ref().is_some_and(|s| s.len() > 1024)
             {
                 return Err(AccountingRefusal::Invalid);
@@ -560,6 +563,7 @@ impl AccountingRecord {
             last_failure: None,
             repeated_failures: 0,
             wait_reason: None,
+            wait_until_unix_ms: None,
             pause: None,
         });
         Ok(())
@@ -682,7 +686,13 @@ impl TaskAccounting {
     }
 
     fn outstanding_usage(&self) -> Result<bool, AccountingRefusal> {
-        for send in &self.sends {
+        self.outstanding_usage_except(None)
+    }
+    fn outstanding_usage_except(
+        &self,
+        current: Option<&SendConsumption>,
+    ) -> Result<bool, AccountingRefusal> {
+        for send in self.sends.iter().filter(|send| Some(*send) != current) {
             let samples: Vec<_> = self
                 .usage
                 .iter()
@@ -715,6 +725,31 @@ impl TaskAccounting {
         Ok(())
     }
 
+    /// Recheck a charged send without charging it again or requiring its own future usage.
+    pub fn check_release(&self, send: &SendConsumption) -> Result<(), AccountingRefusal> {
+        if !self.sends.contains(send) {
+            return Err(AccountingRefusal::Scope);
+        }
+        if let Some(reason) = self.pause {
+            return Err(reason);
+        }
+        if self.wait_reason.is_some() {
+            return Err(AccountingRefusal::Replan);
+        }
+        if self
+            .token_limit
+            .is_some_and(|cap| self.totals.token_lower_bound >= cap)
+        {
+            return Err(AccountingRefusal::Tokens);
+        }
+        if self.token_limit.is_some()
+            && ((!self.usage.is_empty() && !self.totals.tokens_complete)
+                || self.outstanding_usage_except(Some(send))?)
+        {
+            return Err(AccountingRefusal::UsageUnavailable);
+        }
+        Ok(())
+    }
     pub fn consume_send(&mut self, send: SendConsumption) -> Result<(), AccountingRefusal> {
         if let Some(old) = self.sends.iter().find(|old| old.command == send.command) {
             return if *old == send {

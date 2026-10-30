@@ -166,6 +166,16 @@ fn scan_cgroup_processes(path: &Path, excluded: Option<u32>) -> io::Result<bool>
         .strip_prefix("/sys/fs/cgroup")
         .map_err(io::Error::other)?;
     let expected = format!("0::/{}", relative.display());
+    scan_process_cgroups(excluded, |text| {
+        text.lines().any(|line| {
+            line == expected
+                || line
+                    .strip_prefix(&expected)
+                    .is_some_and(|suffix| suffix.starts_with('/') || suffix == " (deleted)")
+        })
+    })
+}
+fn scan_process_cgroups(excluded: Option<u32>, matches: impl Fn(&str) -> bool) -> io::Result<bool> {
     for entry in fs::read_dir("/proc")? {
         let entry = entry?;
         let pid = entry
@@ -176,14 +186,7 @@ fn scan_cgroup_processes(path: &Path, excluded: Option<u32>) -> io::Result<bool>
             continue;
         }
         match fs::read_to_string(entry.path().join("cgroup")) {
-            Ok(text)
-                if text.lines().any(|line| {
-                    line == expected
-                        || line
-                            .strip_prefix(&expected)
-                            .is_some_and(|suffix| suffix.starts_with('/') || suffix == " (deleted)")
-                }) =>
-            {
+            Ok(text) if matches(&text) => {
                 return Ok(false);
             }
             Ok(_) => {}
@@ -197,6 +200,61 @@ fn scan_cgroup_processes(path: &Path, excluded: Option<u32>) -> io::Result<bool>
         }
     }
     Ok(true)
+}
+
+/// Observe every cgroup and process for an unbound, nonce-scoped service name.
+/// # Errors
+/// Ambiguous mounts, directory traversal, process observations or capacity refuse proof.
+pub fn unit_tree_absent(unit: &str) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let nonce = unit
+        .strip_prefix("kinewright-job-")
+        .and_then(|s| s.strip_suffix(".service"))
+        .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| invalid("invalid native unit name"))?;
+    let _ = nonce;
+    let mount = Path::new("/sys/fs/cgroup");
+    let file = File::open(mount)?;
+    if fs::canonicalize(mount)? != mount || rustix::fs::fstatfs(&file)?.f_type != 0x6367_7270 {
+        return Err(invalid("unbound recovery needs cgroup-v2"));
+    }
+    let device = file.metadata()?.dev();
+    let mut pending = vec![mount.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(path) = pending.pop() {
+        visited += 1;
+        if visited > 65_536 {
+            return Err(invalid("cgroup observation capacity"));
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = match fs::symlink_metadata(entry.path()) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            if metadata.file_type().is_symlink() || metadata.dev() != device {
+                return Err(invalid("cgroup observation mount changed"));
+            }
+            if metadata.is_dir() {
+                if entry.file_name() == unit {
+                    return Ok(false);
+                }
+                pending.push(entry.path());
+                if pending.len() > 65_536 {
+                    return Err(invalid("cgroup observation capacity"));
+                }
+            }
+        }
+    }
+    scan_process_cgroups(None, |text| {
+        text.lines().any(|line| {
+            line.strip_prefix("0::/").is_some_and(|path| {
+                path.split('/')
+                    .any(|part| part.strip_suffix(" (deleted)").unwrap_or(part) == unit)
+            })
+        })
+    })
 }
 
 fn start_time(pid: u32) -> io::Result<u64> {

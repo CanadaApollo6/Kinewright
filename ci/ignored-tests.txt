@@ -141,3 +141,8 @@ kinewright_agent writer_host::hooks_tests::tests::s4b_c3_real_recovery_before_co
 kinewright_agent writer_host::hooks_tests::tests::s4b_c3_real_recovery_after_commit_has_no_duplicate crates/kinewright-agent/src/writer_host/native_recovery_tests.rs linux on-demand  # C3 equipped native recovery/pump qualification; explicitly run in C3 gate
 kinewright_agent writer_host::hooks_tests::tests::s4b_c3_one_effect_pump_charges_and_records_raw_usage crates/kinewright-agent/src/writer_host/native_recovery_tests.rs linux on-demand  # C3 equipped native recovery/pump qualification; explicitly run in C3 gate
 ja_s4_guardian s4b_c3_late_recovery_deleted_service_zombie_blocks_proof crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand  # C3 late recovery must observe zombies after service deletion; explicitly run in C3 gate
+
+kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_release_after_six_hour_deadline crates/kinewright-agent/src/writer_host/c3_fix1_tests.rs linux on-demand  # C3 COMMIT deadline qualification; explicitly run in fix gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_commit_rechecks_monotonic_and_usage crates/kinewright-agent/src/writer_host/c3_fix1_tests.rs linux on-demand  # C3 release-time budgets; explicitly run in fix gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_history_atomic_crash_cuts crates/kinewright-agent/src/writer_host/c3_fix1_tests.rs linux on-demand  # C3 atomic history crash cuts; explicitly run in fix gate
+kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_rate_wait_clears_after_bounded_clock_time crates/kinewright-agent/src/writer_host/c3_fix1_muse_tests.rs linux on-demand  # C3 bounded rate wait; explicitly run in fix gate

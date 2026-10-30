@@ -4,6 +4,8 @@ use kinewright_project::orchestration_accounting::{
     AccountingRefusal, UsageMode, UsageSample, UsageValues,
 };
 
+pub(crate) const RATE_LIMIT_BACKOFF_MS: u64 = 5_000;
+
 pub(crate) enum SpendingChange {
     Clock,
     Ceiling(u64),
@@ -93,6 +95,7 @@ impl HostCommandOwner {
             next.add_task(identity.task.0.clone(), None)
                 .map_err(refused)?;
         }
+        let deadline_unix_ms = next.deadline_unix_ms;
         let task = next.task_mut(&identity.task.0).map_err(refused)?;
         let outcome = match change {
             SpendingChange::Clock => Ok(()),
@@ -101,6 +104,12 @@ impl HostCommandOwner {
                 if reason.as_ref().is_some_and(|s| s.len() > 1024) {
                     return Err(refused("wait capacity"));
                 }
+                task.wait_until_unix_ms = reason.as_ref().map(|_| {
+                    clock
+                        .unix_ms
+                        .saturating_add(RATE_LIMIT_BACKOFF_MS)
+                        .min(deadline_unix_ms)
+                });
                 task.wait_reason = reason;
                 Ok(())
             }
@@ -137,6 +146,111 @@ impl HostCommandOwner {
         self.replace_accounting_reference(&mut state, sealed.reference)?;
         self.publish_native(producer, state, identity, vec![])?;
         clock_result.and(outcome).map_err(refused)
+    }
+    pub(crate) fn clear_due_native_waits(
+        &mut self,
+        producer: &HostAuth,
+        run: &crate::orchestration::orchestration_records::RunId,
+        now: u64,
+    ) -> Result<(), HostError> {
+        let state = self.spending_scope(producer, run)?;
+        let accounting = self
+            .native_accounting(&state)?
+            .ok_or_else(|| refused("run has no durable clock"))?;
+        for task in accounting.tasks.iter().filter(|t| {
+            t.wait_reason.is_some() && t.wait_until_unix_ms.is_none_or(|until| now >= until)
+        }) {
+            // Clock/wait context survives archival; it grants no native authority.
+            let identity = state
+                .attempts
+                .iter()
+                .rev()
+                .find(|a| a.identity.task.0 == task.task)
+                .map_or_else(
+                    || ExecutionIdentity {
+                        version: 1,
+                        project: accounting.project.clone(),
+                        run: run.clone(),
+                        task: crate::orchestration::orchestration_records::TaskId(
+                            task.task.clone(),
+                        ),
+                        attempt: crate::orchestration::orchestration_records::AttemptId(
+                            run.0.clone(),
+                        ),
+                        nonce: run.0.clone(),
+                        owner_instance: run.0.clone(),
+                    },
+                    |a| a.identity.clone(),
+                );
+            // Legacy waits receive the same bounded backoff before their first clear.
+            let change = if task.wait_until_unix_ms.is_some() {
+                SpendingChange::Wait(None)
+            } else {
+                SpendingChange::Wait(task.wait_reason.clone())
+            };
+            self.change_spending(
+                producer,
+                &identity,
+                change,
+                ClockObservation {
+                    unix_ms: now,
+                    monotonic_delta_ms: 0,
+                    trusted: true,
+                },
+            )?;
+        }
+        Ok(())
+    }
+    fn check_native_commit_budget(
+        &mut self,
+        producer: &HostAuth,
+        invocation: &AuthorizedInvocation,
+    ) -> Result<(), HostError> {
+        let identity = invocation.invocation().binding().identity();
+        let lifetime = invocation.lifetime();
+        let state = self.spending_scope(producer, &identity.run)?;
+        let current = self
+            .native_accounting(&state)?
+            .ok_or_else(|| refused("native clock missing"))?;
+        self.change_spending(
+            producer,
+            identity,
+            SpendingChange::Clock,
+            ClockObservation {
+                unix_ms: super::spending::unix_ms()?,
+                monotonic_delta_ms: lifetime.elapsed_floor().saturating_sub(current.elapsed_ms),
+                trusted: true,
+            },
+        )?;
+        let state = self.spending_scope(producer, &identity.run)?;
+        let mut current = self
+            .native_accounting(&state)?
+            .ok_or_else(|| refused("native clock missing"))?;
+        current
+            .tasks
+            .iter()
+            .find(|t| t.task == identity.task.0)
+            .ok_or_else(|| refused("native accounting task missing"))?
+            .check_release(invocation.acknowledgment().consumption())
+            .map_err(refused)?;
+        let now = super::spending::unix_ms()?;
+        if let Err(reason) = current.observe_clock(now, 0, true) {
+            self.change_spending(
+                producer,
+                identity,
+                SpendingChange::Clock,
+                ClockObservation {
+                    unix_ms: now,
+                    monotonic_delta_ms: 0,
+                    trusted: true,
+                },
+            )?;
+            return Err(refused(reason));
+        }
+        if std::time::Instant::now() >= lifetime.expires {
+            return Err(refused(AccountingRefusal::Time));
+        }
+        Ok(())
     }
     pub(crate) fn ingest_native_raw(
         &mut self,
@@ -324,6 +438,13 @@ impl HostCommandOwner {
             return Err(refused("cleanup proof scope changed"));
         }
         let mut state = self.spending_scope(producer, &identity.run)?;
+        if self
+            .recovery_attempt(&state, native)?
+            .is_some_and(|a| matches!(a.state, AttemptState::Retired(_)))
+        {
+            return Ok(());
+        }
+
         self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts

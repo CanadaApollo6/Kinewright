@@ -122,6 +122,49 @@ impl EffectPump {
         self.opened = true;
         Ok(now)
     }
+    fn launch_reserved(
+        &self,
+        owner: &Arc<Mutex<HostCommandOwner>>,
+        attempt: AdmittedAttempt,
+        effect: &crate::orchestration::orchestration_records::EffectId,
+        kind: crate::orchestration::adapters::SendKind,
+        now: u64,
+    ) -> io::Result<Box<dyn AgentSession>> {
+        let identity = attempt.identity();
+        if let Some(limit) = self.ceiling {
+            owner
+                .lock()
+                .map_err(|_| io::Error::other("host owner poisoned"))?
+                .change_spending(
+                    &self.producer,
+                    identity,
+                    crate::writer_host::native_invocation::SpendingChange::Ceiling(limit.get()),
+                    crate::protocol::limits::usage::ClockObservation {
+                        unix_ms: now,
+                        monotonic_delta_ms: 0,
+                        trusted: true,
+                    },
+                )
+                .map_err(io::Error::other)?;
+        }
+        let profile = self.profiles.bind(&attempt)?;
+        let invocation = owner
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .charge_native_invocation(
+                &self.producer,
+                &attempt,
+                profile,
+                effect,
+                kind,
+                crate::writer_host::spending::unix_ms().map_err(io::Error::other)?,
+            )
+            .map_err(io::Error::other)?;
+        self.launcher
+            .launch(attempt, invocation)
+            .map_err(|e| io::Error::other(e.0))
+            .map(crate::orchestration::adapters::ContainedSession::into_session)
+    }
     pub(crate) fn tick(&mut self) -> io::Result<()> {
         self.drain_events()?;
         let owner = self
@@ -147,17 +190,30 @@ impl EffectPump {
             },
             |a| a.identity.clone(),
         );
-        let ready = self.active.len() < 3
+        let accounting = host.native_accounting(&state).map_err(io::Error::other)?;
+        let available = self.active.len() < 3
             && state.effects.iter().any(|e| {
                 crate::orchestration::outbox::next_effect(&state, &e.lane)
                     .is_some_and(|n| n.id == e.id)
             });
+        let ready = available
+            && state.effects.iter().any(|e| {
+                crate::orchestration::outbox::next_effect(&state, &e.lane)
+                    .is_some_and(|n| n.id == e.id)
+                    && !accounting.as_ref().is_some_and(|a| {
+                        a.tasks
+                            .iter()
+                            .any(|t| t.task == e.task.0 && t.wait_reason.is_some())
+                    })
+            });
         let now = self.observe_clock(&mut host, &state, &identity, ready)?;
+        host.clear_due_native_waits(&self.producer, &self.run, now)
+            .map_err(io::Error::other)?;
         if state.outcome != RunOutcome::Pending && self.active.is_empty() {
             let _ = self.sender.send(AgentEvent::Done);
             return Ok(());
         }
-        if !ready {
+        if !available {
             return Ok(());
         }
         let Some((attempt, effect, kind)) = host
@@ -166,40 +222,28 @@ impl EffectPump {
         else {
             return Ok(());
         };
-        if let Some(limit) = self.ceiling {
-            host.change_spending(
-                &self.producer,
-                attempt.identity(),
-                crate::writer_host::native_invocation::SpendingChange::Ceiling(limit.get()),
-                crate::protocol::limits::usage::ClockObservation {
-                    unix_ms: now,
-                    monotonic_delta_ms: 0,
-                    trusted: true,
-                },
-            )
-            .map_err(io::Error::other)?;
-        }
+        let identity = attempt.identity().clone();
         drop(host);
-        // Endpoint/runtime checks may perform IO. Never hold the H1 owner here.
-        let profile = self.profiles.bind(&attempt)?;
-        let invocation = owner
-            .lock()
-            .map_err(|_| io::Error::other("host owner poisoned"))?
-            .charge_native_invocation(
-                &self.producer,
-                &attempt,
-                profile,
-                &effect,
-                kind,
-                crate::writer_host::spending::unix_ms().map_err(io::Error::other)?,
-            )
-            .map_err(io::Error::other)?;
-        let id = attempt.identity().attempt.clone();
-        let session = self
-            .launcher
-            .launch(attempt, invocation)
-            .map_err(|e| io::Error::other(e.0))?
-            .into_session();
+        let launched = self.launch_reserved(&owner, attempt, &effect, kind, now);
+        let session = match launched {
+            Ok(session) => session,
+            Err(error) => {
+                let mut claim = self
+                    .launcher
+                    .claim
+                    .lock()
+                    .map_err(|_| io::Error::other("machine claim poisoned"))?;
+                if let Err(cleanup) =
+                    reconcile_attempt(&owner, &mut claim, &self.producer, &identity)
+                {
+                    return Err(io::Error::other(format!(
+                        "{error}; cleanup_blocked: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        let id = identity.attempt;
         self.active.insert(id, session);
         Ok(())
     }
@@ -259,32 +303,28 @@ pub(crate) fn recover_run(
         .map_err(io::Error::other)?;
     let retained = claim.recovery_identities().to_vec();
     for native in retained {
-        let recovery = claim.recovery(&native)?;
-        let proof = crate::guardian::RecoveryObserver::recover_cleanup(&recovery)?;
-        if let Some(attempt) = state.attempts.iter().find(|a| {
-            a.identity.attempt.0.as_str() == native.attempt
-                && a.identity.nonce.as_str() == native.nonce
-        }) {
-            host.lock()
-                .map_err(|_| io::Error::other("host owner poisoned"))?
-                .native_completed(&producer, &attempt.identity, false, &proof)
-                .map_err(io::Error::other)?;
-        } else {
-            return Err(io::Error::other("private attempt missing from H1"));
-        }
-        claim.retire(&proof)?;
+        let attempt = host
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .recovery_attempt(&state, &native)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("private attempt missing from H1"))?;
+        reconcile_attempt(host, &mut claim, &producer, &attempt.identity)?;
     }
     for attempt in &state.attempts {
-        if !matches!(
-            attempt.state,
-            crate::orchestration::orchestration_records::AttemptState::Retired(_)
-        ) {
-            // While this same lock is held, no private reservation means launch
-            // never began OR an earlier cleanup proof already retired its file.
-            host.lock()
-                .map_err(|_| io::Error::other("host owner poisoned"))?
-                .reconcile_native_effect(&producer, &attempt.identity)
-                .map_err(io::Error::other)?;
+        let current = host
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .spending_scope(&producer, run)
+            .map_err(io::Error::other)?;
+        if current.attempts.iter().any(|a| {
+            a.identity == attempt.identity
+                && !matches!(
+                    a.state,
+                    crate::orchestration::orchestration_records::AttemptState::Retired(_)
+                )
+        }) {
+            reconcile_attempt(host, &mut claim, &producer, &attempt.identity)?;
         }
     }
     if let Some(attempt) = state.attempts.first() {
@@ -337,4 +377,69 @@ pub(crate) fn recover_run(
         )?,
         producer,
     ))
+}
+
+fn reconcile_attempt(
+    host: &Arc<Mutex<HostCommandOwner>>,
+    claim: &mut MachineClaim,
+    producer: &HostAuth,
+    identity: &ExecutionIdentity,
+) -> io::Result<()> {
+    use crate::orchestration::orchestration_records::AttemptState;
+    claim.check_run(identity.project.as_str(), identity.run.0.as_str())?;
+    host.lock()
+        .map_err(|_| io::Error::other("host owner poisoned"))?
+        .reconcile_native_pending(producer)
+        .map_err(io::Error::other)?;
+    let native = claim
+        .recovery_identities()
+        .iter()
+        .find(|a| a.attempt == identity.attempt.0.as_str())
+        .cloned();
+    if let Some(native) = native {
+        if native.project != identity.project.as_str()
+            || native.run != identity.run.0.as_str()
+            || native.task != identity.task.0.as_str()
+            || native.nonce != identity.nonce.as_str()
+            || native.owner_instance != identity.owner_instance.as_str()
+        {
+            return Err(io::Error::other("private attempt scope changed"));
+        }
+        match claim.recovery(&native) {
+            Ok(recovery) => {
+                let proof = crate::guardian::RecoveryObserver::recover_cleanup(&recovery)?;
+                host.lock()
+                    .map_err(|_| io::Error::other("host owner poisoned"))?
+                    .native_completed(producer, identity, false, &proof)
+                    .map_err(io::Error::other)?;
+                claim.retire(&proof)?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let state = host
+                    .lock()
+                    .map_err(|_| io::Error::other("host owner poisoned"))?
+                    .spending_scope(producer, &identity.run)
+                    .map_err(io::Error::other)?;
+                if !state
+                    .attempts
+                    .iter()
+                    .any(|a| a.identity == *identity && a.state == AttemptState::Reserved)
+                {
+                    return Err(io::Error::other(
+                        "unbound native recovery requires Reserved H1 attempt",
+                    ));
+                }
+                let proof = crate::guardian::RecoveryObserver::unbound_cleanup(&native)?;
+                // Delete only under proof. A crash here leaves H1 Reserved with no
+                // private record, the already-cleaned case covered by the same lock.
+                claim.retire_unbound(&proof)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    host.lock()
+        .map_err(|_| io::Error::other("host owner poisoned"))?
+        .reconcile_native_effect(producer, identity)
+        .map_err(io::Error::other)
 }

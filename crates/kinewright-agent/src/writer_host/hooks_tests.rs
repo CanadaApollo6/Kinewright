@@ -25,6 +25,8 @@ mod tests {
     include!("native_spending_tests.rs");
     include!("native_recovery_tests.rs");
     include!("task_history_tests.rs");
+    include!("c3_fix1_tests.rs");
+    include!("c3_fix1_muse_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,

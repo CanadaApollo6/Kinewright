@@ -299,7 +299,7 @@ impl EditorTask {
             .map_err(|_| BundleError::HistoryChanged)?;
         let base_ref = owner.persist_registered_task_checkpoint(&mut self.registration)?;
         Ok((
-            owner.candidate_binding(self.registration.branch_id())?,
+            owner.task_checkpoint_binding(self.registration.branch_id())?,
             base_ref,
             false,
         ))
@@ -331,6 +331,20 @@ impl EditorTask {
     #[must_use]
     pub fn core(&self) -> &Core {
         self.registration.core()
+    }
+    #[cfg(any(test, feature = "eval-harness"))]
+    pub fn freeze_fixture(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+    ) -> Result<&FrozenTaskResult, BundleError> {
+        if self.frozen.is_none() {
+            let _drain = self
+                .endpoint
+                .close_and_drain()
+                .map_err(BundleError::Unsupported)?;
+            self.frozen = Some(owner.freeze_registered_candidate(&mut self.registration)?);
+        }
+        self.frozen.as_ref().ok_or(BundleError::HistoryChanged)
     }
     pub fn freeze(
         &mut self,

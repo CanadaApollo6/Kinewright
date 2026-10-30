@@ -452,7 +452,7 @@ fn s4_drain_and_durable_base() {
     });
     entered.wait();
     let freezing = std::thread::spawn(move || {
-        let frozen = task.freeze(&mut owner).unwrap().clone();
+        let frozen = task.freeze_fixture(&mut owner).unwrap().clone();
         (task, owner, frozen)
     });
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -514,7 +514,10 @@ fn s4_drain_and_durable_base() {
         None,
     )
     .unwrap();
-    assert_eq!(reopened.freeze(&mut owner).unwrap().delta().len(), 1);
+    assert_eq!(
+        reopened.freeze_fixture(&mut owner).unwrap().delta().len(),
+        1
+    );
     let mut wrong = base.clone();
     wrong.head = s4_id(999);
     assert!(
@@ -562,7 +565,7 @@ fn s4_drain_and_durable_base() {
             locked: false,
         }))
         .unwrap();
-    invalid_task.freeze(&mut owner).unwrap();
+    invalid_task.freeze_fixture(&mut owner).unwrap();
     let issuer = owner
         .issue_manual_lease("second-issuer".into(), "second-private".into())
         .unwrap()
@@ -669,7 +672,7 @@ fn s4_editor_result_to_candidate() {
         let plan=prepared.structured_content.unwrap();
         let applied=s4_call(&handler,"commit_edit_plan",json!({"plan_id":plan["plan_id"],"expected_revision":handler.snapshot().unwrap().0}));
         assert_eq!(applied.is_error,Some(false),"{applied:?}");
-        let frozen=task.freeze(&mut owner).unwrap().clone();
+        let frozen=task.freeze_fixture(&mut owner).unwrap().clone();
         assert_eq!(frozen.base(),&base);
         let reopened=kinewright_project::bundle::LoadedBundle::read(&path).unwrap();
         assert_eq!(reopened.root().unwrap().manual_branch_id,manual_attachment.current.branch);

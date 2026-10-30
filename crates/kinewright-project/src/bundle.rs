@@ -750,6 +750,7 @@ impl LoadedBundle {
             pending_command: None,
             pending_result: None,
             pending_metadata: None,
+            task_checkpoints: BTreeMap::new(),
             voice_slots: std::sync::Mutex::default(),
             last_collection_error: None,
             pending_save: None,
@@ -806,6 +807,7 @@ pub struct ProjectBundle {
     pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
     pub(crate) pending_metadata: Option<crate::studio_store::ValidatedMetadataUpdate>,
+    pub(crate) task_checkpoints: BTreeMap<BranchId, crate::task_checkpoint::StagedTaskCheckpoint>,
     pub(crate) voice_slots: crate::voice_store::VoiceSlots,
 }
 pub(crate) struct PendingSave {
@@ -1025,6 +1027,7 @@ impl ProjectBundle {
                 pending_command: None,
                 pending_result: None,
                 pending_metadata: None,
+                task_checkpoints: BTreeMap::new(),
                 voice_slots: std::sync::Mutex::default(),
                 last_collection_error: None,
                 pending_save: None,
@@ -1264,6 +1267,18 @@ impl ProjectBundle {
         self.inventory = loaded.inventory;
         self.root = Some(root);
         self.admission = loaded.admission;
+        let installed: Vec<_> = self
+            .task_checkpoints
+            .iter()
+            .filter_map(|(branch, staged)| {
+                self.checkpoint_reference(branch)
+                    .is_ok_and(|reference| reference == staged.reference)
+                    .then_some(branch.clone())
+            })
+            .collect();
+        for branch in installed {
+            self.task_checkpoints.remove(&branch);
+        }
         self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
         self.store.publish_inventory(&self.recovery)?;
         self.store.allow_collection()?;

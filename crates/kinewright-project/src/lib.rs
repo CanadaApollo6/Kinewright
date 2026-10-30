@@ -103,3 +103,5 @@ pub(crate) fn test_hook(point: &str) {
 }
 
 pub mod manual_history;
+
+mod task_checkpoint;

@@ -97,6 +97,20 @@ pub enum InvocationRefusal {
     PayloadChanged,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+pub(crate) struct InvocationLifetime {
+    pub observed: std::time::Instant,
+    pub elapsed_ms: u64,
+    pub expires: std::time::Instant,
+}
+#[cfg(target_os = "linux")]
+impl InvocationLifetime {
+    pub(crate) fn elapsed_floor(self) -> u64 {
+        self.elapsed_ms
+            .saturating_add(u64::try_from(self.observed.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+}
 /// No Clone, deserializer or production constructor. C1 cannot release a provider.
 /// C2's minimal durable first-send path must issue this before guardian COMMIT.
 /// The launcher consumes it once and verifies the actual manifest/payload before release.
@@ -106,12 +120,15 @@ pub enum InvocationRefusal {
 /// let authorization = AuthorizedInvocation {};
 /// ```
 pub struct AuthorizedInvocation {
+    #[cfg(target_os = "linux")]
+    lifetime: InvocationLifetime,
     profile: CertifiedConnectorProfile,
     invocation: ImmutableInvocation,
     acknowledgment: SendConsumptionAcknowledgment,
 }
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparedInvocation {
+    pub lifetime: InvocationLifetime,
     pub profile: CertifiedConnectorProfile,
     pub kind: SendKind,
     pub manifest_bytes: Vec<u8>,
@@ -121,6 +138,14 @@ pub(crate) struct PreparedInvocation {
     pub consumption: SendConsumption,
 }
 impl AuthorizedInvocation {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn lifetime(&self) -> InvocationLifetime {
+        self.lifetime
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn expire_for_test(&mut self) {
+        self.lifetime.expires = std::time::Instant::now();
+    }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn replace_payload_for_test(&mut self, bytes: Vec<u8>) {
         self.invocation.bytes = bytes;
@@ -133,6 +158,7 @@ impl AuthorizedInvocation {
         receipt: &OrchestrationReceipt,
     ) -> Result<Self, InvocationRefusal> {
         let PreparedInvocation {
+            lifetime,
             profile,
             kind,
             manifest_bytes,
@@ -160,6 +186,7 @@ impl AuthorizedInvocation {
             return Err(InvocationRefusal::SendAcknowledgment);
         }
         Ok(Self {
+            lifetime,
             invocation: ImmutableInvocation {
                 binding: profile.binding().clone(),
                 kind,
@@ -275,6 +302,15 @@ impl AuthorizedInvocation {
             receipt: attempt.reservation_receipt().clone(),
         };
         Self {
+            #[cfg(target_os = "linux")]
+            lifetime: InvocationLifetime {
+                observed: std::time::Instant::now(),
+                elapsed_ms: 0,
+                expires: std::time::Instant::now()
+                    + std::time::Duration::from_millis(
+                        kinewright_project::orchestration_accounting::RUN_MILLIS,
+                    ),
+            },
             profile,
             invocation,
             acknowledgment,

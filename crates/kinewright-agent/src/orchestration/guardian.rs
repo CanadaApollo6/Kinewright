@@ -145,6 +145,18 @@ impl CleanupProof {
     }
 }
 
+/// No native identity was bound. Only complete unit-name observation constructs this proof.
+#[cfg(target_os = "linux")]
+pub struct UnboundCleanupProof {
+    identity: AttemptIdentity,
+}
+#[cfg(target_os = "linux")]
+impl UnboundCleanupProof {
+    #[must_use]
+    pub fn identity(&self) -> &AttemptIdentity {
+        &self.identity
+    }
+}
 /// A prepared, contained execution. Dropping it closes the sole lifetime writer
 /// and retains its machine reservation for recovery rather than granting a slot.
 pub struct ContainedSession {
@@ -332,6 +344,28 @@ impl ContainedSession {
             return Err(io::Error::other("absolute guardian path required"));
         }
         claim.reserve(&identity)?;
+        #[cfg(target_os = "linux")]
+        let cleanup_identity = identity.clone();
+        let result = Self::prepare_reserved(claim, owner, identity, program, executable, profile);
+        if let Err(error) = result {
+            #[cfg(target_os = "linux")]
+            if let Err(cleanup) = cleanup_failed_prepare(claim, &cleanup_identity) {
+                return Err(io::Error::other(format!(
+                    "{error}; cleanup_blocked: {cleanup}"
+                )));
+            }
+            return Err(error);
+        }
+        result
+    }
+    fn prepare_reserved(
+        claim: &mut MachineClaim,
+        owner: &mut impl DurableAttemptOwner,
+        identity: AttemptIdentity,
+        program: Program,
+        executable: &Path,
+        profile: &CertifiedProfile,
+    ) -> io::Result<Self> {
         owner.reserve(&identity)?;
         let root = claim.root().join(format!("job-{}", identity.nonce));
         fs::create_dir(&root)?;
@@ -671,6 +705,24 @@ pub struct RecoveryObserver {
 }
 #[cfg(target_os = "linux")]
 impl RecoveryObserver {
+    /// # Errors
+    /// An existing service/payload name or any surviving member, including zombies, retains the claim.
+    pub fn unbound_cleanup(identity: &AttemptIdentity) -> io::Result<UnboundCleanupProof> {
+        identity.validate()?;
+        let deadline = Instant::now() + protocol::CLEANUP;
+        loop {
+            if kinewright_job_sys::unit_tree_absent(&identity.unit())? && Instant::now() < deadline
+            {
+                return Ok(UnboundCleanupProof {
+                    identity: identity.clone(),
+                });
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other("cleanup_blocked: unbound native unit"));
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
     /// Reopen after a host crash, including an already deleted native tree.
     /// The live path pins the original kernel identities. The late path requires
     /// both original cgroups deleted on their original cgroup-v2 mount AND the
@@ -769,6 +821,17 @@ impl RecoveryObserver {
     /// Returns a whole-cgroup kill failure.
     pub fn stop_tree(&mut self) -> io::Result<()> {
         self.service.kill()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_failed_prepare(claim: &mut MachineClaim, identity: &AttemptIdentity) -> io::Result<()> {
+    match claim.recovery(identity) {
+        Ok(recovery) => claim.retire(&RecoveryObserver::recover_cleanup(&recovery)?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            claim.retire_unbound(&RecoveryObserver::unbound_cleanup(identity)?)
+        }
+        Err(e) => Err(e),
     }
 }
 

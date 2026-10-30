@@ -31,6 +31,18 @@ pub enum CommitOutcome {
     DurabilityUnknown,
     CommittedWithError(BundleError),
 }
+enum BranchPublication {
+    Published(BundleSaveReport),
+    Staged(Box<crate::task_checkpoint::StagedTaskCheckpoint>),
+}
+impl BranchPublication {
+    fn published(self) -> Result<BundleSaveReport, BundleError> {
+        match self {
+            Self::Published(report) => Ok(report),
+            Self::Staged(_) => Err(BundleError::HistoryBarrierInvariant),
+        }
+    }
+}
 pub struct BundleCommit;
 impl BundleCommit {
     /// Stage through Core, then publish the result and issuer sequence with the same root.
@@ -494,7 +506,9 @@ impl BundleCommit {
             false,
             None,
             &[],
+            None,
         )
+        .and_then(BranchPublication::published)
     }
     pub(crate) fn publish_recovery_batch(
         bundle: &mut ProjectBundle,
@@ -515,7 +529,9 @@ impl BundleCommit {
             false,
             None,
             envelopes,
+            None,
         )
+        .and_then(BranchPublication::published)
     }
     pub(crate) fn publish_selection(
         bundle: &mut ProjectBundle,
@@ -534,7 +550,9 @@ impl BundleCommit {
             false,
             None,
             &[],
-        );
+            None,
+        )
+        .and_then(BranchPublication::published);
         #[cfg(any(test, feature = "test-util"))]
         if result.is_ok() {
             crate::test_hook("switch_after_publish");
@@ -558,7 +576,9 @@ impl BundleCommit {
             true,
             None,
             &[],
+            None,
         )
+        .and_then(BranchPublication::published)
     }
     pub(crate) fn publish_rescue(
         bundle: &mut ProjectBundle,
@@ -579,7 +599,37 @@ impl BundleCommit {
             false,
             Some((source, contexts)),
             &[],
+            None,
         )
+        .and_then(BranchPublication::published)
+    }
+    pub(crate) fn stage_task_checkpoint(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
+        base: &ObjectRef,
+    ) -> Result<(), BundleError> {
+        let result = Self::publish_branch_impl(
+            bundle,
+            history,
+            inputs,
+            branch,
+            None,
+            Some(history),
+            None,
+            false,
+            None,
+            &[],
+            Some(base),
+        )?;
+        let BranchPublication::Staged(staged) = result else {
+            return Err(BundleError::HistoryBarrierInvariant);
+        };
+        bundle.task_checkpoints.insert(branch.clone(), *staged);
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("task_checkpoint_staged");
+        Ok(())
     }
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn publish_branch_impl(
@@ -593,7 +643,8 @@ impl BundleCommit {
         metadata_only: bool,
         rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
         manual_batch: &[CommandEnvelope],
-    ) -> Result<BundleSaveReport, BundleError> {
+        stage_base: Option<&ObjectRef>,
+    ) -> Result<BranchPublication, BundleError> {
         let existing_selection = metadata_only
             || selection.is_some_and(|selected| {
                 matches!(
@@ -1003,6 +1054,25 @@ impl BundleCommit {
         } else {
             seal!(&checkpoint)
         };
+        if let Some(base_ref) = stage_base {
+            bundle
+                .store
+                .with_namespace(crate::namespace::ProjectNamespace::finish_object_batch)?;
+            let pin = bundle
+                .store
+                .pin(&[checkpoint_ref.clone(), base_ref.clone()])?;
+            return Ok(BranchPublication::Staged(Box::new(
+                crate::task_checkpoint::StagedTaskCheckpoint {
+                    before: bundle.checkpoint_reference(branch_id)?,
+                    reference: checkpoint_ref,
+                    checkpoint,
+                    base_ref: base_ref.clone(),
+                    history: std::sync::Arc::clone(&checked),
+                    _pin: pin,
+                    _seals: seals,
+                },
+            )));
+        }
         let mut branches = bundle.branches.clone();
         branches.insert(branch_id.clone(), checkpoint);
         let mut branch_index: BTreeMap<_, _> = if let Some(root) = bundle.root.as_ref() {
@@ -1073,6 +1143,19 @@ impl BundleCommit {
                 checkpoint_ref: checkpoint_ref.clone(),
                 equivalence_digest: branches[branch_id].history_ref.sha256.clone(),
             }));
+        }
+        if let Some(pending) = &bundle.pending_metadata {
+            for branch in &pending.task_checkpoints {
+                let staged = bundle
+                    .task_checkpoints
+                    .get(branch)
+                    .ok_or(BundleError::HistoryChanged)?;
+                if branch_index.get(branch) != Some(&staged.before) {
+                    return Err(BundleError::HistoryChanged);
+                }
+                branches.insert(branch.clone(), staged.checkpoint.clone());
+                branch_index.insert(branch.clone(), staged.reference.clone());
+            }
         }
         let branch_index_ref = seal!(&branch_index);
         barrier(bundle, CommitBarrier::B1)?;
@@ -1324,6 +1407,14 @@ impl BundleCommit {
         if let Some(pending) = &mut bundle.pending_save {
             pending.root_sha256 = Some(tag.root_sha256);
         }
+        #[cfg(any(test, feature = "test-util"))]
+        if bundle
+            .pending_metadata
+            .as_ref()
+            .is_some_and(|p| !p.task_checkpoints.is_empty())
+        {
+            crate::test_hook("task_checkpoint_before_publish");
+        }
         if let Err(failure) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {
                 bundle.publication_state = crate::bundle::PublicationState::Unknown;
@@ -1343,6 +1434,14 @@ impl BundleCommit {
             }
             return Err(failure.error);
         }
+        #[cfg(any(test, feature = "test-util"))]
+        if bundle
+            .pending_metadata
+            .as_ref()
+            .is_some_and(|p| !p.task_checkpoints.is_empty())
+        {
+            crate::test_hook("task_checkpoint_after_publish");
+        }
         bundle.publication_state = crate::bundle::PublicationState::Committed;
         // Publication is monotonic: any fallible tail is unsettled, never a definite rollback.
         bundle.unsettled = true;
@@ -1353,6 +1452,12 @@ impl BundleCommit {
             bundle.manual_branch_id = manual_branch_id.clone();
             bundle.root = Some(root);
             bundle.branches = branches;
+            if let Some(pending) = &bundle.pending_metadata {
+                for branch in &pending.task_checkpoints {
+                    bundle.task_checkpoints.remove(branch);
+                    bundle.history_cache.remove(branch);
+                }
+            }
             bundle.history_cache.insert(
                 branch_id.clone(),
                 crate::bundle::CachedHistory {
@@ -1374,7 +1479,7 @@ impl BundleCommit {
         }
         bundle.unsettled = false;
         drop(seals);
-        Ok(BundleSaveReport {
+        Ok(BranchPublication::Published(BundleSaveReport {
             history_sha256: bundle.checkpoint(branch_id)?.history_ref.sha256.clone(),
             collection,
             path: saved_path,
@@ -1383,7 +1488,7 @@ impl BundleCommit {
             head_id,
             root_sha256: kinewright_media::sha256_bytes(bundle.admission.raw_bytes()),
             byte_length: bundle.admission.raw_bytes().len() as u64,
-        })
+        }))
     }
 }
 pub(crate) struct BoundedHistory {

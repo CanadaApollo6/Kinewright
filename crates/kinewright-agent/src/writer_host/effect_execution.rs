@@ -6,6 +6,18 @@ impl HostCommandOwner {
         self.owner()?.project_id().map_err(Into::into)
     }
 
+    pub(crate) fn reconcile_native_pending(
+        &mut self,
+        producer: &HostAuth,
+    ) -> Result<(), HostError> {
+        match self.hooks.pending.clone() {
+            None => Ok(()),
+            Some(super::orchestration::PendingPublication::Owner(original)) => self
+                .publish_orchestration_transition(producer, &original, None)
+                .map(|_| ()),
+            Some(_) => Err(refused("original wire publication must reconcile first")),
+        }
+    }
     pub(crate) fn reserve_native_effect(
         &mut self,
         producer: &HostAuth,
@@ -25,12 +37,17 @@ impl HostCommandOwner {
         {
             return Ok(None);
         }
+        let accounting = self.native_accounting(&state)?;
         let effect = state
             .effects
             .iter()
             .filter(|e| e.safety == EffectSafety::ProcessBound)
             .find(|e| {
-                crate::orchestration::outbox::next_effect(&state, &e.lane)
+                !accounting.as_ref().is_some_and(|a| {
+                    a.tasks
+                        .iter()
+                        .any(|t| t.task == e.task.0 && t.wait_reason.is_some())
+                }) && crate::orchestration::outbox::next_effect(&state, &e.lane)
                     .is_some_and(|next| next.id == e.id)
                     && !state.attempts.iter().any(|a| {
                         a.identity.task == e.task && !matches!(a.state, AttemptState::Retired(_))

@@ -337,6 +337,7 @@ pub(crate) struct ValidatedMetadataUpdate {
     pub(crate) feedback: Option<ObjectRef>,
     pub(crate) runs: Option<ObjectRef>,
     pub(crate) seals: Vec<SealedObject>,
+    pub(crate) task_checkpoints: Vec<crate::bundle_records::BranchId>,
 }
 impl ValidatedMetadataUpdate {
     pub(crate) fn apply(&self, root: &mut StudioRoot) {
@@ -709,6 +710,7 @@ impl ProjectBundle {
             feedback: None,
             runs: None,
             seals: vec![],
+            task_checkpoints: vec![],
         };
         let original_feedback = self.feedback_index()?;
         let _feedback_charge = charge_value(&self.store, &*original_feedback)?;
@@ -725,6 +727,7 @@ impl ProjectBundle {
                     consume_batch.as_ref(),
                     &mut feedback,
                 )?;
+                pending.task_checkpoints = self.task_checkpoint_updates(transition)?;
                 pending.seals.extend(sealed);
                 pending.runs = Some(index_ref);
                 MetadataResult::Orchestration(vec![RunId(transition.projection().run.0.clone())])

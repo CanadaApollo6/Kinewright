@@ -100,6 +100,29 @@ impl HostCommandOwner {
             },
         ))
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recovery_attempt(
+        &self,
+        state: &RunProjection,
+        native: &crate::job_guardian::protocol::AttemptIdentity,
+    ) -> Result<Option<crate::orchestration::orchestration_records::AttemptReservation>, HostError>
+    {
+        let archive = self.attempt_archive(state)?.1;
+        Ok(state
+            .attempts
+            .iter()
+            .chain(&archive.attempts)
+            .find(|a| {
+                let id = &a.identity;
+                id.project.as_str() == native.project
+                    && id.run.0.as_str() == native.run
+                    && id.task.0.as_str() == native.task
+                    && id.attempt.0.as_str() == native.attempt
+                    && id.nonce.as_str() == native.nonce
+                    && id.owner_instance.as_str() == native.owner_instance
+            })
+            .cloned())
+    }
     pub(super) fn retired_task_authority_exists(
         &self,
         state: &RunProjection,
@@ -192,6 +215,13 @@ impl HostCommandOwner {
         };
         let result = (|| {
             if runtime.endpoint().authority().attempt != identity.attempt {
+                if self.retired_task_authority(
+                    state,
+                    &identity.task,
+                    &runtime.endpoint().authority().attempt,
+                )? {
+                    return Ok(());
+                }
                 return Err(refused("task authority changed"));
             }
             let brief = state

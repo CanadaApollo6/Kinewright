@@ -2454,6 +2454,10 @@ fn service_proof_refused(caller: ProofCaller, zombie: bool, isolate_events: bool
             !service.path().try_exists().unwrap(),
             "C3_LATE_SERVICE_GONE_SETUP"
         );
+        assert!(
+            !kinewright_job_sys::unit_tree_absent(&session.recovery().attempt.unit()).unwrap(),
+            "C3_UNBOUND_UNIT_SCAN_RETAINS_DELETED_ZOMBIE"
+        );
     }
     let refused = if late {
         RecoveryObserver::recover_cleanup(session.recovery()).is_err()
@@ -2469,6 +2473,9 @@ fn service_proof_refused(caller: ProofCaller, zombie: bool, isolate_events: bool
     assert_eq!(claim.retained_attempts(), 1);
     child.kill().unwrap();
     child.wait().unwrap();
+    if late {
+        assert!(kinewright_job_sys::unit_tree_absent(&session.recovery().attempt.unit()).unwrap());
+    }
     let proof = if late {
         RecoveryObserver::recover_cleanup(session.recovery()).unwrap()
     } else if recovery_caller {

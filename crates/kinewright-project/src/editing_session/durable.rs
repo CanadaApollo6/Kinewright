@@ -152,6 +152,17 @@ impl Ja1EditingSession {
             document_hash: checkpoint.document_hash.clone(),
         })
     }
+    /// A prepared binding is published only with its matching H1 history record.
+    pub fn task_checkpoint_binding(&self, branch: &BranchId) -> Result<BranchBinding, BundleError> {
+        let bundle = self.active_bundle()?;
+        if let Some(staged) = bundle.task_checkpoints.get(branch) {
+            if bundle.checkpoint_reference(branch)? != staged.before {
+                return Err(BundleError::HistoryChanged);
+            }
+            return Ok(staged.binding());
+        }
+        self.candidate_binding(branch)
+    }
     fn candidate_core(&self, binding: &BranchBinding) -> Result<Core, BundleError> {
         if self.candidate_binding(&binding.branch)? != *binding {
             return Err(BundleError::HistoryChanged);
@@ -268,7 +279,11 @@ impl Ja1EditingSession {
                 checkpoint: base.frozen_checkpoint_ref.clone(),
                 document_hash: base.base_document_hash.clone(),
             },
-            source: self.candidate_binding(guard.branch_id())?,
+            source: if retain_checkpoint {
+                self.task_checkpoint_binding(guard.branch_id())?
+            } else {
+                self.candidate_binding(guard.branch_id())?
+            },
             base_ref,
             delta: base.full_applied_delta.clone(),
         })
@@ -617,8 +632,8 @@ impl Ja1EditingSession {
     ) -> Result<ObjectRef, BundleError> {
         self.persist_durable_branch_inner(guard, true, false)
     }
-    /// Keep an unchanged task checkpoint identity; pending H1 records are
-    /// published separately by the serialized owner before task authority.
+    /// Stage a task checkpoint for the matching H1 root transaction.
+    /// Unchanged checkpoints retain their exact identity.
     pub fn persist_registered_task_checkpoint(
         &mut self,
         guard: &mut DurableBranchSessionGuard,
@@ -651,6 +666,16 @@ impl Ja1EditingSession {
             .attach_core(&canonical.core)?;
         let cut = owner.freeze().map_err(crate::bundle::history_error)?;
         let result = (|| {
+            if retain_checkpoint
+                && let Some(staged) = self
+                    .registered_bundle(&canonical)?
+                    .task_checkpoints
+                    .get(&canonical.branch)
+                && **staged.history == *cut.history()
+            {
+                *guard = canonical.clone();
+                return Ok(staged.base_ref.clone());
+            }
             let discarded = usize::try_from(
                 cut.history()
                     .floor_offset
@@ -722,8 +747,20 @@ impl Ja1EditingSession {
             let before = (bundle.evidence.len(), bundle.pending_evidence.len());
             let reference = bundle.stage_specialist_base(guard.base())?;
             let inputs = bundle.checkpoint(&guard.branch)?.input_manifest_ref.clone();
-            if let Err(error) = bundle.save_frozen_branch(&guard.core, &inputs, &cut, &guard.branch)
-            {
+            let publication = if retain_checkpoint {
+                crate::bundle_commit::BundleCommit::stage_task_checkpoint(
+                    bundle,
+                    cut.history(),
+                    &inputs,
+                    &guard.branch,
+                    &reference,
+                )
+            } else {
+                bundle
+                    .save_frozen_branch(&guard.core, &inputs, &cut, &guard.branch)
+                    .map(|_| ())
+            };
+            if let Err(error) = publication {
                 if !bundle.unsettled {
                     bundle.evidence.truncate(before.0);
                     bundle.pending_evidence.truncate(before.1);
@@ -732,7 +769,10 @@ impl Ja1EditingSession {
             }
             let pin = bundle.store.pin(&[
                 reference.clone(),
-                bundle.checkpoint_reference(&guard.branch)?,
+                bundle.task_checkpoints.get(&guard.branch).map_or_else(
+                    || bundle.checkpoint_reference(&guard.branch),
+                    |staged| Ok(staged.reference.clone()),
+                )?,
             ])?;
             self.durable_sessions[index].pin = pin;
             Ok(reference)

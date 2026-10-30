@@ -204,7 +204,7 @@ impl InvocationOwner for HostInvocationOwner {
         let registered = host
             .hooks
             .native
-            .get_mut(&(identity.run.clone(), identity.attempt.clone()))
+            .get(&(identity.run.clone(), identity.attempt.clone()))
             .ok_or_else(|| transport("native startup revoked"))?;
         if registered.identity != *identity
             || registered.recovery != *recovery
@@ -214,6 +214,16 @@ impl InvocationOwner for HostInvocationOwner {
         {
             return Err(transport("native startup changed or revoked"));
         }
+        let control = registered.control.clone();
+        if let Err(error) = host.check_native_commit_budget(&self.producer, invocation) {
+            control.close();
+            return Err(transport(error));
+        }
+        let registered = host
+            .hooks
+            .native
+            .get_mut(&(identity.run.clone(), identity.attempt.clone()))
+            .ok_or_else(|| transport("native startup revoked"))?;
         // Stop uses this same host mutex and the registered sole lifetime writer.
         // Do not wait for the guardian acknowledgment while holding the host.
         registered.commit = NativeCommit::Sent;
@@ -350,6 +360,7 @@ impl HostCommandOwner {
         kind: SendKind,
         now_ms: u64,
     ) -> Result<AuthorizedInvocation, HostError> {
+        let observed = std::time::Instant::now();
         profile
             .validate_session(profile.session_config(), admitted.identity())
             .map_err(refused)?;
@@ -521,19 +532,17 @@ impl HostCommandOwner {
         };
         let manifest_bytes = serde_json::to_vec(&manifest)?;
         let manifest_ref = self.owner_mut()?.admit_host_grant(&manifest_bytes)?;
-        let previous = self.native_accounting(&state)?;
-        let mut accounting = if let Some(current) = &previous {
-            let archive = current.archive().map_err(refused)?;
-            self.owner_mut()?
-                .admit_scheduler_record(&OrchestrationRecord {
-                    version: 1,
-                    payload: OrchestrationPayload::AccountingArchive(Box::new(archive)),
-                })?;
-            current.successor().map_err(refused)?
-        } else {
-            AccountingRecord::new(identity.project.clone(), identity.run.0.clone(), now_ms)
-                .map_err(refused)?
-        };
+        let previous = self
+            .native_accounting(&state)?
+            .ok_or_else(|| refused("run has no durable clock"))?;
+        self.owner_mut()?
+            .admit_scheduler_record(&OrchestrationRecord {
+                version: 1,
+                payload: OrchestrationPayload::AccountingArchive(Box::new(
+                    previous.archive().map_err(refused)?,
+                )),
+            })?;
+        let mut accounting = previous.successor().map_err(refused)?;
         accounting.observe_clock(now_ms, 0, true).map_err(refused)?;
         if !accounting
             .tasks
@@ -586,9 +595,22 @@ impl HostCommandOwner {
             .map_err(refused)?
             .consume_send(send.clone())
             .map_err(refused)?;
-        if let Some(previous) = previous {
-            accounting.validate_successor(&previous).map_err(refused)?;
-        }
+        accounting.validate_successor(&previous).map_err(refused)?;
+        let lifetime = crate::orchestration::adapters::InvocationLifetime {
+            observed,
+            elapsed_ms: accounting.elapsed_ms,
+            expires: observed
+                .checked_add(std::time::Duration::from_millis(
+                    kinewright_project::orchestration_accounting::RUN_MILLIS
+                        .saturating_sub(accounting.elapsed_ms)
+                        .min(
+                            accounting
+                                .deadline_unix_ms
+                                .saturating_sub(accounting.last_unix_ms),
+                        ),
+                ))
+                .ok_or_else(|| refused("native monotonic deadline unavailable"))?,
+        };
         let sealed = self
             .owner_mut()?
             .admit_scheduler_record(&OrchestrationRecord {
@@ -620,6 +642,7 @@ impl HostCommandOwner {
         )?;
         AuthorizedInvocation::acknowledged(
             crate::orchestration::adapters::PreparedInvocation {
+                lifetime,
                 profile,
                 kind,
                 manifest_bytes,

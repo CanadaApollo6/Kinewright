@@ -232,6 +232,41 @@ impl MachineClaim {
         Ok(())
     }
 
+    /// # Errors
+    /// Only a complete unbound proof and an absent native file authorize retirement.
+    #[cfg(target_os = "linux")]
+    pub fn retire_unbound(
+        &mut self,
+        proof: &super::guardian::UnboundCleanupProof,
+    ) -> io::Result<()> {
+        let identity = proof.identity();
+        match self.recovery(identity) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(io::Error::other(
+                    "unbound retirement needs absent native identity",
+                ));
+            }
+        }
+        let index = self
+            .attempts
+            .iter()
+            .position(|a| a == identity)
+            .ok_or_else(|| io::Error::other("unretained unbound attempt"))?;
+        let root = self.root.join(format!("job-{}", identity.nonce));
+        match fs::symlink_metadata(&root) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(io::Error::other("native state directory replaced"));
+            }
+            Ok(_) => fs::remove_dir_all(root)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        fs::remove_file(record_path(&self.root, identity))?;
+        sync_directory(&self.root)?;
+        self.attempts.remove(index);
+        Ok(())
+    }
     /// Inspect the exact private record while holding the account-wide lock.
     /// # Errors
     /// Refuses missing, foreign or replaced native identities.
