@@ -284,7 +284,7 @@ impl ContainedSession {
             &mut writer,
             &HostMessage::Prepare {
                 identity: identity.clone(),
-                program,
+                program: Box::new(program),
             },
         )?;
         let GuardianMessage::Owned {

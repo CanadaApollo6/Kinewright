@@ -1,4 +1,4 @@
-use super::protocol::Program;
+use super::protocol::{Program, ProviderSandbox};
 use kinewright_job_sys::{Cgroup, ProcessHandle};
 use std::{
     fs,
@@ -186,6 +186,20 @@ fn write_ready(writer: &mut impl Write, result: &impl serde::Serialize) -> io::R
 }
 
 fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
+    use std::os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::net::UnixStream,
+    };
+    let pipes = program
+        .pipe_directory
+        .as_ref()
+        .map(|root| {
+            ["stdin", "stdout", "stderr", "credentials"]
+                .map(|name| UnixStream::connect(root.join(name)))
+                .into_iter()
+                .collect::<io::Result<Vec<_>>>()
+        })
+        .transpose()?;
     kinewright_job_sys::close_payload_readiness()?;
     let boundary = kinewright_job_sys::mount_payload_proc().map_err(|error| error.to_string());
     write_ready(&mut ready, &boundary)?;
@@ -196,16 +210,72 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
     if commit != *b"C" {
         return Err(io::Error::other("missing shim COMMIT"));
     }
-    let child = Command::new(program.executable)
+    let pinned = match &program.sandbox {
+        ProviderSandbox::ContainmentOnly => None,
+        ProviderSandbox::LinuxAllowlist {
+            runtime,
+            scratch,
+            credential_store,
+            executable_identity,
+        } => {
+            let pinned = kinewright_job_sys::restrict_provider(
+                &program.executable,
+                *executable_identity,
+                runtime,
+                scratch,
+                credential_store,
+            )?;
+            kinewright_job_sys::restrict_provider_syscalls()?;
+            Some(pinned)
+        }
+    };
+    let executable = pinned.as_ref().map_or_else(
+        || program.executable.clone(),
+        |file| PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
+    );
+    let mut command = Command::new(executable);
+    command
         .args(program.arguments)
+        .env_clear()
+        .envs(program.environment)
+        .current_dir(program.working_directory)
         .env(
             "XDG_RUNTIME_DIR",
             format!("/run/user/{}", rustix::process::getuid().as_raw()),
         )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    if let Some(pipes) = pipes {
+        let mut pipes = pipes.into_iter();
+        command
+            .stdin(Stdio::from(OwnedFd::from(
+                pipes.next().expect("stdin pipe"),
+            )))
+            .stdout(Stdio::from(OwnedFd::from(
+                pipes.next().expect("stdout pipe"),
+            )))
+            .stderr(Stdio::from(OwnedFd::from(
+                pipes.next().expect("stderr pipe"),
+            )));
+        let credentials = pipes.next().expect("credential pipe");
+        let mut bytes = Vec::new();
+        credentials.set_read_timeout(Some(super::protocol::STARTUP))?;
+        credentials.take(4097).read_to_end(&mut bytes)?;
+        if bytes.len() > 4096 {
+            return Err(io::Error::other("provider credential capacity"));
+        }
+        if !bytes.is_empty() {
+            let token = String::from_utf8(bytes)
+                .map_err(|_| io::Error::other("provider credential encoding"))?;
+            if token.contains('\0') || token.contains('\n') {
+                return Err(io::Error::other("provider credential encoding"));
+            }
+            command.env("KINEWRIGHT_HOST_MCP_TOKEN", token);
+        }
+    }
+    let child = command.spawn()?;
+    drop(pinned);
     kinewright_job_sys::reap_payload_until_exit(child.id())
 }
 

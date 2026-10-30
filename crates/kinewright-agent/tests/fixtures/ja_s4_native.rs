@@ -45,6 +45,26 @@ fn main() {
         let _ = std::io::stdout().write_all(&vec![b'x'; 192 * 1024]);
         return;
     }
+    if role == "s4b-pipes" {
+        use std::io::BufRead;
+        let mut request = String::new();
+        std::io::stdin().lock().read_line(&mut request).unwrap();
+        assert_eq!(request, "exact prompt\n");
+        let ambient_absent = env::var_os("KINEWRIGHT_S4B_C2_AMBIENT").is_none()
+            && env::var_os("OPENAI_API_KEY").is_none()
+            && env::var_os("ANTHROPIC_API_KEY").is_none();
+        let private_token =
+            env::var("KINEWRIGHT_HOST_MCP_TOKEN").as_deref() == Ok("private-pipe-token");
+        writeln!(
+            std::io::stdout(),
+            "{{\"ambient_absent\":{ambient_absent},\"private_token\":{private_token}}}"
+        )
+        .unwrap();
+        std::io::stderr()
+            .write_all(b"dedicated diagnostic\n")
+            .unwrap();
+        return;
+    }
     publish(
         root,
         if role == "stubborn-payload" {

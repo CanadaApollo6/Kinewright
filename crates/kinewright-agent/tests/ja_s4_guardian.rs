@@ -113,6 +113,10 @@ fn identity() -> AttemptIdentity {
 fn program(root: &Path) -> Program {
     Program {
         executable: fixture().into(),
+        environment: std::collections::BTreeMap::new(),
+        working_directory: root.into(),
+        sandbox: protocol::ProviderSandbox::ContainmentOnly,
+        pipe_directory: None,
         arguments: vec![root.to_string_lossy().into_owned(), "payload".into()],
     }
 }
@@ -539,6 +543,10 @@ fn s4_native_host_fixture() {
     let mut owner = Owner::new(&root);
     let program = Program {
         executable: std::env::var_os("KINEWRIGHT_S4_NATIVE").unwrap().into(),
+        environment: std::collections::BTreeMap::new(),
+        working_directory: root.clone(),
+        sandbox: protocol::ProviderSandbox::ContainmentOnly,
+        pipe_directory: None,
         arguments: vec![
             root.to_string_lossy().into_owned(),
             if root.join("stubborn").exists() {
@@ -614,7 +622,7 @@ fn s4_lost_startup_acknowledgments() {
             &mut writer,
             &HostMessage::Prepare {
                 identity: id.clone(),
-                program: program(&root),
+                program: Box::new(program(&root)),
             },
         )
         .unwrap();
@@ -823,7 +831,7 @@ fn s4_reaped_guardian_and_identity_are_required() {
         &mut writer,
         &HostMessage::Prepare {
             identity: id.clone(),
-            program: program(&root),
+            program: Box::new(program(&root)),
         },
     )
     .unwrap();
@@ -1058,7 +1066,7 @@ fn s4_startup_deadline_kills_a_contained_shim() {
         &mut writer,
         &HostMessage::Prepare {
             identity: id.clone(),
-            program: program(&root),
+            program: Box::new(program(&root)),
         },
     )
     .unwrap();
@@ -2446,4 +2454,92 @@ fn s4_c2_service_events_recovery() {
         return;
     }
     service_proof_refused(true, false, true);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn s4b_c2_provider_pipes_and_final_environment() {
+    use kinewright_agent::provider_pipes::ProviderPipeListeners;
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        os::unix::fs::MetadataExt,
+    };
+    struct ManagerEnvironment;
+    impl Drop for ManagerEnvironment {
+        fn drop(&mut self) {
+            let _ = Command::new("systemctl")
+                .args(["--user", "unset-environment", "KINEWRIGHT_S4B_C2_AMBIENT"])
+                .status();
+        }
+    }
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p2-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let _cleanup = FixtureCleanup(root.clone());
+    let scratch = root.join("scratch");
+    let credentials = root.join("credentials");
+    fs::create_dir(&scratch).unwrap();
+    fs::create_dir(&credentials).unwrap();
+    let pipes = ProviderPipeListeners::bind(&root.join("pipes")).unwrap();
+    let id = identity();
+    let mut claim =
+        MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
+    let mut owner = Owner::new(&root);
+    let metadata = fs::metadata(fixture()).unwrap();
+    let program = Program {
+        executable: fixture().into(),
+        arguments: vec![scratch.to_string_lossy().into_owned(), "s4b-pipes".into()],
+        environment: std::collections::BTreeMap::new(),
+        working_directory: scratch.clone(),
+        sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            runtime: ["/usr", "/lib", "/lib64", "/dev/null"]
+                .map(Into::into)
+                .to_vec(),
+            scratch,
+            credential_store: credentials,
+            executable_identity: [metadata.dev(), metadata.ino()],
+        },
+        pipe_directory: Some(pipes.directory().into()),
+    };
+    assert!(
+        Command::new("systemctl")
+            .args([
+                "--user",
+                "set-environment",
+                "KINEWRIGHT_S4B_C2_AMBIENT=manager-secret"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let _environment = ManagerEnvironment;
+    let mut session = ContainedSession::prepare(
+        &mut claim,
+        &mut owner,
+        id,
+        program,
+        guardian(),
+        &CertifiedProfile::fixture(),
+    )
+    .unwrap();
+    let mut pipes = pipes.accept().unwrap();
+    pipes
+        .output
+        .set_read_timeout(Some(protocol::STARTUP))
+        .unwrap();
+    pipes.credentials(b"private-pipe-token").unwrap();
+    pipes.input.write_all(b"exact prompt\n").unwrap();
+    session.commit(&mut owner).unwrap();
+    let mut line = String::new();
+    BufReader::new(&mut pipes.output)
+        .read_line(&mut line)
+        .unwrap();
+    assert!(!line.is_empty(), "S4B_C2_PROVIDER_PIPE_FRAME");
+    let result: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(result["ambient_absent"], true, "S4B_C2_MANAGER_ENV_CLEARED");
+    assert_eq!(result["private_token"], true, "S4B_C2_PRIVATE_MCP_PIPE");
+    let proof = session.cleanup().unwrap();
+    assert_eq!(proof.identity(), &session.recovery().attempt);
+    let mut diagnostics = String::new();
+    pipes.diagnostics.read_to_string(&mut diagnostics).unwrap();
+    assert_eq!(diagnostics, "dedicated diagnostic\n");
 }

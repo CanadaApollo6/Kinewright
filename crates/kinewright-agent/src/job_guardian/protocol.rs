@@ -63,17 +63,62 @@ impl AttemptIdentity {
 pub struct Program {
     pub executable: PathBuf,
     pub arguments: Vec<String>,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub working_directory: PathBuf,
+    pub sandbox: ProviderSandbox,
+    pub pipe_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "policy", deny_unknown_fields)]
+pub enum ProviderSandbox {
+    ContainmentOnly,
+    LinuxAllowlist {
+        runtime: Vec<PathBuf>,
+        scratch: PathBuf,
+        credential_store: PathBuf,
+        executable_identity: [u64; 2],
+    },
 }
 impl Program {
     /// # Errors
     /// Refuses relative executables, excessive arguments, or protocol overflow.
     pub fn validate(&self) -> io::Result<()> {
         if !self.executable.is_absolute()
+            || !self.working_directory.is_absolute()
+            || self.environment.len() > 16
+            || self.environment.iter().any(|(key, value)| {
+                !matches!(
+                    key.as_str(),
+                    "PATH" | "HOME" | "LANG" | "LC_ALL" | "TMPDIR" | "CODEX_HOME"
+                ) || value.contains('\0')
+            })
+            || self
+                .pipe_directory
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
             || self.arguments.len() > 128
             || serde_json::to_vec(self)?.len() > WIRE_CAP / 2
             || self.arguments.iter().any(|s| s.contains('\0'))
         {
             return Err(io::Error::other("invalid native program"));
+        }
+        if let ProviderSandbox::LinuxAllowlist {
+            runtime,
+            scratch,
+            credential_store,
+            executable_identity,
+        } = &self.sandbox
+            && (self.pipe_directory.is_none()
+                || runtime.len() > 32
+                || runtime
+                    .iter()
+                    .chain([scratch, credential_store])
+                    .any(|path| !path.is_absolute())
+                || scratch != &self.working_directory
+                || executable_identity == &[0, 0])
+        {
+            return Err(io::Error::other("invalid provider sandbox"));
         }
         Ok(())
     }
@@ -112,7 +157,7 @@ impl RecoveryIdentity {
 pub enum HostMessage {
     Prepare {
         identity: AttemptIdentity,
-        program: Program,
+        program: Box<Program>,
     },
     Contain {
         nonce: String,
