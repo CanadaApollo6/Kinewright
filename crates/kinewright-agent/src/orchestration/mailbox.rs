@@ -68,9 +68,13 @@ pub fn result_and_delivery(
                 .any(|other| other.id == delivery.task && other.parent == task.parent)
         })
         .collect::<Vec<_>>();
-    let coalesced = siblings
-        .iter()
-        .find(|delivery| delivery.state == DeliveryState::Pending);
+    let coalesced = siblings.iter().find(|delivery| {
+        delivery.state == DeliveryState::Pending
+            && state
+                .effects
+                .iter()
+                .any(|effect| effect.id == delivery.wake && effect.state == EffectState::Pending)
+    });
     let generation = coalesced.map_or_else(
         || {
             siblings
@@ -299,4 +303,35 @@ pub fn settle_generations(state: &mut RunProjection) {
             };
         }
     }
+}
+
+/// The host offers only results whose exact wake payload was charged for this attempt.
+pub(crate) fn offer_attempt_deliveries(
+    state: &mut RunProjection,
+    parent: &super::orchestration_records::TaskId,
+    attempt: &super::orchestration_records::AttemptId,
+    wake: &super::orchestration_records::EffectId,
+) -> Result<(), Refusal> {
+    let turn = state
+        .tasks
+        .iter()
+        .find(|task| &task.id == parent)
+        .and_then(|task| task.progress.turn.as_ref())
+        .ok_or(Refusal::InvalidState)?;
+    super::requests::live_turn(state, turn)?;
+    if &turn.attempt != attempt {
+        return Err(Refusal::ScopeConflict);
+    }
+    for delivery in &mut state.deliveries {
+        if &delivery.wake == wake
+            && state
+                .tasks
+                .iter()
+                .any(|task| task.id == delivery.task && task.parent.as_ref() == Some(parent))
+            && matches!(delivery.state, DeliveryState::Pending)
+        {
+            delivery.state = DeliveryState::Offered(attempt.clone(), delivery.message.clone());
+        }
+    }
+    Ok(())
 }

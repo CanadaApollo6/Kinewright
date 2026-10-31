@@ -55,8 +55,22 @@ fn main() {
         writeln!(executions, "execution").unwrap();
         executions.sync_all().unwrap();
         fs::write(root.join("execution-ready"), b"").unwrap();
-        if prompt == "overflow" || prompt == "block" {
-            for _ in 0..if prompt == "block" { 30 } else { 40 } {
+        let fixture_full = fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"full");
+        if fixture_full {
+            writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"fixture gate\"}}}}").unwrap();
+            std::io::stdout().flush().unwrap();
+            while !root.join("event-release").exists() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if prompt == "overflow" || prompt == "block" || fixture_full {
+            for _ in 0..if fixture_full {
+                30 // The bounded channel reserves its last two slots for Error/Done.
+            } else if prompt == "block" {
+                30
+            } else {
+                40
+            } {
                 writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"bounded fixture event\"}}}}").unwrap();
             }
             loop {

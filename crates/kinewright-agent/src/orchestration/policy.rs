@@ -147,6 +147,22 @@ impl TaskPolicy {
         Ok(())
     }
 
+    pub(crate) fn validate_history_change(
+        &self,
+        before: &Document,
+        after: &Document,
+    ) -> Result<(), String> {
+        self.validate_scope()?;
+        if self.role == Role::Reviewer {
+            return Err("reviewer is mutation-free".into());
+        }
+        let mut tracks = BTreeSet::new();
+        self.validate_changes(before, after, &mut tracks)?;
+        if audio_changed(before, after) {
+            self.validate_routing(before, after, tracks)?;
+        }
+        Ok(())
+    }
     fn validate_scope(&self) -> Result<(), String> {
         for operation in &self.scope.operations {
             if !OPERATION_NAMES.contains(&operation.as_str()) {

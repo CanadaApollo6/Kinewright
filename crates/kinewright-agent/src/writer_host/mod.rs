@@ -18,7 +18,12 @@ mod recovery;
 mod resolve;
 mod revise;
 pub(crate) mod spending;
+#[cfg(target_os = "linux")]
+mod studio_runtime;
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub use studio_runtime::fixture::{ProtocolFixture, ProtocolFixtureMode, ProtocolObservation};
 mod task_history;
+pub(crate) mod task_mcp;
 pub use crate::orchestration::director_setting::{
     DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,
     scheduler_settings_directory, write_director_setting,
@@ -57,7 +62,10 @@ use kinewright_project::{
     },
     storage_budget::StorageLimits,
 };
-pub use orchestration::{MetadataIssuer, RunViewPage, ScopedOrchestrationRequest};
+pub use orchestration::{
+    DurableRunAccounting, DurableTaskAccounting, MetadataIssuer, RunViewPage,
+    ScopedOrchestrationRequest,
+};
 pub use protocol::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -400,6 +408,8 @@ impl Drop for ServerThread {
     }
 }
 pub struct WriterHost {
+    #[cfg(target_os = "linux")]
+    runtime: Arc<studio_runtime::StudioRuntime>,
     endpoint: HostEndpoint,
     auth: HostAuth,
     roots: SessionRoots,
@@ -418,6 +428,20 @@ impl WriterHost {
         auth: HostAuth,
         issuer: Option<HostAuth>,
     ) -> Result<Self, HostError> {
+        Self::start_inner(
+            config,
+            auth,
+            issuer,
+            #[cfg(target_os = "linux")]
+            studio_runtime::RuntimePorts::default(),
+        )
+    }
+    fn start_inner(
+        config: HostConfig,
+        auth: HostAuth,
+        issuer: Option<HostAuth>,
+        #[cfg(target_os = "linux")] ports: studio_runtime::RuntimePorts,
+    ) -> Result<Self, HostError> {
         let mut owner = HostCommandOwner::open(config.clone())?;
         owner.register_attachment(
             auth.clone(),
@@ -427,6 +451,19 @@ impl WriterHost {
             true,
         )?;
         let owner = Arc::new(Mutex::new(owner));
+        owner
+            .lock()
+            .map_err(|_| HostError::Protocol("host owner unavailable".into()))?
+            .runtime_owner = Arc::downgrade(&owner);
+        #[cfg(target_os = "linux")]
+        let runtime = Arc::new(studio_runtime::StudioRuntime::new(&owner, ports));
+        #[cfg(target_os = "linux")]
+        if let Err(error) = runtime.recover_on_open() {
+            owner
+                .lock()
+                .map_err(|_| HostError::Protocol("host unavailable".into()))?
+                .message = format!("cleanup pending: {error}");
+        }
         let roots = config.roots.canonicalize()?;
         let (listener, address) = bind_loopback()?;
         let endpoint = HostEndpoint {
@@ -436,6 +473,8 @@ impl WriterHost {
         };
         let stop = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(HttpState {
+            #[cfg(target_os = "linux")]
+            runtime: runtime.clone(),
             issuer,
             stop: Arc::clone(&stop),
             bootstrap: HostBootstrap {
@@ -461,7 +500,16 @@ impl WriterHost {
             roots,
             server,
             owner: Arc::downgrade(&owner),
+            #[cfg(target_os = "linux")]
+            runtime,
         })
+    }
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    pub fn start_protocol_fixture(
+        config: HostConfig,
+        fixture: &ProtocolFixture,
+    ) -> Result<Self, HostError> {
+        Self::start_inner(config, HostAuth::generate()?, None, fixture.ports())
     }
     /// Trusted local issuance. This method is never exposed as an HTTP or MCP command.
     pub fn attach(
@@ -528,6 +576,8 @@ impl Drop for WriterHost {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .revoke_native_owner(None);
         }
+        #[cfg(target_os = "linux")]
+        self.runtime.stop();
         self.server.stop.notify_one();
         if let Some(thread) = self.server.thread.take() {
             let _ = thread.join();
@@ -572,6 +622,8 @@ fn serve(
     })
 }
 struct HttpState {
+    #[cfg(target_os = "linux")]
+    runtime: Arc<studio_runtime::StudioRuntime>,
     issuer: Option<HostAuth>,
     stop: Arc<tokio::sync::Notify>,
     bootstrap: HostBootstrap,
@@ -651,6 +703,8 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
             },
             |mut owner| owner.execute_bearer(Some(&bearer), request),
         );
+        #[cfg(target_os = "linux")]
+        state.runtime.update();
         if shutting_down && reply.error.is_none() {
             state.stop.notify_one();
         }
@@ -1116,6 +1170,7 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    runtime_owner: std::sync::Weak<Mutex<HostCommandOwner>>,
     hooks: orchestration::Hooks,
     attachments: Vec<auth::Attachment>,
     next_attachment_id: u64,
@@ -1273,6 +1328,7 @@ impl HostCommandOwner {
             owner.freeze_manual_barrier()?;
         }
         let mut host = Self {
+            runtime_owner: std::sync::Weak::new(),
             hooks: orchestration::Hooks::default(),
             attachments: Vec::new(),
             next_attachment_id: 1,

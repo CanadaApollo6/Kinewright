@@ -140,7 +140,7 @@ impl EffectiveAuthEvidence {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "linux", feature = "test-util")))]
 pub(super) fn fixture(
     executable: &ExecutableIdentity,
 ) -> (EffectiveLaunchContext, EffectiveAuthEvidence) {

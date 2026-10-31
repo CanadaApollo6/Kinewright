@@ -415,6 +415,25 @@ impl HostCommandOwner {
             expected_head: task.brief.scope.base.head.clone(),
             purpose: TurnPurpose::Work,
         });
+        let wake = state
+            .effects
+            .iter()
+            .find(|effect| {
+                effect.state
+                    == crate::orchestration::orchestration_records::EffectState::Claimed(
+                        identity.attempt.clone(),
+                    )
+            })
+            .map(|effect| effect.id.clone());
+        if let Some(wake) = wake {
+            crate::orchestration::mailbox::offer_attempt_deliveries(
+                &mut state,
+                &identity.task,
+                &identity.attempt,
+                &wake,
+            )
+            .map_err(refused)?;
+        }
         self.publish_native(producer, state, identity, vec![])
     }
     pub(crate) fn native_completed(
@@ -486,6 +505,47 @@ impl HostCommandOwner {
             };
         }
         crate::orchestration::tasks::refresh_cleanup(&mut state);
+        if state.outcome == crate::orchestration::orchestration_records::RunOutcome::Pending
+            && state.cleanup == crate::orchestration::orchestration_records::RunCleanup::Settled
+            && let Some(reference) = state
+                .tasks
+                .iter()
+                .find(|task| {
+                    task.brief.role == crate::orchestration::orchestration_records::Role::Director
+                })
+                .and_then(|task| {
+                    if let TaskState::Terminal(reference) = &task.state {
+                        Some(reference.clone())
+                    } else {
+                        None
+                    }
+                })
+        {
+            let record = self
+                .owner()?
+                .store()?
+                .read_record::<OrchestrationRecord>(&reference)?;
+            if let OrchestrationPayload::Result(result) = &record.payload {
+                use crate::orchestration::orchestration_records::{
+                    OutcomeDetail, RunOutcome, RunPhase, RunWait,
+                };
+                state.outcome = match result.outcome {
+                    AttemptOutcome::Completed => RunOutcome::Ready,
+                    AttemptOutcome::Failed => RunOutcome::Failed(OutcomeDetail {
+                        code: "director_failed".into(),
+                        detail_ref: Some(result.explanation.clone()),
+                    }),
+                    AttemptOutcome::Cancelled | AttemptOutcome::Interrupted => {
+                        RunOutcome::Cancelled(OutcomeDetail {
+                            code: "director_cancelled".into(),
+                            detail_ref: Some(result.explanation.clone()),
+                        })
+                    }
+                };
+                state.phase = RunPhase::Finished;
+                state.wait = RunWait::None;
+            }
+        }
         self.publish_native(producer, state, identity, vec![])
     }
 }

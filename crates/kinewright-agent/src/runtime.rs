@@ -236,17 +236,18 @@ pub fn is_destructive_operation(operation: &Operation) -> bool {
 
 #[must_use]
 pub fn is_invocable_capability(name: &str) -> bool {
-    INSPECTOR_TOOL_NAMES.contains(&name)
-        && !matches!(
-            name,
-            "apply_edit_plan"
-                | "search_capabilities"
-                | "get_capability"
-                | "invoke_capability"
-                | "prepare_edit_plan"
-                | "commit_edit_plan"
-                | "discard_edit_plan"
-        )
+    crate::writer_host::task_mcp::is_capability(name)
+        || (INSPECTOR_TOOL_NAMES.contains(&name)
+            && !matches!(
+                name,
+                "apply_edit_plan"
+                    | "search_capabilities"
+                    | "get_capability"
+                    | "invoke_capability"
+                    | "prepare_edit_plan"
+                    | "commit_edit_plan"
+                    | "discard_edit_plan"
+            ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

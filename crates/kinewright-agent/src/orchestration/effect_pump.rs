@@ -24,6 +24,15 @@ use std::{
 
 pub(crate) trait ProfileFactory: Send + Sync {
     fn bind(&self, attempt: &AdmittedAttempt) -> io::Result<CertifiedConnectorProfile>;
+    fn bind_for_task(
+        &self,
+        _attempt: &AdmittedAttempt,
+        _endpoint: &str,
+    ) -> io::Result<CertifiedConnectorProfile> {
+        Err(io::Error::other(
+            "a profile bound to the host task endpoint is required",
+        ))
+    }
 }
 
 /// Driven by the existing `session::pump_session` through nonblocking Studio
@@ -40,6 +49,9 @@ pub(crate) struct EffectPump {
     events: crossbeam_channel::Receiver<AgentEvent>,
     observed: Instant,
     opened: bool,
+    #[cfg(any(test, feature = "test-util"))]
+    native_event_observer:
+        Option<Arc<dyn Fn(crossbeam_channel::Receiver<AgentEvent>) + Send + Sync>>,
 }
 impl EffectPump {
     pub(crate) fn new(
@@ -63,7 +75,16 @@ impl EffectPump {
             events,
             observed: Instant::now(),
             opened: false,
+            #[cfg(any(test, feature = "test-util"))]
+            native_event_observer: None,
         }
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn set_native_event_observer(
+        &mut self,
+        observer: Arc<dyn Fn(crossbeam_channel::Receiver<AgentEvent>) + Send + Sync>,
+    ) {
+        self.native_event_observer = Some(observer);
     }
     fn drain_events(&mut self) -> io::Result<()> {
         // Drain bounded child channels on the SAME owner pump. Raw usage is
@@ -243,6 +264,10 @@ impl EffectPump {
                 return Err(error);
             }
         };
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(observer) = &self.native_event_observer {
+            observer(session.events());
+        }
         let id = identity.attempt;
         self.active.insert(id, session);
         Ok(())
@@ -327,7 +352,9 @@ pub(crate) fn recover_run(
             reconcile_attempt(host, &mut claim, &producer, &attempt.identity)?;
         }
     }
-    if let Some(attempt) = state.attempts.first() {
+    if let Some(attempt) = state.attempts.first()
+        && state.outcome == RunOutcome::Pending
+    {
         let mut owner = host
             .lock()
             .map_err(|_| io::Error::other("host owner poisoned"))?;

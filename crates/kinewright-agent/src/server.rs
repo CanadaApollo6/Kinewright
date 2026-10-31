@@ -525,7 +525,7 @@ impl McpServer {
         project: &str,
         roots: crate::writer_host::SessionRoots,
     ) -> Result<Self, crate::writer_host::HostError> {
-        Self::start_host_endpoint(core, playback, analysis, project, roots, None)
+        Self::start_host_endpoint(core, playback, analysis, project, roots, None, None)
     }
     pub(crate) fn start_task_isolated(
         core: Core,
@@ -534,8 +534,17 @@ impl McpServer {
         project: &str,
         roots: crate::writer_host::SessionRoots,
         endpoint: crate::orchestration::tasks::TaskEndpoint,
+        control: Option<crate::writer_host::task_mcp::TaskMcp>,
     ) -> Result<Self, crate::writer_host::HostError> {
-        Self::start_host_endpoint(core, playback, analysis, project, roots, Some(endpoint))
+        Self::start_host_endpoint(
+            core,
+            playback,
+            analysis,
+            project,
+            roots,
+            Some(endpoint),
+            control,
+        )
     }
     fn start_host_endpoint(
         core: Core,
@@ -544,6 +553,7 @@ impl McpServer {
         project: &str,
         roots: crate::writer_host::SessionRoots,
         task: Option<crate::orchestration::tasks::TaskEndpoint>,
+        control: Option<crate::writer_host::task_mcp::TaskMcp>,
     ) -> Result<Self, crate::writer_host::HostError> {
         use crate::writer_host::{HOST_PROTOCOL, HostAuth, HostBootstrap, HostEndpoint};
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
@@ -573,6 +583,7 @@ impl McpServer {
             Arc::clone(&incidents),
         );
         handler.host_scoped = true;
+        handler.task_control = control;
         if let Some(endpoint) = task {
             handler = handler.with_task_endpoint(endpoint);
         }
@@ -1201,6 +1212,7 @@ struct KinewrightMcp {
     served_tool_allowlist: Option<&'static [&'static str]>,
     host_scoped: bool,
     task_endpoint: Option<crate::orchestration::tasks::TaskEndpoint>,
+    task_control: Option<crate::writer_host::task_mcp::TaskMcp>,
     #[cfg(test)]
     task_admission_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -1257,6 +1269,7 @@ impl KinewrightMcp {
             served_tool_allowlist: None,
             host_scoped: false,
             task_endpoint: None,
+            task_control: None,
             #[cfg(test)]
             task_admission_hook: None,
         }
@@ -1349,6 +1362,21 @@ impl KinewrightMcp {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
+        if request.name == "invoke_capability" {
+            let args: InvokeCapabilityArgs = decode_args(
+                "invoke_capability",
+                request.arguments.clone().unwrap_or_default(),
+            )?;
+            if crate::writer_host::task_mcp::is_capability(&args.name) {
+                return Ok(match &self.task_control {
+                    Some(control) => match control.call(&args.name, args.arguments) {
+                        Ok(result) => success_structured("task control", result),
+                        Err(error) => error_text(error.to_string()),
+                    },
+                    None => error_text("task_scope: no task control attachment"),
+                });
+            }
+        }
         let _task_admission = if let Some(endpoint) = &self.task_endpoint {
             if !endpoint.matches_core(&self.core) {
                 return Ok(error_text("task_scope: endpoint/Core identity mismatch"));
@@ -1389,8 +1417,11 @@ impl KinewrightMcp {
         match request.name.as_ref() {
             "search_capabilities" => {
                 let args: CapabilitySearchArgs = decode_args("search_capabilities", arguments)?;
-                let tools = Self::capability_tools()
+                let mut tools = Self::capability_tools()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                if self.task_control.is_some() {
+                    tools.extend(task_control_tools());
+                }
                 let found = search_capability_queries(&tools, &args);
                 Ok(success_structured(
                     format!("found {} matching Kinewright capabilities", found.len()),
@@ -1402,8 +1433,11 @@ impl KinewrightMcp {
             }
             "get_capability" => {
                 let args: CapabilityArgs = decode_args("get_capability", arguments)?;
-                let tools = Self::capability_tools()
+                let mut tools = Self::capability_tools()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                if self.task_control.is_some() {
+                    tools.extend(task_control_tools());
+                }
                 Ok(open_capabilities(&tools, args))
             }
             "invoke_capability" => {
@@ -36111,4 +36145,18 @@ mod tests {
         assert_eq!(override_runtime.metrics().num_workers(), 1);
     }
     include!("orchestration/server_tests.rs");
+}
+
+fn task_control_tools() -> Vec<Tool> {
+    crate::writer_host::task_mcp::CAPABILITIES
+        .iter()
+        .map(|(name, description)| {
+            let schema = crate::writer_host::task_mcp::schema::capability(name);
+            Tool::new(
+                *name,
+                *description,
+                std::sync::Arc::new(schema.as_object().expect("schema object").clone()),
+            )
+        })
+        .collect()
 }

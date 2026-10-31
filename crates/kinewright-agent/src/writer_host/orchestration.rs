@@ -45,10 +45,33 @@ pub struct MetadataIssuer {
 #[serde(deny_unknown_fields)]
 pub struct RunViewPage {
     pub projection: RunProjection,
+    #[serde(default)]
+    pub accounting: Option<DurableRunAccounting>,
     pub full_refresh: bool,
     pub allowed_actions: Vec<RunActionKind>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableRunAccounting {
+    pub stop_reason: Option<String>,
+    pub start_unix_ms: u64,
+    pub deadline_unix_ms: u64,
+    pub last_unix_ms: u64,
+    pub elapsed_ms: u64,
+    pub clock_uncertain: bool,
+    pub tasks: Vec<DurableTaskAccounting>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableTaskAccounting {
+    pub task: TaskId,
+    pub sends: usize,
+    pub provider: Option<kinewright_project::orchestration_accounting::ProviderMetadata>,
+    pub totals: kinewright_project::orchestration_accounting::UsageTotals,
+    pub wait_reason: Option<String>,
+    pub pause: Option<kinewright_project::orchestration_accounting::AccountingRefusal>,
+}
 #[derive(Clone)]
 pub(super) struct ProducerScope {
     pub run: RunId,
@@ -181,7 +204,18 @@ impl HostCommandOwner {
                 attempt: attempt.identity.attempt.clone(),
                 owner_epoch: attempt.owner_epoch,
             };
-            if !binding.live_in(projection, epoch) {
+            let draining = Some(attempt.owner_epoch) == epoch
+                && projection.outcome == RunOutcome::Pending
+                && projection.tasks.iter().any(|task| {
+                    task.id == attempt.identity.task
+                        && matches!(task.state, TaskState::Terminal(_))
+                        && !task.progress.expired
+                })
+                && projection.attempts.iter().any(|reservation| {
+                    reservation.identity == attempt.identity
+                        && reservation.state == AttemptState::Executing
+                });
+            if !binding.live_in(projection, epoch) && !draining {
                 attempt.control.close();
             }
             !attempt.control.closed()
@@ -326,7 +360,7 @@ impl HostCommandOwner {
             grant_ref,
         })
     }
-    fn expected_grant(&self, index: usize) -> Result<ObjectRef, HostError> {
+    pub(super) fn expected_grant(&self, index: usize) -> Result<ObjectRef, HostError> {
         let bytes = serde_json::to_vec(&(
             &self.instance,
             &self.attachments[index].subject,
@@ -401,7 +435,7 @@ impl HostCommandOwner {
         reply.status = self.status();
         reply
     }
-    fn authorize_orchestration(
+    pub(super) fn authorize_orchestration(
         &self,
         index: usize,
         request: &ScopedOrchestrationRequest,
@@ -515,6 +549,14 @@ impl HostCommandOwner {
             return Err(refused("Producer task or attempt is no longer live"));
         }
         let own_task = |id: &TaskId| Some(id) == scope.task.as_ref();
+        let child = |id: &TaskId| {
+            task.brief.role == Role::Director
+                && state.tasks.iter().any(|child| {
+                    &child.id == id
+                        && child.parent.as_ref() == Some(&task.id)
+                        && scope_contains(&scope.scope, &child.brief.scope)
+                })
+        };
         let allowed = match &request.envelope.command {
             OrchestrationCommand::AssignTask(assignment) => {
                 assignment.run == scope.run
@@ -529,8 +571,30 @@ impl HostCommandOwner {
                     && Some(&turn.attempt) == scope.attempt.as_ref()
                     && turn.owner_epoch == scope.owner_epoch
             }
-            OrchestrationCommand::RecordContext { task, .. }
-            | OrchestrationCommand::FreezeTask(task) => own_task(task),
+            OrchestrationCommand::RecordContext { task, .. } => own_task(task),
+            OrchestrationCommand::FreezeTask(target) | OrchestrationCommand::CancelTask(target) => {
+                own_task(target) || child(target)
+            }
+            OrchestrationCommand::PublishResult(result) => {
+                own_task(&result.task) || child(&result.task)
+            }
+            OrchestrationCommand::MergeTask(merge) => {
+                task.brief.role == Role::Director && (own_task(&merge.task) || child(&merge.task))
+            }
+            OrchestrationCommand::ObserveDelivery(id) => state.deliveries.iter().any(|delivery| {
+                &delivery.id == id
+                    && state.tasks.iter().any(|child| {
+                        child.id == delivery.task && child.parent.as_ref() == Some(&task.id)
+                    })
+            }),
+            OrchestrationCommand::ControlRun(intent) => {
+                task.brief.role == Role::Director
+                    && intent.run_id == scope.run
+                    && matches!(
+                        intent.action,
+                        crate::orchestration::orchestration_records::RunAction::SendMessage { .. }
+                    )
+            }
             OrchestrationCommand::Request(RuntimeRequest::Question(question)) => {
                 own_task(&question.task) && Some(&question.origin.attempt) == scope.attempt.as_ref()
             }
@@ -589,7 +653,7 @@ impl HostCommandOwner {
             return Err(refused("fresh epoch or attachment grant changed"));
         }
         let owner = self.owner()?;
-        let previous = request
+        let mut previous = request
             .run
             .as_ref()
             .map(|run| owner.orchestration_projection(run))
@@ -602,18 +666,90 @@ impl HostCommandOwner {
             .transpose()?
             .flatten()
             .map(|cut| cut.segment);
+        // Freeze is an explicit completion request. H3, rather than a provider
+        // turn command, ends the owning turn in the same cut as its frozen history.
+        if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command
+            && let Some(state) = &mut previous
+        {
+            let mut ended = state.clone();
+            if let Some(task) = ended.tasks.iter_mut().find(|task| &task.id == target)
+                && task.progress.turn.as_ref().is_some_and(|turn| {
+                    turn.purpose == crate::orchestration::orchestration_records::TurnPurpose::Work
+                })
+            {
+                task.progress.turn_ended = true;
+            }
+            if crate::orchestration::tasks::decide_task(&ended, &request.envelope.command)
+                .is_ok_and(|transition| transition.is_some())
+            {
+                *state = ended;
+            }
+        }
         let generation = self.owner()?.metadata_generation()?;
         let attention = self.live_attention_admission(request)?;
-        let transition = machine::prepare_with_attention(
-            previous.as_ref(),
-            &self.owner()?.active_manual_project()?,
-            generation,
-            &request.envelope,
-            previous_segment,
-            attention.as_ref().map(|(proof, _)| proof),
-        )
-        .map_err(scheduler_error)?;
+        let transition =
+            if let OrchestrationCommand::PublishResult(publish) = &request.envelope.command {
+                let state = previous
+                    .as_ref()
+                    .ok_or_else(|| refused("result run missing"))?;
+                let history = self
+                    .saved_task_history(state, &publish.task)?
+                    .ok_or_else(|| refused("result history missing"))?;
+                let runtime = self
+                    .hooks
+                    .runs
+                    .get(&state.run)
+                    .and_then(|run| run.tasks.get(&publish.task))
+                    .ok_or_else(|| refused("result task missing"))?;
+                let delta = runtime
+                    .frozen_delta()
+                    .ok_or_else(|| refused("task is not frozen"))?;
+                let result = &publish.result;
+                if !history.frozen
+                    || result.base.as_ref() != Some(&history.base)
+                    || result.head.as_ref() != Some(&history.source)
+                    || result.usage_ref != self.current_accounting_reference(state)?
+                    || match &result.delta_ref {
+                        Some(reference) => {
+                            *self.owner()?.store()?.read_evidence(reference)?
+                                != serde_json::to_vec(delta)?
+                        }
+                        None => !delta.is_empty(),
+                    }
+                {
+                    return Err(refused("result differs from the frozen task"));
+                }
+                let record = self.owner_mut()?.admit_scheduler_record(
+                &crate::orchestration::orchestration_records::OrchestrationRecord {
+                    version: 1,
+                    payload:
+                        crate::orchestration::orchestration_records::OrchestrationPayload::Result(
+                            Box::new(result.clone()),
+                        ),
+                },
+            )?;
+                crate::orchestration::mailbox::prepare_result_update(
+                    state,
+                    &request.envelope.project,
+                    generation,
+                    &request.envelope,
+                    previous_segment,
+                    record.reference,
+                )
+                .map_err(scheduler_error)?
+            } else {
+                machine::prepare_with_attention(
+                    previous.as_ref(),
+                    &self.owner()?.active_manual_project()?,
+                    generation,
+                    &request.envelope,
+                    previous_segment,
+                    attention.as_ref().map(|(proof, _)| proof),
+                )
+                .map_err(scheduler_error)?
+            };
         let transition = self.seed_run_spending(transition)?;
+        let transition = self.stage_control_freeze(transition)?;
         if let Some((_, bytes)) = attention {
             self.owner_mut()?.admit_host_grant(&bytes)?;
         }
@@ -697,7 +833,9 @@ impl HostCommandOwner {
         } else {
             vec![]
         };
+        let accounting = self.durable_run_accounting(&projection)?;
         Ok(RunViewPage {
+            accounting,
             full_refresh: after_sequence == 0
                 || after_sequence > projection.sequence
                 || after_sequence.saturating_add(1) < projection.sequence,
@@ -816,6 +954,16 @@ impl HostCommandOwner {
         attempt: &AttemptId,
         ttl: Duration,
     ) -> Result<(HostAuth, TaskEndpoint), HostError> {
+        // Retired task grants cannot consume attachment capacity across all 80 sends.
+        if self.hooks.pending.is_none() {
+            self.attachments.retain(|attachment| {
+                attachment.alive.load(std::sync::atomic::Ordering::Acquire)
+                    || attachment
+                        .producer_scope
+                        .as_ref()
+                        .is_none_or(|scope| scope.task.is_none())
+            });
+        }
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let root = self.attachments[index]
             .producer_scope
@@ -957,6 +1105,7 @@ impl HostCommandOwner {
             {
                 return Err(refused("prior task history is unavailable"));
             }
+            self.restore_initial_run_candidate(&state, &task_record.brief.scope.base.branch)?;
             EditorTask::prepare(self.owner_mut()?, task_record.brief.clone(), authority)?
         };
         let endpoint = editor_task.endpoint();
@@ -1019,7 +1168,21 @@ impl HostCommandOwner {
             media,
             &self.config.project,
             self.attachments[index].roots.clone(),
-            endpoint,
+            endpoint.clone(),
+            Some(super::task_mcp::TaskMcp::new(
+                self.runtime_owner.clone(),
+                self.attachments
+                    .iter()
+                    .find(|attachment| {
+                        attachment.producer_scope.as_ref().is_some_and(|scope| {
+                            scope.endpoint.as_ref() == Some(&endpoint.authority().endpoint)
+                        })
+                    })
+                    .ok_or_else(|| refused("task attachment missing"))?
+                    .auth
+                    .clone(),
+                endpoint,
+            )),
         )
     }
 }

@@ -84,6 +84,9 @@ impl TaskEndpoint {
     pub(crate) fn matches_brief(&self, brief: &TaskBrief) -> bool {
         self.0.policy.scope == brief.scope && self.0.policy.role == brief.role
     }
+    pub(crate) fn head(&self) -> &super::bundle_records::HeadId {
+        &self.0.policy.scope.base.head
+    }
     pub(crate) fn matches_core(&self, core: &Core) -> bool {
         self.0.actor == core.actor_identity()
     }
@@ -114,6 +117,67 @@ impl TaskEndpoint {
             .gate
             .lock()
             .map_err(|_| "task_ingress_poisoned".into())
+    }
+    pub(crate) fn history_step(
+        &self,
+        core: &Core,
+        expected: kinewright_core::TimelineRevision,
+        redo: bool,
+    ) -> Result<kinewright_core::HistorySnapshot, String> {
+        let _gate = self.admit()?;
+        if !self.matches_core(core) {
+            return Err("task actor changed".into());
+        }
+        let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
+            revision,
+            ..
+        }) = core
+            .request(kinewright_core::Command::Query(
+                kinewright_core::Query::Snapshot,
+            ))
+            .map_err(|e| e.to_string())?
+        else {
+            return Err("task revision unavailable".into());
+        };
+        if revision != expected {
+            return Err("task revision changed".into());
+        }
+        let history = core.export_history().map_err(|e| e.to_string())?;
+        let boundary = if redo {
+            history.cursor.redo.last()
+        } else {
+            history.cursor.undo.last()
+        }
+        .ok_or("history cursor is empty")?;
+        self.0
+            .policy
+            .validate_batch(&boundary.document, &boundary.operations)?;
+        let private = Core::spawn((*history.baseline).clone()).map_err(|e| e.to_string())?;
+        private
+            .restore_history(history.clone())
+            .map_err(|e| e.to_string())?;
+        private
+            .request(if redo {
+                kinewright_core::Command::Redo
+            } else {
+                kinewright_core::Command::Undo
+            })
+            .map_err(|e| e.to_string())?;
+        let after = private.export_history().map_err(|e| e.to_string())?;
+        self.0
+            .policy
+            .validate_history_change(&history.document, &after.document)?;
+        core.request(if redo {
+            kinewright_core::Command::Redo
+        } else {
+            kinewright_core::Command::Undo
+        })
+        .map_err(|e| e.to_string())?;
+        let actual = core.export_history().map_err(|e| e.to_string())?;
+        if actual != after {
+            return Err("task history differs from validated transition".into());
+        }
+        Ok(actual)
     }
     pub(crate) fn validate_batch(
         &self,
@@ -316,13 +380,13 @@ impl EditorTask {
                 Err(BundleError::HistoryChanged)
             };
         }
-        self.endpoint
-            .check_live()
-            .map_err(BundleError::Unsupported)?;
         validate_owner_authority(owner, self.endpoint.authority())?;
         let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
         self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
         Ok(())
+    }
+    pub(crate) fn frozen_delta(&self) -> Option<&[Operation]> {
+        self.frozen.as_ref().map(FrozenTaskResult::delta)
     }
     #[must_use]
     pub fn endpoint(&self) -> TaskEndpoint {
@@ -377,9 +441,6 @@ impl EditorTask {
                 return Ok(receipt);
             }
         }
-        self.endpoint
-            .check_live()
-            .map_err(BundleError::Unsupported)?;
         validate_owner_authority(owner, self.endpoint.authority())?;
         let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
         let checkpoint = owner
@@ -391,6 +452,8 @@ impl EditorTask {
             .store()?
             .read_record::<Document>(&checkpoint.document_ref)?;
         self.endpoint
+            .0
+            .policy
             .validate_batch(&document, frozen.delta())
             .map_err(BundleError::Unsupported)?;
         if self.merge_envelope.is_none() {
@@ -499,7 +562,10 @@ pub fn decide_task(
             if !ready(state, id)
                 || !matches!(
                     task.state,
-                    TaskState::Preparing | TaskState::Running(_) | TaskState::WaitingForChildren(_)
+                    TaskState::Queued
+                        | TaskState::Preparing
+                        | TaskState::Running(_)
+                        | TaskState::WaitingForChildren(_)
                 )
             {
                 return Err(Refusal::InvalidState);

@@ -371,6 +371,12 @@ impl MachineClaim {
     }
     /// # Errors
     /// Refuses recovery against a different project or run before H1 is changed.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn claimed_run(&self) -> (&str, &str) {
+        (&self.run.project, &self.run.run)
+    }
+    /// # Errors
+    /// Refuses recovery against a different project or run.
     pub fn check_run(&self, project: &str, run: &str) -> io::Result<()> {
         if self.run.project != project || self.run.run != run {
             return Err(io::Error::other("foreign machine run"));

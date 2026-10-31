@@ -29,6 +29,7 @@ mod tests {
     include!("c3_fix1_muse_tests.rs");
     include!("c3_fix2_tests.rs");
     include!("c3_fix3_tests.rs");
+    include!("c4_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,
@@ -950,7 +951,7 @@ mod tests {
         );
     }
     #[test]
-    fn h4_refuses_without_independently_retained_inputs() {
+    fn h4_reopen_retains_inputs_and_refuses_if_the_closure_is_lost() {
         let f = Fixture::new();
         let started = f.start();
         let run: RunId = started.envelope.identity("run").unwrap();
@@ -990,6 +991,15 @@ mod tests {
             temp,
         };
         assert_eq!(f.projection(&run).outcome, RunOutcome::Pending);
+        {
+            let owner = f.host.owner.upgrade().unwrap();
+            let mut host = owner.lock().unwrap();
+            assert!(
+                host.hooks.runs.contains_key(&run),
+                "C4_REOPEN_RETAINS_INPUTS"
+            );
+            host.hooks.runs.clear();
+        }
         denied(
             &f,
             &f.editor,

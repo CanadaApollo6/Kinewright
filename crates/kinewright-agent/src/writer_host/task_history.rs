@@ -183,6 +183,97 @@ impl HostCommandOwner {
             .retain(|a| !matches!(a.state, AttemptState::Retired(_)));
         Ok(())
     }
+    pub(super) fn restore_frozen_task(
+        &mut self,
+        state: &RunProjection,
+        task: &TaskId,
+    ) -> Result<(), HostError> {
+        if self
+            .hooks
+            .runs
+            .get(&state.run)
+            .is_some_and(|run| run.tasks.contains_key(task))
+        {
+            return Ok(());
+        }
+        let history = self
+            .saved_task_history(state, task)?
+            .ok_or_else(|| refused("frozen history missing"))?;
+        if !history.frozen {
+            return Err(refused("task is not frozen"));
+        }
+        let brief = state
+            .tasks
+            .iter()
+            .find(|record| &record.id == task)
+            .ok_or_else(|| refused("task missing"))?
+            .brief
+            .clone();
+        self.restore_task_candidate(&history)?;
+        // An owner-only, already frozen actor grants no MCP attachment and no
+        // native reservation. Its original attempt and receipt identities stay exact.
+        let authority = crate::orchestration::tasks::RuntimeTaskAuthority {
+            project: history.project.clone(),
+            run: state.run.clone(),
+            task: task.clone(),
+            attempt: history.attempt.clone(),
+            endpoint: crate::orchestration::orchestration_records::EndpointId(
+                kinewright_project::bundle_records::SessionId::fresh()?,
+            ),
+            owner_epoch: self.owner()?.store()?.owner_epoch(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(300),
+        };
+        let mut actor = crate::orchestration::tasks::EditorTask::reopen(
+            self.owner_mut()?,
+            brief,
+            authority,
+            history.source.branch.clone(),
+            &history.base_ref,
+            history.merge_envelope.clone(),
+        )?;
+        if self.owner()?.candidate_binding(&history.source.branch)? != history.source
+            || actor.freeze(self.owner_mut()?)?.source() != &history.source
+        {
+            return Err(refused("frozen checkpoint changed"));
+        }
+        self.hooks
+            .runs
+            .get_mut(&state.run)
+            .ok_or_else(|| refused("run missing"))?
+            .tasks
+            .insert(task.clone(), actor);
+        Ok(())
+    }
+    pub(super) fn restore_initial_run_candidate(
+        &mut self,
+        state: &RunProjection,
+        branch: &kinewright_project::bundle_records::BranchId,
+    ) -> Result<(), HostError> {
+        if self
+            .owner()?
+            .durable_sessions()
+            .iter()
+            .any(|(_, guard)| guard.branch_id() == branch)
+        {
+            return Ok(());
+        }
+        let references = state
+            .tasks
+            .iter()
+            .filter(|task| &task.brief.scope.base.branch == branch)
+            .flat_map(|task| &task.progress.decisions)
+            .filter(|reference| reference.record_kind == RecordKind::SpecialistBase)
+            .collect::<Vec<_>>();
+        let reference = references
+            .first()
+            .ok_or_else(|| refused("initial candidate base was not retained"))?;
+        if references.iter().any(|other| *other != *reference) {
+            return Err(refused("ambiguous candidate base"));
+        }
+        self.owner_mut()?
+            .reopen_registered_candidate(branch.clone(), reference)?;
+        Ok(())
+    }
     pub(super) fn restore_task_candidate(
         &mut self,
         history: &TaskHistoryRecord,
@@ -332,13 +423,25 @@ impl HostCommandOwner {
             .authority()
             .attempt
             .clone();
-        let identity = state
+        let identity = if let Some(reservation) = state
             .attempts
             .iter()
             .find(|a| a.identity.task == *task && a.identity.attempt == attempt)
-            .ok_or_else(|| refused("task reservation missing"))?
-            .identity
-            .clone();
+        {
+            reservation.identity.clone()
+        } else {
+            self.attempt_archive(&state)?
+                .1
+                .attempts
+                .into_iter()
+                .find(|a| {
+                    a.identity.task == *task
+                        && a.identity.attempt == attempt
+                        && matches!(a.state, AttemptState::Retired(_))
+                })
+                .ok_or_else(|| refused("task reservation missing"))?
+                .identity
+        };
         self.persist_runtime_task(&mut state, &identity, true)?;
         self.publish_native(producer, state.clone(), &identity, vec![])?;
         self.saved_task_history(&state, task)?
