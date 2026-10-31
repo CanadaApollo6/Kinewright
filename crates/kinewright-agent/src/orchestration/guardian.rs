@@ -78,6 +78,21 @@ pub trait DurableAttemptOwner {
     /// # Errors
     /// Refuses uncertainty, stale authority, changed ownership, or an unacknowledged root.
     fn authorize_commit(&mut self, recovery: &RecoveryIdentity) -> io::Result<()>;
+    /// Acknowledge the observed abort before its private proof is deleted.
+    /// Standalone containment owners have no H1 record; the production adapter
+    /// persists retirement through the same native completion port.
+    /// # Errors
+    /// Retains private recovery state if durable retirement is uncertain.
+    #[cfg(target_os = "linux")]
+    fn cleanup_completed(&mut self, _proof: &CleanupProof) -> io::Result<()> {
+        Ok(())
+    }
+    /// # Errors
+    /// Retains an unbound start fence until H1 acknowledges its retirement.
+    #[cfg(target_os = "linux")]
+    fn cleanup_unbound(&mut self, _proof: &UnboundCleanupProof) -> io::Result<()> {
+        Ok(())
+    }
     /// Serialize the native COMMIT write with revocation. The default is for
     /// standalone owners without concurrent Studio commands.
     ///
@@ -155,6 +170,75 @@ impl UnboundCleanupProof {
     #[must_use]
     pub fn identity(&self) -> &AttemptIdentity {
         &self.identity
+    }
+}
+/// A host-recorded launch belonged to a different kernel boot. No process or
+/// delayed systemd transport from that boot can survive in this one.
+#[cfg(target_os = "linux")]
+pub(crate) struct RebootCleanupProof {
+    identity: AttemptIdentity,
+}
+#[cfg(target_os = "linux")]
+impl RebootCleanupProof {
+    pub(crate) fn identity(&self) -> &AttemptIdentity {
+        &self.identity
+    }
+}
+#[cfg(target_os = "linux")]
+pub(crate) enum AttemptRetirementProof<'a> {
+    Reboot(&'a RebootCleanupProof),
+    Unbound(&'a UnboundCleanupProof),
+    NotDispatched(AttemptIdentity),
+}
+#[cfg(target_os = "linux")]
+impl AttemptRetirementProof<'_> {
+    pub(crate) fn identity(&self) -> &AttemptIdentity {
+        match self {
+            Self::Reboot(proof) => proof.identity(),
+            Self::Unbound(proof) => proof.identity(),
+            Self::NotDispatched(identity) => identity,
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn boot_id() -> io::Result<String> {
+    let id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let id = id.trim();
+    if id.len() != 36
+        || id.bytes().enumerate().any(|(i, c)| {
+            if [8, 13, 18, 23].contains(&i) {
+                c != b'-'
+            } else {
+                !c.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err(io::Error::other("invalid kernel boot identity"));
+    }
+    Ok(id.to_owned())
+}
+#[cfg(target_os = "linux")]
+impl RecoveryObserver {
+    pub(crate) fn reboot_cleanup(
+        identity: AttemptIdentity,
+        launch_boot: &str,
+    ) -> io::Result<RebootCleanupProof> {
+        identity.validate()?;
+        if launch_boot.len() != 36
+            || launch_boot.bytes().enumerate().any(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c != b'-'
+                } else {
+                    !c.is_ascii_hexdigit()
+                }
+            })
+            || launch_boot.eq_ignore_ascii_case(&boot_id()?)
+        {
+            return Err(io::Error::other(
+                "cleanup pending: same boot or no launch proof",
+            ));
+        }
+        Ok(RebootCleanupProof { identity })
     }
 }
 /// A prepared, contained execution. Dropping it closes the sole lifetime writer
@@ -367,7 +451,7 @@ impl ContainedSession {
         let result = Self::prepare_reserved(claim, owner, identity, program, executable, profile);
         if let Err(error) = result {
             #[cfg(target_os = "linux")]
-            if let Err(cleanup) = cleanup_failed_prepare(claim, &cleanup_identity) {
+            if let Err(cleanup) = cleanup_failed_prepare(claim, owner, &cleanup_identity) {
                 return Err(io::Error::other(format!(
                     "{error}; cleanup_blocked: {cleanup}"
                 )));
@@ -935,11 +1019,20 @@ impl RecoveryObserver {
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_failed_prepare(claim: &mut MachineClaim, identity: &AttemptIdentity) -> io::Result<()> {
+fn cleanup_failed_prepare(
+    claim: &mut MachineClaim,
+    owner: &mut impl DurableAttemptOwner,
+    identity: &AttemptIdentity,
+) -> io::Result<()> {
     match claim.recovery(identity) {
-        Ok(recovery) => claim.retire(&RecoveryObserver::recover_cleanup(&recovery)?),
+        Ok(recovery) => {
+            let proof = RecoveryObserver::recover_cleanup(&recovery)?;
+            owner.cleanup_completed(&proof)?;
+            claim.retire(&proof)
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let proof = RecoveryObserver::unbound_cleanup(claim, identity)?;
+            owner.cleanup_unbound(&proof)?;
             claim.retire_unbound(&proof)
         }
         Err(e) => Err(e),

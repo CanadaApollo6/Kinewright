@@ -33,6 +33,25 @@ fn transport(reason: impl std::fmt::Display) -> io::Error {
     io::Error::other(reason.to_string())
 }
 
+/// Host-only H1 launch intent. Kept across reserve, bind, charge and execution.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeLaunchIntent {
+    pub identity: ExecutionIdentity,
+    pub boot_id: String,
+    pub dispatched: bool,
+    pub native: Option<RecoveryIdentity>,
+}
+impl NativeLaunchIntent {
+    pub(super) fn new(identity: &ExecutionIdentity) -> io::Result<Self> {
+        Ok(Self {
+            identity: identity.clone(),
+            boot_id: crate::guardian::boot_id()?,
+            dispatched: false,
+            native: None,
+        })
+    }
+}
 pub(crate) struct HostInvocationOwner {
     host: Weak<Mutex<HostCommandOwner>>,
     producer: HostAuth,
@@ -98,14 +117,55 @@ impl InvocationOwner for HostInvocationOwner {
             .native_completed(&self.producer, identity, completed, proof)
             .map_err(transport)
     }
+    fn unbound_completed(
+        &self,
+        identity: &ExecutionIdentity,
+        proof: &crate::guardian::UnboundCleanupProof,
+    ) -> io::Result<()> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| transport("host owner lost"))?;
+        host.lock()
+            .map_err(|_| transport("host owner poisoned"))?
+            .reconcile_native_effect(
+                &self.producer,
+                identity,
+                &crate::guardian::AttemptRetirementProof::Unbound(proof),
+            )
+            .map_err(transport)
+    }
     fn reserve(&self, invocation: &AuthorizedInvocation) -> io::Result<()> {
         let host = self
             .host
             .upgrade()
             .ok_or_else(|| transport("host owner lost"))?;
         let mut host = host.lock().map_err(|_| transport("host owner poisoned"))?;
-        host.validate_native_invocation(&self.producer, invocation)
-            .map(|_| ())
+        let mut projection = host
+            .validate_native_invocation(&self.producer, invocation)
+            .map_err(transport)?;
+        let identity = invocation.invocation().binding().identity();
+        let mut intent = host
+            .native_launch_intent(&projection, identity)
+            .map_err(transport)?
+            .unwrap_or(NativeLaunchIntent::new(identity)?);
+        if intent.boot_id != crate::guardian::boot_id()? {
+            return Err(transport("launch boot changed"));
+        }
+        intent.dispatched = true;
+        let reference = host
+            .owner_mut()
+            .map_err(transport)?
+            .admit_host_grant(&serde_json::to_vec(&intent)?)
+            .map_err(transport)?;
+        projection
+            .attempts
+            .iter_mut()
+            .find(|a| a.identity == *identity)
+            .ok_or_else(|| transport("launch reservation missing"))?
+            .recovery_ref = reference.clone();
+        crate::orchestration::tasks::refresh_cleanup(&mut projection);
+        host.publish_native(&self.producer, projection, identity, vec![reference])
             .map_err(transport)
     }
     fn release(
@@ -155,10 +215,18 @@ impl InvocationOwner for HostInvocationOwner {
                 commit: NativeCommit::Authorized,
             },
         );
+        let mut intent = host
+            .native_launch_intent(&projection, identity)
+            .map_err(transport)?
+            .unwrap_or(NativeLaunchIntent::new(identity)?);
+        if intent.boot_id != crate::guardian::boot_id()? {
+            return Err(transport("launch boot changed"));
+        }
+        intent.native = Some(recovery.clone());
         let recovery_ref = host
             .owner_mut()
             .map_err(transport)?
-            .admit_host_grant(&serde_json::to_vec(recovery)?)
+            .admit_host_grant(&serde_json::to_vec(&intent)?)
             .map_err(transport)?;
         let reservation = projection
             .attempts
@@ -262,6 +330,9 @@ impl HostCommandOwner {
         producer: &HostAuth,
         identity: &ExecutionIdentity,
     ) -> Result<RunProjection, HostError> {
+        if self.recovery_only {
+            return Err(refused("recovery-only owner cannot authorize sends"));
+        }
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let scope = self.attachments[index]
             .producer_scope

@@ -516,6 +516,8 @@ impl HostCommandOwner {
             .get_mut(run)
             .and_then(|r| r.tasks.remove(task))
             .ok_or_else(|| refused("task actor missing"))?;
+        #[cfg(test)]
+        c4_merge_crash_cut("before_candidate_commit");
         let result = runtime
             .merge(self.owner_mut()?, id)
             .map_err(HostError::from);
@@ -526,7 +528,18 @@ impl HostCommandOwner {
             .tasks
             .insert(task.clone(), runtime);
         let receipt = result?;
+        #[cfg(test)]
+        c4_merge_crash_cut("after_candidate_commit");
         self.checkpoint_task_history(producer, run, task)?;
+        #[cfg(test)]
+        c4_merge_crash_cut("after_history_checkpoint");
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+fn c4_merge_crash_cut(point: &str) {
+    if std::env::var("KINEWRIGHT_C4_MERGE_CUT").as_deref() == Ok(point) {
+        std::process::exit(86);
     }
 }

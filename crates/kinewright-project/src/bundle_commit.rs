@@ -106,6 +106,11 @@ impl BundleCommit {
         if lookup != ReceiptLookup::Absent {
             return Ok(lookup);
         }
+        let retained_candidate = !install
+            && target != &bundle.manual_branch_id
+            && envelope.action == "edit"
+            && envelope.transition.is_none()
+            && bundle.retained_candidate_merge(envelope)?;
         let checkpoint = bundle
             .branches
             .get(target)
@@ -115,7 +120,7 @@ impl BundleCommit {
         }
         if envelope.project_id != bundle.project_id
             || envelope.target_branch != *target
-            || envelope.owner_epoch != bundle.store.owner_epoch()
+            || (envelope.owner_epoch != bundle.store.owner_epoch() && !retained_candidate)
             || envelope.lease.is_some()
             || envelope.expected_head.as_ref() != Some(&checkpoint.head_id)
         {
@@ -129,7 +134,7 @@ impl BundleCommit {
         else {
             return Err(BundleError::Corrupt("Core snapshot response".into()));
         };
-        if revision != envelope.expected_revision {
+        if revision != envelope.expected_revision && !retained_candidate {
             return Err(BundleError::Unsupported("stale runtime binding".into()));
         }
         let issuer = bundle
@@ -1015,7 +1020,8 @@ impl BundleCommit {
         if let Some(floor_inputs) = floor_inputs {
             contexts[0] = seal!(&floor_inputs);
         }
-        let checkpoint = if existing_selection {
+        let reuse_checkpoint = existing_selection || (stage_base.is_some() && unchanged);
+        let checkpoint = if reuse_checkpoint {
             prior.clone().ok_or_else(|| {
                 BundleError::Corrupt("missing existing selection checkpoint".into())
             })?
@@ -1054,7 +1060,7 @@ impl BundleCommit {
                 take_map_revision_ref: None,
             }
         };
-        let checkpoint_ref = if existing_selection {
+        let checkpoint_ref = if reuse_checkpoint {
             bundle.checkpoint_reference(branch_id)?
         } else {
             seal!(&checkpoint)
@@ -1077,6 +1083,22 @@ impl BundleCommit {
                     _seals: seals,
                 },
             )));
+        }
+        let mut candidate_recovery = bundle
+            .root
+            .as_ref()
+            .map_or_else(BTreeMap::new, |root| root.candidate_recovery.clone());
+        if !existing_selection
+            && let Some(base) = bundle.advanced_candidate_base(branch_id, &checked)?
+        {
+            let base_ref = seal!(&base);
+            candidate_recovery.insert(
+                branch_id.clone(),
+                crate::candidate_recovery::CandidateRecovery {
+                    checkpoint: checkpoint_ref.clone(),
+                    base_ref,
+                },
+            );
         }
         let mut branches = bundle.branches.clone();
         branches.insert(branch_id.clone(), checkpoint);
@@ -1160,8 +1182,16 @@ impl BundleCommit {
                 }
                 branches.insert(branch.clone(), staged.checkpoint.clone());
                 branch_index.insert(branch.clone(), staged.reference.clone());
+                candidate_recovery.insert(
+                    branch.clone(),
+                    crate::candidate_recovery::CandidateRecovery {
+                        checkpoint: staged.reference.clone(),
+                        base_ref: staged.base_ref.clone(),
+                    },
+                );
             }
         }
+        candidate_recovery.retain(|branch, _| branches.contains_key(branch));
         let branch_index_ref = seal!(&branch_index);
         barrier(bundle, CommitBarrier::B1)?;
         let mut staged_inventory = None;
@@ -1289,6 +1319,11 @@ impl BundleCommit {
             roots.extend(root.run_index_ref.clone());
             roots.extend(root.claim_index_ref.clone());
         }
+        roots.extend(
+            candidate_recovery
+                .values()
+                .flat_map(|binding| [binding.checkpoint.clone(), binding.base_ref.clone()]),
+        );
         roots.extend(receipt_index_ref.clone());
         roots.extend(issuer_state_ref.clone());
         let mut inventory = SupportInventory {
@@ -1335,6 +1370,7 @@ impl BundleCommit {
                 .cloned()
                 .collect(),
             branch_index_ref,
+            candidate_recovery,
             version_index_ref: metadata_root
                 .as_ref()
                 .and_then(|r| r.version_index_ref.clone()),

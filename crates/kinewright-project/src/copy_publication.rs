@@ -136,6 +136,7 @@ impl ProjectBundle {
             let sealed = self.store.admit_record(&index)?;
             root.branch_index_ref = sealed.reference.clone();
             root.run_index_ref = None;
+            root.candidate_recovery.clear();
             if let Some(feedback) = &feedback_seal {
                 root.feedback_index_ref = Some(feedback.reference.clone());
             }
@@ -169,6 +170,7 @@ impl ProjectBundle {
             return Err(BundleError::HistoryBarrierInvariant);
         };
         if root.run_index_ref.is_some()
+            || !root.candidate_recovery.is_empty()
             || copy
                 .checkpoints
                 .iter()

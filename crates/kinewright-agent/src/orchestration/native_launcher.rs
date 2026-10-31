@@ -374,6 +374,11 @@ pub(crate) trait InvocationOwner: Send + Sync {
         completed: bool,
         proof: &crate::guardian::CleanupProof,
     ) -> io::Result<()>;
+    fn unbound_completed(
+        &self,
+        identity: &crate::orchestration::ExecutionIdentity,
+        proof: &crate::guardian::UnboundCleanupProof,
+    ) -> io::Result<()>;
     fn steering(
         &self,
         identity: &crate::orchestration::ExecutionIdentity,
@@ -402,6 +407,8 @@ pub(crate) enum StartupFailure {
 }
 
 struct StartupCleanup {
+    owner: Arc<dyn InvocationOwner>,
+    identity: crate::orchestration::ExecutionIdentity,
     control: Option<Arc<Mutex<ContainedSession>>>,
     claim: Arc<Mutex<MachineClaim>>,
 }
@@ -415,6 +422,7 @@ impl Drop for StartupCleanup {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         native.close_lifetime();
         if let Ok(proof) = native.cleanup()
+            && self.owner.completed(&self.identity, false, &proof).is_ok()
             && let Ok(mut claim) = self.claim.lock()
         {
             let _ = claim.retire(&proof);
@@ -429,6 +437,17 @@ struct Owner<'a> {
     after_release: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 impl DurableAttemptOwner for Owner<'_> {
+    fn cleanup_completed(&mut self, proof: &crate::guardian::CleanupProof) -> io::Result<()> {
+        self.port.completed(
+            self.invocation.invocation().binding().identity(),
+            false,
+            proof,
+        )
+    }
+    fn cleanup_unbound(&mut self, proof: &crate::guardian::UnboundCleanupProof) -> io::Result<()> {
+        self.port
+            .unbound_completed(self.invocation.invocation().binding().identity(), proof)
+    }
     fn reserve(&mut self, identity: &AttemptIdentity) -> io::Result<()> {
         if identity != &native_identity(self.invocation.invocation().binding().identity()) {
             return Err(io::Error::other("native reservation identity changed"));
@@ -457,7 +476,9 @@ impl DurableAttemptOwner for Owner<'_> {
         self.port.commit(self.invocation, recovery, send)
     }
 }
-fn native_identity(identity: &crate::orchestration::ExecutionIdentity) -> AttemptIdentity {
+pub(crate) fn native_identity(
+    identity: &crate::orchestration::ExecutionIdentity,
+) -> AttemptIdentity {
     AttemptIdentity {
         project: identity.project.as_str().into(),
         run: identity.run.0.as_str().into(),
@@ -566,6 +587,8 @@ impl NativeGuardianLauncher {
         drop(claim_guard);
         let control = Arc::new(Mutex::new(native));
         let mut startup = StartupCleanup {
+            owner: self.owner.clone(),
+            identity: attempt.identity().clone(),
             control: Some(control.clone()),
             claim: self.claim.clone(),
         };
@@ -682,8 +705,7 @@ impl NativeGuardianLauncher {
                             .is_err()
                         {
                             sender.interrupt("native completion publication remains unresolved");
-                        }
-                        if claim
+                        } else if claim
                             .lock()
                             .map_err(|_| ())
                             .and_then(|mut claim| claim.retire(&proof).map_err(|_| ()))

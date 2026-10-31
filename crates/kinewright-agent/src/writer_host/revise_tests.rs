@@ -207,6 +207,7 @@ fn c7_revise_cut_replays_after_host_restart() {
         origin: HostOrigin::Headless,
     })
     .unwrap();
+    wait_runtime_recovery(&host);
     let editor = host.client();
     let again = editor
         .request(HostCommand::ReviseCut {

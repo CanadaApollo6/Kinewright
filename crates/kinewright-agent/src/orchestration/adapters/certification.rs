@@ -463,7 +463,7 @@ impl CertifiedConnectorProfile {
         Ok(())
     }
 
-    #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+    #[cfg(any(test, all(target_os = "linux", feature = "test-util")))]
     #[allow(
         dead_code,
         reason = "isolated kernel integration fixture uses the production factory"

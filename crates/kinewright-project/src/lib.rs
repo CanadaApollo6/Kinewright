@@ -106,3 +106,5 @@ pub mod manual_history;
 
 mod copy_publication;
 mod task_checkpoint;
+
+mod candidate_recovery;

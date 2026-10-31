@@ -406,6 +406,10 @@ pub(crate) fn recover_run(
     ))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "retirement proof selection and H1-before-private publication are audited together"
+)]
 fn reconcile_attempt(
     host: &Arc<Mutex<HostCommandOwner>>,
     claim: &mut MachineClaim,
@@ -418,18 +422,45 @@ fn reconcile_attempt(
         .map_err(|_| io::Error::other("host owner poisoned"))?
         .reconcile_native_pending(producer)
         .map_err(io::Error::other)?;
+    #[cfg(feature = "test-util")]
+    crate::writer_host::studio_runtime::fixture::recovery_barrier()?;
+    if retired_without_private(host, claim, producer, identity)? {
+        return Ok(());
+    }
+    let intent = {
+        let mut owner = host
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?;
+        let state = owner
+            .spending_scope(producer, &identity.run)
+            .map_err(io::Error::other)?;
+        owner
+            .native_launch_intent(&state, identity)
+            .map_err(io::Error::other)?
+    };
+    if let Some(intent) = &intent
+        && intent.boot_id != crate::guardian::boot_id()?
+    {
+        let native = crate::native_launcher::native_identity(identity);
+        let proof = crate::guardian::RecoveryObserver::reboot_cleanup(native, &intent.boot_id)?;
+        host.lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .reconcile_native_effect(
+                producer,
+                identity,
+                &crate::guardian::AttemptRetirementProof::Reboot(&proof),
+            )
+            .map_err(io::Error::other)?;
+        claim.retire_after_reboot(&proof)?;
+        return Ok(());
+    }
     let native = claim
         .recovery_identities()
         .iter()
         .find(|a| a.attempt == identity.attempt.0.as_str())
         .cloned();
     if let Some(native) = native {
-        if native.project != identity.project.as_str()
-            || native.run != identity.run.0.as_str()
-            || native.task != identity.task.0.as_str()
-            || native.nonce != identity.nonce.as_str()
-            || native.owner_instance != identity.owner_instance.as_str()
-        {
+        if !crate::writer_host::native_invocation::same_native_attempt(identity, &native) {
             return Err(io::Error::other("private attempt scope changed"));
         }
         match claim.recovery(&native) {
@@ -448,25 +479,76 @@ fn reconcile_attempt(
                     .map_err(|_| io::Error::other("host owner poisoned"))?
                     .spending_scope(producer, &identity.run)
                     .map_err(io::Error::other)?;
-                if !state
-                    .attempts
-                    .iter()
-                    .any(|a| a.identity == *identity && a.state == AttemptState::Reserved)
-                {
+                if !state.attempts.iter().any(|a| {
+                    a.identity == *identity
+                        && (a.state == AttemptState::Reserved
+                            || matches!(a.state, AttemptState::Retired(_)))
+                }) {
                     return Err(io::Error::other(
-                        "unbound native recovery requires Reserved H1 attempt",
+                        "unbound recovery requires Reserved H1 attempt",
                     ));
                 }
                 let proof = crate::guardian::RecoveryObserver::unbound_cleanup(claim, &native)?;
-                // Delete only under proof. A crash here leaves H1 Reserved with no
-                // private record, the already-cleaned case covered by the same lock.
+                // Retire H1 under proof before deleting private evidence. A crash
+                // between these cuts leaves the transport fence available for retry.
+                host.lock()
+                    .map_err(|_| io::Error::other("host owner poisoned"))?
+                    .reconcile_native_effect(
+                        producer,
+                        identity,
+                        &crate::guardian::AttemptRetirementProof::Unbound(&proof),
+                    )
+                    .map_err(io::Error::other)?;
                 claim.retire_unbound(&proof)?;
+                return Ok(());
             }
             Err(error) => return Err(error),
         }
     }
-    host.lock()
-        .map_err(|_| io::Error::other("host owner poisoned"))?
-        .reconcile_native_effect(producer, identity)
-        .map_err(io::Error::other)
+    if intent.is_some_and(|intent| !intent.dispatched && intent.native.is_none()) {
+        let native = crate::native_launcher::native_identity(identity);
+        return host
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .reconcile_native_effect(
+                producer,
+                identity,
+                &crate::guardian::AttemptRetirementProof::NotDispatched(native),
+            )
+            .map_err(io::Error::other);
+    }
+    Err(io::Error::other(
+        "cleanup pending: private claim missing on this boot; no execution absence proof",
+    ))
+}
+
+fn retired_without_private(
+    host: &Arc<Mutex<HostCommandOwner>>,
+    claim: &MachineClaim,
+    producer: &HostAuth,
+    identity: &ExecutionIdentity,
+) -> io::Result<bool> {
+    // A durable retirement is an acknowledgment replay, not a new absence claim.
+    let private = claim
+        .recovery_identities()
+        .iter()
+        .any(|native| crate::writer_host::native_invocation::same_native_attempt(identity, native));
+    if private {
+        return Ok(false);
+    }
+    let mut owner = host
+        .lock()
+        .map_err(|_| io::Error::other("host owner poisoned"))?;
+    let state = owner
+        .spending_scope(producer, &identity.run)
+        .map_err(io::Error::other)?;
+    Ok(owner
+        .recovery_attempt(&state, &crate::native_launcher::native_identity(identity))
+        .map_err(io::Error::other)?
+        .is_some_and(|a| {
+            matches!(
+                a.state,
+                crate::orchestration::orchestration_records::AttemptState::Retired(_)
+            )
+        }))
 }

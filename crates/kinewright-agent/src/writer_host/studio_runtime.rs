@@ -65,7 +65,8 @@ impl Default for RuntimePorts {
                 .with_file_name("kinewright-job-guardian"),
             ceiling: None,
             #[cfg(any(test, feature = "test-util"))]
-            fixture_claim: None,
+            fixture_claim: std::env::var_os("KINEWRIGHT_C4_RECOVERY_FIXTURE_ROOT")
+                .map(PathBuf::from),
             #[cfg(any(test, feature = "test-util"))]
             fixture_autostart: false,
             #[cfg(any(test, feature = "test-util"))]
@@ -74,124 +75,123 @@ impl Default for RuntimePorts {
     }
 }
 struct Worker {
+    run: RunId,
     cancel: Arc<AtomicBool>,
-    thread: JoinHandle<()>,
+    thread: JoinHandle<Option<String>>,
 }
 #[derive(Default)]
 struct State {
     recovered: bool,
-    blocked: Option<String>,
+    stopping: bool,
+    recovering: bool,
+    retry_at: Option<std::time::Instant>,
+    recovery_worker: Option<JoinHandle<()>>,
+    blocked: Option<(RunId, String)>,
     claim: Option<(RunId, Arc<Mutex<MachineClaim>>)>,
     worker: Option<Worker>,
 }
 pub(super) struct StudioRuntime {
+    me: Weak<Self>,
     host: Weak<Mutex<HostCommandOwner>>,
     ports: RuntimePorts,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 impl StudioRuntime {
-    pub(super) fn new(host: &Arc<Mutex<HostCommandOwner>>, ports: RuntimePorts) -> Self {
+    pub(super) fn new(host: &Arc<Mutex<HostCommandOwner>>, ports: RuntimePorts) -> Arc<Self> {
         let mut ports = ports;
+        #[cfg(any(test, feature = "test-util"))]
+        if ports.fixture_claim.is_none()
+            && let Some(base) = std::env::var_os("KINEWRIGHT_C4_RECOVERY_FIXTURE_BASE")
+        {
+            let owner = host.lock().expect("new host owner");
+            let scope = owner
+                .config
+                .path
+                .as_ref()
+                .map_or(owner.instance.as_bytes(), |path| {
+                    path.as_os_str().as_encoded_bytes()
+                });
+            let key = kinewright_media::sha256_bytes(scope);
+            ports.fixture_claim = Some(PathBuf::from(base).join(&key[..16]));
+        }
         if ports.profiles.is_none() {
             ports.profiles = Some(Arc::new(RegisteredProfiles {
                 host: Arc::downgrade(host),
                 checks: ports.checks.clone(),
             }));
         }
-        Self {
+        {
+            let mut owner = host.lock().expect("new host owner");
+            owner.native_recovery_status = Some("cleanup pending: checking native recovery".into());
+            owner.native_recovery_pending = true;
+        }
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             host: Arc::downgrade(host),
             ports,
-            state: Mutex::default(),
-        }
+            state: Arc::default(),
+        })
     }
-    /// Every host open inspects the private claim. Recovery never launches work.
-    pub(super) fn recover_on_open(&self) -> io::Result<()> {
+    /// Called only by post-discovery updates. It never blocks an HTTP request.
+    fn begin_recovery(&self) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        if state.stopping
+            || state.recovered
+            || state.recovering
+            || state
+                .retry_at
+                .is_some_and(|at| at > std::time::Instant::now())
+        {
+            return Ok(());
+        }
+        if let Some(worker) = state.recovery_worker.take() {
+            let _ = worker.join();
+        }
         let host = self
             .host
             .upgrade()
             .ok_or_else(|| io::Error::other("host closed"))?;
-        {
-            let mut owner = host
-                .lock()
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            if let Ok(session) = owner.owner() {
-                let runs = session.orchestration_runs().map_err(io::Error::other)?;
-                for run in runs {
-                    let state = owner
-                        .owner()
-                        .map_err(io::Error::other)?
-                        .orchestration_projection(&run)
-                        .map_err(io::Error::other)?
-                        .ok_or_else(|| io::Error::other("run missing"))?;
-                    if state.outcome
-                        == crate::orchestration::orchestration_records::RunOutcome::Pending
-                        || state.cleanup
-                            != crate::orchestration::orchestration_records::RunCleanup::Settled
-                    {
-                        owner.restore_native_run(&run).map_err(io::Error::other)?;
+        let recovery_state = self.state.clone();
+        let runtime = self.me.clone();
+        #[cfg(any(test, feature = "test-util"))]
+        let fixture_root = self.ports.fixture_claim.clone();
+        #[cfg(not(any(test, feature = "test-util")))]
+        let fixture_root: Option<PathBuf> = None;
+        state.recovery_worker = Some(
+            std::thread::Builder::new()
+                .name("kinewright-studio-recovery".into())
+                .spawn(move || {
+                    let result = recover_on_open(&host, fixture_root.as_deref());
+                    let status = result
+                        .as_ref()
+                        .err()
+                        .map(|e| format!("cleanup pending: {e}"));
+                    if let Ok(mut owner) = host.lock() {
+                        owner.native_recovery_status.clone_from(&status);
+                        owner.native_recovery_pending = result.is_err();
                     }
-                }
-            }
-        }
-        let claim = {
-            #[cfg(any(test, feature = "test-util"))]
-            if let Some(root) = &self.ports.fixture_claim {
-                MachineClaim::recover_fixture(root)
-            } else {
-                MachineClaim::recover()
-            }
-            #[cfg(not(any(test, feature = "test-util")))]
-            MachineClaim::recover()
-        };
-        let claim = match claim {
-            Ok(claim) => claim,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.state
-                    .lock()
-                    .map_err(|error| io::Error::other(error.to_string()))?
-                    .recovered = true;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        let (project, run) = claim.claimed_run();
-        if host
-            .lock()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .spending_project()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .as_str()
-            != project
-        {
-            return Err(io::Error::other("another project's run requires recovery"));
-        }
-        let run: RunId = serde_json::from_value(serde_json::json!(run))?;
-        let (claim, _) = crate::effect_pump::recover_run(&host, claim, &run)?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let terminal = host
-            .lock()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .owner()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .orchestration_projection(&run)
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .is_some_and(|run| {
-                run.outcome != crate::orchestration::orchestration_records::RunOutcome::Pending
-                    && run.cleanup
-                        == crate::orchestration::orchestration_records::RunCleanup::Settled
-            });
-        if terminal {
-            claim.finish()?;
-        } else {
-            state.claim = Some((run, Arc::new(Mutex::new(claim))));
-        }
-        state.recovered = true;
+                    if let Ok(mut state) = recovery_state.lock() {
+                        state.recovering = false;
+                        state.recovered = result.is_ok();
+                        state.retry_at = result
+                            .is_err()
+                            .then(|| std::time::Instant::now() + Duration::from_millis(250));
+                    }
+                    if result.is_ok()
+                        && let Some(runtime) = runtime.upgrade()
+                    {
+                        runtime.update();
+                    }
+                })?,
+        );
+        state.recovering = true;
         Ok(())
     }
     pub(super) fn drive(&self) -> io::Result<()> {
+        self.begin_recovery()?;
         let host = self
             .host
             .upgrade()
@@ -200,8 +200,13 @@ impl StudioRuntime {
             .state
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?;
+        if runtime.stopping {
+            return Ok(());
+        }
         if !runtime.recovered {
-            return Err(io::Error::other("native recovery is not settled"));
+            return Err(io::Error::other(
+                "cleanup pending: native recovery is not settled",
+            ));
         }
         if runtime
             .worker
@@ -211,7 +216,15 @@ impl StudioRuntime {
             return Ok(());
         }
         if let Some(worker) = runtime.worker.take() {
-            let _ = worker.thread.join();
+            match worker.thread.join() {
+                Ok(Some(reason)) => {
+                    runtime.blocked = Some((worker.run, reason));
+                }
+                Err(_) => {
+                    runtime.blocked = Some((worker.run, "native runtime worker failed".into()));
+                }
+                Ok(None) => {}
+            }
         }
         if let Some((run, claim)) = runtime.claim.take() {
             let terminal = host
@@ -275,10 +288,17 @@ impl StudioRuntime {
                 }
             }
             let Some(candidate) = candidate else {
+                runtime.blocked = None;
                 return Ok(());
             };
             candidate
         };
+        if let Some((blocked_run, reason)) = &runtime.blocked {
+            if blocked_run == &run {
+                return Err(io::Error::other(reason.clone()));
+            }
+            runtime.blocked = None;
+        }
         #[cfg(not(any(test, feature = "test-util")))]
         let fixture = false;
         #[cfg(any(test, feature = "test-util"))]
@@ -309,6 +329,17 @@ impl StudioRuntime {
                 #[cfg(not(any(test, feature = "test-util")))]
                 MachineClaim::acquire(project.as_str(), run.0.as_str())
             }?;
+            let mut claim = claim;
+            let locator = host
+                .lock()
+                .map_err(|e| io::Error::other(e.to_string()))?
+                .owner()
+                .map_err(io::Error::other)?
+                .association()
+                .ok_or_else(|| io::Error::other("named project locator missing"))?
+                .path()
+                .to_path_buf();
+            claim.record_project_locator(&locator)?;
             let claim = Arc::new(Mutex::new(claim));
             runtime.claim = Some((run.clone(), claim.clone()));
             claim
@@ -342,6 +373,7 @@ impl StudioRuntime {
         let refusal_owner = Arc::downgrade(&host);
         let refusal_producer = producer.clone();
         let refusal_run = run.clone();
+        let worker_run = run.clone();
         let mut session =
             EffectPump::new(&host, producer, run, launcher, profiles, self.ports.ceiling);
         #[cfg(any(test, feature = "test-util"))]
@@ -373,31 +405,55 @@ impl StudioRuntime {
                     &cancelled,
                     &mut { observer },
                 );
-                #[cfg(test)]
-                eprintln!("C4_RUNTIME_STOP {stop:?}");
-                if let crate::SessionStop::Cancelled(crate::StopReason::Harness(reason)) = stop
-                    && let Some(host) = refusal_owner.upgrade()
-                    && let Ok(mut owner) = host.lock()
-                    && let Err(error) =
-                        owner.record_runtime_refusal(&refusal_producer, &refusal_run, &reason)
-                {
-                    owner.message =
-                        format!("native runtime refusal: {reason}; publication: {error}");
-                    #[cfg(test)]
-                    eprintln!("C4_RUNTIME_REFUSAL {}", owner.message);
+                if let crate::SessionStop::Cancelled(crate::StopReason::Harness(reason)) = stop {
+                    if let Some(host) = refusal_owner.upgrade()
+                        && let Ok(owner) = host.lock()
+                        && owner.owner().ok().and_then(|session| session.orchestration_projection(&refusal_run).ok().flatten())
+                            .is_some_and(|run| run.outcome != crate::orchestration::orchestration_records::RunOutcome::Pending
+                                && run.cleanup == crate::orchestration::orchestration_records::RunCleanup::Settled)
+                    { return None; }
+                    if let Some(host) = refusal_owner.upgrade()
+                        && let Ok(mut owner) = host.lock()
+                        && let Err(error) =
+                            owner.record_runtime_refusal(&refusal_producer, &refusal_run, &reason)
+                    {
+                        owner.message =
+                            format!("native runtime refusal: {reason}; publication: {error}");
+                    }
+                    return Some(format!("native runtime refusal: {reason}"));
                 }
+                None
             })?;
-        runtime.worker = Some(Worker { cancel, thread });
+        runtime.worker = Some(Worker {
+            run: worker_run,
+            cancel,
+            thread,
+        });
         Ok(())
     }
     pub(super) fn update(&self) {
-        if let Err(error) = self.drive()
-            && let Ok(mut state) = self.state.lock()
-        {
-            state.blocked = Some(error.to_string());
+        let _ = self.begin_recovery();
+        let recovered = self
+            .state
+            .lock()
+            .is_ok_and(|state| state.recovered && !state.stopping);
+        if recovered {
+            let status = self.drive().err().map(|error| error.to_string());
+            if let Some(host) = self.host.upgrade()
+                && let Ok(mut owner) = host.lock()
+            {
+                owner.native_recovery_status = status;
+            }
         }
     }
     pub(super) fn stop(&self) {
+        let recovery = self.state.lock().ok().and_then(|mut state| {
+            state.stopping = true;
+            state.recovery_worker.take()
+        });
+        if let Some(recovery) = recovery {
+            let _ = recovery.join();
+        }
         let worker = self
             .state
             .lock()
@@ -413,6 +469,122 @@ impl Drop for StudioRuntime {
     fn drop(&mut self) {
         self.stop();
     }
+}
+/// The same executor handles active-project, missing-private-state and foreign
+/// claims. This function is never on the child discovery/serving critical path.
+fn recover_on_open(
+    host: &Arc<Mutex<HostCommandOwner>>,
+    fixture_root: Option<&std::path::Path>,
+) -> io::Result<()> {
+    let mut claim = {
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(root) = fixture_root {
+            MachineClaim::inspect_fixture(root)
+        } else {
+            MachineClaim::inspect()
+        }
+        #[cfg(not(any(test, feature = "test-util")))]
+        {
+            let _ = fixture_root;
+            MachineClaim::inspect()
+        }
+    }?;
+    let mut already_recovered = None;
+    let (project, run) = claim.claimed_run();
+    if !project.is_empty() {
+        let project = project.to_owned();
+        let run: RunId = serde_json::from_value(serde_json::json!(run))?;
+        let active = host
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?
+            .owner()
+            .ok()
+            .and_then(|owner| owner.project_id().ok());
+        if active
+            .as_ref()
+            .is_some_and(|active| active.as_str() == project)
+        {
+            (claim, _) = crate::effect_pump::recover_run(host, claim, &run)?;
+            already_recovered = Some((project.clone(), run.clone()));
+        } else {
+            let locator = claim.project_locator().map(std::path::Path::to_path_buf);
+            let name = locator
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|p| p.to_str())
+                .unwrap_or(&project);
+            let pending =
+                || io::Error::other(format!("cleanup pending for {name}: open it to finish"));
+            let locator = locator.as_ref().ok_or_else(pending)?;
+            let parent = locator.parent().ok_or_else(pending)?.to_path_buf();
+            // No listener, attachment, runtime or profile factory is created for
+            // this owner. Its sole capability is reconciliation of this claim.
+            let mut owner = HostCommandOwner::open(super::HostConfig {
+                scheduler_settings: None,
+                project: project.clone(),
+                path: Some(locator.clone()),
+                roots: super::SessionRoots {
+                    read: vec![parent.clone()],
+                    write: vec![parent],
+                },
+                origin: super::HostOrigin::Headless,
+            })
+            .map_err(|_| pending())?;
+            if owner.spending_project().map_err(io::Error::other)?.as_str() != project {
+                return Err(pending());
+            }
+            owner.native_recovery_status = Some("recovery-only owner".into());
+            owner.native_recovery_pending = true;
+            owner.recovery_only = true;
+            let recovery_owner = Arc::new(Mutex::new(owner));
+            recovery_owner.lock().map_err(|_| pending())?.runtime_owner =
+                Arc::downgrade(&recovery_owner);
+            (claim, _) = crate::effect_pump::recover_run(&recovery_owner, claim, &run)?;
+        }
+        claim.clear_recovered_run()?;
+    }
+    let (runs, project, locator) = {
+        let owner = host.lock().map_err(|e| io::Error::other(e.to_string()))?;
+        let Ok(session) = owner.owner() else {
+            claim.finish()?;
+            return Ok(());
+        };
+        (
+            session.orchestration_runs().map_err(io::Error::other)?,
+            session.project_id().map_err(io::Error::other)?,
+            session
+                .association()
+                .ok_or_else(|| io::Error::other("project locator missing"))?
+                .path()
+                .to_path_buf(),
+        )
+    };
+    for run in runs {
+        if already_recovered
+            .as_ref()
+            .is_some_and(|(p, r)| p == project.as_str() && r == &run)
+        {
+            continue;
+        }
+        let unsettled = host
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?
+            .owner()
+            .map_err(io::Error::other)?
+            .orchestration_projection(&run)
+            .map_err(io::Error::other)?
+            .is_some_and(|state| {
+                state.outcome == crate::orchestration::orchestration_records::RunOutcome::Pending
+                    || state.cleanup
+                        != crate::orchestration::orchestration_records::RunCleanup::Settled
+            });
+        if unsettled {
+            claim.select_recovery_run(project.as_str(), run.0.as_str(), &locator)?;
+            (claim, _) = crate::effect_pump::recover_run(host, claim, &run)?;
+            claim.clear_recovered_run()?;
+        }
+    }
+    claim.finish()
 }
 struct Observer {
     #[cfg(any(test, feature = "test-util"))]

@@ -58,17 +58,26 @@ pub(super) fn fixture() -> (
     });
     bundle.save(&core, &inputs).unwrap();
     drop(bundle);
-    let host = WriterHost::start(HostConfig {
-        scheduler_settings: None,
-        project: "s3-capabilities".into(),
-        path: Some(path),
-        roots: SessionRoots {
-            read: vec![temp.root().into()],
-            write: vec![temp.root().into()],
+    let host = WriterHost::start_inner(
+        HostConfig {
+            scheduler_settings: None,
+            project: "s3-capabilities".into(),
+            path: Some(path),
+            roots: SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+            origin: HostOrigin::Headless,
         },
-        origin: HostOrigin::Headless,
-    })
+        HostAuth::generate().unwrap(),
+        None,
+        studio_runtime::RuntimePorts {
+            fixture_claim: Some(temp.path("fixture-machine")),
+            ..Default::default()
+        },
+    )
     .unwrap();
+    wait_runtime_recovery(&host);
     (temp, host, refs.into())
 }
 
@@ -689,6 +698,7 @@ fn s3_viewer_capabilities() {
         origin: HostOrigin::Headless,
     })
     .unwrap();
+    wait_runtime_recovery(&replacement);
     let expired =
         HostClient::connect(replacement.endpoint.clone(), old_auth, roots.clone()).unwrap();
     assert!(

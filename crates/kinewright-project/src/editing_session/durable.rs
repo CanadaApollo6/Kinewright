@@ -349,8 +349,12 @@ impl Ja1EditingSession {
             return Err(BundleError::Unsettled);
         }
         let core = self.candidate_core(frozen.base())?;
-        if self.candidate_binding(&frozen.source.branch)? != frozen.source
-            || *envelope != self.candidate_merge_envelope(frozen, envelope.id.clone())?
+        let mut expected = self.candidate_merge_envelope(frozen, envelope.id.clone())?;
+        if self.active_bundle()?.retained_candidate_merge(envelope)? {
+            expected.owner_epoch = envelope.owner_epoch;
+            expected.expected_revision = envelope.expected_revision;
+        }
+        if self.candidate_binding(&frozen.source.branch)? != frozen.source || *envelope != expected
         {
             return Err(BundleError::HistoryChanged);
         }
@@ -541,7 +545,10 @@ impl Ja1EditingSession {
         }
         let charge = self.registration_capacity(name)?;
         let bundle = self.active_bundle()?;
-        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;
+        let base_ref = bundle.current_candidate_base(&branch, base_ref)?;
+        let base = bundle
+            .store
+            .read_record::<SpecialistBaseRecord>(&base_ref)?;
         let checkpoint = bundle
             .store
             .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;
@@ -724,6 +731,22 @@ impl Ja1EditingSession {
                     .store()
                     .verify(&reference)
                     .is_ok()
+                && self
+                    .registered_bundle(&canonical)?
+                    .root()
+                    .is_some_and(|root| {
+                        root.candidate_recovery
+                            .get(&canonical.branch)
+                            .is_some_and(|binding| {
+                                binding.base_ref == reference
+                                    && self
+                                        .registered_bundle(&canonical)
+                                        .and_then(|bundle| {
+                                            bundle.checkpoint_reference(&canonical.branch)
+                                        })
+                                        .is_ok_and(|checkpoint| binding.checkpoint == checkpoint)
+                            })
+                    })
             {
                 *guard = canonical.clone();
                 return Ok(reference);
@@ -757,7 +780,13 @@ impl Ja1EditingSession {
                 )
             } else {
                 bundle
-                    .save_frozen_branch(&guard.core, &inputs, &cut, &guard.branch)
+                    .save_frozen_branch_with_base(
+                        &guard.core,
+                        &inputs,
+                        &cut,
+                        &guard.branch,
+                        Some(&reference),
+                    )
                     .map(|_| ())
             };
             if let Err(error) = publication {

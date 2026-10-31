@@ -26,6 +26,9 @@ impl HostCommandOwner {
         use crate::orchestration::orchestration_records::{
             AttemptReservation, DependencyReservation, TaskState,
         };
+        if self.recovery_only {
+            return Err(refused("recovery-only owner cannot reserve sends"));
+        }
         let mut state = self.spending_scope(producer, run)?;
         self.archive_retired_attempts(&mut state)?;
         if state
@@ -100,9 +103,9 @@ impl HostCommandOwner {
             nonce: kinewright_project::bundle_records::SessionId::fresh()?,
             owner_instance: kinewright_project::bundle_records::SessionId::fresh()?,
         };
-        let recovery_ref = self
-            .owner_mut()?
-            .admit_host_grant(&serde_json::to_vec(&identity)?)?;
+        let recovery_ref = self.owner_mut()?.admit_host_grant(&serde_json::to_vec(
+            &NativeLaunchIntent::new(&identity).map_err(refused)?,
+        )?)?;
         state.attempts.push(AttemptReservation {
             identity: identity.clone(),
             owner_epoch: self.owner()?.store()?.owner_epoch(),
@@ -131,11 +134,30 @@ impl HostCommandOwner {
         &mut self,
         producer: &HostAuth,
         identity: &ExecutionIdentity,
+        proof: &crate::guardian::AttemptRetirementProof<'_>,
     ) -> Result<(), HostError> {
         use crate::orchestration::orchestration_records::{
             AttemptOutcome, DependencyReservation, TaskState,
         };
+        if !same_native_attempt(identity, proof.identity()) {
+            return Err(refused("attempt retirement proof scope changed"));
+        }
         let mut state = self.spending_scope(producer, &identity.run)?;
+        if self
+            .recovery_attempt(&state, proof.identity())?
+            .is_some_and(|attempt| matches!(attempt.state, AttemptState::Retired(_)))
+        {
+            return Ok(());
+        }
+        if matches!(
+            proof,
+            crate::guardian::AttemptRetirementProof::NotDispatched(_)
+        ) && self
+            .native_launch_intent(&state, identity)?
+            .is_none_or(|intent| intent.dispatched || intent.native.is_some())
+        {
+            return Err(refused("no durable unstarted launch fence"));
+        }
         self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
@@ -165,6 +187,28 @@ impl HostCommandOwner {
         crate::orchestration::tasks::refresh_cleanup(&mut state);
         self.publish_native(producer, state, identity, vec![])
     }
+    pub(crate) fn native_launch_intent(
+        &self,
+        state: &RunProjection,
+        identity: &ExecutionIdentity,
+    ) -> Result<Option<NativeLaunchIntent>, HostError> {
+        let attempt = self
+            .recovery_attempt(state, &crate::native_launcher::native_identity(identity))?
+            .ok_or_else(|| refused("launch intent attempt missing"))?;
+        let bytes = self
+            .owner()?
+            .store()?
+            .read_evidence(&attempt.recovery_ref)?;
+        // Legacy records cannot prove a reboot. Bound private identities still
+        // recover through the normal native observer.
+        let Ok(intent) = serde_json::from_slice::<NativeLaunchIntent>(&bytes) else {
+            return Ok(None);
+        };
+        if intent.identity != *identity {
+            return Err(refused("launch intent identity changed"));
+        }
+        Ok(Some(intent))
+    }
     pub(crate) fn restore_native_run(
         &mut self,
         run: &crate::orchestration::orchestration_records::RunId,
@@ -183,4 +227,16 @@ impl HostCommandOwner {
         self.retain_run(run, &brief)?;
         Ok((self.run_producer(run)?, state))
     }
+}
+
+pub(crate) fn same_native_attempt(
+    identity: &ExecutionIdentity,
+    native: &crate::job_guardian::protocol::AttemptIdentity,
+) -> bool {
+    native.project == identity.project.as_str()
+        && native.run == identity.run.0.as_str()
+        && native.task == identity.task.0.as_str()
+        && native.attempt == identity.attempt.0.as_str()
+        && native.nonce == identity.nonce.as_str()
+        && native.owner_instance == identity.owner_instance.as_str()
 }

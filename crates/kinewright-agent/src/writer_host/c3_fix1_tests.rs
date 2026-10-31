@@ -203,6 +203,13 @@ struct HistoryCrashOwner {
     point: &'static str,
 }
 impl crate::native_launcher::InvocationOwner for HistoryCrashOwner {
+    fn unbound_completed(
+        &self,
+        identity: &ExecutionIdentity,
+        proof: &crate::guardian::UnboundCleanupProof,
+    ) -> std::io::Result<()> {
+        self.inner.unbound_completed(identity, proof)
+    }
     fn reserve(
         &self,
         v: &crate::orchestration::adapters::AuthorizedInvocation,

@@ -386,8 +386,8 @@ fn s4b_c2_lost_commit_ack_reopens_one_charge_and_one_execution() {
     let projection = f.projection(&run);
     assert_eq!(
         projection.attempts[0].state,
-        AttemptState::Contained,
-        "S4B_C2_RECOVERY_ACK_BEFORE_EXECUTION"
+        AttemptState::Retired(AttemptOutcome::Interrupted),
+        "S4B_C2_LOST_ACK_RETIRES_UNDER_PROOF"
     );
     let producer = f.producer(&run);
     assert!(

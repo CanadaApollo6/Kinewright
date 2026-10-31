@@ -14,6 +14,8 @@ use std::{
 struct RunClaim {
     project: String,
     run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locator: Option<PathBuf>,
 }
 
 /// The serialized host owns this guard until every native attempt is retired.
@@ -70,6 +72,7 @@ impl MachineClaim {
         claim.run = RunClaim {
             project: project.into(),
             run: run.into(),
+            locator: None,
         };
         write_record(&root.join("run.json"), &claim.run)?;
         claim.recovering = false;
@@ -86,6 +89,131 @@ impl MachineClaim {
         Ok(claim)
     }
 
+    /// Hold exclusive machine ownership even when the private run record vanished.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn inspect() -> io::Result<Self> {
+        Self::inspect_at(&machine_root()?)
+    }
+    #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
+    pub(crate) fn inspect_fixture(root: &Path) -> io::Result<Self> {
+        Self::inspect_at(root)
+    }
+    #[cfg(target_os = "linux")]
+    fn inspect_at(root: &Path) -> io::Result<Self> {
+        let mut claim = Self::locked(root)?;
+        match read_record(&root.join("run.json")) {
+            Ok(run) => claim.run = run,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Some(first) = claim.attempts.first() {
+                    if claim
+                        .attempts
+                        .iter()
+                        .any(|a| a.project != first.project || a.run != first.run)
+                    {
+                        return Err(io::Error::other(
+                            "cleanup pending: ambiguous orphan attempt scope",
+                        ));
+                    }
+                    claim.run = RunClaim {
+                        project: first.project.clone(),
+                        run: first.run.clone(),
+                        locator: None,
+                    };
+                    // Rebuild routing only. H1 plus independent native/boot proof
+                    // must still authorize every retirement in recover_run.
+                    write_record(&root.join("run.json"), &claim.run)?;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(claim)
+    }
+    /// The caller takes this path from its already-opened bundle, never an MCP request.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn record_project_locator(&mut self, path: &Path) -> io::Result<()> {
+        if !self.attempts.is_empty() || !path.is_absolute() || path.as_os_str().len() > 4096 {
+            return Err(io::Error::other(
+                "trusted project locator required before launch",
+            ));
+        }
+        self.run.locator = Some(path.to_path_buf());
+        write_record(&self.root.join("run.json"), &self.run)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn project_locator(&self) -> Option<&Path> {
+        self.run.locator.as_deref()
+    }
+    /// Select an H1 run for reconciliation without releasing the machine lock.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn select_recovery_run(
+        &mut self,
+        project: &str,
+        run: &str,
+        path: &Path,
+    ) -> io::Result<()> {
+        if !self.run.project.is_empty() || !self.attempts.is_empty() {
+            return Err(io::Error::other(
+                "cleanup pending: previous claim not reconciled",
+            ));
+        }
+        self.run = RunClaim {
+            project: project.into(),
+            run: run.into(),
+            locator: Some(path.into()),
+        };
+        self.recovering = true;
+        write_record(&self.root.join("run.json"), &self.run)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clear_recovered_run(&mut self) -> io::Result<()> {
+        if !self.attempts.is_empty() {
+            return Err(io::Error::other("cleanup pending"));
+        }
+        if !self.run.project.is_empty() {
+            fs::remove_file(self.root.join("run.json"))?;
+            sync_directory(&self.root)?;
+        }
+        self.run = RunClaim {
+            project: String::new(),
+            run: String::new(),
+            locator: None,
+        };
+        self.recovering = true;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn retire_after_reboot(
+        &mut self,
+        proof: &super::guardian::RebootCleanupProof,
+    ) -> io::Result<()> {
+        let identity = proof.identity();
+        self.check_run(&identity.project, &identity.run)?;
+        if self.attempts.contains(identity) {
+            let job = self.root.join(format!("job-{}", identity.nonce));
+            match fs::symlink_metadata(&job) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(io::Error::other("native state directory replaced"));
+                }
+                Ok(_) => fs::remove_dir_all(job)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            for path in [
+                record_path(&self.root, identity),
+                self.root.join(format!("native-{}.json", identity.nonce)),
+                self.transport_path(identity),
+            ] {
+                match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            sync_directory(&self.root)?;
+            self.attempts.retain(|a| a != identity);
+        }
+        Ok(())
+    }
     fn locked(root: &Path) -> io::Result<Self> {
         if !root.is_absolute() {
             return Err(io::Error::other("absolute machine state root required"));
@@ -147,6 +275,7 @@ impl MachineClaim {
             run: RunClaim {
                 project: String::new(),
                 run: String::new(),
+                locator: None,
             },
             attempts,
             recovering: true,
@@ -413,8 +542,10 @@ impl MachineClaim {
         if !self.attempts.is_empty() {
             return Err(io::Error::other("cleanup_blocked"));
         }
-        fs::remove_file(self.root.join("run.json"))?;
-        sync_directory(&self.root)?;
+        if !self.run.project.is_empty() {
+            fs::remove_file(self.root.join("run.json"))?;
+            sync_directory(&self.root)?;
+        }
         self.lock.unlock()?;
         Ok(())
     }

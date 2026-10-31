@@ -360,6 +360,7 @@ pub fn verify_projection_payloads(
         .and_then(|f| f.studio.as_ref())
         .ok_or(BundleError::Unsettled)?;
     if before.inspection_document() != after.inspection_document()
+        || left.candidate_recovery != right.candidate_recovery
         || left.branch_index_ref != right.branch_index_ref
         || left.input_manifest_ref != right.input_manifest_ref
         || left.version_index_ref != right.version_index_ref

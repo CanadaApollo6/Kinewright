@@ -1121,6 +1121,13 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         .filter(|id| **id != root.manual_branch_id)
         .cloned()
         .collect();
+    for (branch, binding) in &root.candidate_recovery {
+        if index.get(branch) != Some(&binding.checkpoint) {
+            return Err(BundleError::Corrupt(
+                "candidate recovery checkpoint mismatch".into(),
+            ));
+        }
+    }
     if root.candidate_branch_ids != candidates {
         return Err(BundleError::Corrupt(
             "candidate branch inventory mismatch".into(),

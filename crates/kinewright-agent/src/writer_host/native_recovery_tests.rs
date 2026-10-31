@@ -93,6 +93,13 @@ struct CrashCommit {
     scratch: std::path::PathBuf,
 }
 impl crate::native_launcher::InvocationOwner for CrashCommit {
+    fn unbound_completed(
+        &self,
+        identity: &ExecutionIdentity,
+        proof: &crate::guardian::UnboundCleanupProof,
+    ) -> std::io::Result<()> {
+        self.inner.unbound_completed(identity, proof)
+    }
     fn reserve(
         &self,
         v: &crate::orchestration::adapters::AuthorizedInvocation,

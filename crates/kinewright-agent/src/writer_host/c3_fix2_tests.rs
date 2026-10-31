@@ -59,9 +59,12 @@ fn s4b_c3_fix2_session_commands_refuse_unpaired_task_checkpoint() {
         drop(core);
         drop(claim);
         let f = restart_history_fixture(f);
-        let claim =
-            crate::execution_claim::MachineClaim::recover_fixture(&f.temp.path("history-machine"))
-                .unwrap();
+        let claim = crate::execution_claim::MachineClaim::acquire_fixture(
+            &f.temp.path("history-machine"),
+            start.envelope.project.as_str(),
+            run.0.as_str(),
+        )
+        .unwrap();
         let host = f.host.owner.upgrade().unwrap();
         let (claim, _) = crate::effect_pump::recover_run(&host, claim, &run).unwrap();
         // Check the shared boundary before trying strict continuation, so the mutation

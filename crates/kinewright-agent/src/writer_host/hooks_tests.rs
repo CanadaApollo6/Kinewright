@@ -30,6 +30,7 @@ mod tests {
     include!("c3_fix2_tests.rs");
     include!("c3_fix3_tests.rs");
     include!("c4_tests.rs");
+    include!("c4_fix1_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,
@@ -78,7 +79,7 @@ mod tests {
                 write: vec![temp.root().into()],
             };
             let issuer_auth = HostAuth::generate().unwrap();
-            let host = WriterHost::start_with_issuer(
+            let host = WriterHost::start_inner(
                 HostConfig {
                     scheduler_settings: None,
                     project: "hooks".into(),
@@ -88,8 +89,13 @@ mod tests {
                 },
                 HostAuth::generate().unwrap(),
                 Some(issuer_auth.clone()),
+                super::super::studio_runtime::RuntimePorts {
+                    fixture_claim: Some(temp.path("fixture-machine")),
+                    ..Default::default()
+                },
             )
             .unwrap();
+            wait_runtime_recovery(&host);
             let editor = host.client();
             let issuer =
                 HostIssuer::new(host.endpoint.clone(), issuer_auth.clone(), roots).unwrap();
@@ -575,17 +581,18 @@ mod tests {
         projection.tasks[0].state = TaskState::Preparing;
         projection.tasks[0].progress.capacity =
             DependencyReservation::Backed(identity.attempt.clone());
+        let recovery_ref = fixture_launch_intent(f, &identity, false, false);
         projection.attempts.push(AttemptReservation {
             identity: identity.clone(),
             owner_epoch: epoch,
             state: AttemptState::Reserved,
-            recovery_ref: f.brief.assignment.clone(),
+            recovery_ref: recovery_ref.clone(),
         });
         projection.cleanup = RunCleanup::Pending(vec![CleanupIdentity {
             attempt: identity.attempt.clone(),
             nonce: identity.nonce.clone(),
             owner_instance: identity.owner_instance.clone(),
-            recovery_ref: f.brief.assignment.clone(),
+            recovery_ref: recovery_ref.clone(),
         }]);
         publish_projection(f, &actor, &run, projection, Some(&identity));
         (run, identity, actor)
@@ -975,6 +982,7 @@ mod tests {
             Some(issuer_auth.clone()),
         )
         .unwrap();
+        wait_runtime_recovery(&host);
         let editor = host.client();
         let issuer = HostIssuer::new(
             host.endpoint.clone(),

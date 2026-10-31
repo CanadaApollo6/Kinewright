@@ -72,6 +72,7 @@ impl From<rustix::io::Errno> for BundleError {
     }
 }
 
+pub use crate::candidate_recovery::CandidateRecovery;
 use crate::{
     bundle_records::{BranchId, HeadId, ObjectRef, RecordKind},
     project::{ProjectFile, ProjectSaveError},
@@ -108,6 +109,9 @@ pub struct StudioRoot {
     pub manual_switch_generation: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidate_branch_ids: Vec<BranchId>,
+    /// The current recovery base belongs to this exact branch checkpoint.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub candidate_recovery: BTreeMap<BranchId, CandidateRecovery>,
     pub branch_index_ref: ObjectRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_index_ref: Option<ObjectRef>,
@@ -147,6 +151,13 @@ impl StudioRoot {
                 != self.origin_project_ids.len()
         {
             return Err(BundleError::Capacity("project origins"));
+        }
+        if self.candidate_recovery.len() > self.candidate_branch_ids.len() + 1 {
+            return Err(BundleError::Capacity("candidate recovery bindings"));
+        }
+        for binding in self.candidate_recovery.values() {
+            crate::studio_records::kind(&binding.checkpoint, RecordKind::BranchCheckpoint)?;
+            crate::studio_records::kind(&binding.base_ref, RecordKind::SpecialistBase)?;
         }
         if self.generation == 0 || self.manual_switch_generation >= self.generation {
             return Err(BundleError::Unsupported(
@@ -211,6 +222,11 @@ impl StudioRoot {
             self.input_manifest_ref.clone(),
             self.store_manifest_ref.clone(),
         ];
+        refs.extend(
+            self.candidate_recovery
+                .values()
+                .flat_map(|binding| [binding.checkpoint.clone(), binding.base_ref.clone()]),
+        );
         refs.extend(self.version_index_ref.clone());
         refs.extend(self.feedback_index_ref.clone());
         refs.extend(self.run_index_ref.clone());
@@ -813,6 +829,7 @@ pub struct ProjectBundle {
     pub(crate) voice_slots: crate::voice_store::VoiceSlots,
 }
 pub(crate) struct PendingSave {
+    pub(crate) candidate_base: Option<(BranchId, ObjectRef)>,
     pub(crate) core: Core,
     pub(crate) barrier: Option<crate::history_save::FloorBarrier>,
     pub(crate) root_sha256: Option<String>,
@@ -1090,18 +1107,7 @@ impl ProjectBundle {
             .root
             .as_ref()
             .ok_or_else(|| BundleError::Corrupt("no root".into()))?;
-        let mut refs = vec![
-            root.branch_index_ref.clone(),
-            root.input_manifest_ref.clone(),
-            root.store_manifest_ref.clone(),
-        ];
-        refs.extend(root.version_index_ref.clone());
-        refs.extend(root.feedback_index_ref.clone());
-        refs.extend(root.run_index_ref.clone());
-        refs.extend(root.claim_index_ref.clone());
-        refs.extend(root.receipt_index_ref.clone());
-        refs.extend(root.issuer_state_ref.clone());
-        Ok(refs)
+        Ok(root.references())
     }
     #[must_use]
     pub fn root(&self) -> Option<&StudioRoot> {
@@ -1402,7 +1408,7 @@ impl ProjectBundle {
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
         reconcile_core_save(core)?;
-        self.publish_core_admitted(core, selected, inputs, branch)
+        self.publish_core_admitted(core, selected, inputs, branch, None)
     }
 
     /// Only the local lifecycle can save its exact frozen cut. Public saves still refuse Frozen.
@@ -1422,6 +1428,16 @@ impl ProjectBundle {
         cut: &kinewright_core::AcceptedCut,
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
+        self.save_frozen_branch_with_base(core, inputs, cut, branch, None)
+    }
+    pub(crate) fn save_frozen_branch_with_base(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+        cut: &kinewright_core::AcceptedCut,
+        branch: &BranchId,
+        base: Option<&ObjectRef>,
+    ) -> Result<BundleSaveReport, BundleError> {
         let owner = self.attach_core(core)?;
         if core.attachment_state().map_err(history_error)?
             != kinewright_core::AttachmentState::Frozen
@@ -1436,7 +1452,7 @@ impl ProjectBundle {
             return Err(BundleError::HistoryBarrierInvariant);
         }
         crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
-        self.publish_core_admitted(core, cut.history(), inputs, branch)
+        self.publish_core_admitted(core, cut.history(), inputs, branch, base)
     }
 
     fn publish_core_admitted(
@@ -1445,6 +1461,7 @@ impl ProjectBundle {
         selected: &HistorySnapshot,
         inputs: &ObjectRef,
         branch: &BranchId,
+        base: Option<&ObjectRef>,
     ) -> Result<BundleSaveReport, BundleError> {
         if self.unsettled {
             return Err(BundleError::Unsettled);
@@ -1488,24 +1505,13 @@ impl ProjectBundle {
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("history_selected");
         let barrier = pending_floor(core, transition)?;
-        self.publish_barrier(core, barrier, selected, &bounded.history, inputs, branch)
-    }
-
-    pub(crate) fn publish_barrier(
-        &mut self,
-        core: &Core,
-        barrier: Option<crate::history_save::FloorBarrier>,
-        history: &HistorySnapshot,
-        selected: &HistorySnapshot,
-        inputs: &ObjectRef,
-        branch: &BranchId,
-    ) -> Result<BundleSaveReport, BundleError> {
         self.pending_save = Some(PendingSave {
             core: core.clone(),
             barrier,
             root_sha256: None,
+            candidate_base: base.map(|reference| (branch.clone(), reference.clone())),
         });
-        self.publish_pending(history, selected, inputs, branch)
+        self.publish_pending(selected, &bounded.history, inputs, branch)
     }
 
     pub(crate) fn publish_pending(

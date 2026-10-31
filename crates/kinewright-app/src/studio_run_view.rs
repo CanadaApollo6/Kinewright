@@ -5,6 +5,7 @@ use kinewright_project::orchestration_accounting::UsageTotals;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunView {
     pub(crate) elapsed: String,
+    pub(crate) runtime_status: Option<String>,
     pub(crate) stop_reason: Option<String>,
     pub(crate) tasks: Vec<TaskView>,
 }
@@ -18,6 +19,7 @@ impl RunView {
     pub(crate) fn of(page: &RunViewPage) -> Self {
         let accounting = page.accounting.as_ref();
         Self {
+            runtime_status: page.runtime_status.clone(),
             elapsed: accounting.map_or_else(
                 || "Elapsed unavailable / 6 hours".into(),
                 |record| {

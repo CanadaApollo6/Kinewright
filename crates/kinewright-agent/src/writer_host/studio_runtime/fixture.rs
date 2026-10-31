@@ -279,3 +279,21 @@ impl ConnectorRuntimeChecks for Factory {
             .ok_or(CertificationRefusal::ExecutableIdentity)
     }
 }
+
+/// A bounded proof-observation barrier for the real child-launch witness. No
+/// provider profile, authority, or evidence can be supplied through this port.
+pub(crate) fn recovery_barrier() -> io::Result<()> {
+    let Some(path) = std::env::var_os("KINEWRIGHT_C4_RECOVERY_FIXTURE_BARRIER") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    std::fs::write(path.join("entered"), b"")?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !path.join("release").exists() {
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("fixture recovery proof barrier expired"));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}

@@ -82,41 +82,10 @@ fn history_turn(
     );
 }
 fn restart_history_fixture(f: Fixture) -> Fixture {
-    let Fixture {
-        host,
-        temp,
-        brief,
-        issuer_auth,
-        ..
-    } = f;
-    drop(host);
-    let roots = SessionRoots {
-        read: vec![temp.root().into()],
-        write: vec![temp.root().into()],
-    };
-    let host = WriterHost::start_with_issuer(
-        HostConfig {
-            scheduler_settings: None,
-            project: "hooks".into(),
-            path: Some(temp.path("project.kinewright")),
-            roots: roots.clone(),
-            origin: HostOrigin::Headless,
-        },
-        HostAuth::generate().unwrap(),
-        Some(issuer_auth.clone()),
-    )
-    .unwrap();
-    let editor = host.client();
-    let issuer = HostIssuer::new(host.endpoint.clone(), issuer_auth.clone(), roots).unwrap();
-    Fixture {
-        host,
-        editor,
-        issuer,
-        issuer_auth,
-        brief,
-        temp,
-    }
+    let machine = f.temp.path("history-machine");
+    c4_restart(f, &machine)
 }
+
 #[test]
 fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
     use kinewright_core::Command;
@@ -214,11 +183,21 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
     drop(claim);
     let f = restart_history_fixture(f);
     assert!(second_endpoint.check_live().is_err());
-    let claim =
-        crate::execution_claim::MachineClaim::recover_fixture(&f.temp.path("history-machine"))
-            .unwrap();
-    let (claim, producer) =
-        crate::effect_pump::recover_run(&f.host.owner.upgrade().unwrap(), claim, &run).unwrap();
+    let claim = crate::execution_claim::MachineClaim::acquire_fixture(
+        &f.temp.path("history-machine"),
+        f.host
+            .owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .spending_project()
+            .unwrap()
+            .as_str(),
+        run.0.as_str(),
+    )
+    .unwrap();
+    let producer = f.producer(&run);
     let (third, _, _, third_core) = history_task_endpoint(&f, &run);
     assert_ne!(second.attempt, third.attempt);
     assert_eq!(
@@ -305,11 +284,21 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
     drop(fourth_core);
     drop(claim);
     let f = restart_history_fixture(f);
-    let claim =
-        crate::execution_claim::MachineClaim::recover_fixture(&f.temp.path("history-machine"))
-            .unwrap();
-    let (claim, producer) =
-        crate::effect_pump::recover_run(&f.host.owner.upgrade().unwrap(), claim, &run).unwrap();
+    let claim = crate::execution_claim::MachineClaim::acquire_fixture(
+        &f.temp.path("history-machine"),
+        f.host
+            .owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .spending_project()
+            .unwrap()
+            .as_str(),
+        run.0.as_str(),
+    )
+    .unwrap();
+    let producer = f.producer(&run);
     let (fifth, _, fifth_endpoint, fifth_core) = history_task_endpoint(&f, &run);
     assert!(
         fifth_endpoint.admit().is_err(),

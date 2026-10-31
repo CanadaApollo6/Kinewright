@@ -1128,6 +1128,7 @@ impl SessionStore {
         )?;
         let (mut target, before, prepared) = destination(path, limits)?;
         target.pending_save = Some(crate::bundle::PendingSave {
+            candidate_base: None,
             core: core.clone(),
             barrier,
             root_sha256: None,

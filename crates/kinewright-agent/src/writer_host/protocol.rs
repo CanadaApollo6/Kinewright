@@ -527,6 +527,8 @@ pub enum HostChoiceKind {
     reason = "Independent wire observations and explicit consent flags reflect the existing authoritative owner states"
 )]
 pub struct HostStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_runtime_status: Option<String>,
     #[serde(default)]
     pub project_id: Option<kinewright_project::bundle_records::ProjectId>,
     #[serde(default)]

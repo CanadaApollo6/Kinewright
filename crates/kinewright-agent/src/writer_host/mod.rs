@@ -19,7 +19,7 @@ mod resolve;
 mod revise;
 pub(crate) mod spending;
 #[cfg(target_os = "linux")]
-mod studio_runtime;
+pub(crate) mod studio_runtime;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use studio_runtime::fixture::{ProtocolFixture, ProtocolFixtureMode, ProtocolObservation};
 mod task_history;
@@ -456,14 +456,7 @@ impl WriterHost {
             .map_err(|_| HostError::Protocol("host owner unavailable".into()))?
             .runtime_owner = Arc::downgrade(&owner);
         #[cfg(target_os = "linux")]
-        let runtime = Arc::new(studio_runtime::StudioRuntime::new(&owner, ports));
-        #[cfg(target_os = "linux")]
-        if let Err(error) = runtime.recover_on_open() {
-            owner
-                .lock()
-                .map_err(|_| HostError::Protocol("host unavailable".into()))?
-                .message = format!("cleanup pending: {error}");
-        }
+        let runtime = studio_runtime::StudioRuntime::new(&owner, ports);
         let roots = config.roots.canonicalize()?;
         let (listener, address) = bind_loopback()?;
         let endpoint = HostEndpoint {
@@ -560,6 +553,9 @@ impl WriterHost {
     }
     /// Waits for an authenticated Shutdown command; dropping the router runs all owner Drops.
     pub fn wait(self) {
+        // The shipping child calls wait only after flushing discovery.
+        #[cfg(target_os = "linux")]
+        self.runtime.update();
         if let Some(thread) = &self.server.thread {
             while !thread.is_finished() {
                 thread::park_timeout(Duration::from_millis(20));
@@ -571,10 +567,11 @@ impl Drop for WriterHost {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner.upgrade() {
-            owner
+            let mut owner = owner
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .revoke_native_owner(None);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            owner.recovery_only = true;
+            owner.revoke_native_owner(None);
         }
         #[cfg(target_os = "linux")]
         self.runtime.stop();
@@ -1171,6 +1168,12 @@ impl BorrowedSourceReader for RemoteSource {
 )]
 pub struct HostCommandOwner {
     runtime_owner: std::sync::Weak<Mutex<HostCommandOwner>>,
+    #[cfg(target_os = "linux")]
+    native_recovery_status: Option<String>,
+    #[cfg(target_os = "linux")]
+    native_recovery_pending: bool,
+    #[cfg(target_os = "linux")]
+    recovery_only: bool,
     hooks: orchestration::Hooks,
     attachments: Vec<auth::Attachment>,
     next_attachment_id: u64,
@@ -1329,6 +1332,12 @@ impl HostCommandOwner {
         }
         let mut host = Self {
             runtime_owner: std::sync::Weak::new(),
+            #[cfg(target_os = "linux")]
+            native_recovery_status: None,
+            #[cfg(target_os = "linux")]
+            native_recovery_pending: false,
+            #[cfg(target_os = "linux")]
+            recovery_only: false,
             hooks: orchestration::Hooks::default(),
             attachments: Vec::new(),
             next_attachment_id: 1,
@@ -1484,6 +1493,14 @@ impl HostCommandOwner {
                     | HostCommand::Shutdown
             );
             if write {
+                #[cfg(target_os = "linux")]
+                if self.recovery_only {
+                    return Err(HostRefusal::new(
+                        "recovery_only",
+                        "this owner only reconciles retained execution",
+                    )
+                    .into());
+                }
                 self.prove_retention()?;
             }
             // Every named access honors the forwarded roots again. Its IO owner already holds
@@ -2400,6 +2417,8 @@ impl HostCommandOwner {
     }
     fn status(&self) -> HostStatus {
         let mut status = HostStatus {
+            #[cfg(target_os = "linux")]
+            native_runtime_status: self.native_recovery_status.clone(),
             continuation_runs: self
                 .hooks
                 .runs
@@ -3256,3 +3275,31 @@ mod c12_tests;
 mod ja_s3_host;
 #[cfg(all(test, target_os = "linux"))]
 mod s2h_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn wait_runtime_recovery(host: &WriterHost) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        host.runtime.update();
+        let status = host
+            .client()
+            .request(HostCommand::Status)
+            .unwrap()
+            .status
+            .native_runtime_status;
+        if status.is_none() {
+            return;
+        }
+        if status
+            .as_deref()
+            .is_some_and(|s| !s.contains("checking native recovery"))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "C4_RECOVERY_FINISH {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

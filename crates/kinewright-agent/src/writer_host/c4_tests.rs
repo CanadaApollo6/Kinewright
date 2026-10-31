@@ -5,6 +5,9 @@ struct C4Mcp {
 }
 impl C4Mcp {
     fn new(f: &Fixture, run: &RunId, task: &TaskId) -> Self {
+        Self::for_host(&f.host, run, task)
+    }
+    fn for_host(host: &WriterHost, run: &RunId, task: &TaskId) -> Self {
         use rmcp::{
             ServiceExt,
             transport::{
@@ -12,7 +15,7 @@ impl C4Mcp {
                 streamable_http_client::StreamableHttpClientTransportConfig,
             },
         };
-        let host = f.host.owner.upgrade().unwrap();
+        let host = host.owner.upgrade().unwrap();
         let owner = host.lock().unwrap();
         let server = owner
             .start_task_server(&owner.run_producer(run).unwrap(), run, task)
@@ -411,7 +414,7 @@ fn c4_reserve_task(
         identity: execution.clone(),
         owner_epoch: epoch,
         state: AttemptState::Reserved,
-        recovery_ref: f.brief.assignment.clone(),
+        recovery_ref: fixture_launch_intent(f, &execution, false, false),
     });
     let record = state.tasks.iter_mut().find(|t| &t.id == task).unwrap();
     record.state = TaskState::Preparing;
@@ -465,6 +468,7 @@ fn c4_restart(f: Fixture, claim_root: &std::path::Path) -> Fixture {
         ports,
     )
     .unwrap();
+    wait_runtime_recovery(&host);
     let editor = host.client();
     let issuer = HostIssuer::new(host.endpoint.clone(), issuer_auth.clone(), roots).unwrap();
     Fixture {
@@ -802,6 +806,7 @@ fn s4b_c4_host_session_drives_production_effect_pump() {
         fixture.ports(),
     )
     .unwrap();
+    wait_runtime_recovery(&host);
     let editor = host.client();
     let issuer = HostIssuer::new(host.endpoint.clone(), issuer_auth.clone(), roots).unwrap();
     let f = Fixture {
@@ -968,16 +973,51 @@ fn s4b_c4_host_session_drives_production_effect_pump() {
 }
 #[test]
 fn s4b_c4_production_has_no_contained_driver_path() {
-    for source in [
-        include_str!("studio_runtime.rs"),
-        include_str!("mod.rs"),
-        include_str!("../orchestration/effect_pump.rs"),
-    ] {
-        assert!(
-            !source.contains("ContainedDriver"),
-            "C4_NO_CONTAINED_DRIVER_REACHABILITY"
-        );
+    let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    let mut read = 0;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if path.file_name().is_none_or(|name| name != "ja_harness") {
+                    pending.push(path);
+                }
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy();
+            if path.extension().is_none_or(|extension| extension != "rs")
+                || name.ends_with("_tests.rs")
+                || name == "fixture.rs"
+                || name == "kinewright-eval.rs"
+                || name == "ja_harness.rs"
+            {
+                continue;
+            }
+            let whole = std::fs::read_to_string(&path)
+                .unwrap()
+                .replace("\r\n", "\n");
+            let source = whole.split("#[cfg(test)]\nmod tests {").next().unwrap();
+            let source = source
+                .split("#[cfg(all(test, target_os = \"linux\"))]\nmod tests {")
+                .next()
+                .unwrap();
+            read += 1;
+            // Exclude only the three declarations, never any constructor/use.
+            let source = source
+                .replace("pub struct ContainedDriver<L>", "")
+                .replace("impl<L: GuardianLauncher> ContainedDriver<L>", "")
+                .replace(
+                    "impl<L: GuardianLauncher> AgentDriver for ContainedDriver<L>",
+                    "",
+                );
+            assert!(
+                !source.contains("ContainedDriver"),
+                "C4_NO_CONTAINED_DRIVER_REACHABILITY {}",
+                path.display()
+            );
+        }
     }
+    assert!(read > 80, "C4_SCAN_NONEMPTY read={read}");
     let runtime = include_str!("studio_runtime.rs");
     assert!(
         runtime.contains("EffectPump::new") && runtime.contains("crate::pump_session("),

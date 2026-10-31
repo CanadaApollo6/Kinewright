@@ -451,6 +451,9 @@ fn local_reply(result: Result<ReceiptLookup, BundleError>) -> Reply {
 
 /// The owner a feedback write reaches: the in-process writer or the private host.
 pub(crate) trait FeedbackPort {
+    fn runtime_status(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
     /// Seal one bounded evidence object. In-process owners return its pin.
     fn admit(
         &mut self,
@@ -491,6 +494,7 @@ pub(crate) trait FeedbackPort {
         Ok(RunViewPage {
             projection: self.observe(run)?,
             accounting: None,
+            runtime_status: None,
             full_refresh: true,
             allowed_actions: vec![],
         })
@@ -738,6 +742,12 @@ impl HostFeedback<'_> {
     }
 }
 impl FeedbackPort for HostFeedback<'_> {
+    fn runtime_status(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .request(kinewright_agent::writer_host::HostCommand::Status)?
+            .status
+            .native_runtime_status)
+    }
     fn admit(
         &mut self,
         kind: FeedbackEvidenceKind,
@@ -1377,6 +1387,7 @@ pub(crate) struct Feedback {
     pub(crate) saved: Vec<SavedNote>,
     pub(crate) batches: Vec<FeedbackBatchId>,
     pub(crate) message: Option<String>,
+    pub(crate) runtime_status: Option<String>,
     pub(crate) loaded: bool,
     pub(crate) scene: Option<String>,
     /// Where this project's feedback is kept between sessions.
@@ -1854,6 +1865,7 @@ impl Feedback {
     }
     /// Reload the private saved list. Saved-but-unsubmitted notes never leave this port.
     pub(crate) fn refresh(&mut self, port: &dyn FeedbackPort) -> Result<(), String> {
+        self.runtime_status = port.runtime_status()?;
         let index = port.index()?;
         let mut saved = Vec::new();
         for (comment, revisions) in &index.revisions {
@@ -2197,14 +2209,21 @@ impl Feedback {
     }
     /// Whether a linked run has not finished, so Notes keeps reading it.
     pub(crate) fn observing(&self) -> bool {
-        self.rows
-            .iter()
-            .any(|row| row.run.is_some() && !row.settled())
+        self.runtime_status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("cleanup pending"))
+            || self
+                .rows
+                .iter()
+                .any(|row| row.run.is_some() && !row.settled())
     }
     /// Re-read run links and unfinished runs. This touches only the run rows:
     /// the selection, drafts and manual work stay exactly as they are.
     pub(crate) fn observe_runs(&mut self, port: &dyn FeedbackPort) {
         self.observed_at = Some(std::time::Instant::now());
+        if let Ok(status) = port.runtime_status() {
+            self.runtime_status = status;
+        }
         let Ok(index) = port.index() else {
             return;
         };
@@ -3007,6 +3026,9 @@ impl KinewrightApp {
         if let Some(message) = &self.focused().studio.feedback.message {
             ui.colored_label(po0::TEXT_2, message);
         }
+        if let Some(status) = &self.focused().studio.feedback.runtime_status {
+            ui.colored_label(po0::TEXT_2, status);
+        }
         let fps = self.program_document().fps;
         let pending = self.focused().studio.feedback.submission.is_some()
             || self.focused().studio.feedback.revise.is_some();
@@ -3305,6 +3327,7 @@ impl KinewrightApp {
                                 ui.small(&task.usage);
                             }
                             ui.small(&state.view.elapsed);
+                            if let Some(status) = &state.view.runtime_status { ui.small(status); }
                             if let Some(reason) = &state.view.stop_reason { ui.small(reason); }
                         });
                     }

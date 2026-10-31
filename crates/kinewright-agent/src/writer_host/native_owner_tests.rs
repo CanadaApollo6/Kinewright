@@ -4,6 +4,8 @@ struct LiveNative {
     claim: Arc<Mutex<crate::execution_claim::MachineClaim>>,
     scratch: std::path::PathBuf,
     control: crate::guardian::StartupControl,
+    original: std::path::PathBuf,
+    machine: std::path::PathBuf,
     _unit: NativeUnitCleanup,
 }
 impl LiveNative {
@@ -35,24 +37,27 @@ impl LiveNative {
             claim,
             scratch,
             control,
+            original: f.temp.path("project.kinewright"),
+            machine: f.temp.path("native-machine"),
             _unit: unit,
         }
     }
-    fn retired(&self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.claim.lock().unwrap().retained_attempts() != 0 {
-            if Instant::now() >= deadline {
-                return false;
+    fn cleanup_proven(&self) -> bool {
+        let native = crate::native_launcher::native_identity(&self.execution);
+        let recovery = self.claim.lock().unwrap().recovery(&native);
+        match recovery {
+            Ok(recovery) => crate::guardian::RecoveryObserver::recover_cleanup(&recovery).is_ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.claim.lock().unwrap().retained_attempts() == 0
             }
-            std::thread::sleep(Duration::from_millis(1));
+            Err(_) => false,
         }
-        true
     }
     fn finish(mut self) {
         // Also cleans a mutated failure before any assertion ends the test.
         self.session.interrupt();
         drop(self.session);
-        finish_stopped_native(self.claim);
+        finish_native_after_owner_loss(self.claim, &self.original, &self.machine);
         std::fs::remove_dir_all(self.scratch).unwrap();
     }
 }
@@ -93,7 +98,8 @@ fn s4b_c2_fix2_save_as_revokes_executing_native() {
         .unwrap()
         .snapshot_read_owner();
     let closed = live.control.closed();
-    let retired = live.retired();
+    let retired = live.cleanup_proven();
+    drop(f.host);
     live.finish();
     assert!(reply.error.is_none(), "S4B_C2_FIX2_SAVE_AS_ACCEPTED");
     assert_ne!(before, after, "S4B_C2_FIX2_SAVE_AS_CHANGED_OWNER");
@@ -172,7 +178,17 @@ fn s4b_c2_fix2_save_as_before_commit_revokes_lifetime() {
         session.interrupt();
         drop(session);
     }
-    finish_stopped_native(claim);
+    assert_eq!(
+        claim.lock().unwrap().retained_attempts(),
+        1,
+        "C4_STARTUP_OWNER_CHANGE_RETAINS_UNACKNOWLEDGED_PROOF"
+    );
+    drop(f.host);
+    finish_native_after_owner_loss(
+        claim,
+        &f.temp.path("project.kinewright"),
+        &f.temp.path("native-machine"),
+    );
     let executed = scratch.join("executions").exists();
     std::fs::remove_dir_all(scratch).unwrap();
     assert!(accepted, "S4B_C2_FIX2_STARTUP_SAVE_AS_ACCEPTED");
@@ -229,6 +245,7 @@ fn s4b_c2_fix2_detach_retains_native_owner() {
         .detached
         .as_ref()
         .is_some_and(|detached| detached.retained_runs.contains(&live.execution.run));
+    drop(f.host);
     live.finish();
     assert_eq!(refused.error.unwrap().code, "continuation_required");
     assert!(refused_live, "S4B_C2_FIX2_REFUSED_SHUTDOWN_RETAINS_OWNER");
@@ -248,7 +265,7 @@ fn s4b_c2_fix2_host_drop_closes_native() {
     let weak = f.host.owner.clone();
     drop(f.host);
     let closed = live.control.closed();
-    let retired = live.retired();
+    let retired = live.cleanup_proven();
     let owner_gone = weak.upgrade().is_none();
     live.finish();
     assert!(owner_gone, "S4B_C2_FIX2_HOST_OWNER_DROPPED");
@@ -285,7 +302,8 @@ fn s4b_c2_fix2_owner_scope_checks_project_epoch_and_loss() {
             }
         };
         let closed = live.control.closed();
-        let retired = live.retired();
+        let retired = live.cleanup_proven();
+        drop(f.host);
         live.finish();
         assert_eq!(reply.error.is_some(), mode == 2);
         match mode {
@@ -294,4 +312,68 @@ fn s4b_c2_fix2_owner_scope_checks_project_epoch_and_loss() {
             _ => assert!(closed && retired, "S4B_C2_FIX2_UNAVAILABLE_OWNER_REVOKED"),
         }
     }
+}
+
+// Native proof alone cannot delete private state before A's H1 retirement ACK.
+// Reopen A through the same post-discovery production recovery path.
+fn finish_native_after_owner_loss(
+    claim: Arc<Mutex<crate::execution_claim::MachineClaim>>,
+    original: &std::path::Path,
+    machine: &std::path::Path,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Arc::strong_count(&claim) != 1 {
+        assert!(Instant::now() < deadline, "C4_NATIVE_OBSERVER_JOINED");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    if claim.lock().unwrap().retained_attempts() == 0 {
+        finish_stopped_native(claim);
+        return;
+    }
+    let run: RunId = {
+        let claim = claim.lock().unwrap();
+        serde_json::from_value(serde_json::json!(claim.claimed_run().1)).unwrap()
+    };
+    drop(claim);
+    let root = original.parent().unwrap();
+    let host = WriterHost::start_inner(
+        HostConfig {
+            scheduler_settings: None,
+            project: "native-owner-recovery".into(),
+            path: Some(original.into()),
+            roots: SessionRoots {
+                read: vec![root.into()],
+                write: vec![root.into()],
+            },
+            origin: HostOrigin::Headless,
+        },
+        HostAuth::generate().unwrap(),
+        None,
+        super::super::studio_runtime::RuntimePorts {
+            fixture_claim: Some(machine.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    wait_runtime_recovery(&host);
+    let owner = host.owner.upgrade().unwrap();
+    let state = owner
+        .lock()
+        .unwrap()
+        .owner()
+        .unwrap()
+        .orchestration_projection(&run)
+        .unwrap()
+        .unwrap();
+    assert!(
+        state
+            .attempts
+            .iter()
+            .all(|a| matches!(a.state, AttemptState::Retired(_))),
+        "C4_NATIVE_OWNER_REOPEN_H1_RETIRED"
+    );
+    assert!(
+        !machine.join("run.json").exists(),
+        "C4_NATIVE_OWNER_REOPEN_PRIVATE_SETTLED"
+    );
 }

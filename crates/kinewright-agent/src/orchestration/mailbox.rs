@@ -306,6 +306,7 @@ pub fn settle_generations(state: &mut RunProjection) {
 }
 
 /// The host offers only results whose exact wake payload was charged for this attempt.
+#[cfg(target_os = "linux")]
 pub(crate) fn offer_attempt_deliveries(
     state: &mut RunProjection,
     parent: &super::orchestration_records::TaskId,

@@ -630,6 +630,8 @@ pub struct TaskHistoryRecord {
     pub base: BranchBinding,
     pub source: BranchBinding,
     pub base_ref: ObjectRef,
+    /// Legacy lineage hint. Current recovery resolves the checkpoint-bound shared
+    /// candidate record from `StudioRoot`, independently of task restore order.
     pub candidate_base_ref: ObjectRef,
     pub frozen: bool,
     pub merge_envelope: Option<crate::receipts::CommandEnvelope>,

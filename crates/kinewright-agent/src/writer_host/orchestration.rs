@@ -47,6 +47,8 @@ pub struct RunViewPage {
     pub projection: RunProjection,
     #[serde(default)]
     pub accounting: Option<DurableRunAccounting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_status: Option<String>,
     pub full_refresh: bool,
     pub allowed_actions: Vec<RunActionKind>,
 }
@@ -386,6 +388,16 @@ impl HostCommandOwner {
         );
         let result = (|| {
             if !read {
+                #[cfg(target_os = "linux")]
+                if !matches!(command, HostCommand::IssueMetadataIssuer { .. })
+                    && (self.native_recovery_pending || self.recovery_only)
+                {
+                    let status = self
+                        .native_recovery_status
+                        .as_deref()
+                        .unwrap_or("cleanup pending");
+                    return Err(HostRefusal::new("recovery_frozen", status).into());
+                }
                 self.prove_retention()?;
                 if self.recovering || self.switch_frozen {
                     return Err(HostRefusal::new(
@@ -440,6 +452,14 @@ impl HostCommandOwner {
         index: usize,
         request: &ScopedOrchestrationRequest,
     ) -> Result<(), HostError> {
+        #[cfg(target_os = "linux")]
+        if self.native_recovery_pending || self.recovery_only {
+            let status = self
+                .native_recovery_status
+                .as_deref()
+                .unwrap_or("cleanup pending");
+            return Err(HostRefusal::new("recovery_frozen", status).into());
+        }
         let attachment = &self.attachments[index];
         self.require_metadata_issuer(index, &request.envelope.id.issuer)?;
         request.envelope.validate().map_err(scheduler_error)?;
@@ -812,30 +832,40 @@ impl HostCommandOwner {
         } else if self.attachments[index].role == AttachmentRole::Producer {
             return Err(refused("Producer has no observation scope"));
         }
-        let allowed_actions = if self.attachments[index].role == AttachmentRole::Editor {
-            [
-                RunAction::Pause,
-                RunAction::Stop,
-                RunAction::Continue,
-                RunAction::SendMessage {
-                    text_ref: projection.tasks[0].brief.assignment.clone(),
-                },
-            ]
-            .into_iter()
-            .filter(|action| machine::eligible(&projection, action))
-            .map(|action| match action {
-                RunAction::Pause => RunActionKind::Pause,
-                RunAction::Stop => RunActionKind::Stop,
-                RunAction::SendMessage { .. } => RunActionKind::SendMessage,
-                RunAction::Continue => RunActionKind::Continue,
-            })
-            .collect()
-        } else {
-            vec![]
-        };
+        #[cfg(target_os = "linux")]
+        let runtime_status = self.native_recovery_status.clone();
+        #[cfg(not(target_os = "linux"))]
+        let runtime_status: Option<String> = None;
+        #[cfg(target_os = "linux")]
+        let recovery_ready = !self.native_recovery_pending;
+        #[cfg(not(target_os = "linux"))]
+        let recovery_ready = true;
+        let allowed_actions =
+            if recovery_ready && self.attachments[index].role == AttachmentRole::Editor {
+                [
+                    RunAction::Pause,
+                    RunAction::Stop,
+                    RunAction::Continue,
+                    RunAction::SendMessage {
+                        text_ref: projection.tasks[0].brief.assignment.clone(),
+                    },
+                ]
+                .into_iter()
+                .filter(|action| machine::eligible(&projection, action))
+                .map(|action| match action {
+                    RunAction::Pause => RunActionKind::Pause,
+                    RunAction::Stop => RunActionKind::Stop,
+                    RunAction::SendMessage { .. } => RunActionKind::SendMessage,
+                    RunAction::Continue => RunActionKind::Continue,
+                })
+                .collect()
+            } else {
+                vec![]
+            };
         let accounting = self.durable_run_accounting(&projection)?;
         Ok(RunViewPage {
             accounting,
+            runtime_status,
             full_refresh: after_sequence == 0
                 || after_sequence > projection.sequence
                 || after_sequence.saturating_add(1) < projection.sequence,
