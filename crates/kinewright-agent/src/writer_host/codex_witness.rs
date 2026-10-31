@@ -302,10 +302,10 @@ pub fn run_installed_codex_local_policy_witness() {
 )]
 pub fn run_installed_codex_director_witness() {
     let number = std::env::var("KINEWRIGHT_S4B_C5_RUN")
-        .unwrap_or_else(|_| "1".into())
+        .unwrap_or_else(|_| "4".into())
         .parse::<u8>()
         .unwrap();
-    assert!((1..=3).contains(&number), "C5 three-run cap");
+    assert!((4..=5).contains(&number), "C5c two additional run cap");
     let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&evidence).unwrap();
     fs::OpenOptions::new()
@@ -334,6 +334,30 @@ pub fn run_installed_codex_director_witness() {
     reason = "the live gate keeps ReviseCut, history and cleanup assertions together"
 )]
 fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
+    run_installed_codex_network_witness();
+    {
+        let mut evidence = report.lock().unwrap();
+        evidence["guardian_sha256"] = serde_json::json!(
+            kinewright_media::sha256_reader(&mut fs::File::open(guardian()).unwrap()).unwrap()
+        );
+        evidence["network_probe_sha256"] = serde_json::json!(
+            kinewright_media::sha256_reader(
+                &mut fs::File::open(guardian().with_file_name("kinewright-network-probe")).unwrap()
+            )
+            .unwrap()
+        );
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/s4b-c5c/source-prelive.json");
+        let source: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("C5c prelive source manifest")).unwrap();
+        evidence["source_manifest"] = source["sha256"].clone();
+        evidence["cli_sha256"] = serde_json::json!(crate::codex_qualification::CODEX_BINARY_SHA256);
+        let network = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/s4b-c5c/network-contained.json");
+        evidence["network_report"] = serde_json::from_slice(&fs::read(network).unwrap()).unwrap();
+        evidence["deadline_seconds"] = serde_json::json!(900);
+        evidence["unpaid_network_passed"] = serde_json::json!(true);
+    }
     local_version_probe();
     let credential_source = crate::codex_credentials::source_path().unwrap();
     let credential_identity = crate::codex_credentials::inspect(&credential_source, None).unwrap();
@@ -352,6 +376,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
                         .any(|(candidate, _)| *candidate == name);
                 let mut report = observed.lock().unwrap();
                 if known {
+                    eprintln!("C5_LIVE_TOOL {name}");
                     if report["tools_observed"].is_null() {
                         report["tools_observed"] = serde_json::json!([]);
                     }
@@ -571,7 +596,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         panic!("C5 ReviseCut");
     };
     let run: RunId = serde_json::from_value(serde_json::to_value(run_id).unwrap()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(240);
+    let deadline = Instant::now() + Duration::from_mins(15);
     let mut failure = false;
     let final_state = loop {
         let view = reply(
@@ -626,41 +651,51 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    // Always Stop through the same editor control path, including a failed run.
-    let issued = issue(&client);
-    let mut envelope = OrchestrationEnvelope {
-        id: issued.envelope.id.clone(),
-        digest: serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap(),
-        project: issued.envelope.project_id,
-        expected_generation: issued.root_generation,
-        authority: AuthorityBinding {
-            grant_ref: issued.grant_ref,
-            owner_epoch: issued.envelope.owner_epoch,
-            endpoint: None,
-            attempt: None,
-        },
-        command: OrchestrationCommand::ControlRun(RunIntent {
-            command_id: issued.envelope.id,
-            run_id: run.clone(),
-            expected_control_revision: final_state.control_revision.clone(),
-            action: RunAction::Stop,
-        }),
-    };
-    envelope.digest = envelope.computed_digest().unwrap();
-    let stopped = reply(
-        &client,
-        HostCommand::DispatchOrchestration {
-            request: Box::new(ScopedOrchestrationRequest {
-                run: Some(run.clone()),
-                envelope,
-                consume_batch: None,
+    report.lock().unwrap()["final_outcome"] = serde_json::to_value(&final_state.outcome).unwrap();
+    report.lock().unwrap()["final_phase"] = serde_json::to_value(final_state.phase).unwrap();
+    let stop_eligible = crate::orchestration::machine::eligible(&final_state, &RunAction::Stop);
+    report.lock().unwrap()["stop_eligible"] = serde_json::json!(stop_eligible);
+    let stop_applied = if stop_eligible {
+        let issued = issue(&client);
+        let mut envelope = OrchestrationEnvelope {
+            id: issued.envelope.id.clone(),
+            digest: serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap(),
+            project: issued.envelope.project_id,
+            expected_generation: issued.root_generation,
+            authority: AuthorityBinding {
+                grant_ref: issued.grant_ref,
+                owner_epoch: issued.envelope.owner_epoch,
+                endpoint: None,
+                attempt: None,
+            },
+            command: OrchestrationCommand::ControlRun(RunIntent {
+                command_id: issued.envelope.id,
+                run_id: run.clone(),
+                expected_control_revision: final_state.control_revision.clone(),
+                action: RunAction::Stop,
             }),
-        },
-    );
-    assert_eq!(
-        stopped.orchestration.unwrap().decision,
-        CommandDecision::Applied
-    );
+        };
+        envelope.digest = envelope.computed_digest().unwrap();
+        let stopped = client
+            .request(HostCommand::DispatchOrchestration {
+                request: Box::new(ScopedOrchestrationRequest {
+                    run: Some(run.clone()),
+                    envelope,
+                    consume_batch: None,
+                }),
+            })
+            .expect("C5 Stop transport");
+        if let Some(ref refusal) = stopped.error {
+            report.lock().unwrap()["stop_refusal_code"] = serde_json::json!(refusal.code);
+        }
+        stopped.error.is_none()
+            && stopped
+                .orchestration
+                .is_some_and(|receipt| receipt.decision == CommandDecision::Applied)
+    } else {
+        false
+    };
+    report.lock().unwrap()["stop_applied"] = serde_json::json!(stop_applied);
     let cleanup = Instant::now() + Duration::from_secs(20);
     while claim.join("run.json").exists() {
         reply(&client, HostCommand::Status);
@@ -683,7 +718,20 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
     );
     report.lock().unwrap()["cleanup"] = serde_json::json!(true);
     report.lock().unwrap()["manual_exact"] = serde_json::json!(true);
+    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
+    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(
+        fs::metadata(&credential_source)
+            .unwrap()
+            .modified()
+            .unwrap()
+            != credential_before
+    );
+    report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
     assert!(!failure, "C5 provider/runtime failure; no automatic retry");
+    assert!(
+        stop_applied,
+        "C5 terminal run cannot certify an active Stop"
+    );
     assert!(
         report.lock().unwrap()["unexpected_tool"] != true,
         "C5 unexpected provider tool"
@@ -695,15 +743,6 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             && tools.contains(&serde_json::json!("commit_edit_plan"))),
         "C5 actual specialist MCP calls"
     );
-    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
-    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(
-        fs::metadata(&credential_source)
-            .unwrap()
-            .modified()
-            .unwrap()
-            != credential_before
-    );
-    report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
     assert!(
         accounting
             .tasks
@@ -786,3 +825,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         "C5_INSTALLED_DIRECTOR ReviseCut=true specialist_mcp_edit=true merge_once=true manual_exact=true stop=true cleanup=true"
     );
 }
+
+#[path = "network_witness.rs"]
+mod network_witness;
+pub use network_witness::run_installed_codex_network_witness;

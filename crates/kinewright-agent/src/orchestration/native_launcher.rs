@@ -42,6 +42,68 @@ pub(crate) fn codex_feature_policy() -> String {
     format!("features={{{entries}}}")
 }
 
+pub(crate) fn environment(
+    scratch: &std::path::Path,
+    credentials: &std::path::Path,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        (
+            "XDG_RUNTIME_DIR".into(),
+            format!("/run/user/{}", rustix::process::getuid().as_raw()),
+        ),
+        ("HOME".into(), scratch.to_string_lossy().into_owned()),
+        ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
+        (
+            "CODEX_HOME".into(),
+            credentials.to_string_lossy().into_owned(),
+        ),
+    ])
+}
+
+pub(crate) fn sandbox(
+    executable: &adapters::ExecutableIdentity,
+    scratch: &std::path::Path,
+    scope: &adapters::CredentialStoreScope,
+    mcp_port: u16,
+    user_local_runtime: bool,
+) -> io::Result<ProviderSandbox> {
+    Ok(ProviderSandbox::LinuxAllowlist {
+        credential_mount: scope.single_file.as_ref().map(|file| {
+            Box::new(crate::job_guardian::protocol::CredentialMount {
+                source: file.source.clone(),
+                target: scope.root.join("auth.json"),
+                identity: file.identity,
+            })
+        }),
+        connect_tcp: vec![443, mcp_port],
+        runtime: [
+            "/usr",
+            "/lib",
+            "/lib64",
+            "/dev/null",
+            "/dev/urandom",
+            "/etc/hosts",
+            "/etc/resolv.conf",
+            "/etc/nsswitch.conf",
+            "/etc/ld.so.cache",
+        ]
+        .map(Into::into)
+        .into_iter()
+        .chain(super::native_runtime::network_files()?)
+        .chain(if user_local_runtime {
+            super::native_runtime::runtime_tree(executable)?
+        } else {
+            None
+        })
+        .collect(),
+        scratch: scratch.to_path_buf(),
+        credential_store: scope.root.clone(),
+        executable_identity: executable.file_identity,
+    })
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
@@ -154,20 +216,7 @@ pub(crate) fn recipe(
             "provider scratch overlaps project authority",
         ));
     }
-    let environment = BTreeMap::from([
-        ("PATH".into(), "/usr/bin:/bin".into()),
-        ("LANG".into(), "C.UTF-8".into()),
-        (
-            "XDG_RUNTIME_DIR".into(),
-            format!("/run/user/{}", rustix::process::getuid().as_raw()),
-        ),
-        ("HOME".into(), scratch.to_string_lossy().into_owned()),
-        ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
-        (
-            "CODEX_HOME".into(),
-            credentials.to_string_lossy().into_owned(),
-        ),
-    ]);
+    let environment = environment(&scratch, &credentials);
     let mut arguments = vec![];
     match specification.provider() {
         "codex" => {
@@ -288,45 +337,16 @@ pub(crate) fn recipe(
         environment,
         working_directory: scratch.clone(),
         pipe_directory: Some(scratch.join("io")),
-        sandbox: ProviderSandbox::LinuxAllowlist {
-            credential_mount: scope.single_file.as_ref().map(|file| {
-                Box::new(crate::job_guardian::protocol::CredentialMount {
-                    source: file.source.clone(),
-                    target: credentials.join("auth.json"),
-                    identity: file.identity,
-                })
-            }),
-            connect_tcp: vec![
-                443,
-                reqwest::Url::parse(binding.endpoint())
-                    .map_err(io::Error::other)?
-                    .port_or_known_default()
-                    .ok_or_else(|| io::Error::other("MCP port missing"))?,
-            ],
-            runtime: [
-                "/usr",
-                "/lib",
-                "/lib64",
-                "/dev/null",
-                "/dev/urandom",
-                "/etc/ssl",
-                "/etc/hosts",
-                "/etc/resolv.conf",
-                "/etc/nsswitch.conf",
-                "/etc/ld.so.cache",
-            ]
-            .map(Into::into)
-            .into_iter()
-            .chain(if specification.provider() == "codex" {
-                super::native_runtime::runtime_tree(&runtime.executable)?
-            } else {
-                None
-            })
-            .collect(),
-            scratch,
-            credential_store: credentials,
-            executable_identity: runtime.executable.file_identity,
-        },
+        sandbox: sandbox(
+            &runtime.executable,
+            &scratch,
+            scope,
+            reqwest::Url::parse(binding.endpoint())
+                .map_err(io::Error::other)?
+                .port_or_known_default()
+                .ok_or_else(|| io::Error::other("MCP port missing"))?,
+            specification.provider() == "codex",
+        )?,
     };
     for denied in binding.roots() {
         for grant in runtime_paths(&result) {
@@ -855,6 +875,12 @@ pub(crate) fn read_provider_output(
         });
         if let Ok(parsed) = result {
             for event in parsed {
+                let event = match event {
+                    AgentEvent::Error(message) if transport_error(&message) => AgentEvent::Error(
+                        "network: provider transport failed or is reconnecting".into(),
+                    ),
+                    other => other,
+                };
                 if !matches!(event, AgentEvent::Done | AgentEvent::Cost { .. })
                     && sender.send(event).is_err()
                 {
@@ -898,5 +924,62 @@ fn native_item_allowed(raw: &serde_json::Value) -> bool {
                     })
         }
         _ => false,
+    }
+}
+
+fn transport_error(message: &str) -> bool {
+    let has = |needle: &[u8]| {
+        message
+            .as_bytes()
+            .windows(needle.len())
+            .any(|part| part.eq_ignore_ascii_case(needle))
+    };
+    !has(b"mcp")
+        && [
+            b"reconnect".as_slice(),
+            b"network",
+            b"tls",
+            b"dns",
+            b"connection",
+            b"stream disconnected",
+        ]
+        .iter()
+        .any(|needle| has(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn s4b_c5c_retries_surface_network_before_eof() {
+        use std::io::Write;
+        assert!(!transport_error("MCP connection closed"));
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (sender, events) = crate::protocol::limits::event_channel();
+        let eof = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = eof.clone();
+        let worker = thread::spawn(move || {
+            read_provider_output(reader, &sender, |_, _, end| {
+                if end {
+                    seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(())
+            })
+        });
+        writer.write_all(b"{\"type\":\"error\",\"message\":\"Reconnecting... 2/5\"}\n{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network\"}\n").unwrap();
+        let first = events.recv_timeout(std::time::Duration::from_secs(2));
+        let second = events.recv_timeout(std::time::Duration::from_secs(2));
+        let before_eof = !eof.load(std::sync::atomic::Ordering::SeqCst);
+        drop(writer);
+        let completed = worker.join().unwrap();
+        assert!(!completed);
+        assert!(eof.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(before_eof, "C5C_NETWORK_BEFORE_EOF");
+        for observed in [first, second] {
+            assert!(
+                matches!(observed, Ok(AgentEvent::Error(message)) if message.starts_with("network:")),
+                "C5C_RECONNECT_CATEGORY"
+            );
+        }
     }
 }

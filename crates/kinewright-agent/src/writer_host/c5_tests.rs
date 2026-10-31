@@ -61,6 +61,7 @@ fn s4b_c5_ci_protocol_child() {
         "duplicate-cache",
         "missing",
         "auth",
+        "network-abort",
         "steering",
         "interrupt",
     ] {
@@ -145,6 +146,23 @@ fn ci_protocol_case(binary: &std::path::Path, mode: &str) {
             1,
             "C5_AUTH_FAILURE_RECORDED"
         );
+    }
+    if mode == "network-abort" {
+        assert!(!completed, "C5C_ABORT_IS_NOT_COMPLETED");
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::Error(message) if message.starts_with("network:"))), "C5C_ABORT_NETWORK_REPORTED");
+        assert_eq!(
+            accounting.tasks[0].totals.known.input, None,
+            "C5C_ABORT_USAGE_UNAVAILABLE"
+        );
+        assert_eq!(accounting.tasks[0].totals.known.output, None);
+        assert!(
+            accounting.tasks[0]
+                .usage
+                .iter()
+                .any(|event| event.event.starts_with("native.eof:") && event.complete),
+            "C5C_ABORT_EOF_RECORDED"
+        );
+        assert_eq!(accounting.tasks[0].totals.known.cost_micros, None);
     }
     if mode == "missing" {
         assert_eq!(accounting.tasks[0].totals.known.input, None);

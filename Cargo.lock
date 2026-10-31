@@ -2324,6 +2324,8 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rustix 1.1.4",
+ "rustls",
+ "rustls-native-certs",
  "schemars",
  "serde",
  "serde_json",
@@ -3972,6 +3974,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",

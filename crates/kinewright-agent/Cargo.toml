@@ -20,6 +20,8 @@ default = ["eval-harness"]
 # MO2 R7: the harness saves its project fixtures through the shared project
 # writer, so they stamp the same minimum-required format version.
 eval-harness = [
+    "dep:rustls",
+    "dep:rustls-native-certs",
     "test-util",
     "kinewright-core/test-util",
     "kinewright-media/test-util",
@@ -72,6 +74,15 @@ tokio.workspace = true
 [target.'cfg(unix)'.dependencies]
 # Already pinned transitively; safe waitid(WNOWAIT), group signals and fixed-role reaping.
 rustix = { version = "=1.1.4", features = ["process", "fs"] }
+
+[[bin]]
+name = "kinewright-network-probe"
+path = "src/bin/kinewright-network-probe.rs"
+required-features = ["eval-harness"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustls = { version = "=0.23.43", optional = true }
+rustls-native-certs = { version = "=0.8.4", optional = true }
 
 [dev-dependencies]
 # `tests/mcp_server.rs` drives the AU6 scenarios and generates their sources,

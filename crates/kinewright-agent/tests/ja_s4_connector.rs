@@ -12,3 +12,9 @@ fn s4b_installed_codex_director() {
 fn s4b_installed_codex_local_policy() {
     kinewright_agent::writer_host::run_installed_codex_local_policy_witness();
 }
+
+#[test]
+#[ignore = "on-demand: unpaid installed Codex sandbox network qualification"]
+fn s4b_installed_codex_network() {
+    kinewright_agent::writer_host::run_installed_codex_network_witness();
+}

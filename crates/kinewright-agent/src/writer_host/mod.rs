@@ -3320,4 +3320,5 @@ mod codex_witness;
 #[doc(hidden)]
 pub use codex_witness::{
     run_installed_codex_director_witness, run_installed_codex_local_policy_witness,
+    run_installed_codex_network_witness,
 };

@@ -162,3 +162,5 @@ ja_s4_guardian s4b_c5_single_file_credentials crates/kinewright-agent/tests/ja_s
 ja_s4_connector s4b_installed_codex_director crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5 installed subscription Director qualification
 
 ja_s4_connector s4b_installed_codex_local_policy crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5 unpaid installed CLI policy checks
+
+ja_s4_connector s4b_installed_codex_network crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5c unpaid native DNS TCP TLS witness

@@ -40,6 +40,32 @@ pub(crate) fn runtime_tree(executable: &ExecutableIdentity) -> io::Result<Option
     Ok(Some(tree.into()))
 }
 
+/// Native-root aliases can leave /etc/ssl through symlinks. Grant only their
+/// resolved regular files; never grant the directory containing a target.
+pub(crate) fn network_files() -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for alias in [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/ssl/cert.pem",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    ] {
+        if let Ok(path) = std::fs::canonicalize(alias)
+            && path.is_file()
+            && !files.contains(&path)
+        {
+            files.push(path);
+        }
+    }
+    if files.is_empty() {
+        return Err(io::Error::other("native CA bundle unavailable"));
+    }
+    if std::path::Path::new("/etc/gai.conf").is_file() {
+        files.push("/etc/gai.conf".into());
+    }
+    Ok(files)
+}
+
 pub(crate) fn write_model_catalog(scratch: &Path, model: Option<&str>) -> io::Result<()> {
     let source = crate::drivers::codex_model_cache_path()
         .ok_or_else(|| io::Error::other("model metadata unavailable"))?;

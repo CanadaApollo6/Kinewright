@@ -39,6 +39,16 @@ fn main() {
         "missing" => {
             let _ = writeln!(output, "{{\"type\":\"turn.completed\"}}");
         }
+        "network-abort" => {
+            let _ = writeln!(
+                output,
+                "{{\"type\":\"error\",\"message\":\"Reconnecting... 2/5\"}}"
+            );
+            let _ = writeln!(
+                output,
+                "{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"network transport failed\"}}}}"
+            );
+        }
         "auth" => {
             let _ = writeln!(
                 output,

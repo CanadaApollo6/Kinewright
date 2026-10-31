@@ -131,3 +131,7 @@ pub use solo::{
 #[cfg(target_os = "linux")]
 #[path = "orchestration/effect_pump.rs"]
 pub(crate) mod effect_pump;
+
+#[cfg(all(target_os = "linux", feature = "eval-harness"))]
+#[doc(hidden)]
+pub mod network_probe;
