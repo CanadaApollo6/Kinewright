@@ -357,7 +357,7 @@ fn s4_large_owned_input_reference_contract() {
 }
 
 #[test]
-fn s4_event_predecessor_retention_contract() {
+fn s4_event_predecessor_identity_without_recursive_edge_contract() {
     let envelope = envelope(10, 4);
     let mut state = projection(&envelope);
     state.sequence = 2;
@@ -380,14 +380,21 @@ fn s4_event_predecessor_retention_contract() {
     };
     segment.previous = Some(reference(60, RecordKind::RunIndex));
     assert!(
-        record
+        !record
             .dependencies()
             .unwrap()
-            .contains(&reference(60, RecordKind::RunIndex))
+            .contains(&reference(60, RecordKind::RunIndex)),
+        "H1 owns preceding segments directly in its flat cut index"
     );
     let OrchestrationPayload::EventSegment(segment) = &mut record.payload else {
         unreachable!()
     };
+    segment.previous.as_mut().unwrap().sha256.clear();
+    assert_eq!(record.dependencies(), Err(Refusal::InvalidState));
+    let OrchestrationPayload::EventSegment(segment) = &mut record.payload else {
+        unreachable!()
+    };
+    segment.previous = Some(reference(60, RecordKind::RunIndex));
     segment.first_sequence = 0;
     segment.events[0].sequence = 0;
     segment.events[0].projection.sequence = 0;

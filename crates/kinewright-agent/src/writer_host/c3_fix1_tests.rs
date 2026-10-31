@@ -109,16 +109,6 @@ fn s4b_c3_fix1_commit_rechecks_monotonic_and_usage() {
             if mode == "clock" {
                 let mut state = owner.spending_scope(&producer, &identity.run).unwrap();
                 let previous = owner.native_accounting(&state).unwrap().unwrap();
-                owner
-                    .owner_mut()
-                    .unwrap()
-                    .admit_scheduler_record(&OrchestrationRecord {
-                        version: 1,
-                        payload: OrchestrationPayload::AccountingArchive(Box::new(
-                            previous.archive().unwrap(),
-                        )),
-                    })
-                    .unwrap();
                 let mut next = previous.successor().unwrap();
                 next.clock_uncertain = true;
                 let reference = owner
@@ -544,7 +534,8 @@ fn s4b_c3_fix1_history_lost_ack_reconciles_original_cut() {
     let producer = f.producer(&run);
     let host = f.host.owner.upgrade().unwrap();
     let mut owner = host.lock().unwrap();
-    let refused = kinewright_project::io_observer::fail_nth("root_parent_sync", 2, || {
+    // The run Producer reuses its issuer; the checkpoint itself is the only root cut.
+    let refused = kinewright_project::io_observer::fail_nth("root_parent_sync", 1, || {
         owner.checkpoint_task_history(&producer, &run, &identity.task)
     });
     assert!(refused.is_err(), "C3_HISTORY_H1_ACK_CUT");

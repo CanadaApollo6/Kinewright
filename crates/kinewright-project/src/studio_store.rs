@@ -174,6 +174,7 @@ record!(
     RunIndex,
     |v: &RunIndex| {
         let mut refs: Vec<_> = v.runs.values().flat_map(RunRecord::references).collect();
+        refs.extend(v.cumulative.values().cloned());
         refs.extend(
             v.orchestration
                 .values()
@@ -186,6 +187,12 @@ record!(
         schema(v.version)?;
         if (v.runs.len() + v.orchestration.len()) as u64 > l.versions {
             return Err(BundleError::Capacity("run index entries"));
+        }
+        for (run, reference) in &v.cumulative {
+            if !v.orchestration.contains_key(run) {
+                return Err(BundleError::Corrupt("orphan cumulative run".into()));
+            }
+            kind(reference, RecordKind::RunIndex)?;
         }
         for cuts in v.orchestration.values() {
             if cuts.is_empty() || cuts.len() as u64 > l.receipts {
@@ -1083,6 +1090,19 @@ impl crate::editing_session::Ja1EditingSession {
         }
         self.active_bundle_mut()?
             .issue_metadata_issuer_bound(Some(subject.to_owned()))
+    }
+    pub fn reuse_metadata_issuer_for(
+        &mut self,
+        subject: &str,
+    ) -> Result<crate::receipts::IssuerId, BundleError> {
+        if let Some((issuer, _)) =
+            self.active_bundle()?.issuers.iter().find(|(_, state)| {
+                !state.retired && state.metadata_subject.as_deref() == Some(subject)
+            })
+        {
+            return Ok(issuer.clone());
+        }
+        self.issue_metadata_issuer_for(subject)
     }
     pub fn metadata_issuer_subject(
         &self,

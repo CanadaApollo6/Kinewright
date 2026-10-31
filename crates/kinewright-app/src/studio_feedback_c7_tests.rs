@@ -376,7 +376,12 @@ fn s3_c10_settings_choose_director_then_revise_uses_it() {
     let view = settings(&mut app);
     assert_eq!(view.status, DirectorStatus::Missing, "C10_APP_MISSING");
     assert_eq!(view.choices, director_choices(), "C10_APP_OFFERED");
-    assert!(view.choices.is_empty(), "C5_NO_FIXTURE_IN_PRODUCT_CHOICES");
+    assert!(
+        view.choices
+            .iter()
+            .all(|choice| choice.connector != "scripted"),
+        "C5_NO_FIXTURE_IN_PRODUCT_CHOICES"
+    );
     let fixture = kinewright_agent::orchestration::adapters::fixture_connectors()[0].selection();
     // Revise cut without a Director waits; the batch stays submitted.
     let outcome = app

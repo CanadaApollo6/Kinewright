@@ -165,6 +165,11 @@ impl Drop for Hooks {
 pub(super) enum PendingPublication {
     Wire(Box<ScopedOrchestrationRequest>, super::auth::AttachmentId),
     Owner(Box<ValidatedRunUpdate>),
+    #[cfg(target_os = "linux")]
+    Cumulative(
+        Box<crate::orchestration::ExecutionIdentity>,
+        Box<kinewright_project::orchestration_accounting::AccountingRecord>,
+    ),
 }
 
 fn refused(reason: &str) -> HostError {
@@ -343,7 +348,15 @@ impl HostCommandOwner {
             issuer
         } else {
             let subject = self.metadata_subject(index);
-            self.owner_mut()?.issue_metadata_issuer_for(&subject)?
+            if self.attachments[index]
+                .producer_scope
+                .as_ref()
+                .is_some_and(|scope| scope.task.is_none())
+            {
+                self.owner_mut()?.reuse_metadata_issuer_for(&subject)?
+            } else {
+                self.owner_mut()?.issue_metadata_issuer_for(&subject)?
+            }
         };
         let sequence = self.owner()?.metadata_issuer_sequence(&issuer)?;
         let envelope = self

@@ -339,7 +339,7 @@ fn s4_raw_usage_preserves_unavailable_and_subset_categories() {
 }
 
 #[test]
-fn s4_registered_accounting_bytes_and_predecessor_contract() {
+fn s4_registered_accounting_bytes_and_replacement_contract() {
     let current = accounting(None);
     let wrapped = OrchestrationRecord {
         version: 1,
@@ -350,20 +350,10 @@ fn s4_registered_accounting_bytes_and_predecessor_contract() {
     let reference = current.record_reference().unwrap();
     assert_eq!(reference.sha256, kinewright_media::sha256_bytes(&bytes));
     assert_eq!(reference.byte_length, bytes.len() as u64);
-    let archive = current.archive().unwrap();
-    let archive_record = OrchestrationRecord {
-        version: 1,
-        payload: OrchestrationPayload::AccountingArchive(Box::new(archive.clone())),
-    };
-    assert_eq!(
-        archive.record_bytes().unwrap(),
-        serde_json::to_vec(&archive_record).unwrap()
-    );
-    assert_eq!(archive.original, reference);
     let next = current.successor().unwrap();
     assert_eq!(
         next.dependencies().unwrap(),
-        vec![archive.record_reference().unwrap()]
+        current.dependencies().unwrap()
     );
     next.validate_successor(&current).unwrap();
 }

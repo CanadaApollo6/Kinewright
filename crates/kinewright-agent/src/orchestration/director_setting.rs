@@ -269,7 +269,11 @@ mod tests {
         let temp = TempDirectory::new_in(&workspace_target_dir(), "c5-registry");
         super::write_fixture_director_setting(temp.root()).unwrap();
         let before = std::fs::read(temp.path("director.json")).unwrap();
-        assert!(super::director_choices().is_empty());
+        assert!(
+            super::director_choices()
+                .iter()
+                .all(|choice| choice.connector != "scripted")
+        );
         assert_eq!(
             super::director_status(Some(temp.root())),
             DirectorStatus::NoLongerOffered(fixture())

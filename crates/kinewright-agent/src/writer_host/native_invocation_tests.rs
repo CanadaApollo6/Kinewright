@@ -56,10 +56,16 @@ fn native_admitted(
         &cut.receipt.envelope.project,
         cut.receipt.envelope.expected_generation,
         &cut.receipt.envelope,
-        owner
-            .orchestration_projection(&identity.run)
+        match &owner
+            .store()
             .unwrap()
-            .unwrap(),
+            .read_record::<OrchestrationRecord>(&cut.snapshot)
+            .unwrap()
+            .payload
+        {
+            OrchestrationPayload::Snapshot(state) => (**state).clone(),
+            _ => panic!("native reservation snapshot"),
+        },
         segment.clone(),
         cut.receipt.decision.clone(),
     )

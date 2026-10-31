@@ -1416,6 +1416,58 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Measure the complete committed graph, including retained recovery inventories.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn maximum_committed_depth(&self) -> Result<u64, BundleError> {
+        fn depth(
+            ledger: &Ledger,
+            reference: &ObjectRef,
+            inventory: bool,
+            memo: &mut BTreeMap<(String, bool), u64>,
+            active: &mut BTreeSet<String>,
+        ) -> Result<u64, BundleError> {
+            let inventory = inventory && reference.record_kind != RecordKind::RootCheckpoint;
+            let key = (reference.sha256.clone(), inventory);
+            if let Some(depth) = memo.get(&key) {
+                return Ok(*depth);
+            }
+            if !active.insert(reference.sha256.clone()) {
+                return Err(BundleError::Corrupt("dependency cycle".into()));
+            }
+            let (_, edges) = ledger
+                .objects
+                .get(&reference.sha256)
+                .ok_or_else(|| BundleError::Corrupt("missing graph node".into()))?;
+            let mut maximum = 0;
+            for edge in edges.iter().chain(
+                ledger
+                    .inventory_dependencies
+                    .get(&reference.sha256)
+                    .filter(|_| inventory)
+                    .into_iter()
+                    .flatten(),
+            ) {
+                maximum = maximum.max(1 + depth(ledger, edge, inventory, memo, active)?);
+            }
+            active.remove(&reference.sha256);
+            memo.insert(key, maximum);
+            Ok(maximum)
+        }
+        let ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let mut memo = BTreeMap::new();
+        let mut active = BTreeSet::new();
+        let mut maximum = 0;
+        for root in &ledger.committed {
+            maximum = maximum.max(depth(&ledger, root, true, &mut memo, &mut active)?);
+        }
+        Ok(maximum)
+    }
+
     pub fn closure(&self, roots: &[ObjectRef]) -> Result<Vec<ObjectRef>, BundleError> {
         self.closure_with_inventory(roots, true)
     }

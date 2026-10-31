@@ -410,7 +410,7 @@ pub(crate) fn recover_run(
     clippy::too_many_lines,
     reason = "retirement proof selection and H1-before-private publication are audited together"
 )]
-fn reconcile_attempt(
+pub(crate) fn reconcile_attempt(
     host: &Arc<Mutex<HostCommandOwner>>,
     claim: &mut MachineClaim,
     producer: &HostAuth,

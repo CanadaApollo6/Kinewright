@@ -1508,6 +1508,29 @@ pub(super) fn validate_studio_records(
                 }
                 previous = Some(cut);
             }
+            if let Some(reference) = index.cumulative.get(id) {
+                let last = cuts
+                    .last()
+                    .ok_or_else(|| BundleError::Corrupt("missing semantic run cut".into()))?;
+                if reference != &last.snapshot {
+                    let base = load!(
+                        crate::orchestration_records::OrchestrationRecord,
+                        &last.snapshot
+                    );
+                    let current =
+                        load!(crate::orchestration_records::OrchestrationRecord, reference);
+                    let (
+                        crate::orchestration_records::OrchestrationPayload::Snapshot(base),
+                        crate::orchestration_records::OrchestrationPayload::Snapshot(current),
+                    ) = (&base.payload, &current.payload)
+                    else {
+                        return Err(BundleError::HistoryChanged);
+                    };
+                    crate::orchestration_cumulative::validate_snapshot(base, current, |r| {
+                        Ok((*load!(crate::orchestration_records::OrchestrationRecord, r)).clone())
+                    })?;
+                }
+            }
         }
         for run in index.runs.values() {
             macro_rules! run_records {

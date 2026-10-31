@@ -1245,7 +1245,8 @@ fn s4b_c4_fix1_failed_launch_publishes_retirement_before_private_delete() {
             },
         };
         let result = if mode == "ack_failure" {
-            kinewright_project::io_observer::fail_nth("root_before_publish", 3, || {
+            // The dispatch cut is first; fail the subsequent H1 retirement cut.
+            kinewright_project::io_observer::fail_nth("root_before_publish", 2, || {
                 launcher.launch(admitted, invocation)
             })
         } else {

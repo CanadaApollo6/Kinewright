@@ -180,6 +180,7 @@ impl ProjectBundle {
             version: 1,
             payload: OrchestrationPayload::EventSegment(transition.segment().clone()),
         })?;
+        index.cumulative.remove(run);
         index
             .orchestration
             .entry(run.clone())
@@ -233,12 +234,12 @@ impl ProjectBundle {
         &self,
         run: &RunId,
     ) -> Result<Option<RunProjection>, BundleError> {
-        let Some(cut) = self.orchestration_cut(run)? else {
+        let index = self.run_index()?;
+        let Some(cut) = index.orchestration.get(run).and_then(|cuts| cuts.last()) else {
             return Ok(None);
         };
-        let record = self
-            .store
-            .read_record::<OrchestrationRecord>(&cut.snapshot)?;
+        let reference = index.cumulative.get(run).unwrap_or(&cut.snapshot);
+        let record = self.store.read_record::<OrchestrationRecord>(reference)?;
         let OrchestrationPayload::Snapshot(projection) = &record.payload else {
             return Err(invalid("snapshot kind"));
         };

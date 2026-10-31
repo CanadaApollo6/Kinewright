@@ -611,13 +611,6 @@ impl HostCommandOwner {
         let previous = self
             .native_accounting(&state)?
             .ok_or_else(|| refused("run has no durable clock"))?;
-        self.owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
-                version: 1,
-                payload: OrchestrationPayload::AccountingArchive(Box::new(
-                    previous.archive().map_err(refused)?,
-                )),
-            })?;
         let mut accounting = previous.successor().map_err(refused)?;
         accounting.observe_clock(now_ms, 0, true).map_err(refused)?;
         if !accounting

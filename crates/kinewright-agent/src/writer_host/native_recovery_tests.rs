@@ -169,7 +169,8 @@ fn s4b_c3_crash_helper() {
     .unwrap();
     std::fs::write(path, serde_json::to_vec(&serde_json::json!({"root":f.temp.root(),"identity":identity,"machine":machine,"scratch":scratch})).unwrap()).unwrap();
     if !after {
-        let refused = kinewright_project::io_observer::fail_nth("root_parent_sync", 2, || {
+        // Issuer reuse leaves the charge as the only root publication.
+        let refused = kinewright_project::io_observer::fail_nth("root_parent_sync", 1, || {
             let producer = f.producer(&run);
             let now = native_now(&f, &run);
             let effect = f.projection(&run).effects[0].id.clone();

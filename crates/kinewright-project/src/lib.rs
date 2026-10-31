@@ -108,3 +108,5 @@ mod copy_publication;
 mod task_checkpoint;
 
 mod candidate_recovery;
+
+mod orchestration_cumulative;

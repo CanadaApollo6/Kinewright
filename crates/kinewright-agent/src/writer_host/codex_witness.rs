@@ -302,20 +302,20 @@ pub fn run_installed_codex_local_policy_witness() {
 )]
 pub fn run_installed_codex_director_witness() {
     let number = std::env::var("KINEWRIGHT_S4B_C5_RUN")
-        .unwrap_or_else(|_| "5".into())
+        .unwrap_or_else(|_| "6".into())
         .parse::<u8>()
         .unwrap();
-    assert!((5..=6).contains(&number), "C5d authorized run cap");
+    assert!((6..=7).contains(&number), "C5e authorized run cap");
     let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&evidence).unwrap();
-    if number == 6 {
+    if number == 7 {
         let previous: serde_json::Value = serde_json::from_slice(
-            &fs::read(evidence.join("live-5.json")).expect("C5 invocation 5 evidence"),
+            &fs::read(evidence.join("live-6.json")).expect("C5 invocation 6 evidence"),
         )
         .unwrap();
         assert_eq!(
             previous["failure_origin"], "witness",
-            "C5 invocation 6 requires a proved witness defect"
+            "C5 invocation 7 requires a proved witness defect"
         );
         assert_eq!(previous["passed"], false);
     }
@@ -362,9 +362,9 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             .unwrap()
         );
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/s4b-c5d/source-prelive.json");
+            .join("../../target/s4b-c5e/source-prelive.json");
         let source: serde_json::Value =
-            serde_json::from_slice(&fs::read(path).expect("C5d prelive source manifest")).unwrap();
+            serde_json::from_slice(&fs::read(path).expect("C5e prelive source manifest")).unwrap();
         evidence["source_manifest"] = source["sha256"].clone();
         evidence["cli_sha256"] = serde_json::json!(crate::codex_qualification::CODEX_BINARY_SHA256);
         let network = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

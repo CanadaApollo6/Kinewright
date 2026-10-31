@@ -59,19 +59,6 @@ impl HostCommandOwner {
         state.usage = keep;
         Ok(())
     }
-    fn accounting_successor(
-        &mut self,
-        current: &AccountingRecord,
-    ) -> Result<AccountingRecord, HostError> {
-        self.owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
-                version: 1,
-                payload: OrchestrationPayload::AccountingArchive(Box::new(
-                    current.archive().map_err(refused)?,
-                )),
-            })?;
-        current.successor().map_err(refused)
-    }
     pub(crate) fn change_spending(
         &mut self,
         producer: &HostAuth,
@@ -88,7 +75,7 @@ impl HostCommandOwner {
         let previous = self
             .native_accounting(&state)?
             .ok_or_else(|| refused("run has no durable clock"))?;
-        let mut next = self.accounting_successor(&previous)?;
+        let mut next = previous.successor().map_err(refused)?;
         let clock_result =
             next.observe_clock(clock.unix_ms, clock.monotonic_delta_ms, clock.trusted);
         if !next.tasks.iter().any(|t| t.task == identity.task.0) {
@@ -97,6 +84,10 @@ impl HostCommandOwner {
         }
         let deadline_unix_ms = next.deadline_unix_ms;
         let task = next.task_mut(&identity.task.0).map_err(refused)?;
+        let retain_event = matches!(
+            &change,
+            SpendingChange::Wait(_) | SpendingChange::Repair { .. }
+        );
         let outcome = match change {
             SpendingChange::Clock => Ok(()),
             SpendingChange::Ceiling(limit) => task.configure_token_limit(limit),
@@ -137,15 +128,57 @@ impl HostCommandOwner {
             }
         }
         next.validate_successor(&previous).map_err(refused)?;
-        let sealed = self
-            .owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
-                version: 1,
-                payload: OrchestrationPayload::Accounting(Box::new(next)),
-            })?;
-        self.replace_accounting_reference(&mut state, sealed.reference)?;
-        self.publish_native(producer, state, identity, vec![])?;
+        if retain_event {
+            let sealed = self
+                .owner_mut()?
+                .admit_scheduler_record(&OrchestrationRecord {
+                    version: 1,
+                    payload: OrchestrationPayload::Accounting(Box::new(next)),
+                })?;
+            self.replace_accounting_reference(&mut state, sealed.reference)?;
+            self.publish_native(producer, state, identity, vec![])?;
+        } else {
+            self.publish_accounting(producer, identity, &next)?;
+        }
         clock_result.and(outcome).map_err(refused)
+    }
+    pub(super) fn publish_accounting(
+        &mut self,
+        producer: &HostAuth,
+        identity: &ExecutionIdentity,
+        next: &AccountingRecord,
+    ) -> Result<(), HostError> {
+        use super::orchestration::PendingPublication;
+        if let Some(pending) = &self.hooks.pending {
+            if !matches!(pending, PendingPublication::Cumulative(original, record) if **original == *identity && **record == *next)
+            {
+                return Err(refused("another publication must reconcile first"));
+            }
+            self.owner_mut()?.reconcile_metadata()?;
+            self.hooks.pending = None;
+        }
+        let state = self.spending_scope(producer, &identity.run)?;
+        if identity.project != self.owner()?.project_id()?
+            || !state.tasks.iter().any(|t| t.id == identity.task)
+        {
+            return Err(refused("accounting authority changed"));
+        }
+        self.hooks.pending = Some(PendingPublication::Cumulative(
+            Box::new(identity.clone()),
+            Box::new(next.clone()),
+        ));
+        let result = self
+            .owner_mut()?
+            .publish_run_accounting(&identity.run, next);
+        if !matches!(
+            result,
+            Err(kinewright_project::bundle::BundleError::DurabilityUnknown
+                | kinewright_project::bundle::BundleError::DurabilityUnknownAt(_)
+                | kinewright_project::bundle::BundleError::Unsettled)
+        ) {
+            self.hooks.pending = None;
+        }
+        result.map_err(Into::into)
     }
     pub(crate) fn clear_due_native_waits(
         &mut self,

@@ -1,0 +1,230 @@
+{
+  "cli": {
+    "model": "gpt-6.1-sol",
+    "options": {
+      "model_reasoning_effort": "high"
+    },
+    "service_tier": null,
+    "sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+    "token_ceiling": 2000000,
+    "version": "0.166.0"
+  },
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "fixtures": {
+    "crates/kinewright-agent/src/bin/kinewright-network-probe.rs": "67021de7e71c5030c0ef0172d6d8758554644d8643fa2246e81dfca500140576",
+    "crates/kinewright-agent/src/job_guardian/linux.rs": "e3901600d94977678482d2fc5a8b246791a59024f8ceb5c73b07f54162b89037",
+    "crates/kinewright-agent/src/network_probe.rs": "e9a2c8dfcce1da03e83e69e16d06a6c631580ad8420b8b7777c8aeb61c1244b4",
+    "crates/kinewright-agent/src/orchestration/codex_credentials.rs": "8f55c67a3e79e812b393d8dcfb45fc24c1a7166cc56b8badd8227daea5ada325",
+    "crates/kinewright-agent/src/orchestration/codex_qualification.rs": "1cc92218f7cb282e2ded30dc4b03bdb86fdb28c7cd5de54bba1ebf89480ed3f4",
+    "crates/kinewright-agent/src/writer_host/c5_tests.rs": "024a6be387b7c35df096267b626ec55b0e0fef66f27f4b9c4ba05c3f3707508b",
+    "crates/kinewright-agent/src/writer_host/c5d_tests.rs": "dfdc4882218a32dfeb7f9390d8e01cd4cfcbcb665143ed08e68f49666c8c3a00",
+    "crates/kinewright-agent/src/writer_host/c5e_tests.rs": "3887500a3256d23cefc1aa9f63ce6033746a3267c68fed77747fb3374b1e5a47",
+    "crates/kinewright-agent/src/writer_host/codex_witness.rs": "552e44673934c037f747922a6f5504263b2b579710e29e516b10a7e125bae0b0",
+    "crates/kinewright-agent/src/writer_host/network_witness.rs": "1fdec6d34e2d8d868fbe90dd6810d1a20fdfaea0253e410d1ce4221d3e1d5415",
+    "crates/kinewright-agent/src/writer_host/qualification_gate.rs": "701b1cbd52de3278c155ae50acf0fd73238a769365425b4a2a2e38a0a0a28cd8"
+  },
+  "guardian_sha256": "c2a77c3b85b4015e45251a1a428c12bad3f8835cd2034fcff70563ac5b30c271",
+  "live": {
+    "active_at_stop": true,
+    "cleanup": true,
+    "credential_identity_exit": true,
+    "credential_write_observed": false,
+    "duration_seconds": 96.58,
+    "invocation": 6,
+    "manual_exact": true,
+    "merge_once": true,
+    "passed": true,
+    "refresh_live": "NOT RUN",
+    "reopen_exact": true,
+    "report_sha256": "2d47c4e6d3365096bfbac80fe5112ec052ec4c1a848565d4d3b390d12cd2679c",
+    "stop_applied": true,
+    "usage": [
+      {
+        "events": 2,
+        "providers": 2,
+        "sends": 2,
+        "totals": {
+          "complete": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "known": {
+            "cache_read": 36096,
+            "cache_write": 0,
+            "cost_micros": null,
+            "input": 52408,
+            "output": 725,
+            "reasoning": 0
+          },
+          "token_lower_bound": 53133,
+          "tokens_complete": false
+        }
+      },
+      {
+        "events": 1,
+        "providers": 1,
+        "sends": 1,
+        "totals": {
+          "complete": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "known": {
+            "cache_read": 227200,
+            "cache_write": 0,
+            "cost_micros": null,
+            "input": 261640,
+            "output": 1044,
+            "reasoning": 0
+          },
+          "token_lower_bound": 262684,
+          "tokens_complete": true
+        }
+      }
+    ]
+  },
+  "maximal": {
+    "assertion_bound": 16,
+    "attempts_per_task": 3,
+    "cleanup": true,
+    "clocks": 720,
+    "interval_ms": 30000,
+    "maximum_depth": 7,
+    "reopen_exact": true,
+    "sends_per_task": 80,
+    "stop": true,
+    "storage_graph_depth": 32,
+    "tasks": 3,
+    "usage_samples_per_task": 160
+  },
+  "network": {
+    "environment_presence": {
+      "ALL_PROXY": false,
+      "CODEX_CA_CERTIFICATE": false,
+      "HTTPS_PROXY": false,
+      "HTTP_PROXY": false,
+      "NO_PROXY": false,
+      "SSL_CERT_DIR": false,
+      "SSL_CERT_FILE": false,
+      "all_proxy": false,
+      "http_proxy": false,
+      "https_proxy": false,
+      "no_proxy": false
+    },
+    "files": [
+      {
+        "errno": null,
+        "path": "/etc/resolv.conf",
+        "readable": true
+      },
+      {
+        "errno": null,
+        "path": "/run/systemd/resolve/stub-resolv.conf",
+        "readable": true
+      },
+      {
+        "errno": null,
+        "path": "/etc/hosts",
+        "readable": true
+      },
+      {
+        "errno": null,
+        "path": "/etc/nsswitch.conf",
+        "readable": true
+      },
+      {
+        "errno": null,
+        "path": "/etc/gai.conf",
+        "readable": true
+      },
+      {
+        "errno": null,
+        "path": "/etc/ssl/certs/ca-certificates.crt",
+        "readable": true
+      },
+      {
+        "errno": null,
+        "path": "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+        "readable": true
+      }
+    ],
+    "hosts": [
+      {
+        "failure": null,
+        "getaddrinfo": true,
+        "host": "chatgpt.com",
+        "tcp_443": true,
+        "tls": true
+      },
+      {
+        "failure": null,
+        "getaddrinfo": true,
+        "host": "api.openai.com",
+        "tcp_443": true,
+        "tls": true
+      },
+      {
+        "failure": null,
+        "getaddrinfo": true,
+        "host": "auth.openai.com",
+        "tcp_443": true,
+        "tls": true
+      }
+    ],
+    "root_errors": 1,
+    "roots": 118
+  },
+  "network_probe_sha256": "4be1fdd7ca0c94e9df2afee7b7ac2da4b05b2f2c919c83874cc5da491a5435d8",
+  "pair": {
+    "green_depth": 7,
+    "green_exit": 0,
+    "profile_sha256": "6c112fdbd79c6c432d9cc445aee82013c583a1f6aba274a8f7bc7b0a4cf97642",
+    "red_depth": 17,
+    "red_exit": 101,
+    "restored_exact": true,
+    "sha256": "0064d622af4f6ffa87d7b670c7a9838b583705df147fc4a4e333d33458814d74",
+    "source_sha256": "c0f00cf47c0cbe9e96dbab939f9f336ed2fb709671ea0c2d68fe19f988f83b6b"
+  },
+  "platform": "Linux-7.2.8-10-omarchy-x86_64-with-glibc2.44",
+  "source": {
+    "base": "f91a611070edab76abd7d4f50d66a4dc2943d923",
+    "files": {
+      "ci/ignored-tests.txt": "09bebbd3861b22c3df43e4c0529581245631e9557dd5eea2f42cb9d00f34dc16",
+      "crates/kinewright-agent/src/orchestration/effect_pump.rs": "dd19e4d1ca8ef4295e3e0f8837a291264d2796dfd304aa7bc0bc851b3de034cb",
+      "crates/kinewright-agent/src/writer_host/c3_fix1_tests.rs": "e9c571925c53550c771cdac04eae3c2a01fe83aa35153ef1143a2ba57513d1fc",
+      "crates/kinewright-agent/src/writer_host/c4_fix1_tests.rs": "e1d728e07aa1e0aecc6caf19789128969e26c7db2e0f248896231ee2e4621a47",
+      "crates/kinewright-agent/src/writer_host/c5e_tests.rs": "3887500a3256d23cefc1aa9f63ce6033746a3267c68fed77747fb3374b1e5a47",
+      "crates/kinewright-agent/src/writer_host/codex_witness.rs": "552e44673934c037f747922a6f5504263b2b579710e29e516b10a7e125bae0b0",
+      "crates/kinewright-agent/src/writer_host/effect_execution.rs": "c60de3ebdb7352d1cc2141936d838973c1ef763e82345f626393bb16136f3d9f",
+      "crates/kinewright-agent/src/writer_host/hooks_tests.rs": "1fa39ad23e31d25cead08c44576e6236322d74510ed6f899e843b5b4839616c9",
+      "crates/kinewright-agent/src/writer_host/native_invocation.rs": "8241d53691bc26178d0d035bc6d1fe38a00d517125b69789a1562d93633fa7fc",
+      "crates/kinewright-agent/src/writer_host/native_invocation_tests.rs": "cd8fae11004cc5bc04e6787d78051a0a2458fabe4e3109682b0dae8485ec10af",
+      "crates/kinewright-agent/src/writer_host/native_recovery_tests.rs": "d95aeecc91225cde4ac93bff34dbdffa26fd1d80ff0460c9b687b9674829b1c0",
+      "crates/kinewright-agent/src/writer_host/native_spending.rs": "8b16d573e765516fc1cf21804141d4fda515843cdee5bfc510c6fc90cb778f46",
+      "crates/kinewright-agent/src/writer_host/orchestration.rs": "1984c4ab9084bec9ea4dd44ec7a18f9dbf3d5ee434ff0e2260fdc21cd4b4ece3",
+      "crates/kinewright-agent/tests/ja_s4_usage.rs": "70aa19ee6aaa64ded0a96a438ba418f9dfdde859264837406430ded3d09b7e75",
+      "crates/kinewright-project/src/bundle_recovery.rs": "8bf8d73f2a87269affcc1a283fb42091531a80f97c42396e94360f0342c01f14",
+      "crates/kinewright-project/src/lib.rs": "fd7d10f639d7102040591cb96e805aff509e62bd02741316c3854709f90ea948",
+      "crates/kinewright-project/src/orchestration_accounting.rs": "c4663908a822a08f88d3f39cda2ae287634dffe1945037aeb7bc417402fd0cfc",
+      "crates/kinewright-project/src/orchestration_commit.rs": "8c646ff0f97af02695196ea322862a7b14824713648a421ba3551f8c1f7a57c7",
+      "crates/kinewright-project/src/orchestration_cumulative.rs": "2bd9cd3e81c0b2fad5ff05e7b192cce25a6bf62310ce6e39a507ee7f7294ced7",
+      "crates/kinewright-project/src/orchestration_records.rs": "c1a6ca30e40ebca6b31639c921d2862d03bcd2d2f89d8416f4a194f9309f6ae1",
+      "crates/kinewright-project/src/orchestration_store.rs": "a50d7d7ada682f26985d3c2e55cb7138c9c89737b32d53e43c9f70c936d8ef9f",
+      "crates/kinewright-project/src/store.rs": "d5d938182fb67bf9e810f818900f5a40668d0bd9afc9ca2c0c4749ce73d3dfa6",
+      "crates/kinewright-project/src/studio_records.rs": "1b70289cbf66aa325fc35788b2eceb52eea0fdb18e5eb034d7e14bfb758fc617",
+      "crates/kinewright-project/src/studio_store.rs": "7a6e6267c5cb36c2c426124c13f7be535d84dc05d09790974de0b2fcce31314e",
+      "crates/kinewright-project/tests/ja_s4_store.rs": "36bdda6988a22bb6d1796cfa05fdeb47a96303c84fc7d2357235a3e10ba79743"
+    },
+    "sha256": "c0f00cf47c0cbe9e96dbab939f9f336ed2fb709671ea0c2d68fe19f988f83b6b"
+  },
+  "target": "x86_64-unknown-linux-gnu",
+  "version": 1
+}

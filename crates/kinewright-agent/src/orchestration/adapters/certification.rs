@@ -212,10 +212,17 @@ impl ConnectorSpecification {
     }
 }
 
-/// The only registration source used by Director choices. Production ships empty.
+/// Director choices are witnessed release policy, independent of local detection.
 #[must_use]
 pub fn certified_connectors() -> Vec<&'static ConnectorSpecification> {
-    Vec::new()
+    #[cfg(target_os = "linux")]
+    {
+        vec![codex_candidate()]
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
 }
 
 /// Explicit fixture ports only. Never used by product choices or readiness.
@@ -600,9 +607,9 @@ static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
     authentication: AuthenticationMode::Subscription,
     auth_contract: super::CODEX_AUTH_CONTRACT,
     evidence: ReleaseEvidence {
-        source: "C5 candidate, not registered",
-        guardian: "C5 Linux guardian",
-        fixtures: "C5 single-file + network witnesses",
+        source: "c0f00cf47c0cbe9e96dbab939f9f336ed2fb709671ea0c2d68fe19f988f83b6b",
+        guardian: "c2a77c3b85b4015e45251a1a428c12bad3f8835cd2034fcff70563ac5b30c271",
+        fixtures: "1316b78566e15ceffd3ade39d8c9a876e4da2c6ab912588bd18a08d8621b01da",
         target: "x86_64-unknown-linux-gnu",
     },
 };
@@ -871,12 +878,20 @@ mod tests {
                 target: "forged",
             },
         };
-        for provider in ["codex", "claude", "unknown"] {
+        for provider in ["claude", "unknown"] {
             assert_eq!(
                 certify_connector(provider, binding(), &runtime()).err(),
                 Some(CertificationRefusal::UnknownProvider)
             );
         }
+        assert_eq!(
+            certify_connector("codex", binding(), &runtime()).err(),
+            Some(if cfg!(target_os = "linux") {
+                CertificationRefusal::UnqualifiedVersion
+            } else {
+                CertificationRefusal::UnknownProvider
+            })
+        );
         assert_eq!(
             FORGED.bind(binding(), &runtime()).err(),
             Some(CertificationRefusal::UnqualifiedSpecification)
@@ -914,11 +929,18 @@ mod tests {
     }
 
     #[test]
-    fn s4b_c1_shipping_providers_are_not_advertised_by_readiness() {
-        assert!(
-            certified_connectors()
-                .iter()
-                .all(|spec| spec.provider() == "scripted")
+    fn s4b_c1_readiness_never_changes_release_registration() {
+        let registered: Vec<_> = certified_connectors()
+            .iter()
+            .map(|spec| spec.provider())
+            .collect();
+        assert_eq!(
+            registered,
+            if cfg!(target_os = "linux") {
+                vec!["codex"]
+            } else {
+                vec![]
+            }
         );
         for _readiness in [
             ConnectorReadiness::Install,
@@ -926,10 +948,12 @@ mod tests {
             ConnectorReadiness::CheckAgain,
             ConnectorReadiness::Ready,
         ] {
-            assert!(
-                !certified_connectors()
+            assert_eq!(
+                certified_connectors()
                     .iter()
-                    .any(|spec| matches!(spec.provider(), "codex" | "claude"))
+                    .map(|spec| spec.provider())
+                    .collect::<Vec<_>>(),
+                registered
             );
         }
     }

@@ -15,6 +15,9 @@ impl HostCommandOwner {
             Some(super::orchestration::PendingPublication::Owner(original)) => self
                 .publish_orchestration_transition(producer, &original, None)
                 .map(|_| ()),
+            Some(super::orchestration::PendingPublication::Cumulative(identity, record)) => {
+                self.publish_accounting(producer, &identity, &record)
+            }
             Some(_) => Err(refused("original wire publication must reconcile first")),
         }
     }

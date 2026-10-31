@@ -202,9 +202,6 @@ impl OrchestrationRecord {
             OrchestrationPayload::Accounting(record) => {
                 refs.extend(record.dependencies().map_err(|_| Refusal::InvalidState)?);
             }
-            OrchestrationPayload::AccountingArchive(record) => {
-                refs.extend(record.dependencies().map_err(|_| Refusal::InvalidState)?);
-            }
             OrchestrationPayload::RunIndex(index) => {
                 if index.len() > ITEM_LIMIT {
                     return Err(Refusal::Capacity);
@@ -228,7 +225,8 @@ impl OrchestrationRecord {
                     if previous.record_kind != RecordKind::RunIndex {
                         return Err(Refusal::InvalidState);
                     }
-                    refs.push(previous.clone());
+                    validate_reference(previous)?;
+                    // H1 owns all segments in a flat index and validates this identity there.
                 }
                 for (offset, event) in segment.events.iter().enumerate() {
                     if segment.first_sequence.checked_add(offset as u64) != Some(event.sequence)

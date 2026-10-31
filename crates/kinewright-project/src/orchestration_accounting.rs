@@ -19,7 +19,6 @@ pub const TASKS: usize = 128;
 pub const ITEMS: usize = 256;
 pub const RECORD_BYTES: usize = 64 * 1024 * 1024;
 pub const USAGE_EVENTS: usize = 10_000;
-pub const HISTORY_RECORDS: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,8 +162,6 @@ pub struct AccountingRecord {
     pub version: u32,
     pub project: ProjectId,
     pub run: SessionId,
-    pub previous: Option<ObjectRef>,
-    pub history: Vec<ObjectRef>,
     pub revision: u64,
     pub start_unix_ms: u64,
     pub deadline_unix_ms: u64,
@@ -173,16 +170,6 @@ pub struct AccountingRecord {
     pub clock_uncertain: bool,
     pub durable_event_bytes: u64,
     pub tasks: Vec<TaskAccounting>,
-}
-
-/// Exact predecessor bytes can be reconstructed without following its old edges.
-/// The current index retains every archive directly, so graph depth stays fixed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountingArchive {
-    pub version: u32,
-    pub original: ObjectRef,
-    pub record: Box<AccountingRecord>,
 }
 
 /// A bounded encoder includes transient serialized bytes in admission.
@@ -230,11 +217,9 @@ fn reference(reference: &ObjectRef) -> Result<(), AccountingRefusal> {
 impl AccountingRecord {
     pub fn new(project: ProjectId, run: SessionId, now: u64) -> Result<Self, AccountingRefusal> {
         Ok(Self {
-            version: 2,
+            version: 3,
             project,
             run,
-            previous: None,
-            history: vec![],
             revision: 0,
             start_unix_ms: now,
             deadline_unix_ms: now
@@ -250,7 +235,7 @@ impl AccountingRecord {
 
     pub fn dependencies(&self) -> Result<Vec<ObjectRef>, AccountingRefusal> {
         self.validate()?;
-        let mut refs = self.history.clone();
+        let mut refs = Vec::new();
         for task in &self.tasks {
             refs.extend(task.sends.iter().map(|send| send.payload.clone()));
         }
@@ -264,33 +249,18 @@ impl AccountingRecord {
         reason = "one boundary validates the bounded accounting record"
     )]
     pub fn validate(&self) -> Result<(), AccountingRefusal> {
-        if self.version != 2
+        if self.version != 3
             || self.deadline_unix_ms.checked_sub(self.start_unix_ms) != Some(RUN_MILLIS)
             || self.last_unix_ms < self.start_unix_ms
             || self.elapsed_ms < self.last_unix_ms - self.start_unix_ms
-            || (self.revision == 0) != self.previous.is_none()
-            || usize::try_from(self.revision).ok() != Some(self.history.len())
         {
             return Err(AccountingRefusal::Invalid);
         }
         if self.durable_event_bytes > RECORD_BYTES as u64 {
             return Err(AccountingRefusal::Capacity);
         }
-        if self.tasks.len() > TASKS || self.history.len() > HISTORY_RECORDS {
+        if self.tasks.len() > TASKS {
             return Err(AccountingRefusal::Capacity);
-        }
-        let mut history = std::collections::BTreeSet::new();
-        for archive in &self.history {
-            reference(archive)?;
-            if archive.record_kind != RecordKind::RunIndex || !history.insert(archive) {
-                return Err(AccountingRefusal::Invalid);
-            }
-        }
-        if let Some(previous) = &self.previous {
-            reference(previous)?;
-            if previous.record_kind != RecordKind::RunIndex {
-                return Err(AccountingRefusal::Invalid);
-            }
         }
         for (index, task) in self.tasks.iter().enumerate() {
             if self.tasks[..index].iter().any(|old| old.task == task.task) {
@@ -371,15 +341,10 @@ impl AccountingRecord {
         Ok(())
     }
 
-    /// H1 stages `self.archive()` before this successor, retaining exact history.
+    /// Replace cumulative state; retain original sends and usage in flat arrays.
     pub fn successor(&self) -> Result<Self, AccountingRefusal> {
         self.validate()?;
         let mut next = self.clone();
-        next.previous = Some(self.record_reference()?);
-        if next.history.len() >= HISTORY_RECORDS {
-            return Err(AccountingRefusal::Capacity);
-        }
-        next.history.push(self.archive()?.record_reference()?);
         next.revision = next
             .revision
             .checked_add(1)
@@ -404,8 +369,6 @@ impl AccountingRecord {
         let expected = previous.successor()?;
         if self.project != previous.project
             || self.run != previous.run
-            || self.previous != expected.previous
-            || self.history != expected.history
             || self.revision != expected.revision
             || self.start_unix_ms != previous.start_unix_ms
             || self.deadline_unix_ms != previous.deadline_unix_ms
@@ -467,15 +430,6 @@ impl AccountingRecord {
             }
         }
         Ok(())
-    }
-
-    pub fn archive(&self) -> Result<AccountingArchive, AccountingRefusal> {
-        self.validate()?;
-        Ok(AccountingArchive {
-            version: 1,
-            original: self.record_reference()?,
-            record: Box::new(self.clone()),
-        })
     }
 
     /// Canonical bytes of `OrchestrationRecord::Accounting`, including its tag.
@@ -861,57 +815,6 @@ impl TaskAccounting {
     }
 }
 
-impl AccountingArchive {
-    pub fn dependencies(&self) -> Result<Vec<ObjectRef>, AccountingRefusal> {
-        self.record.validate()?;
-        if self.version != 1 || self.original != self.record.record_reference()? {
-            return Err(AccountingRefusal::Invalid);
-        }
-        let mut refs: Vec<_> = self
-            .record
-            .tasks
-            .iter()
-            .flat_map(|task| &task.sends)
-            .map(|send| send.payload.clone())
-            .collect();
-        refs.sort();
-        refs.dedup();
-        Ok(refs)
-    }
-
-    pub fn record_bytes(&self) -> Result<Vec<u8>, AccountingRefusal> {
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            kind: &'static str,
-            record: &'a AccountingArchive,
-        }
-        #[derive(Serialize)]
-        struct Record<'a> {
-            version: u32,
-            payload: Payload<'a>,
-        }
-        encode(
-            &Record {
-                version: 1,
-                payload: Payload {
-                    kind: "accounting_archive",
-                    record: self,
-                },
-            },
-            RECORD_BYTES,
-        )
-    }
-
-    pub fn record_reference(&self) -> Result<ObjectRef, AccountingRefusal> {
-        let bytes = self.record_bytes()?;
-        Ok(ObjectRef {
-            sha256: kinewright_media::sha256_bytes(&bytes),
-            byte_length: bytes.len() as u64,
-            record_kind: RecordKind::RunIndex,
-        })
-    }
-}
-
 impl ProviderMetadata {
     fn validate_selection(&self) -> Result<(), AccountingRefusal> {
         for selection in [&self.requested, &self.resolved] {
@@ -979,12 +882,6 @@ mod tests {
         next: &AccountingRecord,
     ) -> SealedObject {
         next.validate_successor(previous).unwrap();
-        let archive = previous.archive().unwrap();
-        let _archive = stage(
-            store,
-            &archive.record_bytes().unwrap(),
-            archive.dependencies().unwrap(),
-        );
         stage(
             store,
             &next.record_bytes().unwrap(),
@@ -1019,7 +916,6 @@ mod tests {
         reason = "one receiving-store history and retention witness"
     )]
     fn s4_eighty_send_usage_publications_through_receiving_store() {
-        use std::io::Read as _;
         let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
         std::fs::create_dir_all(&parent).unwrap();
         let root = TempDirectory::new_in(&parent, "c5-accounting-depth");
@@ -1061,7 +957,6 @@ mod tests {
             &current.record_bytes().unwrap(),
             current.dependencies().unwrap(),
         );
-        let mut exact_history = vec![];
         for turn in 1..=80 {
             let mut next = current.successor().unwrap();
             next.tasks[0]
@@ -1075,10 +970,6 @@ mod tests {
                     payload: payload_ref.clone(),
                 })
                 .unwrap();
-            exact_history.push((
-                current.record_reference().unwrap(),
-                current.record_bytes().unwrap(),
-            ));
             let published = publish(&mut store, &current, &next);
             drop(retained);
             retained = published;
@@ -1100,10 +991,6 @@ mod tests {
                 output_includes_reasoning: true,
             });
             next.tasks[0].totals = normalize(&next.tasks[0].usage).unwrap();
-            exact_history.push((
-                current.record_reference().unwrap(),
-                current.record_bytes().unwrap(),
-            ));
             let published = publish(&mut store, &current, &next);
             drop(retained);
             retained = published;
@@ -1112,25 +999,13 @@ mod tests {
         }
         assert_eq!(current.tasks[0].sends.len(), 80);
         assert_eq!(current.tasks[0].totals.token_lower_bound, 160);
-        assert_eq!(current.history.len(), 160);
+        assert_eq!(current.revision, 160);
+        assert_eq!(current.tasks[0].usage.len(), 80);
         store
             .closure(&[contract_ref(current.record_reference().unwrap())])
             .unwrap();
-        for (reference, (original, bytes)) in current.history.iter().zip(&exact_history) {
-            let mut archive_bytes = vec![];
-            store
-                .open_verified(&contract_ref(reference.clone()))
-                .unwrap()
-                .read_to_end(&mut archive_bytes)
-                .unwrap();
-            let wrapper: serde_json::Value = serde_json::from_slice(&archive_bytes).unwrap();
-            let archive: AccountingArchive =
-                serde_json::from_value(wrapper["payload"]["record"].clone()).unwrap();
-            assert_eq!(&archive.original, original);
-            assert_eq!(&archive.record.record_bytes().unwrap(), bytes);
-        }
         let mut forged = current.successor().unwrap();
-        forged.history.remove(0);
+        forged.tasks[0].usage.remove(0);
         assert!(forged.validate_successor(&current).is_err());
         drop(retained);
     }
