@@ -155,3 +155,4 @@ kinewright_app studio_feedback::ja_s3_feedback::c4::s4b_c4_notes_stop_startup_fu
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_fix1_child_discovery_precedes_recovery_proof crates/kinewright-agent/src/writer_host/c4_fix1_tests.rs linux on-demand # C4 fix 1 real child discovery before delayed cleanup proof
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_fix1_merge_crash_cuts crates/kinewright-agent/src/writer_host/c4_fix1_tests.rs linux on-demand # C4 candidate commit and H1 acknowledgment crash cuts
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_fix1_failed_launch_publishes_retirement_before_private_delete crates/kinewright-agent/src/writer_host/c4_fix1_tests.rs linux on-demand # C4 abort proof/H1/private ordering and failed retirement acknowledgment recovery
+kinewright_job_sys sandbox::tests::s4b_c5_network_ports crates/kinewright-job-sys/src/sandbox.rs linux on-demand # C5 connect port and bind rights

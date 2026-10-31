@@ -246,6 +246,7 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
             scratch,
             credential_store,
             executable_identity,
+            connect_tcp,
         } => {
             let pinned = kinewright_job_sys::restrict_provider(
                 &program.executable,
@@ -253,6 +254,7 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
                 runtime,
                 scratch,
                 credential_store,
+                connect_tcp,
             )?;
             kinewright_job_sys::restrict_provider_syscalls()?;
             Some(pinned)

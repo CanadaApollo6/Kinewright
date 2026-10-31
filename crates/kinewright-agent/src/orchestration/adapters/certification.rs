@@ -148,7 +148,7 @@ impl ConnectorSpecification {
     }
 
     fn registered(&self) -> bool {
-        certified_connectors()
+        execution_specifications()
             .iter()
             .any(|spec| std::ptr::eq(*spec, self))
     }
@@ -207,18 +207,25 @@ impl ConnectorSpecification {
 /// The only registration source used by Director choices. Production ships empty.
 #[must_use]
 pub fn certified_connectors() -> Vec<&'static ConnectorSpecification> {
-    let shipping: [&ConnectorSpecification; 0] = [];
+    Vec::new()
+}
+
+/// Explicit fixture ports only. Never used by product choices or readiness.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+#[must_use]
+pub fn fixture_connectors() -> Vec<&'static ConnectorSpecification> {
+    vec![&FIXTURE_SPECIFICATION]
+}
+
+fn execution_specifications() -> Vec<&'static ConnectorSpecification> {
+    let specifications = certified_connectors();
     #[cfg(any(test, feature = "test-util"))]
-    {
-        shipping
-            .into_iter()
-            .chain([&FIXTURE_SPECIFICATION])
-            .collect()
-    }
-    #[cfg(not(any(test, feature = "test-util")))]
-    {
-        shipping.to_vec()
-    }
+    let specifications = specifications
+        .into_iter()
+        .chain(fixture_connectors())
+        .collect();
+    specifications
 }
 
 #[allow(
@@ -230,7 +237,7 @@ pub(crate) fn certify_connector(
     binding: AttemptBinding,
     checks: &dyn ConnectorRuntimeChecks,
 ) -> Result<CertifiedConnectorProfile, CertificationRefusal> {
-    certified_connectors()
+    execution_specifications()
         .into_iter()
         .find(|spec| spec.provider == provider)
         .ok_or(CertificationRefusal::UnknownProvider)?

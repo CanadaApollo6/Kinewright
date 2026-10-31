@@ -376,7 +376,8 @@ fn s3_c10_settings_choose_director_then_revise_uses_it() {
     let view = settings(&mut app);
     assert_eq!(view.status, DirectorStatus::Missing, "C10_APP_MISSING");
     assert_eq!(view.choices, director_choices(), "C10_APP_OFFERED");
-    let fixture = view.choices.first().cloned().expect("C10_APP_OFFERED");
+    assert!(view.choices.is_empty(), "C5_NO_FIXTURE_IN_PRODUCT_CHOICES");
+    let fixture = kinewright_agent::orchestration::adapters::fixture_connectors()[0].selection();
     // Revise cut without a Director waits; the batch stays submitted.
     let outcome = app
         .with_feedback(|feedback, port| feedback.submit(port))
@@ -426,11 +427,17 @@ fn s3_c10_settings_choose_director_then_revise_uses_it() {
     );
     // Choosing writes S4's setting and starts no run.
     app.choose_director(&fixture);
+    assert!(
+        app.director_setting.as_ref().unwrap().error.is_some(),
+        "C5_FIXTURE_CHOICE_REFUSED"
+    );
+    kinewright_agent::orchestration::director_setting::write_fixture_director_setting(&folder)
+        .unwrap();
     let view = settings(&mut app);
     assert_eq!(
         view.status,
-        DirectorStatus::Set(fixture.clone()),
-        "C10_APP_CHOSEN"
+        DirectorStatus::NoLongerOffered(fixture.clone()),
+        "C5_FIXTURE_NOT_PRODUCT_CERTIFICATION"
     );
     assert_eq!(view.error, None, "C10_APP_CHOSEN");
     assert_eq!(runs(&mut app), vec![None], "C10_APP_NO_RUN_FROM_SETTINGS");

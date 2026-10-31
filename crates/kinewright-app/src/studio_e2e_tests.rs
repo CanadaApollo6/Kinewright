@@ -18,9 +18,7 @@ use crate::{
     studio_feedback::{Origin, Outcome, RunStart},
 };
 use eframe::egui;
-use kinewright_agent::writer_host::{
-    FeedbackMapping, HostCommand, MapTarget, SessionRoots, director_choices,
-};
+use kinewright_agent::writer_host::{FeedbackMapping, HostCommand, MapTarget, SessionRoots};
 use kinewright_core::{
     Command, Core, Document, Event, Operation, Playback, TimeCode, Track, TrackId, TrackKind,
 };
@@ -492,11 +490,11 @@ fn end_to_end(live: bool) {
 
     // 3. One batch across both versions. Its first send and its Revise cut
     // each lose their reply; each retry sends the exact same bytes.
-    let director = director_choices()
-        .into_iter()
-        .next()
-        .expect("E2E_DIRECTOR_OFFERED");
-    app.choose_director(&director);
+    let director = kinewright_agent::orchestration::adapters::fixture_connectors()[0].selection();
+    kinewright_agent::orchestration::director_setting::write_fixture_director_setting(
+        &fixture.root.path("scheduler"),
+    )
+    .unwrap();
     for reference in [&drawn_ref, &spoken_ref] {
         app.focused_mut().studio.feedback.toggle(reference);
     }

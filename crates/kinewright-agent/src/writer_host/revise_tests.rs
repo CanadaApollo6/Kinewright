@@ -469,7 +469,7 @@ fn c10_unoffered_director_is_waiting_until_chosen_again() {
     );
     assert_eq!(consumed(&f, &batch), None, "C10_UNOFFERED_WAITS");
     assert_eq!(run_count(&f), 0, "C10_UNOFFERED_WAITS");
-    super::super::write_director_setting(Some(&folder), &f.brief.provider).unwrap();
+    crate::orchestration::director_setting::write_fixture_director_setting(&folder).unwrap();
     let accepted = revise_result(revise(&f, &f.editor, &request), "C10_CHOSEN_AGAIN");
     assert!(
         matches!(accepted, ReviseResult::Accepted { .. }),

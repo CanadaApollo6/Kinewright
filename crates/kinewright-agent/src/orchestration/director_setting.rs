@@ -68,6 +68,12 @@ fn valid_shape(director: &ProviderSelectionRecord) -> bool {
 /// Read the setting. Only reads one bounded file; it never starts a provider.
 #[must_use]
 pub fn director_status(folder: Option<&Path>) -> DirectorStatus {
+    director_status_in(folder, &director_choices())
+}
+fn director_status_in(
+    folder: Option<&Path>,
+    choices: &[ProviderSelectionRecord],
+) -> DirectorStatus {
     let folder = match folder_or_default(folder) {
         Ok(folder) => folder,
         Err(why) => return DirectorStatus::Unreadable(why),
@@ -107,7 +113,7 @@ pub fn director_status(folder: Option<&Path>) -> DirectorStatus {
             "The Director setting has an unknown version or shape.".into(),
         );
     }
-    if director_choices().contains(&setting.director) {
+    if choices.contains(&setting.director) {
         DirectorStatus::Set(setting.director)
     } else {
         DirectorStatus::NoLongerOffered(setting.director)
@@ -116,12 +122,18 @@ pub fn director_status(folder: Option<&Path>) -> DirectorStatus {
 
 /// The configured Director provider, or why there is none, in plain words.
 pub fn configured_director(folder: Option<&Path>) -> Result<ProviderSelectionRecord, String> {
+    configured_director_in(folder, &director_choices())
+}
+fn configured_director_in(
+    folder: Option<&Path>,
+    choices: &[ProviderSelectionRecord],
+) -> Result<ProviderSelectionRecord, String> {
     if folder.is_none()
         && let Err(why) = scheduler_settings_directory()
     {
         return Err(format!("{NO_DIRECTOR} ({why})"));
     }
-    match director_status(folder) {
+    match director_status_in(folder, choices) {
         DirectorStatus::Set(director) => Ok(director),
         DirectorStatus::Missing => Err(NO_DIRECTOR.into()),
         DirectorStatus::NoLongerOffered(director) => Err(format!(
@@ -146,7 +158,15 @@ fn write_director_setting_with(
     director: &ProviderSelectionRecord,
     before_rename: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    if !director_choices().contains(director) {
+    write_director_setting_in(folder, director, &director_choices(), before_rename)
+}
+fn write_director_setting_in(
+    folder: Option<&Path>,
+    director: &ProviderSelectionRecord,
+    choices: &[ProviderSelectionRecord],
+    before_rename: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    if !choices.contains(director) {
         return Err(format!(
             "{} · {} is not a Director this computer offers.",
             director.connector, director.model
@@ -176,6 +196,26 @@ fn write_director_setting_with(
     sync_folder(&folder).map_err(failed)
 }
 
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub fn write_fixture_director_setting(folder: &Path) -> Result<(), String> {
+    let choices: Vec<_> = super::adapters::fixture_connectors()
+        .iter()
+        .map(|s| s.selection())
+        .collect();
+    write_director_setting_in(Some(folder), &choices[0], &choices, |_| Ok(()))
+}
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+pub(crate) fn configured_fixture_director(
+    folder: Option<&Path>,
+) -> Result<ProviderSelectionRecord, String> {
+    let choices: Vec<_> = super::adapters::fixture_connectors()
+        .iter()
+        .map(|s| s.selection())
+        .collect();
+    configured_director_in(folder, &choices)
+}
+
 #[cfg(unix)]
 fn sync_folder(folder: &Path) -> std::io::Result<()> {
     std::fs::File::open(folder)?.sync_all()
@@ -195,10 +235,48 @@ mod tests {
     use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 
     fn fixture() -> ProviderSelectionRecord {
-        director_choices()
+        super::super::adapters::fixture_connectors()
+            .into_iter()
+            .map(super::super::adapters::ConnectorSpecification::selection)
+            .collect::<Vec<_>>()
             .into_iter()
             .next()
             .expect("fixture builds certify the scripted Director")
+    }
+
+    fn director_status(folder: Option<&Path>) -> DirectorStatus {
+        super::director_status_in(folder, &[fixture()])
+    }
+    fn configured_director(folder: Option<&Path>) -> Result<ProviderSelectionRecord, String> {
+        super::configured_director_in(folder, &[fixture()])
+    }
+    fn write_director_setting(
+        folder: Option<&Path>,
+        choice: &ProviderSelectionRecord,
+    ) -> Result<(), String> {
+        super::write_director_setting_in(folder, choice, &[fixture()], |_| Ok(()))
+    }
+    fn write_director_setting_with(
+        folder: Option<&Path>,
+        choice: &ProviderSelectionRecord,
+        hook: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        super::write_director_setting_in(folder, choice, &[fixture()], hook)
+    }
+
+    #[test]
+    fn s4b_c5_product_registry_preserves_but_never_offers_fixture_choice() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "c5-registry");
+        super::write_fixture_director_setting(temp.root()).unwrap();
+        let before = std::fs::read(temp.path("director.json")).unwrap();
+        assert!(super::director_choices().is_empty());
+        assert_eq!(
+            super::director_status(Some(temp.root())),
+            DirectorStatus::NoLongerOffered(fixture())
+        );
+        assert!(super::configured_director(Some(temp.root())).is_err());
+        assert!(super::write_director_setting(Some(temp.root()), &fixture()).is_err());
+        assert_eq!(std::fs::read(temp.path("director.json")).unwrap(), before);
     }
 
     /// The setting offers only certified connectors, writes whole or not at

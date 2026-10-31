@@ -1171,6 +1171,9 @@ pub struct HostCommandOwner {
     #[cfg(target_os = "linux")]
     native_recovery_status: Option<String>,
     #[cfg(target_os = "linux")]
+    #[cfg(any(test, feature = "test-util"))]
+    fixture_director: bool,
+    #[cfg(target_os = "linux")]
     native_recovery_pending: bool,
     #[cfg(target_os = "linux")]
     recovery_only: bool,
@@ -1334,6 +1337,9 @@ impl HostCommandOwner {
             runtime_owner: std::sync::Weak::new(),
             #[cfg(target_os = "linux")]
             native_recovery_status: None,
+            #[cfg(target_os = "linux")]
+            #[cfg(any(test, feature = "test-util"))]
+            fixture_director: false,
             #[cfg(target_os = "linux")]
             native_recovery_pending: false,
             #[cfg(target_os = "linux")]

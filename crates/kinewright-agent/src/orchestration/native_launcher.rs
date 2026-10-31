@@ -129,6 +129,10 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
     let mut arguments = vec![];
     match profile.specification().provider() {
         "codex" => {
+            super::native_runtime::write_model_catalog(
+                &scratch,
+                profile.session_config().model.as_deref(),
+            )?;
             arguments.extend(
                 [
                     "exec",
@@ -247,6 +251,13 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
         working_directory: scratch.clone(),
         pipe_directory: Some(scratch.join("io")),
         sandbox: ProviderSandbox::LinuxAllowlist {
+            connect_tcp: vec![
+                443,
+                reqwest::Url::parse(binding.endpoint())
+                    .map_err(io::Error::other)?
+                    .port_or_known_default()
+                    .ok_or_else(|| io::Error::other("MCP port missing"))?,
+            ],
             runtime: [
                 "/usr",
                 "/lib",
@@ -260,7 +271,13 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
                 "/etc/ld.so.cache",
             ]
             .map(Into::into)
-            .to_vec(),
+            .into_iter()
+            .chain(if profile.specification().provider() == "codex" {
+                super::native_runtime::runtime_tree(&runtime.executable)?
+            } else {
+                None
+            })
+            .collect(),
             scratch,
             credential_store: credentials,
             executable_identity: runtime.executable.file_identity,
@@ -655,45 +672,9 @@ impl NativeGuardianLauncher {
                     pipes.diagnostics,
                     "kinewright-contained-stderr",
                 );
-                let mut parser = crate::protocol::CodexProtocol::default();
-                let mut ordinal = 0_u64;
-                let mut completed = false;
-                for line in crate::protocol::limits::Frames::new(pipes.output) {
-                    let result = line.map_err(io::Error::other).and_then(|line| {
-                        ordinal = ordinal
-                            .checked_add(1)
-                            .ok_or_else(|| io::Error::other("usage event capacity"))?;
-                        let raw: serde_json::Value = serde_json::from_str(&line)?;
-                        usage_owner.raw(&execution, &raw, ordinal, false)?;
-                        completed |= raw.get("type").and_then(serde_json::Value::as_str)
-                            == Some("turn.completed");
-                        parser.parse_line(&line).map_err(io::Error::other)
-                    });
-                    if let Ok(parsed) = result {
-                        for event in parsed {
-                            if event != AgentEvent::Done && sender.send(event).is_err() {
-                                break;
-                            }
-                        }
-                    } else {
-                        sender.interrupt("provider stream refused; cleanup pending");
-                        break;
-                    }
-                    if sender.failed() {
-                        break;
-                    }
-                }
-                if usage_owner
-                    .raw(
-                        &execution,
-                        &serde_json::json!({"type":"native.eof"}),
-                        ordinal.saturating_add(1),
-                        true,
-                    )
-                    .is_err()
-                {
-                    sender.interrupt("usage publication remains unresolved");
-                }
+                let completed = read_provider_output(pipes.output, &sender, |raw, ordinal, eof| {
+                    usage_owner.raw(&execution, raw, ordinal, eof)
+                });
                 let mut native = worker_control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -773,4 +754,53 @@ impl Drop for RestrictedSession {
     fn drop(&mut self) {
         self.interrupt();
     }
+}
+
+/// The native launch path and uncertified CI children share bounded framing,
+/// raw H1 accounting before display parsing, and terminal failure handling.
+pub(crate) fn read_provider_output(
+    output: impl std::io::Read,
+    sender: &crate::protocol::limits::EventSender,
+    mut record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
+) -> bool {
+    let mut parser = crate::protocol::CodexProtocol::default();
+    let mut ordinal = 0_u64;
+    let mut completed = false;
+    for line in crate::protocol::limits::Frames::new(output) {
+        let result = line.map_err(io::Error::other).and_then(|line| {
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("usage event capacity"))?;
+            let raw: serde_json::Value = serde_json::from_str(&line)?;
+            record(&raw, ordinal, false)?;
+            completed |=
+                raw.get("type").and_then(serde_json::Value::as_str) == Some("turn.completed");
+            parser.parse_line(&line).map_err(io::Error::other)
+        });
+        if let Ok(parsed) = result {
+            for event in parsed {
+                if !matches!(event, AgentEvent::Done | AgentEvent::Cost { .. })
+                    && sender.send(event).is_err()
+                {
+                    break;
+                }
+            }
+        } else {
+            sender.interrupt("provider stream refused; cleanup pending");
+            break;
+        }
+        if sender.failed() {
+            break;
+        }
+    }
+    if record(
+        &serde_json::json!({"type":"native.eof"}),
+        ordinal.saturating_add(1),
+        true,
+    )
+    .is_err()
+    {
+        sender.interrupt("usage publication remains unresolved");
+    }
+    completed
 }

@@ -128,6 +128,7 @@ fn host_ipc_case(restricted: bool) {
         working_directory: root.clone(),
         sandbox: if restricted {
             protocol::ProviderSandbox::LinuxAllowlist {
+                connect_tcp: vec![443],
                 runtime: [
                     "/usr",
                     "/lib",
@@ -2703,6 +2704,7 @@ fn s4b_c2_provider_pipes_and_final_environment() {
         environment: std::collections::BTreeMap::new(),
         working_directory: scratch.clone(),
         sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            connect_tcp: vec![443],
             runtime: ["/usr", "/lib", "/lib64", "/dev/null"]
                 .map(Into::into)
                 .to_vec(),

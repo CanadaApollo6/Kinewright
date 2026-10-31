@@ -122,6 +122,10 @@ impl StudioRuntime {
         }
         {
             let mut owner = host.lock().expect("new host owner");
+            #[cfg(any(test, feature = "test-util"))]
+            {
+                owner.fixture_director = ports.fixture_claim.is_some();
+            }
             owner.native_recovery_status = Some("cleanup pending: checking native recovery".into());
             owner.native_recovery_pending = true;
         }
@@ -549,8 +553,13 @@ fn recover_on_open(
             claim.finish()?;
             return Ok(());
         };
+        let runs = session.orchestration_runs().map_err(io::Error::other)?;
+        if runs.is_empty() {
+            claim.finish()?;
+            return Ok(());
+        }
         (
-            session.orchestration_runs().map_err(io::Error::other)?,
+            runs,
             session.project_id().map_err(io::Error::other)?,
             session
                 .association()

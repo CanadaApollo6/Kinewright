@@ -74,6 +74,7 @@ pub struct Program {
 pub enum ProviderSandbox {
     ContainmentOnly,
     LinuxAllowlist {
+        connect_tcp: Vec<u16>,
         runtime: Vec<PathBuf>,
         scratch: PathBuf,
         credential_store: PathBuf,
@@ -114,8 +115,12 @@ impl Program {
             scratch,
             credential_store,
             executable_identity,
+            connect_tcp,
         } = &self.sandbox
             && (self.pipe_directory.is_none()
+                || connect_tcp.is_empty()
+                || connect_tcp.len() > 2
+                || connect_tcp.contains(&0)
                 || runtime.len() > 32
                 || runtime
                     .iter()

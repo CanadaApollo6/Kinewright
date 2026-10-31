@@ -759,7 +759,7 @@ pub(crate) fn codex_config_path() -> Option<PathBuf> {
     codex_home().map(|home| home.join("config.toml"))
 }
 
-fn force_direct_tool_mode(catalog: &mut Value) -> Result<(), AgentError> {
+pub(crate) fn force_direct_tool_mode(catalog: &mut Value) -> Result<(), AgentError> {
     let models = if catalog.is_array() {
         catalog.as_array_mut()
     } else {

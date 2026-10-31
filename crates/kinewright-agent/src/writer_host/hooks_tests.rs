@@ -1117,4 +1117,5 @@ mod tests {
             assert!(gap.allowed_actions.contains(&RunActionKind::Continue));
         }
     }
+    include!("c5_tests.rs");
 }

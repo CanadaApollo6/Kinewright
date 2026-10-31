@@ -13,6 +13,7 @@ const READ: u64 = (1 << 0) | (1 << 2) | (1 << 3);
 const FILE_READ: u64 = (1 << 0) | (1 << 2);
 const WRITE: u64 =
     READ | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 7) | (1 << 8) | (1 << 12) | (1 << 13) | (1 << 14);
+const NETWORK: u64 = 3;
 const HANDLED: u64 = (1 << 17) - 1;
 
 #[repr(C)]
@@ -20,6 +21,11 @@ struct Ruleset {
     filesystem: u64,
     network: u64,
     scoped: u64,
+}
+#[repr(C, packed)]
+struct Port {
+    allowed: u64,
+    port: u64,
 }
 #[repr(C, packed)]
 struct Beneath {
@@ -37,7 +43,7 @@ fn checked(result: libc::c_long) -> io::Result<libc::c_long> {
 
 /// Pins the executable and installs an inherited, deny-by-default filesystem policy.
 /// Runtime trees are read-only; only scratch and the dedicated credential store are writable.
-/// TCP/UDP remain available. Pathname and abstract desktop sockets remain outside the domain.
+/// TCP connects are limited to the explicit port set; TCP bind is denied.
 ///
 /// # Errors
 /// Refuses kernels older than Landlock ABI 9, replaced executables or invalid rules.
@@ -47,6 +53,7 @@ pub fn restrict_provider(
     runtime: &[std::path::PathBuf],
     scratch: &Path,
     credentials: &Path,
+    connect_tcp: &[u16],
 ) -> io::Result<File> {
     // SAFETY: VERSION takes no pointer; the remaining syscalls borrow live, correctly sized ABI structures.
     let abi = checked(unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0, 0, 1) })?;
@@ -60,7 +67,7 @@ pub fn restrict_provider(
     }
     let attributes = Ruleset {
         filesystem: HANDLED,
-        network: 0,
+        network: NETWORK,
         scoped: 3,
     };
     // SAFETY: attributes has the kernel's ABI 6 layout. A successful syscall returns an owned descriptor.
@@ -92,6 +99,19 @@ pub fn restrict_provider(
         // SAFETY: rules and file remain open; rule is the packed kernel path-beneath layout.
         checked(unsafe {
             libc::syscall(libc::SYS_landlock_add_rule, rules.as_raw_fd(), 1, &rule, 0)
+        })?;
+    }
+    for port in connect_tcp.iter().filter(|_| NETWORK != 0) {
+        if *port == 0 {
+            return Err(io::Error::other("invalid provider connect port"));
+        }
+        let rule = Port {
+            allowed: 2,
+            port: u64::from(*port),
+        };
+        // SAFETY: rule is the live kernel net-port layout; type 2 selects it.
+        checked(unsafe {
+            libc::syscall(libc::SYS_landlock_add_rule, rules.as_raw_fd(), 2, &rule, 0)
         })?;
     }
     rustix::thread::set_no_new_privs(true)?;
@@ -262,13 +282,24 @@ mod tests {
         let outside = (case == 5).then(|| File::open(root.join("outside")).unwrap());
         let executable = std::env::current_exe().unwrap();
         let metadata = fs::metadata(&executable).unwrap();
-        let runtime = ["/usr", "/lib", "/lib64", "/dev/null"].map(Into::into);
+        let runtime: Vec<std::path::PathBuf> = ["/usr", "/lib", "/lib64", "/dev/null"]
+            .map(Into::into)
+            .into_iter()
+            .chain([root.join("runtime")])
+            .collect();
         let _pinned = restrict_provider(
             &executable,
             [metadata.dev(), metadata.ino()],
             &runtime,
             &root.join("scratch"),
             &root.join("credentials"),
+            &[
+                443,
+                std::env::var("KINEWRIGHT_S4B_TCP")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            ],
         )
         .unwrap();
         restrict_provider_syscalls().unwrap();
@@ -408,17 +439,46 @@ mod tests {
             fs::read(root.join("credentials/auth.json")).unwrap(),
             b"refreshed"
         );
+        assert_eq!(
+            fs::read(root.join("runtime/dependency")).unwrap(),
+            b"runtime"
+        );
+        assert!(
+            fs::write(root.join("runtime/dependency"), b"changed").is_err(),
+            "C5_USER_RUNTIME_READ_ONLY"
+        );
         fs::write(root.join("scratch/result"), b"private").unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let connection = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let _accepted = listener.accept().unwrap();
-        drop(connection);
+        let allowed: u16 = std::env::var("KINEWRIGHT_S4B_TCP")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let denied: u16 = std::env::var("KINEWRIGHT_S4B_DENIED_TCP")
+            .unwrap()
+            .parse()
+            .unwrap();
+        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, allowed)).unwrap();
+        assert!(
+            matches!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, denied)), Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
+            "S4B_C5_CONNECT_PORT_DENIED"
+        );
+        assert!(
+            matches!(std::net::TcpListener::bind("127.0.0.1:0"), Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
+            "S4B_C5_BIND_DENIED"
+        );
+    }
+
+    #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
+    fn s4b_c5_network_ports() {
+        sandbox_case(7);
     }
 
     fn sandbox_case(case: u8) {
         let root =
             std::env::temp_dir().join(format!("s4b-c2-sandbox-{}-{case}", std::process::id()));
         fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("runtime")).unwrap();
+        fs::write(root.join("runtime/dependency"), b"runtime").unwrap();
         fs::create_dir(root.join("scratch")).unwrap();
         fs::create_dir(root.join("credentials")).unwrap();
         fs::write(root.join("outside"), b"outside secret").unwrap();
@@ -440,6 +500,8 @@ mod tests {
             );
         }
         let socket = UnixListener::bind(root.join("desktop")).unwrap();
+        let allowed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let denied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -448,6 +510,14 @@ mod tests {
             ])
             .env("KINEWRIGHT_S4B_SANDBOX_CHILD", &root)
             .env("KINEWRIGHT_S4B_CASE", case.to_string())
+            .env(
+                "KINEWRIGHT_S4B_TCP",
+                allowed.local_addr().unwrap().port().to_string(),
+            )
+            .env(
+                "KINEWRIGHT_S4B_DENIED_TCP",
+                denied.local_addr().unwrap().port().to_string(),
+            )
             .output()
             .unwrap();
         drop(socket);

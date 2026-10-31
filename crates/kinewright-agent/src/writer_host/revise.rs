@@ -121,7 +121,16 @@ impl HostCommandOwner {
         if manual.head_id != request.expected_candidate_head {
             return Ok(ReviseResult::Conflict);
         }
-        let provider = match configured_director(self.config.scheduler_settings.as_deref()) {
+        let director = configured_director(self.config.scheduler_settings.as_deref());
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        let director = if self.fixture_director {
+            crate::orchestration::director_setting::configured_fixture_director(
+                self.config.scheduler_settings.as_deref(),
+            )
+        } else {
+            director
+        };
+        let provider = match director {
             Ok(provider) => provider,
             Err(reason) => return Ok(waiting(&reason)),
         };
