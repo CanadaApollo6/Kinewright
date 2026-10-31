@@ -25,6 +25,23 @@ use std::{
     thread,
 };
 
+/// One explicit TOML feature table stays within the guardian's argument bound.
+pub(crate) fn codex_feature_policy() -> String {
+    let entries = crate::drivers::CODEX_DISABLED_FEATURES
+        .iter()
+        .copied()
+        .chain([
+            "token_budget",
+            "sleep_tool",
+            "current_time_reminder",
+            "send_message_to_user_async",
+        ])
+        .map(|name| format!("{name}=false"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("features={{{entries}}}")
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
@@ -42,8 +59,26 @@ pub(crate) struct Manifest {
     reason = "the qualified recipe and filesystem policy are audited together"
 )]
 pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::Result<Program> {
-    let binding = profile.binding();
-    let runtime = profile.runtime();
+    recipe(
+        profile.specification(),
+        profile.binding(),
+        profile.runtime(),
+        profile.session_config(),
+        prompt,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one provider recipe is fingerprinted before certification and spawn"
+)]
+pub(crate) fn recipe(
+    specification: &adapters::ConnectorSpecification,
+    binding: &adapters::AttemptBinding,
+    runtime: &adapters::RuntimeQualification,
+    config: &kinewright_core::SessionConfig,
+    prompt: &str,
+) -> io::Result<Program> {
     let scratch = binding.working_directory().to_path_buf();
     let credentials = runtime.launch_context.credential_store.root.clone();
     let canonical = std::fs::canonicalize(&scratch)?;
@@ -58,7 +93,14 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
         }
     }
     let scope = &runtime.launch_context.credential_store;
-    let mut pending = vec![credentials.clone()];
+    if let Some(mount) = &scope.single_file {
+        crate::codex_credentials::inspect(&mount.source, Some(mount.identity))?;
+    }
+    let mut pending = if scope.single_file.is_some() {
+        vec![]
+    } else {
+        vec![credentials.clone()]
+    };
     let mut entries = 0;
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory)? {
@@ -127,12 +169,9 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
         ),
     ]);
     let mut arguments = vec![];
-    match profile.specification().provider() {
+    match specification.provider() {
         "codex" => {
-            super::native_runtime::write_model_catalog(
-                &scratch,
-                profile.session_config().model.as_deref(),
-            )?;
+            super::native_runtime::write_model_catalog(&scratch, config.model.as_deref())?;
             arguments.extend(
                 [
                     "exec",
@@ -149,10 +188,8 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
                 ]
                 .map(str::to_owned),
             );
-            for feature in crate::drivers::CODEX_DISABLED_FEATURES {
-                arguments.extend(["--disable".into(), (*feature).into()]);
-            }
-            let cfg = profile.session_config();
+            arguments.extend(["-c".into(), codex_feature_policy()]);
+            let cfg = config;
             if let Some(model) = &cfg.model {
                 arguments.extend(["--model".into(), model.clone()]);
             }
@@ -171,6 +208,7 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
             for option in [
                 "approval_policy='never'",
                 "forced_login_method='chatgpt'",
+                "cli_auth_credentials_store='file'",
                 "web_search='disabled'",
                 "tools.update_plan.enabled=false",
                 "agents.enabled=false",
@@ -251,6 +289,13 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
         working_directory: scratch.clone(),
         pipe_directory: Some(scratch.join("io")),
         sandbox: ProviderSandbox::LinuxAllowlist {
+            credential_mount: scope.single_file.as_ref().map(|file| {
+                Box::new(crate::job_guardian::protocol::CredentialMount {
+                    source: file.source.clone(),
+                    target: credentials.join("auth.json"),
+                    identity: file.identity,
+                })
+            }),
             connect_tcp: vec![
                 443,
                 reqwest::Url::parse(binding.endpoint())
@@ -272,7 +317,7 @@ pub(crate) fn program(profile: &CertifiedConnectorProfile, prompt: &str) -> io::
             ]
             .map(Into::into)
             .into_iter()
-            .chain(if profile.specification().provider() == "codex" {
+            .chain(if specification.provider() == "codex" {
                 super::native_runtime::runtime_tree(&runtime.executable)?
             } else {
                 None
@@ -309,6 +354,13 @@ pub(crate) fn runtime_paths(program: &Program) -> Vec<&std::path::Path> {
     {
         paths.extend(runtime.iter().map(PathBuf::as_path));
         paths.push(credential_store);
+        if let ProviderSandbox::LinuxAllowlist {
+            credential_mount: Some(mount),
+            ..
+        } = &program.sandbox
+        {
+            paths.push(&mount.source);
+        }
     }
     paths
 }
@@ -428,6 +480,7 @@ struct StartupCleanup {
     identity: crate::orchestration::ExecutionIdentity,
     control: Option<Arc<Mutex<ContainedSession>>>,
     claim: Arc<Mutex<MachineClaim>>,
+    credential_mount: Option<Box<crate::job_guardian::protocol::CredentialMount>>,
 }
 impl Drop for StartupCleanup {
     fn drop(&mut self) {
@@ -438,7 +491,11 @@ impl Drop for StartupCleanup {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         native.close_lifetime();
-        if let Ok(proof) = native.cleanup()
+        let proof = native.cleanup();
+        if let Some(mount) = &self.credential_mount {
+            let _ = crate::codex_credentials::verify_mount(mount);
+        }
+        if let Ok(proof) = proof
             && self.owner.completed(&self.identity, false, &proof).is_ok()
             && let Ok(mut claim) = self.claim.lock()
         {
@@ -593,6 +650,12 @@ impl NativeGuardianLauncher {
             .claim
             .lock()
             .map_err(|_| io::Error::other("machine claim poisoned"))?;
+        let credential_mount = match &actual.sandbox {
+            ProviderSandbox::LinuxAllowlist {
+                credential_mount, ..
+            } => credential_mount.clone(),
+            ProviderSandbox::ContainmentOnly => None,
+        };
         let native = ContainedSession::prepare(
             &mut claim_guard,
             &mut owner,
@@ -608,6 +671,7 @@ impl NativeGuardianLauncher {
             identity: attempt.identity().clone(),
             control: Some(control.clone()),
             claim: self.claim.clone(),
+            credential_mount: credential_mount.clone(),
         };
         owner.control = Some(
             control
@@ -672,15 +736,24 @@ impl NativeGuardianLauncher {
                     pipes.diagnostics,
                     "kinewright-contained-stderr",
                 );
-                let completed = read_provider_output(pipes.output, &sender, |raw, ordinal, eof| {
-                    usage_owner.raw(&execution, raw, ordinal, eof)
-                });
+                let mut completed =
+                    read_provider_output(pipes.output, &sender, |raw, ordinal, eof| {
+                        usage_owner.raw(&execution, raw, ordinal, eof)
+                    });
                 let mut native = worker_control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 native.close_lifetime();
                 match native.cleanup() {
                     Ok(proof) => {
+                        if credential_mount.as_ref().is_some_and(|mount| {
+                            crate::codex_credentials::verify_mount(mount).is_err()
+                        }) {
+                            completed = false;
+                            sender.interrupt(
+                                "Sign in: credential identity or authentication changed",
+                            );
+                        }
                         if usage_owner
                             .completed(&execution, completed && !sender.failed(), &proof)
                             .is_err()
@@ -773,6 +846,9 @@ pub(crate) fn read_provider_output(
                 .ok_or_else(|| io::Error::other("usage event capacity"))?;
             let raw: serde_json::Value = serde_json::from_str(&line)?;
             record(&raw, ordinal, false)?;
+            if !native_item_allowed(&raw) {
+                return Err(io::Error::other("provider-native tool refused"));
+            }
             completed |=
                 raw.get("type").and_then(serde_json::Value::as_str) == Some("turn.completed");
             parser.parse_line(&line).map_err(io::Error::other)
@@ -803,4 +879,24 @@ pub(crate) fn read_provider_output(
         sender.interrupt("usage publication remains unresolved");
     }
     completed
+}
+
+fn native_item_allowed(raw: &serde_json::Value) -> bool {
+    let Some(item) = raw.get("item") else {
+        return true;
+    };
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("agent_message" | "reasoning" | "error") => true,
+        Some("mcp_tool_call") => {
+            item.get("server").and_then(serde_json::Value::as_str) == Some("kinewright")
+                && item
+                    .get("tool")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|tool| {
+                        crate::runtime::COMPACT_TOOL_NAMES
+                            .contains(&crate::protocol::display_tool_name(tool).as_str())
+                    })
+        }
+        _ => false,
+    }
 }

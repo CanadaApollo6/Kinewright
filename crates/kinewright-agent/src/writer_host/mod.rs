@@ -1173,6 +1173,8 @@ pub struct HostCommandOwner {
     #[cfg(target_os = "linux")]
     #[cfg(any(test, feature = "test-util"))]
     fixture_director: bool,
+    #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+    qualification_director: bool,
     #[cfg(target_os = "linux")]
     native_recovery_pending: bool,
     #[cfg(target_os = "linux")]
@@ -1340,6 +1342,8 @@ impl HostCommandOwner {
             #[cfg(target_os = "linux")]
             #[cfg(any(test, feature = "test-util"))]
             fixture_director: false,
+            #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+            qualification_director: false,
             #[cfg(target_os = "linux")]
             native_recovery_pending: false,
             #[cfg(target_os = "linux")]
@@ -3309,3 +3313,11 @@ pub(super) fn wait_runtime_recovery(host: &WriterHost) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[cfg(all(target_os = "linux", feature = "eval-harness"))]
+mod codex_witness;
+#[cfg(all(target_os = "linux", feature = "eval-harness"))]
+#[doc(hidden)]
+pub use codex_witness::{
+    run_installed_codex_director_witness, run_installed_codex_local_policy_witness,
+};

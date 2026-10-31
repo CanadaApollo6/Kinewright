@@ -8,6 +8,12 @@ pub mod guardian;
 pub mod job_guardian;
 // S4b C2
 #[cfg(target_os = "linux")]
+#[path = "orchestration/codex_credentials.rs"]
+mod codex_credentials;
+#[cfg(target_os = "linux")]
+#[path = "orchestration/codex_qualification.rs"]
+mod codex_qualification;
+#[cfg(target_os = "linux")]
 #[path = "orchestration/native_launcher.rs"]
 pub(crate) mod native_launcher;
 #[cfg(target_os = "linux")]

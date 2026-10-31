@@ -53,6 +53,9 @@ fn s4b_c5_ci_protocol_child() {
         path
     });
     for mode in [
+        "native-tool",
+        "other-mcp",
+        "other-tool",
         "malformed",
         "oversized",
         "duplicate-cache",
@@ -107,7 +110,10 @@ fn ci_protocol_case(binary: &std::path::Path, mode: &str) {
         !events.iter().any(|e| matches!(e, AgentEvent::Cost { .. })),
         "C5_NO_LEGACY_COST"
     );
-    if matches!(mode, "malformed" | "oversized" | "interrupt") {
+    if matches!(
+        mode,
+        "native-tool" | "other-mcp" | "other-tool" | "malformed" | "oversized" | "interrupt"
+    ) {
         assert!(sender.failed(), "C5_FRAME_REFUSAL {mode}");
     }
     if mode == "duplicate-cache" {
@@ -162,4 +168,47 @@ fn ci_protocol_case(binary: &std::path::Path, mode: &str) {
         "C5_CI_RETIRES_ONLY_FIXTURE_RESERVATION"
     );
     std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn s4b_c5_opening_prompt_contains_bound_brief_and_notes() {
+    let f = Fixture::with_media(true);
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .qualification_director = true;
+    let batch = manual_batch(&f);
+    let request = submitted_request(&f, &batch);
+    let result = revise_result(revise(&f, &f.editor, &request), "C5_PROMPT_REVISE");
+    let kinewright_project::studio_records::ReviseResult::Accepted { run_id, .. } = result else {
+        panic!("C5_PROMPT_ACCEPTED");
+    };
+    let state = f.projection(&run_of(&run_id));
+    let owner = f.host.owner.upgrade().unwrap();
+    let owner = owner.lock().unwrap();
+    let assignment = owner
+        .owner()
+        .unwrap()
+        .store()
+        .unwrap()
+        .read_evidence(&state.tasks[0].brief.assignment)
+        .unwrap();
+    let prompt = owner.codex_prompt(&state.tasks[0], &assignment).unwrap();
+    let prompt: serde_json::Value = serde_json::from_slice(&prompt).unwrap();
+    assert_eq!(
+        prompt["brief"],
+        serde_json::to_value(&state.tasks[0].brief).unwrap()
+    );
+    assert_eq!(
+        prompt["notes"][0]["text"],
+        "hook plan, script and assignment"
+    );
+    assert!(prompt["instructions"].as_str().unwrap().contains("Editor"));
+    assert!(
+        state.attempts.is_empty(),
+        "C5_PROMPT_FIXTURE_NEVER_LAUNCHES"
+    );
 }

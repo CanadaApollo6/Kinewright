@@ -156,3 +156,9 @@ kinewright_agent writer_host::hooks_tests::tests::s4b_c4_fix1_child_discovery_pr
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_fix1_merge_crash_cuts crates/kinewright-agent/src/writer_host/c4_fix1_tests.rs linux on-demand # C4 candidate commit and H1 acknowledgment crash cuts
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_fix1_failed_launch_publishes_retirement_before_private_delete crates/kinewright-agent/src/writer_host/c4_fix1_tests.rs linux on-demand # C4 abort proof/H1/private ordering and failed retirement acknowledgment recovery
 kinewright_job_sys sandbox::tests::s4b_c5_network_ports crates/kinewright-job-sys/src/sandbox.rs linux on-demand # C5 connect port and bind rights
+
+ja_s4_guardian s4b_c5_single_file_credentials crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand # C5 single-file credential mount isolation
+
+ja_s4_connector s4b_installed_codex_director crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5 installed subscription Director qualification
+
+ja_s4_connector s4b_installed_codex_local_policy crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5 unpaid installed CLI policy checks

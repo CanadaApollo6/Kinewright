@@ -40,35 +40,26 @@ pub(super) struct RuntimePorts {
     #[cfg(any(test, feature = "test-util"))]
     pub fixture_autostart: bool,
     #[cfg(any(test, feature = "test-util"))]
+    pub qualification: bool,
+    #[cfg(any(test, feature = "test-util"))]
     pub witness: Option<Arc<RuntimeWitness>>,
-}
-struct Unqualified;
-impl ConnectorRuntimeChecks for Unqualified {
-    fn probe(
-        &self,
-        _: &crate::orchestration::adapters::ConnectorSpecification,
-        _: &crate::orchestration::adapters::AttemptBinding,
-    ) -> Result<
-        crate::orchestration::adapters::RuntimeQualification,
-        crate::orchestration::adapters::CertificationRefusal,
-    > {
-        Err(crate::orchestration::adapters::CertificationRefusal::UnqualifiedSpecification)
-    }
 }
 impl Default for RuntimePorts {
     fn default() -> Self {
         Self {
             profiles: None,
-            checks: Arc::new(Unqualified),
+            checks: Arc::new(crate::codex_qualification::InstalledCodexChecks),
             guardian: std::env::current_exe()
                 .unwrap_or_default()
                 .with_file_name("kinewright-job-guardian"),
-            ceiling: None,
+            ceiling: std::num::NonZeroU64::new(crate::codex_qualification::TOKEN_CEILING),
             #[cfg(any(test, feature = "test-util"))]
             fixture_claim: std::env::var_os("KINEWRIGHT_C4_RECOVERY_FIXTURE_ROOT")
                 .map(PathBuf::from),
             #[cfg(any(test, feature = "test-util"))]
             fixture_autostart: false,
+            #[cfg(any(test, feature = "test-util"))]
+            qualification: false,
             #[cfg(any(test, feature = "test-util"))]
             witness: None,
         }
@@ -118,6 +109,8 @@ impl StudioRuntime {
             ports.profiles = Some(Arc::new(RegisteredProfiles {
                 host: Arc::downgrade(host),
                 checks: ports.checks.clone(),
+                #[cfg(any(test, feature = "test-util"))]
+                qualification: ports.qualification,
             }));
         }
         {
@@ -125,6 +118,7 @@ impl StudioRuntime {
             #[cfg(any(test, feature = "test-util"))]
             {
                 owner.fixture_director = ports.fixture_claim.is_some();
+                owner.qualification_director = ports.qualification;
             }
             owner.native_recovery_status = Some("cleanup pending: checking native recovery".into());
             owner.native_recovery_pending = true;
@@ -280,7 +274,10 @@ impl StudioRuntime {
                     .any(|spec| spec.selection() == *selection && spec.provider() != "scripted");
                 #[cfg(any(test, feature = "test-util"))]
                 let qualified = qualified
-                    || (self.ports.fixture_claim.is_some() && self.ports.fixture_autostart);
+                    || (self.ports.fixture_claim.is_some() && self.ports.fixture_autostart)
+                    || (self.ports.qualification
+                        && *selection
+                            == crate::orchestration::adapters::codex_candidate().selection());
                 if qualified {
                     candidate = Some((
                         id.clone(),
@@ -693,6 +690,8 @@ impl ProfileFactory for TaskProfiles {
 }
 
 struct RegisteredProfiles {
+    #[cfg(any(test, feature = "test-util"))]
+    qualification: bool,
     host: Weak<Mutex<HostCommandOwner>>,
     checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
 }
@@ -740,16 +739,19 @@ impl ProfileFactory for RegisteredProfiles {
                     .collect(),
             )
         };
-        if !crate::orchestration::adapters::certified_connectors()
-            .iter()
-            .any(|spec| spec.selection() == selection)
+        #[cfg(any(test, feature = "test-util"))]
+        let candidate = self.qualification
+            && crate::orchestration::adapters::codex_candidate().selection() == selection;
+        #[cfg(not(any(test, feature = "test-util")))]
+        let candidate = false;
+        if !candidate
+            && !crate::orchestration::adapters::certified_connectors()
+                .iter()
+                .any(|spec| spec.selection() == selection)
         {
             return Err(io::Error::other("saved connector is not qualified"));
         }
-        let scratch = std::env::temp_dir().join(format!(
-            "kinewright-studio-{}",
-            attempt.identity().nonce.as_str()
-        ));
+        let scratch = std::env::temp_dir().join(format!("k-{}", attempt.identity().nonce.as_str()));
         std::fs::create_dir(&scratch)?;
         std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
         let metadata = std::fs::symlink_metadata(&scratch)?;
@@ -762,7 +764,15 @@ impl ProfileFactory for RegisteredProfiles {
         let binding = AttemptBinding::issue(attempt, endpoint.into(), roots, scratch)
             .map_err(io::Error::other)?;
         let scratch = binding.working_directory().to_path_buf();
-        let profile = match certify_connector(&selection.connector, binding, self.checks.as_ref()) {
+        #[cfg(any(test, feature = "test-util"))]
+        let certify = if candidate {
+            crate::orchestration::adapters::certify_codex_candidate(binding, self.checks.as_ref())
+        } else {
+            certify_connector(&selection.connector, binding, self.checks.as_ref())
+        };
+        #[cfg(not(any(test, feature = "test-util")))]
+        let certify = certify_connector(&selection.connector, binding, self.checks.as_ref());
+        let profile = match certify {
             Ok(profile) => profile,
             Err(error) => {
                 let _ = std::fs::remove_dir(&scratch);

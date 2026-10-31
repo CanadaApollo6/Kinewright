@@ -3,6 +3,8 @@
 //! The executable includes this module directly and links no media or UI code.
 
 #[cfg(target_os = "linux")]
+pub(crate) mod credentials;
+#[cfg(target_os = "linux")]
 mod linux;
 pub mod protocol;
 mod service;

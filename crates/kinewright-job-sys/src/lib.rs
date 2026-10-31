@@ -21,3 +21,8 @@ pub use sandbox::*;
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+
+#[cfg(target_os = "linux")]
+mod credential;
+#[cfg(target_os = "linux")]
+pub use credential::*;

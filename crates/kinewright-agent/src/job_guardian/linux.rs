@@ -214,6 +214,10 @@ fn write_ready(writer: &mut impl Write, result: &impl serde::Serialize) -> io::R
     writer.flush()
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the final spawn orders credentials, policy, environment and pipes together"
+)]
 fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
     use std::os::{
         fd::{AsRawFd, OwnedFd},
@@ -231,6 +235,13 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
         .transpose()?;
     kinewright_job_sys::close_payload_readiness()?;
     let boundary = kinewright_job_sys::mount_payload_proc().map_err(|error| error.to_string());
+    if let ProviderSandbox::LinuxAllowlist {
+        credential_mount: Some(mount),
+        ..
+    } = &program.sandbox
+    {
+        kinewright_job_sys::mount_credential_file(&mount.source, &mount.target, mount.identity)?;
+    }
     write_ready(&mut ready, &boundary)?;
     drop(ready);
     boundary.map_err(io::Error::other)?;
@@ -238,6 +249,13 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
     std::io::stdin().read_exact(&mut commit)?;
     if commit != *b"C" {
         return Err(io::Error::other("missing shim COMMIT"));
+    }
+    if let ProviderSandbox::LinuxAllowlist {
+        credential_mount: Some(mount),
+        ..
+    } = &program.sandbox
+    {
+        super::credentials::inspect_subscription(&mount.target, Some(mount.identity))?;
     }
     let pinned = match &program.sandbox {
         ProviderSandbox::ContainmentOnly => None,
@@ -247,6 +265,7 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
             credential_store,
             executable_identity,
             connect_tcp,
+            ..
         } => {
             let pinned = kinewright_job_sys::restrict_provider(
                 &program.executable,

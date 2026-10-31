@@ -68,6 +68,22 @@ fn write_model_catalog_from(scratch: &Path, source: &Path, model: Option<&str>) 
         ));
     }
     crate::drivers::force_direct_tool_mode(&mut catalog).map_err(io::Error::other)?;
+    let models = if catalog.is_array() {
+        catalog.as_array_mut()
+    } else {
+        catalog
+            .get_mut("models")
+            .and_then(serde_json::Value::as_array_mut)
+    }
+    .ok_or_else(|| io::Error::other("model metadata shape"))?;
+    for model in models {
+        let object = model
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("model metadata entry"))?;
+        object.insert("shell_type".into(), serde_json::json!("disabled"));
+        object.insert("apply_patch_tool_type".into(), serde_json::Value::Null);
+        object.insert("experimental_supported_tools".into(), serde_json::json!([]));
+    }
     let bytes = serde_json::to_vec(&catalog)?;
     let path = scratch.join("models-direct.json");
     if path.exists() {
@@ -119,7 +135,7 @@ mod tests {
         let source = root.path("metadata.json");
         std::fs::write(
             &source,
-            br#"{"models":[{"slug":"chosen","tool_mode":"search","supports_search_tool":true}]}"#,
+            br#"{"models":[{"slug":"chosen","tool_mode":"search","supports_search_tool":true,"shell_type":"unified_exec","apply_patch_tool_type":"freeform","experimental_supported_tools":["clock","send_user_message_async"]}]}"#,
         )
         .unwrap();
         let scratch = root.path("scratch");
@@ -130,6 +146,15 @@ mod tests {
                 .unwrap();
         assert_eq!(catalog["models"][0]["tool_mode"], "direct");
         assert_eq!(catalog["models"][0]["supports_search_tool"], false);
+        assert_eq!(
+            catalog["models"][0]["shell_type"], "disabled",
+            "C5_NATIVE_MODEL_TOOLS_DISABLED"
+        );
+        assert!(catalog["models"][0]["apply_patch_tool_type"].is_null());
+        assert_eq!(
+            catalog["models"][0]["experimental_supported_tools"],
+            serde_json::json!([])
+        );
         assert!(write_model_catalog_from(&scratch, &source, Some("unknown")).is_err());
         write_model_catalog_from(&scratch, &source, Some("chosen")).unwrap();
     }

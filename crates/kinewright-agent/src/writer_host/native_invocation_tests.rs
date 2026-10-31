@@ -113,7 +113,7 @@ fn native_profile_at(
     runtime.launch_context.executable = runtime.executable.clone();
     runtime.launch_context.credential_store.root = credentials;
     runtime.authentication.context = runtime.launch_context.clone();
-    runtime.authentication.refreshed_store = runtime.launch_context.credential_store.clone();
+    runtime.authentication.observed_store = runtime.launch_context.credential_store.clone();
     let mut checks = NativeChecks(runtime);
     let profile = certify_connector("scripted", binding.clone(), &checks).unwrap();
     let program = crate::native_launcher::program(&profile, "placeholder").unwrap();
@@ -710,7 +710,7 @@ fn s4b_c2_project_alias_is_not_private_scratch() {
     checks.0.launch_context.executable = checks.0.executable.clone();
     checks.0.launch_context.credential_store.root = credentials;
     checks.0.authentication.context = checks.0.launch_context.clone();
-    checks.0.authentication.refreshed_store = checks.0.launch_context.credential_store.clone();
+    checks.0.authentication.observed_store = checks.0.launch_context.credential_store.clone();
     let profile = certify_connector("scripted", binding, &checks).unwrap();
     let error = crate::native_launcher::program(&profile, "prompt")
         .expect_err("S4B_C2_PROJECT_ALIAS_DENIED");

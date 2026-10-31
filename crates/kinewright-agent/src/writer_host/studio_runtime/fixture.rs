@@ -111,6 +111,7 @@ impl ProtocolFixture {
             ceiling: None,
             fixture_claim: Some(self.claim_root()),
             fixture_autostart: true,
+            qualification: false,
             witness: Some(Arc::new(super::RuntimeWitness {
                 on_event: Arc::new(move |_| {
                     if events.mode == ProtocolFixtureMode::FullQueue {
@@ -231,7 +232,7 @@ impl ProfileFactory for Factory {
         runtime.launch_context.executable = runtime.executable.clone();
         runtime.launch_context.credential_store.root = credentials;
         runtime.authentication.context = runtime.launch_context.clone();
-        runtime.authentication.refreshed_store = runtime.launch_context.credential_store.clone();
+        runtime.authentication.observed_store = runtime.launch_context.credential_store.clone();
         self.0
             .checks
             .lock()

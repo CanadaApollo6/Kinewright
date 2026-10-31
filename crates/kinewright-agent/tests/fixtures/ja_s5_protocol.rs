@@ -4,6 +4,24 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap();
     let mut output = std::io::stdout().lock();
     match mode.as_str() {
+        "other-mcp" => {
+            let _ = writeln!(
+                output,
+                "{{\"type\":\"item.started\",\"item\":{{\"type\":\"mcp_tool_call\",\"server\":\"ambient\",\"tool\":\"get_timeline_state\"}}}}"
+            );
+        }
+        "other-tool" => {
+            let _ = writeln!(
+                output,
+                "{{\"type\":\"item.started\",\"item\":{{\"type\":\"mcp_tool_call\",\"server\":\"kinewright\",\"tool\":\"bash\"}}}}"
+            );
+        }
+        "native-tool" => {
+            let _ = writeln!(
+                output,
+                "{{\"type\":\"item.started\",\"item\":{{\"type\":\"command_execution\"}}}}"
+            );
+        }
         "malformed" => {
             let _ = writeln!(output, "not-json");
         }

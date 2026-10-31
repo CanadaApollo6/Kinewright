@@ -15,6 +15,7 @@ pub enum SubscriptionProof {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialStoreOperation {
     ReadCredentials,
+    InPlaceWrite,
     ExclusiveStoreLocks,
     CreateSiblingTemporary,
     AtomicReplace,
@@ -47,7 +48,12 @@ const REFRESH: CredentialRefreshContract = CredentialRefreshContract {
 pub const CODEX_AUTH_CONTRACT: ProviderAuthContract = ProviderAuthContract {
     provider: "codex",
     proof: SubscriptionProof::CodexSubscriptionLoginMethod,
-    refresh: REFRESH,
+    refresh: CredentialRefreshContract {
+        operations: &[
+            CredentialStoreOperation::ReadCredentials,
+            CredentialStoreOperation::InPlaceWrite,
+        ],
+    },
 };
 pub const CLAUDE_AUTH_CONTRACT: ProviderAuthContract = ProviderAuthContract {
     provider: "claude",
@@ -56,11 +62,19 @@ pub const CLAUDE_AUTH_CONTRACT: ProviderAuthContract = ProviderAuthContract {
 };
 
 /// Exact sandbox allowlist required by one qualified provider/version/OS.
+/// Codex `single_file` grants one mounted inode beneath private root, never its source directory.
 /// All entries are relative to root; temp prefixes authorize only siblings of credentials.
 /// Keychain/managed-policy stores need a separately qualified contract before registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialFile {
+    pub source: PathBuf,
+    pub identity: [u64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialStoreScope {
     pub root: PathBuf,
+    pub single_file: Option<CredentialFile>,
     pub credential_files: Vec<PathBuf>,
     pub lock_files: Vec<PathBuf>,
     pub temporary_file_prefixes: Vec<PathBuf>,
@@ -79,15 +93,18 @@ pub struct EffectiveLaunchContext {
     pub executable: ExecutableIdentity,
 }
 
-/// Both observations must use this same effective context, including after atomic refresh.
+/// Both observations use the same effective context. Codex rechecks in-place saves;
+/// Claude still requires its atomic-refresh qualification. No refresh is inferred from two reads.
 /// A loggedIn flag or ambient login-status text cannot populate subscription proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveAuthEvidence {
     pub contract: ProviderAuthContract,
     pub context: EffectiveLaunchContext,
-    pub before_refresh: AuthenticationMode,
-    pub after_refresh: AuthenticationMode,
-    pub refreshed_store: CredentialStoreScope,
+    pub at_launch: AuthenticationMode,
+    /// None at Codex certification: final spawn and exit perform real rechecks.
+    /// It never asserts that an actual refresh happened.
+    pub at_recheck: Option<AuthenticationMode>,
+    pub observed_store: CredentialStoreScope,
 }
 impl EffectiveAuthEvidence {
     pub(super) fn validate(
@@ -96,7 +113,7 @@ impl EffectiveAuthEvidence {
         launch: &EffectiveLaunchContext,
         executable: &ExecutableIdentity,
     ) -> Result<(), CertificationRefusal> {
-        for mode in [self.before_refresh, self.after_refresh] {
+        for mode in std::iter::once(self.at_launch).chain(self.at_recheck) {
             match mode {
                 AuthenticationMode::ApiKey => return Err(CertificationRefusal::ApiAuthentication),
                 AuthenticationMode::Unknown => {
@@ -112,7 +129,9 @@ impl EffectiveAuthEvidence {
                     .components()
                     .all(|c| matches!(c, std::path::Component::Normal(_)))
         };
-        if self.contract != contract
+        if (self.at_recheck.is_none()
+            && contract.proof != SubscriptionProof::CodexSubscriptionLoginMethod)
+            || self.contract != contract
             || &self.context != launch
             || &launch.executable != executable
             || !launch.environment_cleared
@@ -123,7 +142,7 @@ impl EffectiveAuthEvidence {
             || scope.credential_files.is_empty()
             || scope.credential_files.len() > 32
             || scope.lock_files.len() > 32
-            || scope.temporary_file_prefixes.is_empty()
+            || (scope.temporary_file_prefixes.is_empty() && scope.single_file.is_none())
             || scope.temporary_file_prefixes.len() > 32
             || !scope
                 .credential_files
@@ -131,8 +150,16 @@ impl EffectiveAuthEvidence {
                 .chain(&scope.lock_files)
                 .chain(&scope.temporary_file_prefixes)
                 .all(relative)
+            || (contract.proof == SubscriptionProof::CodexSubscriptionLoginMethod
+                && (scope.credential_files != [PathBuf::from("auth.json")]
+                    || !scope.lock_files.is_empty()
+                    || !scope.temporary_file_prefixes.is_empty()
+                    || !scope
+                        .single_file
+                        .as_ref()
+                        .is_some_and(|file| file.source.is_absolute() && file.identity != [0, 0])))
             || scope.refresh != contract.refresh
-            || self.refreshed_store != *scope
+            || self.observed_store != *scope
         {
             return Err(CertificationRefusal::EffectiveAuthentication);
         }
@@ -152,6 +179,7 @@ pub(super) fn fixture(
         executable: executable.clone(),
         credential_store: CredentialStoreScope {
             root: std::env::current_dir().unwrap().join("fixture-credentials"),
+            single_file: None,
             credential_files: vec!["credentials.json".into()],
             lock_files: vec!["credentials.lock".into()],
             temporary_file_prefixes: vec!["credentials.tmp-".into()],
@@ -165,9 +193,9 @@ pub(super) fn fixture(
             refresh: REFRESH,
         },
         context: context.clone(),
-        before_refresh: AuthenticationMode::Subscription,
-        after_refresh: AuthenticationMode::Subscription,
-        refreshed_store: context.credential_store.clone(),
+        at_launch: AuthenticationMode::Subscription,
+        at_recheck: Some(AuthenticationMode::Subscription),
+        observed_store: context.credential_store.clone(),
     };
     (context, evidence)
 }
@@ -185,6 +213,19 @@ mod tests {
         for contract in [CODEX_AUTH_CONTRACT, CLAUDE_AUTH_CONTRACT] {
             let (context, mut evidence) = fixture(&executable);
             evidence.contract = contract;
+            let mut context = context;
+            context.credential_store.refresh = contract.refresh;
+            if contract.proof == SubscriptionProof::CodexSubscriptionLoginMethod {
+                context.credential_store.credential_files = vec!["auth.json".into()];
+                context.credential_store.lock_files.clear();
+                context.credential_store.temporary_file_prefixes.clear();
+                context.credential_store.single_file = Some(CredentialFile {
+                    source: std::env::current_dir().unwrap().join("synthetic-auth.json"),
+                    identity: [1, 2],
+                });
+            }
+            evidence.context = context.clone();
+            evidence.observed_store = context.credential_store.clone();
             assert_eq!(evidence.validate(contract, &context, &executable), Ok(()));
             for field in 0..7 {
                 let mut changed = context.clone();
@@ -209,7 +250,7 @@ mod tests {
             }
             let mut changed = evidence.clone();
             changed
-                .refreshed_store
+                .observed_store
                 .temporary_file_prefixes
                 .push("other-store".into());
             assert_eq!(
@@ -217,12 +258,12 @@ mod tests {
                 Err(CertificationRefusal::EffectiveAuthentication)
             );
             changed = evidence.clone();
-            changed.after_refresh = AuthenticationMode::ApiKey;
+            changed.at_recheck = Some(AuthenticationMode::ApiKey);
             assert_eq!(
                 changed.validate(contract, &context, &executable),
                 Err(CertificationRefusal::ApiAuthentication)
             );
-            changed.after_refresh = AuthenticationMode::Unknown;
+            changed.at_recheck = Some(AuthenticationMode::Unknown);
             assert_eq!(
                 changed.validate(contract, &context, &executable),
                 Err(CertificationRefusal::UnknownAuthentication)

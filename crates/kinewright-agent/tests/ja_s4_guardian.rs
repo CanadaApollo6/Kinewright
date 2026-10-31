@@ -128,6 +128,7 @@ fn host_ipc_case(restricted: bool) {
         working_directory: root.clone(),
         sandbox: if restricted {
             protocol::ProviderSandbox::LinuxAllowlist {
+                credential_mount: None,
                 connect_tcp: vec![443],
                 runtime: [
                     "/usr",
@@ -2704,6 +2705,7 @@ fn s4b_c2_provider_pipes_and_final_environment() {
         environment: std::collections::BTreeMap::new(),
         working_directory: scratch.clone(),
         sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            credential_mount: None,
             connect_tcp: vec![443],
             runtime: ["/usr", "/lib", "/lib64", "/dev/null"]
                 .map(Into::into)
@@ -2892,5 +2894,106 @@ fn s4b_c3_fix2_starting_transport_child() {
     assert!(
         !premature && owned,
         "C3_STARTING_TRANSPORT_CANNOT_PROVE_ABSENT mode={mode}"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "on-demand: single-file credential mount isolation"]
+fn s4b_c5_single_file_credentials() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    assert!(equipped_session("s4b_c5_single_file_credentials"));
+    let root = std::env::temp_dir().join(format!("a5-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let _cleanup = FixtureCleanup(root.clone());
+    let original = root.join("original");
+    fs::create_dir(&original).unwrap();
+    fs::write(original.join("config.toml"), b"ambient fixture").unwrap();
+    fs::write(original.join("ambient.fixture"), b"unrelated fixture").unwrap();
+    let source = original.join("auth.json");
+    fs::write(&source, br#"{"auth_mode":"chatgpt","fixture":"initial"}"#).unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+    let metadata = fs::metadata(&source).unwrap();
+    let identity_file = [metadata.dev(), metadata.ino()];
+    let scratch = root.join("private");
+    let credentials = scratch.join("codex-home");
+    fs::create_dir_all(&credentials).unwrap();
+    let target = credentials.join("auth.json");
+    fs::write(&target, b"").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let pipes =
+        kinewright_agent::provider_pipes::ProviderPipeListeners::bind(&scratch.join("pipes"))
+            .unwrap();
+    let executable = fixture();
+    let metadata = fs::metadata(executable).unwrap();
+    let program = Program {
+        executable: executable.into(),
+        arguments: vec![
+            scratch.to_string_lossy().into_owned(),
+            "s4b-credentials".into(),
+            original.to_string_lossy().into_owned(),
+        ],
+        environment: std::collections::BTreeMap::new(),
+        working_directory: scratch.clone(),
+        sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            credential_mount: Some(Box::new(protocol::CredentialMount {
+                source: source.clone(),
+                target,
+                identity: identity_file,
+            })),
+            connect_tcp: vec![443],
+            runtime: ["/usr", "/lib", "/lib64", "/dev/null"]
+                .map(Into::into)
+                .into(),
+            scratch: scratch.clone(),
+            credential_store: credentials,
+            executable_identity: [metadata.dev(), metadata.ino()],
+        },
+        pipe_directory: Some(pipes.directory().into()),
+    };
+    let id = identity();
+    let mut claim =
+        MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
+    let mut owner = Owner::new(&root);
+    let mut session = ContainedSession::prepare(
+        &mut claim,
+        &mut owner,
+        id,
+        program,
+        guardian(),
+        &CertifiedProfile::fixture(),
+    )
+    .unwrap();
+    let mut accepted = pipes.accept().unwrap();
+    accepted.credentials(b"").unwrap();
+    session.commit(&mut owner).unwrap();
+    let report = scratch.join("credential-report.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !report.exists() {
+        assert!(Instant::now() < deadline, "credential child report");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let observation: serde_json::Value =
+        serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    session.close_lifetime();
+    let proof = session.cleanup().unwrap();
+    claim.retire(&proof).unwrap();
+    claim.finish().unwrap();
+    assert_eq!(
+        observation["replacement_denied"], true,
+        "C5_CREDENTIAL_REPLACEMENT_DENIED"
+    );
+    assert_eq!(
+        observation["ambient_denied"], true,
+        "C5_CREDENTIAL_AMBIENT_DENIED"
+    );
+    assert_eq!(observation["in_place"], true);
+    kinewright_job_sys::pin_credential_file(&source, Some(identity_file)).unwrap();
+    assert_eq!(
+        fs::read(&source).unwrap(),
+        br#"{"auth_mode":"chatgpt","fixture":"refreshed"}"#
+    );
+    println!(
+        "C5_CREDENTIAL_MOUNT ambient_denied=true replacement_denied=true in_place=true same_identity=true cleanup=true"
     );
 }

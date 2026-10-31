@@ -69,11 +69,20 @@ pub struct Program {
     pub pipe_directory: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialMount {
+    pub source: PathBuf,
+    pub target: PathBuf,
+    pub identity: [u64; 2],
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "policy", deny_unknown_fields)]
 pub enum ProviderSandbox {
     ContainmentOnly,
     LinuxAllowlist {
+        credential_mount: Option<Box<CredentialMount>>,
         connect_tcp: Vec<u16>,
         runtime: Vec<PathBuf>,
         scratch: PathBuf,
@@ -116,8 +125,14 @@ impl Program {
             credential_store,
             executable_identity,
             connect_tcp,
+            credential_mount,
         } = &self.sandbox
-            && (self.pipe_directory.is_none()
+            && (credential_mount.as_ref().is_some_and(|mount| {
+                !mount.source.is_absolute()
+                    || mount.target != credential_store.join("auth.json")
+                    || !credential_store.starts_with(scratch)
+                    || mount.identity == [0, 0]
+            }) || self.pipe_directory.is_none()
                 || connect_tcp.is_empty()
                 || connect_tcp.len() > 2
                 || connect_tcp.contains(&0)

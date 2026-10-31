@@ -41,6 +41,19 @@ fn checked(result: libc::c_long) -> io::Result<libc::c_long> {
     }
 }
 
+/// Probe the required Landlock ABI without restricting the calling host.
+///
+/// # Errors
+/// Refuses unavailable or older Landlock kernels.
+pub fn require_provider_landlock() -> io::Result<()> {
+    // SAFETY: VERSION takes no pointer and changes no process policy.
+    let abi = checked(unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0, 0, 1) })?;
+    if abi < 9 {
+        return Err(io::Error::other("provider_landlock_abi_unavailable"));
+    }
+    Ok(())
+}
+
 /// Pins the executable and installs an inherited, deny-by-default filesystem policy.
 /// Runtime trees are read-only; only scratch and the dedicated credential store are writable.
 /// TCP connects are limited to the explicit port set; TCP bind is denied.

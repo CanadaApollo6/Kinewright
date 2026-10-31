@@ -135,7 +135,7 @@ impl ConnectorSpecification {
         self.evidence
     }
 
-    fn session_config(&self, binding: &AttemptBinding) -> SessionConfig {
+    pub(crate) fn session_config(&self, binding: &AttemptBinding) -> SessionConfig {
         SessionConfig {
             model: Some(self.session.model.into()),
             effort: self.session.effort.map(Into::into),
@@ -148,9 +148,12 @@ impl ConnectorSpecification {
     }
 
     fn registered(&self) -> bool {
-        execution_specifications()
+        let known = execution_specifications()
             .iter()
-            .any(|spec| std::ptr::eq(*spec, self))
+            .any(|spec| std::ptr::eq(*spec, self));
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        let known = known || std::ptr::eq(self, codex_candidate());
+        known
     }
 
     #[allow(
@@ -221,7 +224,7 @@ pub fn fixture_connectors() -> Vec<&'static ConnectorSpecification> {
 fn execution_specifications() -> Vec<&'static ConnectorSpecification> {
     let specifications = certified_connectors();
     #[cfg(any(test, feature = "test-util"))]
-    let specifications = specifications
+    let specifications: Vec<_> = specifications
         .into_iter()
         .chain(fixture_connectors())
         .collect();
@@ -539,13 +542,61 @@ static FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
     auth_contract: ProviderAuthContract {
         provider: "scripted",
         proof: super::SubscriptionProof::Fixture,
-        refresh: super::CODEX_AUTH_CONTRACT.refresh,
+        refresh: super::CLAUDE_AUTH_CONTRACT.refresh,
     },
     evidence: ReleaseEvidence {
         source: "test-only-source",
         guardian: "test-only-guardian",
         fixtures: "test-only-fixtures",
         target: "test-only",
+    },
+};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn codex_candidate() -> &'static ConnectorSpecification {
+    &CODEX_CANDIDATE
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+pub(crate) fn certify_codex_candidate(
+    binding: AttemptBinding,
+    checks: &dyn ConnectorRuntimeChecks,
+) -> Result<CertifiedConnectorProfile, CertificationRefusal> {
+    codex_candidate().bind(binding, checks)
+}
+
+#[cfg(target_os = "linux")]
+static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
+    provider: "codex",
+    versions: QualifiedVersions {
+        first: CliVersion(0, 166, 0),
+        last: CliVersion(0, 166, 0),
+    },
+    session: SessionPolicy {
+        model: "gpt-6.1-sol",
+        options: &[("model_reasoning_effort", "high")],
+        effort: Some("high"),
+        service_tier: None,
+        max_turns: 1,
+        tools: &[
+            "get_timeline_state",
+            "search_capabilities",
+            "get_capability",
+            "invoke_capability",
+            "prepare_edit_plan",
+            "commit_edit_plan",
+            "discard_edit_plan",
+        ],
+    },
+    mcp: McpPolicy::HostEndpointOnly,
+    sandbox: SandboxPolicy::LinuxFilesystemAndIpc,
+    authentication: AuthenticationMode::Subscription,
+    auth_contract: super::CODEX_AUTH_CONTRACT,
+    evidence: ReleaseEvidence {
+        source: "C5 candidate, not registered",
+        guardian: "C5 Linux guardian",
+        fixtures: "C5 single-file + network witnesses",
+        target: "x86_64-unknown-linux-gnu",
     },
 };
 
@@ -731,10 +782,10 @@ mod tests {
             ),
         ] {
             let mut check = runtime();
-            check.authentication.before_refresh = authentication;
+            check.authentication.at_launch = authentication;
             assert_eq!(refusal(&check), expected);
-            check.authentication.before_refresh = AuthenticationMode::Subscription;
-            check.authentication.after_refresh = authentication;
+            check.authentication.at_launch = AuthenticationMode::Subscription;
+            check.authentication.at_recheck = Some(authentication);
             assert_eq!(refusal(&check), expected);
         }
     }
@@ -765,7 +816,7 @@ mod tests {
             Err(CertificationRefusal::ExecutableIdentity)
         );
         check = runtime();
-        check.authentication.before_refresh = AuthenticationMode::ApiKey;
+        check.authentication.at_launch = AuthenticationMode::ApiKey;
         assert_eq!(
             profile.recheck_runtime(&check),
             Err(CertificationRefusal::ApiAuthentication)

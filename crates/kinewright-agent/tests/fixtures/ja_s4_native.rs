@@ -37,6 +37,31 @@ fn main() {
     let args: Vec<_> = env::args_os().collect();
     let root = Path::new(&args[1]);
     let role = args[2].to_str().unwrap();
+    #[cfg(target_os = "linux")]
+    if role == "s4b-credentials" {
+        let original = Path::new(&args[3]);
+        let ambient_denied = fs::read_dir(original).is_err()
+            && fs::read(original.join("config.toml")).is_err()
+            && fs::read(root.join("codex-home/ambient.fixture")).is_err()
+            && fs::read_dir(root.join("codex-home"))
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() != "ambient.fixture");
+        let auth = root.join("codex-home/auth.json");
+        let in_place =
+            fs::write(&auth, br#"{"auth_mode":"chatgpt","fixture":"refreshed"}"#).is_ok();
+        let replacement = root.join("replacement");
+        fs::write(&replacement, b"synthetic replacement").unwrap();
+        let rename = fs::rename(&replacement, &auth).is_err();
+        let unlink = fs::remove_file(&auth).is_err();
+        let replacement_denied = rename && unlink;
+        fs::write(root.join("credential-report.partial"),format!("{{\"ambient_denied\":{ambient_denied},\"in_place\":{in_place},\"replacement_denied\":{replacement_denied}}}")).unwrap();
+        fs::rename(
+            root.join("credential-report.partial"),
+            root.join("credential-report.json"),
+        )
+        .unwrap();
+        return;
+    }
     if role == "ingress" {
         use std::io::Write as _;
         std::io::stderr()

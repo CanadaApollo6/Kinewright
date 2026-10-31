@@ -45,6 +45,8 @@ pub(crate) const CODEX_DISABLED_FEATURES: &[&str] = &[
     "plugins",
     "recommended_plugins",
     "multi_agent",
+    "multi_agent_v2",
+    "multi_agent_v2_dynamic_tools",
     "goals",
     "memories",
     "skill_search",
@@ -961,12 +963,23 @@ fn claude_authentication(executable: &Path) -> AuthenticationStatus {
 }
 
 fn codex_authentication(target: &CodexSpawnTarget) -> AuthenticationStatus {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = target;
+        crate::codex_qualification::authentication_status()
+    }
+    #[cfg(not(target_os = "linux"))]
+    codex_authentication_from_cli(target)
+}
+#[cfg(not(target_os = "linux"))]
+fn codex_authentication_from_cli(target: &CodexSpawnTarget) -> AuthenticationStatus {
     let Some(output) = codex_process_output(target, &["login", "status"]) else {
         return AuthenticationStatus::Unknown;
     };
     codex_authentication_status(&output)
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn codex_authentication_status(output: &str) -> AuthenticationStatus {
     let output = output.to_ascii_lowercase();
     if output.contains("not logged in") {

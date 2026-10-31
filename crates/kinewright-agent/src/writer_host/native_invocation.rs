@@ -571,6 +571,11 @@ impl HostCommandOwner {
                 .read_evidence(&next.payload)?
                 .to_vec()
         };
+        let payload = if profile.specification().provider() == "codex" {
+            self.codex_prompt(task, &payload)?
+        } else {
+            payload
+        };
         if payload.len() > crate::protocol::limits::FRAME_BYTES / 2 {
             return Err(refused("native prompt capacity"));
         }
@@ -782,3 +787,5 @@ impl HostCommandOwner {
 include!("native_spending.rs");
 
 include!("effect_execution.rs");
+
+include!("codex_prompt.rs");

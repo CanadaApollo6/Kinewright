@@ -469,7 +469,7 @@ fn nested_token_value(value: &Value, object: &str, field: &str) -> Option<u64> {
     value.get(object)?.get(field)?.as_u64()
 }
 
-fn display_tool_name(name: &str) -> String {
+pub(crate) fn display_tool_name(name: &str) -> String {
     // Copilot joins the MCP server and tool with a dash; every other harness
     // uses the double-underscore form.
     name.strip_prefix("mcp__kinewright__")
