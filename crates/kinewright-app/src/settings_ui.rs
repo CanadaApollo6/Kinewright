@@ -5,6 +5,7 @@
 //! Provider toggles gate which harnesses the composer offers for new turns;
 //! they never interrupt a session that is already running.
 
+use crate::director_readiness::{Readiness, readiness};
 use eframe::egui;
 use kinewright_agent::{
     orchestration::orchestration_records::ProviderSelectionRecord,
@@ -28,6 +29,7 @@ pub(crate) struct DirectorView {
     pub(crate) choices: Vec<ProviderSelectionRecord>,
     pub(crate) status: DirectorStatus,
     pub(crate) error: Option<String>,
+    check: Option<crossbeam_channel::Receiver<(AgentHarnessChoice, Option<HarnessInfo>)>>,
 }
 impl DirectorView {
     fn read(folder: Option<&Path>) -> Self {
@@ -35,6 +37,7 @@ impl DirectorView {
             choices: director_choices(),
             status: director_status(folder),
             error: None,
+            check: None,
         }
     }
 }
@@ -132,6 +135,68 @@ impl KinewrightApp {
         self.director_setting = Some(DirectorView::read(director_folder().as_deref()));
     }
 
+    pub(crate) fn check_director_readiness(&mut self) {
+        if self
+            .director_setting
+            .as_ref()
+            .is_some_and(|view| view.check.is_some())
+        {
+            return;
+        }
+        self.refresh_director_setting();
+        let Some(view) = &mut self.director_setting else {
+            return;
+        };
+        let DirectorStatus::Set(selection) = &view.status else {
+            return;
+        };
+        let Some(choice) = director_harness(selection) else {
+            return;
+        };
+        if READINESS_CHECKING
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let guard = ReadinessCheck;
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        match std::thread::Builder::new()
+            .name("kinewright-director-readiness".into())
+            .spawn(move || {
+                let _guard = guard;
+                // Only local --version and login/auth status; never model discovery or a session.
+                let _ = sender.send((choice, crate::chat_ui::detect_harness(choice)));
+            }) {
+            Ok(_) => view.check = Some(receiver),
+            Err(_) => view.error = Some("Could not check the local sign-in right now.".into()),
+        }
+    }
+    fn poll_director_readiness(&mut self, ctx: &egui::Context) {
+        let Some(view) = &mut self.director_setting else {
+            return;
+        };
+        let Some(receiver) = &view.check else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((choice, info)) => {
+                self.harness[choice.index()].info = info;
+                self.harness[choice.index()].detected = true;
+                view.check = None;
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => view.check = None,
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
     /// Write the person's Director choice through S4, then read it back.
     pub(crate) fn choose_director(&mut self, choice: &ProviderSelectionRecord) {
         let folder = director_folder();
@@ -144,6 +209,7 @@ impl KinewrightApp {
     /// The Director section (JA-1 S3 C10): the certified connectors S4 offers,
     /// and the one Revise cut runs start with.
     pub(crate) fn show_director_settings(&mut self, ui: &mut egui::Ui) {
+        self.poll_director_readiness(ui.ctx());
         let Some(view) = self.director_setting.clone() else {
             return;
         };
@@ -153,7 +219,7 @@ impl KinewrightApp {
         if view.choices.is_empty() {
             ui.colored_label(
                 color::TEXT_MUTED,
-                "No Director is available on this computer yet. Your notes still save.",
+                "The Director is not available yet. Your notes and saved choice are kept.",
             );
         } else {
             let current = match &view.status {
@@ -221,11 +287,53 @@ impl KinewrightApp {
         if !status.is_empty() {
             ui.colored_label(color::TEXT_MUTED, status);
         }
+        self.show_director_readiness(ui, &view);
         if let Some(error) = &view.error {
             ui.colored_label(color::TEXT_MUTED, error);
         }
         if let Some(choice) = chosen {
             self.choose_director(&choice);
+        }
+    }
+
+    fn show_director_readiness(&mut self, ui: &mut egui::Ui, view: &DirectorView) {
+        let selection = match &view.status {
+            DirectorStatus::Set(selection) | DirectorStatus::NoLongerOffered(selection) => {
+                Some(selection)
+            }
+            _ => None,
+        };
+        if let Some(selection) = selection {
+            let qualified = view.choices.contains(selection);
+            if let Some(choice) = director_harness(selection) {
+                let local = &self.harness[choice.index()];
+                match readiness(qualified, local.detected, local.info.as_ref()) {
+                    Readiness::Install => {
+                        ui.hyperlink_to("Install", choice.install_url());
+                    }
+                    Readiness::SignIn => {
+                        ui.hyperlink_to("Sign in", choice.install_url())
+                            .on_hover_text(
+                                "Follow the provider's CLI sign-in instructions, then Check again.",
+                            );
+                    }
+                    Readiness::LocalSignIn => {
+                        ui.colored_label(color::TEXT_MUTED, "Installed · local sign-in detected. Qualification is checked at launch.");
+                    }
+                    Readiness::CheckAgain => {
+                        ui.colored_label(color::TEXT_MUTED, "Local readiness needs checking.");
+                    }
+                    Readiness::NotAvailable => {
+                        ui.colored_label(color::TEXT_MUTED, "Not available yet.");
+                    }
+                }
+            }
+        }
+        if ui
+            .add_enabled(view.check.is_none(), egui::Button::new("Check again"))
+            .clicked()
+        {
+            self.check_director_readiness();
         }
     }
 
@@ -536,4 +644,26 @@ fn provider_card(
             }
         });
     theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
+}
+
+/// Only these two release-qualified providers have local, non-inference probes.
+fn director_harness(selection: &ProviderSelectionRecord) -> Option<AgentHarnessChoice> {
+    let provider = kinewright_agent::orchestration::adapters::certified_connectors()
+        .iter()
+        .find(|spec| spec.selection() == *selection)?
+        .provider();
+    match AgentHarnessChoice::from_key(provider)? {
+        choice @ (AgentHarnessChoice::Codex | AgentHarnessChoice::ClaudeCode) => Some(choice),
+        _ => None,
+    }
+}
+
+// One local check at a time, including across closing and reopening Settings.
+static READINESS_CHECKING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+struct ReadinessCheck;
+impl Drop for ReadinessCheck {
+    fn drop(&mut self) {
+        READINESS_CHECKING.store(false, std::sync::atomic::Ordering::Release);
+    }
 }

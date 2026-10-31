@@ -150,3 +150,4 @@ ja_s4_guardian s4b_c3_fix2_starting_transport_fences_absence crates/kinewright-a
 
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_host_session_drives_production_effect_pump crates/kinewright-agent/src/writer_host/c4_tests.rs linux on-demand  # C4 host lifecycle, real task endpoint and durable raw usage; explicitly run in C4 gate
 kinewright_agent writer_host::hooks_tests::tests::s4b_c4_stop_during_startup_and_full_native_queue crates/kinewright-agent/src/writer_host/c4_tests.rs linux on-demand  # C4 real startup and full-queue Stop/proof; explicitly run in C4 gate
+kinewright_app studio_feedback::ja_s3_feedback::c4::s4b_c4_notes_stop_startup_full_queue_and_execution crates/kinewright-app/src/studio_feedback_c4_tests.rs linux on-demand  # C4 actual Notes port, native startup/full data queue/execution, durable Stop retry and cleanup

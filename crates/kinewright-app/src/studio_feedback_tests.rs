@@ -813,6 +813,41 @@ impl FeedbackPort for Lossy<'_> {
     fn observe(&self, run: &RunId) -> Result<RunProjection, String> {
         self.inner.observe(run)
     }
+    fn run_view(&self, run: &RunId) -> Result<RunViewPage, String> {
+        self.inner.run_view(run)
+    }
+    fn prepare_stop(
+        &mut self,
+        run: &RunId,
+        revision: &OpaqueRevision,
+        issuer: &mut Option<IssuerId>,
+    ) -> Result<ScopedOrchestrationRequest, String> {
+        self.inner.prepare_stop(run, revision, issuer)
+    }
+    fn send_stop(&mut self, request: &ScopedOrchestrationRequest) -> stop::StopReply {
+        self.calls += 1;
+        if let Some(path) = &self.crash_at_dispatch {
+            let bytes = std::fs::read(path).unwrap();
+            let kept: Kept = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                kept.stops
+                    .iter()
+                    .any(|pending| pending.request == *request && pending.valid(&kept.project)),
+                "C4_STOP_INTENT_KEPT_BEFORE_DISPATCH"
+            );
+            self.seen.push(Some(bytes));
+        }
+        if self.before > 0 {
+            self.before -= 1;
+            return stop::StopReply::Unknown("Stop request lost".into());
+        }
+        let reply = self.inner.send_stop(request);
+        if self.after > 0 {
+            self.after -= 1;
+            return stop::StopReply::Unknown("Stop reply lost".into());
+        }
+        reply
+    }
     fn resolve(
         &self,
         revision: &ObjectRef,
@@ -1790,3 +1825,6 @@ fn s3_stage_fix2_a_failed_last_write_keeps_the_project() {
     let kept = std::fs::read_to_string(kept_file(&temp, &a)).unwrap();
     assert!(kept.contains(&inputs.sha256), "SF2_A_FILE_WRITTEN");
 }
+
+#[path = "studio_feedback_c4_tests.rs"]
+mod c4;

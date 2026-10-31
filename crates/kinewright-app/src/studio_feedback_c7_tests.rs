@@ -9,12 +9,12 @@ use kinewright_agent::{
 
 /// A saved project with one saved note selected for Revise cut, and a Director
 /// configured in a per-test scheduler folder.
-struct Project {
-    temp: TempDirectory,
-    path: std::path::PathBuf,
-    feedback: Feedback,
+pub(super) struct Project {
+    pub(super) temp: TempDirectory,
+    pub(super) path: std::path::PathBuf,
+    pub(super) feedback: Feedback,
 }
-fn project(name: &str) -> Project {
+pub(super) fn project(name: &str) -> Project {
     let core = Core::spawn(Document::default()).unwrap();
     let temp = TempDirectory::new_in(&workspace_target_dir(), name);
     let path = temp.path("revise.kinewright");
@@ -55,7 +55,7 @@ fn project(name: &str) -> Project {
 }
 /// The App's owner for `path` with its real writer host, reading this test's
 /// scheduler folder.
-fn launch(project: &Project) -> Ja1Attachment {
+pub(super) fn launch(project: &Project) -> Ja1Attachment {
     let owner =
         kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
     let mut attachment = Ja1Attachment::new(owner).unwrap();

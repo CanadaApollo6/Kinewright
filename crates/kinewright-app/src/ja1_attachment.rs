@@ -1812,3 +1812,67 @@ fn rescue_preview(selection: &RescueSelection) -> String {
 #[cfg(test)]
 #[path = "ja1_attachment_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+impl Ja1Attachment {
+    pub(crate) fn launch_protocol_fixture(
+        &mut self,
+        roots: kinewright_agent::writer_host::SessionRoots,
+        scheduler: PathBuf,
+        fixture: &kinewright_agent::writer_host::ProtocolFixture,
+    ) -> Result<kinewright_agent::writer_host::WriterHost, BundleError> {
+        use kinewright_agent::writer_host::{
+            HostConfig, HostOrigin, HostSnapshot, HostSourceBinding, SourceServer, WriterHost,
+        };
+        let transfer = self.owner.prepare_host_attachment()?;
+        let context = Arc::downgrade(&self.originating_context);
+        let retained_context = context.clone();
+        let server = if let Some(reader) = transfer.source_service {
+            SourceServer::start(reader)
+        } else {
+            SourceServer::start_context(move || {
+                if context
+                    .upgrade()
+                    .is_some_and(|live| live.load(std::sync::atomic::Ordering::Acquire))
+                {
+                    Ok(())
+                } else {
+                    Err(BundleError::Identity("fixture GUI context closed".into()))
+                }
+            })
+        }
+        .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let writer = WriterHost::start_protocol_fixture(
+            HostConfig {
+                scheduler_settings: Some(scheduler),
+                project: "c4-notes".into(),
+                path: transfer.named_path,
+                roots,
+                origin: HostOrigin::Gui {
+                    initial_snapshot: HostSnapshot::from_history(transfer.history)
+                        .map_err(|error| BundleError::Corrupt(error.to_string()))?,
+                    retention: HostSourceBinding {
+                        inputs: transfer.source.as_ref().map(|_| transfer.inputs.clone()),
+                        source: transfer.source.clone(),
+                        callback: server.bootstrap(),
+                    },
+                    expected_root_sha256: transfer.expected_root_sha256,
+                    expected_project_id: transfer.project_id,
+                },
+            },
+            fixture,
+        )
+        .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let cut = self.owner.freeze_host_cut()?;
+        self.owner.complete_host_cut(&cut, None, None)?;
+        self.host = Some(host::HostAttachment::connected(
+            writer.client(),
+            transfer.source,
+            transfer.inputs,
+            server,
+            retained_context,
+        )?);
+        self.start_host_manual()?;
+        Ok(writer)
+    }
+}
