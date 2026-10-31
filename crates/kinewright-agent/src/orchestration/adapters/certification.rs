@@ -81,6 +81,7 @@ pub struct ConnectorSpecification {
     provider: &'static str,
     versions: QualifiedVersions,
     session: SessionPolicy,
+    default_token_ceiling: std::num::NonZeroU64,
     mcp: McpPolicy,
     sandbox: SandboxPolicy,
     authentication: AuthenticationMode,
@@ -109,6 +110,10 @@ impl ConnectorSpecification {
                 )
                 .collect(),
         }
+    }
+    #[must_use]
+    pub fn default_token_ceiling(&self) -> std::num::NonZeroU64 {
+        self.default_token_ceiling
     }
     #[must_use]
     pub fn versions(&self) -> QualifiedVersions {
@@ -537,6 +542,7 @@ static FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
         ],
     },
     mcp: McpPolicy::HostEndpointOnly,
+    default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
     sandbox: SandboxPolicy::Fixture,
     authentication: AuthenticationMode::Subscription,
     auth_contract: ProviderAuthContract {
@@ -589,6 +595,7 @@ static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
         ],
     },
     mcp: McpPolicy::HostEndpointOnly,
+    default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
     sandbox: SandboxPolicy::LinuxFilesystemAndIpc,
     authentication: AuthenticationMode::Subscription,
     auth_contract: super::CODEX_AUTH_CONTRACT,
@@ -852,6 +859,7 @@ mod tests {
                 max_turns: 1,
                 tools: &[],
             },
+            default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
             mcp: McpPolicy::HostEndpointOnly,
             sandbox: SandboxPolicy::Fixture,
             authentication: AuthenticationMode::Subscription,

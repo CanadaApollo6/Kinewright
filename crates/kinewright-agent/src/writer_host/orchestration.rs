@@ -1212,6 +1212,8 @@ impl HostCommandOwner {
                     .auth
                     .clone(),
                 endpoint,
+                #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+                self.qualification_stop.clone(),
             )),
         )
     }

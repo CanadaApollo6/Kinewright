@@ -112,6 +112,7 @@ impl ProtocolFixture {
             fixture_claim: Some(self.claim_root()),
             fixture_autostart: true,
             qualification: false,
+            stop_gate: None,
             witness: Some(Arc::new(super::RuntimeWitness {
                 on_event: Arc::new(move |_| {
                     if events.mode == ProtocolFixtureMode::FullQueue {

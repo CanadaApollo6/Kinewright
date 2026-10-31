@@ -13,7 +13,6 @@ use std::{
 
 pub(crate) const CODEX_BINARY_SHA256: &str =
     "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8";
-pub(crate) const TOKEN_CEILING: u64 = 16_384;
 pub(crate) struct InstalledCodexChecks;
 
 pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
@@ -126,12 +125,20 @@ impl ConnectorRuntimeChecks for InstalledCodexChecks {
 }
 
 pub(crate) fn authentication_status() -> kinewright_core::AuthenticationStatus {
+    use kinewright_core::AuthenticationStatus;
     if crate::codex_credentials::source_path()
         .and_then(|path| crate::codex_credentials::inspect(&path, None))
-        .is_ok()
+        .is_err()
     {
-        kinewright_core::AuthenticationStatus::Authenticated
-    } else {
-        kinewright_core::AuthenticationStatus::Unauthenticated
+        return AuthenticationStatus::Unauthenticated;
     }
+    // Readiness is local. The same exact executable and kernel prerequisites
+    // are checked again by InstalledCodexChecks at every native admission.
+    if executable().is_err()
+        || kinewright_job_sys::require_nsdelegate().is_err()
+        || kinewright_job_sys::require_provider_landlock().is_err()
+    {
+        return AuthenticationStatus::Unknown;
+    }
+    AuthenticationStatus::Authenticated
 }

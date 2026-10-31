@@ -91,6 +91,7 @@ mod tests {
                 Some(issuer_auth.clone()),
                 super::super::studio_runtime::RuntimePorts {
                     fixture_claim: Some(temp.path("fixture-machine")),
+                    ceiling: None, // Unit fixtures must never spend on an installed provider.
                     ..Default::default()
                 },
             )
@@ -1118,4 +1119,5 @@ mod tests {
         }
     }
     include!("c5_tests.rs");
+    include!("c5d_tests.rs");
 }

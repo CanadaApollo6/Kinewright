@@ -302,22 +302,37 @@ pub fn run_installed_codex_local_policy_witness() {
 )]
 pub fn run_installed_codex_director_witness() {
     let number = std::env::var("KINEWRIGHT_S4B_C5_RUN")
-        .unwrap_or_else(|_| "4".into())
+        .unwrap_or_else(|_| "5".into())
         .parse::<u8>()
         .unwrap();
-    assert!((4..=5).contains(&number), "C5c two additional run cap");
+    assert!((5..=6).contains(&number), "C5d authorized run cap");
     let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&evidence).unwrap();
+    if number == 6 {
+        let previous: serde_json::Value = serde_json::from_slice(
+            &fs::read(evidence.join("live-5.json")).expect("C5 invocation 5 evidence"),
+        )
+        .unwrap();
+        assert_eq!(
+            previous["failure_origin"], "witness",
+            "C5 invocation 6 requires a proved witness defect"
+        );
+        assert_eq!(previous["passed"], false);
+    }
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(evidence.join(format!("live-{number}.started")))
         .expect("C5 live run id already used");
     let report = Arc::new(Mutex::new(
-        serde_json::json!({"run":number,"full_run_started":false,"usage":null,"refresh_live":"NOT RUN","version":"0.166.0","model":"gpt-6.1-sol","reasoning":"high","token_ceiling":crate::codex_qualification::TOKEN_CEILING}),
+        serde_json::json!({"run":number,"full_run_started":false,"usage":null,"refresh_live":"NOT RUN","version":"0.166.0","model":"gpt-6.1-sol","reasoning":"high","token_ceiling":crate::orchestration::adapters::codex_candidate().default_token_ceiling().get()}),
     ));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| live_body(&report)));
     report.lock().unwrap()["passed"] = serde_json::json!(result.is_ok());
+    if result.is_err() {
+        // A failed assertion alone never authorizes another paid invocation.
+        report.lock().unwrap()["failure_origin"] = serde_json::json!("unresolved");
+    }
     fs::write(
         evidence.join(format!("live-{number}.json")),
         serde_json::to_vec_pretty(&*report.lock().unwrap()).unwrap(),
@@ -347,9 +362,9 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             .unwrap()
         );
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/s4b-c5c/source-prelive.json");
+            .join("../../target/s4b-c5d/source-prelive.json");
         let source: serde_json::Value =
-            serde_json::from_slice(&fs::read(path).expect("C5c prelive source manifest")).unwrap();
+            serde_json::from_slice(&fs::read(path).expect("C5d prelive source manifest")).unwrap();
         evidence["source_manifest"] = source["sha256"].clone();
         evidence["cli_sha256"] = serde_json::json!(crate::codex_qualification::CODEX_BINARY_SHA256);
         let network = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -467,6 +482,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
     assert!(!manual.cursor.redo.is_empty());
     drop(owner);
     let claim = temp.path("machine");
+    let stop_gate = Arc::new(super::qualification_gate::MergeStopGate::default());
     let host = WriterHost::start_inner(
         HostConfig {
             scheduler_settings: None,
@@ -482,6 +498,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         None,
         studio_runtime::RuntimePorts {
             witness: Some(witness),
+            stop_gate: Some(stop_gate.clone()),
             qualification: true,
             guardian: guardian(),
             fixture_claim: Some(claim.clone()),
@@ -489,6 +506,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         },
     )
     .unwrap();
+    let _release = stop_gate.release_on_drop();
     wait_recovery(&host);
     let client = host.client();
     let owner_arc = host.owner.upgrade().unwrap();
@@ -531,7 +549,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         panic!("C5 snapshot");
     };
     let mut locked = owner_arc.lock().unwrap();
-    let text=locked.owner_mut().unwrap().admit_host_grant(b"Move existing marker 1 from frame 1 to frame 2. Use one Editor specialist and its MCP edit. Merge that child's result once into the candidate, then freeze/publish the Director. Preserve the person's manual history. Do not use any other provider.").unwrap();
+    let text=locked.owner_mut().unwrap().admit_host_grant(b"Move existing marker 1 from frame 1 to frame 2. Use one Editor specialist and its MCP edit. Merge that child's result once into the candidate, then call task_status to acknowledge the merge before any further control. Then freeze/publish the Director. Preserve the person's manual history. Do not use any other provider.").unwrap();
     let empty = locked.owner_mut().unwrap().admit_host_grant(b"[]").unwrap();
     drop(locked);
     let saved = metadata(
@@ -627,8 +645,26 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             failure = true;
             break state;
         }
-        if state.outcome != RunOutcome::Pending && state.cleanup == RunCleanup::Settled {
+        if stop_gate.holding() {
+            report.lock().unwrap()["merge_acknowledged_before_stop"] = serde_json::json!(true);
             break state;
+        }
+        if state.outcome != RunOutcome::Pending {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("director_ended_before_stop");
+            failure = true;
+            break state;
+        }
+        if let Some(status) = &view.runtime_status {
+            let category = if status.contains("storage_backpressure") {
+                "storage_backpressure"
+            } else {
+                "native_runtime_refusal"
+            };
+            report.lock().unwrap()["runtime_status_code"] = serde_json::json!(category);
+            report.lock().unwrap()["error_kind"] = serde_json::json!(category);
+        }
+        if Instant::now() >= deadline {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("deadline");
         }
         if state.phase == RunPhase::Interrupted
             || Instant::now() >= deadline
@@ -653,6 +689,29 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
     };
     report.lock().unwrap()["final_outcome"] = serde_json::to_value(&final_state.outcome).unwrap();
     report.lock().unwrap()["final_phase"] = serde_json::to_value(final_state.phase).unwrap();
+    let before_stop = if !failure && stop_gate.holding() {
+        let owner = owner_arc.lock().unwrap();
+        assert_eq!(
+            final_state.outcome,
+            RunOutcome::Pending,
+            "C5 active outcome at Stop"
+        );
+        assert!(
+            final_state
+                .attempts
+                .iter()
+                .any(|a| a.identity.task == final_state.tasks[0].id
+                    && matches!(
+                        a.state,
+                        crate::orchestration::orchestration_records::AttemptState::Executing
+                    )),
+            "C5 executing Director at Stop"
+        );
+        report.lock().unwrap()["active_at_stop"] = serde_json::json!(true);
+        Some(merged_histories(&owner, &final_state, &manual.document))
+    } else {
+        None
+    };
     let stop_eligible = crate::orchestration::machine::eligible(&final_state, &RunAction::Stop);
     report.lock().unwrap()["stop_eligible"] = serde_json::json!(stop_eligible);
     let stop_applied = if stop_eligible {
@@ -696,6 +755,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         false
     };
     report.lock().unwrap()["stop_applied"] = serde_json::json!(stop_applied);
+    stop_gate.release();
     let cleanup = Instant::now() + Duration::from_secs(20);
     while claim.join("run.json").exists() {
         reply(&client, HostCommand::Status);
@@ -711,6 +771,20 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         .unwrap();
     let accounting = owner.native_accounting(&projection).unwrap().unwrap();
     report.lock().unwrap()["usage"] = serde_json::to_value(&accounting).unwrap();
+    report.lock().unwrap()["outcome_after_stop"] =
+        serde_json::to_value(&projection.outcome).unwrap();
+    assert_eq!(
+        projection.cleanup,
+        RunCleanup::Settled,
+        "C5 settled after Stop"
+    );
+    assert!(
+        projection.attempts.iter().all(|a| matches!(
+            a.state,
+            crate::orchestration::orchestration_records::AttemptState::Retired(_)
+        )),
+        "C5 no active attempt after cleanup"
+    );
     assert_eq!(
         owner.owner().unwrap().published_manual_history().unwrap(),
         manual,
@@ -743,75 +817,27 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             && tools.contains(&serde_json::json!("commit_edit_plan"))),
         "C5 actual specialist MCP calls"
     );
+    // Completed turns retain raw usage. Stop may abort the held Director turn;
+    // its EOF stays unavailable instead of becoming a synthetic zero.
     assert!(
-        accounting
-            .tasks
-            .iter()
-            .filter(|task| !task.sends.is_empty())
-            .all(|task| task.totals.known.input.is_some() && task.totals.known.output.is_some()),
-        "C5 recorded usage"
-    );
-    assert_eq!(final_state.outcome, RunOutcome::Ready, "C5 live completion");
-    assert_eq!(final_state.tasks.len(), 2, "C5 one specialist");
-    let child = final_state
-        .tasks
-        .iter()
-        .find(|task| task.parent.is_some())
-        .unwrap();
-    assert_eq!(
-        owner.hooks.runs[&run].tasks[&child.id]
-            .core()
-            .export_history()
-            .unwrap()
-            .document
-            .markers[0]
-            .position,
-        kinewright_core::TimeCode(2),
-        "C5 editor owns the actual edit"
+        accounting.tasks.iter().all(|task| {
+            task.totals.known.input.is_some() && task.totals.known.output.is_some()
+        }),
+        "C5 completed-turn usage retained"
     );
     assert!(
-        final_state
-            .tasks
-            .iter()
-            .any(|task| task.parent.is_some() && task.brief.role == Role::Editor),
-        "C5 specialist"
+        matches!(projection.outcome, RunOutcome::Cancelled(_)),
+        "C5 active Stop cancellation"
     );
+    let before_stop = before_stop.expect("C5 active merge acknowledgment required");
+    let after_stop = merged_histories(&owner, &projection, &manual.document);
     assert_eq!(
-        final_state
-            .tasks
-            .iter()
-            .filter(|task| owner
-                .saved_task_history(&projection, &task.id)
-                .unwrap()
-                .is_some_and(|history| history.merge_envelope.is_some()))
-            .count(),
-        1,
-        "C5 one candidate merge"
+        after_stop, before_stop,
+        "C5 child and candidate full histories after Stop"
     );
-    let candidate = &final_state.tasks[0].brief.scope.base;
-    let guard = owner
-        .owner()
-        .unwrap()
-        .durable_sessions()
-        .into_iter()
-        .find(|(_, guard)| guard.branch_id() == &candidate.branch)
-        .unwrap()
-        .1;
-    assert_eq!(
-        owner
-            .owner()
-            .unwrap()
-            .durable_branch_history(&guard)
-            .unwrap()
-            .document
-            .markers[0]
-            .position,
-        kinewright_core::TimeCode(2),
-        "C5 specialist edit"
-    );
+    let (child_branch, child_history, candidate_branch, candidate_history) = after_stop;
     report.lock().unwrap()["specialist_edit"] = serde_json::json!(true);
     report.lock().unwrap()["merge_once"] = serde_json::json!(true);
-    drop(guard);
     drop(owner);
     drop(owner_arc);
     drop(host);
@@ -821,6 +847,17 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         manual,
         "C5 reopened manual history"
     );
+    assert_eq!(
+        branch_history(&reopened, &child_branch),
+        child_history,
+        "C5 reopened child exact"
+    );
+    assert_eq!(
+        branch_history(&reopened, &candidate_branch),
+        candidate_history,
+        "C5 reopened candidate exact"
+    );
+    report.lock().unwrap()["reopen_exact"] = serde_json::json!(true);
     eprintln!(
         "C5_INSTALLED_DIRECTOR ReviseCut=true specialist_mcp_edit=true merge_once=true manual_exact=true stop=true cleanup=true"
     );
@@ -829,3 +866,75 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
 #[path = "network_witness.rs"]
 mod network_witness;
 pub use network_witness::run_installed_codex_network_witness;
+
+fn branch_history(
+    owner: &Ja1EditingSession,
+    branch: &kinewright_project::bundle_records::BranchId,
+) -> kinewright_core::HistorySnapshot {
+    let binding = owner.candidate_binding(branch).unwrap();
+    let checkpoint = owner
+        .store()
+        .unwrap()
+        .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&binding.checkpoint)
+        .unwrap();
+    (*owner
+        .store()
+        .unwrap()
+        .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+        .unwrap())
+    .clone()
+}
+fn merged_histories(
+    owner: &super::HostCommandOwner,
+    state: &crate::orchestration::orchestration_records::RunProjection,
+    manual: &Document,
+) -> (
+    kinewright_project::bundle_records::BranchId,
+    kinewright_core::HistorySnapshot,
+    kinewright_project::bundle_records::BranchId,
+    kinewright_core::HistorySnapshot,
+) {
+    assert_eq!(state.tasks.len(), 2, "C5 one specialist");
+    let child = state
+        .tasks
+        .iter()
+        .find(|t| t.parent.is_some() && t.brief.role == Role::Editor)
+        .expect("C5 Editor specialist");
+    assert_eq!(
+        state
+            .tasks
+            .iter()
+            .filter(|t| owner
+                .saved_task_history(state, &t.id)
+                .unwrap()
+                .is_some_and(|h| h.merge_envelope.is_some()))
+            .count(),
+        1,
+        "C5 one original merge envelope"
+    );
+    let saved = owner.saved_task_history(state, &child.id).unwrap().unwrap();
+    assert!(
+        saved.merge_envelope.is_some(),
+        "C5 child merge acknowledged"
+    );
+    let child_history = branch_history(owner.owner().unwrap(), &saved.source.branch);
+    let candidate_history = branch_history(owner.owner().unwrap(), &saved.base.branch);
+    let mut expected = manual.clone();
+    expected.markers[0].position = kinewright_core::TimeCode(2);
+    assert_eq!(
+        child_history.document.as_ref(),
+        &expected,
+        "C5 exact specialist document"
+    );
+    assert_eq!(
+        candidate_history.document.as_ref(),
+        &expected,
+        "C5 exact candidate document"
+    );
+    (
+        saved.source.branch,
+        child_history,
+        saved.base.branch,
+        candidate_history,
+    )
+}

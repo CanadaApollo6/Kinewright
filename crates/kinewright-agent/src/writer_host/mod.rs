@@ -1175,6 +1175,8 @@ pub struct HostCommandOwner {
     fixture_director: bool,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
     qualification_director: bool,
+    #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+    qualification_stop: Option<Arc<qualification_gate::MergeStopGate>>,
     #[cfg(target_os = "linux")]
     native_recovery_pending: bool,
     #[cfg(target_os = "linux")]
@@ -1344,6 +1346,8 @@ impl HostCommandOwner {
             fixture_director: false,
             #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
             qualification_director: false,
+            #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+            qualification_stop: None,
             #[cfg(target_os = "linux")]
             native_recovery_pending: false,
             #[cfg(target_os = "linux")]
@@ -3322,3 +3326,6 @@ pub use codex_witness::{
     run_installed_codex_director_witness, run_installed_codex_local_policy_witness,
     run_installed_codex_network_witness,
 };
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+mod qualification_gate;

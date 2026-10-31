@@ -76,6 +76,8 @@ pub(crate) struct TaskMcp {
     auth: HostAuth,
     endpoint: TaskEndpoint,
     issuer: Arc<Mutex<Option<IssuerId>>>,
+    #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+    stop_gate: Option<Arc<super::qualification_gate::MergeStopGate>>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,15 +96,35 @@ impl TaskMcp {
         host: Weak<Mutex<HostCommandOwner>>,
         auth: HostAuth,
         endpoint: TaskEndpoint,
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))] stop_gate: Option<
+            Arc<super::qualification_gate::MergeStopGate>,
+        >,
     ) -> Self {
         Self {
             host,
             auth,
             endpoint,
             issuer: Arc::default(),
+            #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+            stop_gate,
         }
     }
     pub(crate) fn call(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        if let Some(gate) = &self.stop_gate {
+            gate.before_request(&self.endpoint.authority().task)
+                .map_err(refused)?;
+        }
+        let reply = self.call_inner(name, arguments)?;
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        if name == "merge_task"
+            && let Some(gate) = &self.stop_gate
+        {
+            gate.after_merge(self.endpoint.authority().task.clone());
+        }
+        Ok(reply)
+    }
+    fn call_inner(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
         let host = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
         let mut issuer = self
             .issuer

@@ -43,6 +43,8 @@ pub(super) struct RuntimePorts {
     pub qualification: bool,
     #[cfg(any(test, feature = "test-util"))]
     pub witness: Option<Arc<RuntimeWitness>>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub stop_gate: Option<Arc<super::qualification_gate::MergeStopGate>>,
 }
 impl Default for RuntimePorts {
     fn default() -> Self {
@@ -52,7 +54,9 @@ impl Default for RuntimePorts {
             guardian: std::env::current_exe()
                 .unwrap_or_default()
                 .with_file_name("kinewright-job-guardian"),
-            ceiling: std::num::NonZeroU64::new(crate::codex_qualification::TOKEN_CEILING),
+            ceiling: Some(
+                crate::orchestration::adapters::codex_candidate().default_token_ceiling(),
+            ),
             #[cfg(any(test, feature = "test-util"))]
             fixture_claim: std::env::var_os("KINEWRIGHT_C4_RECOVERY_FIXTURE_ROOT")
                 .map(PathBuf::from),
@@ -62,6 +66,8 @@ impl Default for RuntimePorts {
             qualification: false,
             #[cfg(any(test, feature = "test-util"))]
             witness: None,
+            #[cfg(any(test, feature = "test-util"))]
+            stop_gate: None,
         }
     }
 }
@@ -119,6 +125,7 @@ impl StudioRuntime {
             {
                 owner.fixture_director = ports.fixture_claim.is_some();
                 owner.qualification_director = ports.qualification;
+                owner.qualification_stop.clone_from(&ports.stop_gate);
             }
             owner.native_recovery_status = Some("cleanup pending: checking native recovery".into());
             owner.native_recovery_pending = true;
