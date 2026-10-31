@@ -145,7 +145,7 @@ impl CleanupProof {
     }
 }
 
-/// No native identity was bound. Only complete unit-name observation constructs this proof.
+/// No native identity was bound. The start fence and complete native observation grant proof.
 #[cfg(target_os = "linux")]
 pub struct UnboundCleanupProof {
     identity: AttemptIdentity,
@@ -210,6 +210,7 @@ pub fn spawn_transport(
     guardian: &Path,
     root: &Path,
     identity: &AttemptIdentity,
+    claim: &mut MachineClaim,
 ) -> io::Result<(Launcher, ChildStdin, Receiver<io::Result<GuardianMessage>>)> {
     let _ = profile;
     #[cfg(target_os = "linux")]
@@ -232,7 +233,9 @@ pub fn spawn_transport(
         .map_err(|_| io::Error::other("native spawn lock poisoned"))?;
     #[cfg(target_os = "linux")]
     let mut command = {
-        let mut command = Command::new("systemd-run");
+        let intent = claim.begin_transport(identity)?;
+        let mut command = Command::new(guardian);
+        command.arg("--transport").arg(intent);
         let kill_mode = "--property=KillMode=control-group";
         #[cfg(test)]
         let kill_mode = if profile.manager_process_only {
@@ -264,7 +267,10 @@ pub fn spawn_transport(
         command
     };
     #[cfg(not(target_os = "linux"))]
-    let mut command = Command::new(guardian);
+    let mut command = {
+        let _ = claim;
+        Command::new(guardian)
+    };
     command
         .arg("--serve")
         .arg(root)
@@ -272,7 +278,19 @@ pub fn spawn_transport(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn()?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            #[cfg(target_os = "linux")]
+            claim.cancel_unspawned_transport(identity)?;
+            return Err(error);
+        }
+    };
+    let mut launcher = Launcher(Some(child));
+    let child = launcher
+        .0
+        .as_mut()
+        .ok_or_else(|| io::Error::other("launcher missing"))?;
     let writer = child
         .stdin
         .take()
@@ -292,7 +310,7 @@ pub fn spawn_transport(
             }
         }
     });
-    Ok((Launcher(Some(child)), writer, receiver))
+    Ok((launcher, writer, receiver))
 }
 
 /// The host reaps its own transport process even after a partial startup failure.
@@ -370,7 +388,7 @@ impl ContainedSession {
         let root = claim.root().join(format!("job-{}", identity.nonce));
         fs::create_dir(&root)?;
         let (launcher, mut writer, replies) =
-            spawn_transport(profile, executable, &root, &identity)?;
+            spawn_transport(profile, executable, &root, &identity, claim)?;
         protocol::write_frame(
             &mut writer,
             &HostMessage::Prepare {
@@ -693,6 +711,76 @@ impl Drop for ContainedSession {
     }
 }
 
+/// Bound the complete manager query after the original transport is reaped.
+#[cfg(target_os = "linux")]
+fn manager_start_idle(unit: &str, deadline: Instant) -> io::Result<bool> {
+    use std::io::Read;
+    let mut child = Command::new("systemctl")
+        .args([
+            "--user",
+            "list-jobs",
+            "--no-pager",
+            "--no-legend",
+            "--plain",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("manager output"))?;
+    let mut query = Launcher(Some(child));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = output
+            .take(protocol::WIRE_CAP as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    loop {
+        if Instant::now() >= deadline {
+            if let Some(child) = query.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(io::Error::other("cleanup_blocked: manager query deadline"));
+        }
+        if let Some(status) = query.try_wait()? {
+            if !status.success() {
+                return Err(io::Error::other("cleanup_blocked: manager query failed"));
+            }
+            match receiver.try_recv() {
+                Ok(bytes) => {
+                    let bytes = bytes?;
+                    if bytes.len() > protocol::WIRE_CAP {
+                        return Err(io::Error::other("manager jobs cap"));
+                    }
+                    let jobs = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
+                    for line in jobs.lines().filter(|line| !line.trim().is_empty()) {
+                        let fields: Vec<_> = line.split_whitespace().collect();
+                        if fields.len() != 4 || fields[0].parse::<u32>().is_err() {
+                            return Err(io::Error::other("ambiguous manager job"));
+                        }
+                        if fields[1] == unit {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    return Err(io::Error::other("manager output lost"));
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Independent process-only observer retained across host or guardian loss.
 /// It cannot release a claim on EOF or on an unlocked execution file.
 #[cfg(target_os = "linux")]
@@ -707,9 +795,31 @@ pub struct RecoveryObserver {
 impl RecoveryObserver {
     /// # Errors
     /// An existing service/payload name or any surviving member, including zombies, retains the claim.
-    pub fn unbound_cleanup(identity: &AttemptIdentity) -> io::Result<UnboundCleanupProof> {
+    pub fn unbound_cleanup(
+        claim: &mut MachineClaim,
+        identity: &AttemptIdentity,
+    ) -> io::Result<UnboundCleanupProof> {
         identity.validate()?;
         let deadline = Instant::now() + protocol::CLEANUP;
+        loop {
+            use crate::job_guardian::protocol::TransportState;
+            let settled = match claim.transport_intent(identity)? {
+                TransportState::Unstarted | TransportState::Closed => true,
+                TransportState::Starting => false,
+                TransportState::Started { pid, start } => {
+                    kinewright_job_sys::process_identity_reaped(pid, start)?
+                        && manager_start_idle(&identity.unit(), deadline)?
+                }
+            };
+            if settled {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other("cleanup_blocked: starting transport"));
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        claim.fence_transport(identity)?;
         loop {
             if kinewright_job_sys::unit_tree_absent(&identity.unit())? && Instant::now() < deadline
             {
@@ -829,7 +939,8 @@ fn cleanup_failed_prepare(claim: &mut MachineClaim, identity: &AttemptIdentity) 
     match claim.recovery(identity) {
         Ok(recovery) => claim.retire(&RecoveryObserver::recover_cleanup(&recovery)?),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            claim.retire_unbound(&RecoveryObserver::unbound_cleanup(identity)?)
+            let proof = RecoveryObserver::unbound_cleanup(claim, identity)?;
+            claim.retire_unbound(&proof)
         }
         Err(e) => Err(e),
     }

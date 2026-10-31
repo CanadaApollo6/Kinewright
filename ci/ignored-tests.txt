@@ -146,3 +146,4 @@ kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_release_after_six_
 kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_commit_rechecks_monotonic_and_usage crates/kinewright-agent/src/writer_host/c3_fix1_tests.rs linux on-demand  # C3 release-time budgets; explicitly run in fix gate
 kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_history_atomic_crash_cuts crates/kinewright-agent/src/writer_host/c3_fix1_tests.rs linux on-demand  # C3 atomic history crash cuts; explicitly run in fix gate
 kinewright_agent writer_host::hooks_tests::tests::s4b_c3_fix1_rate_wait_clears_after_bounded_clock_time crates/kinewright-agent/src/writer_host/c3_fix1_muse_tests.rs linux on-demand  # C3 bounded rate wait; explicitly run in fix gate
+ja_s4_guardian s4b_c3_fix2_starting_transport_fences_absence crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand  # C3 transport start fence; explicitly run in fix gate

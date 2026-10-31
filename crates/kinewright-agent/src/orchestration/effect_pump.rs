@@ -430,7 +430,7 @@ fn reconcile_attempt(
                         "unbound native recovery requires Reserved H1 attempt",
                     ));
                 }
-                let proof = crate::guardian::RecoveryObserver::unbound_cleanup(&native)?;
+                let proof = crate::guardian::RecoveryObserver::unbound_cleanup(claim, &native)?;
                 // Delete only under proof. A crash here leaves H1 Reserved with no
                 // private record, the already-cleaned case covered by the same lock.
                 claim.retire_unbound(&proof)?;

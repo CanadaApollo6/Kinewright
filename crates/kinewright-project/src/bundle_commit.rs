@@ -672,6 +672,9 @@ impl BundleCommit {
         if bundle.unsettled {
             return Err(BundleError::Unsettled);
         }
+        if stage_base.is_none() && !existing_selection {
+            bundle.refuse_unpaired_task_checkpoint(branch_id)?;
+        }
         bundle.store.with_namespace(|n| n.verify())?;
         if bundle.store.with_namespace(|n| n.read_root())?.as_deref()
             != bundle

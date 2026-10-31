@@ -777,8 +777,14 @@ fn s4_lost_startup_acknowledgments() {
         claim.reserve(&id).unwrap();
         let private = root.join("native");
         fs::create_dir(&private).unwrap();
-        let (mut launcher, mut writer, replies) =
-            spawn_transport(&CertifiedProfile::fixture(), guardian(), &private, &id).unwrap();
+        let (mut launcher, mut writer, replies) = spawn_transport(
+            &CertifiedProfile::fixture(),
+            guardian(),
+            &private,
+            &id,
+            &mut claim,
+        )
+        .unwrap();
         protocol::write_frame(
             &mut writer,
             &HostMessage::Prepare {
@@ -986,8 +992,14 @@ fn s4_reaped_guardian_and_identity_are_required() {
     claim.reserve(&id).unwrap();
     let private = root.join("native");
     fs::create_dir(&private).unwrap();
-    let (mut launcher, mut writer, replies) =
-        spawn_transport(&CertifiedProfile::fixture(), guardian(), &private, &id).unwrap();
+    let (mut launcher, mut writer, replies) = spawn_transport(
+        &CertifiedProfile::fixture(),
+        guardian(),
+        &private,
+        &id,
+        &mut claim,
+    )
+    .unwrap();
     protocol::write_frame(
         &mut writer,
         &HostMessage::Prepare {
@@ -1221,8 +1233,14 @@ fn s4_startup_deadline_kills_a_contained_shim() {
     claim.reserve(&id).unwrap();
     let private = root.join("native");
     fs::create_dir(&private).unwrap();
-    let (mut launcher, mut writer, replies) =
-        spawn_transport(&CertifiedProfile::fixture(), guardian(), &private, &id).unwrap();
+    let (mut launcher, mut writer, replies) = spawn_transport(
+        &CertifiedProfile::fixture(),
+        guardian(),
+        &private,
+        &id,
+        &mut claim,
+    )
+    .unwrap();
     protocol::write_frame(
         &mut writer,
         &HostMessage::Prepare {
@@ -2746,4 +2764,131 @@ fn s4b_c3_late_recovery_deleted_service_zombie_blocks_proof() {
         "s4b_c3_late_recovery_deleted_service_zombie_blocks_proof"
     ));
     service_proof_refused(ProofCaller::Reopened, true, false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "on-demand: equipped Linux guardian qualification"]
+fn s4b_c3_fix2_starting_transport_fences_absence() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(equipped_session(
+        "s4b_c3_fix2_starting_transport_fences_absence"
+    ));
+    for mode in ["recovery", "prepare-error"] {
+        let gate = root("start-gate");
+        let _cleanup = FixtureCleanup(gate.clone());
+        let script = gate.join("systemd-run");
+        fs::write(&script, b"#!/bin/sh\n: > \"$KINEWRIGHT_TRANSPORT_GATE/ready\"\nwhile [ ! -f \"$KINEWRIGHT_TRANSPORT_GATE/release\" ]; do /usr/bin/sleep 0.01; done\nexec /usr/bin/systemd-run \"$@\"\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut path = vec![gate.clone()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "s4b_c3_fix2_starting_transport_child",
+                "--nocapture",
+            ])
+            .env("PATH", std::env::join_paths(path).unwrap())
+            .env("KINEWRIGHT_TRANSPORT_GATE", &gate)
+            .env("KINEWRIGHT_TRANSPORT_MODE", mode)
+            .output()
+            .unwrap();
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "C3_TRANSPORT_CHILD {mode}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s4b_c3_fix2_starting_transport_child() {
+    let Some(gate) = std::env::var_os("KINEWRIGHT_TRANSPORT_GATE") else {
+        return;
+    };
+    let gate = PathBuf::from(gate);
+    let mode = std::env::var("KINEWRIGHT_TRANSPORT_MODE").unwrap();
+    let root = root("starting");
+    let _cleanup = FixtureCleanup(root.clone());
+    let id = identity();
+    let machine = root.join("machine");
+    let mut claim = MachineClaim::acquire_fixture(&machine, &id.project, &id.run).unwrap();
+    let private = machine.join(format!("job-{}", id.nonce));
+    let (premature, owned) = if mode == "recovery" {
+        claim.reserve(&id).unwrap();
+        fs::create_dir(&private).unwrap();
+        let (mut launcher, mut writer, replies) = spawn_transport(
+            &CertifiedProfile::fixture(),
+            guardian(),
+            &private,
+            &id,
+            &mut claim,
+        )
+        .unwrap();
+        protocol::write_frame(
+            &mut writer,
+            &HostMessage::Prepare {
+                identity: id.clone(),
+                program: Box::new(program(&root)),
+            },
+        )
+        .unwrap();
+        wait_file(&gate.join("ready"));
+        drop(writer);
+        assert!(launcher.try_wait().unwrap().is_none());
+        drop(claim);
+        let mut recovered = MachineClaim::recover_fixture(&machine).unwrap();
+        let issued = RecoveryObserver::unbound_cleanup(&mut recovered, &id).is_ok();
+        assert!(launcher.try_wait().unwrap().is_none());
+        fs::write(gate.join("release"), b"").unwrap();
+        let owned = matches!(
+            replies
+                .recv_timeout(Duration::from_secs(8))
+                .unwrap()
+                .unwrap(),
+            GuardianMessage::Owned { .. }
+        );
+        launcher.wait().unwrap();
+        claim = recovered;
+        (issued, owned)
+    } else {
+        // The real startup deadline expires while the already-recorded transport
+        // is delayed. Prepare cleanup must retain the claim until it settles.
+        let result = ContainedSession::prepare(
+            &mut claim,
+            &mut Owner::new(&root),
+            id.clone(),
+            program(&root),
+            guardian(),
+            &CertifiedProfile::fixture(),
+        );
+        assert!(result.is_err());
+        assert!(gate.join("ready").exists());
+        let retained = claim.recovery_identities().contains(&id);
+        fs::write(gate.join("release"), b"").unwrap();
+        if let Ok(session) = result {
+            drop(session);
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !matches!(claim.transport_intent(&id), Ok(job_guardian::protocol::TransportState::Started { pid, start }) if kinewright_job_sys::process_identity_reaped(pid,start).unwrap())
+        {
+            assert!(Instant::now() < deadline, "transport reaping");
+            thread::sleep(Duration::from_millis(1));
+        }
+        (!retained, private.join("native-recovery.json").exists())
+    };
+    let proof = RecoveryObserver::unbound_cleanup(&mut claim, &id).unwrap();
+    // The durable fence also prevents a later submit after proof issuance.
+    assert!(claim.begin_transport(&id).is_err());
+    claim.retire_unbound(&proof).unwrap();
+    claim.finish().unwrap();
+    eprintln!(
+        "C3_START_FENCE mode={mode} premature={premature} owned_after_settle={owned} transport_reaped=true manager_idle=true tree_absent=true"
+    );
+    assert!(
+        !premature && owned,
+        "C3_STARTING_TRANSPORT_CANNOT_PROVE_ABSENT mode={mode}"
+    );
 }

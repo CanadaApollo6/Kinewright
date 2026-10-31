@@ -240,3 +240,20 @@ pub fn write_frame(writer: &mut impl Write, message: &impl Serialize) -> io::Res
     writer.write_all(&bytes)?;
     writer.flush()
 }
+/// Durable fence around Linux manager submission; PID/start is reopened through a pidfd.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportIntent {
+    pub attempt: AttemptIdentity,
+    pub state: TransportState,
+}
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum TransportState {
+    Unstarted,
+    Starting,
+    Started { pid: u32, start: u64 },
+    Closed,
+}

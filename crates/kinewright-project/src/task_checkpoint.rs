@@ -29,6 +29,33 @@ impl StagedTaskCheckpoint {
     }
 }
 impl ProjectBundle {
+    /// Ordinary checkpoint publication cannot advance the task actor retained by H1.
+    pub(crate) fn refuse_unpaired_task_checkpoint(
+        &self,
+        branch: &BranchId,
+    ) -> Result<(), BundleError> {
+        for run in self.run_index()?.orchestration.keys() {
+            let Some(projection) = self.orchestration_projection(run)? else {
+                continue;
+            };
+            for task in projection.tasks {
+                for reference in task.progress.decisions {
+                    if reference.record_kind != crate::bundle_records::RecordKind::RunIndex {
+                        continue;
+                    }
+                    let record = self.store.read_record::<OrchestrationRecord>(&reference)?;
+                    if let OrchestrationPayload::TaskHistory(history) = &record.payload
+                        && &history.source.branch == branch
+                    {
+                        return Err(BundleError::Identity(
+                            "task checkpoint requires atomic H1 history publication".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn task_checkpoint_updates(
         &self,
         transition: &ValidatedRunUpdate,

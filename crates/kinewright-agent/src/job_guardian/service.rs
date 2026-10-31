@@ -113,6 +113,10 @@ pub fn main_entry() -> io::Result<()> {
         return super::linux::shim(args);
     }
     #[cfg(target_os = "linux")]
+    if mode == "--transport" {
+        return super::linux::transport(args);
+    }
+    #[cfg(target_os = "linux")]
     if mode == "--probe" {
         let unit = args
             .next()

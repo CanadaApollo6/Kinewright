@@ -27,6 +27,7 @@ mod tests {
     include!("task_history_tests.rs");
     include!("c3_fix1_tests.rs");
     include!("c3_fix1_muse_tests.rs");
+    include!("c3_fix2_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,

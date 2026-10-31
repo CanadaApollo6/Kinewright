@@ -8,6 +8,35 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
 };
 
+/// Persist the pinned exec identity before the transport can submit a manager job.
+pub(super) fn transport(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<()> {
+    use super::protocol::{RECOVERY_CAP, TransportIntent, TransportState};
+    use std::os::unix::process::CommandExt;
+    let path = PathBuf::from(
+        args.next()
+            .ok_or_else(|| io::Error::other("transport intent required"))?,
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(&path)?
+        .take(RECOVERY_CAP as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > RECOVERY_CAP {
+        return Err(io::Error::other("transport intent cap"));
+    }
+    let mut intent: TransportIntent = serde_json::from_slice(&bytes)?;
+    intent.attempt.validate()?;
+    if !matches!(intent.state, TransportState::Starting) {
+        return Err(io::Error::other("transport start fenced"));
+    }
+    let process = ProcessHandle::open(std::process::id())?;
+    intent.state = TransportState::Started {
+        pid: process.pid(),
+        start: process.start(),
+    };
+    super::service::atomic_record(&path, &intent, RECOVERY_CAP)?;
+    Err(Command::new("systemd-run").args(args).exec())
+}
+
 pub(super) struct Tree {
     cgroup: Cgroup,
     service: Cgroup,

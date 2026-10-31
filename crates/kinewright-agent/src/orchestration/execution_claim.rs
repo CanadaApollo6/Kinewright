@@ -171,6 +171,11 @@ impl MachineClaim {
             return Err(io::Error::other("duplicate native reservation"));
         }
         write_record(&record_path(&self.root, identity), identity)?;
+        #[cfg(target_os = "linux")]
+        self.write_transport(
+            identity,
+            crate::job_guardian::protocol::TransportState::Unstarted,
+        )?;
         self.attempts.push(identity.clone());
         Ok(())
     }
@@ -193,6 +198,71 @@ impl MachineClaim {
             return Err(io::Error::other("native reservation identity changed"));
         }
         write_record(&path, recovery)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn transport_path(&self, identity: &AttemptIdentity) -> PathBuf {
+        self.root.join(format!("launch-{}.json", identity.nonce))
+    }
+    #[cfg(target_os = "linux")]
+    fn write_transport(
+        &self,
+        identity: &AttemptIdentity,
+        state: crate::job_guardian::protocol::TransportState,
+    ) -> io::Result<()> {
+        write_record(
+            &self.transport_path(identity),
+            &crate::job_guardian::protocol::TransportIntent {
+                attempt: identity.clone(),
+                state,
+            },
+        )
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn transport_intent(
+        &self,
+        identity: &AttemptIdentity,
+    ) -> io::Result<crate::job_guardian::protocol::TransportState> {
+        if !self.attempts.contains(identity) {
+            return Err(io::Error::other("unretained transport"));
+        }
+        let record: crate::job_guardian::protocol::TransportIntent =
+            read_record(&self.transport_path(identity))?;
+        if record.attempt != *identity {
+            return Err(io::Error::other("foreign transport"));
+        }
+        Ok(record.state)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn begin_transport(&mut self, identity: &AttemptIdentity) -> io::Result<PathBuf> {
+        if !matches!(
+            self.transport_intent(identity)?,
+            crate::job_guardian::protocol::TransportState::Unstarted
+        ) {
+            return Err(io::Error::other("transport already started or fenced"));
+        }
+        self.write_transport(
+            identity,
+            crate::job_guardian::protocol::TransportState::Starting,
+        )?;
+        Ok(self.transport_path(identity))
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cancel_unspawned_transport(
+        &mut self,
+        identity: &AttemptIdentity,
+    ) -> io::Result<()> {
+        self.write_transport(
+            identity,
+            crate::job_guardian::protocol::TransportState::Unstarted,
+        )
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fence_transport(&mut self, identity: &AttemptIdentity) -> io::Result<()> {
+        self.write_transport(
+            identity,
+            crate::job_guardian::protocol::TransportState::Closed,
+        )
     }
 
     /// Proofs are produced by independent native observation, never pipe EOF.
@@ -227,6 +297,8 @@ impl MachineClaim {
             .root
             .join(format!("native-{}.json", proof.identity().nonce));
         fs::remove_file(recovery)?;
+        #[cfg(target_os = "linux")]
+        self.remove_transport(proof.identity())?;
         sync_directory(&self.root)?;
         self.attempts.remove(index);
         Ok(())
@@ -240,6 +312,12 @@ impl MachineClaim {
         proof: &super::guardian::UnboundCleanupProof,
     ) -> io::Result<()> {
         let identity = proof.identity();
+        if !matches!(
+            self.transport_intent(identity)?,
+            crate::job_guardian::protocol::TransportState::Closed
+        ) {
+            return Err(io::Error::other("unbound transport not fenced"));
+        }
         match self.recovery(identity) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             _ => {
@@ -263,9 +341,18 @@ impl MachineClaim {
             Err(e) => return Err(e),
         }
         fs::remove_file(record_path(&self.root, identity))?;
+        self.remove_transport(identity)?;
         sync_directory(&self.root)?;
         self.attempts.remove(index);
         Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn remove_transport(&self, identity: &AttemptIdentity) -> io::Result<()> {
+        match fs::remove_file(self.transport_path(identity)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
     /// Inspect the exact private record while holding the account-wide lock.
     /// # Errors
