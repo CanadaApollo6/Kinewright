@@ -414,6 +414,7 @@ impl BundleCopy {
         }
         if actual == self.before.root {
             destination.settle_destination_ticket(live)?;
+            destination.copy_publication = None;
             destination.store.settle_object_writes()?;
             destination.store.rollback_copy(
                 self.before.root.as_deref(),
@@ -526,6 +527,7 @@ fn destination_admitted(
         .store
         .rebind_unshared_copy_owner(project_id.clone())?;
     target.project_id = project_id;
+    target.copy_publication = Some(crate::copy_publication::CopyPublication::Pending);
     Ok((
         target,
         DestinationBefore {
@@ -609,6 +611,13 @@ fn result(
     let status = match publication {
         Ok(report) => CopyStatus::Committed(report),
         Err(error) => {
+            if !matches!(
+                target.publication_state,
+                crate::bundle::PublicationState::Unknown
+                    | crate::bundle::PublicationState::Committed
+            ) {
+                target.copy_publication = None;
+            }
             let uncertain = target.unsettled
                 || target.store.with_namespace(|n| Ok(n.is_uncertain()))?
                 || target.store.has_unsettled_objects()?;
@@ -848,6 +857,7 @@ impl ProjectBundle {
                 .checked_add(1)
                 .ok_or(BundleError::Capacity("copy generation"))?;
             target.manual_branch_id = self.manual_branch_id.clone();
+            target.capture_copy_tasks(self)?;
             target.evidence.clone_from(&self.evidence);
             target.receipts = self.receipts.clone();
             target.issuers = self.issuers.clone();
@@ -1213,6 +1223,7 @@ pub(crate) fn rescue_copy(
         let mut rescue_contexts = Vec::new();
         if let Some(original) = named {
             target.manual_branch_id = original.manual_branch_id.clone();
+            target.capture_copy_tasks(original)?;
             target.generation = original.generation;
             target.root.clone_from(&original.root);
             target.recovery = original.recovery.clone();

@@ -645,6 +645,8 @@ impl BundleCommit {
         manual_batch: &[CommandEnvelope],
         stage_base: Option<&ObjectRef>,
     ) -> Result<BranchPublication, BundleError> {
+        let copy_branch = bundle.prepare_plain_copy(branch_id)?;
+        let branch_id = copy_branch.as_ref().unwrap_or(branch_id);
         let existing_selection = metadata_only
             || selection.is_some_and(|selected| {
                 matches!(
@@ -1349,6 +1351,7 @@ impl BundleCommit {
             store_manifest_ref,
         };
         root.admit()?;
+        bundle.validate_plain_copy(&root, &branch_index)?;
         bundle
             .store
             .with_namespace(crate::namespace::ProjectNamespace::finish_object_batch)?;
@@ -1455,6 +1458,7 @@ impl BundleCommit {
             bundle.manual_branch_id = manual_branch_id.clone();
             bundle.root = Some(root);
             bundle.branches = branches;
+            bundle.copy_publication = None;
             if let Some(pending) = &bundle.pending_metadata {
                 for branch in &pending.task_checkpoints {
                     bundle.task_checkpoints.remove(branch);

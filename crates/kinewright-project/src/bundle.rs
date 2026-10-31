@@ -751,6 +751,7 @@ impl LoadedBundle {
             pending_result: None,
             pending_metadata: None,
             task_checkpoints: BTreeMap::new(),
+            copy_publication: None,
             voice_slots: std::sync::Mutex::default(),
             last_collection_error: None,
             pending_save: None,
@@ -808,6 +809,7 @@ pub struct ProjectBundle {
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
     pub(crate) pending_metadata: Option<crate::studio_store::ValidatedMetadataUpdate>,
     pub(crate) task_checkpoints: BTreeMap<BranchId, crate::task_checkpoint::StagedTaskCheckpoint>,
+    pub(crate) copy_publication: Option<crate::copy_publication::CopyPublication>,
     pub(crate) voice_slots: crate::voice_store::VoiceSlots,
 }
 pub(crate) struct PendingSave {
@@ -1028,6 +1030,7 @@ impl ProjectBundle {
                 pending_result: None,
                 pending_metadata: None,
                 task_checkpoints: BTreeMap::new(),
+                copy_publication: None,
                 voice_slots: std::sync::Mutex::default(),
                 last_collection_error: None,
                 pending_save: None,
@@ -1267,6 +1270,7 @@ impl ProjectBundle {
         self.inventory = loaded.inventory;
         self.root = Some(root);
         self.admission = loaded.admission;
+        self.copy_publication = None;
         let installed: Vec<_> = self
             .task_checkpoints
             .iter()

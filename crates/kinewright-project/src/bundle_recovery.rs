@@ -1064,7 +1064,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                 BundleError::Corrupt("active branch input manifest missing".into())
             })?;
             if (input.project_id.as_ref() != Some(&root.project_id)
-                && ((active && root.manual_switch_generation == 0)
+                && ((active && id == &root.manual_branch_id && root.manual_switch_generation == 0)
                     || !input
                         .project_id
                         .as_ref()

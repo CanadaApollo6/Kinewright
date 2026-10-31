@@ -28,6 +28,7 @@ mod tests {
     include!("c3_fix1_tests.rs");
     include!("c3_fix1_muse_tests.rs");
     include!("c3_fix2_tests.rs");
+    include!("c3_fix3_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,
@@ -44,11 +45,15 @@ mod tests {
             Self::with_document(media, Document::default())
         }
         fn with_document(media: bool, document: Document) -> Self {
+            Self::with_document_at(media, document, "project.kinewright")
+        }
+        fn with_document_at(media: bool, document: Document, name: &str) -> Self {
             let temp = kinewright_media::test_support::TempDirectory::new_in(
                 &kinewright_media::test_support::workspace_target_dir(),
                 "s3-hooks",
             );
-            let path = temp.path("project.kinewright");
+            let path = temp.path(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let core = Core::spawn(document).unwrap();
             let mut bundle =
                 ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();

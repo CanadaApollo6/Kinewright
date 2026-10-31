@@ -206,8 +206,32 @@ fn h1_run_and_feedback_publish_atomically_and_reopen() {
     drop(owner);
     let owner = Ja1EditingSession::open(&copied).unwrap();
     assert!(
-        owner.orchestration_projection(&run).unwrap().is_some(),
-        "H1_SAVE_CARRIES_RUN"
+        owner.orchestration_projection(&run).unwrap().is_none(),
+        "H1_COPY_HAS_NO_INHERITED_RUN"
+    );
+    assert!(
+        owner
+            .read_submitted_batch(&batch)
+            .unwrap()
+            .consumed_by
+            .is_none(),
+        "H1_COPY_HAS_NO_RUN_CONSUMPTION"
+    );
+    drop(owner);
+    let original = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    assert!(
+        original.orchestration_projection(&run).unwrap().is_some(),
+        "H1_ORIGINAL_KEEPS_RUN"
+    );
+    assert_eq!(
+        original
+            .read_submitted_batch(&batch)
+            .unwrap()
+            .consumed_by
+            .as_ref()
+            .map(kinewright_project::studio_records::RunId::as_str),
+        Some(run.0.as_str()),
+        "H1_ORIGINAL_KEEPS_CONSUMPTION"
     );
 }
 #[test]

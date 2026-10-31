@@ -231,18 +231,30 @@ fn assert_retained(
         root.version_index_ref, expected_root.version_index_ref,
         "S3_EXACT_VERSION_INDEX"
     );
-    assert_eq!(
-        root.feedback_index_ref, expected_root.feedback_index_ref,
-        "S3_EXACT_FEEDBACK_INDEX"
-    );
-    assert_eq!(
-        root.run_index_ref, expected_root.run_index_ref,
-        "S3_EXACT_RUN_INDEX"
-    );
+    let copied = root.project_id != expected_root.project_id;
+    if copied {
+        assert_ne!(
+            root.feedback_index_ref, expected_root.feedback_index_ref,
+            "S3_COPY_DETACHES_RUN_CONSUMPTION"
+        );
+    } else {
+        assert_eq!(
+            root.feedback_index_ref, expected_root.feedback_index_ref,
+            "S3_EXACT_FEEDBACK_INDEX"
+        );
+    }
+    if copied {
+        assert!(root.run_index_ref.is_none(), "S3_COPY_HAS_NO_INHERITED_RUN");
+    } else {
+        assert_eq!(
+            root.run_index_ref, expected_root.run_index_ref,
+            "S3_EXACT_RUN_INDEX"
+        );
+    }
     assert!(
         root.version_index_ref.is_some()
             && root.feedback_index_ref.is_some()
-            && root.run_index_ref.is_some(),
+            && (copied || root.run_index_ref.is_some()),
         "S3_ROOT_INDEX_PRESERVATION"
     );
     drop(loaded);
@@ -272,19 +284,26 @@ fn assert_retained(
     assert_eq!(submitted.batch.revision_refs, vec![revision.clone()]);
     assert_eq!(
         submitted.consumed_by.as_ref(),
-        Some(run),
+        if copied { None } else { Some(run) },
         "S3_RUN_BATCH_PRESERVATION"
     );
     let index = b.run_index().unwrap();
-    let record = &index.runs[run];
-    let segment = b
-        .store()
-        .read_record::<RunEventSegment>(&record.event_segment_refs[0])
-        .unwrap();
-    assert_eq!(segment.run_id, *run, "S3_RUN_GRAPH_PRESERVATION");
+    if copied {
+        assert!(
+            index.runs.is_empty() && index.orchestration.is_empty(),
+            "S3_COPY_HAS_NO_RUN_BINDINGS"
+        );
+    } else {
+        let record = &index.runs[run];
+        let segment = b
+            .store()
+            .read_record::<RunEventSegment>(&record.event_segment_refs[0])
+            .unwrap();
+        assert_eq!(segment.run_id, *run, "S3_RUN_GRAPH_PRESERVATION");
+    }
     b.reconcile_metadata().unwrap();
 }
-fn index_bytes(path: &Path, root: &kinewright_project::bundle::StudioRoot) -> Vec<Vec<u8>> {
+fn index_bytes(path: &Path, root: &kinewright_project::bundle::StudioRoot) -> Vec<Option<Vec<u8>>> {
     [
         &root.version_index_ref,
         &root.feedback_index_ref,
@@ -292,13 +311,14 @@ fn index_bytes(path: &Path, root: &kinewright_project::bundle::StudioRoot) -> Ve
     ]
     .into_iter()
     .map(|reference| {
-        let reference = reference.as_ref().expect("S3_RESCUE_NONEMPTY_INDEX");
-        std::fs::read(
-            path.with_extension("kinewright-assets")
-                .join("studio/objects")
-                .join(&reference.sha256),
-        )
-        .unwrap()
+        reference.as_ref().map(|reference| {
+            std::fs::read(
+                path.with_extension("kinewright-assets")
+                    .join("studio/objects")
+                    .join(&reference.sha256),
+            )
+            .unwrap()
+        })
     })
     .collect()
 }
@@ -759,6 +779,16 @@ fn s3_indexes_survive_all_root_producers() {
     )
     .unwrap();
     let projected_root = projected.studio.unwrap();
+    assert_eq!(
+        index_bytes(&twice, &projected_root),
+        expected_bytes,
+        "S3_ARCHIVED_SOURCE_INDEX_BYTES"
+    );
+    let destination_bytes = index_bytes(&twice, owner.root().unwrap());
+    assert!(
+        owner.root().unwrap().run_index_ref.is_none(),
+        "S3_RESCUE_HAS_NO_INHERITED_RUN"
+    );
     let manifest = owner
         .store()
         .read_record::<kinewright_project::store::StoreManifest>(&projected_root.store_manifest_ref)
@@ -800,8 +830,8 @@ fn s3_indexes_survive_all_root_producers() {
     let restored = LoadedBundle::read(&twice).unwrap();
     assert_eq!(
         index_bytes(&twice, restored.root().unwrap()),
-        expected_bytes,
-        "S3_RESCUE_PROJECTED_INDEX_BYTES"
+        destination_bytes,
+        "S3_RECOVERY_SELECTION_PRESERVES_DESTINATION_INDEX_BYTES"
     );
     drop(restored);
     assert_retained(&twice, &key, &revision, &batch, &run, &expected_root);
