@@ -599,6 +599,8 @@ pub struct RunIndex {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cumulative: BTreeMap<crate::orchestration_records::RunId, ObjectRef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub budgets: BTreeMap<crate::orchestration_records::RunId, crate::run_admission::RunBudget>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub orchestration: BTreeMap<
         crate::orchestration_records::RunId,
         Vec<crate::orchestration_commit::PublishedRunCut>,
@@ -611,6 +613,7 @@ impl Default for RunIndex {
             runs: BTreeMap::new(),
             orchestration: BTreeMap::new(),
             cumulative: BTreeMap::new(),
+            budgets: BTreeMap::new(),
         }
     }
 }

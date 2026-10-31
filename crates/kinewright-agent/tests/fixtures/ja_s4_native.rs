@@ -38,6 +38,19 @@ fn main() {
     let root = Path::new(&args[1]);
     let role = args[2].to_str().unwrap();
     #[cfg(target_os = "linux")]
+    if role == "s4b-image" {
+        let hidden = fs::read("/proc/self/exe").is_err()
+            && fs::read_dir("/proc/1/fd").is_err()
+            && fs::read_dir("/proc/self/fd").is_err();
+        fs::write(
+            root.join("image-report.partial"),
+            format!("qualified=true proc_hidden={hidden}"),
+        )
+        .unwrap();
+        fs::rename(root.join("image-report.partial"), root.join("image-report")).unwrap();
+        return;
+    }
+    #[cfg(target_os = "linux")]
     if role == "s4b-credentials" {
         let original = Path::new(&args[3]);
         let ambient_denied = fs::read_dir(original).is_err()

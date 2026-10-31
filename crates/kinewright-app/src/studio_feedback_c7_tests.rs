@@ -61,15 +61,21 @@ pub(super) fn launch(project: &Project) -> Ja1Attachment {
     let mut attachment = Ja1Attachment::new(owner).unwrap();
     crate::ja1_attachment::SCHEDULER_SETTINGS
         .with(|folder| *folder.borrow_mut() = Some(project.temp.path("scheduler")));
-    attachment
-        .launch_host(
-            "c7-revise".into(),
+    let fixture = kinewright_agent::writer_host::ProtocolFixture::new(
+        project.temp.root(),
+        kinewright_agent::writer_host::ProtocolFixtureMode::Dormant,
+    );
+    let writer = attachment
+        .launch_protocol_fixture(
             SessionRoots {
                 read: vec![project.temp.root().into()],
                 write: vec![project.temp.root().into()],
             },
+            project.temp.path("scheduler"),
+            &fixture,
         )
         .unwrap();
+    attachment.fixture_host = Some(writer);
     attachment
 }
 fn with_host<R>(attachment: &Ja1Attachment, act: impl FnOnce(&mut HostFeedback<'_>) -> R) -> R {

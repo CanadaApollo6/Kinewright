@@ -187,6 +187,8 @@ pub(crate) struct Ja1Attachment {
     originating_context: Arc<std::sync::atomic::AtomicBool>,
     snapshot_readers: host_snapshot::SnapshotReaders,
     host: Option<host::HostAttachment>,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fixture_host: Option<kinewright_agent::writer_host::WriterHost>,
     host_history_digest: std::cell::RefCell<
         Option<(
             kinewright_core::ActorIdentity,
@@ -234,6 +236,8 @@ impl Ja1Attachment {
             originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             snapshot_readers: host_snapshot::SnapshotReaders::new()?,
             host: None,
+            #[cfg(all(test, target_os = "linux"))]
+            fixture_host: None,
             host_history_digest: std::cell::RefCell::new(None),
             known_agent_effects: std::collections::BTreeSet::new(),
             save_disclosure: String::new(),
@@ -1815,6 +1819,28 @@ pub(crate) mod tests;
 
 #[cfg(all(test, target_os = "linux"))]
 impl Ja1Attachment {
+    /// Explicit fixture port for tests that must kill and reopen a child host.
+    pub(crate) fn launch_fixture_child(
+        &mut self,
+        root: &Path,
+        project: String,
+        roots: kinewright_agent::writer_host::SessionRoots,
+    ) -> Result<(), BundleError> {
+        use std::os::unix::fs::PermissionsExt;
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+        let wrapper = root.join("writer-host-fixture");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport KINEWRIGHT_C4_RECOVERY_FIXTURE_ROOT={}\nexec {} \"$@\"\n",
+                quote(&root.join("fixture-machine")),
+                quote(&host::executable()),
+            ),
+        )?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        self.launch_host_at(&wrapper, project, roots)
+    }
+
     pub(crate) fn launch_protocol_fixture(
         &mut self,
         roots: kinewright_agent::writer_host::SessionRoots,

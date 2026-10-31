@@ -22,6 +22,7 @@ use std::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolFixtureMode {
+    Dormant,
     Normal,
     Startup,
     FullQueue,
@@ -110,7 +111,7 @@ impl ProtocolFixture {
             guardian: target_dir().join("kinewright-job-guardian"),
             ceiling: None,
             fixture_claim: Some(self.claim_root()),
-            fixture_autostart: true,
+            fixture_autostart: self.0.mode != ProtocolFixtureMode::Dormant,
             qualification: false,
             stop_gate: None,
             witness: Some(Arc::new(super::RuntimeWitness {

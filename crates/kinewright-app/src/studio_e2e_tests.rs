@@ -111,7 +111,9 @@ fn roots(fixture: &Fixtures) -> SessionRoots {
 }
 fn launch(fixture: &Fixtures, owner: Ja1EditingSession, name: &str) -> Ja1Attachment {
     let mut attachment = Ja1Attachment::new(owner).unwrap();
-    attachment.launch_host(name.into(), roots(fixture)).unwrap();
+    attachment
+        .launch_fixture_child(fixture.root.root(), name.into(), roots(fixture))
+        .unwrap();
     assert!(attachment.host_attached(), "E2E_HOST_ATTACHED");
     attachment
 }
@@ -774,8 +776,8 @@ fn end_to_end(live: bool) {
     );
     drop(app.focused_mut().ja1.take());
     drop(proxy);
-    // No connector is certified, so the run never ends by itself. Ending the
-    // detached host stands in for that: only durable state comes back.
+    // The dormant fixture keeps the run pending. End the detached host so only
+    // durable state comes back.
     end_host(host);
     let (replacement, _) = crate::app::in1_tests::in1_harness_with_engine(
         context_b.document.clone(),

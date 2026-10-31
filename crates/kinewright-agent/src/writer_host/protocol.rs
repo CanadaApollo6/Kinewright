@@ -455,6 +455,7 @@ impl From<BundleError> for HostRefusal {
             BundleError::HistoryCommitInvariant => "history_commit_invariant",
             BundleError::CleanupPending(_) => "cleanup_pending",
             BundleError::Capacity(_) => "storage_backpressure",
+            BundleError::RunLimit | BundleError::RunAdmission(_) => "run_limit",
             BundleError::Unsupported(_) => "unsupported_bundle",
             BundleError::Corrupt(_) => "damaged_bundle",
             BundleError::Unsettled => "unsettled",

@@ -316,6 +316,7 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<kinewright_project::bundle_records::ObjectRef, HostError> {
+        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
             let record = self
                 .owner()?

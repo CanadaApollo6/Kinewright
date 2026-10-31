@@ -26,3 +26,9 @@ pub use windows::*;
 mod credential;
 #[cfg(target_os = "linux")]
 pub use credential::*;
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod executable_image;
+#[cfg(target_os = "linux")]
+pub use executable_image::*;

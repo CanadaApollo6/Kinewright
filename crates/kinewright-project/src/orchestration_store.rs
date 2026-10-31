@@ -180,6 +180,7 @@ impl ProjectBundle {
             version: 1,
             payload: OrchestrationPayload::EventSegment(transition.segment().clone()),
         })?;
+        self.advance_run_budget(&mut index, transition)?;
         index.cumulative.remove(run);
         index
             .orchestration
@@ -223,6 +224,7 @@ impl ProjectBundle {
             && manual.document_hash == candidate.document_hash)
     }
     pub fn orchestration_cut(&self, run: &RunId) -> Result<Option<PublishedRunCut>, BundleError> {
+        let _reading = self.store.terminal_admission();
         Ok(self
             .run_index()?
             .orchestration
@@ -234,6 +236,7 @@ impl ProjectBundle {
         &self,
         run: &RunId,
     ) -> Result<Option<RunProjection>, BundleError> {
+        let _reading = self.store.terminal_admission();
         let index = self.run_index()?;
         let Some(cut) = index.orchestration.get(run).and_then(|cuts| cuts.last()) else {
             return Ok(None);
@@ -250,6 +253,7 @@ impl ProjectBundle {
         envelope: &OrchestrationEnvelope,
         consume_batch: Option<&FeedbackBatchId>,
     ) -> Result<Option<OrchestrationReceipt>, BundleError> {
+        let _reading = self.store.terminal_admission();
         for cut in self.run_index()?.orchestration.values().flatten() {
             if cut.receipt.envelope.id == envelope.id {
                 if &cut.receipt.envelope != envelope || cut.consumed_batch.as_ref() != consume_batch
@@ -282,7 +286,8 @@ pub fn commit_orchestration(
             consume_batch,
         },
     };
-    let result = owner.metadata_command(&metadata, MetadataScope::Orchestration, &update)?;
+    let result = owner.metadata_command(&metadata, MetadataScope::Orchestration, &update);
+    let result = result?;
     let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) = result else {
         return Err(BundleError::Unsettled);
     };
@@ -313,6 +318,7 @@ impl crate::editing_session::Ja1EditingSession {
         self.active_bundle()?.orchestration_replay(envelope, batch)
     }
     pub fn orchestration_runs(&self) -> Result<Vec<RunId>, BundleError> {
+        let _reading = self.run_terminal_admission()?;
         Ok(self
             .active_bundle()?
             .run_index()?

@@ -83,6 +83,8 @@ impl ProjectBundle {
             Ok((*self.store.read_record::<OrchestrationRecord>(r)?).clone())
         })?;
         next.validate_successor(&previous).map_err(|_| invalid())?;
+        crate::orchestration_accounting::encode(next, crate::run_admission::ACCOUNTING_BYTES)
+            .map_err(|_| BundleError::RunLimit)?;
         cumulative_progress(&previous, next)?;
         let record = self.store.admit_record(&OrchestrationRecord {
             version: 1,
@@ -109,6 +111,7 @@ impl ProjectBundle {
         run: &RunId,
         next: &AccountingRecord,
     ) -> Result<(), BundleError> {
+        let _terminal = self.store.terminal_admission();
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }

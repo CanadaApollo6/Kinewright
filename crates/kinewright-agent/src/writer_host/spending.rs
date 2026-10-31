@@ -82,6 +82,7 @@ impl HostCommandOwner {
         &self,
         state: &crate::orchestration::orchestration_records::RunProjection,
     ) -> Result<Option<super::orchestration::DurableRunAccounting>, HostError> {
+        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
             let record = self
                 .owner()?

@@ -10,6 +10,7 @@ impl HostCommandOwner {
         &mut self,
         producer: &HostAuth,
     ) -> Result<(), HostError> {
+        let _recovery = self.owner()?.run_terminal_admission()?;
         match self.hooks.pending.clone() {
             None => Ok(()),
             Some(super::orchestration::PendingPublication::Owner(original)) => self
@@ -161,6 +162,7 @@ impl HostCommandOwner {
         {
             return Err(refused("no durable unstarted launch fence"));
         }
+        let _terminal = self.owner()?.run_terminal_admission()?;
         self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
@@ -216,6 +218,7 @@ impl HostCommandOwner {
         &mut self,
         run: &crate::orchestration::orchestration_records::RunId,
     ) -> Result<(HostAuth, RunProjection), HostError> {
+        let _recovery = self.owner()?.run_terminal_admission()?;
         let state = self
             .owner()?
             .orchestration_projection(run)?

@@ -118,7 +118,9 @@ fn host_ipc_case(restricted: bool) {
     let pipes = restricted.then(|| {
         kinewright_agent::provider_pipes::ProviderPipeListeners::bind(&root.join("pipes")).unwrap()
     });
-    let program = Program {
+    let mut program = Program {
+        image: None,
+        credential_root: None,
         executable: binary.clone(),
         arguments: std::iter::once("probe".into())
             .chain(ids)
@@ -149,6 +151,7 @@ fn host_ipc_case(restricted: bool) {
         },
         pipe_directory: pipes.as_ref().map(|pipes| pipes.directory().into()),
     };
+    let _image = program.fixture_image().unwrap();
     let id = identity();
     let mut claim =
         MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
@@ -275,6 +278,8 @@ fn identity() -> AttemptIdentity {
 }
 fn program(root: &Path) -> Program {
     Program {
+        image: None,
+        credential_root: None,
         executable: fixture().into(),
         environment: std::collections::BTreeMap::new(),
         working_directory: root.into(),
@@ -705,6 +710,8 @@ fn s4_native_host_fixture() {
         MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
     let mut owner = Owner::new(&root);
     let program = Program {
+        image: None,
+        credential_root: None,
         executable: std::env::var_os("KINEWRIGHT_S4_NATIVE").unwrap().into(),
         environment: std::collections::BTreeMap::new(),
         working_directory: root.clone(),
@@ -2699,7 +2706,9 @@ fn s4b_c2_provider_pipes_and_final_environment() {
         MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
     let mut owner = Owner::new(&root);
     let metadata = fs::metadata(fixture()).unwrap();
-    let program = Program {
+    let mut program = Program {
+        image: None,
+        credential_root: None,
         executable: fixture().into(),
         arguments: vec![scratch.to_string_lossy().into_owned(), "s4b-pipes".into()],
         environment: std::collections::BTreeMap::new(),
@@ -2716,6 +2725,7 @@ fn s4b_c2_provider_pipes_and_final_environment() {
         },
         pipe_directory: Some(pipes.directory().into()),
     };
+    let _image = program.fixture_image().unwrap();
     assert!(
         Command::new("systemctl")
             .args([
@@ -2900,6 +2910,10 @@ fn s4b_c3_fix2_starting_transport_child() {
 #[test]
 #[cfg(target_os = "linux")]
 #[ignore = "on-demand: single-file credential mount isolation"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one credential identity stays pinned through the combined-grant and child witnesses"
+)]
 fn s4b_c5_single_file_credentials() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     assert!(equipped_session("s4b_c5_single_file_credentials"));
@@ -2926,7 +2940,9 @@ fn s4b_c5_single_file_credentials() {
             .unwrap();
     let executable = fixture();
     let metadata = fs::metadata(executable).unwrap();
-    let program = Program {
+    let mut program = Program {
+        image: None,
+        credential_root: None,
         executable: executable.into(),
         arguments: vec![
             scratch.to_string_lossy().into_owned(),
@@ -2951,6 +2967,15 @@ fn s4b_c5_single_file_credentials() {
         },
         pipe_directory: Some(pipes.directory().into()),
     };
+    let _image = program.fixture_image().unwrap();
+    let mut overlap = program.clone();
+    if let protocol::ProviderSandbox::LinuxAllowlist { runtime, .. } = &mut overlap.sandbox {
+        runtime.push(original.clone());
+    }
+    assert!(
+        overlap.validate().is_err(),
+        "C5_FIX1_AMBIENT_OVERLAP_REFUSED"
+    );
     let id = identity();
     let mut claim =
         MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
@@ -2995,5 +3020,204 @@ fn s4b_c5_single_file_credentials() {
     );
     println!(
         "C5_CREDENTIAL_MOUNT ambient_denied=true replacement_denied=true in_place=true same_identity=true cleanup=true"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "on-demand: equipped Linux sealed-image qualification"]
+fn s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier() {
+    use kinewright_agent::provider_pipes::ProviderPipeListeners;
+    use std::{io::Write, os::unix::fs::MetadataExt};
+    assert!(equipped_session("s4b_c5_fix1_sealed_image"));
+    let root = root("ib");
+    let _cleanup = FixtureCleanup(root.clone());
+    let executable = root.join("qualified");
+    fs::copy(fixture(), &executable).unwrap();
+    let scratch = root.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let credentials = root.join("credentials");
+    fs::create_dir(&credentials).unwrap();
+    let pipes = ProviderPipeListeners::bind(&root.join("pipes")).unwrap();
+    let metadata = fs::metadata(&executable).unwrap();
+    let mut program = Program {
+        image: None,
+        credential_root: None,
+        executable: executable.clone(),
+        arguments: vec![scratch.to_string_lossy().into_owned(), "s4b-image".into()],
+        environment: std::collections::BTreeMap::default(),
+        working_directory: scratch.clone(),
+        pipe_directory: Some(pipes.directory().into()),
+        sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            credential_mount: None,
+            connect_tcp: vec![443],
+            runtime: ["/usr", "/lib", "/lib64", "/dev/null"]
+                .map(Into::into)
+                .to_vec(),
+            scratch: scratch.clone(),
+            credential_store: credentials,
+            executable_identity: [metadata.dev(), metadata.ino()],
+        },
+    };
+    let _image = program.fixture_image().unwrap();
+    // The image has been qualified. Overwrite the same source inode before prepare/exec.
+    let mut writer = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&executable)
+        .unwrap();
+    writer
+        .write_all(&fs::read("/usr/bin/false").unwrap())
+        .unwrap();
+    writer.sync_all().unwrap();
+    drop(writer);
+    assert_eq!(metadata.ino(), fs::metadata(&executable).unwrap().ino());
+    let id = identity();
+    let mut claim =
+        MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
+    let mut owner = Owner::new(&root);
+    let mut session = ContainedSession::prepare(
+        &mut claim,
+        &mut owner,
+        id,
+        program,
+        guardian(),
+        &CertifiedProfile::fixture(),
+    )
+    .unwrap();
+    let mut streams = pipes.accept().unwrap();
+    streams.credentials(b"").unwrap();
+    session.commit(&mut owner).unwrap();
+    let report = scratch.join("image-report");
+    let deadline = Instant::now() + protocol::STARTUP;
+    while !report.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let result = fs::read_to_string(report);
+    let proof = session.cleanup().unwrap();
+    assert_retired(&mut claim, &proof);
+    claim.finish().unwrap();
+    assert_eq!(
+        result.unwrap_or_default(),
+        "qualified=true proc_hidden=true",
+        "C5_FIX1_GUARDIAN_QUALIFIED_IMAGE_AND_PRIVATE_FD"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "on-demand: installed CLI version with synthetic credentials and no model egress"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one unpaid child holds the image, synthetic mount and cleanup proof together"
+)]
+fn s4b_c5_fix1_unpaid_sealed_codex_version() {
+    use std::{
+        io::Read,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+    };
+    let executable = fs::canonicalize(
+        std::env::var_os("KINEWRIGHT_C5_BINARY").expect("explicit installed version probe"),
+    )
+    .unwrap();
+    let root = std::env::temp_dir().join(format!("v5-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let _cleanup = FixtureCleanup(root.clone());
+    let original = root.join("original");
+    fs::create_dir(&original).unwrap();
+    let source = original.join("auth.json");
+    fs::write(&source, br#"{"auth_mode":"chatgpt"}"#).unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+    let auth = fs::metadata(&source).unwrap();
+    let scratch = root.join("s");
+    let home = scratch.join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    for directory in [&root, &original, &scratch, &home] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let target = home.join("auth.json");
+    fs::write(&target, b"").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        home.join("config.toml"),
+        b"forced_login_method = \"chatgpt\"\ncli_auth_credentials_store = \"file\"\n",
+    )
+    .unwrap();
+    let pipes =
+        kinewright_agent::provider_pipes::ProviderPipeListeners::bind(&scratch.join("io")).unwrap();
+    let binary = fs::metadata(&executable).unwrap();
+    let mut runtime = ["/usr", "/lib", "/lib64", "/dev/null"]
+        .map(Into::into)
+        .to_vec();
+    runtime.push(executable.parent().unwrap().into());
+    let mut program = Program {
+        executable,
+        arguments: vec!["--version".into()],
+        image: None,
+        credential_root: None,
+        environment: std::collections::BTreeMap::from([
+            ("HOME".into(), scratch.to_string_lossy().into_owned()),
+            ("TMPDIR".into(), scratch.to_string_lossy().into_owned()),
+            ("CODEX_HOME".into(), home.to_string_lossy().into_owned()),
+        ]),
+        working_directory: scratch.clone(),
+        pipe_directory: Some(pipes.directory().into()),
+        sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            runtime,
+            scratch: scratch.clone(),
+            credential_store: home,
+            executable_identity: [binary.dev(), binary.ino()],
+            connect_tcp: vec![1],
+            credential_mount: Some(Box::new(protocol::CredentialMount {
+                source: source.clone(),
+                target,
+                identity: [auth.dev(), auth.ino()],
+            })),
+        },
+    };
+    let _image = program.fixture_image().unwrap();
+    let id = identity();
+    let mut claim =
+        MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
+    let mut owner = Owner::new(&root);
+    let mut session = ContainedSession::prepare(
+        &mut claim,
+        &mut owner,
+        id,
+        program,
+        guardian(),
+        &CertifiedProfile::fixture(),
+    )
+    .unwrap();
+    let mut streams = pipes.accept().unwrap();
+    streams.credentials(b"").unwrap();
+    streams
+        .output
+        .set_read_timeout(Some(protocol::STARTUP))
+        .unwrap();
+    streams
+        .diagnostics
+        .set_read_timeout(Some(protocol::STARTUP))
+        .unwrap();
+    session.commit(&mut owner).unwrap();
+    let mut output = String::new();
+    let result = streams.output.take(65537).read_to_string(&mut output);
+    session.close_lifetime();
+    let proof = session.cleanup().unwrap();
+    claim.retire(&proof).unwrap();
+    claim.finish().unwrap();
+    let mut diagnostics = String::new();
+    streams
+        .diagnostics
+        .take(65537)
+        .read_to_string(&mut diagnostics)
+        .unwrap();
+    assert!(
+        result.is_ok() && output.contains("codex-cli 0.166.0"),
+        "C5_FIX1_UNPAID_SEALED_VERSION output={output:?} diagnostics={diagnostics:?}"
+    );
+    assert_eq!(fs::read(source).unwrap(), br#"{"auth_mode":"chatgpt"}"#);
+    eprintln!(
+        "C5_FIX1_VERSION codex=0.166.0 sealed=true synthetic_credentials=true model_egress=false paid_sends=0"
     );
 }

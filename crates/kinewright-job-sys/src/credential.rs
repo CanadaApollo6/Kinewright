@@ -28,7 +28,7 @@ pub fn pin_credential_file(path: &Path, expected: Option<[u64; 2]>) -> io::Resul
 }
 
 fn credential_metadata_valid(metadata: &std::fs::Metadata, uid: u32) -> bool {
-    metadata.is_file() && metadata.uid() == uid && metadata.mode() & 0o7777 & !0o600 == 0
+    metadata.is_file() && metadata.uid() == uid && metadata.mode() & 0o7777 == 0o600
 }
 
 /// Bind one pinned file into the private mount namespace before provider execution.
@@ -63,6 +63,17 @@ mod tests {
         let link = root.join("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(pin_credential_file(&link, None).is_err());
+        for mode in [0o400, 0o200, 0o000, 0o4600, 0o2600, 0o1600] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                pin_credential_file(&path, None).is_err(),
+                "C5_FIX1_EXACT_MODE_BEFORE {mode:o}"
+            );
+            assert!(
+                pin_credential_file(&path, Some([metadata.dev(), metadata.ino()])).is_err(),
+                "C5_FIX1_EXACT_MODE_AFTER {mode:o}"
+            );
+        }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         assert!(pin_credential_file(&path, None).is_err());
         std::fs::remove_dir_all(root).unwrap();

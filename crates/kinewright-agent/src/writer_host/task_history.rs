@@ -47,6 +47,7 @@ impl HostCommandOwner {
         state: &RunProjection,
         task: &TaskId,
     ) -> Result<Option<TaskHistoryRecord>, HostError> {
+        let _reading = self.owner()?.run_terminal_admission()?;
         let task = state
             .tasks
             .iter()
@@ -80,6 +81,7 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<(Option<ObjectRef>, RetiredAttemptArchive), HostError> {
+        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
             let record = self
                 .owner()?

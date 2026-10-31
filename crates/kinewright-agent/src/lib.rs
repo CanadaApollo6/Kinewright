@@ -135,3 +135,7 @@ pub(crate) mod effect_pump;
 #[cfg(all(target_os = "linux", feature = "eval-harness"))]
 #[doc(hidden)]
 pub mod network_probe;
+
+#[cfg(target_os = "linux")]
+#[path = "orchestration/executable_images.rs"]
+pub(crate) mod executable_images;

@@ -63,6 +63,7 @@ fn effect_pump(
     };
     let claim = Arc::new(Mutex::new(claim));
     let launcher = crate::native_launcher::NativeGuardianLauncher {
+        images: std::sync::Arc::default(),
         claim: claim.clone(),
         owner: Arc::new(super::super::native_invocation::HostInvocationOwner::new(
             host,
@@ -199,6 +200,7 @@ fn s4b_c3_crash_helper() {
         scratch,
     };
     let launcher = crate::native_launcher::NativeGuardianLauncher {
+        images: std::sync::Arc::default(),
         claim: Arc::new(Mutex::new(claim)),
         owner: Arc::new(port),
         guardian: kinewright_media::test_support::workspace_target_dir()

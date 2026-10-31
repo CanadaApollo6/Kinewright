@@ -15,7 +15,7 @@ use std::io::Write;
 
 pub const RUN_MILLIS: u64 = 6 * 60 * 60 * 1000;
 pub const TASK_SENDS: usize = 80;
-pub const TASKS: usize = 128;
+pub const TASKS: usize = crate::run_admission::TASKS;
 pub const ITEMS: usize = 256;
 pub const RECORD_BYTES: usize = 64 * 1024 * 1024;
 pub const USAGE_EVENTS: usize = 10_000;
@@ -259,7 +259,11 @@ impl AccountingRecord {
         if self.durable_event_bytes > RECORD_BYTES as u64 {
             return Err(AccountingRefusal::Capacity);
         }
-        if self.tasks.len() > TASKS {
+        if self.tasks.len() > TASKS
+            || self.tasks.iter().map(|t| t.sends.len()).sum::<usize>() > crate::run_admission::SENDS
+            || self.tasks.iter().map(|t| t.usage.len()).sum::<usize>()
+                > crate::run_admission::USAGE_SAMPLES
+        {
             return Err(AccountingRefusal::Capacity);
         }
         for (index, task) in self.tasks.iter().enumerate() {
@@ -337,7 +341,7 @@ impl AccountingRecord {
                 }
             }
         }
-        encode(self, RECORD_BYTES)?;
+        encode(self, crate::run_admission::ACCOUNTING_BYTES)?;
         Ok(())
     }
 

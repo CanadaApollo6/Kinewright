@@ -67,6 +67,7 @@ pub fn restrict_provider(
     scratch: &Path,
     credentials: &Path,
     connect_tcp: &[u16],
+    credential_root: Option<&Path>,
 ) -> io::Result<File> {
     // SAFETY: VERSION takes no pointer; the remaining syscalls borrow live, correctly sized ABI structures.
     let abi = checked(unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0, 0, 1) })?;
@@ -94,12 +95,16 @@ pub fn restrict_provider(
     })?;
     // SAFETY: The syscall returned a new valid descriptor and ownership is transferred exactly once.
     let rules = unsafe { File::from_raw_fd(i32::try_from(fd).map_err(io::Error::other)?) };
+    let credential_root = credential_root.map(File::open).transpose()?;
     for (path, access) in runtime.iter().map(|path| (path.as_path(), READ)).chain([
         (scratch, WRITE),
         (credentials, WRITE),
         (executable, FILE_READ),
     ]) {
         let file = File::open(path)?;
+        if let Some(root) = &credential_root {
+            validate_pinned_credential_grant(&file, root)?;
+        }
         let access = if file.metadata()?.is_dir() {
             access
         } else {
@@ -127,10 +132,80 @@ pub fn restrict_provider(
             libc::syscall(libc::SYS_landlock_add_rule, rules.as_raw_fd(), 2, &rule, 0)
         })?;
     }
+    if rustix::process::getpid().as_raw_nonzero().get() == 1 {
+        crate::verify_payload_pid_namespace(1)?;
+        rustix::mount::mount(
+            "kinewright-provider-proc",
+            "/proc",
+            "tmpfs",
+            rustix::mount::MountFlags::NOSUID
+                | rustix::mount::MountFlags::NODEV
+                | rustix::mount::MountFlags::NOEXEC,
+            c"mode=0000,size=4096",
+        )?;
+    }
     rustix::thread::set_no_new_privs(true)?;
     // SAFETY: rules is live, flags zero selects the supported restrict-self operation.
     checked(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, rules.as_raw_fd(), 0) })?;
     Ok(pinned)
+}
+
+/// Reject any directory or file authority overlapping the original credential tree.
+///
+/// # Errors
+/// Refuses aliases, ancestors and descendants of the credential root.
+pub fn validate_credential_grant(grant: &Path, credential_root: &Path) -> io::Result<()> {
+    validate_pinned_credential_grant(&File::open(grant)?, &File::open(credential_root)?)
+}
+fn validate_pinned_credential_grant(grant: &File, root: &File) -> io::Result<()> {
+    fn identity(file: &File) -> io::Result<(u64, u64)> {
+        let m = file.metadata()?;
+        Ok((m.dev(), m.ino()))
+    }
+    fn beneath(directory: &File, ancestor: (u64, u64)) -> io::Result<bool> {
+        let mut directory = directory.try_clone()?;
+        for _ in 0..1024 {
+            let here = identity(&directory)?;
+            if here == ancestor {
+                return Ok(true);
+            }
+            let parent = File::from(rustix::fs::openat(
+                &directory,
+                c"..",
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )?);
+            if identity(&parent)? == here {
+                return Ok(false);
+            }
+            directory = parent;
+        }
+        Err(io::Error::other("credential ancestor capacity"))
+    }
+    let grant_identity = identity(grant)?;
+    let root_identity = identity(root)?;
+    let inside = if grant.metadata()?.is_dir() {
+        beneath(grant, root_identity)?
+    } else {
+        let path = std::fs::canonicalize(format!("/proc/self/fd/{}", grant.as_raw_fd()))?;
+        let parent = File::open(
+            path.parent()
+                .ok_or_else(|| io::Error::other("grant parent missing"))?,
+        )?;
+        // Fail closed if the name no longer denotes the pinned file.
+        if identity(&File::open(path)?)? != grant_identity {
+            return Err(io::Error::other("runtime grant moved"));
+        }
+        beneath(&parent, root_identity)?
+    };
+    if inside || beneath(root, grant_identity)? {
+        return Err(io::Error::other(
+            "Check again: runtime overlaps credential root",
+        ));
+    }
+    Ok(())
 }
 
 /// Closes mutation and descriptor escape operations not mediated by Landlock.
@@ -313,6 +388,7 @@ mod tests {
                     .parse()
                     .unwrap(),
             ],
+            None,
         )
         .unwrap();
         restrict_provider_syscalls().unwrap();
@@ -577,5 +653,35 @@ mod tests {
     #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_fix1_ipc_syscalls_denied() {
         sandbox_case(6);
+    }
+}
+
+#[cfg(test)]
+mod credential_overlap_tests {
+    use super::*;
+    #[test]
+    fn s4b_c5_fix1_pinned_runtime_cannot_overlap_credentials() {
+        use std::{
+            fs,
+            os::{fd::AsRawFd, unix::fs::symlink},
+        };
+        let root = std::env::temp_dir().join(format!("overlap-{}", std::process::id()));
+        fs::create_dir_all(root.join("runtime/credentials")).unwrap();
+        fs::create_dir_all(root.join("other")).unwrap();
+        let credentials = root.join("runtime/credentials");
+        let grant = fs::File::open(root.join("runtime")).unwrap();
+        let pinned = format!("/proc/self/fd/{}", grant.as_raw_fd());
+        assert!(
+            validate_credential_grant(Path::new(&pinned), &credentials).is_err(),
+            "C5_FIX1_PINNED_CREDENTIAL_OVERLAP"
+        );
+        assert!(validate_credential_grant(&credentials, &credentials).is_err());
+        fs::write(credentials.join("history"), "private").unwrap();
+        assert!(validate_credential_grant(&credentials.join("history"), &credentials).is_err());
+        let alias = root.join("alias");
+        symlink(root.join("runtime"), &alias).unwrap();
+        assert!(validate_credential_grant(&alias, &credentials).is_err());
+        assert!(validate_credential_grant(&root.join("other"), &credentials).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 }

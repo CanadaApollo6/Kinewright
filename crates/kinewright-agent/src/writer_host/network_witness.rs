@@ -34,7 +34,8 @@ pub fn run_installed_codex_network_witness() {
     fs::create_dir(&scratch).unwrap();
     fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
     let home = crate::codex_credentials::prepare_home(&scratch).unwrap();
-    let source = root.0.join("synthetic-auth.json");
+    fs::create_dir(root.0.join("source")).unwrap();
+    let source = root.0.join("source/auth.json");
     fs::write(&source, br#"{"auth_mode":"chatgpt"}"#).unwrap();
     fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
     let meta = fs::metadata(&source).unwrap();
@@ -87,7 +88,9 @@ pub fn run_installed_codex_network_witness() {
     )
     .unwrap();
     let pipes = crate::provider_pipes::ProviderPipeListeners::bind(&scratch.join("io")).unwrap();
-    let program = Program {
+    let mut program = Program {
+        image: None,
+        credential_root: None,
         executable: probe,
         arguments: vec![],
         environment,
@@ -95,6 +98,7 @@ pub fn run_installed_codex_network_witness() {
         pipe_directory: Some(pipes.directory().into()),
         sandbox,
     };
+    let _image = program.fixture_image().unwrap();
     fs::write(
         out.join("network-policy.json"),
         serde_json::to_vec_pretty(&program).unwrap(),

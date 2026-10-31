@@ -1224,6 +1224,7 @@ fn s4b_c4_fix1_failed_launch_publishes_retirement_before_private_delete() {
         let claim = Arc::new(Mutex::new(claim));
         let owner = f.host.owner.upgrade().unwrap();
         let launcher = crate::native_launcher::NativeGuardianLauncher {
+            images: std::sync::Arc::default(),
             claim: claim.clone(),
             owner: Arc::new(super::super::native_invocation::HostInvocationOwner::new(
                 &owner,

@@ -18,6 +18,8 @@ pub enum BundleError {
     HistoryCommitInvariant,
     CleanupPending(String),
     Capacity(&'static str),
+    RunLimit,
+    RunAdmission(&'static str),
     Unsupported(String),
     Corrupt(String),
     Unsettled,
@@ -44,6 +46,8 @@ impl fmt::Display for BundleError {
                 f.write_str("internal_history_commit_invariant: ticket released")
             }
             Self::CleanupPending(e) => write!(f, "save failed; cleanup pending: {e}"),
+            Self::RunAdmission(reason) => f.write_str(reason),
+            Self::RunLimit => f.write_str(crate::run_admission::REASON),
             Self::Capacity(e) => write!(f, "storage_backpressure: {e}"),
             Self::Unsupported(e) => write!(f, "unsupported_bundle: {e}"),
             Self::Corrupt(e) => write!(f, "damaged_bundle: {e}"),

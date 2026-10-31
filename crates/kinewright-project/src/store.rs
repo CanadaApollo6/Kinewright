@@ -98,6 +98,9 @@ struct MediaAdmission {
 }
 
 struct StoreInner {
+    admission_identity: Arc<()>,
+    run_budget: std::sync::atomic::AtomicBool,
+    run_limit: std::sync::atomic::AtomicBool,
     read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
     read_graph_charge: Option<snapshot_reader::GraphCharge>,
     namespace: Mutex<ProjectNamespace>,
@@ -586,6 +589,9 @@ impl ProjectStore {
         let can_collect = read_authority.is_none() && root_bytes == 0;
         Ok(Self {
             inner: Arc::new(StoreInner {
+                admission_identity: Arc::new(()),
+                run_budget: std::sync::atomic::AtomicBool::new(false),
+                run_limit: std::sync::atomic::AtomicBool::new(false),
                 read_authority,
                 read_graph_charge: None,
                 namespace: Mutex::new(namespace),
@@ -629,6 +635,37 @@ impl ProjectStore {
             }),
         })
     }
+    pub(crate) fn admission_key(&self) -> usize {
+        Arc::as_ptr(&self.inner.admission_identity) as usize
+    }
+    pub(crate) fn admission_lifetime(&self) -> Arc<()> {
+        self.inner.admission_identity.clone()
+    }
+    pub(crate) fn run_budget_active(&self) -> bool {
+        self.inner
+            .run_budget
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(crate) fn set_run_budget(&self, active: bool) {
+        self.inner
+            .run_budget
+            .store(active, std::sync::atomic::Ordering::SeqCst);
+        if !active {
+            self.inner
+                .run_limit
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    pub(crate) fn note_run_limit(&self) {
+        self.inner
+            .run_limit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(crate) fn has_run_limit(&self) -> bool {
+        self.inner
+            .run_limit
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
     pub fn usage(&self) -> Result<StorageUsage, BundleError> {
         self.inner
             .usage
@@ -651,8 +688,9 @@ impl ProjectStore {
         self.reserve(0, decoded, history, false)
     }
     pub fn reserve_history_shadow(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
-        if bytes > self.limits().branch_history_bytes {
-            return Err(BundleError::Capacity("branch history shadow"));
+        self.admit_run_write()?;
+        if bytes > self.admission_limits().branch_history_bytes {
+            return Err(self.run_error(BundleError::Capacity("branch history shadow")));
         }
         self.reserve(0, bytes, bytes, false)
     }
@@ -746,13 +784,14 @@ impl ProjectStore {
         let free = self.with_namespace(|n| n.available_bytes())?;
         StorageReservation::reserve(
             &self.inner.usage,
-            &self.inner.limits,
+            &self.admission_limits(),
             bytes,
             decoded,
             history,
             copy,
             free,
         )
+        .map_err(|error| self.run_error(error))
     }
     fn object_path(reference: &ObjectRef) -> Result<PortablePath, BundleError> {
         reference.validate()?;
@@ -796,6 +835,7 @@ impl ProjectStore {
         dependencies: &[ObjectRef],
         recover: bool,
     ) -> Result<SealedObject, BundleError> {
+        self.admit_run_write()?;
         reference.validate()?;
         let _working = self.reserve(0, (1 << 20) + 65_536, 0, false)?;
         let mut dependencies = dependencies.to_vec();
@@ -804,8 +844,15 @@ impl ProjectStore {
         self.closure_at(
             &dependencies,
             reference.record_kind != RecordKind::RootCheckpoint,
-            1,
-        )?;
+            1 + if self.run_budget_active()
+                && !crate::run_admission::is_terminal(self.admission_key())
+            {
+                crate::run_admission::GRAPH_LEVELS
+            } else {
+                0
+            },
+        )
+        .map_err(|error| self.run_error(error))?;
         let unclassified = self
             .inner
             .ledger
@@ -868,17 +915,18 @@ impl ProjectStore {
                     .and_then(|n| {
                         n.checked_add(usage.decoded_bytes.checked_sub(usage.decoder_bytes)?)
                     })
-                    .is_none_or(|n| n > self.inner.limits.metadata_bytes)
+                    .is_none_or(|n| n > self.admission_limits().metadata_bytes)
                     || (reference.record_kind.is_owned_bytes()
                         && usage
                             .owned_bytes
                             .checked_add(reference.byte_length)
-                            .is_none_or(|n| n > self.inner.limits.owned_bytes))
+                            .is_none_or(|n| n > self.admission_limits().owned_bytes))
                 {
-                    return Err(BundleError::Capacity("object/edge metadata or owned bytes"));
+                    return Err(self
+                        .run_error(BundleError::Capacity("object/edge metadata or owned bytes")));
                 }
-                if usage.objects >= self.inner.limits.objects && unclassified.is_none() {
-                    return Err(BundleError::Capacity("object count"));
+                if usage.objects >= self.admission_limits().objects && unclassified.is_none() {
+                    return Err(self.run_error(BundleError::Capacity("object count")));
                 }
                 false
             }
@@ -1091,20 +1139,22 @@ impl ProjectStore {
         reader: &mut impl Read,
         length: u64,
     ) -> Result<(SealedObject, crate::owned_inputs::InputChunkTable), BundleError> {
-        let count = crate::owned_inputs::InputChunkTable::checked_count(length, self.limits())?;
+        self.admit_run_write()?;
+        let count =
+            crate::owned_inputs::InputChunkTable::checked_count(length, &self.admission_limits())?;
         let _scratch = self.reserve(0, (1 << 20) + count * 32 + 1024, 0, false)?;
         let usage = self.usage()?;
-        if usage.objects >= self.limits().objects
+        if usage.objects >= self.admission_limits().objects
             || usage
                 .owned_bytes
                 .checked_add(length)
-                .is_none_or(|n| n > self.limits().owned_bytes)
+                .is_none_or(|n| n > self.admission_limits().owned_bytes)
             || usage
                 .metadata_bytes
                 .checked_add(256)
-                .is_none_or(|n| n > self.limits().metadata_bytes)
+                .is_none_or(|n| n > self.admission_limits().metadata_bytes)
         {
-            return Err(BundleError::Capacity("import object admission"));
+            return Err(self.run_error(BundleError::Capacity("import object admission")));
         }
         let reservation = self.reserve(length, 0, 0, false)?;
         let mut table = None;
@@ -2408,19 +2458,30 @@ impl ProjectStore {
         &mut self,
         record: &T,
     ) -> Result<SealedObject, BundleError> {
-        record.validate(self.limits())?;
-        record.validate_admission(self)?;
+        self.admit_run_write()?;
+        record
+            .validate(&self.admission_limits())
+            .map_err(|e| self.run_error(e))?;
+        record
+            .validate_admission(self)
+            .map_err(|e| self.run_error(e))?;
         if !T::KIND.supported() {
             return Err(BundleError::Unsupported("inactive record kind".into()));
         }
         let limit = if T::KIND == RecordKind::History {
-            self.limits().branch_history_bytes
+            self.admission_limits().branch_history_bytes
+        } else if self.run_budget_active()
+            && !crate::run_admission::is_terminal(self.admission_key())
+        {
+            self.limits()
+                .decoded_record_bytes
+                .min(crate::run_admission::RECORD_BYTES)
         } else {
             self.limits().decoded_record_bytes
         };
         let mut counter = BoundedCounter { bytes: 0, limit };
         serde_json::to_writer(&mut counter, record)
-            .map_err(|_| BundleError::Capacity("encoded record"))?;
+            .map_err(|_| self.run_error(BundleError::Capacity("encoded record")))?;
         let _encoded = self.reserve(0, counter.bytes, 0, false)?;
         let capacity =
             usize::try_from(counter.bytes).map_err(|_| BundleError::Capacity("record size"))?;
@@ -2431,9 +2492,18 @@ impl ProjectStore {
             return Err(BundleError::Corrupt("unstable record serialization".into()));
         }
         let preflight = self.reserve(0, self.limits().decoded_record_bytes, 0, false)?;
-        let decoded = preflight_record(&bytes, self.limits())?;
+        let decoded =
+            preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?;
         drop(preflight);
-        if T::KIND == RecordKind::History && decoded > self.limits().branch_history_bytes {
+        if self.run_budget_active()
+            && !crate::run_admission::is_terminal(self.admission_key())
+            && decoded > crate::run_admission::DECODED_BYTES
+        {
+            self.note_run_limit();
+            return Err(BundleError::RunLimit);
+        }
+        if T::KIND == RecordKind::History && decoded > self.admission_limits().branch_history_bytes
+        {
             return Err(BundleError::Capacity("live branch history"));
         }
         let _decoded = self.reserve(
@@ -3074,14 +3144,14 @@ impl ProjectStore {
         boundary: &mut crate::namespace::RootReplaceBoundary,
     ) -> Result<(), BundleError> {
         let length = bytes.len() as u64;
-        if length > self.limits().control_bytes
+        if length > self.admission_limits().control_bytes
             || self
                 .usage()?
                 .metadata_bytes
                 .checked_add(length)
-                .is_none_or(|n| n > self.limits().metadata_bytes)
+                .is_none_or(|n| n > self.admission_limits().metadata_bytes)
         {
-            return Err(BundleError::Capacity("control publication"));
+            return Err(self.run_error(BundleError::Capacity("control publication")));
         }
         let reservation = self.reserve(length, 0, 0, false)?;
         let result = if root {
@@ -3602,7 +3672,11 @@ impl ProjectStore {
         let free = self.with_namespace(|n| n.available_bytes())?;
         StorageReservation::reserve_for_retained_read(
             &self.inner.usage,
-            self.limits(),
+            &if cleanup_only {
+                self.limits().clone()
+            } else {
+                self.admission_limits()
+            },
             bytes,
             decoded,
             history,
@@ -3610,6 +3684,15 @@ impl ProjectStore {
             free,
             cleanup_only,
         )
+        .map_err(|error| {
+            // A refused read must not latch a spending decision or block the
+            // reconciliation of an already admitted publication.
+            if self.run_budget_active() && matches!(error, BundleError::Capacity(_)) {
+                BundleError::RunLimit
+            } else {
+                error
+            }
+        })
     }
     pub(crate) fn begin_copy(
         &self,

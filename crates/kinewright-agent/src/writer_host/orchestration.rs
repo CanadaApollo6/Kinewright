@@ -343,20 +343,23 @@ impl HostCommandOwner {
         if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
         }
+        let terminal = (self.attachments[index].role == AttachmentRole::Editor
+            && self.attachments[index].bootstrap)
+            || self.attachments[index]
+                .producer_scope
+                .as_ref()
+                .is_some_and(|scope| scope.task.is_none());
+        let _terminal = if terminal {
+            Some(self.owner()?.run_terminal_admission()?)
+        } else {
+            None
+        };
         let issuer = if let Some(issuer) = issuer {
             self.require_metadata_issuer(index, &issuer)?;
             issuer
         } else {
             let subject = self.metadata_subject(index);
-            if self.attachments[index]
-                .producer_scope
-                .as_ref()
-                .is_some_and(|scope| scope.task.is_none())
-            {
-                self.owner_mut()?.reuse_metadata_issuer_for(&subject)?
-            } else {
-                self.owner_mut()?.issue_metadata_issuer_for(&subject)?
-            }
+            self.owner_mut()?.reuse_metadata_issuer_for(&subject)?
         };
         let sequence = self.owner()?.metadata_issuer_sequence(&issuer)?;
         let envelope = self
@@ -651,6 +654,9 @@ impl HostCommandOwner {
         index: usize,
         request: &ScopedOrchestrationRequest,
     ) -> Result<OrchestrationReceipt, HostError> {
+        // Bounded owner reads/replay finish before ordinary staging begins.
+        // Long-lived snapshot readers never receive this allowance.
+        let reading = self.owner()?.run_terminal_admission()?;
         if let Some(pending) = &self.hooks.pending {
             // An immutable attachment instance admitted this exact command before B4.
             // Scope records are unreadable while the namespace is uncertain; only that
@@ -699,6 +705,7 @@ impl HostCommandOwner {
             .transpose()?
             .flatten()
             .map(|cut| cut.segment);
+        drop(reading);
         // Freeze is an explicit completion request. H3, rather than a provider
         // turn command, ends the owning turn in the same cut as its frozen history.
         if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command
@@ -781,6 +788,7 @@ impl HostCommandOwner {
                 )
                 .map_err(scheduler_error)?
             };
+        let _admission = self.owner_mut()?.run_transition_admission(&transition)?;
         let transition = self.seed_run_spending(transition)?;
         let transition = self.stage_control_freeze(transition)?;
         if let Some((_, bytes)) = attention {
@@ -875,6 +883,7 @@ impl HostCommandOwner {
             } else {
                 vec![]
             };
+        let runtime_status = runtime_status.or(self.owner()?.run_publication_status(run)?);
         let accounting = self.durable_run_accounting(&projection)?;
         Ok(RunViewPage {
             accounting,

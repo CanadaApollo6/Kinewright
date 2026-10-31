@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 pub const ORCHESTRATION_SUPPORT: &str = "orchestration@1";
 pub const COMMAND_BYTES: usize = 256 * 1024;
 pub const CONTROL_BYTES: usize = 64 * 1024 * 1024;
-pub const TASK_LIMIT: usize = 128;
+pub const TASK_LIMIT: usize = crate::run_admission::TASKS;
 pub const ITEM_LIMIT: usize = 256;
 pub const ATTEMPT_LIMIT: usize = 3;
 pub const BACKGROUND_LIMIT: u32 = 256;

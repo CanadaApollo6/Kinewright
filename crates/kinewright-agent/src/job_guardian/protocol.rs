@@ -61,12 +61,23 @@ impl AttemptIdentity {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Program {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ExecutableImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_root: Option<PathBuf>,
     pub executable: PathBuf,
     pub arguments: Vec<String>,
     pub environment: std::collections::BTreeMap<String, String>,
     pub working_directory: PathBuf,
     pub sandbox: ProviderSandbox,
     pub pipe_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutableImage {
+    pub digest: String,
+    pub source: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -91,11 +102,47 @@ pub enum ProviderSandbox {
     },
 }
 impl Program {
+    #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
+    #[allow(
+        dead_code,
+        reason = "the guardian binary includes the shared test protocol surface"
+    )]
+    pub(crate) fn fixture_image(&mut self) -> io::Result<Option<std::fs::File>> {
+        if matches!(self.sandbox, ProviderSandbox::ContainmentOnly) {
+            return Ok(None);
+        }
+        let digest = self.image.as_ref().map_or_else(
+            || kinewright_media::sha256_file(&self.executable).map_err(io::Error::other),
+            |i| Ok(i.digest.clone()),
+        )?;
+        let image = kinewright_job_sys::seal_executable(&self.executable, &digest)?;
+        self.image = Some(ExecutableImage {
+            digest,
+            source: Some(PathBuf::from(format!(
+                "/proc/{}/fd/{}",
+                std::process::id(),
+                std::os::fd::AsRawFd::as_raw_fd(&image)
+            ))),
+        });
+        if let ProviderSandbox::LinuxAllowlist {
+            credential_mount: Some(mount),
+            ..
+        } = &self.sandbox
+        {
+            self.credential_root = mount.source.parent().map(std::path::Path::to_path_buf);
+        }
+        Ok(Some(image))
+    }
     /// # Errors
     /// Refuses relative executables, excessive arguments, or protocol overflow.
     pub fn validate(&self) -> io::Result<()> {
         if !self.executable.is_absolute()
             || !self.working_directory.is_absolute()
+            || self.image.as_ref().is_some_and(|i| {
+                i.digest.len() != 64
+                    || !i.digest.bytes().all(|b| b.is_ascii_hexdigit())
+                    || i.source.as_ref().is_some_and(|p| !p.is_absolute())
+            })
             || self.environment.len() > 16
             || self.environment.iter().any(|(key, value)| {
                 !matches!(
@@ -128,7 +175,8 @@ impl Program {
             credential_mount,
         } = &self.sandbox
             && (credential_mount.as_ref().is_some_and(|mount| {
-                !mount.source.is_absolute()
+                self.credential_root.as_deref() != mount.source.parent()
+                    || !mount.source.is_absolute()
                     || mount.target != credential_store.join("auth.json")
                     || !credential_store.starts_with(scratch)
                     || mount.identity == [0, 0]
@@ -145,6 +193,26 @@ impl Program {
                 || executable_identity == &[0, 0])
         {
             return Err(io::Error::other("invalid provider sandbox"));
+        }
+        #[cfg(target_os = "linux")]
+        if let (
+            ProviderSandbox::LinuxAllowlist {
+                runtime,
+                scratch,
+                credential_store,
+                ..
+            },
+            Some(root),
+        ) = (&self.sandbox, &self.credential_root)
+        {
+            for grant in runtime.iter().chain([
+                scratch,
+                credential_store,
+                &self.executable,
+                &self.working_directory,
+            ]) {
+                kinewright_job_sys::validate_credential_grant(grant, root)?;
+            }
         }
         Ok(())
     }

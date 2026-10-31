@@ -125,7 +125,9 @@ fn local_probe(arguments: Vec<String>) -> (String, String) {
         .into_iter()
         .chain(crate::native_runtime::runtime_tree(&executable).unwrap())
         .collect();
-    let program = Program {
+    let mut program = Program {
+        image: None,
+        credential_root: None,
         executable: executable.path.clone(),
         arguments,
         environment: std::collections::BTreeMap::from([
@@ -149,6 +151,7 @@ fn local_probe(arguments: Vec<String>) -> (String, String) {
             executable_identity: executable.file_identity,
         },
     };
+    let _image = program.fixture_image().unwrap();
     let fresh = || {
         kinewright_project::bundle_records::SessionId::fresh()
             .unwrap()

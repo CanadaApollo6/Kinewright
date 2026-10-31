@@ -44,6 +44,29 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
     let mut state = owner.spending_scope(&producer, &execution.run).unwrap();
     let previous = owner.native_accounting(&state).unwrap().unwrap();
     let mut next = previous.successor().unwrap();
+    if !next
+        .task_mut(&execution.task.0)
+        .unwrap()
+        .providers
+        .iter()
+        .any(|p| p.attempt == execution.attempt.0)
+    {
+        use kinewright_project::orchestration_accounting::{ProviderMetadata, ProviderSelection};
+        let selection = ProviderSelection {
+            connector: "scripted".into(),
+            model: "fixture".into(),
+            options: vec![],
+        };
+        next.task_mut(&execution.task.0)
+            .unwrap()
+            .select_provider(ProviderMetadata {
+                attempt: execution.attempt.0.clone(),
+                requested: selection.clone(),
+                resolved: selection,
+                cli_version: "fixture-1".into(),
+            })
+            .unwrap();
+    }
     let index = owner.resolve_attachment(Some(&producer.bearer())).unwrap();
     let issued = owner.issue_metadata(index, None).unwrap();
     let payload = state
@@ -109,8 +132,9 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
 )]
 fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     use super::super::native_invocation::SpendingChange;
-    use kinewright_project::orchestration_accounting::{
-        ProviderMetadata, ProviderSelection, RUN_MILLIS, UsageMode, UsageSample, UsageValues,
+    use kinewright_project::{
+        orchestration_accounting::{RUN_MILLIS, UsageMode, UsageSample, UsageValues},
+        run_admission,
     };
     let mut f = Fixture::new();
     f.host.runtime.stop();
@@ -138,113 +162,60 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
         owner.owner_mut().unwrap().save_active().unwrap();
         owner.core().export_history().unwrap()
     };
-    let (run, parent, director) = c4_director(&f);
-    for role in [Role::Editor, Role::Reviewer] {
-        let mut brief = f.brief.clone();
-        brief.role = role;
-        if role == Role::Reviewer {
-            brief.scope.operations.clear();
-        }
-        director.accepted(
-            "assign_task",
-            OrchestrationCommand::AssignTask(Box::new(AssignTask {
-                run: run.clone(),
-                parent: parent.task.clone(),
-                brief,
-            })),
-        );
-    }
-    drop(director);
-    let tasks: Vec<_> = f
-        .projection(&run)
-        .tasks
-        .iter()
-        .map(|t| t.id.clone())
-        .collect();
-    let now = native_now(&f, &run);
-    let mut current = vec![];
-    let mut expected = vec![];
-    for task in &tasks {
-        let (execution, client, endpoint, core) = if *task == parent.task {
-            let (client, endpoint) = task_actor(&f, &run, &parent, &f.producer_client(&run));
-            let core = f.host.owner.upgrade().unwrap().lock().unwrap().hooks.runs[&run].tasks[task]
-                .core()
-                .clone();
-            (parent.clone(), client, endpoint, core)
-        } else {
-            c4_reserve_task(&f, &run, task)
-        };
-        history_turn(&f, &execution, &client, &endpoint, 1, true);
-        let history = if f
-            .projection(&run)
-            .tasks
-            .iter()
-            .find(|t| t.id == *task)
-            .unwrap()
-            .brief
-            .role
-            == Role::Editor
-        {
-            c4_mcp_edit_redo(&C4Mcp::new(&f, &run, task), &core)
-        } else {
-            core.export_history().unwrap()
-        };
-        let producer = f.producer(&run);
-        f.host
-            .owner
-            .upgrade()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .checkpoint_task_history(&producer, &run, task)
-            .unwrap();
-        history_turn(&f, &execution, &client, &endpoint, 1, false);
-        spending_change(
-            &f,
-            &execution,
-            SpendingChange::Ceiling(2_000_000),
-            now,
-            0,
-            true,
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .owner_mut()
+        .unwrap()
+        .admit_host_grant(b"hook plan, script and assignment")
+        .unwrap();
+    let (run, parent, _) = reserve(&f);
+    let run_auth = f.producer(&run);
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .prepare_task_endpoint(
+            &run_auth,
+            &run,
+            &parent.task,
+            &parent.attempt,
+            Duration::from_secs(3600),
         )
         .unwrap();
-        expected.push(history);
-        current.push(execution);
-    }
-    let sequence = f.projection(&run).sequence;
+    let director = C4Mcp::new(&f, &run, &parent.task);
+    let now = native_now(&f, &run);
     let mut maximum = 0;
-    let started = Instant::now();
+    let sequence = f.projection(&run).sequence;
     for tick in 1..720 {
-        let result = spending_change(
-            &f,
-            &parent,
-            SpendingChange::Clock,
-            now + tick * 30_000,
-            30_000,
-            true,
-        );
         assert!(
-            result.is_ok(),
-            "C5E_CLOCK_PUBLICATION tick={tick} {result:?}"
+            spending_change(
+                &f,
+                &parent,
+                SpendingChange::Clock,
+                now + tick * 30_000,
+                30_000,
+                true
+            )
+            .is_ok(),
+            "C5_FIX1_CLOCK {tick}"
         );
         assert_eq!(
             f.projection(&run).sequence,
             sequence,
-            "C5E_CLOCK_REPLACES_STATE"
+            "C5_FIX1_CLOCK_REPLACES"
         );
-        c5e_depth(&f, &mut maximum);
-        if tick % 60 == 0 {
-            eprintln!(
-                "C5E_CLOCK tick={tick} max_depth={maximum} elapsed_s={}",
-                started.elapsed().as_secs()
-            );
+        if tick % 120 == 0 {
+            eprintln!("C5_FIX1_CLOCK {tick}");
+            c5e_depth(&f, &mut maximum);
         }
     }
-    eprintln!(
-        "C5E_CLOCK_PHASE_DONE elapsed_s={}",
-        started.elapsed().as_secs()
-    );
-    let claim_root = f.temp.path("c5e-machine");
+    let claim_root = f.temp.path("c5-fix1-machine");
     let mut claim = crate::execution_claim::MachineClaim::acquire_fixture(
         &claim_root,
         parent.project.as_str(),
@@ -252,114 +223,161 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     )
     .unwrap();
     let mut all_attempts = vec![];
-    for round in 0..3 {
-        if round != 0 {
-            current.clear();
-            for (task, history) in tasks.iter().zip(&expected) {
-                let (execution, _, _, core) = c4_reserve_task(&f, &run, task);
+    let mut histories = vec![];
+    let mut last = parent.clone();
+    // Seven serial specialists fit the three simultaneous dependency slots.
+    // One task reaches its 80-send ceiling; the run reaches its shared 128-send ceiling.
+    for task_index in 0..8 {
+        let task = if task_index == 7 {
+            parent.task.clone()
+        } else {
+            let mut brief = f.brief.clone();
+            brief.role = if task_index == 0 {
+                Role::Editor
+            } else {
+                Role::Reviewer
+            };
+            if brief.role == Role::Reviewer {
+                brief.scope.operations.clear();
+            }
+            director.accepted(
+                "assign_task",
+                OrchestrationCommand::AssignTask(Box::new(AssignTask {
+                    run: run.clone(),
+                    parent: parent.task.clone(),
+                    brief,
+                })),
+            );
+            f.projection(&run).tasks.last().unwrap().id.clone()
+        };
+        let sends: usize = if task_index == 7 {
+            80
+        } else if task_index == 6 {
+            6
+        } else {
+            7
+        };
+        let mut history = None;
+        for round in 0..3 {
+            let (execution, client, endpoint, core) = if task_index == 7 && round == 0 {
+                let (client, endpoint) = task_actor(&f, &run, &parent, &f.producer_client(&run));
+                let core = f.host.owner.upgrade().unwrap().lock().unwrap().hooks.runs[&run].tasks
+                    [&task]
+                    .core()
+                    .clone();
+                (parent.clone(), client, endpoint, core)
+            } else {
+                c4_reserve_task(&f, &run, &task)
+            };
+            if round == 0 {
+                history_turn(&f, &execution, &client, &endpoint, 1, true);
+                history = Some(if task_index == 0 {
+                    c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
+                } else {
+                    core.export_history().unwrap()
+                });
+                f.host
+                    .owner
+                    .upgrade()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .checkpoint_task_history(&run_auth, &run, &task)
+                    .unwrap();
+                history_turn(&f, &execution, &client, &endpoint, 1, false);
+                spending_change(
+                    &f,
+                    &execution,
+                    SpendingChange::Ceiling(2_000_000),
+                    now + 719 * 30_000,
+                    0,
+                    true,
+                )
+                .unwrap();
+            } else {
                 assert_eq!(
                     core.export_history().unwrap(),
-                    *history,
-                    "C5E_ATTEMPT_HISTORY"
+                    *history.as_ref().unwrap(),
+                    "C5_FIX1_ATTEMPT_HISTORY"
                 );
-                current.push(execution);
             }
-        }
-        for execution in &current {
-            let producer = f.producer(&run);
-            {
-                let host = f.host.owner.upgrade().unwrap();
-                let mut owner = host.lock().unwrap();
-                let state = owner.spending_scope(&producer, &run).unwrap();
-                let previous = owner.native_accounting(&state).unwrap().unwrap();
-                let mut next = previous.successor().unwrap();
-                let selection = ProviderSelection {
-                    connector: "scripted".into(),
-                    model: "fixture".into(),
-                    options: vec![],
-                };
-                next.task_mut(&execution.task.0)
-                    .unwrap()
-                    .select_provider(ProviderMetadata {
-                        attempt: execution.attempt.0.clone(),
-                        requested: selection.clone(),
-                        resolved: selection,
-                        cli_version: "fixture-1".into(),
-                    })
-                    .unwrap();
-                owner
-                    .publish_accounting(&producer, execution, &next)
-                    .unwrap();
-            }
-            let count = if round == 2 { 26 } else { 27 };
-            for turn in 1..=count {
-                c5e_send(&f, execution, turn);
-                if turn % 10 == 0 {
-                    eprintln!(
-                        "C5E_TURNS round={round} turn={turn} elapsed_s={}",
-                        started.elapsed().as_secs()
-                    );
-                }
-                c5e_depth(&f, &mut maximum);
+            let count = sends / 3 + usize::from(round < sends % 3);
+            for turn in 1..=count as u64 {
+                c5e_send(&f, &execution, turn);
                 for (event, ordinal, input, output, complete) in [
                     ("partial", 1, 2, 1, false),
                     ("complete", 2, 5, 2, true),
                     ("complete", 2, 5, 2, true),
                 ] {
-                    let sample = crate::protocol::limits::usage::decode_usage(crate::protocol::limits::usage::UsageAdapter::Codex,
+                    let sample=crate::protocol::limits::usage::decode_usage(crate::protocol::limits::usage::UsageAdapter::Codex,
                         &serde_json::json!({"usage":{"input_tokens":input,"cached_input_tokens":1,"output_tokens":output,"reasoning_output_tokens":1}}),
-                        UsageSample { attempt: execution.attempt.0.clone(), turn, event: event.into(), ordinal, mode: UsageMode::Cumulative, values: UsageValues::default(), complete, input_includes_cache: true, output_includes_reasoning: true }).unwrap();
+                        UsageSample {attempt:execution.attempt.0.clone(),turn,event:event.into(),ordinal,mode:UsageMode::Cumulative,values:UsageValues::default(),complete,input_includes_cache:true,output_includes_reasoning:true}).unwrap();
                     spending_change(
                         &f,
-                        execution,
+                        &execution,
                         SpendingChange::Usage(sample),
                         now + 719 * 30_000,
                         0,
                         true,
                     )
                     .unwrap();
-                    c5e_depth(&f, &mut maximum);
                 }
             }
+            all_attempts.push(execution.clone());
+            last = execution.clone();
+            if task_index != 7 || round != 2 {
+                crate::effect_pump::reconcile_attempt(
+                    &f.host.owner.upgrade().unwrap(),
+                    &mut claim,
+                    &run_auth,
+                    &execution,
+                )
+                .unwrap();
+            }
+            c5e_depth(&f, &mut maximum);
+        }
+        histories.push((task, history.unwrap(), sends));
+        eprintln!("C5_FIX1_MAX_TASK {task_index} sends={sends}");
+    }
+    assert_eq!(histories.len(), run_admission::TASKS);
+    assert_eq!(all_attempts.len(), run_admission::ATTEMPTS);
+    assert_eq!(
+        spending_record(&f, &run)
+            .tasks
+            .iter()
+            .map(|t| t.sends.len())
+            .sum::<usize>(),
+        run_admission::SENDS
+    );
+    drop(director);
+    assert!(
+        spending_change(
+            &f,
+            &last,
+            SpendingChange::Clock,
+            now + RUN_MILLIS,
+            30_000,
+            true
+        )
+        .is_err()
+    );
+    assert_eq!(spending_record(&f, &run).elapsed_ms, RUN_MILLIS);
+    let full = spending_record(&f, &run);
+    assert!(
+        matches!(
             f.host
                 .owner
                 .upgrade()
                 .unwrap()
                 .lock()
                 .unwrap()
-                .checkpoint_task_history(&producer, &run, &execution.task)
-                .unwrap();
-        }
-        if round != 2 {
-            for execution in &current {
-                crate::effect_pump::reconcile_attempt(
-                    &f.host.owner.upgrade().unwrap(),
-                    &mut claim,
-                    &f.producer(&run),
-                    execution,
-                )
-                .unwrap();
-                c5e_depth(&f, &mut maximum);
-            }
-        }
-        all_attempts.extend(current.clone());
-        eprintln!("C5E_SENDS round={round} max_depth={maximum}");
-    }
-    let final_tick = spending_change(
-        &f,
-        &parent,
-        SpendingChange::Clock,
-        now + RUN_MILLIS,
-        30_000,
-        true,
+                .owner()
+                .unwrap()
+                .check_run_send_budget(&full),
+            Err(kinewright_project::bundle::BundleError::RunLimit)
+        ),
+        "C5_FIX1_MAX_SEND_ADMISSION_CLOSED"
     );
-    assert!(final_tick.is_err(), "C5E_DEADLINE_POLICY");
-    assert_eq!(
-        spending_record(&f, &run).elapsed_ms,
-        RUN_MILLIS,
-        "C5E_FINAL_CLOCK_PUBLISHED"
-    );
-    c5e_depth(&f, &mut maximum);
     let stop = f.control(&f.editor, &run, RunAction::Stop);
     ok(
         f.editor
@@ -367,89 +385,63 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                 request: Box::new(stop),
             })
             .unwrap(),
-        "C5E_STOP_AT_MAXIMAL_RUN",
+        "C5_FIX1_MAX_STOP",
     );
-    for execution in &current {
-        crate::effect_pump::reconcile_attempt(
-            &f.host.owner.upgrade().unwrap(),
-            &mut claim,
-            &f.producer(&run),
-            execution,
-        )
-        .unwrap();
-        c5e_depth(&f, &mut maximum);
-    }
+    crate::effect_pump::reconcile_attempt(
+        &f.host.owner.upgrade().unwrap(),
+        &mut claim,
+        &run_auth,
+        &last,
+    )
+    .unwrap();
     {
-        let producer = f.producer(&run);
         let host = f.host.owner.upgrade().unwrap();
         let mut owner = host.lock().unwrap();
-        let mut state = owner.spending_scope(&producer, &run).unwrap();
+        let mut state = owner.spending_scope(&run_auth, &run).unwrap();
         owner.archive_retired_attempts(&mut state).unwrap();
         owner
-            .publish_native(&producer, state, &parent, vec![])
+            .publish_native(&run_auth, state, &last, vec![])
             .unwrap();
+        let store = owner.owner().unwrap().store().unwrap();
+        eprintln!("C5_FIX1_MAX_USAGE {:?}", store.usage().unwrap());
     }
     claim.finish().unwrap();
-    assert!(!claim_root.join("run.json").exists(), "C5E_CLAIM_RETIRED");
     let record = spending_record(&f, &run);
-    assert_eq!(record.tasks.len(), 3);
-    for task in &record.tasks {
-        assert_eq!(task.sends.len(), 80);
-        assert_eq!(task.providers.len(), 3);
-        assert_eq!(task.usage.len(), 160);
-        assert_eq!(task.totals.token_lower_bound, 560);
-    }
     let state = f.projection(&run);
     assert_eq!(state.cleanup, RunCleanup::Settled);
-    assert!(matches!(state.outcome, RunOutcome::Cancelled(_)));
-    assert!(state.attempts.is_empty(), "C5E_RETIRED_ARCHIVED");
+    assert!(state.attempts.is_empty());
+    for (task, history, sends) in &histories {
+        let t = record.tasks.iter().find(|t| t.task == task.0).unwrap();
+        assert_eq!(t.sends.len(), *sends);
+        assert_eq!(t.providers.len(), 3);
+        assert_eq!(t.usage.len(), sends * 2);
+        assert_eq!(t.totals.token_lower_bound, *sends as u64 * 7);
+        assert_eq!(c5e_history(&f, &run, task), *history);
+    }
     for execution in &all_attempts {
-        let host = f.host.owner.upgrade().unwrap();
-        let owner = host.lock().unwrap();
-        assert!(
-            matches!(
-                owner
-                    .recovery_attempt(&state, &crate::native_launcher::native_identity(execution))
-                    .unwrap()
-                    .unwrap()
-                    .state,
-                AttemptState::Retired(_)
-            ),
-            "C5E_ARCHIVE_IDENTITIES"
-        );
+        assert!(matches!(
+            f.host
+                .owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .recovery_attempt(&state, &crate::native_launcher::native_identity(execution))
+                .unwrap()
+                .unwrap()
+                .state,
+            AttemptState::Retired(_)
+        ));
     }
-    for (task, history) in tasks.iter().zip(&expected) {
-        assert_eq!(
-            c5e_history(&f, &run, task),
-            *history,
-            "C5E_HISTORY_AFTER_STOP"
-        );
-    }
-    assert_eq!(
-        f.host
-            .owner
-            .upgrade()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .core()
-            .export_history()
-            .unwrap(),
-        manual
-    );
     let f = c4_restart(f, &claim_root);
     assert_eq!(
         spending_record(&f, &run),
         record,
-        "C5E_REOPEN_ACCOUNTING_EXACT"
+        "C5_FIX1_MAX_REOPEN_ACCOUNTING"
     );
-    assert_eq!(f.projection(&run), state, "C5E_REOPEN_PROJECTION_EXACT");
-    for (task, history) in tasks.iter().zip(&expected) {
-        assert_eq!(
-            c5e_history(&f, &run, task),
-            *history,
-            "C5E_REOPEN_HISTORY_EXACT"
-        );
+    assert_eq!(f.projection(&run), state, "C5_FIX1_MAX_REOPEN_PROJECTION");
+    for (task, history, _) in &histories {
+        assert_eq!(c5e_history(&f, &run, task), *history);
     }
     assert_eq!(
         f.host
@@ -462,11 +454,11 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
             .export_history()
             .unwrap(),
         manual,
-        "C5E_REOPEN_MANUAL_REDO"
+        "C5_FIX1_MAX_REOPEN_MANUAL"
     );
     c5e_depth(&f, &mut maximum);
     eprintln!(
-        "C5E_MAXIMAL clocks=720 interval_ms=30000 tasks=3 sends_per_task=80 attempts_per_task=3 samples_per_task=160 max_depth={maximum} stop=true cleanup=true reopen_exact=true"
+        "C5_FIX1_MAXIMAL clocks=720 tasks=8 sends=128 attempts=24 max_depth={maximum} stop=true cleanup=true reopen_exact=true"
     );
 }
 

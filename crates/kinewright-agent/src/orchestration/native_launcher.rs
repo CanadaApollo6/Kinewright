@@ -332,6 +332,18 @@ pub(crate) fn recipe(
         _ => return Err(io::Error::other("provider recipe unavailable")),
     }
     let result = Program {
+        image: Some(crate::job_guardian::protocol::ExecutableImage {
+            digest: if specification.provider() == "codex" {
+                crate::codex_qualification::CODEX_BINARY_SHA256.into()
+            } else {
+                kinewright_media::sha256_file(&runtime.executable.path).map_err(io::Error::other)?
+            },
+            source: None,
+        }),
+        credential_root: scope
+            .single_file
+            .as_ref()
+            .and_then(|mount| mount.source.parent().map(std::path::Path::to_path_buf)),
         executable: runtime.executable.path.clone(),
         arguments,
         environment,
@@ -476,6 +488,7 @@ pub(crate) trait InvocationOwner: Send + Sync {
 }
 
 pub(crate) struct NativeGuardianLauncher {
+    pub images: Arc<crate::executable_images::ExecutableImages>,
     pub claim: Arc<Mutex<MachineClaim>>,
     pub owner: Arc<dyn InvocationOwner>,
     pub guardian: PathBuf,
@@ -631,7 +644,7 @@ impl NativeGuardianLauncher {
         let prompt = std::str::from_utf8(immutable.bytes())
             .map_err(|_| io::Error::other("provider prompt encoding"))?
             .to_owned();
-        let actual = program(invocation.profile(), &prompt)?;
+        let mut actual = program(invocation.profile(), &prompt)?;
         let actual_bytes = serde_json::to_vec(&Manifest {
             program: actual.clone(),
             ..manifest
@@ -665,6 +678,12 @@ impl NativeGuardianLauncher {
         if !qualified {
             return Err(io::Error::other("provider sandbox not qualified"));
         }
+        let image = actual
+            .image
+            .as_mut()
+            .ok_or_else(|| io::Error::other("qualified image missing"))?;
+        let sealed = self.images.get(&actual.executable, &image.digest)?;
+        image.source = Some(crate::executable_images::source(&sealed));
         let profile = CertifiedProfile::linux_allowlist();
         let mut claim_guard = self
             .claim

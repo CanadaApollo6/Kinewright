@@ -164,6 +164,8 @@ fn s4b_c3_fix1_prepare_failure_retires_unbound_only_under_proof() {
             .into();
         id.attempt = id.nonce.clone();
         let program = crate::job_guardian::protocol::Program {
+            image: None,
+            credential_root: None,
             executable: "/usr/bin/true".into(),
             arguments: vec![],
             environment: std::collections::BTreeMap::default(),
@@ -266,6 +268,7 @@ fn s4b_c3_fix1_failed_tick_retires_reservation() {
         checks: Arc::default(),
     };
     let launcher = crate::native_launcher::NativeGuardianLauncher {
+        images: std::sync::Arc::default(),
         claim: claim.clone(),
         owner: Arc::new(super::super::native_invocation::HostInvocationOwner::new(
             &host,

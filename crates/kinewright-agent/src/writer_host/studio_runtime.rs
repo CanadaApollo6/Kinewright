@@ -92,6 +92,7 @@ pub(super) struct StudioRuntime {
     host: Weak<Mutex<HostCommandOwner>>,
     ports: RuntimePorts,
     state: Arc<Mutex<State>>,
+    images: Arc<crate::executable_images::ExecutableImages>,
 }
 impl StudioRuntime {
     pub(super) fn new(host: &Arc<Mutex<HostCommandOwner>>, ports: RuntimePorts) -> Arc<Self> {
@@ -135,6 +136,7 @@ impl StudioRuntime {
             host: Arc::downgrade(host),
             ports,
             state: Arc::default(),
+            images: Arc::default(),
         })
     }
     /// Called only by post-discovery updates. It never blocks an HTTP request.
@@ -297,6 +299,7 @@ impl StudioRuntime {
             }
             let Some(candidate) = candidate else {
                 runtime.blocked = None;
+                self.images.clear();
                 return Ok(());
             };
             candidate
@@ -353,6 +356,7 @@ impl StudioRuntime {
             claim
         };
         let launcher = NativeGuardianLauncher {
+            images: self.images.clone(),
             claim,
             owner: Arc::new(super::native_invocation::HostInvocationOwner::new(
                 &host,
@@ -471,6 +475,7 @@ impl StudioRuntime {
             worker.cancel.store(true, Ordering::Release);
             let _ = worker.thread.join();
         }
+        self.images.clear();
     }
 }
 impl Drop for StudioRuntime {

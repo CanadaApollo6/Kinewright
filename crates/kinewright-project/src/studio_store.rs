@@ -194,6 +194,18 @@ record!(
             }
             kind(reference, RecordKind::RunIndex)?;
         }
+        for (run, budget) in &v.budgets {
+            let Some(cuts) = v.orchestration.get(run) else {
+                return Err(BundleError::Corrupt("orphan run admission budget".into()));
+            };
+            if budget.ordinary > crate::run_admission::ORDINARY_CUTS
+                || budget.terminal as u64 > crate::run_admission::TERMINAL_CUTS
+                || budget.attempts > crate::run_admission::ATTEMPTS
+                || budget.ordinary.checked_add(budget.terminal) != Some(cuts.len())
+            {
+                return Err(BundleError::Corrupt("run admission budget mismatch".into()));
+            }
+        }
         for cuts in v.orchestration.values() {
             if cuts.is_empty() || cuts.len() as u64 > l.receipts {
                 return Err(BundleError::Capacity("orchestration cuts"));
@@ -438,7 +450,24 @@ impl ProjectBundle {
         )
     }
     pub fn run_index(&self) -> Result<StorageReservation<RunIndex>, BundleError> {
-        self.read_index(self.root.as_ref().and_then(|r| r.run_index_ref.as_ref()))
+        let index: StorageReservation<RunIndex> =
+            self.read_index(self.root.as_ref().and_then(|r| r.run_index_ref.as_ref()))?;
+        if index.budgets.values().any(|b| b.active) {
+            self.store.set_run_budget(true);
+            if self.receipts.detailed.len() as u64 + self.receipts.retired.len() as u64
+                >= crate::run_admission::ordinary(self.store.limits()).receipts
+            {
+                self.store.note_run_limit();
+            }
+        }
+        if index
+            .budgets
+            .values()
+            .any(|b| b.active && (b.ordinary >= crate::run_admission::ORDINARY_CUTS || b.exhausted))
+        {
+            self.store.note_run_limit();
+        }
+        Ok(index)
     }
     pub fn read_snapshot(&self, key: &SnapshotKey) -> Result<PinnedSnapshot, BundleError> {
         let index = self.version_index()?;
@@ -599,7 +628,20 @@ impl ProjectBundle {
         if matches!(update.change, MetadataChange::SaveVoice(_)) {
             return crate::voice_store::metadata_command(self, envelope, scope, update);
         }
-        self.metadata_command_inner(envelope, scope, update, None)
+        let result = self
+            .metadata_command_inner(envelope, scope, update, None)
+            .map_err(|error| self.store.run_error(error));
+        if matches!(&update.change, MetadataChange::OrchestrationUpdate { .. })
+            && !matches!(
+                &result,
+                Err(BundleError::DurabilityUnknown
+                    | BundleError::DurabilityUnknownAt(_)
+                    | BundleError::Unsettled)
+            )
+        {
+            self.refresh_run_budget()?;
+        }
+        result
     }
     /// Only the locked note slot can authorize a voice publication, including `WriterHost` writes.
     pub(crate) fn voice_metadata_command(
@@ -663,9 +705,16 @@ impl ProjectBundle {
             .filter(|i| !i.retired && i.next_sequence == envelope.id.sequence)
             .cloned()
             .ok_or_else(|| BundleError::Identity("metadata issuer sequence".into()))?;
-        if self.store.limits().pending_commands == 0
+        let _admission = match &update.change {
+            MetadataChange::OrchestrationUpdate { transition, .. } => {
+                self.run_admission(transition, true)?
+            }
+            _ => None,
+        };
+        let limits = self.store.admission_limits();
+        if limits.pending_commands == 0
             || self.receipts.detailed.len() as u64 + self.receipts.retired.len() as u64
-                >= self.store.limits().receipts
+                >= limits.receipts
         {
             return Err(BundleError::Capacity("metadata receipts/pending"));
         }
@@ -1018,7 +1067,7 @@ impl ProjectBundle {
         if self.unsettled || self.pending_command.is_some() || self.pending_metadata.is_some() {
             return Err(BundleError::Unsettled);
         }
-        if self.issuers.len() as u64 >= self.store.limits().issuers {
+        if self.issuers.len() as u64 >= self.store.admission_limits().issuers {
             return Err(BundleError::Capacity("metadata issuers"));
         }
         let id = crate::receipts::IssuerId::fresh()?;
@@ -1060,6 +1109,7 @@ impl ProjectBundle {
         }
     }
     pub fn reconcile_metadata(&mut self) -> Result<(), BundleError> {
+        let _terminal = self.store.terminal_admission();
         self.reconcile_destination(None)?;
         self.pending_metadata = None;
         self.pending_command = None;

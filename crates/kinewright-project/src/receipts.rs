@@ -477,9 +477,11 @@ impl ProjectBundle {
                         || state.reconciled_high_water.checked_add(1) != Some(state.next_sequence)
                 })
                 .count() as u64
-                >= self.store.limits().issuers
+                >= self.store.admission_limits().issuers
         {
-            return Err(BundleError::Capacity("issuer entries"));
+            return Err(self
+                .store
+                .run_error(BundleError::Capacity("issuer entries")));
         }
         let id = IssuerId::fresh()?;
         self.issuers.insert(

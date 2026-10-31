@@ -7,6 +7,17 @@ use std::{
 };
 
 pub(crate) fn runtime_tree(executable: &ExecutableIdentity) -> io::Result<Option<PathBuf>> {
+    let root = crate::codex_credentials::source_path()?;
+    runtime_tree_for(
+        executable,
+        root.parent()
+            .ok_or_else(|| io::Error::other("credential root missing"))?,
+    )
+}
+fn runtime_tree_for(
+    executable: &ExecutableIdentity,
+    credential_root: &Path,
+) -> io::Result<Option<PathBuf>> {
     let path = std::fs::canonicalize(&executable.path)?;
     let metadata = std::fs::metadata(&path)?;
     if [metadata.dev(), metadata.ino()] != executable.file_identity {
@@ -37,6 +48,7 @@ pub(crate) fn runtime_tree(executable: &ExecutableIdentity) -> io::Result<Option
             return Err(io::Error::other("runtime grant includes home"));
         }
     }
+    kinewright_job_sys::validate_credential_grant(tree, credential_root)?;
     Ok(Some(tree.into()))
 }
 
@@ -149,13 +161,27 @@ mod tests {
             path: bin.clone(),
             file_identity: [m.dev(), m.ino()],
         };
-        assert_eq!(runtime_tree(&executable).unwrap(), Some(package));
+        let credentials = root.path("credentials");
+        std::fs::create_dir(&credentials).unwrap();
+        assert_eq!(
+            runtime_tree_for(&executable, &credentials).unwrap(),
+            Some(package.clone())
+        );
+        std::fs::create_dir(package.join("private-codex")).unwrap();
+        assert!(
+            runtime_tree_for(&executable, &package.join("private-codex")).is_err(),
+            "C5_FIX1_RUNTIME_CREDENTIAL_OVERLAP"
+        );
+        assert!(
+            runtime_tree_for(&executable, &package).is_err(),
+            "C5_FIX1_EXECUTABLE_INSIDE_CREDENTIALS"
+        );
         let changed = ExecutableIdentity {
             file_identity: [m.dev(), m.ino() + 1],
             ..executable
         };
         assert!(
-            runtime_tree(&changed).is_err(),
+            runtime_tree_for(&changed, &credentials).is_err(),
             "C5_CHANGED_RUNTIME_REFUSED"
         );
         let source = root.path("metadata.json");

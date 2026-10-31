@@ -45,6 +45,7 @@ impl HostCommandOwner {
         state: &mut RunProjection,
         reference: ObjectRef,
     ) -> Result<(), HostError> {
+        let _reading = self.owner()?.run_terminal_admission()?;
         let mut keep = Vec::new();
         for previous in &state.usage {
             let record = self
@@ -84,10 +85,6 @@ impl HostCommandOwner {
         }
         let deadline_unix_ms = next.deadline_unix_ms;
         let task = next.task_mut(&identity.task.0).map_err(refused)?;
-        let retain_event = matches!(
-            &change,
-            SpendingChange::Wait(_) | SpendingChange::Repair { .. }
-        );
         let outcome = match change {
             SpendingChange::Clock => Ok(()),
             SpendingChange::Ceiling(limit) => task.configure_token_limit(limit),
@@ -128,18 +125,13 @@ impl HostCommandOwner {
             }
         }
         next.validate_successor(&previous).map_err(refused)?;
-        if retain_event {
-            let sealed = self
-                .owner_mut()?
-                .admit_scheduler_record(&OrchestrationRecord {
-                    version: 1,
-                    payload: OrchestrationPayload::Accounting(Box::new(next)),
-                })?;
-            self.replace_accounting_reference(&mut state, sealed.reference)?;
-            self.publish_native(producer, state, identity, vec![])?;
-        } else {
-            self.publish_accounting(producer, identity, &next)?;
+        let revision = next.revision;
+        next.revision = previous.revision;
+        if next == previous {
+            return clock_result.and(outcome).map_err(refused);
         }
+        next.revision = revision;
+        self.publish_accounting(producer, identity, &next)?;
         clock_result.and(outcome).map_err(refused)
     }
     pub(super) fn publish_accounting(
@@ -497,6 +489,7 @@ impl HostCommandOwner {
             return Ok(());
         }
 
+        let _terminal = self.owner()?.run_terminal_admission()?;
         self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts

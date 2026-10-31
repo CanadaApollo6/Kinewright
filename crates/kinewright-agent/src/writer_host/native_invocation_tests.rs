@@ -204,6 +204,7 @@ fn native_start_barrier(
         f.producer(&admitted.identity().run),
     );
     let launcher = crate::native_launcher::NativeGuardianLauncher {
+        images: std::sync::Arc::default(),
         claim: claim.clone(),
         owner: Arc::new(port),
         guardian: kinewright_media::test_support::workspace_target_dir()
@@ -1066,6 +1067,7 @@ fn s4b_c2_fix1_three_failed_launches_leave_machine_usable() {
             .unwrap();
         let config = invocation.profile().session_config().clone();
         let launcher = NativeGuardianLauncher {
+            images: std::sync::Arc::default(),
             claim: claim.clone(),
             owner: Arc::new(
                 crate::writer_host::native_invocation::HostInvocationOwner::new(&host, producer),

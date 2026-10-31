@@ -376,6 +376,7 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<Option<AccountingRecord>, HostError> {
+        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
             let record = self
                 .owner()?
@@ -611,6 +612,7 @@ impl HostCommandOwner {
         let previous = self
             .native_accounting(&state)?
             .ok_or_else(|| refused("run has no durable clock"))?;
+        self.owner()?.check_run_send_budget(&previous)?;
         let mut accounting = previous.successor().map_err(refused)?;
         accounting.observe_clock(now_ms, 0, true).map_err(refused)?;
         if !accounting

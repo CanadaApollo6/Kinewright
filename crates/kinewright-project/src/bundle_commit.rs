@@ -152,12 +152,14 @@ impl BundleCommit {
             .sequence
             .checked_add(1)
             .ok_or(BundleError::Capacity("issuer sequence overflow"))?;
-        if bundle.store.limits().pending_commands == 0
+        if bundle.store.admission_limits().pending_commands == 0
             || (bundle.receipts.detailed.len() as u64)
                 .checked_add(bundle.receipts.retired.len() as u64)
-                .is_none_or(|n| n >= bundle.store.limits().receipts)
+                .is_none_or(|n| n >= bundle.store.admission_limits().receipts)
         {
-            return Err(BundleError::Capacity("pending command/receipt entries"));
+            return Err(bundle
+                .store
+                .run_error(BundleError::Capacity("pending command/receipt entries")));
         }
         let encoded = envelope.encoded_bytes()?;
         if encoded > bundle.store.limits().command_bytes {
@@ -366,11 +368,13 @@ impl BundleCommit {
         if issuer.retired || issuer.next_sequence != envelope.id.sequence {
             return Err(BundleError::HistoryChanged);
         }
-        if bundle.store.limits().pending_commands == 0
+        if bundle.store.admission_limits().pending_commands == 0
             || (bundle.receipts.detailed.len() + bundle.receipts.retired.len()) as u64
-                >= bundle.store.limits().receipts
+                >= bundle.store.admission_limits().receipts
         {
-            return Err(BundleError::Capacity("manual receipt entries"));
+            return Err(bundle
+                .store
+                .run_error(BundleError::Capacity("manual receipt entries")));
         }
         let bytes = envelope.encoded_bytes()?;
         if bytes > bundle.store.limits().command_bytes {
@@ -1513,6 +1517,7 @@ impl BundleCommit {
             bundle.recovery = recovery;
             bundle.admission = next_admission;
             bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
+            bundle.refresh_run_budget()?;
             barrier(bundle, CommitBarrier::B5)?;
             bundle.pending_evidence.clear();
             Ok(())

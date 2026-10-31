@@ -317,6 +317,7 @@ fn s4b_c3_fix1_history_crash_child() {
         let invocation = native_charge(&f, &admitted, profile);
         let claim = Arc::new(Mutex::new(claim));
         let launcher = crate::native_launcher::NativeGuardianLauncher {
+            images: std::sync::Arc::default(),
             claim,
             owner: Arc::new(HistoryCrashOwner {
                 inner: super::super::native_invocation::HostInvocationOwner::new(&host, producer),

@@ -151,6 +151,17 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     }
     let program: Program = serde_json::from_slice(&bytes)?;
     program.validate()?;
+    let image = match &program.image {
+        Some(image) => Some(kinewright_job_sys::open_executable_image(
+            image
+                .source
+                .as_deref()
+                .ok_or_else(|| io::Error::other("image source missing"))?,
+            &image.digest,
+        )?),
+        None if matches!(program.sandbox, ProviderSandbox::ContainmentOnly) => None,
+        None => return Err(io::Error::other("qualified image missing")),
+    };
     let cgroup = Cgroup::open(&leaf)?;
     cgroup.enter()?;
     drop(cgroup);
@@ -159,7 +170,7 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
         kinewright_job_sys::enter_payload_boundary()?;
         let Some(pid) = kinewright_job_sys::fork_payload_init()? else {
             drop(read);
-            let result = init(program, std::fs::File::from(write));
+            let result = init(program, image, std::fs::File::from(write));
             std::process::exit(result.unwrap_or(1));
         };
         drop(write);
@@ -218,11 +229,12 @@ fn write_ready(writer: &mut impl Write, result: &impl serde::Serialize) -> io::R
     clippy::too_many_lines,
     reason = "the final spawn orders credentials, policy, environment and pipes together"
 )]
-fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
-    use std::os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::net::UnixStream,
-    };
+fn init(
+    program: Program,
+    image: Option<std::fs::File>,
+    mut ready: std::fs::File,
+) -> io::Result<i32> {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let pipes = program
         .pipe_directory
         .as_ref()
@@ -274,16 +286,13 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
                 scratch,
                 credential_store,
                 connect_tcp,
+                program.credential_root.as_deref(),
             )?;
             kinewright_job_sys::restrict_provider_syscalls()?;
             Some(pinned)
         }
     };
-    let executable = pinned.as_ref().map_or_else(
-        || program.executable.clone(),
-        |file| PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
-    );
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&program.executable);
     command
         .args(program.arguments)
         .env_clear()
@@ -326,7 +335,12 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
             command.env("KINEWRIGHT_HOST_MCP_TOKEN", token);
         }
     }
-    let child = command.spawn()?;
+    let child = if let Some(image) = &image {
+        kinewright_job_sys::spawn_executable_image(command, image)?
+    } else {
+        command.spawn()?
+    };
+    drop(image);
     drop(pinned);
     kinewright_job_sys::reap_payload_until_exit(child.id())
 }
