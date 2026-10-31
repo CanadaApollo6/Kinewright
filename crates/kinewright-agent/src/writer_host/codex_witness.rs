@@ -293,6 +293,14 @@ pub fn run_installed_codex_local_policy_witness() {
     eprintln!("C5_LOCAL_POLICY subscription=true required_features_disabled=true paid=false");
 }
 
+fn live_invocation_authorized(number: u8, previous: Option<&serde_json::Value>) -> bool {
+    number == 7
+        || (number == 8
+            && previous.is_some_and(|previous| {
+                previous["failure_origin"] == "witness" && previous["passed"] == false
+            }))
+}
+
 /// The only public qualification entry point runs the complete fixed witness.
 /// It cannot supply profiles, auth evidence, or arbitrary provider commands.
 ///
@@ -305,23 +313,21 @@ pub fn run_installed_codex_local_policy_witness() {
 )]
 pub fn run_installed_codex_director_witness() {
     let number = std::env::var("KINEWRIGHT_S4B_C5_RUN")
-        .unwrap_or_else(|_| "6".into())
+        .unwrap_or_else(|_| "7".into())
         .parse::<u8>()
         .unwrap();
-    assert!((6..=7).contains(&number), "C5e authorized run cap");
     let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&evidence).unwrap();
-    if number == 7 {
-        let previous: serde_json::Value = serde_json::from_slice(
-            &fs::read(evidence.join("live-6.json")).expect("C5 invocation 6 evidence"),
+    let previous: Option<serde_json::Value> = (number == 8).then(|| {
+        serde_json::from_slice(
+            &fs::read(evidence.join("live-7.json")).expect("C5 invocation 7 evidence"),
         )
-        .unwrap();
-        assert_eq!(
-            previous["failure_origin"], "witness",
-            "C5 invocation 7 requires a proved witness defect"
-        );
-        assert_eq!(previous["passed"], false);
-    }
+        .unwrap()
+    });
+    assert!(
+        live_invocation_authorized(number, previous.as_ref()),
+        "C5 invocation 7 is authorized; invocation 8 requires a proved witness defect"
+    );
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -364,11 +370,13 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             )
             .unwrap()
         );
+        let number = evidence["run"].as_u64().unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/s4b-c5e/source-prelive.json");
+            .join(format!("../../target/s4b-c5/source-prelive-{number}.json"));
         let source: serde_json::Value =
-            serde_json::from_slice(&fs::read(path).expect("C5e prelive source manifest")).unwrap();
+            serde_json::from_slice(&fs::read(path).expect("C5 prelive source manifest")).unwrap();
         evidence["source_manifest"] = source["sha256"].clone();
+        evidence["source_head"] = source["head"].clone();
         evidence["cli_sha256"] = serde_json::json!(crate::codex_qualification::CODEX_BINARY_SHA256);
         let network = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/s4b-c5c/network-contained.json");
@@ -940,4 +948,30 @@ fn merged_histories(
         saved.base.branch,
         candidate_history,
     )
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::live_invocation_authorized;
+
+    #[test]
+    fn s4b_c5_live_seventh_is_authorized_eighth_requires_proved_harness_defect() {
+        use serde_json::json;
+        assert!(live_invocation_authorized(7, None));
+        assert!(!live_invocation_authorized(6, None));
+        assert!(!live_invocation_authorized(9, None));
+        assert!(!live_invocation_authorized(8, None));
+        for previous in [
+            json!({"passed": true, "failure_origin": "witness"}),
+            json!({"passed": false, "failure_origin": "product"}),
+            json!({"passed": false, "failure_origin": "unresolved"}),
+            json!({"passed": false}),
+        ] {
+            assert!(!live_invocation_authorized(8, Some(&previous)));
+        }
+        assert!(live_invocation_authorized(
+            8,
+            Some(&json!({"passed": false, "failure_origin": "witness"}))
+        ));
+    }
 }
