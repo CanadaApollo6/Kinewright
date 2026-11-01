@@ -657,6 +657,7 @@ impl Ja1EditingSession {
         resume: bool,
         retain_checkpoint: bool,
     ) -> Result<ObjectRef, BundleError> {
+        let _reading = crate::run_admission::reading(self.store()?);
         let index = self.registered(guard)?;
         let canonical = self.durable_sessions[index].guard.clone();
         if self

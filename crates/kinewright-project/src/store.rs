@@ -124,6 +124,7 @@ struct StoreInner {
 
 pub struct ProjectStore {
     inner: Arc<StoreInner>,
+    pub(crate) publication: Option<crate::run_admission::TerminalAdmission>,
 }
 pub struct StorePin {
     inner: Arc<StoreInner>,
@@ -163,6 +164,7 @@ impl RetainedReadAdmission {
     ) -> Result<StorageReservation, BundleError> {
         let store = ProjectStore {
             inner: Arc::clone(&self.hold.pin.inner),
+            publication: None,
         };
         if store
             .inner
@@ -182,6 +184,7 @@ impl RetainedReadAdmission {
     ) -> Result<StorageReservation, BundleError> {
         let store = ProjectStore {
             inner: Arc::clone(&self.hold.pin.inner),
+            publication: None,
         };
         store.reserve_copy_read(0, encoded_bytes, 0, false, true)
     }
@@ -191,6 +194,7 @@ impl RetainedReadAdmission {
     ) -> Result<crate::namespace::DestinationInspection, BundleError> {
         let store = ProjectStore {
             inner: Arc::clone(&self.hold.pin.inner),
+            publication: None,
         };
         ProjectStore::inspect_borrowed_destination(path, &[&store])
     }
@@ -212,6 +216,7 @@ impl RetainedReadAdmission {
         }
         let store = ProjectStore {
             inner: Arc::clone(&self.hold.pin.inner),
+            publication: None,
         };
         let path = ProjectStore::object_path(reference)?;
         crate::namespace::note("rescue_permission_read", path.as_path());
@@ -553,6 +558,20 @@ impl ProjectStore {
         session_id: Option<SessionId>,
         limits: StorageLimits,
     ) -> Result<Self, BundleError> {
+        if namespace.read_root()?.is_some() {
+            return Err(BundleError::Identity(
+                "existing stores require verified bundle activation".into(),
+            ));
+        }
+        Self::from_namespace(namespace, project_id, session_id, limits)
+    }
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn from_namespace(
+        namespace: ProjectNamespace,
+        project_id: Option<ProjectId>,
+        session_id: Option<SessionId>,
+        limits: StorageLimits,
+    ) -> Result<Self, BundleError> {
         limits.validate()?;
         if project_id.is_some() == session_id.is_some() {
             return Err(BundleError::Identity(
@@ -633,6 +652,7 @@ impl ProjectStore {
                 session_closed: std::sync::atomic::AtomicBool::new(false),
                 session_closing: std::sync::atomic::AtomicBool::new(false),
             }),
+            publication: None,
         })
     }
     pub(crate) fn admission_key(&self) -> usize {
@@ -640,6 +660,18 @@ impl ProjectStore {
     }
     pub(crate) fn admission_lifetime(&self) -> Arc<()> {
         self.inner.admission_identity.clone()
+    }
+    pub(crate) fn publication_store(
+        &self,
+        token: crate::run_admission::TerminalAdmission,
+    ) -> Result<Self, BundleError> {
+        if !token.matches_store(self) {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        Ok(Self {
+            inner: Arc::clone(&self.inner),
+            publication: Some(token),
+        })
     }
     pub(crate) fn run_budget_active(&self) -> bool {
         self.inner
@@ -844,9 +876,7 @@ impl ProjectStore {
         self.closure_at(
             &dependencies,
             reference.record_kind != RecordKind::RootCheckpoint,
-            1 + if self.run_budget_active()
-                && !crate::run_admission::is_terminal(self.admission_key())
-            {
+            1 + if self.run_budget_active() && !self.is_terminal_publication() {
                 crate::run_admission::GRAPH_LEVELS
             } else {
                 0
@@ -1369,6 +1399,7 @@ impl ProjectStore {
     pub(crate) fn metadata_reserver(&self) -> Arc<kinewright_media::owned_io::CursorReservation> {
         let store = Self {
             inner: Arc::clone(&self.inner),
+            publication: None,
         };
         Arc::new(move |bytes| {
             store
@@ -1381,6 +1412,7 @@ impl ProjectStore {
     pub(crate) fn decoder_reserver(&self) -> Arc<kinewright_media::owned_io::CursorReservation> {
         let store = Self {
             inner: Arc::clone(&self.inner),
+            publication: None,
         };
         Arc::new(move |bytes| {
             store.check_read_authority().map_err(|e| e.to_string())?;
@@ -2470,9 +2502,7 @@ impl ProjectStore {
         }
         let limit = if T::KIND == RecordKind::History {
             self.admission_limits().branch_history_bytes
-        } else if self.run_budget_active()
-            && !crate::run_admission::is_terminal(self.admission_key())
-        {
+        } else if self.run_budget_active() && !self.is_terminal_publication() {
             self.limits()
                 .decoded_record_bytes
                 .min(crate::run_admission::RECORD_BYTES)
@@ -2496,7 +2526,7 @@ impl ProjectStore {
             preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?;
         drop(preflight);
         if self.run_budget_active()
-            && !crate::run_admission::is_terminal(self.admission_key())
+            && !self.is_terminal_publication()
             && decoded > crate::run_admission::DECODED_BYTES
         {
             self.note_run_limit();
@@ -2814,7 +2844,7 @@ impl ProjectStore {
                 "store owner differs from root".into(),
             ));
         }
-        let mut store = Self::new(namespace, Some(project_id), None, limits)?;
+        let mut store = Self::from_namespace(namespace, Some(project_id), None, limits)?;
         let inner = Arc::get_mut(&mut store.inner)
             .ok_or_else(|| BundleError::Identity("store already shared".into()))?;
         inner.usage = usage;
@@ -3652,6 +3682,15 @@ impl ProjectStore {
         Ok(())
     }
 
+    pub(crate) fn reserve_read(
+        &self,
+        bytes: u64,
+        decoded: u64,
+        history: u64,
+        copy: bool,
+    ) -> Result<StorageReservation, BundleError> {
+        self.reserve_copy_read(bytes, decoded, history, copy, false)
+    }
     fn reserve_copy_read(
         &self,
         bytes: u64,
@@ -3672,7 +3711,7 @@ impl ProjectStore {
         let free = self.with_namespace(|n| n.available_bytes())?;
         StorageReservation::reserve_for_retained_read(
             &self.inner.usage,
-            &if cleanup_only {
+            &if cleanup_only || crate::run_admission::is_reading(self.admission_key()) {
                 self.limits().clone()
             } else {
                 self.admission_limits()
@@ -4253,6 +4292,7 @@ impl StorePin {
     pub(crate) fn read_store(&self) -> ProjectStore {
         ProjectStore {
             inner: Arc::clone(&self.inner),
+            publication: None,
         }
     }
 }

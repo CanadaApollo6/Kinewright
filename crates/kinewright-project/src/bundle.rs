@@ -768,8 +768,10 @@ impl LoadedBundle {
                 .as_ref()
                 .map_or_else(BTreeMap::new, |v| (**v).clone()),
             pending_command: None,
+            prepared_metadata_authorities: BTreeMap::new(),
             pending_result: None,
             pending_metadata: None,
+            pending_terminal_publication: None,
             task_checkpoints: BTreeMap::new(),
             copy_publication: None,
             voice_slots: std::sync::Mutex::default(),
@@ -780,6 +782,7 @@ impl LoadedBundle {
             publication_state: PublicationState::NeverAttempted,
         };
         bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
+        bundle.refresh_run_budget()?;
         Ok(bundle)
     }
 }
@@ -825,9 +828,12 @@ pub struct ProjectBundle {
     pub(crate) unsettled: bool,
     pub(crate) receipts: crate::receipts::ReceiptLedger,
     pub(crate) issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
+    pub(crate) prepared_metadata_authorities:
+        BTreeMap<crate::receipts::IssuerId, crate::studio_store::PreparedMetadataAuthority>,
     pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
     pub(crate) pending_metadata: Option<crate::studio_store::ValidatedMetadataUpdate>,
+    pub(crate) pending_terminal_publication: Option<crate::run_admission::TerminalAdmission>,
     pub(crate) task_checkpoints: BTreeMap<BranchId, crate::task_checkpoint::StagedTaskCheckpoint>,
     pub(crate) copy_publication: Option<crate::copy_publication::CopyPublication>,
     pub(crate) voice_slots: crate::voice_store::VoiceSlots,
@@ -1002,7 +1008,8 @@ impl ProjectBundle {
             recovery.activation_project_id = Some(project_id.clone());
             recovery.manual_branch_id = Some(manual_branch_id.clone());
             recovery.namespace_root_file_name = Some(root_name);
-            let mut store = ProjectStore::new(namespace, Some(project_id.clone()), None, limits)?;
+            let mut store =
+                ProjectStore::from_namespace(namespace, Some(project_id.clone()), None, limits)?;
             store.adopt_usage(Arc::clone(&admission.data.usage))?;
             store.account_residuals(false)?;
             let mut durable = None;
@@ -1048,8 +1055,10 @@ impl ProjectBundle {
                 receipts: crate::receipts::ReceiptLedger::default(),
                 issuers: BTreeMap::new(),
                 pending_command: None,
+                prepared_metadata_authorities: BTreeMap::new(),
                 pending_result: None,
                 pending_metadata: None,
+                pending_terminal_publication: None,
                 task_checkpoints: BTreeMap::new(),
                 copy_publication: None,
                 voice_slots: std::sync::Mutex::default(),
@@ -1184,6 +1193,20 @@ impl ProjectBundle {
         &mut self,
         live: Option<&Core>,
     ) -> Result<Option<BundleSaveReport>, BundleError> {
+        if !self.store.is_terminal_publication()
+            && let Some(admission) = self.pending_terminal_publication.clone()
+        {
+            if !admission.matches_pending(self) {
+                return Err(BundleError::HistoryBarrierInvariant);
+            }
+            let result = self.with_publication_admission(Some(admission), |bundle| {
+                bundle.reconcile_destination(live)
+            });
+            if !self.unsettled {
+                self.pending_terminal_publication = None;
+            }
+            return result;
+        }
         #[cfg(any(test, feature = "test-util"))]
         self.store.clear_verified_memo()?;
         crate::namespace::note("bundle_reconcile", &self.store.resolved_root()?);

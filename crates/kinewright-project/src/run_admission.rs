@@ -22,15 +22,77 @@ pub const OWNED: u64 = 8 << 20;
 pub const LIVE_HISTORY: u64 = 16 << 20;
 pub const GRAPH_LEVELS: u64 = 8;
 pub const REASON: &str = "Run limit reached. Stop this run to finish cleanup.";
-thread_local! { static TERMINAL: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
-pub struct TerminalAdmission {
+thread_local! { static READ_HEADROOM: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
+#[derive(Clone)]
+pub(crate) struct TerminalAdmission {
+    key: usize,
+    _lifetime: std::sync::Arc<()>,
+    publication: PublicationIdentity,
+}
+#[derive(Clone)]
+enum PublicationIdentity {
+    Cut {
+        run: crate::orchestration_records::RunId,
+        command: crate::receipts::CommandId,
+        digest: String,
+    },
+    Accounting {
+        run: crate::orchestration_records::RunId,
+        revision: u64,
+        digest: String,
+        root: Option<crate::bundle_records::ObjectRef>,
+    },
+}
+impl TerminalAdmission {
+    pub(crate) fn matches_store(&self, store: &ProjectStore) -> bool {
+        self.key == store.admission_key()
+    }
+    pub(crate) fn matches_update(&self, update: &ValidatedRunUpdate) -> bool {
+        matches!(&self.publication, PublicationIdentity::Cut { run, command, digest }
+            if run == &update.projection().run && command == &update.envelope().id && digest == &update.receipt().cut_digest)
+    }
+    pub(crate) fn matches_pending(&self, bundle: &crate::bundle::ProjectBundle) -> bool {
+        match &self.publication {
+            PublicationIdentity::Cut { command, .. } => bundle
+                .pending_command
+                .as_ref()
+                .is_some_and(|pending| &pending.id == command),
+            PublicationIdentity::Accounting {
+                root: Some(root), ..
+            } => {
+                bundle.pending_command.is_none()
+                    && bundle
+                        .root
+                        .as_ref()
+                        .and_then(|current| current.run_index_ref.as_ref())
+                        == Some(root)
+            }
+            PublicationIdentity::Accounting { root: None, .. } => false,
+        }
+    }
+    pub(crate) fn accounting_root(&mut self, root: crate::bundle_records::ObjectRef) {
+        if let PublicationIdentity::Accounting { root: current, .. } = &mut self.publication {
+            *current = Some(root);
+        }
+    }
+    pub(crate) fn matches_accounting(
+        &self,
+        run: &crate::orchestration_records::RunId,
+        next: &crate::orchestration_accounting::AccountingRecord,
+    ) -> bool {
+        matches!(&self.publication, PublicationIdentity::Accounting { run: expected, revision, digest, .. }
+            if expected == run && *revision == next.revision
+                && crate::orchestration_accounting::encode(next, ACCOUNTING_BYTES).is_ok_and(|bytes| kinewright_media::sha256_bytes(&bytes) == *digest))
+    }
+}
+pub(crate) struct RunReadHeadroom {
     key: usize,
     _lifetime: std::sync::Arc<()>,
     _thread: PhantomData<Rc<()>>,
 }
-impl Drop for TerminalAdmission {
+impl Drop for RunReadHeadroom {
     fn drop(&mut self) {
-        TERMINAL.with_borrow_mut(|entries| {
+        READ_HEADROOM.with_borrow_mut(|entries| {
             if let Some(depth) = entries.get_mut(&self.key) {
                 *depth -= 1;
                 if *depth == 0 {
@@ -40,17 +102,24 @@ impl Drop for TerminalAdmission {
         });
     }
 }
-pub(crate) fn terminal(store: &ProjectStore) -> TerminalAdmission {
+pub(crate) fn reading(store: &ProjectStore) -> RunReadHeadroom {
     let key = store.admission_key();
-    TERMINAL.with_borrow_mut(|entries| *entries.entry(key).or_default() += 1);
-    TerminalAdmission {
+    READ_HEADROOM.with_borrow_mut(|entries| *entries.entry(key).or_default() += 1);
+    RunReadHeadroom {
         key,
         _lifetime: store.admission_lifetime(),
         _thread: PhantomData,
     }
 }
-pub(crate) fn is_terminal(key: usize) -> bool {
-    TERMINAL.with_borrow(|entries| entries.contains_key(&key))
+pub(crate) fn is_reading(key: usize) -> bool {
+    READ_HEADROOM.with_borrow(|entries| entries.contains_key(&key))
+}
+fn mint_terminal(store: &ProjectStore, publication: PublicationIdentity) -> TerminalAdmission {
+    TerminalAdmission {
+        key: store.admission_key(),
+        _lifetime: store.admission_lifetime(),
+        publication,
+    }
 }
 pub(crate) fn ordinary(raw: &StorageLimits) -> StorageLimits {
     let mut limits = raw.clone();
@@ -68,12 +137,24 @@ pub(crate) fn ordinary(raw: &StorageLimits) -> StorageLimits {
     limits
 }
 impl ProjectStore {
-    #[must_use]
-    pub fn terminal_admission(&self) -> TerminalAdmission {
-        terminal(self)
+    pub(crate) fn is_terminal_publication(&self) -> bool {
+        self.publication
+            .as_ref()
+            .is_some_and(|token| token.matches_store(self))
+    }
+    /// Return an owned H1 record; headroom cannot escape as a retained reservation.
+    pub fn read_run_record(
+        &self,
+        reference: &crate::bundle_records::ObjectRef,
+    ) -> Result<Box<crate::orchestration_records::OrchestrationRecord>, BundleError> {
+        let _reading = reading(self);
+        Ok(Box::new(
+            (*self.read_record::<crate::orchestration_records::OrchestrationRecord>(reference)?)
+                .clone(),
+        ))
     }
     pub(crate) fn admission_limits(&self) -> StorageLimits {
-        if self.run_budget_active() && !is_terminal(self.admission_key()) {
+        if self.run_budget_active() && !self.is_terminal_publication() {
             ordinary(self.limits())
         } else {
             self.limits().clone()
@@ -88,7 +169,7 @@ impl ProjectStore {
         }
     }
     pub(crate) fn admit_run_write(&self) -> Result<(), BundleError> {
-        if self.run_budget_active() && !is_terminal(self.admission_key()) && self.has_run_limit() {
+        if self.run_budget_active() && !self.is_terminal_publication() && self.has_run_limit() {
             return Err(BundleError::RunLimit);
         }
         Ok(())
@@ -96,6 +177,46 @@ impl ProjectStore {
     #[must_use]
     pub fn run_limit_reached(&self) -> bool {
         self.has_run_limit()
+    }
+}
+
+struct PublicationBundle<'a> {
+    bundle: &'a mut crate::bundle::ProjectBundle,
+    ordinary: Option<ProjectStore>,
+}
+impl std::ops::Deref for PublicationBundle<'_> {
+    type Target = crate::bundle::ProjectBundle;
+    fn deref(&self) -> &Self::Target {
+        self.bundle
+    }
+}
+impl std::ops::DerefMut for PublicationBundle<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.bundle
+    }
+}
+impl Drop for PublicationBundle<'_> {
+    fn drop(&mut self) {
+        self.bundle.store = self.ordinary.take().expect("publication store owner");
+    }
+}
+impl crate::bundle::ProjectBundle {
+    pub(crate) fn with_publication_admission<T>(
+        &mut self,
+        admission: Option<TerminalAdmission>,
+        publish: impl FnOnce(&mut Self) -> Result<T, BundleError>,
+    ) -> Result<T, BundleError> {
+        let Some(admission) = admission else {
+            return publish(self);
+        };
+        let _reading = reading(&self.store);
+        let writer = self.store.publication_store(admission)?;
+        let ordinary = std::mem::replace(&mut self.store, writer);
+        let mut publication = PublicationBundle {
+            bundle: self,
+            ordinary: Some(ordinary),
+        };
+        publish(&mut publication)
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,9 +277,61 @@ pub(crate) fn terminal_progress(before: &RunProjection, update: &ValidatedRunUpd
         || before.phase != RunPhase::Interrupted && after.phase == RunPhase::Interrupted
 }
 impl crate::bundle::ProjectBundle {
+    pub(crate) fn accounting_recovery_admission(
+        &self,
+        state: &RunProjection,
+        before: &crate::orchestration_accounting::AccountingRecord,
+        after: &crate::orchestration_accounting::AccountingRecord,
+    ) -> Result<Option<TerminalAdmission>, BundleError> {
+        after
+            .validate_successor(before)
+            .map_err(|_| BundleError::HistoryChanged)?;
+        let bytes = crate::orchestration_accounting::encode(after, ACCOUNTING_BYTES)
+            .map_err(|_| BundleError::RunLimit)?;
+        let _reading = reading(&self.store);
+        let index = self.run_index()?;
+        let budget = index
+            .budgets
+            .get(&state.run)
+            .ok_or(BundleError::HistoryChanged)?;
+        if !budget.active
+            || !(budget.exhausted
+                || self.store.run_limit_reached()
+                || state.outcome != RunOutcome::Pending)
+        {
+            return Ok(None);
+        }
+        // Recover only clock/usage for already charged work. New work and
+        // growing wait/repair identities continue to use ordinary admission.
+        if before.tasks.len() != after.tasks.len()
+            || before.tasks.iter().zip(&after.tasks).any(|(old, new)| {
+                old.task != new.task
+                    || old.token_limit != new.token_limit
+                    || old.sends != new.sends
+                    || old.providers != new.providers
+                    || old.repairs != new.repairs
+                    || old.last_failure != new.last_failure
+                    || old.repeated_failures != new.repeated_failures
+                    || old.wait_reason != new.wait_reason
+                    || old.wait_until_unix_ms != new.wait_until_unix_ms
+            })
+        {
+            return Err(BundleError::RunLimit);
+        }
+        Ok(Some(mint_terminal(
+            &self.store,
+            PublicationIdentity::Accounting {
+                run: state.run.clone(),
+                revision: after.revision,
+                digest: kinewright_media::sha256_bytes(&bytes),
+                root: None,
+            },
+        )))
+    }
     fn check_run_start_capacity(
         &self,
         index: &crate::studio_records::RunIndex,
+        incoming_issuer: bool,
     ) -> Result<(), BundleError> {
         let raw = self.store.limits();
         let limits = ordinary(raw);
@@ -171,7 +344,7 @@ impl crate::bundle::ProjectBundle {
             || limits.pending_commands == 0
             || limits.live_history_bytes < HISTORY_BYTES
             || (index.runs.len() + index.orchestration.len()) as u64 + 1 > limits.versions
-            || self.issuers.len() as u64 + 4 > limits.issuers
+            || self.issuers.len() as u64 + u64::from(incoming_issuer) + 4 > limits.issuers
             || self.receipts.detailed.len() as u64
                 + self.receipts.retired.len() as u64
                 + MINIMAL_CUTS
@@ -239,8 +412,8 @@ impl crate::bundle::ProjectBundle {
         update: &ValidatedRunUpdate,
         arm: bool,
     ) -> Result<Option<TerminalAdmission>, BundleError> {
-        let reserved = is_terminal(self.store.admission_key());
-        let reading = self.store.terminal_admission();
+        let reserved = self.store.is_terminal_publication();
+        let reading = reading(&self.store);
         let run = &update.projection().run;
         let index = self.run_index()?;
         let budget = index.budgets.get(run).cloned().unwrap_or_default();
@@ -253,14 +426,29 @@ impl crate::bundle::ProjectBundle {
                 .map_err(|_| BundleError::RunLimit)?;
             crate::orchestration_accounting::encode(update, TERMINAL_TRANSITION_BYTES)
                 .map_err(|_| BundleError::RunLimit)?;
-            return Ok(Some(self.store.terminal_admission()));
+            if !budget.active || budget.terminal as u64 >= TERMINAL_CUTS {
+                return Err(BundleError::RunLimit);
+            }
+            return Ok(arm.then(|| {
+                mint_terminal(
+                    &self.store,
+                    PublicationIdentity::Cut {
+                        run: run.clone(),
+                        command: update.envelope().id.clone(),
+                        digest: update.receipt().cut_digest.clone(),
+                    },
+                )
+            }));
         }
         if before.is_none() {
             if index.budgets.values().any(|b| b.active) {
                 return Err(BundleError::RunLimit);
             }
             if !reserved {
-                self.check_run_start_capacity(&index)?;
+                self.check_run_start_capacity(
+                    &index,
+                    !self.issuers.contains_key(&update.envelope().id.issuer),
+                )?;
             }
             let director = update
                 .projection()
@@ -324,7 +512,7 @@ impl crate::bundle::ProjectBundle {
         Ok(None)
     }
     pub(crate) fn refresh_run_budget(&self) -> Result<(), BundleError> {
-        let _terminal = self.store.terminal_admission();
+        let _reading = reading(&self.store);
         let index = self.run_index()?;
         let active = index.budgets.values().any(|b| b.active);
         self.store.set_run_budget(active);
@@ -349,8 +537,10 @@ impl crate::editing_session::Ja1EditingSession {
     pub fn run_transition_admission(
         &mut self,
         update: &ValidatedRunUpdate,
-    ) -> Result<Option<TerminalAdmission>, BundleError> {
-        self.active_bundle_mut()?.run_admission(update, false)
+    ) -> Result<(), BundleError> {
+        self.active_bundle_mut()?
+            .run_admission(update, false)
+            .map(|_| ())
     }
     #[cfg(target_os = "linux")]
     pub fn check_run_send_budget(
@@ -363,14 +553,11 @@ impl crate::editing_session::Ja1EditingSession {
         }
         Ok(())
     }
-    pub fn run_terminal_admission(&self) -> Result<TerminalAdmission, BundleError> {
-        Ok(self.store()?.terminal_admission())
-    }
     pub fn run_publication_status(
         &self,
         run: &crate::orchestration_records::RunId,
     ) -> Result<Option<String>, BundleError> {
-        let _reading = self.run_terminal_admission()?;
+        let _reading = reading(self.store()?);
         let index = self.active_bundle()?.run_index()?;
         let exhausted = index
             .budgets
@@ -431,7 +618,7 @@ mod tests {
             !store.run_limit_reached(),
             "a refused read is not a spending decision"
         );
-        let _terminal = store.terminal_admission();
+        let _reading = reading(&store);
         let terminal = store
             .read_record::<kinewright_core::Document>(&sealed.reference)
             .expect("C5_FIX1_TERMINAL_READ_MEMORY");
@@ -478,7 +665,9 @@ mod tests {
         }
         let refused = refused.expect("C5_FIX1_GRAPH_RESERVED");
         assert_eq!(refused, store.limits().graph_depth - GRAPH_LEVELS + 1);
-        let _terminal = store.terminal_admission();
+        assert!(append(&mut store, 100, &previous).is_err());
+        // This unit store has no H1 run. Its inactive control retains the raw cap.
+        store.set_run_budget(false);
         for n in refused..refused + GRAPH_LEVELS {
             previous = vec![
                 append(&mut store, n, &previous)
@@ -544,7 +733,14 @@ mod tests {
                 "C5_FIX1_RECORD_RESERVE decoded={decoded}"
             );
             assert_eq!(store.usage().unwrap().objects, before);
-            let _terminal = store.terminal_admission();
+            let headroom = reading(&store);
+            assert!(
+                matches!(store.admit_document(&document), Err(BundleError::RunLimit)),
+                "C5_FIX2_READING_IS_NOT_WRITE_AUTHORITY"
+            );
+            drop(headroom);
+            // No H1 run was admitted in this unit fixture.
+            store.set_run_budget(false);
             assert!(
                 store.admit_document(&document).is_ok(),
                 "C5_FIX1_TERMINAL_RECORD_HEADROOM decoded={decoded}"

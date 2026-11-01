@@ -111,38 +111,65 @@ impl ProjectBundle {
         run: &RunId,
         next: &AccountingRecord,
     ) -> Result<(), BundleError> {
-        let _terminal = self.store.terminal_admission();
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }
-        let state = self.orchestration_projection(run)?.ok_or_else(invalid)?;
-        let (_, current) = accounting(&state, &mut |r| {
-            Ok((*self.store.read_record::<OrchestrationRecord>(r)?).clone())
-        })?;
+        let (state, current) = {
+            let _reading = crate::run_admission::reading(&self.store);
+            let state = self.orchestration_projection(run)?.ok_or_else(invalid)?;
+            let (_, current) = accounting(&state, &mut |r| {
+                Ok((*self.store.read_run_record(r)?).clone())
+            })?;
+            (state, current)
+        };
         if current == *next {
             return Ok(());
         }
-        if let Err(error) = self.collect_after_ack() {
-            self.store.with_namespace(|namespace| namespace.verify())?;
-            if matches!(
-                error,
-                BundleError::Unsettled
-                    | BundleError::DurabilityUnknown
-                    | BundleError::DurabilityUnknownAt(_)
-            ) {
-                return Err(error);
-            }
+        let admission = self.accounting_recovery_admission(&state, &current, next)?;
+        if admission
+            .as_ref()
+            .is_some_and(|token| !token.matches_accounting(run, next))
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
         }
-        let before = self.root.clone();
-        let (_seals, reference) = self.stage_orchestration_accounting(run, next)?;
-        self.root.as_mut().ok_or_else(invalid)?.run_index_ref = Some(reference);
-        if let Err(error) = crate::bundle_commit::BundleCommit::publish_maintenance(self) {
-            if !self.unsettled {
-                self.root = before;
+        let terminal = admission.is_some();
+        self.pending_terminal_publication.clone_from(&admission);
+        let result = self.with_publication_admission(admission, |bundle| {
+            if let Err(error) = bundle.collect_after_ack() {
+                bundle
+                    .store
+                    .with_namespace(|namespace| namespace.verify())?;
+                if matches!(
+                    error,
+                    BundleError::Unsettled
+                        | BundleError::DurabilityUnknown
+                        | BundleError::DurabilityUnknownAt(_)
+                ) {
+                    return Err(error);
+                }
             }
-            return Err(error);
+            let before = bundle.root.clone();
+            let result = (|| {
+                let (_seals, reference) = bundle.stage_orchestration_accounting(run, next)?;
+                if let Some(admission) = &mut bundle.pending_terminal_publication {
+                    admission.accounting_root(reference.clone());
+                }
+                bundle.root.as_mut().ok_or_else(invalid)?.run_index_ref = Some(reference);
+                crate::bundle_commit::BundleCommit::publish_maintenance(bundle).map(|_| ())
+            })();
+            if result.is_err() && !bundle.unsettled {
+                bundle.root = before;
+                if terminal && bundle.collect_after_ack().is_err() {
+                    bundle.unsettled = true;
+                    return Err(BundleError::Unsettled);
+                }
+            }
+            result
+        });
+        if !self.unsettled {
+            self.pending_terminal_publication = None;
         }
-        Ok(())
+        result
     }
 }
 impl crate::editing_session::Ja1EditingSession {

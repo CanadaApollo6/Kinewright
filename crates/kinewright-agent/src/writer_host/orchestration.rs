@@ -338,40 +338,42 @@ impl HostCommandOwner {
     pub(super) fn issue_metadata(
         &mut self,
         index: usize,
-        issuer: Option<IssuerId>,
+        issuer: Option<&IssuerId>,
     ) -> Result<MetadataIssuer, HostError> {
         if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
         }
-        let terminal = (self.attachments[index].role == AttachmentRole::Editor
-            && self.attachments[index].bootstrap)
-            || self.attachments[index]
-                .producer_scope
-                .as_ref()
-                .is_some_and(|scope| scope.task.is_none());
-        let _terminal = if terminal {
-            Some(self.owner()?.run_terminal_admission()?)
-        } else {
-            None
-        };
-        let issuer = if let Some(issuer) = issuer {
-            self.require_metadata_issuer(index, &issuer)?;
-            issuer
-        } else {
-            let subject = self.metadata_subject(index);
-            self.owner_mut()?.reuse_metadata_issuer_for(&subject)?
-        };
-        let sequence = self.owner()?.metadata_issuer_sequence(&issuer)?;
-        let envelope = self
-            .owner()?
-            .metadata_envelope(CommandId { issuer, sequence })?;
+        if let Some(issuer) = issuer {
+            self.require_metadata_issuer(index, issuer)?;
+        }
         let grant = serde_json::to_vec(&(
             &self.instance,
             &self.attachments[index].subject,
             self.attachments[index].role,
             &self.attachments[index].roots,
         ))?;
-        let grant_ref = self.owner_mut()?.admit_host_grant(&grant)?;
+        let subject = self.metadata_subject(index);
+        // Ordinary admission publishes the issuer and grant at once, so a
+        // receipt query after a host restart can still prove absence. Only a
+        // closed ordinary admission leaves them as an unpublished description,
+        // which the first validated publication commits under its own admission.
+        let owner = self.owner_mut()?;
+        let published = match issuer {
+            Some(issuer) => Ok(issuer.clone()),
+            None => owner.reuse_metadata_issuer_for(&subject),
+        }
+        .and_then(|issuer| Ok((issuer, owner.admit_host_grant(&grant)?)));
+        let (issuer, grant_ref) = match published {
+            Ok(published) => published,
+            Err(BundleError::RunLimit) => {
+                owner.prepare_metadata_authority(&subject, issuer, &grant)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let sequence = self.owner()?.metadata_issuer_sequence(&issuer)?;
+        let envelope = self
+            .owner()?
+            .metadata_envelope(CommandId { issuer, sequence })?;
         Ok(MetadataIssuer {
             envelope,
             root_generation: self.owner()?.metadata_generation()?,
@@ -432,7 +434,7 @@ impl HostCommandOwner {
             }
             match command {
                 HostCommand::IssueMetadataIssuer { issuer } => {
-                    reply.metadata_issuer = Some(self.issue_metadata(index, issuer)?);
+                    reply.metadata_issuer = Some(self.issue_metadata(index, issuer.as_ref())?);
                 }
                 HostCommand::DispatchOrchestration { request } => {
                     reply.orchestration = Some(self.dispatch_orchestration(index, &request)?);
@@ -656,7 +658,6 @@ impl HostCommandOwner {
     ) -> Result<OrchestrationReceipt, HostError> {
         // Bounded owner reads/replay finish before ordinary staging begins.
         // Long-lived snapshot readers never receive this allowance.
-        let reading = self.owner()?.run_terminal_admission()?;
         if let Some(pending) = &self.hooks.pending {
             // An immutable attachment instance admitted this exact command before B4.
             // Scope records are unreadable while the namespace is uncertain; only that
@@ -705,7 +706,6 @@ impl HostCommandOwner {
             .transpose()?
             .flatten()
             .map(|cut| cut.segment);
-        drop(reading);
         // Freeze is an explicit completion request. H3, rather than a provider
         // turn command, ends the owning turn in the same cut as its frozen history.
         if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command
@@ -788,7 +788,7 @@ impl HostCommandOwner {
                 )
                 .map_err(scheduler_error)?
             };
-        let _admission = self.owner_mut()?.run_transition_admission(&transition)?;
+        self.owner_mut()?.run_transition_admission(&transition)?;
         let transition = self.seed_run_spending(transition)?;
         let transition = self.stage_control_freeze(transition)?;
         if let Some((_, bytes)) = attention {

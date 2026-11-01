@@ -45,13 +45,12 @@ impl HostCommandOwner {
         state: &mut RunProjection,
         reference: ObjectRef,
     ) -> Result<(), HostError> {
-        let _reading = self.owner()?.run_terminal_admission()?;
         let mut keep = Vec::new();
         for previous in &state.usage {
             let record = self
                 .owner()?
                 .store()?
-                .read_record::<OrchestrationRecord>(previous)?;
+                .read_run_record(previous)?;
             if !matches!(record.payload, OrchestrationPayload::Accounting(_)) {
                 keep.push(previous.clone());
             }
@@ -489,7 +488,6 @@ impl HostCommandOwner {
             return Ok(());
         }
 
-        let _terminal = self.owner()?.run_terminal_admission()?;
         self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
@@ -550,7 +548,7 @@ impl HostCommandOwner {
             let record = self
                 .owner()?
                 .store()?
-                .read_record::<OrchestrationRecord>(&reference)?;
+                .read_run_record(&reference)?;
             if let OrchestrationPayload::Result(result) = &record.payload {
                 use crate::orchestration::orchestration_records::{
                     OutcomeDetail, RunOutcome, RunPhase, RunWait,

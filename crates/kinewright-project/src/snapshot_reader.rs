@@ -129,7 +129,7 @@ impl SnapshotReadSession {
         }
         let mut namespace = ProjectNamespace::inspect(path)?;
         namespace.lend_read_authority(authority)?;
-        let mut store = ProjectStore::new(
+        let mut store = ProjectStore::from_namespace(
             namespace,
             manifest.project_id.clone(),
             None,

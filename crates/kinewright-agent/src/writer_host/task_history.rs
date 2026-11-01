@@ -47,7 +47,6 @@ impl HostCommandOwner {
         state: &RunProjection,
         task: &TaskId,
     ) -> Result<Option<TaskHistoryRecord>, HostError> {
-        let _reading = self.owner()?.run_terminal_admission()?;
         let task = state
             .tasks
             .iter()
@@ -60,10 +59,7 @@ impl HostCommandOwner {
             .rev()
             .filter(|r| r.record_kind == RecordKind::RunIndex)
         {
-            let record = self
-                .owner()?
-                .store()?
-                .read_record::<OrchestrationRecord>(reference)?;
+            let record = self.owner()?.store()?.read_run_record(reference)?;
             if let OrchestrationPayload::TaskHistory(history) = &record.payload {
                 if history.project != self.owner()?.project_id()?
                     || history.run != state.run
@@ -81,12 +77,8 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<(Option<ObjectRef>, RetiredAttemptArchive), HostError> {
-        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
-            let record = self
-                .owner()?
-                .store()?
-                .read_record::<OrchestrationRecord>(reference)?;
+            let record = self.owner()?.store()?.read_run_record(reference)?;
             if let OrchestrationPayload::AttemptArchive(archive) = &record.payload {
                 if archive.run != state.run {
                     return Err(refused("archive run changed"));
@@ -358,6 +350,9 @@ impl HostCommandOwner {
             }) {
                 return Err(refused("original task history or receipts changed"));
             }
+            if previous.as_ref() == Some(&history) {
+                return Ok(());
+            }
             let sealed = self
                 .owner_mut()?
                 .admit_scheduler_record(&OrchestrationRecord {
@@ -376,10 +371,7 @@ impl HostCommandOwner {
             for reference in decisions {
                 let history = reference.record_kind == RecordKind::RunIndex
                     && matches!(
-                        self.owner()?
-                            .store()?
-                            .read_record::<OrchestrationRecord>(&reference)?
-                            .payload,
+                        self.owner()?.store()?.read_run_record(&reference)?.payload,
                         OrchestrationPayload::TaskHistory(_)
                     );
                 if !history {

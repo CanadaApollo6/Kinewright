@@ -439,6 +439,13 @@ fn c4_reserve_task(
     (execution, client, endpoint, core)
 }
 fn c4_restart(f: Fixture, claim_root: &std::path::Path) -> Fixture {
+    c4_restart_with(f, claim_root, |_| {})
+}
+fn c4_restart_with(
+    f: Fixture,
+    claim_root: &std::path::Path,
+    between: impl FnOnce(&std::path::Path),
+) -> Fixture {
     let Fixture {
         host,
         temp,
@@ -447,6 +454,7 @@ fn c4_restart(f: Fixture, claim_root: &std::path::Path) -> Fixture {
         ..
     } = f;
     drop(host);
+    between(&temp.path("project.kinewright"));
     let roots = SessionRoots {
         read: vec![temp.root().into()],
         write: vec![temp.root().into()],

@@ -88,6 +88,7 @@ impl ProjectBundle {
             .ok_or_else(|| BundleError::Unsupported("unknown branch".into()))
     }
     pub fn checkpoint_reference(&self, id: &BranchId) -> Result<ObjectRef, BundleError> {
+        let _reading = crate::run_admission::reading(&self.store);
         let root = self
             .root
             .as_ref()

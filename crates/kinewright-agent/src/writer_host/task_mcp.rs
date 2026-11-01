@@ -141,7 +141,7 @@ impl TaskMcp {
                 after_sequence: u64,
             }
             let observe: Observe = serde_json::from_value(arguments)?;
-            let metadata = host.issue_metadata(index, issuer.clone())?;
+            let metadata = host.issue_metadata(index, issuer.as_ref())?;
             *issuer = Some(metadata.envelope.id.issuer.clone());
             return Ok(
                 json!({"run": host.observe_run(index, &state.run, observe.after_sequence)?,
@@ -239,12 +239,7 @@ impl TaskMcp {
                     }
                 })
         {
-            let record = host
-                .owner()?
-                .store()?
-                .read_record::<crate::orchestration::orchestration_records::OrchestrationRecord>(
-                reference,
-            )?;
+            let record = host.owner()?.store()?.read_run_record(reference)?;
             if record.payload
                 != crate::orchestration::orchestration_records::OrchestrationPayload::Result(
                     Box::new(publish.result.clone()),
@@ -316,14 +311,8 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<kinewright_project::bundle_records::ObjectRef, HostError> {
-        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
-            let record = self
-                .owner()?
-                .store()?
-                .read_record::<crate::orchestration::orchestration_records::OrchestrationRecord>(
-                reference,
-            )?;
+            let record = self.owner()?.store()?.read_run_record(reference)?;
             if matches!(
                 record.payload,
                 crate::orchestration::orchestration_records::OrchestrationPayload::Accounting(_)

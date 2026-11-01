@@ -376,12 +376,8 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<Option<AccountingRecord>, HostError> {
-        let _reading = self.owner()?.run_terminal_admission()?;
         for reference in state.usage.iter().rev() {
-            let record = self
-                .owner()?
-                .store()?
-                .read_record::<OrchestrationRecord>(reference)?;
+            let record = self.owner()?.store()?.read_run_record(reference)?;
             if let OrchestrationPayload::Accounting(accounting) = &record.payload {
                 return Ok(Some((**accounting).clone()));
             }
@@ -514,10 +510,7 @@ impl HostCommandOwner {
                 .collect();
             let mut expanded = Vec::new();
             for reference in references {
-                let record = self
-                    .owner()?
-                    .store()?
-                    .read_record::<OrchestrationRecord>(reference)?;
+                let record = self.owner()?.store()?.read_run_record(reference)?;
                 let OrchestrationPayload::Result(result) = &record.payload else {
                     return Err(refused("wake reference is not a task result"));
                 };
@@ -541,10 +534,7 @@ impl HostCommandOwner {
                         };
                         Ok(match reference.record_kind {
                             RecordKind::RunIndex => serde_json::to_value(
-                                &*self
-                                    .owner()?
-                                    .store()?
-                                    .read_record::<OrchestrationRecord>(reference)?,
+                                &*self.owner()?.store()?.read_run_record(reference)?,
                             )?,
                             RecordKind::SpecialistBase => serde_json::to_value(
                                 &*self

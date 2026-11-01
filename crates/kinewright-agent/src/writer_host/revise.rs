@@ -148,7 +148,7 @@ impl HostCommandOwner {
         let brief = self.revise_brief(request, &submitted.batch_ref, provider)?;
         let subject = request.command_id.issuer.clone();
         let issued = if self.require_metadata_issuer(index, &subject).is_ok() {
-            self.issue_metadata(index, Some(subject))?
+            self.issue_metadata(index, Some(&subject))?
         } else {
             self.issue_metadata(index, None)?
         };

@@ -18,6 +18,13 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+#[derive(Clone)]
+pub(crate) struct PreparedMetadataAuthority {
+    issuer: crate::receipts::IssuerState,
+    reference: ObjectRef,
+    bytes: Vec<u8>,
+}
+
 macro_rules! record {
     ($ty:ty, $kind:ident, $deps:expr, $check:expr) => {
         impl record_sealed::Sealed for $ty {}
@@ -659,6 +666,10 @@ impl ProjectBundle {
         }
         self.metadata_command_inner(envelope, scope, update, None)
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one validated metadata cut owns issuer preparation, terminal admission and rollback"
+    )]
     fn metadata_command_inner(
         &mut self,
         envelope: &MetadataEnvelope,
@@ -685,7 +696,15 @@ impl ProjectBundle {
         }
         bounded(update, self.store.limits().command_bytes)?;
         let command = envelope.receipt_envelope(update)?;
-        let lookup = self.receipt_lookup(&command)?;
+        let lookup = if !self.issuers.contains_key(&envelope.id.issuer)
+            && self
+                .prepared_metadata_authorities
+                .contains_key(&envelope.id.issuer)
+        {
+            ReceiptLookup::Absent
+        } else {
+            self.receipt_lookup(&command)?
+        };
         if lookup != ReceiptLookup::Absent {
             return Ok(lookup);
         }
@@ -702,15 +721,92 @@ impl ProjectBundle {
         let issuer = self
             .issuers
             .get(&envelope.id.issuer)
+            .or_else(|| {
+                self.prepared_metadata_authorities
+                    .get(&envelope.id.issuer)
+                    .map(|prepared| &prepared.issuer)
+            })
             .filter(|i| !i.retired && i.next_sequence == envelope.id.sequence)
             .cloned()
             .ok_or_else(|| BundleError::Identity("metadata issuer sequence".into()))?;
-        let _admission = match &update.change {
+        let admission = match &update.change {
             MetadataChange::OrchestrationUpdate { transition, .. } => {
+                self.validate_run_publication_binding(envelope, transition)?;
                 self.run_admission(transition, true)?
             }
             _ => None,
         };
+        if let Some(admission) = &admission
+            && !matches!(&update.change, MetadataChange::OrchestrationUpdate { transition, .. } if admission.matches_update(transition))
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        let terminal = admission.is_some();
+        self.pending_terminal_publication.clone_from(&admission);
+        let result = self.with_publication_admission(admission, |bundle| {
+            let fresh = !bundle.issuers.contains_key(&envelope.id.issuer);
+            let evidence = bundle.evidence.len();
+            let pending_evidence = bundle.pending_evidence.len();
+            let result = (|| {
+                if fresh {
+                    if bundle.issuers.len() as u64 >= bundle.store.admission_limits().issuers {
+                        return Err(bundle
+                            .store
+                            .run_error(BundleError::Capacity("metadata issuers")));
+                    }
+                    bundle
+                        .issuers
+                        .insert(envelope.id.issuer.clone(), issuer.clone());
+                }
+                if let MetadataChange::OrchestrationUpdate { transition, .. } = &update.change
+                    && let Some(prepared) = bundle
+                        .prepared_metadata_authorities
+                        .get(&envelope.id.issuer)
+                        .cloned()
+                {
+                    if transition.envelope().authority.grant_ref != prepared.reference {
+                        return Err(BundleError::HistoryChanged);
+                    }
+                    let seal = bundle.store.admit_blob(
+                        &mut &prepared.bytes[..],
+                        &prepared.reference,
+                        &[],
+                    )?;
+                    bundle.retain_evidence(&prepared.reference)?;
+                    drop(seal);
+                }
+                bundle.finish_metadata_publication(envelope, update, &command, issuer, admitted)
+            })();
+            if result.is_ok() {
+                bundle
+                    .prepared_metadata_authorities
+                    .remove(&envelope.id.issuer);
+            } else if !bundle.unsettled {
+                if fresh {
+                    bundle.issuers.remove(&envelope.id.issuer);
+                }
+                bundle.evidence.truncate(evidence);
+                bundle.pending_evidence.truncate(pending_evidence);
+                if terminal && bundle.collect_after_ack().is_err() {
+                    bundle.unsettled = true;
+                    return Err(BundleError::Unsettled);
+                }
+            }
+            result
+        });
+        if !self.unsettled {
+            self.pending_terminal_publication = None;
+        }
+        result
+    }
+    fn finish_metadata_publication(
+        &mut self,
+        envelope: &MetadataEnvelope,
+        update: &MetadataUpdate,
+        command: &CommandEnvelope,
+        issuer: crate::receipts::IssuerState,
+        admitted: Option<(ValidatedMetadataUpdate, MetadataResult)>,
+    ) -> Result<ReceiptLookup, BundleError> {
         let limits = self.store.admission_limits();
         if limits.pending_commands == 0
             || self.receipts.detailed.len() as u64 + self.receipts.retired.len() as u64
@@ -751,7 +847,7 @@ impl ProjectBundle {
         self.pending_command = None;
         self.pending_result = None;
         self.pending_metadata = None;
-        self.receipt_lookup(&command)
+        self.receipt_lookup(command)
     }
     #[allow(clippy::too_many_lines)]
     fn validate_metadata(
@@ -1094,6 +1190,11 @@ impl ProjectBundle {
     ) -> Result<u64, BundleError> {
         self.issuers
             .get(issuer)
+            .or_else(|| {
+                self.prepared_metadata_authorities
+                    .get(issuer)
+                    .map(|prepared| &prepared.issuer)
+            })
             .filter(|state| !state.retired)
             .map(|state| state.next_sequence)
             .ok_or_else(|| BundleError::Identity("metadata issuer retired or absent".into()))
@@ -1109,7 +1210,7 @@ impl ProjectBundle {
         }
     }
     pub fn reconcile_metadata(&mut self) -> Result<(), BundleError> {
-        let _terminal = self.store.terminal_admission();
+        let _terminal = crate::run_admission::reading(&self.store);
         self.reconcile_destination(None)?;
         self.pending_metadata = None;
         self.pending_command = None;
@@ -1119,6 +1220,79 @@ impl ProjectBundle {
 }
 
 impl crate::editing_session::Ja1EditingSession {
+    /// Prepare authority without a store write. Its first publication commits it
+    /// under that publication's ordinary or validated terminal admission.
+    pub fn prepare_metadata_authority(
+        &mut self,
+        subject: &str,
+        requested: Option<&crate::receipts::IssuerId>,
+        grant: &[u8],
+    ) -> Result<(crate::receipts::IssuerId, ObjectRef), BundleError> {
+        if subject.is_empty()
+            || subject.len() > 512
+            || grant.len() > crate::run_admission::TERMINAL_RECEIPT_BYTES
+        {
+            return Err(BundleError::Capacity("prepared metadata authority"));
+        }
+        let bundle = self.active_bundle_mut()?;
+        if bundle.unsettled || bundle.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
+        }
+        let existing = match requested {
+            Some(id) => bundle.issuers.get_key_value(id),
+            None => bundle.issuers.iter().find(|(_, state)| {
+                !state.retired && state.metadata_subject.as_deref() == Some(subject)
+            }),
+        };
+        let (id, issuer) = if let Some((id, issuer)) = existing {
+            if issuer.retired || issuer.metadata_subject.as_deref() != Some(subject) {
+                return Err(BundleError::HistoryChanged);
+            }
+            (id.clone(), issuer.clone())
+        } else if let Some((id, authority)) =
+            bundle
+                .prepared_metadata_authorities
+                .iter()
+                .find(|(id, authority)| {
+                    requested.is_none_or(|requested| requested == *id)
+                        && authority.issuer.metadata_subject.as_deref() == Some(subject)
+                })
+        {
+            (id.clone(), authority.issuer.clone())
+        } else if requested.is_some() {
+            return Err(BundleError::HistoryChanged);
+        } else {
+            (
+                crate::receipts::IssuerId::fresh()?,
+                crate::receipts::IssuerState {
+                    next_sequence: 1,
+                    reconciled_high_water: 0,
+                    retired: false,
+                    metadata_subject: Some(subject.into()),
+                },
+            )
+        };
+        if bundle.prepared_metadata_authorities.len() >= 128
+            && !bundle.prepared_metadata_authorities.contains_key(&id)
+        {
+            // These are unpublished queries, never receipts or durable issuers.
+            bundle.prepared_metadata_authorities.pop_first();
+        }
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(grant),
+            byte_length: grant.len() as u64,
+            record_kind: RecordKind::OwnedEvidence,
+        };
+        bundle.prepared_metadata_authorities.insert(
+            id.clone(),
+            PreparedMetadataAuthority {
+                issuer,
+                reference: reference.clone(),
+                bytes: grant.to_vec(),
+            },
+        );
+        Ok((id, reference))
+    }
     pub fn metadata_command(
         &mut self,
         envelope: &MetadataEnvelope,
@@ -1162,6 +1336,13 @@ impl crate::editing_session::Ja1EditingSession {
             .active_bundle()?
             .issuers
             .get(issuer)
+            .or_else(|| {
+                self.active_bundle()
+                    .ok()?
+                    .prepared_metadata_authorities
+                    .get(issuer)
+                    .map(|prepared| &prepared.issuer)
+            })
             .and_then(|state| state.metadata_subject.clone()))
     }
     pub fn metadata_issuer_sequence(

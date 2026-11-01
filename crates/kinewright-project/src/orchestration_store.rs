@@ -115,6 +115,36 @@ impl PublishedRunCut {
 }
 
 impl ProjectBundle {
+    pub(crate) fn validate_run_publication_binding(
+        &self,
+        metadata: &MetadataEnvelope,
+        transition: &ValidatedRunUpdate,
+    ) -> Result<(), BundleError> {
+        let _reading = crate::run_admission::reading(&self.store);
+        transition
+            .validate_returned_receipt(transition.receipt())
+            .map_err(invalid)?;
+        let envelope = transition.envelope();
+        if envelope.project != self.project_id
+            || envelope.id != metadata.id
+            || envelope.authority.owner_epoch != self.store.owner_epoch()
+            || envelope.expected_generation != self.generation
+        {
+            return Err(invalid("publication envelope"));
+        }
+        let index = self.run_index()?;
+        let previous = index
+            .orchestration
+            .get(&transition.projection().run)
+            .and_then(|cuts| cuts.last());
+        if transition.projection().sequence
+            != previous.map_or(1, |cut| cut.receipt.sequence.saturating_add(1))
+            || transition.segment().previous.as_ref() != previous.map(|cut| &cut.segment)
+        {
+            return Err(invalid("successor isolation"));
+        }
+        Ok(())
+    }
     pub(crate) fn stage_orchestration_update(
         &mut self,
         metadata_envelope: &MetadataEnvelope,
@@ -122,27 +152,10 @@ impl ProjectBundle {
         consume_batch: Option<&FeedbackBatchId>,
         feedback: &mut FeedbackIndex,
     ) -> Result<(Vec<SealedObject>, ObjectRef), BundleError> {
-        let envelope = transition.envelope();
-        transition
-            .validate_returned_receipt(transition.receipt())
-            .map_err(invalid)?;
-        if envelope.project != self.project_id
-            || envelope.id != metadata_envelope.id
-            || envelope.authority.owner_epoch != self.store.owner_epoch()
-            || envelope.expected_generation != self.generation
-        {
-            return Err(invalid("publication envelope"));
-        }
+        self.validate_run_publication_binding(metadata_envelope, transition)?;
         let original = self.run_index()?;
         let mut index = (*original).clone();
         let run = &transition.projection().run;
-        let previous = index.orchestration.get(run).and_then(|cuts| cuts.last());
-        if transition.projection().sequence
-            != previous.map_or(1, |cut| cut.receipt.sequence.saturating_add(1))
-            || transition.segment().previous.as_ref() != previous.map(|cut| &cut.segment)
-        {
-            return Err(invalid("successor isolation"));
-        }
         if let Some(batch) = consume_batch {
             if transition.receipt().decision != super::CommandDecision::Applied {
                 return Err(invalid("refused feedback consumption"));
@@ -224,7 +237,7 @@ impl ProjectBundle {
             && manual.document_hash == candidate.document_hash)
     }
     pub fn orchestration_cut(&self, run: &RunId) -> Result<Option<PublishedRunCut>, BundleError> {
-        let _reading = self.store.terminal_admission();
+        let _reading = crate::run_admission::reading(&self.store);
         Ok(self
             .run_index()?
             .orchestration
@@ -236,7 +249,7 @@ impl ProjectBundle {
         &self,
         run: &RunId,
     ) -> Result<Option<RunProjection>, BundleError> {
-        let _reading = self.store.terminal_admission();
+        let _reading = crate::run_admission::reading(&self.store);
         let index = self.run_index()?;
         let Some(cut) = index.orchestration.get(run).and_then(|cuts| cuts.last()) else {
             return Ok(None);
@@ -253,7 +266,7 @@ impl ProjectBundle {
         envelope: &OrchestrationEnvelope,
         consume_batch: Option<&FeedbackBatchId>,
     ) -> Result<Option<OrchestrationReceipt>, BundleError> {
-        let _reading = self.store.terminal_admission();
+        let _reading = crate::run_admission::reading(&self.store);
         for cut in self.run_index()?.orchestration.values().flatten() {
             if cut.receipt.envelope.id == envelope.id {
                 if &cut.receipt.envelope != envelope || cut.consumed_batch.as_ref() != consume_batch
@@ -318,7 +331,7 @@ impl crate::editing_session::Ja1EditingSession {
         self.active_bundle()?.orchestration_replay(envelope, batch)
     }
     pub fn orchestration_runs(&self) -> Result<Vec<RunId>, BundleError> {
-        let _reading = self.run_terminal_admission()?;
+        let _reading = crate::run_admission::reading(self.store()?);
         Ok(self
             .active_bundle()?
             .run_index()?
@@ -352,6 +365,7 @@ impl crate::editing_session::Ja1EditingSession {
         project: &ProjectId,
         brief: &crate::orchestration_records::TaskBrief,
     ) -> Result<(), BundleError> {
+        let _reading = crate::run_admission::reading(self.store()?);
         let store = self.store()?;
         let checkpoint = store
             .read_record::<crate::bundle_records::BranchCheckpoint>(&brief.scope.base.checkpoint)?;

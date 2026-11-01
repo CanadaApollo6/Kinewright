@@ -353,6 +353,86 @@ fn s4b_c5_fix1_objects_and_decoded_pressure_leave_terminal_capacity() {
             refused,
             "C5_FIX1_SHARED_RESOURCE_RESERVE metadata={metadata}"
         );
+        let before = spending_record(&f, &run);
+        // Read headroom returns owned results and cannot authorize a write.
+        {
+            let mut owner = host.lock().unwrap();
+            let state = owner.spending_scope(&producer, &run).unwrap();
+            owner.saved_task_history(&state, &execution.task).unwrap();
+            owner
+                .retired_task_authority_exists(&state, &execution.task)
+                .unwrap();
+            owner.native_accounting(&state).unwrap();
+            owner.durable_run_accounting(&state).unwrap();
+            let reference = owner.current_accounting_reference(&state).unwrap();
+            let mut replaced = state.clone();
+            owner
+                .replace_accounting_reference(&mut replaced, reference)
+                .unwrap();
+            assert_eq!(replaced, state);
+            let editor_index = owner
+                .resolve_attachment(Some(&f.editor.bootstrap.auth.bearer()))
+                .unwrap();
+            let usage = owner
+                .owner()
+                .unwrap()
+                .store()
+                .unwrap()
+                .usage()
+                .unwrap()
+                .objects;
+            owner.issue_metadata(editor_index, None).unwrap();
+            assert_eq!(
+                owner
+                    .owner()
+                    .unwrap()
+                    .store()
+                    .unwrap()
+                    .usage()
+                    .unwrap()
+                    .objects,
+                usage,
+                "C5_FIX2_ISSUER_QUERY_HAS_NO_WRITES"
+            );
+            assert!(
+                matches!(
+                    owner
+                        .owner_mut()
+                        .unwrap()
+                        .admit_host_grant(b"ordinary write after reads"),
+                    Err(kinewright_project::bundle::BundleError::RunLimit)
+                ),
+                "C5_FIX2_READS_CANNOT_ADMIT_WRITES"
+            );
+        }
+        spending_change(
+            &f,
+            &execution,
+            super::super::native_invocation::SpendingChange::Clock,
+            before.last_unix_ms + 1,
+            1,
+            true,
+        )
+        .unwrap();
+        let settled_accounting = spending_record(&f, &run);
+        assert_eq!(
+            settled_accounting.elapsed_ms,
+            before.elapsed_ms + 1,
+            "C5_FIX2_EXISTING_CLOCK_CAN_SETTLE"
+        );
+        assert!(
+            spending_change(
+                &f,
+                &execution,
+                super::super::native_invocation::SpendingChange::Wait(Some("new wait".into())),
+                before.last_unix_ms + 2,
+                1,
+                true
+            )
+            .is_err(),
+            "C5_FIX2_WAIT_HAS_NO_TERMINAL_AUTHORITY"
+        );
+        assert_eq!(spending_record(&f, &run), settled_accounting);
         let stop = f.control(&f.editor, &run, RunAction::Stop);
         ok(
             f.editor

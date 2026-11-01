@@ -514,6 +514,7 @@ impl ProjectBundle {
         }
     }
     pub fn receipt_lookup(&self, envelope: &CommandEnvelope) -> Result<ReceiptLookup, BundleError> {
+        let _reading = crate::run_admission::reading(&self.store);
         self.store.with_namespace(|n| n.verify_read_authority())?;
         let digest = envelope.digest()?;
         if let Some(pending) = &self.pending_command
@@ -538,7 +539,9 @@ impl ProjectBundle {
         let mut recovery = self.recovery.predecessors.clone();
         recovery.extend(records.iter().filter_map(|r| r.acknowledged_root.clone()));
         for reference in &recovery {
-            let _encoded = self.store.reserve(0, reference.byte_length, 0, false)?;
+            let _encoded = self
+                .store
+                .reserve_read(0, reference.byte_length, 0, false)?;
             let mut file = self.store.open_verified(reference)?;
             let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
             let prior = crate::bundle::BundleWriteAdmission::from_bytes_using(
