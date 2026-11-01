@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::protocol::limits::{EVENTS, EventSink, Frames, encoded_frame, stderr_capture};
+use crate::protocol::limits::{EVENTS, EventSink, Frames, encoded_frame};
 #[cfg(test)]
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -428,7 +428,7 @@ impl Drop for AcpInner {
     }
 }
 
-fn spawn_reader(
+pub(crate) fn spawn_reader(
     stdout: impl Read + Send + 'static,
     stderr: impl Read + Send + 'static,
     pending: Arc<Mutex<HashMap<u64, Sender<PendingReply>>>>,
@@ -437,7 +437,8 @@ fn spawn_reader(
     process_name: &'static str,
     ingress_failed: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
-    let stderr_reader = stderr_capture(stderr, "kinewright-acp-stderr")?;
+    let stderr_reader = crate::provider_stderr::stderr_summary(stderr, "kinewright-acp-stderr")
+        .map_err(|error| AgentError::Harness(error.to_string()))?;
 
     thread::Builder::new()
         .name("kinewright-acp-reader".to_owned())
@@ -476,18 +477,17 @@ fn spawn_reader(
             let notify_fault =
                 !interrupted.load(Ordering::Acquire) || ingress_failed.load(Ordering::Acquire);
             ingress_failed.store(true, Ordering::Release);
-            let stderr_text = if stderr_reader.is_finished() {
-                stderr_reader.join().unwrap_or_default()
+            let diagnostics = if stderr_reader.is_finished() {
+                crate::provider_stderr::join_summary(stderr_reader)
             } else {
-                String::new()
+                crate::provider_stderr::StderrSummary::default()
             };
-            let detail = stderr_text.trim();
+            // C5 fix 5: provider stderr never reaches the fault.
             let message = failure.unwrap_or_else(|| {
-                if detail.is_empty() {
-                    format!("{process_name} closed its ACP stream")
-                } else {
-                    format!("{process_name} closed its ACP stream: {detail}")
-                }
+                crate::provider_stderr::with_hint(
+                    format!("{process_name} closed its ACP stream"),
+                    diagnostics,
+                )
             });
             fail_pending(&pending, &message);
             if notify_fault {

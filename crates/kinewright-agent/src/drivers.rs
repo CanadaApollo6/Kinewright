@@ -12,9 +12,7 @@ use std::{
     thread,
 };
 
-use crate::protocol::limits::{
-    EventSender as Sender, Frames, event_channel, stderr_capture, write_frame,
-};
+use crate::protocol::limits::{EventSender as Sender, Frames, event_channel, write_frame};
 use crossbeam_channel::Receiver;
 use kinewright_core::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
@@ -640,7 +638,7 @@ fn build_codex_command(
     command
 }
 
-fn spawn_codex_reader(
+pub(crate) fn spawn_codex_reader(
     stdout: impl std::io::Read + Send + 'static,
     stderr: impl std::io::Read + Send + 'static,
     child: Arc<Mutex<Option<(u32, Child)>>>,
@@ -648,7 +646,8 @@ fn spawn_codex_reader(
     done: Arc<AtomicBool>,
     reader_turn: u32,
 ) -> Result<thread::JoinHandle<()>, AgentError> {
-    let stderr_reader = stderr_capture(stderr, "kinewright-codex-stderr")?;
+    let stderr_reader = crate::provider_stderr::stderr_summary(stderr, "kinewright-codex-stderr")
+        .map_err(|error| AgentError::Harness(error.to_string()))?;
     thread::Builder::new()
         .name("kinewright-codex-events".to_owned())
         .spawn(move || {
@@ -691,19 +690,15 @@ fn spawn_codex_reader(
                 if process.try_wait().ok().flatten().is_none() {let _=process.kill();}
                 process.wait().ok()
             });
-            let stderr_text = stderr_reader.join().unwrap_or_default();
+            let diagnostics = crate::provider_stderr::join_summary(stderr_reader);
             let Ok(active)=child.lock() else {return;};
             if !matches!(active.as_ref(),Some((active_turn,_)) if *active_turn == reader_turn) {return;}
             if !done.load(Ordering::Acquire)
                 && let Some(status) = status
                 && !status.success()
             {
-                let detail = stderr_text.trim();
-                let message = if detail.is_empty() {
-                    format!("Codex exited with {status}")
-                } else {
-                    format!("Codex exited with {status}: {detail}")
-                };
+                // C5 fix 5: provider stderr never reaches the event.
+                let message = crate::provider_stderr::exit_message("Codex", status, diagnostics);
                 let _ = events.send(AgentEvent::Error(message));
             }
             send_done(&events, &done);

@@ -4,9 +4,10 @@
 //! Windows, read a short `--version`/status command's output (preferring
 //! stdout and falling back to stderr, because several CLIs print their
 //! version banner on stderr), allocate an empty scratch working directory,
-//! and drain a running child's stderr. The drain is not cosmetic: a piped
-//! stderr nobody reads blocks the child once the pipe buffer fills (~64 KiB
-//! on Linux, ~4 KiB on Windows), which wedges the turn with no diagnostic.
+//! and drain a running child's stderr through `provider_stderr`, which keeps
+//! no provider bytes. The drain is not cosmetic: a piped stderr nobody reads
+//! blocks the child once the pipe buffer fills (~64 KiB on Linux, ~4 KiB on
+//! Windows), which wedges the turn with no diagnostic.
 
 use std::{
     env, fs,
@@ -155,23 +156,6 @@ pub(crate) fn create_scratch_directory(infix: &str) -> Result<PathBuf, AgentErro
     Err(AgentError::Harness(format!(
         "could not allocate a unique {infix} scratch directory"
     )))
-}
-
-/// Drain a running child's stderr on its own thread and keep the text for
-/// the failure message. Joining the handle waits for the child's stderr to
-/// close, so join it only after its stdout has ended.
-pub(crate) fn spawn_stderr_capture(
-    stderr: impl Read + Send + 'static,
-    thread_name: &str,
-) -> Result<JoinHandle<String>, AgentError> {
-    thread::Builder::new()
-        .name(thread_name.to_owned())
-        .spawn(move || {
-            let mut text = String::new();
-            let _ = BufReader::new(stderr).read_to_string(&mut text);
-            text
-        })
-        .map_err(|error| AgentError::Harness(error.to_string()))
 }
 
 #[cfg(test)]

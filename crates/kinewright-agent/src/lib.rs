@@ -59,6 +59,10 @@ mod muse;
 pub mod orchestration;
 mod pacing;
 mod protocol;
+mod provider_stderr;
+#[cfg(feature = "eval-harness")]
+#[doc(hidden)]
+pub use provider_stderr::witness as adapter_stderr_witness;
 mod render;
 mod runtime;
 mod schema;

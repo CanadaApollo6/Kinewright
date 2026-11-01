@@ -3070,6 +3070,72 @@ pub(crate) async fn guard_mcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// C5 fix 5: a direct adapter whose provider writes a credential-looking
+    /// value to stderr and exits 1 reports a fixed message. The value reaches
+    /// neither the error event nor the host's retained session state.
+    #[test]
+    fn s4b_c5_fix5_adapter_stderr_reaches_no_event_or_host_state() {
+        use crate::provider_stderr::witness::{ADAPTER_STDERR_SECRET, adapter_stderr_witness};
+        let secret = ADAPTER_STDERR_SECRET.split_once('=').unwrap().1;
+        let outputs = adapter_stderr_witness();
+        assert_eq!(outputs.len(), 3, "C5_FIX5_ADAPTERS");
+        for (adapter, events) in outputs {
+            let errors = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Error(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!errors.is_empty(), "C5_FIX5_NO_ERROR {adapter} {events:?}");
+            for event in &events {
+                assert!(
+                    !format!("{event:?}").contains(secret),
+                    "C5_FIX5_STDERR_IN_EVENT {adapter} {event:?}"
+                );
+            }
+            let expected = |text: &str| match adapter {
+                // The Codex reader may kill a child that closed stdout but
+                // is not yet reaped; then the status is a signal.
+                "codex" => {
+                    text == "Codex exited with status 1 before replying"
+                        || text.starts_with("Codex stopped before replying (")
+                }
+                "copilot" => text == "Copilot exited with status 1 before replying",
+                _ => text.ends_with("Fixture ACP agent closed its ACP stream"),
+            };
+            assert!(
+                errors.iter().all(|text| expected(text)),
+                "C5_FIX5_MESSAGE {adapter} {errors:?}"
+            );
+            let state = Arc::new(Mutex::new(SessionState {
+                events: VecDeque::new(),
+                bytes: 0,
+                overflowed: false,
+                running: true,
+                stop: None,
+            }));
+            let mut observer = HostObserver {
+                state: Arc::clone(&state),
+            };
+            for event in &events {
+                let _ = crate::SessionObserver::on_event(&mut observer, event);
+            }
+            let retained = state.lock().unwrap();
+            assert!(
+                retained.events.iter().any(|event| event.kind == "error"),
+                "C5_FIX5_HOST_KEPT_NO_ERROR {adapter}"
+            );
+            for event in &retained.events {
+                assert!(
+                    !event.text.contains(secret),
+                    "C5_FIX5_STDERR_IN_HOST_STATE {adapter} {}",
+                    event.text
+                );
+            }
+            eprintln!("C5_FIX5_ADAPTER {adapter} errors={errors:?}");
+        }
+    }
     #[test]
     fn s3_portable_roles_revoke_and_refuse_before_manual_write_admission() {
         let configuration = || HostConfig {

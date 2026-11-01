@@ -1532,16 +1532,13 @@ impl KinewrightApp {
                         .push(ChatEntry::Text(text));
                 }
                 AgentEvent::Error(error) => {
+                    let (entry, observed) =
+                        agent_error_display(&self.projects[project_index].name, &error);
                     self.projects[project_index].threads[thread_index]
                         .chat
-                        .push(ChatEntry::Text(error.clone()));
-                    let project_name = self.projects[project_index].name.clone();
+                        .push(entry);
                     // Appendix B row 47.
-                    self.note_label(
-                        LabelIncident::Agent,
-                        IncidentSubject::Agent,
-                        format!("{project_name}: {error}"),
-                    );
+                    self.note_label(LabelIncident::Agent, IncidentSubject::Agent, observed);
                 }
                 AgentEvent::ToolCall { name, arguments } => {
                     let kind = if name == "get_frame_at" || name.contains("storyboard") {
@@ -3062,9 +3059,51 @@ fn summarize(value: &str, maximum_chars: usize) -> String {
     summary
 }
 
+/// The chat line and incident text for an agent error event. The adapters
+/// put no provider-written stderr into the event (C5 fix 5), so neither
+/// carries provider bytes.
+fn agent_error_display(project_name: &str, error: &str) -> (ChatEntry, String) {
+    (
+        ChatEntry::Text(error.to_owned()),
+        format!("{project_name}: {error}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C5 fix 5: the chat line and incident text for each direct adapter's
+    /// failed turn carry no provider stderr.
+    #[test]
+    fn s4b_c5_fix5_chat_shows_no_provider_stderr() {
+        use kinewright_agent::adapter_stderr_witness::{
+            ADAPTER_STDERR_SECRET, adapter_stderr_witness,
+        };
+        let secret = ADAPTER_STDERR_SECRET.split_once('=').unwrap().1;
+        let mut shown = 0;
+        for (adapter, events) in adapter_stderr_witness() {
+            for event in events {
+                let AgentEvent::Error(error) = event else {
+                    continue;
+                };
+                let (entry, observed) = agent_error_display("fixture project", &error);
+                let ChatEntry::Text(text) = entry else {
+                    panic!("C5_FIX5_CHAT_ENTRY {adapter}");
+                };
+                assert!(
+                    !text.contains(secret),
+                    "C5_FIX5_STDERR_IN_CHAT {adapter} {text}"
+                );
+                assert!(
+                    !observed.contains(secret),
+                    "C5_FIX5_STDERR_IN_INCIDENT {adapter} {observed}"
+                );
+                shown += 1;
+            }
+        }
+        assert!(shown >= 3, "C5_FIX5_CHAT_SAW_ERRORS {shown}");
+    }
 
     #[test]
     fn cost_events_accumulate_token_usage() {

@@ -26,9 +26,7 @@ use kinewright_core::{
 use serde_json::json;
 
 use crate::{
-    child_process::{
-        create_scratch_directory, hide_console_window, process_output, spawn_stderr_capture,
-    },
+    child_process::{create_scratch_directory, hide_console_window, process_output},
     drivers::{KINEWRIGHT_SYSTEM_PROMPT, find_on_path},
     models::{ModelChoice, ServiceTier},
     protocol::CopilotProtocol,
@@ -350,16 +348,17 @@ fn build_copilot_command(
 }
 
 /// Read one `copilot -p` run. Its stderr is drained on a second thread and
-/// kept for the failure message: an undrained pipe blocks the child once it
-/// fills, which would hang the turn instead of ending it.
-fn spawn_copilot_reader(
+/// only matched against known errors: an undrained pipe blocks the child once
+/// it fills, which would hang the turn instead of ending it.
+pub(crate) fn spawn_copilot_reader(
     stdout: impl std::io::Read + Send + 'static,
     stderr: impl std::io::Read + Send + 'static,
     child: Arc<Mutex<Option<Child>>>,
     events: Sender<AgentEvent>,
     done: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
-    let stderr_reader = spawn_stderr_capture(stderr, "kinewright-copilot-stderr")?;
+    let stderr_reader = crate::provider_stderr::stderr_summary(stderr, "kinewright-copilot-stderr")
+        .map_err(|error| AgentError::Harness(error.to_string()))?;
     thread::Builder::new()
         .name("kinewright-copilot-events".to_owned())
         .spawn(move || {
@@ -397,17 +396,14 @@ fn spawn_copilot_reader(
             // session store would otherwise hold Stop open indefinitely.
             let owned = child.lock().ok().and_then(|mut child| child.take());
             let status = owned.and_then(|mut child| child.wait().ok());
-            let stderr_text = stderr_reader.join().unwrap_or_default();
+            let diagnostics = crate::provider_stderr::join_summary(stderr_reader);
             if !done.load(Ordering::Acquire) {
                 if let Some(status) = status
                     && !status.success()
                 {
-                    let detail = stderr_text.trim();
-                    let message = if detail.is_empty() {
-                        format!("Copilot exited with {status}")
-                    } else {
-                        format!("Copilot exited with {status}: {detail}")
-                    };
+                    // C5 fix 5: provider stderr never reaches the event.
+                    let message =
+                        crate::provider_stderr::exit_message("Copilot", status, diagnostics);
                     let _ = events.send(AgentEvent::Error(message));
                 }
                 send_done(&events, &done);

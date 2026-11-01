@@ -783,7 +783,10 @@ impl NativeGuardianLauncher {
             .name("kinewright-contained-codex".into())
             .spawn(move || {
                 let guardian = pipes.guardian_channel();
-                let diagnostics = stderr_summary(pipes.diagnostics);
+                let diagnostics = crate::provider_stderr::stderr_summary(
+                    pipes.diagnostics,
+                    "kinewright-contained-stderr",
+                );
                 let mut output = CountingReader {
                     inner: pipes.output,
                     bytes: 0,
@@ -836,7 +839,7 @@ impl NativeGuardianLauncher {
                     && !sender.failed()
                     && !worker_stopped.load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    let reason = launch_failure(&guardian, &diagnostics);
+                    let reason = launch_failure(&guardian, diagnostics);
                     if usage_owner.launch_failed(&execution, &reason).is_err() {
                         sender.interrupt("provider launch failure remains unpublished");
                     } else {
@@ -873,64 +876,11 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
     }
 }
 
-/// Provider errors the host recognizes. Only the fixed text is ever shown or
-/// stored; the matched provider bytes are not kept.
-const KNOWN_PROVIDER_ERRORS: [(&[u8], &str); 1] = [(
-    b"Codex executable path is not configured",
-    "Codex could not resolve its own executable path",
-)];
-
-/// What the host keeps from provider stderr: which known errors appeared.
-/// Provider-written bytes are never retained, however long stderr gets.
-#[derive(Default)]
-pub(crate) struct StderrSummary {
-    known: Option<&'static str>,
-}
-
-/// Drain provider stderr and match it against the fixed allowlist. Memory is
-/// bounded to one read buffer plus the longest pattern.
-pub(crate) fn stderr_summary(
-    mut reader: impl std::io::Read + Send + 'static,
-) -> io::Result<thread::JoinHandle<StderrSummary>> {
-    thread::Builder::new()
-        .name("kinewright-contained-stderr".into())
-        .spawn(move || {
-            let longest = KNOWN_PROVIDER_ERRORS
-                .iter()
-                .map(|(pattern, _)| pattern.len())
-                .max()
-                .unwrap_or(1);
-            let mut summary = StderrSummary::default();
-            let mut window = Vec::with_capacity(8192 + longest);
-            let mut chunk = [0_u8; 8192];
-            loop {
-                let read = match reader.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(read) => read,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                };
-                window.extend_from_slice(&chunk[..read]);
-                if summary.known.is_none() {
-                    summary.known = KNOWN_PROVIDER_ERRORS
-                        .iter()
-                        .find(|(pattern, _)| {
-                            window.windows(pattern.len()).any(|part| part == *pattern)
-                        })
-                        .map(|(_, text)| *text);
-                }
-                let keep = longest.saturating_sub(1).min(window.len());
-                window.drain(..window.len() - keep);
-            }
-            summary
-        })
-}
-
 /// The persisted reason is built only from the guardian's own record and the
 /// fixed known-error text. No provider-written byte reaches it.
 pub(crate) fn launch_failure(
     guardian: &crate::provider_pipes::GuardianStatus,
-    diagnostics: &StderrSummary,
+    diagnostics: crate::provider_stderr::StderrSummary,
 ) -> String {
     use crate::provider_pipes::GuardianStatus;
     let base = match guardian {
@@ -944,10 +894,7 @@ pub(crate) fn launch_failure(
             "the provider exited before its first event (status unknown)".to_owned()
         }
     };
-    match diagnostics.known {
-        Some(text) => format!("{base}: {text}"),
-        None => base,
-    }
+    crate::provider_stderr::with_hint(base, diagnostics)
 }
 
 struct RestrictedSession {
@@ -1097,7 +1044,7 @@ mod tests {
     use super::*;
     fn c5_fix4_reason(stderr: &[u8], record: &[u8]) -> String {
         let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
-        let summary = stderr_summary(reader).unwrap();
+        let summary = crate::provider_stderr::stderr_summary(reader, "fix4-test").unwrap();
         // A real socket delivers stderr in pieces, as the provider writes it.
         for piece in stderr.chunks(4093) {
             std::io::Write::write_all(&mut writer, piece).unwrap();
@@ -1105,7 +1052,7 @@ mod tests {
         drop(writer);
         launch_failure(
             &crate::provider_pipes::parse_guardian_status(record),
-            &summary.join().unwrap(),
+            summary.join().unwrap(),
         )
     }
     #[test]
