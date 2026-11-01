@@ -91,4 +91,69 @@ impl ProviderPipes {
         self.credentials.write_all(secret)?;
         self.credentials.shutdown(std::net::Shutdown::Write)
     }
+    /// The guardian's exit record arrives on the credential socket after the
+    /// host has shut down its own write side.
+    ///
+    /// # Errors
+    /// Refuses an unavailable descriptor clone.
+    pub fn guardian_channel(&self) -> io::Result<GuardianChannel> {
+        self.credentials.try_clone().map(GuardianChannel)
+    }
+}
+
+/// Init's private status channel. Only the guardian writes to it.
+pub struct GuardianChannel(UnixStream);
+impl GuardianChannel {
+    /// Read the bounded record once init has exited. A missing, oversized or
+    /// malformed record is `Unknown`, never text.
+    #[must_use]
+    pub fn status(self) -> GuardianStatus {
+        use std::io::Read;
+        let cap = GUARDIAN_STATUS_CAP;
+        let mut record = Vec::new();
+        let read = self
+            .0
+            .set_read_timeout(Some(crate::job_guardian::protocol::CLEANUP))
+            .and_then(|()| (&self.0).take(cap as u64 + 1).read_to_end(&mut record));
+        if read.is_err() || record.len() > cap {
+            return GuardianStatus::Unknown;
+        }
+        parse_guardian_status(&record)
+    }
+}
+
+pub const GUARDIAN_STATUS_CAP: usize = 64;
+
+/// What the guardian says happened after COMMIT. It carries no provider bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuardianStatus {
+    Exited(i32),
+    /// An `io::ErrorKind` name: ASCII letters only, at most 32 bytes.
+    Refused(String),
+    Unknown,
+}
+
+#[must_use]
+pub fn parse_guardian_status(record: &[u8]) -> GuardianStatus {
+    let Some(line) = std::str::from_utf8(record)
+        .ok()
+        .and_then(|text| text.strip_suffix('\n'))
+        .and_then(|text| text.strip_prefix(crate::job_guardian::protocol::GUARDIAN_STATUS))
+        .and_then(|text| text.strip_prefix(' '))
+    else {
+        return GuardianStatus::Unknown;
+    };
+    match line.split_once(' ') {
+        Some(("exited", status)) => status
+            .parse()
+            .map_or(GuardianStatus::Unknown, GuardianStatus::Exited),
+        Some(("refused", kind))
+            if !kind.is_empty()
+                && kind.len() <= 32
+                && kind.bytes().all(|byte| byte.is_ascii_alphabetic()) =>
+        {
+            GuardianStatus::Refused(kind.to_owned())
+        }
+        _ => GuardianStatus::Unknown,
+    }
 }

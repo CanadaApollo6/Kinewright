@@ -168,16 +168,13 @@ fn s4b_c5_fix3_launch_death_surfaces_promptly() {
         .iter()
         .map(|observation| NativeUnitCleanup::new(&observation.identity))
         .collect::<Vec<_>>();
-    for needle in [
-        "provider exited before its first event",
-        "fixture: provider died right after exec",
-        "kinewright-guardian: provider exited with status 3",
-    ] {
-        assert!(
-            refusal.contains(needle),
-            "C5_FIX3_LAUNCH_DEATH_REASON missing {needle:?} in {refusal:?}"
-        );
-    }
+    // C5 fix 4: the stored reason carries the guardian's own status only.
+    // The provider's 192 KiB stderr, its synthetic credential-looking value
+    // and its forged guardian record never reach project evidence.
+    assert_eq!(
+        refusal, "the provider exited before its first event (status 3)",
+        "C5_FIX4_LAUNCH_DEATH_REASON"
+    );
     let observations = fixture.observations();
     assert_eq!(observations.len(), 1, "C5_FIX3_NO_RELAUNCH");
     let executions =

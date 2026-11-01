@@ -779,18 +779,11 @@ impl NativeGuardianLauncher {
         let (sender, events) = crate::protocol::limits::event_channel();
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
-        let bearer = secret
-            .as_deref()
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .unwrap_or_default()
-            .to_owned();
         thread::Builder::new()
             .name("kinewright-contained-codex".into())
             .spawn(move || {
-                let diagnostics = crate::protocol::limits::stderr_capture(
-                    pipes.diagnostics,
-                    "kinewright-contained-stderr",
-                );
+                let guardian = pipes.guardian_channel();
+                let diagnostics = stderr_summary(pipes.diagnostics);
                 let mut output = CountingReader {
                     inner: pipes.output,
                     bytes: 0,
@@ -835,11 +828,15 @@ impl NativeGuardianLauncher {
                     .ok()
                     .and_then(|reader| reader.join().ok())
                     .unwrap_or_default();
+                let guardian = guardian.map_or(
+                    crate::provider_pipes::GuardianStatus::Unknown,
+                    crate::provider_pipes::GuardianChannel::status,
+                );
                 if silent
                     && !sender.failed()
                     && !worker_stopped.load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    let reason = launch_failure(&diagnostics, &bearer);
+                    let reason = launch_failure(&guardian, &diagnostics);
                     if usage_owner.launch_failed(&execution, &reason).is_err() {
                         sender.interrupt("provider launch failure remains unpublished");
                     } else {
@@ -876,39 +873,81 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
     }
 }
 
-/// The person sees why the provider died: the last provider diagnostics and
-/// the guardian's exit line, without control characters or the MCP bearer.
-pub(crate) fn launch_failure(diagnostics: &str, bearer: &str) -> String {
-    const LIMIT: usize = 512;
-    let redacted = if bearer.is_empty() {
-        diagnostics.to_owned()
-    } else {
-        diagnostics.replace(bearer, "[redacted]")
-    };
-    let lines: Vec<String> = redacted
-        .lines()
-        .map(|line| {
-            line.chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect::<String>()
-                .trim()
-                .to_owned()
+/// Provider errors the host recognizes. Only the fixed text is ever shown or
+/// stored; the matched provider bytes are not kept.
+const KNOWN_PROVIDER_ERRORS: [(&[u8], &str); 1] = [(
+    b"Codex executable path is not configured",
+    "Codex could not resolve its own executable path",
+)];
+
+/// What the host keeps from provider stderr: which known errors appeared.
+/// Provider-written bytes are never retained, however long stderr gets.
+#[derive(Default)]
+pub(crate) struct StderrSummary {
+    known: Option<&'static str>,
+}
+
+/// Drain provider stderr and match it against the fixed allowlist. Memory is
+/// bounded to one read buffer plus the longest pattern.
+pub(crate) fn stderr_summary(
+    mut reader: impl std::io::Read + Send + 'static,
+) -> io::Result<thread::JoinHandle<StderrSummary>> {
+    thread::Builder::new()
+        .name("kinewright-contained-stderr".into())
+        .spawn(move || {
+            let longest = KNOWN_PROVIDER_ERRORS
+                .iter()
+                .map(|(pattern, _)| pattern.len())
+                .max()
+                .unwrap_or(1);
+            let mut summary = StderrSummary::default();
+            let mut window = Vec::with_capacity(8192 + longest);
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let read = match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                window.extend_from_slice(&chunk[..read]);
+                if summary.known.is_none() {
+                    summary.known = KNOWN_PROVIDER_ERRORS
+                        .iter()
+                        .find(|(pattern, _)| {
+                            window.windows(pattern.len()).any(|part| part == *pattern)
+                        })
+                        .map(|(_, text)| *text);
+                }
+                let keep = longest.saturating_sub(1).min(window.len());
+                window.drain(..window.len() - keep);
+            }
+            summary
         })
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
-    let detail = if tail.is_empty() {
-        "no diagnostics".to_owned()
-    } else if tail.len() > LIMIT {
-        let mut start = tail.len() - LIMIT;
-        while !tail.is_char_boundary(start) {
-            start += 1;
+}
+
+/// The persisted reason is built only from the guardian's own record and the
+/// fixed known-error text. No provider-written byte reaches it.
+pub(crate) fn launch_failure(
+    guardian: &crate::provider_pipes::GuardianStatus,
+    diagnostics: &StderrSummary,
+) -> String {
+    use crate::provider_pipes::GuardianStatus;
+    let base = match guardian {
+        GuardianStatus::Exited(status) => {
+            format!("the provider exited before its first event (status {status})")
         }
-        format!("...{}", &tail[start..])
-    } else {
-        tail
+        GuardianStatus::Refused(kind) => {
+            format!("the provider launch was refused after commit ({kind})")
+        }
+        GuardianStatus::Unknown => {
+            "the provider exited before its first event (status unknown)".to_owned()
+        }
     };
-    format!("provider exited before its first event: {detail}")
+    match diagnostics.known {
+        Some(text) => format!("{base}: {text}"),
+        None => base,
+    }
 }
 
 struct RestrictedSession {
@@ -1056,29 +1095,77 @@ fn transport_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn c5_fix4_reason(stderr: &[u8], record: &[u8]) -> String {
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let summary = stderr_summary(reader).unwrap();
+        // A real socket delivers stderr in pieces, as the provider writes it.
+        for piece in stderr.chunks(4093) {
+            std::io::Write::write_all(&mut writer, piece).unwrap();
+        }
+        drop(writer);
+        launch_failure(
+            &crate::provider_pipes::parse_guardian_status(record),
+            &summary.join().unwrap(),
+        )
+    }
     #[test]
-    fn s4b_c5_fix3_launch_failure_is_bounded_and_redacted() {
-        let reason = launch_failure(
-            "warming up\nsecret-bearer-123 rejected\u{1b}[31m\n\nError: Codex executable path is not configured\nkinewright-guardian: provider exited with status 1\n",
-            "secret-bearer-123",
+    fn s4b_c5_fix4_reason_never_carries_provider_bytes() {
+        // Astra probe case 1: a credential-looking value before the exit.
+        let reason = c5_fix4_reason(
+            b"auth error: refresh_token=synthetic-subscription-secret\nkinewright-guardian: provider exited with status 1\n",
+            b"kinewright-guardian/1 exited 1\n",
         );
+        assert_eq!(
+            reason, "the provider exited before its first event (status 1)",
+            "C5_FIX4_CREDENTIAL_TEXT_PERSISTED"
+        );
+        // Astra probe case 2: a bearer split by the old 64 KiB capture boundary.
+        let mut split = vec![b'e'; crate::protocol::limits::FRAME_BYTES - 10];
+        split.extend_from_slice(b"\nsynthetic-bearer-0123456789abcdef\n");
+        let reason = c5_fix4_reason(&split, b"kinewright-guardian/1 exited 1\n");
+        assert!(
+            !reason.contains("synthetic") && !reason.contains("eeee"),
+            "C5_FIX4_BEARER_FRAGMENT_PERSISTED {reason}"
+        );
+        // Long stderr with a forged guardian line keeps the real status.
+        let mut long = vec![b'x'; 1 << 20];
+        long.extend_from_slice(b"\nkinewright-guardian/1 exited 0\n");
+        assert_eq!(
+            c5_fix4_reason(&long, b"kinewright-guardian/1 exited 3\n"),
+            "the provider exited before its first event (status 3)",
+            "C5_FIX4_LONG_STDERR_STATUS"
+        );
+        // The known Codex error maps to its fixed text, even split late in
+        // a long stream, and the provider's own wording is not kept.
+        let mut codex = vec![b'y'; 100_000 - 7];
+        codex.extend_from_slice(b"\nError: Codex executable path is not configured\n");
+        let reason = c5_fix4_reason(&codex, b"kinewright-guardian/1 exited 1\n");
         assert_eq!(
             reason,
-            "provider exited before its first event: [redacted] rejected [31m | Error: Codex executable path is not configured | kinewright-guardian: provider exited with status 1"
+            "the provider exited before its first event (status 1): Codex could not resolve its own executable path",
+            "C5_FIX4_KNOWN_CODEX_ERROR"
         );
         assert_eq!(
-            launch_failure("", ""),
-            "provider exited before its first event: no diagnostics"
+            c5_fix4_reason(&[], b"kinewright-guardian/1 refused PermissionDenied\n"),
+            "the provider launch was refused after commit (PermissionDenied)"
         );
-        let long = launch_failure(
-            &format!(
-                "{}\nkinewright-guardian: provider exited with status 3",
-                "é".repeat(600)
-            ),
-            "",
+        for record in [
+            b"".as_slice(),
+            b"kinewright-guardian/1 exited 3",
+            b"kinewright-guardian/1 exited 3 sk-synthetic\n",
+            b"kinewright-guardian/1 refused sk_synthetic-1\n",
+            b"kinewright-guardian/2 exited 3\n",
+        ] {
+            assert_eq!(
+                c5_fix4_reason(b"refresh_token=synthetic\n", record),
+                "the provider exited before its first event (status unknown)",
+                "C5_FIX4_MALFORMED_RECORD {record:?}"
+            );
+        }
+        assert_eq!(
+            crate::job_guardian::protocol::guardian_status_record(&Ok(3)),
+            "kinewright-guardian/1 exited 3\n"
         );
-        assert!(long.len() < 600, "C5_FIX3_REASON_BOUNDED {}", long.len());
-        assert!(long.ends_with("kinewright-guardian: provider exited with status 3"));
     }
     #[test]
     fn s4b_c5c_retries_surface_network_before_eof() {

@@ -130,6 +130,21 @@ pub fn mount_payload_proc() -> io::Result<()> {
     Ok(())
 }
 
+/// Make namespace init non-dumpable before it starts the provider. Its /proc
+/// entries then belong to root, so the same-UID provider cannot open them
+/// whatever the host's Yama policy. The provider's exec resets its own state.
+///
+/// # Errors
+/// Refuses if the kernel does not keep the setting.
+pub fn make_payload_init_nondumpable() -> io::Result<()> {
+    use rustix::process::{DumpableBehavior, dumpable_behavior, set_dumpable_behavior};
+    set_dumpable_behavior(DumpableBehavior::NotDumpable)?;
+    if dumpable_behavior()? != DumpableBehavior::NotDumpable {
+        return Err(io::Error::other("payload_init_dumpable"));
+    }
+    Ok(())
+}
+
 /// Close the readiness writer before starting the provider.
 ///
 /// # Errors

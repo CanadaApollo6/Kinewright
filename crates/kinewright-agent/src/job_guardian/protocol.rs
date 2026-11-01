@@ -12,6 +12,20 @@ pub const WIRE_CAP: usize = 64 * 1024;
 pub const RECOVERY_CAP: usize = 1024;
 pub const VERSION: u32 = 1;
 
+/// Namespace init's own exit record. Init writes it on the private credential
+/// socket, which the provider never holds, so provider output cannot forge it.
+#[cfg(target_os = "linux")]
+pub const GUARDIAN_STATUS: &str = "kinewright-guardian/1";
+
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn guardian_status_record(result: &io::Result<i32>) -> String {
+    match result {
+        Ok(status) => format!("{GUARDIAN_STATUS} exited {status}\n"),
+        Err(error) => format!("{GUARDIAN_STATUS} refused {:?}\n", error.kind()),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptIdentity {

@@ -60,6 +60,56 @@ fn main() {
         return;
     }
     #[cfg(target_os = "linux")]
+    if role == "s4b-proc1" {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        // Records only outcomes and lengths, never init's environment or memory.
+        let errno = |error: std::io::Error| format!("err:{}", error.raw_os_error().unwrap_or(0));
+        let mut report = Vec::new();
+        for name in ["environ", "cmdline", "mem"] {
+            let path = format!("/proc/1/{name}");
+            let outcome = match fs::File::open(&path) {
+                Err(error) => errno(error),
+                Ok(mut file) => {
+                    let mut bytes = [0_u8; 4096];
+                    match file.read(&mut bytes) {
+                        Ok(read) => format!("opened:read_bytes={read}"),
+                        Err(error) => format!("opened:{}", errno(error)),
+                    }
+                }
+            };
+            report.push(format!("\"{name}\":\"{outcome}\""));
+        }
+        let listing = fs::read_dir("/proc/1/fd")
+            .map_or_else(errno, |entries| format!("listed:{}", entries.count()));
+        report.push(format!("\"fd_list\":\"{listing}\""));
+        let links = (0..16)
+            .filter_map(|fd| match fs::read_link(format!("/proc/1/fd/{fd}")) {
+                Err(error) if error.raw_os_error() == Some(2) => None,
+                Err(error) => Some(format!("{fd}={}", errno(error))),
+                Ok(_) => Some(format!("{fd}=readable")),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        report.push(format!("\"fd_links\":\"{links}\""));
+        let owner = fs::metadata("/proc/1/environ").map_or_else(errno, |m| m.uid().to_string());
+        report.push(format!("\"environ_owner\":\"{owner}\""));
+        report.push(format!(
+            "\"provider_uid\":\"{}\"",
+            fs::metadata("/proc/self/environ").map_or_else(errno, |m| m.uid().to_string())
+        ));
+        let named = env::current_exe()
+            .is_ok_and(|path| path.to_string_lossy().starts_with("/memfd:kinewright-provider"));
+        report.push(format!("\"self_exe_named\":{named}"));
+        fs::write(
+            root.join("proc1-report.partial"),
+            format!("{{{}}}", report.join(",")),
+        )
+        .unwrap();
+        fs::rename(root.join("proc1-report.partial"), root.join("proc1-report.json")).unwrap();
+        return;
+    }
+    #[cfg(target_os = "linux")]
     if role == "s4b-credentials" {
         let original = Path::new(&args[3]);
         let ambient_denied = fs::read_dir(original).is_err()
@@ -109,7 +159,14 @@ fn main() {
         executions.sync_all().unwrap();
         fs::write(root.join("execution-ready"), b"").unwrap();
         if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"exit") {
-            eprintln!("fixture: provider died right after exec");
+            // Synthetic only: a credential-looking value, a forged guardian
+            // record and stderr far past any capture bound.
+            let mut stderr = std::io::stderr().lock();
+            writeln!(stderr, "fixture: refresh_token=synthetic-subscription-secret").unwrap();
+            writeln!(stderr, "kinewright-guardian/1 exited 0").unwrap();
+            stderr.write_all(&vec![b'z'; 192 * 1024]).unwrap();
+            writeln!(stderr, "\nfixture: provider died right after exec").unwrap();
+            drop(stderr);
             std::process::exit(3);
         }
         let fixture_full = fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"full");

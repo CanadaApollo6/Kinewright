@@ -76,7 +76,10 @@ impl Tree {
     pub(super) fn contain(&mut self, root: &Path, program: &Program) -> io::Result<ProcessHandle> {
         let program_path = root.join("program.json");
         super::service::atomic_record(&program_path, program, super::protocol::WIRE_CAP)?;
+        // The shim and namespace init need no environment; an empty block
+        // leaves nothing inherited for /proc/<init>/environ to show.
         let mut child = Command::new(std::env::current_exe()?)
+            .env_clear()
             .arg("--shim")
             .arg(self.cgroup.path())
             .arg(&program_path)
@@ -259,19 +262,16 @@ fn init(
         return Err(io::Error::other("missing shim COMMIT"));
     }
     // After COMMIT the host owns an executing attempt and no readiness reply
-    // remains. Name every later refusal, and the provider's exit, on the
-    // provider's diagnostics stream so the host can report it at once.
-    let diagnostics = pipes
+    // remains. Report every later refusal, and the provider's exit, on the
+    // private credential socket. The clone is close-on-exec, so the provider
+    // never holds it and cannot forge or bury this record.
+    let status = pipes
         .as_ref()
-        .map(|pipes| pipes[2].try_clone())
+        .map(|pipes| pipes[3].try_clone())
         .transpose()?;
     let result = launch(program, image, pipes);
-    if let Some(mut diagnostics) = diagnostics {
-        let line = match &result {
-            Ok(status) => format!("kinewright-guardian: provider exited with status {status}\n"),
-            Err(error) => format!("kinewright-guardian: launch refused after commit: {error}\n"),
-        };
-        let _ = diagnostics.write_all(line.as_bytes());
+    if let Some(mut status) = status {
+        let _ = status.write_all(super::protocol::guardian_status_record(&result).as_bytes());
     }
     result
 }
@@ -359,6 +359,10 @@ fn launch(
             command.env("KINEWRIGHT_HOST_MCP_TOKEN", token);
         }
     }
+    // Init still holds the transient MCP bearer and its inherited state. The
+    // provider shares its UID and Landlock domain, so init's /proc entries
+    // must not depend on Yama or on init keeping capabilities.
+    kinewright_job_sys::make_payload_init_nondumpable()?;
     let child = if let Some(image) = &image {
         kinewright_job_sys::spawn_executable_image(command, image)?
     } else {

@@ -2071,15 +2071,14 @@ fn s4_c2_proc_shows_only_the_namespace() {
     let result: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("proc-result.json")).unwrap()).unwrap();
     finish_c2(claim, session);
-    let init_descriptors = result["init_descriptors"].as_array().map_or_else(
-        || host_init_descriptors,
-        |values| {
-            values
-                .iter()
-                .map(|value| value.as_str().unwrap().to_owned())
-                .collect()
-        },
+    // The provider must not enumerate init's descriptors; the inventory is
+    // checked from the host view taken before COMMIT.
+    assert!(
+        result["init_descriptors"].is_null(),
+        "C5_FIX4_PROVIDER_LISTED_INIT_FDS {}",
+        result["init_descriptors"]
     );
+    let init_descriptors = host_init_descriptors;
     assert!(
         init_descriptors
             .iter()
@@ -3101,6 +3100,100 @@ fn s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier() {
         result.unwrap_or_default(),
         "qualified=true named=true sealed=true private_fd=true",
         "C5_FIX3_GUARDIAN_NAMED_SEALED_IMAGE_AND_PRIVATE_FD"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "on-demand: equipped Linux sealed-image qualification"]
+fn s4b_c5_fix4_provider_cannot_read_namespace_init() {
+    use kinewright_agent::provider_pipes::ProviderPipeListeners;
+    use std::os::unix::fs::MetadataExt;
+    assert!(equipped_session("s4b_c5_fix4_namespace_init"));
+    let root = root("p1");
+    let _cleanup = FixtureCleanup(root.clone());
+    let executable = root.join("qualified");
+    fs::copy(fixture(), &executable).unwrap();
+    let scratch = root.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let credentials = root.join("credentials");
+    fs::create_dir(&credentials).unwrap();
+    let pipes = ProviderPipeListeners::bind(&root.join("pipes")).unwrap();
+    let metadata = fs::metadata(&executable).unwrap();
+    let mut program = Program {
+        image: None,
+        credential_root: None,
+        executable: executable.clone(),
+        arguments: vec![scratch.to_string_lossy().into_owned(), "s4b-proc1".into()],
+        environment: std::collections::BTreeMap::default(),
+        working_directory: scratch.clone(),
+        pipe_directory: Some(pipes.directory().into()),
+        sandbox: protocol::ProviderSandbox::LinuxAllowlist {
+            credential_mount: None,
+            connect_tcp: vec![443],
+            runtime: ["/usr", "/lib", "/lib64", "/dev/null"]
+                .map(Into::into)
+                .to_vec(),
+            scratch: scratch.clone(),
+            credential_store: credentials,
+            executable_identity: [metadata.dev(), metadata.ino()],
+        },
+    };
+    let _image = program.fixture_image().unwrap();
+    let id = identity();
+    let mut claim =
+        MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
+    let mut owner = Owner::new(&root);
+    let mut session = ContainedSession::prepare(
+        &mut claim,
+        &mut owner,
+        id,
+        program,
+        guardian(),
+        &CertifiedProfile::fixture(),
+    )
+    .unwrap();
+    let mut streams = pipes.accept().unwrap();
+    // A synthetic bearer stands in for the MCP token init holds before spawn.
+    streams.credentials(b"synthetic-mcp-bearer").unwrap();
+    let status = streams.guardian_channel().unwrap();
+    session.commit(&mut owner).unwrap();
+    let report = scratch.join("proc1-report.json");
+    let deadline = Instant::now() + protocol::STARTUP;
+    while !report.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let result = fs::read_to_string(&report);
+    let proof = session.cleanup().unwrap();
+    assert_retired(&mut claim, &proof);
+    claim.finish().unwrap();
+    let text = result.unwrap_or_default();
+    eprintln!("C5_FIX4_PROC1_REPORT {text}");
+    assert_eq!(
+        status.status(),
+        kinewright_agent::provider_pipes::GuardianStatus::Exited(0),
+        "C5_FIX4_GUARDIAN_STATUS_CHANNEL"
+    );
+    let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        report["self_exe_named"], true,
+        "C5_FIX4_SELF_EXE_STILL_NAMED"
+    );
+    for name in ["environ", "cmdline", "mem", "fd_list"] {
+        assert!(
+            report[name].as_str().unwrap().starts_with("err:"),
+            "C5_FIX4_INIT_PROC_READABLE {name} {report}"
+        );
+    }
+    assert!(
+        !report["fd_links"].as_str().unwrap().contains("readable"),
+        "C5_FIX4_INIT_FD_LINK_READABLE {report}"
+    );
+    // Non-dumpable: init's entries belong to root, which this user namespace
+    // does not map, so the provider sees the overflow owner, never itself.
+    assert_ne!(
+        report["environ_owner"], report["provider_uid"],
+        "C5_FIX4_INIT_DUMPABLE {report}"
     );
 }
 
