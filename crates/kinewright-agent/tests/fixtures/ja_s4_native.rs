@@ -39,12 +39,21 @@ fn main() {
     let role = args[2].to_str().unwrap();
     #[cfg(target_os = "linux")]
     if role == "s4b-image" {
-        let hidden = fs::read("/proc/self/exe").is_err()
-            && fs::read_dir("/proc/1/fd").is_err()
-            && fs::read_dir("/proc/self/fd").is_err();
+        // The provider can name its own sealed image, as Codex must, but it
+        // cannot change it and holds no descriptor for it.
+        let named = env::current_exe()
+            .is_ok_and(|path| path.to_string_lossy().starts_with("/memfd:kinewright-provider"));
+        let sealed = fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/self/exe")
+            .is_err();
+        let private = (0..256).all(|fd| {
+            fs::read_link(format!("/proc/self/fd/{fd}"))
+                .map_or(true, |link| !link.to_string_lossy().starts_with("/memfd:"))
+        });
         fs::write(
             root.join("image-report.partial"),
-            format!("qualified=true proc_hidden={hidden}"),
+            format!("qualified=true named={named} sealed={sealed} private_fd={private}"),
         )
         .unwrap();
         fs::rename(root.join("image-report.partial"), root.join("image-report")).unwrap();
@@ -84,6 +93,12 @@ fn main() {
         return;
     }
     if role == "s4b-codex" {
+        // Codex resolves its own path before any turn and exits 1 without it
+        // (codex-rs exec `ExecServerRuntimeOptions::from_optional_paths`).
+        if env::current_exe().is_err() {
+            eprintln!("Error: Codex executable path is not configured");
+            std::process::exit(1);
+        }
         let prompt = args[3].to_str().unwrap();
         let mut executions = fs::OpenOptions::new()
             .create(true)
@@ -93,6 +108,10 @@ fn main() {
         writeln!(executions, "execution").unwrap();
         executions.sync_all().unwrap();
         fs::write(root.join("execution-ready"), b"").unwrap();
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"exit") {
+            eprintln!("fixture: provider died right after exec");
+            std::process::exit(3);
+        }
         let fixture_full = fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"full");
         if fixture_full {
             writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"fixture gate\"}}}}").unwrap();

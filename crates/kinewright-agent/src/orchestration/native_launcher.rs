@@ -485,6 +485,15 @@ pub(crate) trait InvocationOwner: Send + Sync {
         identity: &crate::orchestration::ExecutionIdentity,
         text: &str,
     ) -> io::Result<()>;
+    /// The provider exited before its first event and nobody asked it to stop.
+    /// The owner shows the reason at once instead of waiting for a deadline.
+    fn launch_failed(
+        &self,
+        _identity: &crate::orchestration::ExecutionIdentity,
+        _reason: &str,
+    ) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) struct NativeGuardianLauncher {
@@ -768,6 +777,13 @@ impl NativeGuardianLauncher {
         let usage_owner = Arc::clone(&self.owner);
         let execution = attempt.identity().clone();
         let (sender, events) = crate::protocol::limits::event_channel();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stopped = Arc::clone(&stopped);
+        let bearer = secret
+            .as_deref()
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_owned();
         thread::Builder::new()
             .name("kinewright-contained-codex".into())
             .spawn(move || {
@@ -775,10 +791,15 @@ impl NativeGuardianLauncher {
                     pipes.diagnostics,
                     "kinewright-contained-stderr",
                 );
+                let mut output = CountingReader {
+                    inner: pipes.output,
+                    bytes: 0,
+                };
                 let mut completed =
-                    read_provider_output(pipes.output, &sender, |raw, ordinal, eof| {
+                    read_provider_output(&mut output, &sender, |raw, ordinal, eof| {
                         usage_owner.raw(&execution, raw, ordinal, eof)
                     });
+                let silent = output.bytes == 0;
                 let mut native = worker_control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -810,8 +831,20 @@ impl NativeGuardianLauncher {
                     Err(_) => sender.interrupt("native cleanup remains blocked"),
                 }
                 drop(native);
-                if let Ok(reader) = diagnostics {
-                    let _ = reader.join();
+                let diagnostics = diagnostics
+                    .ok()
+                    .and_then(|reader| reader.join().ok())
+                    .unwrap_or_default();
+                if silent
+                    && !sender.failed()
+                    && !worker_stopped.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let reason = launch_failure(&diagnostics, &bearer);
+                    if usage_owner.launch_failed(&execution, &reason).is_err() {
+                        sender.interrupt("provider launch failure remains unpublished");
+                    } else {
+                        sender.interrupt(&reason);
+                    }
                 }
                 let _ = sender.send(AgentEvent::Done);
             })?;
@@ -823,16 +856,68 @@ impl NativeGuardianLauncher {
                 owner: Arc::clone(&self.owner),
                 identity: attempt.identity().clone(),
                 first: Some(prompt),
+                stopped,
             },
         )))
     }
 }
+
+/// Counts provider stdout so a launch that never spoke is told apart from a
+/// turn that ended.
+struct CountingReader<R> {
+    inner: R,
+    bytes: u64,
+}
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.bytes = self.bytes.saturating_add(read as u64);
+        Ok(read)
+    }
+}
+
+/// The person sees why the provider died: the last provider diagnostics and
+/// the guardian's exit line, without control characters or the MCP bearer.
+pub(crate) fn launch_failure(diagnostics: &str, bearer: &str) -> String {
+    const LIMIT: usize = 512;
+    let redacted = if bearer.is_empty() {
+        diagnostics.to_owned()
+    } else {
+        diagnostics.replace(bearer, "[redacted]")
+    };
+    let lines: Vec<String> = redacted
+        .lines()
+        .map(|line| {
+            line.chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
+    let detail = if tail.is_empty() {
+        "no diagnostics".to_owned()
+    } else if tail.len() > LIMIT {
+        let mut start = tail.len() - LIMIT;
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", &tail[start..])
+    } else {
+        tail
+    };
+    format!("provider exited before its first event: {detail}")
+}
+
 struct RestrictedSession {
     control: Arc<Mutex<ContainedSession>>,
     events: crossbeam_channel::Receiver<AgentEvent>,
     owner: Arc<dyn InvocationOwner>,
     identity: crate::orchestration::ExecutionIdentity,
     first: Option<String>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 impl AgentSession for RestrictedSession {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
@@ -856,6 +941,8 @@ impl AgentSession for RestrictedSession {
         self.events.clone()
     }
     fn interrupt(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -969,6 +1056,30 @@ fn transport_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn s4b_c5_fix3_launch_failure_is_bounded_and_redacted() {
+        let reason = launch_failure(
+            "warming up\nsecret-bearer-123 rejected\u{1b}[31m\n\nError: Codex executable path is not configured\nkinewright-guardian: provider exited with status 1\n",
+            "secret-bearer-123",
+        );
+        assert_eq!(
+            reason,
+            "provider exited before its first event: [redacted] rejected [31m | Error: Codex executable path is not configured | kinewright-guardian: provider exited with status 1"
+        );
+        assert_eq!(
+            launch_failure("", ""),
+            "provider exited before its first event: no diagnostics"
+        );
+        let long = launch_failure(
+            &format!(
+                "{}\nkinewright-guardian: provider exited with status 3",
+                "é".repeat(600)
+            ),
+            "",
+        );
+        assert!(long.len() < 600, "C5_FIX3_REASON_BOUNDED {}", long.len());
+        assert!(long.ends_with("kinewright-guardian: provider exited with status 3"));
+    }
     #[test]
     fn s4b_c5c_retries_surface_network_before_eof() {
         use std::io::Write;

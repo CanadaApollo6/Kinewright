@@ -225,16 +225,12 @@ fn write_ready(writer: &mut impl Write, result: &impl serde::Serialize) -> io::R
     writer.flush()
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the final spawn orders credentials, policy, environment and pipes together"
-)]
 fn init(
     program: Program,
     image: Option<std::fs::File>,
     mut ready: std::fs::File,
 ) -> io::Result<i32> {
-    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    use std::os::unix::net::UnixStream;
     let pipes = program
         .pipe_directory
         .as_ref()
@@ -262,6 +258,34 @@ fn init(
     if commit != *b"C" {
         return Err(io::Error::other("missing shim COMMIT"));
     }
+    // After COMMIT the host owns an executing attempt and no readiness reply
+    // remains. Name every later refusal, and the provider's exit, on the
+    // provider's diagnostics stream so the host can report it at once.
+    let diagnostics = pipes
+        .as_ref()
+        .map(|pipes| pipes[2].try_clone())
+        .transpose()?;
+    let result = launch(program, image, pipes);
+    if let Some(mut diagnostics) = diagnostics {
+        let line = match &result {
+            Ok(status) => format!("kinewright-guardian: provider exited with status {status}\n"),
+            Err(error) => format!("kinewright-guardian: launch refused after commit: {error}\n"),
+        };
+        let _ = diagnostics.write_all(line.as_bytes());
+    }
+    result
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the final spawn orders credentials, policy, environment and pipes together"
+)]
+fn launch(
+    program: Program,
+    image: Option<std::fs::File>,
+    pipes: Option<Vec<std::os::unix::net::UnixStream>>,
+) -> io::Result<i32> {
+    use std::os::fd::OwnedFd;
     if let ProviderSandbox::LinuxAllowlist {
         credential_mount: Some(mount),
         ..

@@ -799,7 +799,7 @@ impl ProfileFactory for RegisteredProfiles {
 }
 
 impl HostCommandOwner {
-    fn record_runtime_refusal(
+    pub(super) fn record_runtime_refusal(
         &mut self,
         producer: &HostAuth,
         run: &RunId,

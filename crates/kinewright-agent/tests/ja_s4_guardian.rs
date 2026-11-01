@@ -3099,8 +3099,8 @@ fn s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier() {
     claim.finish().unwrap();
     assert_eq!(
         result.unwrap_or_default(),
-        "qualified=true proc_hidden=true",
-        "C5_FIX1_GUARDIAN_QUALIFIED_IMAGE_AND_PRIVATE_FD"
+        "qualified=true named=true sealed=true private_fd=true",
+        "C5_FIX3_GUARDIAN_NAMED_SEALED_IMAGE_AND_PRIVATE_FD"
     );
 }
 

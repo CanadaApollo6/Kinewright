@@ -26,6 +26,8 @@ pub enum ProtocolFixtureMode {
     Normal,
     Startup,
     FullQueue,
+    /// The provider writes one diagnostic line and exits right after exec.
+    ExitAtLaunch,
 }
 #[derive(Clone)]
 pub struct ProtocolObservation {
@@ -211,6 +213,9 @@ impl ProfileFactory for Factory {
         std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
         if self.0.mode == ProtocolFixtureMode::FullQueue {
             std::fs::write(scratch.join("event-mode"), b"full")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::ExitAtLaunch {
+            std::fs::write(scratch.join("event-mode"), b"exit")?;
         }
         let credentials = scratch.join("credentials");
         std::fs::create_dir(&credentials)?;

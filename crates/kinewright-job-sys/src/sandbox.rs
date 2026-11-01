@@ -132,18 +132,10 @@ pub fn restrict_provider(
             libc::syscall(libc::SYS_landlock_add_rule, rules.as_raw_fd(), 2, &rule, 0)
         })?;
     }
-    if rustix::process::getpid().as_raw_nonzero().get() == 1 {
-        crate::verify_payload_pid_namespace(1)?;
-        rustix::mount::mount(
-            "kinewright-provider-proc",
-            "/proc",
-            "tmpfs",
-            rustix::mount::MountFlags::NOSUID
-                | rustix::mount::MountFlags::NODEV
-                | rustix::mount::MountFlags::NOEXEC,
-            c"mode=0000,size=4096",
-        )?;
-    }
+    // The payload's own procfs stays readable. Codex resolves `/proc/self/exe`
+    // before it starts a turn and refuses to run without it. That link names
+    // the sealed image, which no writer can change; the image descriptor
+    // itself closes on exec.
     rustix::thread::set_no_new_privs(true)?;
     // SAFETY: rules is live, flags zero selects the supported restrict-self operation.
     checked(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, rules.as_raw_fd(), 0) })?;

@@ -33,6 +33,7 @@ mod tests {
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_fix2_tests.rs");
+    include!("c5_fix3_tests.rs");
     struct Fixture {
         host: WriterHost,
         editor: HostClient,
