@@ -73,20 +73,20 @@ pub struct CodexDriver;
 pub struct ClaudeCodeDriver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CodexSpawnTarget {
+pub(crate) struct CodexSpawnTarget {
     executable: PathBuf,
     prefix_arguments: Vec<OsString>,
 }
 
 impl CodexSpawnTarget {
-    fn native(executable: PathBuf) -> Self {
+    pub(crate) fn native(executable: PathBuf) -> Self {
         Self {
             executable,
             prefix_arguments: Vec::new(),
         }
     }
 
-    fn command(&self) -> ProcessCommand {
+    pub(crate) fn command(&self) -> ProcessCommand {
         let mut command = ProcessCommand::new(&self.executable);
         command.args(&self.prefix_arguments);
         command
@@ -100,8 +100,7 @@ impl AgentDriver for CodexDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let target = find_codex_spawn_target()?;
-        let version = codex_process_output(&target, &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version = crate::detection_probe::probe_version(target.command(), &["--version"]);
         let authentication = codex_authentication(&target);
         Some(HarnessInfo {
             id: self.id(),
@@ -114,18 +113,7 @@ impl AgentDriver for CodexDriver {
 
     fn start_session(&self, cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
         let target = find_codex_spawn_target().ok_or(AgentError::NotInstalled)?;
-        let version = codex_process_output(&target, &["--version"]).ok_or_else(|| {
-            AgentError::Unavailable(
-                "Kinewright could not verify the installed Codex CLI version; refusing to launch it"
-                    .to_owned(),
-            )
-        })?;
-        if !codex_version_is_supported(&version) {
-            return Err(AgentError::Unavailable(format!(
-                "Codex CLI 0.147.0 or newer is required for Kinewright's restricted driver (found {})",
-                version.trim()
-            )));
-        }
+        codex_start_gate(&target)?;
         let endpoint = cfg.mcp_url.clone().ok_or(AgentError::MissingMcpEndpoint)?;
         CodexSession::new(target, endpoint, cfg).map(|session| Box::new(session) as _)
     }
@@ -929,8 +917,8 @@ fn detect_cli(
     authentication: fn(&Path) -> AuthenticationStatus,
 ) -> Option<HarnessInfo> {
     let executable = find_on_path(executable_name)?;
-    let version = process_output(ProcessCommand::new(&executable), &["--version"])
-        .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+    let version =
+        crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
     let authentication = authentication(&executable);
     Some(HarnessInfo {
         id,
@@ -941,7 +929,7 @@ fn detect_cli(
     })
 }
 
-fn claude_authentication(executable: &Path) -> AuthenticationStatus {
+pub(crate) fn claude_authentication(executable: &Path) -> AuthenticationStatus {
     let Some(output) = process_output(ProcessCommand::new(executable), &["auth", "status"]) else {
         return AuthenticationStatus::Unknown;
     };
@@ -966,15 +954,15 @@ fn codex_authentication(target: &CodexSpawnTarget) -> AuthenticationStatus {
     #[cfg(not(target_os = "linux"))]
     codex_authentication_from_cli(target)
 }
-#[cfg(not(target_os = "linux"))]
-fn codex_authentication_from_cli(target: &CodexSpawnTarget) -> AuthenticationStatus {
+#[cfg(any(feature = "eval-harness", not(target_os = "linux")))]
+pub(crate) fn codex_authentication_from_cli(target: &CodexSpawnTarget) -> AuthenticationStatus {
     let Some(output) = codex_process_output(target, &["login", "status"]) else {
         return AuthenticationStatus::Unknown;
     };
     codex_authentication_status(&output)
 }
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, feature = "eval-harness", not(target_os = "linux")))]
 fn codex_authentication_status(output: &str) -> AuthenticationStatus {
     let output = output.to_ascii_lowercase();
     if output.contains("not logged in") {
@@ -986,18 +974,34 @@ fn codex_authentication_status(output: &str) -> AuthenticationStatus {
     }
 }
 
-fn codex_version_is_supported(output: &str) -> bool {
-    output
-        .split_whitespace()
-        .find_map(|part| {
-            let mut components = part.trim_start_matches('v').split(['.', '-']);
-            Some((
-                components.next()?.parse::<u64>().ok()?,
-                components.next()?.parse::<u64>().ok()?,
-                components.next()?.parse::<u64>().ok()?,
-            ))
-        })
-        .is_some_and(|version| version >= MINIMUM_CODEX_VERSION)
+/// The version check `start_session` runs before it launches Codex.
+pub(crate) fn codex_start_gate(target: &CodexSpawnTarget) -> Result<(), AgentError> {
+    codex_version_gate(codex_process_output(target, &["--version"]))
+}
+
+/// Refuse a Codex CLI older than the restricted driver supports. C5 fix 6:
+/// every message is built from the parsed version token alone, never from
+/// the probe's text.
+pub(crate) fn codex_version_gate(output: Option<String>) -> Result<(), AgentError> {
+    let output = output.ok_or_else(|| {
+        AgentError::Unavailable(
+            "Kinewright could not verify the installed Codex CLI version; refusing to launch it"
+                .to_owned(),
+        )
+    })?;
+    let (major, minor, patch) = MINIMUM_CODEX_VERSION;
+    let minimum = format!("{major}.{minor}.{patch}");
+    let Some(token) = crate::detection_probe::version_token(&output) else {
+        return Err(AgentError::Unavailable(format!(
+            "Codex returned no recognisable version; Kinewright's restricted driver needs Codex CLI {minimum} or newer"
+        )));
+    };
+    if crate::detection_probe::version_triplet(&token) < MINIMUM_CODEX_VERSION {
+        return Err(AgentError::Unavailable(format!(
+            "Codex {token} is older than the supported {minimum}"
+        )));
+    }
+    Ok(())
 }
 
 fn find_codex_spawn_target() -> Option<CodexSpawnTarget> {
@@ -1313,10 +1317,27 @@ mod tests {
 
     #[test]
     fn codex_requires_the_policy_controls_added_by_0_147() {
-        assert!(codex_version_is_supported("codex-cli 0.147.0"));
-        assert!(codex_version_is_supported("codex-cli 0.148.1-beta.2"));
-        assert!(!codex_version_is_supported("codex-cli 0.146.0"));
-        assert!(!codex_version_is_supported("unexpected output"));
+        let gate = |output: &str| codex_version_gate(Some(output.to_owned()));
+        assert!(gate("codex-cli 0.147.0").is_ok());
+        assert!(gate("codex-cli 0.148.1-beta.2").is_ok());
+        let refusal = |output: &str| match gate(output) {
+            Err(AgentError::Unavailable(message)) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        // C5 fix 6: the refusal names only the parsed token.
+        assert_eq!(
+            refusal("codex 0.146.0\nrefresh_token=synthetic-secret\n"),
+            "Codex 0.146.0 is older than the supported 0.147.0",
+            "C5_FIX6_VERSION_ERROR_CARRIES_PROBE_TEXT"
+        );
+        assert_eq!(
+            refusal("refresh_token=synthetic-secret"),
+            "Codex returned no recognisable version; Kinewright's restricted driver needs Codex CLI 0.147.0 or newer"
+        );
+        assert!(matches!(
+            codex_version_gate(None),
+            Err(AgentError::Unavailable(_))
+        ));
     }
 
     #[test]

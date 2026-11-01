@@ -58,8 +58,8 @@ impl AgentDriver for OpenCodeDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("opencode")?;
-        let version = process_output(ProcessCommand::new(&executable), &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
         Some(HarnessInfo {
             id: self.id(),
             executable,
@@ -100,8 +100,8 @@ impl AgentDriver for QwenDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("qwen")?;
-        let version = process_output(ProcessCommand::new(&executable), &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
         Some(HarnessInfo {
             id: self.id(),
             executable,
@@ -145,8 +145,8 @@ impl AgentDriver for KimiDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("kimi")?;
-        let version = process_output(ProcessCommand::new(&executable), &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
         Some(HarnessInfo {
             id: self.id(),
             executable,
@@ -190,8 +190,8 @@ impl AgentDriver for KiroDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("kiro-cli")?;
-        let version = process_output(ProcessCommand::new(&executable), &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
         let authentication = kiro_authentication(&executable);
         Some(HarnessInfo {
             id: self.id(),
@@ -247,13 +247,9 @@ impl AgentDriver for DevinDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("devin")?;
-        let version = process_output(ProcessCommand::new(&executable), &["version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
-        let status = process_output(ProcessCommand::new(&executable), &["auth", "status"]);
-        let authentication = status
-            .as_deref()
-            .map_or(AuthenticationStatus::Unknown, devin_authentication_status);
-        let subscription_tier = status.as_deref().and_then(devin_subscription_tier);
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["version"]);
+        let (authentication, subscription_tier) = devin_status(&executable);
         Some(HarnessInfo {
             id: self.id(),
             executable,
@@ -687,7 +683,7 @@ fn qwen_authentication() -> AuthenticationStatus {
     AuthenticationStatus::Unknown
 }
 
-fn kiro_authentication(executable: &Path) -> AuthenticationStatus {
+pub(crate) fn kiro_authentication(executable: &Path) -> AuthenticationStatus {
     // `whoami` answers "Not logged in" on stdout and (on the installed
     // build) still exits 0, so the output is read regardless of status:
     // the text is the definitive answer, the exit code is not.
@@ -715,11 +711,24 @@ fn devin_authentication_status(output: &str) -> AuthenticationStatus {
     }
 }
 
+/// `devin auth status`, reduced to the enum and a fixed tier label.
+pub(crate) fn devin_status(executable: &Path) -> (AuthenticationStatus, Option<String>) {
+    let status = process_output(ProcessCommand::new(executable), &["auth", "status"]);
+    let authentication = status
+        .as_deref()
+        .map_or(AuthenticationStatus::Unknown, devin_authentication_status);
+    (
+        authentication,
+        status.as_deref().and_then(devin_subscription_tier),
+    )
+}
+
+/// C5 fix 6: the reported tier is mapped to a fixed label, never kept.
 fn devin_subscription_tier(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let value = line.trim().strip_prefix("Tier:")?;
         let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
+        (!value.is_empty()).then(|| crate::detection_probe::tier_label(value).to_owned())
     })
 }
 
@@ -787,7 +796,7 @@ mod tests {
         );
         assert_eq!(
             devin_subscription_tier("Account:\n  Tier:              Devin Pro\n"),
-            Some("Devin Pro".to_owned())
+            Some("Pro".to_owned())
         );
         assert_eq!(devin_subscription_tier("no tier here"), None);
     }

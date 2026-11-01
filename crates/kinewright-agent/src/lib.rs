@@ -35,6 +35,7 @@ mod color_scopes;
 mod color_status;
 mod copilot;
 mod cursor;
+mod detection_probe;
 mod drivers;
 mod durable_branch;
 /// The eval harness. Gated with the fixture data it consumes: `eval.rs`
@@ -59,6 +60,9 @@ mod muse;
 pub mod orchestration;
 mod pacing;
 mod protocol;
+#[cfg(feature = "eval-harness")]
+#[doc(hidden)]
+pub use detection_probe::witness as detection_probe_witness;
 mod provider_stderr;
 #[cfg(feature = "eval-harness")]
 #[doc(hidden)]

@@ -874,7 +874,7 @@ impl KinewrightApp {
                     self.note_label(
                         LabelIncident::Agent,
                         IncidentSubject::Agent,
-                        format!("Could not start {}: {error}", harness.label()),
+                        start_failure_observed(harness.label(), &error),
                     );
                     return;
                 }
@@ -2146,21 +2146,7 @@ impl KinewrightApp {
         let selected_info = self.harness[harness.index()].info.as_ref();
         let selected_available = ready_harnesses.contains(&harness);
         // Owned summary so the composer row can render it while self mutates.
-        let harness_summary = selected_info.map(|info| {
-            let version = info.version.as_deref().map_or("version unknown", |value| {
-                value.split_whitespace().next().unwrap_or(value)
-            });
-            let tier = info
-                .subscription_tier
-                .as_ref()
-                .map(|tier| format!(" · {tier}"))
-                .unwrap_or_default();
-            format!(
-                "{} · {}{tier}",
-                version,
-                authentication_label(info.authentication)
-            )
-        });
+        let harness_summary = selected_info.map(harness_summary);
         let harness_hover = harness_summary.map(|summary| {
             harness
                 .sandbox_notice()
@@ -3059,6 +3045,29 @@ fn summarize(value: &str, maximum_chars: usize) -> String {
     summary
 }
 
+/// The composer's one-line harness summary. Every field is already reduced
+/// to a version token, an enum or a fixed tier label (C5 fix 6).
+fn harness_summary(info: &kinewright_core::HarnessInfo) -> String {
+    let version = info.version.as_deref().map_or("version unknown", |value| {
+        value.split_whitespace().next().unwrap_or(value)
+    });
+    let tier = info
+        .subscription_tier
+        .as_ref()
+        .map(|tier| format!(" · {tier}"))
+        .unwrap_or_default();
+    format!(
+        "{} · {}{tier}",
+        version,
+        authentication_label(info.authentication)
+    )
+}
+
+/// The incident text when a harness session could not start.
+fn start_failure_observed(label: &str, error: &AgentError) -> String {
+    format!("Could not start {label}: {error}")
+}
+
 /// The chat line and incident text for an agent error event. The adapters
 /// put no provider-written stderr into the event (C5 fix 5), so neither
 /// carries provider bytes.
@@ -3072,6 +3081,33 @@ fn agent_error_display(project_name: &str, error: &str) -> (ChatEntry, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C5 fix 6: what the app shows and records from every detection probe
+    /// carries no provider bytes, whichever stream the provider wrote to.
+    #[test]
+    fn s4b_c5_fix6_ui_and_incidents_show_no_probe_bytes() {
+        use kinewright_agent::detection_probe_witness::{PROBE_SECRET, detection_probe_witness};
+        for witness in detection_probe_witness() {
+            let mode = witness.mode;
+            for info in &witness.infos {
+                let summary = harness_summary(info);
+                assert!(
+                    !summary.contains(PROBE_SECRET),
+                    "C5_FIX6_PROBE_BYTES_IN_UI {mode} {summary}"
+                );
+            }
+            let refusal = witness.codex_refusal.expect("C5_FIX6_CODEX_REFUSED");
+            let observed = start_failure_observed("Codex", &refusal);
+            assert!(
+                !observed.contains(PROBE_SECRET),
+                "C5_FIX6_PROBE_BYTES_IN_INCIDENT {mode} {observed}"
+            );
+            assert_eq!(
+                observed,
+                "Could not start Codex: agent driver is unavailable: Codex 0.146.0 is older than the supported 0.147.0"
+            );
+        }
+    }
 
     /// C5 fix 5: the chat line and incident text for each direct adapter's
     /// failed turn carry no provider stderr.

@@ -53,7 +53,10 @@ pub(crate) fn command_output_text(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 /// Run one short CLI command to completion and return its text. `None` when
-/// the command could not be spawned or exited non-zero.
+/// the command could not be spawned or exited non-zero. The text is
+/// provider-written: parse it in place and keep only a validated value (see
+/// `detection_probe`). Never put it into an error, event, status, log or
+/// artifact (C5 fix 6).
 pub(crate) fn process_output(command: ProcessCommand, arguments: &[&str]) -> Option<String> {
     let output = run_to_completion(command, arguments)?;
     output

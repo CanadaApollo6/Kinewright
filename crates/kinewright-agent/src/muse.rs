@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 
 use crate::{
     acp::{AcpClient, AcpIncoming, send_done},
-    child_process::{create_scratch_directory, process_output},
+    child_process::create_scratch_directory,
     drivers::{KINEWRIGHT_SYSTEM_PROMPT, find_on_path},
     models::{ModelChoice, ServiceTier},
 };
@@ -59,8 +59,8 @@ impl AgentDriver for MuseDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("muse")?;
-        let version = process_output(ProcessCommand::new(&executable), &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
         Some(HarnessInfo {
             id: self.id(),
             executable,

@@ -60,20 +60,20 @@ const CURSOR_SPEC: AcpSessionSpec = AcpSessionSpec {
 pub struct CursorAcpDriver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CursorSpawnTarget {
+pub(crate) struct CursorSpawnTarget {
     executable: PathBuf,
     prefix_arguments: Vec<OsString>,
 }
 
 impl CursorSpawnTarget {
-    fn native(executable: PathBuf) -> Self {
+    pub(crate) fn native(executable: PathBuf) -> Self {
         Self {
             executable,
             prefix_arguments: Vec::new(),
         }
     }
 
-    fn command(&self) -> ProcessCommand {
+    pub(crate) fn command(&self) -> ProcessCommand {
         let mut command = ProcessCommand::new(&self.executable);
         command.args(&self.prefix_arguments);
         command
@@ -87,21 +87,8 @@ impl AgentDriver for CursorAcpDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let target = find_cursor_spawn_target()?;
-        let version = cursor_process_output(&target, &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
-        let status = cursor_process_output(&target, &["status", "--format", "json"])
-            .and_then(|output| serde_json::from_str::<Value>(&output).ok());
-        let authentication = status
-            .as_ref()
-            .map_or(AuthenticationStatus::Unknown, cursor_authentication_status);
-        let subscription_tier = cursor_process_output(&target, &["about", "--format", "json"])
-            .and_then(|output| serde_json::from_str::<Value>(&output).ok())
-            .and_then(|about| {
-                about
-                    .get("subscriptionTier")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
+        let version = crate::detection_probe::probe_version(target.command(), &["--version"]);
+        let (authentication, subscription_tier) = cursor_status(&target);
         Some(HarnessInfo {
             id: self.id(),
             executable: target.executable,
@@ -257,6 +244,23 @@ fn cursor_version_key(version: &str) -> (u32, u32, u32, u32, u32, u32) {
         numbers.get(4).copied().unwrap_or_default(),
         numbers.get(5).copied().unwrap_or_default(),
     )
+}
+
+/// `status` and `about`, reduced to the enum and a fixed tier label (C5 fix 6).
+pub(crate) fn cursor_status(target: &CursorSpawnTarget) -> (AuthenticationStatus, Option<String>) {
+    let authentication = cursor_process_output(target, &["status", "--format", "json"])
+        .and_then(|output| serde_json::from_str::<Value>(&output).ok())
+        .as_ref()
+        .map_or(AuthenticationStatus::Unknown, cursor_authentication_status);
+    let subscription_tier = cursor_process_output(target, &["about", "--format", "json"])
+        .and_then(|output| serde_json::from_str::<Value>(&output).ok())
+        .and_then(|about| {
+            about
+                .get("subscriptionTier")
+                .and_then(Value::as_str)
+                .map(|tier| crate::detection_probe::tier_label(tier).to_owned())
+        });
+    (authentication, subscription_tier)
 }
 
 fn cursor_process_output(target: &CursorSpawnTarget, arguments: &[&str]) -> Option<String> {

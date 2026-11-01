@@ -26,7 +26,7 @@ use kinewright_core::{
 use serde_json::json;
 
 use crate::{
-    child_process::{create_scratch_directory, hide_console_window, process_output},
+    child_process::{create_scratch_directory, hide_console_window},
     drivers::{KINEWRIGHT_SYSTEM_PROMPT, find_on_path},
     models::{ModelChoice, ServiceTier},
     protocol::CopilotProtocol,
@@ -56,8 +56,8 @@ impl AgentDriver for CopilotDriver {
 
     fn detect(&self) -> Option<HarnessInfo> {
         let executable = find_on_path("copilot")?;
-        let version = process_output(ProcessCommand::new(&executable), &["--version"])
-            .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned));
+        let version =
+            crate::detection_probe::probe_version(ProcessCommand::new(&executable), &["--version"]);
         Some(HarnessInfo {
             id: self.id(),
             executable,
