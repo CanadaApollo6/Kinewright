@@ -921,6 +921,7 @@ impl NativeGuardianLauncher {
                     completed,
                     refusal,
                     interrupt,
+                    failed_turn,
                 } = read_provider_stream(&mut output, &sender, |raw, ordinal, eof| {
                     usage_owner.raw(&execution, raw, ordinal, eof)
                 });
@@ -932,8 +933,11 @@ impl NativeGuardianLauncher {
                 // lets the pump drop the session) and before the cleanup below
                 // kills the provider, so the run is never seen with no live
                 // provider and no reason. A person's Stop already said why.
-                let refusal =
-                    refusal.filter(|_| !worker_stopped.load(std::sync::atomic::Ordering::SeqCst));
+                // C5 fix 11: a counted failed turn the accounting did not
+                // refuse still ends this attempt; say so the same way, once.
+                let refusal = refusal
+                    .or((failed_turn && !completed).then_some(STREAM_TURN_FAILED))
+                    .filter(|_| !worker_stopped.load(std::sync::atomic::Ordering::SeqCst));
                 if let Some(reason) = refusal
                     && usage_owner.stream_refused(&execution, reason).is_err()
                 {
@@ -1158,6 +1162,10 @@ pub(crate) const STREAM_NATIVE_TOOL_REFUSED: &str =
 pub(crate) const STREAM_MALFORMED: &str = "provider stream refused: malformed provider event";
 pub(crate) const STREAM_USAGE_UNRESOLVED: &str =
     "provider stream refused: usage publication remains unresolved";
+/// C5 fix 11: the provider ended after a counted `turn.failed` that paused
+/// nothing. The fixed reason is published once, before cleanup, instead of
+/// the generic stall. A Director failure delivery is the next stage's.
+pub(crate) const STREAM_TURN_FAILED: &str = "the provider reported a failed turn";
 
 /// What reading one provider's stream ended with.
 pub(crate) struct ProviderRead {
@@ -1168,6 +1176,9 @@ pub(crate) struct ProviderRead {
     /// so the native reader can publish why before `Done` lets the pump drop
     /// the session.
     pub interrupt: Option<&'static str>,
+    /// C5 fix 11: the stream carried a `turn.failed` and no later
+    /// `turn.completed`.
+    pub failed_turn: bool,
 }
 
 /// The native launch path and uncertified CI children share bounded framing,
@@ -1194,6 +1205,7 @@ pub(crate) fn read_provider_stream(
     let mut completed = false;
     let mut refusal = None;
     let mut interrupt = None;
+    let mut failed_turn = false;
     for line in crate::protocol::limits::Frames::new(output) {
         let result = (|| {
             let line = line.map_err(|_| STREAM_MALFORMED)?;
@@ -1204,8 +1216,14 @@ pub(crate) fn read_provider_stream(
             if !native_item_allowed(&raw) {
                 return Err(STREAM_NATIVE_TOOL_REFUSED);
             }
-            completed |=
-                raw.get("type").and_then(serde_json::Value::as_str) == Some("turn.completed");
+            match raw.get("type").and_then(serde_json::Value::as_str) {
+                Some("turn.completed") => {
+                    completed = true;
+                    failed_turn = false;
+                }
+                Some("turn.failed") => failed_turn = true,
+                _ => {}
+            }
             parser.parse_line(&line).map_err(|_| STREAM_MALFORMED)
         })();
         match result {
@@ -1250,6 +1268,7 @@ pub(crate) fn read_provider_stream(
         completed,
         refusal,
         interrupt,
+        failed_turn,
     }
 }
 
@@ -1273,10 +1292,10 @@ fn native_item_allowed(raw: &serde_json::Value) -> bool {
     }
 }
 
-/// A provider message about its network transport: Codex's own retry
-/// notices (`Reconnecting... N/5`, `Reconnecting... waiting for network`)
-/// and transport failures. MCP messages never match.
-pub(crate) fn transport_error(message: &str) -> bool {
+/// A provider message about its network transport, for the display's
+/// `network:` category only. It is broad on purpose and never decides
+/// accounting: see `native_spending::codex_retry_notice` (C5 fix 11).
+fn transport_error(message: &str) -> bool {
     let has = |needle: &[u8]| {
         message
             .as_bytes()

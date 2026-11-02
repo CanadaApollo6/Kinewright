@@ -1049,7 +1049,7 @@ fn s4b_c5_fix10_exhausted_reconnect_counts_once_and_other_errors_count() {
     let f = Fixture::new();
     let (run, execution, _, producer, scratch, _charge) = c5_fix10_charged(&f);
     for (ordinal, raw) in [
-        serde_json::json!({"type":"error","message":"Reconnecting... 5/5"}),
+        serde_json::json!({"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: error sending request)"}),
         serde_json::json!({"type":"turn.failed","error":{"message":"stream disconnected before completion"}}),
     ]
     .iter()
@@ -1168,6 +1168,29 @@ fn s4b_c5_fix10_exhausted_reconnect_counts_one_round() {
     assert_eq!(task.repairs[0].rounds, 1, "C5_FIX10_EXHAUSTED_ROUNDS");
     assert_eq!(task.pause, None, "C5_FIX10_EXHAUSTED_PAUSED");
     assert_eq!(task.sends.len(), 1);
+    // C5 fix 11: the counted failed turn ends the attempt with its own fixed
+    // reason, published once, never the generic stall.
+    assert_eq!(
+        state.phase,
+        RunPhase::Interrupted,
+        "C5_FIX11_FAILED_TURN_PHASE"
+    );
+    assert_eq!(
+        reason,
+        crate::native_launcher::STREAM_TURN_FAILED,
+        "C5_FIX11_FAILED_TURN_REASON"
+    );
+    let sequence = f.projection(&run).sequence;
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        f.projection(&run).sequence,
+        sequence,
+        "C5_FIX11_FAILED_TURN_PUBLISHED_TWICE"
+    );
+    assert_eq!(
+        c5_fix10_wait_reason(&f, &run).as_deref(),
+        Some(reason.as_str())
+    );
     c5_fix3_stop(&f, &run, &fixture);
     eprintln!(
         "C5_FIX10_EXHAUSTED_ONE_ROUND phase={:?} reason={reason:?} rounds=1 pause=None",

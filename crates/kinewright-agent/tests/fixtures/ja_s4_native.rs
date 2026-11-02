@@ -212,12 +212,36 @@ fn main() {
             }
             return;
         }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"terminal") {
+            // C5 fix 11: terminal network-flavoured errors that are not
+            // Codex retry notices (Astra's fix 10 probe strings). The third
+            // reaches the round bound; the reader kills this process.
+            for message in [
+                "TLS certificate verification failed; aborting",
+                "network access denied by policy; request failed",
+                "Connection quota exhausted; request rejected",
+                "reconnect is disabled; fatal provider error",
+            ] {
+                writeln!(
+                    std::io::stdout(),
+                    "{{\"type\":\"error\",\"message\":\"{message}\"}}"
+                )
+                .unwrap();
+            }
+            std::io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(3));
+            fs::write(root.join("survived"), b"").unwrap();
+            while !root.join("exit").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            return;
+        }
         if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"exhausted") {
             // C5 fix 10 ruling: Codex's last retry notice, then the failed
             // turn; Codex exits after it.
             writeln!(
                 std::io::stdout(),
-                "{{\"type\":\"error\",\"message\":\"Reconnecting... 5/5\"}}"
+                "{{\"type\":\"error\",\"message\":\"Reconnecting... 5/5 (stream disconnected before completion: error sending request)\"}}"
             )
             .unwrap();
             writeln!(
@@ -231,13 +255,20 @@ fn main() {
         if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"reconnect") {
             // C5 fix 10 ruling: three Codex retry notices while the turn
             // goes on; the normal response and `turn.completed` follow.
+            // As Codex writes them: the notice, then the underlying error
+            // as `additional_details` in parentheses.
             for attempt in 1..=3 {
                 writeln!(
                     std::io::stdout(),
-                    "{{\"type\":\"error\",\"message\":\"Reconnecting... {attempt}/5\"}}"
+                    "{{\"type\":\"error\",\"message\":\"Reconnecting... {attempt}/5 (stream disconnected before completion: error sending request)\"}}"
                 )
                 .unwrap();
             }
+            writeln!(
+                std::io::stdout(),
+                "{{\"type\":\"error\",\"message\":\"Reconnecting... waiting for network (error sending request for url)\"}}"
+            )
+            .unwrap();
         }
         if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"items") {
             // C5 fix 10: Codex 0.166 `McpToolCallItem` for two refused

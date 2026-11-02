@@ -31,11 +31,12 @@ pub(crate) enum SpendingChange {
 /// code or message; null, absent and empty values are never hashed, and a
 /// failure without either gets the fixed unclassified token.
 ///
-/// A top-level `error` the reader's network-retry check recognizes is
-/// Codex retrying its own transport while the turn goes on, not a failure
-/// (lead ruling on C5 fix 10). It is bounded anyway: Codex stops after five
-/// retries and sends `turn.failed`, which counts, and the first-progress and
-/// run deadlines still apply.
+/// A top-level `error` that is exactly one of Codex 0.166's retry notices
+/// ([`codex_retry_notice`]) is Codex retrying its own transport while the
+/// turn goes on, not a failure (lead ruling on C5 fix 10, narrowed in fix
+/// 11). It is bounded anyway: Codex stops after its retries and sends
+/// `turn.failed`, which counts, and the first-progress and run deadlines
+/// still apply. Every other top-level `error` counts, network text or not.
 pub(crate) fn provider_failure(kind: &str, raw: &serde_json::Value) -> Option<String> {
     let detail = match kind {
         "turn.failed" => raw.get("error"),
@@ -43,7 +44,7 @@ pub(crate) fn provider_failure(kind: &str, raw: &serde_json::Value) -> Option<St
             if raw
                 .get("message")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(crate::native_launcher::transport_error) =>
+                .is_some_and(codex_retry_notice) =>
         {
             return None;
         }
@@ -64,6 +65,49 @@ pub(crate) fn provider_failure(kind: &str, raw: &serde_json::Value) -> Option<St
             kinewright_media::sha256_bytes(format!("{kind}\0{name}\0{value}").as_bytes())
         },
     ))
+}
+/// C5 fix 11: exactly Codex 0.166's retry notices, as its JSONL stream
+/// writes them. `core/src/responses_retry.rs` sends `Reconnecting...
+/// {retry_count}/{max_retries}` and `Reconnecting... waiting for network`
+/// through `notify_stream_error`, which always sets the underlying error as
+/// `additional_details`; `exec/src/event_processor_with_jsonl_output.rs`
+/// then writes `{message} ({details})`. The counts are Codex's: 1 <= N <= M
+/// <= 100 (its hard retry cap), in decimal with no leading zero. Nothing
+/// else matches: the broad `transport_error` classifier stays a display
+/// sanitizer only.
+pub(crate) fn codex_retry_notice(message: &str) -> bool {
+    let Some(rest) = message.strip_prefix("Reconnecting... ") else {
+        return false;
+    };
+    let tail = if let Some(tail) = rest.strip_prefix("waiting for network") {
+        tail
+    } else {
+        let count = |text: &str| -> Option<(u64, usize)> {
+            let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+            if !(1..=3).contains(&digits) || text.starts_with('0') {
+                return None;
+            }
+            Some((text[..digits].parse().ok()?, digits))
+        };
+        let Some((retry, used)) = count(rest) else {
+            return false;
+        };
+        let Some(rest) = rest[used..].strip_prefix('/') else {
+            return false;
+        };
+        let Some((limit, used)) = count(rest) else {
+            return false;
+        };
+        if retry > limit || limit > 100 {
+            return false;
+        }
+        &rest[used..]
+    };
+    tail.is_empty()
+        || tail
+            .strip_prefix(" (")
+            .and_then(|details| details.strip_suffix(')'))
+            .is_some_and(|details| !details.is_empty())
 }
 impl HostCommandOwner {
     pub(crate) fn spending_scope(
@@ -333,22 +377,19 @@ impl HostCommandOwner {
     ) -> Result<(), HostError> {
         let producer = self.run_producer(&authority.run)?;
         let state = self.spending_scope(&producer, &authority.run)?;
-        let identity = state
+        // C5 fix 11: only an attempt the projection admitted is counted; a
+        // refusal from an endpoint whose attempt or task is gone is not.
+        let Some(identity) = state
             .attempts
             .iter()
             .find(|a| a.identity.attempt == authority.attempt && a.identity.task == authority.task)
-            .map_or_else(
-                || ExecutionIdentity {
-                    version: 1,
-                    project: authority.project.clone(),
-                    run: authority.run.clone(),
-                    task: authority.task.clone(),
-                    attempt: authority.attempt.clone(),
-                    nonce: authority.run.0.clone(),
-                    owner_instance: authority.run.0.clone(),
-                },
-                |a| a.identity.clone(),
-            );
+            .map(|a| a.identity.clone())
+        else {
+            return Ok(());
+        };
+        if !state.tasks.iter().any(|t| t.id == authority.task) {
+            return Ok(());
+        }
         self.change_spending(
             &producer,
             &identity,

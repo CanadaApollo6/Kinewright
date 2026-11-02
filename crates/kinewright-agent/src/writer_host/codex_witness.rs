@@ -1321,6 +1321,8 @@ fn runtime_status_category(status: &str) -> &'static str {
         "storage_backpressure"
     } else if status.starts_with("silent_stall") {
         "silent_stall"
+    } else if status == crate::native_launcher::STREAM_TURN_FAILED {
+        "provider_turn_failed"
     } else {
         "native_runtime_refusal"
     }

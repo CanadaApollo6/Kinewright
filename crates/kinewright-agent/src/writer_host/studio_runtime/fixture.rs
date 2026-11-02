@@ -45,6 +45,10 @@ pub enum ProtocolFixtureMode {
     /// C5 fix 10 ruling: Codex's last retry notice, then `turn.failed`, then
     /// the provider exits as Codex does.
     ReconnectExhausted,
+    /// C5 fix 11: four terminal network-flavoured top-level errors that are
+    /// not Codex retry notices; the provider then stays alive and marks
+    /// `survived` unless it is killed first.
+    TerminalNetworkErrors,
 }
 impl ProtocolFixtureMode {
     /// The fix 7 witnesses shorten the first-progress deadline so a held
@@ -264,6 +268,9 @@ impl ProfileFactory for Factory {
         }
         if self.0.mode == ProtocolFixtureMode::ReconnectExhausted {
             std::fs::write(scratch.join("event-mode"), b"exhausted")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::TerminalNetworkErrors {
+            std::fs::write(scratch.join("event-mode"), b"terminal")?;
         }
         let credentials = scratch.join("credentials");
         std::fs::create_dir(&credentials)?;
