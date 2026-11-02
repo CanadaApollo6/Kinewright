@@ -200,6 +200,11 @@ fn validate_pinned_credential_grant(grant: &File, root: &File) -> io::Result<()>
     Ok(())
 }
 
+/// C5 fix 9: the only socket families a provider may open. Codex 0.166 is a
+/// static musl binary: Unix sockets for local IPC, IPv4 and IPv6 for its
+/// HTTPS and MCP traffic. Its resolver needs no netlink.
+pub const PROVIDER_SOCKET_FAMILIES: [i32; 3] = [libc::AF_UNIX, libc::AF_INET, libc::AF_INET6];
+
 /// Closes mutation and descriptor escape operations not mediated by Landlock.
 ///
 /// # Errors
@@ -240,6 +245,38 @@ pub fn restrict_provider_syscalls() -> io::Result<()> {
         },
         statement(0x06, 0x8000_0000),
     ];
+    // C5 fix 9: `socket` and `socketpair` open only the families the provider
+    // uses. Every other family, among them AF_VSOCK, AF_PACKET, AF_NETLINK,
+    // AF_BLUETOOTH, AF_ALG, AF_XDP and AF_TIPC, gets EAFNOSUPPORT. The kernel
+    // reads the family as an `int`, so the low 32 bits of the first argument
+    // are what it sees. The x32 table and foreign architectures are killed
+    // above, and x86_64 has no `socketcall`.
+    let allowed = PROVIDER_SOCKET_FAMILIES.len();
+    let block = u8::try_from(allowed + 3).map_err(io::Error::other)?;
+    filter.extend([
+        equal(
+            u32::try_from(libc::SYS_socket).map_err(io::Error::other)?,
+            1,
+            0,
+        ),
+        equal(
+            u32::try_from(libc::SYS_socketpair).map_err(io::Error::other)?,
+            0,
+            block,
+        ),
+        statement(0x20, 16),
+    ]);
+    for (index, family) in PROVIDER_SOCKET_FAMILIES.iter().enumerate() {
+        filter.push(equal(
+            u32::try_from(*family).map_err(io::Error::other)?,
+            u8::try_from(allowed - index).map_err(io::Error::other)?,
+            0,
+        ));
+    }
+    filter.extend([
+        statement(0x06, 0x0005_0000 | libc::EAFNOSUPPORT.cast_unsigned()),
+        statement(0x06, 0x7fff_0000),
+    ]);
     for syscall in [
         libc::SYS_getxattr,
         libc::SYS_lgetxattr,
@@ -510,6 +547,124 @@ mod tests {
                 );
             }
         }
+        if case == 8 {
+            // C5 fix 9: AF_PACKET (EPERM without CAP_NET_RAW), AF_NETLINK and
+            // AF_ALG (both open unprivileged) and AF_VSOCK (opens, and its
+            // `socketpair` is EOPNOTSUPP) would each fail differently, or
+            // not at all, without the filter.
+            let refused = |result: libc::c_long, family: i32, call: &str| {
+                assert_eq!(
+                    (result, io::Error::last_os_error().raw_os_error()),
+                    (-1, Some(libc::EAFNOSUPPORT)),
+                    "C5_FIX9_FAMILY_NOT_REFUSED {call} {family}"
+                );
+            };
+            for family in [
+                libc::AF_VSOCK,
+                libc::AF_PACKET,
+                libc::AF_NETLINK,
+                libc::AF_ALG,
+                libc::AF_BLUETOOTH,
+                libc::AF_XDP,
+                libc::AF_TIPC,
+            ] {
+                for kind in [libc::SOCK_STREAM, libc::SOCK_DGRAM, libc::SOCK_RAW] {
+                    // SAFETY: socket(2) with integer arguments; nothing is
+                    // dereferenced.
+                    let result = unsafe { libc::syscall(libc::SYS_socket, family, kind, 0) };
+                    refused(result, family, "socket");
+                }
+                let mut pair = [-1; 2];
+                // SAFETY: `pair` is a live two-descriptor array.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_socketpair,
+                        family,
+                        libc::SOCK_STREAM,
+                        0,
+                        pair.as_mut_ptr(),
+                    )
+                };
+                refused(result, family, "socketpair");
+            }
+            // The kernel reads the family as an `int`: high bits neither
+            // smuggle a refused family past the filter nor refuse an allowed one.
+            let high = 0x1_0000_0000_i64;
+            // SAFETY: socket(2) with integer arguments.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_socket,
+                    high | i64::from(libc::AF_VSOCK),
+                    libc::SOCK_STREAM,
+                    0,
+                )
+            };
+            refused(result, libc::AF_VSOCK, "socket high bits");
+            for family in super::PROVIDER_SOCKET_FAMILIES {
+                // SAFETY: socket(2) with integer arguments; the descriptor is closed below.
+                let descriptor = unsafe {
+                    libc::syscall(
+                        libc::SYS_socket,
+                        high | i64::from(family),
+                        libc::SOCK_STREAM,
+                        0,
+                    )
+                };
+                assert!(descriptor >= 0, "C5_FIX9_ALLOWED_FAMILY_REFUSED {family}");
+                // SAFETY: the descriptor was just opened by this probe.
+                unsafe { libc::close(i32::try_from(descriptor).unwrap()) };
+            }
+            let mut pair = [-1; 2];
+            // SAFETY: `pair` is a live two-descriptor array.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_socketpair,
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM,
+                    0,
+                    pair.as_mut_ptr(),
+                )
+            };
+            assert_eq!(result, 0, "C5_FIX9_UNIX_PAIR_REFUSED");
+            // SAFETY: both descriptors were just opened by this probe.
+            unsafe {
+                libc::close(pair[0]);
+                libc::close(pair[1]);
+            }
+        }
+        if case == 9 {
+            // The x32 table: the filter kills the process before the call.
+            // SAFETY: socket(2) through the x32 number with integer arguments.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_socket | 0x4000_0000,
+                    libc::AF_VSOCK,
+                    libc::SOCK_STREAM,
+                    0,
+                )
+            };
+            panic!("C5_FIX9_X32_SOCKET_SURVIVED");
+        }
+        if case == 10 {
+            // The i386 entry: `int 0x80` audits as a foreign architecture,
+            // which the filter kills. 359 is i386 `socket`. LLVM reserves
+            // rbx, so the first argument is swapped in and out.
+            let result: u64;
+            // SAFETY: a syscall instruction with integer arguments; rbx is
+            // restored before the block ends.
+            unsafe {
+                std::arch::asm!(
+                    "xchg {family}, rbx",
+                    "int 0x80",
+                    "xchg {family}, rbx",
+                    family = inout(reg) u64::from(libc::AF_VSOCK.cast_unsigned()) => _,
+                    inlateout("rax") 359_u64 => result,
+                    in("rcx") u64::from(libc::SOCK_STREAM.cast_unsigned()),
+                    in("rdx") 0_u64,
+                );
+            }
+            panic!("C5_FIX9_I386_SOCKET_SURVIVED {result}");
+        }
         fs::write(root.join("credentials/auth.tmp-1"), b"refreshed").unwrap();
         fs::rename(
             root.join("credentials/auth.tmp-1"),
@@ -602,6 +757,17 @@ mod tests {
             .output()
             .unwrap();
         drop(socket);
+        if matches!(case, 9 | 10) {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                output.status.signal(),
+                Some(libc::SIGSYS),
+                "C5_FIX9_FOREIGN_ENTRY_NOT_KILLED {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
         assert!(
             output.status.success(),
             "{}\n{}",
@@ -645,6 +811,21 @@ mod tests {
     #[ignore = "on-demand: Landlock ABI 9 native qualification"]
     fn s4b_c2_fix1_ipc_syscalls_denied() {
         sandbox_case(6);
+    }
+    #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
+    fn s4b_c5_fix9_socket_families_refused() {
+        sandbox_case(8);
+    }
+    #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
+    fn s4b_c5_fix9_x32_socket_killed() {
+        sandbox_case(9);
+    }
+    #[test]
+    #[ignore = "on-demand: Landlock ABI 9 native qualification"]
+    fn s4b_c5_fix9_i386_socket_killed() {
+        sandbox_case(10);
     }
 }
 

@@ -30,6 +30,11 @@ pub use descriptor::*;
 mod descriptor;
 #[cfg(target_os = "linux")]
 pub use credential::*;
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod socket_probe;
+#[cfg(target_os = "linux")]
+pub use socket_probe::*;
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]

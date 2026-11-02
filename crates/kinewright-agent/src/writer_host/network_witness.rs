@@ -99,7 +99,20 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
         Listener::count(std::net::TcpListener::bind((lan, port)).expect("C5_FIX8_LAN_TCP"));
     let lan_udp = UdpCount::bind(lan);
     let udp_port = lan_udp.port;
-    let common = move || vec![port.to_string(), lan.to_string(), udp_port.to_string()];
+    // C5 fix 9: a host-namespace VSOCK listener. VSOCK ignores network
+    // namespaces in `global` mode, so only the seccomp family allowlist
+    // keeps the provider from it.
+    let vsock = kinewright_job_sys::VsockListener::bind().expect("C5_FIX9_VSOCK_LISTENER");
+    let vsock_port = vsock.port;
+    let vsock_seen = AtomicUsize::new(0);
+    let common = move || {
+        vec![
+            port.to_string(),
+            lan.to_string(),
+            udp_port.to_string(),
+            vsock_port.to_string(),
+        ]
+    };
     let control_arguments = [vec!["unpaid-control".to_owned()], common()].concat();
     let probe: Probe<crate::network_probe::UnpaidReport> = run_probe(
         "dry-network",
@@ -116,7 +129,12 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
             ]
             .concat()
         },
-        || (mcp.seen(), lan_tcp.seen(), lan_udp.seen()),
+        || {
+            (mcp.seen(), lan_tcp.seen(), lan_udp.seen(), {
+                let new = vsock.drain();
+                vsock_seen.fetch_add(new, Ordering::SeqCst) + new
+            })
+        },
     );
     let (control, contained) = (&probe.control, &probe.contained);
     let [after_control, after_contained] = probe.counts;
@@ -132,12 +150,20 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
         .all(|r| r.reached)
         && after_control.0 == 1
         && after_control.1 == 1
-        && after_control.2 >= 1;
+        && after_control.2 >= 1
+        && after_control.3 == 1;
     let relay =
         contained.open.iter().all(|r| r.reached) && after_contained.0 == after_control.0 + 1;
     let closed = contained.closed.iter().all(|r| !r.reached)
         && after_contained.1 == after_control.1
-        && after_contained.2 == after_control.2;
+        && after_contained.2 == after_control.2
+        && after_contained.3 == after_control.3;
+    // C5 fix 9: every family outside the allowlist is refused by the filter.
+    let families = contained.families.len() == 2
+        && contained
+            .families
+            .iter()
+            .all(|check| !check.reached && check.errno == Some(97));
     let hosts = crate::network_probe::HOSTS.iter().all(|host| {
         contained
             .base
@@ -162,10 +188,15 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
         && contained.credential.iter().all(|check| check.refused)
         && probe.source_unchanged;
     eprintln!(
-        "C5_FIX8_DRY_EGRESS control={} control_routes={control_routes} relay={relay} closed={closed} hosts_refused={hosts} credential_read_only={credential} connect_tcp={connect_tcp:?} unpaid={unpaid:?}",
+        "C5_FIX8_DRY_EGRESS control={} control_routes={control_routes} relay={relay} closed={closed} hosts_refused={hosts} families_refused={families} credential_read_only={credential} connect_tcp={connect_tcp:?} unpaid={unpaid:?}",
         control.base.passed()
     );
-    for route in contained.open.iter().chain(&contained.closed) {
+    for route in contained
+        .open
+        .iter()
+        .chain(&contained.closed)
+        .chain(&contained.families)
+    {
         eprintln!(
             "C5_FIX8_ROUTE {} reached={} errno={:?}",
             route.route, route.reached, route.errno
@@ -185,8 +216,20 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
     assert!(control_routes, "C5_FIX8_CONTROL_ROUTES {after_control:?}");
     // What the probe observed decides first; the policy shape after.
     assert!(relay, "C5_FIX8_LOOPBACK_RELAY {after_contained:?}");
+    // C5 fix 9: the host-namespace VSOCK listener heard nothing from inside.
+    let vsock_refused = after_contained.3 == after_control.3
+        && contained
+            .closed
+            .iter()
+            .any(|route| route.route.starts_with("vsock ") && !route.reached);
+    assert!(
+        vsock_refused,
+        "C5_FIX9_VSOCK_REACHED host_listener={} control={}",
+        after_contained.3, after_control.3
+    );
     assert!(closed, "C5_FIX8_EGRESS_NOT_REFUSED {after_contained:?}");
     assert!(hosts, "C5_FIX7_DRY_EGRESS_NOT_REFUSED");
+    assert!(families, "C5_FIX9_FAMILY_NOT_REFUSED");
     assert!(credential, "C5_FIX8_CREDENTIAL_WRITABLE");
     assert_eq!(
         unpaid.map(|policy| policy.mcp_port),
@@ -199,6 +242,7 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
         "network_namespace": "loopback only",
         "loopback_mcp_relayed": contained.open.iter().map(|r| r.route.clone()).collect::<Vec<_>>(),
         "refused": contained.closed.iter().map(|r| (r.route.clone(), r.errno)).collect::<std::collections::BTreeMap<_, _>>(),
+        "families_refused": contained.families.iter().map(|r| (r.route.clone(), r.errno)).collect::<std::collections::BTreeMap<_, _>>(),
         "tcp_443_refused": crate::network_probe::HOSTS,
         "contained_failures": contained.base.hosts.iter().map(|check| (check.host.clone(), check.failure.clone())).collect::<std::collections::BTreeMap<_, _>>(),
         "control_passed": true,
@@ -330,7 +374,7 @@ struct Probe<T> {
     control: T,
     contained: T,
     program: Program,
-    counts: [(usize, usize, usize); 2],
+    counts: [(usize, usize, usize, usize); 2],
     source_unchanged: bool,
 }
 
@@ -347,7 +391,7 @@ fn probe_reports(
         endpoint.local_addr().unwrap().port(),
         &[],
         |_, _| vec![],
-        || (0, 0, 0),
+        || (0, 0, 0, 0),
     );
     let connect_tcp = match &probe.program.sandbox {
         ProviderSandbox::LinuxAllowlist { connect_tcp, .. } => connect_tcp.clone(),
@@ -381,7 +425,7 @@ fn run_probe<T: serde::de::DeserializeOwned + serde::Serialize>(
     mcp_port: u16,
     control_arguments: &[String],
     contained_arguments: impl FnOnce(&std::path::Path, [u64; 2]) -> Vec<String>,
-    counts: impl Fn() -> (usize, usize, usize),
+    counts: impl Fn() -> (usize, usize, usize, usize),
 ) -> Probe<T> {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5c");
     fs::create_dir_all(&out).unwrap();

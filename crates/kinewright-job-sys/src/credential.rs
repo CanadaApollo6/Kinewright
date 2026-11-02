@@ -143,8 +143,13 @@ pub fn verify_unpaid_home(home: &Path, credential: [u64; 2]) -> io::Result<Vec<S
                 lines.push(format!("file {relative} (read-only bind of the sign-in)"));
                 continue;
             }
-            if meta.stx_mnt_id != root.stx_mnt_id || identity == credential {
-                return Err(refuse("another mount or the sign-in elsewhere"));
+            if meta.stx_mnt_id != root.stx_mnt_id {
+                return Err(refuse("another mount"));
+            }
+            // The identity is pinned from the live sign-in, so no other file
+            // can carry it: a match is a second name for the sign-in.
+            if identity == credential {
+                return Err(refuse("the sign-in elsewhere"));
             }
             match kind {
                 FileType::Directory if depth < 8 => {
@@ -301,10 +306,16 @@ mod tests {
         let home = root.join("home");
         std::fs::create_dir_all(home.join("skills")).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The identity comes from a sign-in that stays alive for the whole
+        // test, as the pinned source does for a launch. A deleted file's
+        // identity can be handed to the next new file: ext4 reuses freed
+        // inode numbers at once, which made this fixture fail on CI.
+        let sign_in = root.join("sign-in");
+        std::fs::write(&sign_in, b"fixture").unwrap();
+        let meta = std::fs::metadata(&sign_in).unwrap();
+        let identity = [meta.dev(), meta.ino()];
         let auth = home.join("auth.json");
         std::fs::write(&auth, b"fixture").unwrap();
-        let meta = std::fs::metadata(&auth).unwrap();
-        let identity = [meta.dev(), meta.ino()];
         // A plain file is not the bind: same mount as the home.
         let reason = verify_unpaid_home(&home, identity).unwrap_err().to_string();
         assert!(reason.contains("read-only sign-in bind"), "{reason}");
@@ -312,6 +323,11 @@ mod tests {
         std::fs::write(home.join("other"), b"x").unwrap();
         let reason = verify_unpaid_home(&home, identity).unwrap_err().to_string();
         assert!(reason.contains("auth.json missing"), "{reason}");
+        // A second name for the live sign-in anywhere in the home is refused.
+        std::fs::hard_link(&sign_in, home.join("skills/sign-in")).unwrap();
+        let reason = verify_unpaid_home(&home, identity).unwrap_err().to_string();
+        assert!(reason.contains("the sign-in elsewhere"), "{reason}");
+        std::fs::remove_file(home.join("skills/sign-in")).unwrap();
         std::os::unix::fs::symlink("/etc/hostname", home.join("skills/link")).unwrap();
         let reason = verify_unpaid_home(&home, identity).unwrap_err().to_string();
         assert!(reason.contains("symbolic link"), "{reason}");

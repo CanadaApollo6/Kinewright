@@ -187,6 +187,8 @@ pub struct UnpaidReport {
     /// The private home as the shared unpaid check sees it from inside.
     pub home_entries: Vec<String>,
     pub home_refusal: Option<String>,
+    /// C5 fix 9: sockets of families outside the provider allowlist.
+    pub families: Vec<RouteCheck>,
 }
 
 /// What the unpaid probe is given: the MCP port, a non-loopback address of
@@ -200,19 +202,21 @@ pub struct UnpaidTargets {
     pub mcp_port: u16,
     pub lan: std::net::IpAddr,
     pub lan_udp: u16,
+    /// The witness's host-namespace VSOCK listener port.
+    pub vsock_port: u32,
     pub credential: Option<std::path::PathBuf>,
     pub identity: Option<[u64; 2]>,
 }
 impl UnpaidTargets {
     /// `unpaid|unpaid-control <mcp port> <lan address> <lan udp port>
-    /// [<credential> <device>:<inode>]`
+    /// <vsock port> [<credential> <device>:<inode>]`
     ///
     /// # Errors
     /// Refuses any other argument list.
     pub fn parse(arguments: &[String]) -> io::Result<Self> {
         let bad = || io::Error::other("unpaid probe arguments");
         match arguments {
-            [mode, port, lan, udp, rest @ ..]
+            [mode, port, lan, udp, vsock, rest @ ..]
                 if matches!(mode.as_str(), "unpaid" | "unpaid-control")
                     && rest.len() != 1
                     && rest.len() <= 2 =>
@@ -222,6 +226,7 @@ impl UnpaidTargets {
                     mcp_port: port.parse().map_err(|_| bad())?,
                     lan: lan.parse().map_err(|_| bad())?,
                     lan_udp: udp.parse().map_err(|_| bad())?,
+                    vsock_port: vsock.parse().map_err(|_| bad())?,
                     credential: rest.first().map(Into::into),
                     identity: rest
                         .get(1)
@@ -261,6 +266,35 @@ fn udp(route: &str, address: std::net::SocketAddr) -> RouteCheck {
         reached: result.is_ok(),
         errno: result.err().and_then(|e| e.raw_os_error()),
     }
+}
+fn vsock(port: u32) -> RouteCheck {
+    let result = kinewright_job_sys::vsock_connect(kinewright_job_sys::VSOCK_LOCAL, port);
+    RouteCheck {
+        route: format!(
+            "vsock {}:{port} (host listener)",
+            kinewright_job_sys::VSOCK_LOCAL
+        ),
+        reached: result.is_ok(),
+        errno: result.err().and_then(|e| e.raw_os_error()),
+    }
+}
+/// `AF_PACKET` would reach every interface of the namespace; `AF_ALG` is a
+/// family an unprivileged process can open. Both must be refused.
+fn families() -> Vec<RouteCheck> {
+    [
+        ("socket AF_PACKET (raw)", 17, 3, 0x0300),
+        ("socket AF_ALG (seqpacket)", 38, 5, 0),
+    ]
+    .into_iter()
+    .map(|(route, family, kind, protocol)| {
+        let result = kinewright_job_sys::open_socket(family, kind, protocol);
+        RouteCheck {
+            route: route.into(),
+            reached: result.is_ok(),
+            errno: result.err().and_then(|e| e.raw_os_error()),
+        }
+    })
+    .collect()
 }
 fn loopback_mcp(port: u16) -> RouteCheck {
     use std::io::{Read, Write};
@@ -308,6 +342,7 @@ pub fn inspect_unpaid(targets: &UnpaidTargets) -> UnpaidReport {
                     &format!("udp {lan}:{} (listener)", targets.lan_udp),
                     SocketAddr::new(lan, targets.lan_udp),
                 ),
+                vsock(targets.vsock_port),
             ],
             credential: vec![],
             credential_read_only: None,
@@ -315,6 +350,7 @@ pub fn inspect_unpaid(targets: &UnpaidTargets) -> UnpaidReport {
             credential_readable: None,
             home_entries: vec![],
             home_refusal: None,
+            families: vec![],
         };
     }
     let mut closed = vec![
@@ -341,6 +377,7 @@ pub fn inspect_unpaid(targets: &UnpaidTargets) -> UnpaidReport {
         udp(&format!("udp {v4}:53"), SocketAddr::new(v4, 53)),
         udp(&format!("udp [{v6}]:443"), SocketAddr::new(v6, 443)),
         udp(&format!("udp [{v6}]:53"), SocketAddr::new(v6, 53)),
+        vsock(targets.vsock_port),
     ];
     // Any configured resolver that is not loopback. A loopback resolver
     // inside the namespace is the namespace's own, empty loopback.
@@ -371,6 +408,7 @@ pub fn inspect_unpaid(targets: &UnpaidTargets) -> UnpaidReport {
         credential_readable: None,
         home_entries: vec![],
         home_refusal: None,
+        families: families(),
     };
     if let (Some(credential), Some(identity)) = (&targets.credential, targets.identity) {
         credential_checks(credential, identity, &mut report);
