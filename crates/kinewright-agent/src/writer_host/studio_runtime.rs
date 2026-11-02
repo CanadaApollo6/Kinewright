@@ -29,12 +29,17 @@ pub(crate) mod fixture;
 pub(super) struct RuntimeWitness {
     pub on_event: Arc<dyn Fn(&AgentEvent) + Send + Sync>,
     pub on_native_events: Arc<dyn Fn(crossbeam_channel::Receiver<AgentEvent>) + Send + Sync>,
+    /// C5 fix 7: the type token of each raw native provider event.
+    pub raw_type: super::native_invocation::RawTypeWitness,
 }
 pub(super) struct RuntimePorts {
     pub profiles: Option<Arc<dyn ProfileFactory>>,
     pub checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
     pub guardian: PathBuf,
     pub ceiling: Option<std::num::NonZeroU64>,
+    /// C5 fix 7: the native first-progress deadline. Production keeps
+    /// [`crate::native_launcher::FIRST_PROGRESS`]; witnesses shorten it.
+    pub first_progress: std::time::Duration,
     #[cfg(any(test, feature = "test-util"))]
     pub fixture_claim: Option<PathBuf>,
     #[cfg(any(test, feature = "test-util"))]
@@ -57,6 +62,7 @@ impl Default for RuntimePorts {
             ceiling: Some(
                 crate::orchestration::adapters::codex_candidate().default_token_ceiling(),
             ),
+            first_progress: crate::native_launcher::FIRST_PROGRESS,
             #[cfg(any(test, feature = "test-util"))]
             fixture_claim: std::env::var_os("KINEWRIGHT_C4_RECOVERY_FIXTURE_ROOT")
                 .map(PathBuf::from),
@@ -358,12 +364,19 @@ impl StudioRuntime {
         let launcher = NativeGuardianLauncher {
             images: self.images.clone(),
             claim,
-            owner: Arc::new(super::native_invocation::HostInvocationOwner::new(
-                &host,
-                producer.clone(),
-            )),
+            owner: {
+                let owner =
+                    super::native_invocation::HostInvocationOwner::new(&host, producer.clone());
+                #[cfg(any(test, feature = "test-util"))]
+                let owner = match &self.ports.witness {
+                    Some(witness) => owner.with_raw_witness(witness.raw_type.clone()),
+                    None => owner,
+                };
+                Arc::new(owner)
+            },
             guardian: self.ports.guardian.clone(),
             checks: self.ports.checks.clone(),
+            first_progress: self.ports.first_progress,
             #[cfg(test)]
             lose_commit_ack: false,
             #[cfg(test)]

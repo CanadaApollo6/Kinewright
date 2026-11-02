@@ -72,6 +72,7 @@ fn effect_pump(
         guardian: kinewright_media::test_support::workspace_target_dir()
             .join("debug/kinewright-job-guardian"),
         checks: Arc::new(profiles.clone()),
+        first_progress: crate::native_launcher::FIRST_PROGRESS,
         lose_commit_ack: false,
         after_release: None,
         startup_failure: None,
@@ -206,6 +207,7 @@ fn s4b_c3_crash_helper() {
         guardian: kinewright_media::test_support::workspace_target_dir()
             .join("debug/kinewright-job-guardian"),
         checks: Arc::new(checks),
+        first_progress: crate::native_launcher::FIRST_PROGRESS,
         lose_commit_ack: false,
         after_release: None,
         startup_failure: None,

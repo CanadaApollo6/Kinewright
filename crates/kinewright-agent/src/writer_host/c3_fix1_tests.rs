@@ -326,6 +326,7 @@ fn s4b_c3_fix1_history_crash_child() {
             guardian: kinewright_media::test_support::workspace_target_dir()
                 .join("debug/kinewright-job-guardian"),
             checks: Arc::new(checks),
+            first_progress: crate::native_launcher::FIRST_PROGRESS,
             lose_commit_ack: false,
             after_release: None,
             startup_failure: None,

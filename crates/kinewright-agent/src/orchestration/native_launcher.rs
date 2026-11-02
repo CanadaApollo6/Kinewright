@@ -62,6 +62,44 @@ pub(crate) fn environment(
     ])
 }
 
+/// C5 fix 7: while held, every native sandbox this process builds allows TCP
+/// only to the loopback MCP port, never 443. The dry launch holds it around
+/// the unpaid probe and launch so no provider request can leave the machine.
+/// Landlock mediates TCP connect by port; UDP is not mediated.
+#[cfg(feature = "eval-harness")]
+static DENY_PROVIDER_EGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "eval-harness")]
+pub(crate) struct DenyProviderEgress(());
+#[cfg(feature = "eval-harness")]
+impl DenyProviderEgress {
+    /// # Panics
+    /// Refuses a second concurrent holder.
+    pub(crate) fn engage() -> Self {
+        assert!(
+            !DENY_PROVIDER_EGRESS.swap(true, std::sync::atomic::Ordering::SeqCst),
+            "provider egress denial already held"
+        );
+        Self(())
+    }
+    pub(crate) fn engaged() -> bool {
+        DENY_PROVIDER_EGRESS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+#[cfg(feature = "eval-harness")]
+impl Drop for DenyProviderEgress {
+    fn drop(&mut self) {
+        DENY_PROVIDER_EGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+fn provider_ports(mcp_port: u16) -> Vec<u16> {
+    #[cfg(feature = "eval-harness")]
+    if DenyProviderEgress::engaged() {
+        return vec![mcp_port];
+    }
+    vec![443, mcp_port]
+}
+
 pub(crate) fn sandbox(
     executable: &adapters::ExecutableIdentity,
     scratch: &std::path::Path,
@@ -77,7 +115,7 @@ pub(crate) fn sandbox(
                 identity: file.identity,
             })
         }),
-        connect_tcp: vec![443, mcp_port],
+        connect_tcp: provider_ports(mcp_port),
         runtime: [
             "/usr",
             "/lib",
@@ -502,6 +540,8 @@ pub(crate) struct NativeGuardianLauncher {
     pub owner: Arc<dyn InvocationOwner>,
     pub guardian: PathBuf,
     pub checks: Arc<dyn adapters::ConnectorRuntimeChecks + Send + Sync>,
+    /// See [`FIRST_PROGRESS`]; witnesses shorten it.
+    pub first_progress: std::time::Duration,
     #[cfg(test)]
     pub lose_commit_ack: bool,
     #[cfg(test)]
@@ -743,6 +783,9 @@ impl NativeGuardianLauncher {
                 .unwrap_or_default()
                 .as_bytes(),
         )?;
+        // C5 fix 7: the provider's stdin ends here, before COMMIT. Only the
+        // streams the host reads cross into the reader thread.
+        let pipes = pipes.into_reader();
         #[cfg(test)]
         if self.lose_commit_ack {
             let mut native = control
@@ -779,23 +822,26 @@ impl NativeGuardianLauncher {
         let (sender, events) = crate::protocol::limits::event_channel();
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
+        let first_progress = self.first_progress;
         thread::Builder::new()
             .name("kinewright-contained-codex".into())
             .spawn(move || {
-                let guardian = pipes.guardian_channel();
+                let crate::provider_pipes::ProviderReader {
+                    output,
+                    diagnostics,
+                    guardian,
+                } = pipes;
                 let diagnostics = crate::provider_stderr::stderr_summary(
-                    pipes.diagnostics,
+                    diagnostics,
                     "kinewright-contained-stderr",
                 );
-                let mut output = CountingReader {
-                    inner: pipes.output,
-                    bytes: 0,
-                };
+                let mut output = FirstProgress::new(output, first_progress);
                 let mut completed =
                     read_provider_output(&mut output, &sender, |raw, ordinal, eof| {
                         usage_owner.raw(&execution, raw, ordinal, eof)
                     });
                 let silent = output.bytes == 0;
+                let stalled = output.stalled;
                 let mut native = worker_control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -831,15 +877,16 @@ impl NativeGuardianLauncher {
                     .ok()
                     .and_then(|reader| reader.join().ok())
                     .unwrap_or_default();
-                let guardian = guardian.map_or(
-                    crate::provider_pipes::GuardianStatus::Unknown,
-                    crate::provider_pipes::GuardianChannel::status,
-                );
+                let guardian = guardian.status();
                 if silent
                     && !sender.failed()
                     && !worker_stopped.load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    let reason = launch_failure(&guardian, diagnostics);
+                    let reason = if stalled {
+                        first_progress_failure(first_progress)
+                    } else {
+                        launch_failure(&guardian, diagnostics)
+                    };
                     if usage_owner.launch_failed(&execution, &reason).is_err() {
                         sender.interrupt("provider launch failure remains unpublished");
                     } else {
@@ -862,15 +909,75 @@ impl NativeGuardianLauncher {
     }
 }
 
-/// Counts provider stdout so a launch that never spoke is told apart from a
-/// turn that ended.
-struct CountingReader<R> {
-    inner: R,
-    bytes: u64,
+/// C5 fix 7: how long a launched native provider may stay silent before its
+/// first stdout byte. Codex `exec --json` writes `thread.started` within
+/// seconds of a healthy start; the longest startup wait in the retained Codex
+/// 0.166 source is one MCP server's 30 s startup timeout, so 60 s is twice
+/// that. A provider still silent then (invocation 8: alive, blocked on a held
+/// stdin for 897 s) is interrupted instead of holding the run deadline.
+pub(crate) const FIRST_PROGRESS: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The fixed reason for a provider that started but never spoke.
+pub(crate) fn first_progress_failure(deadline: std::time::Duration) -> String {
+    format!(
+        "the provider started but sent nothing within {} s",
+        deadline.as_secs()
+    )
 }
-impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+
+/// Counts provider stdout so a launch that never spoke is told apart from a
+/// turn that ended. Until the first byte, each read is bounded by what is left
+/// of the first-progress deadline; at the deadline the stream reads as ended
+/// and `stalled` is set, so the ordinary end path closes the lifetime, cleans
+/// up and retires the attempt once.
+struct FirstProgress {
+    inner: std::os::unix::net::UnixStream,
+    deadline: std::time::Instant,
+    bytes: u64,
+    stalled: bool,
+}
+impl FirstProgress {
+    fn new(inner: std::os::unix::net::UnixStream, within: std::time::Duration) -> Self {
+        Self {
+            inner,
+            deadline: std::time::Instant::now() + within,
+            bytes: 0,
+            stalled: false,
+        }
+    }
+}
+impl std::io::Read for FirstProgress {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.inner.read(buffer)?;
+        if self.stalled {
+            return Ok(0);
+        }
+        if self.bytes == 0 {
+            let left = self
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                self.stalled = true;
+                return Ok(0);
+            }
+            self.inner.set_read_timeout(Some(left))?;
+        }
+        let read = match self.inner.read(buffer) {
+            Ok(read) => read,
+            Err(error)
+                if self.bytes == 0
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+            {
+                self.stalled = true;
+                return Ok(0);
+            }
+            Err(error) => return Err(error),
+        };
+        if self.bytes == 0 && read > 0 {
+            self.inner.set_read_timeout(None)?;
+        }
         self.bytes = self.bytes.saturating_add(read as u64);
         Ok(read)
     }

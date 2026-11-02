@@ -3048,11 +3048,20 @@ pub(crate) fn mcp_headers(
     Ok(headers)
 }
 /// Middleware executes before MCP initialization/list/read/call, including GET and DELETE.
+/// C5 fix 7: requests that reached a task MCP endpoint in this process, and
+/// those that passed its header and root checks. An MCP client's first
+/// request is `initialize`, so an admitted request means the CLI's handshake
+/// reached Kinewright's loopback endpoint. The dry launch reads both.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) static TASK_MCP_REQUESTS: [std::sync::atomic::AtomicU64; 2] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 pub(crate) async fn guard_mcp(
     State(bootstrap): State<HostBootstrap>,
     request: Request,
     next: axum::middleware::Next,
 ) -> Response {
+    #[cfg(any(test, feature = "test-util"))]
+    TASK_MCP_REQUESTS[0].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Err(status) = check_headers(request.headers(), &bootstrap) {
         return status.into_response();
     }
@@ -3064,6 +3073,8 @@ pub(crate) async fn guard_mcp(
     if roots.and_then(|r| r.canonicalize().ok()).is_none() {
         return StatusCode::FORBIDDEN.into_response();
     }
+    #[cfg(any(test, feature = "test-util"))]
+    TASK_MCP_REQUESTS[1].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     next.run(request).await
 }
 
@@ -3389,8 +3400,8 @@ mod codex_witness;
 #[cfg(all(target_os = "linux", feature = "eval-harness"))]
 #[doc(hidden)]
 pub use codex_witness::{
-    run_installed_codex_director_witness, run_installed_codex_local_policy_witness,
-    run_installed_codex_network_witness,
+    run_installed_codex_director_witness, run_installed_codex_dry_launch,
+    run_installed_codex_local_policy_witness, run_installed_codex_network_witness,
 };
 
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]

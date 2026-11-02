@@ -28,6 +28,22 @@ pub enum ProtocolFixtureMode {
     FullQueue,
     /// The provider writes one diagnostic line and exits right after exec.
     ExitAtLaunch,
+    /// C5 fix 7: like Codex `exec`, the provider reads stdin to EOF before
+    /// its first event.
+    ReadStdinFirst,
+    /// C5 fix 7: the provider stays alive and never writes a first event.
+    SilentAlive,
+}
+impl ProtocolFixtureMode {
+    /// The fix 7 witnesses shorten the first-progress deadline so a held
+    /// stdin or a silent provider is seen in seconds.
+    pub const SHORT_FIRST_PROGRESS: Duration = Duration::from_secs(3);
+    fn first_progress(self) -> Duration {
+        match self {
+            Self::ReadStdinFirst | Self::SilentAlive => Self::SHORT_FIRST_PROGRESS,
+            _ => crate::native_launcher::FIRST_PROGRESS,
+        }
+    }
 }
 #[derive(Clone)]
 pub struct ProtocolObservation {
@@ -112,6 +128,7 @@ impl ProtocolFixture {
             checks: Arc::new(Factory(self.0.clone())),
             guardian: target_dir().join("kinewright-job-guardian"),
             ceiling: None,
+            first_progress: self.0.mode.first_progress(),
             fixture_claim: Some(self.claim_root()),
             fixture_autostart: self.0.mode != ProtocolFixtureMode::Dormant,
             qualification: false,
@@ -131,6 +148,7 @@ impl ProtocolFixture {
                         let _ = wait_release(&events);
                     }
                 }),
+                raw_type: Arc::new(|_| {}),
                 on_native_events: Arc::new(move |receiver| {
                     queues
                         .queues
@@ -216,6 +234,12 @@ impl ProfileFactory for Factory {
         }
         if self.0.mode == ProtocolFixtureMode::ExitAtLaunch {
             std::fs::write(scratch.join("event-mode"), b"exit")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::ReadStdinFirst {
+            std::fs::write(scratch.join("event-mode"), b"stdin")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::SilentAlive {
+            std::fs::write(scratch.join("event-mode"), b"silent")?;
         }
         let credentials = scratch.join("credentials");
         std::fs::create_dir(&credentials)?;

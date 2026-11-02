@@ -18,3 +18,9 @@ fn s4b_installed_codex_local_policy() {
 fn s4b_installed_codex_network() {
     kinewright_agent::writer_host::run_installed_codex_network_witness();
 }
+
+#[test]
+#[ignore = "on-demand: unpaid installed Codex dry launch with provider egress denied"]
+fn s4b_installed_codex_dry_launch() {
+    kinewright_agent::writer_host::run_installed_codex_dry_launch();
+}

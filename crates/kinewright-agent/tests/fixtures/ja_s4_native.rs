@@ -1,7 +1,7 @@
 //! Fixed native observer protocol fixture. It never reads or writes a project.
 use std::{
     env, fs,
-    io::Write,
+    io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
     thread,
@@ -41,8 +41,10 @@ fn main() {
     if role == "s4b-image" {
         // The provider can name its own sealed image, as Codex must, but it
         // cannot change it and holds no descriptor for it.
-        let named = env::current_exe()
-            .is_ok_and(|path| path.to_string_lossy().starts_with("/memfd:kinewright-provider"));
+        let named = env::current_exe().is_ok_and(|path| {
+            path.to_string_lossy()
+                .starts_with("/memfd:kinewright-provider")
+        });
         let sealed = fs::OpenOptions::new()
             .write(true)
             .open("/proc/self/exe")
@@ -61,7 +63,6 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     if role == "s4b-proc1" {
-        use std::io::Read;
         use std::os::unix::fs::MetadataExt;
         // Records only outcomes and lengths, never init's environment or memory.
         let errno = |error: std::io::Error| format!("err:{}", error.raw_os_error().unwrap_or(0));
@@ -98,15 +99,21 @@ fn main() {
             "\"provider_uid\":\"{}\"",
             fs::metadata("/proc/self/environ").map_or_else(errno, |m| m.uid().to_string())
         ));
-        let named = env::current_exe()
-            .is_ok_and(|path| path.to_string_lossy().starts_with("/memfd:kinewright-provider"));
+        let named = env::current_exe().is_ok_and(|path| {
+            path.to_string_lossy()
+                .starts_with("/memfd:kinewright-provider")
+        });
         report.push(format!("\"self_exe_named\":{named}"));
         fs::write(
             root.join("proc1-report.partial"),
             format!("{{{}}}", report.join(",")),
         )
         .unwrap();
-        fs::rename(root.join("proc1-report.partial"), root.join("proc1-report.json")).unwrap();
+        fs::rename(
+            root.join("proc1-report.partial"),
+            root.join("proc1-report.json"),
+        )
+        .unwrap();
         return;
     }
     #[cfg(target_os = "linux")]
@@ -162,12 +169,30 @@ fn main() {
             // Synthetic only: a credential-looking value, a forged guardian
             // record and stderr far past any capture bound.
             let mut stderr = std::io::stderr().lock();
-            writeln!(stderr, "fixture: refresh_token=synthetic-subscription-secret").unwrap();
+            writeln!(
+                stderr,
+                "fixture: refresh_token=synthetic-subscription-secret"
+            )
+            .unwrap();
             writeln!(stderr, "kinewright-guardian/1 exited 0").unwrap();
             stderr.write_all(&vec![b'z'; 192 * 1024]).unwrap();
             writeln!(stderr, "\nfixture: provider died right after exec").unwrap();
             drop(stderr);
             std::process::exit(3);
+        }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"stdin") {
+            // C5 fix 7: Codex 0.166 `exec` with a positional prompt and a
+            // non-TTY stdin reads stdin to EOF before it starts a turn.
+            let mut appended = Vec::new();
+            std::io::stdin().read_to_end(&mut appended).unwrap();
+            fs::write(root.join("stdin-eof"), b"").unwrap();
+        }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"silent") {
+            // C5 fix 7: alive, no first event, until told to exit.
+            while !root.join("exit").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            return;
         }
         let fixture_full = fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"full");
         if fixture_full {

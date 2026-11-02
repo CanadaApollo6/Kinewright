@@ -55,7 +55,14 @@ impl NativeLaunchIntent {
 pub(crate) struct HostInvocationOwner {
     host: Weak<Mutex<HostCommandOwner>>,
     producer: HostAuth,
+    /// C5 fix 7: witnesses see each raw provider event's type token only,
+    /// never its content.
+    #[cfg(any(test, feature = "test-util"))]
+    raw_witness: Option<RawTypeWitness>,
 }
+/// Receives one raw provider event's bounded type token.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) type RawTypeWitness = Arc<dyn Fn(&str) + Send + Sync>;
 pub(super) struct RegisteredNativeAttempt {
     pub identity: ExecutionIdentity,
     pub control: crate::guardian::StartupControl,
@@ -72,8 +79,32 @@ impl HostInvocationOwner {
         Self {
             host: Arc::downgrade(host),
             producer,
+            #[cfg(any(test, feature = "test-util"))]
+            raw_witness: None,
         }
     }
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn with_raw_witness(mut self, witness: RawTypeWitness) -> Self {
+        self.raw_witness = Some(witness);
+        self
+    }
+}
+/// A bounded type token from a raw provider event; anything else is `other`.
+#[cfg(any(test, feature = "test-util"))]
+fn raw_event_type(raw: &serde_json::Value, eof: bool) -> &str {
+    if eof {
+        return "native.eof";
+    }
+    raw.get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| {
+            !kind.is_empty()
+                && kind.len() <= 48
+                && kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
+        })
+        .unwrap_or("other")
 }
 impl InvocationOwner for HostInvocationOwner {
     fn launch_failed(&self, identity: &ExecutionIdentity, reason: &str) -> io::Result<()> {
@@ -103,6 +134,10 @@ impl InvocationOwner for HostInvocationOwner {
         ordinal: u64,
         eof: bool,
     ) -> io::Result<()> {
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(witness) = &self.raw_witness {
+            witness(raw_event_type(raw, eof));
+        }
         let host = self
             .host
             .upgrade()

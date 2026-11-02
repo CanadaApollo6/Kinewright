@@ -26,6 +26,62 @@ impl Drop for ProbeRoot {
 /// Refuses any failed network stage or incomplete native cleanup.
 #[doc(hidden)]
 pub fn run_installed_codex_network_witness() {
+    assert!(
+        !crate::native_launcher::DenyProviderEgress::engaged(),
+        "C5C paid-policy probe under the dry policy"
+    );
+    let (control, contained, _) = probe_reports("network");
+    eprintln!(
+        "C5C_UNPAID control={} contained={} roots={}/{} cleanup=true",
+        control.passed(),
+        contained.passed(),
+        control.roots,
+        contained.roots
+    );
+    assert!(control.passed(), "C5C_NETWORK_CONTROL");
+    assert!(contained.passed(), "C5C_NETWORK_CONTAINED");
+}
+
+/// C5 fix 7: the same probe, in the same dry policy the dry launch uses,
+/// proves TCP 443 to every provider host is refused inside containment while
+/// the control outside containment still reaches them.
+///
+/// # Panics
+/// Refuses unless egress is provably denied.
+pub(super) fn run_dry_network_witness() -> serde_json::Value {
+    assert!(
+        crate::native_launcher::DenyProviderEgress::engaged(),
+        "C5 fix7 dry probe without the dry policy"
+    );
+    let (control, contained, connect_tcp) = probe_reports("dry-network");
+    let refused = crate::network_probe::HOSTS.iter().all(|host| {
+        contained
+            .hosts
+            .iter()
+            .any(|check| check.host == *host && !check.tcp_443 && !check.tls)
+    });
+    eprintln!(
+        "C5_FIX7_DRY_EGRESS control={} tcp_443_refused={refused} connect_tcp={connect_tcp:?}",
+        control.passed()
+    );
+    assert!(control.passed(), "C5_FIX7_DRY_CONTROL");
+    assert!(!connect_tcp.contains(&443), "C5_FIX7_DRY_POLICY_443");
+    assert!(refused, "C5_FIX7_DRY_EGRESS_NOT_REFUSED");
+    serde_json::json!({
+        "connect_tcp_has_443": false,
+        "tcp_443_refused": crate::network_probe::HOSTS,
+        "contained_failures": contained.hosts.iter().map(|check| (check.host.clone(), check.failure.clone())).collect::<std::collections::BTreeMap<_, _>>(),
+        "control_passed": true,
+    })
+}
+
+fn probe_reports(
+    label: &str,
+) -> (
+    crate::network_probe::Report,
+    crate::network_probe::Report,
+    Vec<u16>,
+) {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5c");
     fs::create_dir_all(&out).unwrap();
     let root = ProbeRoot(std::env::temp_dir().join(format!("n5-{}", std::process::id())));
@@ -83,10 +139,14 @@ pub fn run_installed_codex_network_witness() {
     assert!(control.status.success(), "C5C control probe process");
     let control: crate::network_probe::Report = serde_json::from_slice(&control.stdout).unwrap();
     fs::write(
-        out.join("network-control.json"),
+        out.join(format!("{label}-control.json")),
         serde_json::to_vec_pretty(&control).unwrap(),
     )
     .unwrap();
+    let connect_tcp = match &sandbox {
+        ProviderSandbox::LinuxAllowlist { connect_tcp, .. } => connect_tcp.clone(),
+        ProviderSandbox::ContainmentOnly => vec![],
+    };
     let pipes = crate::provider_pipes::ProviderPipeListeners::bind(&scratch.join("io")).unwrap();
     let mut program = Program {
         image: None,
@@ -100,7 +160,7 @@ pub fn run_installed_codex_network_witness() {
     };
     let _image = program.fixture_image().unwrap();
     fs::write(
-        out.join("network-policy.json"),
+        out.join(format!("{label}-policy.json")),
         serde_json::to_vec_pretty(&program).unwrap(),
     )
     .unwrap();
@@ -153,17 +213,9 @@ pub fn run_installed_codex_network_witness() {
     read.unwrap();
     let contained: crate::network_probe::Report = serde_json::from_slice(&output).unwrap();
     fs::write(
-        out.join("network-contained.json"),
+        out.join(format!("{label}-contained.json")),
         serde_json::to_vec_pretty(&contained).unwrap(),
     )
     .unwrap();
-    eprintln!(
-        "C5C_UNPAID control={} contained={} roots={}/{} cleanup=true",
-        control.passed(),
-        contained.passed(),
-        control.roots,
-        contained.roots
-    );
-    assert!(control.passed(), "C5C_NETWORK_CONTROL");
-    assert!(contained.passed(), "C5C_NETWORK_CONTAINED");
+    (control, contained, connect_tcp)
 }

@@ -328,6 +328,14 @@ pub fn run_installed_codex_director_witness() {
         live_invocation_authorized(number, previous.as_ref()),
         "C5 invocation 8 is authorized; invocation 9 requires a proved witness defect"
     );
+    // C5 fix 7: the real CLI's startup through the real launch path is
+    // exercised unpaid, egress denied, before any paid send. A failed dry
+    // launch panics here, before the run id is spent.
+    run_installed_codex_dry_launch();
+    assert!(
+        DRY_LAUNCH_PASSED.load(std::sync::atomic::Ordering::SeqCst),
+        "C5 fix7 dry launch must pass on this head in this process"
+    );
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -391,9 +399,261 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         .unwrap()
         .modified()
         .unwrap();
+    assert!(
+        DRY_LAUNCH_PASSED.load(std::sync::atomic::Ordering::SeqCst),
+        "C5 fix7 paid run without a passed dry launch in this process"
+    );
+    let witness = director_witness(report, &Arc::default());
+    let DirectorRun {
+        temp: _temp,
+        path,
+        claim,
+        manual,
+        stop_gate,
+        host,
+        _release,
+        client,
+        owner_arc,
+        run,
+    } = start_director(witness, "C5 disposable live");
+    let deadline = Instant::now() + Duration::from_mins(15);
+    let mut failure = false;
+    let final_state = loop {
+        let view = reply(
+            &client,
+            HostCommand::ObserveRun {
+                run: run.clone(),
+                after_sequence: 0,
+            },
+        )
+        .run_view
+        .unwrap();
+        let state = view.projection;
+        let mut budget_exceeded = state.tasks.len() > 2;
+        if let Some(accounting) = view.accounting {
+            budget_exceeded |= accounting
+                .tasks
+                .iter()
+                .map(|task| task.sends)
+                .sum::<usize>()
+                > 4;
+            if accounting.tasks.iter().any(|task| task.sends != 0) {
+                report.lock().unwrap()["full_run_started"] = serde_json::json!(true);
+            }
+            report.lock().unwrap()["usage"] = serde_json::to_value(accounting).unwrap();
+        }
+        if budget_exceeded {
+            report.lock().unwrap()["witness_budget_exceeded"] = serde_json::json!(true);
+            failure = true;
+            break state;
+        }
+        if stop_gate.holding() {
+            report.lock().unwrap()["merge_acknowledged_before_stop"] = serde_json::json!(true);
+            break state;
+        }
+        if state.outcome != RunOutcome::Pending {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("director_ended_before_stop");
+            failure = true;
+            break state;
+        }
+        if let Some(status) = &view.runtime_status {
+            let category = if status.contains("storage_backpressure") {
+                "storage_backpressure"
+            } else {
+                "native_runtime_refusal"
+            };
+            report.lock().unwrap()["runtime_status_code"] = serde_json::json!(category);
+            report.lock().unwrap()["error_kind"] = serde_json::json!(category);
+        }
+        if Instant::now() >= deadline {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("deadline");
+        }
+        if state.phase == RunPhase::Interrupted
+            || Instant::now() >= deadline
+            || view.runtime_status.is_some()
+            || report.lock().unwrap()["error_kind"]
+                .as_str()
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "authentication"
+                            | "network"
+                            | "model_unavailable"
+                            | "product_mcp"
+                            | "product_configuration"
+                    )
+                })
+        {
+            failure = true;
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    report.lock().unwrap()["final_outcome"] = serde_json::to_value(&final_state.outcome).unwrap();
+    report.lock().unwrap()["final_phase"] = serde_json::to_value(final_state.phase).unwrap();
+    let before_stop = if !failure && stop_gate.holding() {
+        let owner = owner_arc.lock().unwrap();
+        assert_eq!(
+            final_state.outcome,
+            RunOutcome::Pending,
+            "C5 active outcome at Stop"
+        );
+        assert!(
+            final_state
+                .attempts
+                .iter()
+                .any(|a| a.identity.task == final_state.tasks[0].id
+                    && matches!(
+                        a.state,
+                        crate::orchestration::orchestration_records::AttemptState::Executing
+                    )),
+            "C5 executing Director at Stop"
+        );
+        report.lock().unwrap()["active_at_stop"] = serde_json::json!(true);
+        Some(merged_histories(&owner, &final_state, &manual.document))
+    } else {
+        None
+    };
+    let stop_eligible = crate::orchestration::machine::eligible(&final_state, &RunAction::Stop);
+    report.lock().unwrap()["stop_eligible"] = serde_json::json!(stop_eligible);
+    let stop_applied = stop_eligible && stop_director(&client, &run, &final_state, report);
+    report.lock().unwrap()["stop_applied"] = serde_json::json!(stop_applied);
+    stop_gate.release();
+    let cleanup = Instant::now() + Duration::from_secs(20);
+    while claim.join("run.json").exists() {
+        reply(&client, HostCommand::Status);
+        assert!(Instant::now() < cleanup, "C5 cleanup");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let owner = owner_arc.lock().unwrap();
+    let projection = owner
+        .owner()
+        .unwrap()
+        .orchestration_projection(&run)
+        .unwrap()
+        .unwrap();
+    let accounting = owner.native_accounting(&projection).unwrap().unwrap();
+    report.lock().unwrap()["usage"] = serde_json::to_value(&accounting).unwrap();
+    report.lock().unwrap()["outcome_after_stop"] =
+        serde_json::to_value(&projection.outcome).unwrap();
+    assert_eq!(
+        projection.cleanup,
+        RunCleanup::Settled,
+        "C5 settled after Stop"
+    );
+    assert!(
+        projection.attempts.iter().all(|a| matches!(
+            a.state,
+            crate::orchestration::orchestration_records::AttemptState::Retired(_)
+        )),
+        "C5 no active attempt after cleanup"
+    );
+    assert_eq!(
+        owner.owner().unwrap().published_manual_history().unwrap(),
+        manual,
+        "C5 exact manual history"
+    );
+    report.lock().unwrap()["cleanup"] = serde_json::json!(true);
+    report.lock().unwrap()["manual_exact"] = serde_json::json!(true);
+    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
+    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(
+        fs::metadata(&credential_source)
+            .unwrap()
+            .modified()
+            .unwrap()
+            != credential_before
+    );
+    report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
+    assert!(!failure, "C5 provider/runtime failure; no automatic retry");
+    assert!(
+        stop_applied,
+        "C5 terminal run cannot certify an active Stop"
+    );
+    assert!(
+        report.lock().unwrap()["unexpected_tool"] != true,
+        "C5 unexpected provider tool"
+    );
+    let tools = report.lock().unwrap()["tools_observed"].clone();
+    assert!(
+        tools.as_array().is_some_and(|tools| tools
+            .contains(&serde_json::json!("prepare_edit_plan"))
+            && tools.contains(&serde_json::json!("commit_edit_plan"))),
+        "C5 actual specialist MCP calls"
+    );
+    // Completed turns retain raw usage. Stop may abort the held Director turn;
+    // its EOF stays unavailable instead of becoming a synthetic zero.
+    assert!(
+        accounting.tasks.iter().all(|task| {
+            task.totals.known.input.is_some() && task.totals.known.output.is_some()
+        }),
+        "C5 completed-turn usage retained"
+    );
+    assert!(
+        matches!(projection.outcome, RunOutcome::Cancelled(_)),
+        "C5 active Stop cancellation"
+    );
+    let before_stop = before_stop.expect("C5 active merge acknowledgment required");
+    let after_stop = merged_histories(&owner, &projection, &manual.document);
+    assert_eq!(
+        after_stop, before_stop,
+        "C5 child and candidate full histories after Stop"
+    );
+    let (child_branch, child_history, candidate_branch, candidate_history) = after_stop;
+    report.lock().unwrap()["specialist_edit"] = serde_json::json!(true);
+    report.lock().unwrap()["merge_once"] = serde_json::json!(true);
+    drop(owner);
+    drop(owner_arc);
+    drop(host);
+    let reopened = Ja1EditingSession::open(&path).unwrap();
+    assert_eq!(
+        reopened.published_manual_history().unwrap(),
+        manual,
+        "C5 reopened manual history"
+    );
+    assert_eq!(
+        branch_history(&reopened, &child_branch),
+        child_history,
+        "C5 reopened child exact"
+    );
+    assert_eq!(
+        branch_history(&reopened, &candidate_branch),
+        candidate_history,
+        "C5 reopened candidate exact"
+    );
+    report.lock().unwrap()["reopen_exact"] = serde_json::json!(true);
+    eprintln!(
+        "C5_INSTALLED_DIRECTOR ReviseCut=true specialist_mcp_edit=true merge_once=true manual_exact=true stop=true cleanup=true"
+    );
+}
+
+/// The live witness's event classifier: tool names and error categories only.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixed classifier shared by the live witness and the dry launch"
+)]
+fn director_witness(
+    report: &Arc<Mutex<serde_json::Value>>,
+    first_event: &Arc<std::sync::OnceLock<Instant>>,
+) -> Arc<studio_runtime::RuntimeWitness> {
+    let raw_report = report.clone();
+    let first_event = first_event.clone();
     let observed = report.clone();
-    let witness = Arc::new(studio_runtime::RuntimeWitness {
+    Arc::new(studio_runtime::RuntimeWitness {
         on_native_events: Arc::new(|_| {}),
+        // C5 fix 7: the ordered type tokens of the first raw provider events.
+        raw_type: Arc::new(move |kind| {
+            if kind != "native.eof" {
+                let _ = first_event.set(Instant::now());
+            }
+            let mut report = raw_report.lock().unwrap();
+            if report["raw_types"].is_null() {
+                report["raw_types"] = serde_json::json!([]);
+            }
+            let types = report["raw_types"].as_array_mut().unwrap();
+            if types.len() < 32 {
+                types.push(serde_json::json!(kind));
+            }
+        }),
         on_event: Arc::new(move |event| match event {
             kinewright_core::AgentEvent::ToolCall { name, .. } => {
                 let known = crate::runtime::COMPACT_TOOL_NAMES.contains(&name.as_str())
@@ -452,7 +712,28 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             }
             _ => {}
         }),
-    });
+    })
+}
+
+/// One disposable project driven through the product's own `ReviseCut` path to
+/// a Director launch. The live witness and the C5 fix 7 dry launch share it.
+struct DirectorRun {
+    temp: kinewright_media::test_support::TempDirectory,
+    path: PathBuf,
+    claim: PathBuf,
+    manual: kinewright_core::HistorySnapshot,
+    stop_gate: Arc<super::qualification_gate::MergeStopGate>,
+    host: WriterHost,
+    _release: super::qualification_gate::ReleaseOnDrop,
+    client: HostClient,
+    owner_arc: Arc<Mutex<super::HostCommandOwner>>,
+    run: RunId,
+}
+#[allow(
+    clippy::too_many_lines,
+    reason = "the disposable project, publication, note and ReviseCut stay in product order"
+)]
+fn start_director(witness: Arc<studio_runtime::RuntimeWitness>, project: &str) -> DirectorRun {
     let temp = kinewright_media::test_support::TempDirectory::new_in(&std::env::temp_dir(), "l5");
     let path = temp.path("project.kinewright");
     let mut document = Document::default();
@@ -497,7 +778,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
     let host = WriterHost::start_inner(
         HostConfig {
             scheduler_settings: None,
-            project: "C5 disposable live".into(),
+            project: project.into(),
             path: Some(path.clone()),
             roots: SessionRoots {
                 read: vec![temp.root().into()],
@@ -517,7 +798,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         },
     )
     .unwrap();
-    let _release = stop_gate.release_on_drop();
+    let release = stop_gate.release_on_drop();
     wait_recovery(&host);
     let client = host.client();
     let owner_arc = host.owner.upgrade().unwrap();
@@ -625,8 +906,152 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         panic!("C5 ReviseCut");
     };
     let run: RunId = serde_json::from_value(serde_json::to_value(run_id).unwrap()).unwrap();
-    let deadline = Instant::now() + Duration::from_mins(15);
-    let mut failure = false;
+    DirectorRun {
+        temp,
+        path,
+        claim,
+        manual,
+        stop_gate,
+        host,
+        _release: release,
+        client,
+        owner_arc,
+        run,
+    }
+}
+
+/// The person's Stop, through the same scoped orchestration dispatch.
+fn stop_director(
+    client: &HostClient,
+    run: &RunId,
+    state: &crate::orchestration::orchestration_records::RunProjection,
+    report: &Arc<Mutex<serde_json::Value>>,
+) -> bool {
+    let issued = issue(client);
+    let mut envelope = OrchestrationEnvelope {
+        id: issued.envelope.id.clone(),
+        digest: serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap(),
+        project: issued.envelope.project_id,
+        expected_generation: issued.root_generation,
+        authority: AuthorityBinding {
+            grant_ref: issued.grant_ref,
+            owner_epoch: issued.envelope.owner_epoch,
+            endpoint: None,
+            attempt: None,
+        },
+        command: OrchestrationCommand::ControlRun(RunIntent {
+            command_id: issued.envelope.id,
+            run_id: run.clone(),
+            expected_control_revision: state.control_revision.clone(),
+            action: RunAction::Stop,
+        }),
+    };
+    envelope.digest = envelope.computed_digest().unwrap();
+    let stopped = client
+        .request(HostCommand::DispatchOrchestration {
+            request: Box::new(ScopedOrchestrationRequest {
+                run: Some(run.clone()),
+                envelope,
+                consume_batch: None,
+            }),
+        })
+        .expect("C5 Stop transport");
+    if let Some(ref refusal) = stopped.error {
+        report.lock().unwrap()["stop_refusal_code"] = serde_json::json!(refusal.code);
+    }
+    stopped.error.is_none()
+        && stopped
+            .orchestration
+            .is_some_and(|receipt| receipt.decision == CommandDecision::Applied)
+}
+
+/// Set only by a passed dry launch in this process, so on this head.
+static DRY_LAUNCH_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// C5 fix 7: launch the installed qualified Codex through the full product
+/// path (guardian, sealed image, sandbox, credential mount, real arguments,
+/// environment, MCP config, stdin handling and the Director prompt from
+/// `ReviseCut`) with provider egress denied by the sandbox. Nothing can leave
+/// the machine, so nothing is charged. It passes when the real CLI gets past
+/// startup: a first raw JSONL event, its MCP `initialize` at the loopback
+/// endpoint, or a network failure it reports after its turn starts.
+///
+/// # Panics
+/// Refuses when egress is not provably denied, or when the CLI dies, hangs
+/// or is refused before turn start.
+#[doc(hidden)]
+pub fn run_installed_codex_dry_launch() {
+    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
+    fs::create_dir_all(&evidence).unwrap();
+    let label = std::env::var("KINEWRIGHT_S4B_C5_DRY_LABEL").unwrap_or_else(|_| "dry".into());
+    assert!(
+        !label.is_empty()
+            && label.len() <= 32
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "C5 fix7 dry label"
+    );
+    let report = Arc::new(Mutex::new(serde_json::json!({
+        "paid": false,
+        "label": label,
+        "first_progress_seconds": crate::native_launcher::FIRST_PROGRESS.as_secs(),
+    })));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dry_body(&report)));
+    report.lock().unwrap()["passed"] = serde_json::json!(result.is_ok());
+    fs::write(
+        evidence.join(format!("dry-launch-{label}.json")),
+        serde_json::to_vec_pretty(&*report.lock().unwrap()).unwrap(),
+    )
+    .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+    DRY_LAUNCH_PASSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the denied-egress launch keeps its proof, observation and cleanup together"
+)]
+fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
+    let deny = crate::native_launcher::DenyProviderEgress::engage();
+    // Prove, in this exact policy, that TCP 443 to every provider host is
+    // refused before anything is launched.
+    let egress = network_witness::run_dry_network_witness();
+    report.lock().unwrap()["egress"] = egress;
+    let credential_source = crate::codex_credentials::source_path().unwrap();
+    let credential_identity = crate::codex_credentials::inspect(&credential_source, None).unwrap();
+    let credential_before = fs::metadata(&credential_source).unwrap();
+    let first_event = Arc::new(std::sync::OnceLock::new());
+    let witness = director_witness(report, &first_event);
+    let mcp = || {
+        super::TASK_MCP_REQUESTS
+            .each_ref()
+            .map(|count| count.load(std::sync::atomic::Ordering::SeqCst))
+    };
+    let mcp_before = mcp();
+    let DirectorRun {
+        temp,
+        path: _,
+        claim,
+        manual,
+        stop_gate,
+        host,
+        _release,
+        client,
+        owner_arc,
+        run,
+    } = start_director(witness, "C5 dry launch");
+    let launched = Instant::now();
+    // Startup must show progress before the product's own first-progress
+    // deadline; a little slack lets that deadline's refusal be read.
+    let bound = launched + crate::native_launcher::FIRST_PROGRESS + Duration::from_secs(20);
+    let initialized = || mcp()[1] > mcp_before[1];
+    let network = |report: &Arc<Mutex<serde_json::Value>>| {
+        report.lock().unwrap()["error_kind"].as_str() == Some("network")
+    };
+    let mut refusal = None;
     let final_state = loop {
         let view = reply(
             &client,
@@ -638,139 +1063,103 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         .run_view
         .unwrap();
         let state = view.projection;
-        let mut budget_exceeded = state.tasks.len() > 2;
-        if let Some(accounting) = view.accounting {
-            budget_exceeded |= accounting
-                .tasks
-                .iter()
-                .map(|task| task.sends)
-                .sum::<usize>()
-                > 4;
-            if accounting.tasks.iter().any(|task| task.sends != 0) {
-                report.lock().unwrap()["full_run_started"] = serde_json::json!(true);
-            }
-            report.lock().unwrap()["usage"] = serde_json::to_value(accounting).unwrap();
-        }
-        if budget_exceeded {
-            report.lock().unwrap()["witness_budget_exceeded"] = serde_json::json!(true);
-            failure = true;
-            break state;
-        }
-        if stop_gate.holding() {
-            report.lock().unwrap()["merge_acknowledged_before_stop"] = serde_json::json!(true);
-            break state;
-        }
-        if state.outcome != RunOutcome::Pending {
-            report.lock().unwrap()["error_kind"] = serde_json::json!("director_ended_before_stop");
-            failure = true;
-            break state;
-        }
+        let progressed = first_event.get().is_some() || initialized() || network(report);
         if let Some(status) = &view.runtime_status {
-            let category = if status.contains("storage_backpressure") {
-                "storage_backpressure"
-            } else {
-                "native_runtime_refusal"
-            };
-            report.lock().unwrap()["runtime_status_code"] = serde_json::json!(category);
-            report.lock().unwrap()["error_kind"] = serde_json::json!(category);
+            report.lock().unwrap()["runtime_status_code"] =
+                serde_json::json!(if status.contains("storage_backpressure") {
+                    "storage_backpressure"
+                } else {
+                    "native_runtime_refusal"
+                });
+            break state;
         }
-        if Instant::now() >= deadline {
-            report.lock().unwrap()["error_kind"] = serde_json::json!("deadline");
+        if state.phase == RunPhase::Interrupted || state.outcome != RunOutcome::Pending {
+            if let crate::orchestration::orchestration_records::RunWait::Provider(reason) =
+                &state.wait
+            {
+                let owner = owner_arc.lock().unwrap();
+                refusal = owner
+                    .owner()
+                    .unwrap()
+                    .store()
+                    .unwrap()
+                    .read_evidence(&reason.reason)
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            }
+            break state;
         }
-        if state.phase == RunPhase::Interrupted
-            || Instant::now() >= deadline
-            || view.runtime_status.is_some()
-            || report.lock().unwrap()["error_kind"]
-                .as_str()
-                .is_some_and(|kind| {
-                    matches!(
-                        kind,
-                        "authentication"
-                            | "network"
-                            | "model_unavailable"
-                            | "product_mcp"
-                            | "product_configuration"
-                    )
-                })
+        // Past startup: keep watching briefly so the denied request's network
+        // failure and the MCP handshake are both recorded, then Stop. A
+        // provider that has already ended its stream has nothing more to show.
+        let ended = report.lock().unwrap()["raw_types"]
+            .as_array()
+            .is_some_and(|types| types.contains(&serde_json::json!("native.eof")));
+        if progressed
+            && (ended
+                || (network(report) && initialized())
+                || first_event
+                    .get()
+                    .is_some_and(|at| at.elapsed() >= Duration::from_secs(15)))
         {
-            failure = true;
+            break state;
+        }
+        if Instant::now() >= bound {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("no_startup_progress");
             break state;
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    report.lock().unwrap()["final_outcome"] = serde_json::to_value(&final_state.outcome).unwrap();
-    report.lock().unwrap()["final_phase"] = serde_json::to_value(final_state.phase).unwrap();
-    let before_stop = if !failure && stop_gate.holding() {
-        let owner = owner_arc.lock().unwrap();
-        assert_eq!(
-            final_state.outcome,
-            RunOutcome::Pending,
-            "C5 active outcome at Stop"
-        );
-        assert!(
-            final_state
-                .attempts
-                .iter()
-                .any(|a| a.identity.task == final_state.tasks[0].id
-                    && matches!(
-                        a.state,
-                        crate::orchestration::orchestration_records::AttemptState::Executing
-                    )),
-            "C5 executing Director at Stop"
-        );
-        report.lock().unwrap()["active_at_stop"] = serde_json::json!(true);
-        Some(merged_histories(&owner, &final_state, &manual.document))
-    } else {
-        None
-    };
-    let stop_eligible = crate::orchestration::machine::eligible(&final_state, &RunAction::Stop);
-    report.lock().unwrap()["stop_eligible"] = serde_json::json!(stop_eligible);
-    let stop_applied = if stop_eligible {
-        let issued = issue(&client);
-        let mut envelope = OrchestrationEnvelope {
-            id: issued.envelope.id.clone(),
-            digest: serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap(),
-            project: issued.envelope.project_id,
-            expected_generation: issued.root_generation,
-            authority: AuthorityBinding {
-                grant_ref: issued.grant_ref,
-                owner_epoch: issued.envelope.owner_epoch,
-                endpoint: None,
-                attempt: None,
-            },
-            command: OrchestrationCommand::ControlRun(RunIntent {
-                command_id: issued.envelope.id,
-                run_id: run.clone(),
-                expected_control_revision: final_state.control_revision.clone(),
-                action: RunAction::Stop,
-            }),
-        };
-        envelope.digest = envelope.computed_digest().unwrap();
-        let stopped = client
-            .request(HostCommand::DispatchOrchestration {
-                request: Box::new(ScopedOrchestrationRequest {
-                    run: Some(run.clone()),
-                    envelope,
-                    consume_batch: None,
-                }),
-            })
-            .expect("C5 Stop transport");
-        if let Some(ref refusal) = stopped.error {
-            report.lock().unwrap()["stop_refusal_code"] = serde_json::json!(refusal.code);
+    let observed = serde_json::json!({
+        "first_jsonl_event_ms": first_event.get().map(|at| at.saturating_duration_since(launched).as_millis()),
+        "mcp_handshake_reached_endpoint": initialized(),
+        "mcp_requests_arrived": mcp()[0] - mcp_before[0],
+        "mcp_requests_admitted": mcp()[1] - mcp_before[1],
+        "network_failure_after_turn_start": network(report),
+    });
+    let progressed = observed["first_jsonl_event_ms"].is_number()
+        || observed["mcp_handshake_reached_endpoint"] == true
+        || observed["network_failure_after_turn_start"] == true;
+    {
+        let mut evidence = report.lock().unwrap();
+        evidence["observed"] = observed;
+        evidence["refusal"] = serde_json::json!(refusal);
+        evidence["final_phase"] = serde_json::to_value(final_state.phase).unwrap();
+        evidence["final_outcome"] = serde_json::to_value(&final_state.outcome).unwrap();
+        evidence["elapsed_ms"] = serde_json::json!(launched.elapsed().as_millis());
+    }
+    // The attempt may be ending on its own (its turn failed on the denied
+    // request), so Stop is retried on fresh state until it applies or the
+    // run is no longer pending.
+    let stopping = Instant::now() + Duration::from_secs(30);
+    let mut state = final_state;
+    let stop_applied = loop {
+        if crate::orchestration::machine::eligible(&state, &RunAction::Stop)
+            && stop_director(&client, &run, &state, report)
+        {
+            break true;
         }
-        stopped.error.is_none()
-            && stopped
-                .orchestration
-                .is_some_and(|receipt| receipt.decision == CommandDecision::Applied)
-    } else {
-        false
+        if state.outcome != RunOutcome::Pending || Instant::now() >= stopping {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        state = reply(
+            &client,
+            HostCommand::ObserveRun {
+                run: run.clone(),
+                after_sequence: 0,
+            },
+        )
+        .run_view
+        .unwrap()
+        .projection;
     };
     report.lock().unwrap()["stop_applied"] = serde_json::json!(stop_applied);
     stop_gate.release();
-    let cleanup = Instant::now() + Duration::from_secs(20);
+    let cleanup = Instant::now() + Duration::from_secs(30);
     while claim.join("run.json").exists() {
         reply(&client, HostCommand::Status);
-        assert!(Instant::now() < cleanup, "C5 cleanup");
+        assert!(Instant::now() < cleanup, "C5 fix7 dry cleanup");
         std::thread::sleep(Duration::from_millis(10));
     }
     let owner = owner_arc.lock().unwrap();
@@ -781,96 +1170,60 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         .unwrap()
         .unwrap();
     let accounting = owner.native_accounting(&projection).unwrap().unwrap();
-    report.lock().unwrap()["usage"] = serde_json::to_value(&accounting).unwrap();
-    report.lock().unwrap()["outcome_after_stop"] =
-        serde_json::to_value(&projection.outcome).unwrap();
+    {
+        let mut evidence = report.lock().unwrap();
+        evidence["sends"] = serde_json::json!(
+            accounting
+                .tasks
+                .iter()
+                .map(|task| task.sends.len())
+                .sum::<usize>()
+        );
+        evidence["attempts"] = serde_json::json!(projection.attempts.len());
+        evidence["cleanup"] = serde_json::to_value(&projection.cleanup).unwrap();
+    }
     assert_eq!(
         projection.cleanup,
         RunCleanup::Settled,
-        "C5 settled after Stop"
+        "C5 fix7 dry settled"
     );
     assert!(
         projection.attempts.iter().all(|a| matches!(
             a.state,
             crate::orchestration::orchestration_records::AttemptState::Retired(_)
         )),
-        "C5 no active attempt after cleanup"
+        "C5 fix7 dry no active attempt"
     );
     assert_eq!(
         owner.owner().unwrap().published_manual_history().unwrap(),
         manual,
-        "C5 exact manual history"
+        "C5 fix7 dry exact manual history"
     );
-    report.lock().unwrap()["cleanup"] = serde_json::json!(true);
-    report.lock().unwrap()["manual_exact"] = serde_json::json!(true);
-    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
-    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(
-        fs::metadata(&credential_source)
-            .unwrap()
-            .modified()
-            .unwrap()
-            != credential_before
-    );
-    report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
-    assert!(!failure, "C5 provider/runtime failure; no automatic retry");
-    assert!(
-        stop_applied,
-        "C5 terminal run cannot certify an active Stop"
-    );
-    assert!(
-        report.lock().unwrap()["unexpected_tool"] != true,
-        "C5 unexpected provider tool"
-    );
-    let tools = report.lock().unwrap()["tools_observed"].clone();
-    assert!(
-        tools.as_array().is_some_and(|tools| tools
-            .contains(&serde_json::json!("prepare_edit_plan"))
-            && tools.contains(&serde_json::json!("commit_edit_plan"))),
-        "C5 actual specialist MCP calls"
-    );
-    // Completed turns retain raw usage. Stop may abort the held Director turn;
-    // its EOF stays unavailable instead of becoming a synthetic zero.
-    assert!(
-        accounting.tasks.iter().all(|task| {
-            task.totals.known.input.is_some() && task.totals.known.output.is_some()
-        }),
-        "C5 completed-turn usage retained"
-    );
-    assert!(
-        matches!(projection.outcome, RunOutcome::Cancelled(_)),
-        "C5 active Stop cancellation"
-    );
-    let before_stop = before_stop.expect("C5 active merge acknowledgment required");
-    let after_stop = merged_histories(&owner, &projection, &manual.document);
-    assert_eq!(
-        after_stop, before_stop,
-        "C5 child and candidate full histories after Stop"
-    );
-    let (child_branch, child_history, candidate_branch, candidate_history) = after_stop;
-    report.lock().unwrap()["specialist_edit"] = serde_json::json!(true);
-    report.lock().unwrap()["merge_once"] = serde_json::json!(true);
     drop(owner);
     drop(owner_arc);
+    drop(client);
     drop(host);
-    let reopened = Ja1EditingSession::open(&path).unwrap();
-    assert_eq!(
-        reopened.published_manual_history().unwrap(),
-        manual,
-        "C5 reopened manual history"
+    drop(temp);
+    // Only after the dry host is gone may a sandbox allow 443 again.
+    drop(deny);
+    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
+    let credential_after = fs::metadata(&credential_source).unwrap();
+    let unchanged = credential_after.modified().unwrap() == credential_before.modified().unwrap()
+        && std::os::unix::fs::MetadataExt::ctime(&credential_after)
+            == std::os::unix::fs::MetadataExt::ctime(&credential_before)
+        && std::os::unix::fs::MetadataExt::ctime_nsec(&credential_after)
+            == std::os::unix::fs::MetadataExt::ctime_nsec(&credential_before);
+    report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
+    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(!unchanged);
+    assert!(unchanged, "C5 fix7 dry credential written");
+    let refused = report.lock().unwrap()["refusal"].clone();
+    assert!(
+        progressed,
+        "C5_FIX7_DRY_NO_STARTUP_PROGRESS refusal={refused}"
     );
-    assert_eq!(
-        branch_history(&reopened, &child_branch),
-        child_history,
-        "C5 reopened child exact"
-    );
-    assert_eq!(
-        branch_history(&reopened, &candidate_branch),
-        candidate_history,
-        "C5 reopened candidate exact"
-    );
-    report.lock().unwrap()["reopen_exact"] = serde_json::json!(true);
     eprintln!(
-        "C5_INSTALLED_DIRECTOR ReviseCut=true specialist_mcp_edit=true merge_once=true manual_exact=true stop=true cleanup=true"
+        "C5_FIX7_DRY_LAUNCH observed={} paid=false",
+        report.lock().unwrap()["observed"]
     );
 }
 

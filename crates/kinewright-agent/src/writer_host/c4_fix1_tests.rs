@@ -1237,6 +1237,7 @@ fn s4b_c4_fix1_failed_launch_publishes_retirement_before_private_delete() {
                     .join("debug/kinewright-job-guardian")
             },
             checks: Arc::new(checks),
+            first_progress: crate::native_launcher::FIRST_PROGRESS,
             lose_commit_ack: false,
             after_release: None,
             startup_failure: match mode {

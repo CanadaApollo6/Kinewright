@@ -210,6 +210,7 @@ fn native_start_barrier(
         guardian: kinewright_media::test_support::workspace_target_dir()
             .join("debug/kinewright-job-guardian"),
         checks: Arc::new(checks),
+        first_progress: crate::native_launcher::FIRST_PROGRESS,
         lose_commit_ack,
         after_release,
         startup_failure: None,
@@ -1075,6 +1076,7 @@ fn s4b_c2_fix1_three_failed_launches_leave_machine_usable() {
             guardian: kinewright_media::test_support::workspace_target_dir()
                 .join("debug/kinewright-job-guardian"),
             checks: Arc::new(checks),
+            first_progress: crate::native_launcher::FIRST_PROGRESS,
             lose_commit_ack: false,
             after_release: None,
             startup_failure: failure,
