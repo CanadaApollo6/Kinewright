@@ -236,6 +236,27 @@ use crate::{
         RunProjection,
     },
 };
+
+/// C5 fix 13: terminal authority for one terminal cut. A run with no admitted
+/// budget never gets it. An admitted run that has finished (its budget turns
+/// inactive once its outcome is final and cleanup settles) keeps its own
+/// terminal reserve, so it can still archive its retired attempts after Stop.
+/// `terminal_progress` admits no new task, effect or attempt, and
+/// `advance_run_budget` counts the cut as terminal escrow, so the 32-cut bound
+/// still holds.
+fn terminal_authority(
+    admitted: bool,
+    budget: &RunBudget,
+    before: Option<&RunProjection>,
+) -> Result<(), BundleError> {
+    let finished = before.is_some_and(|before| before.outcome != RunOutcome::Pending);
+    if admitted && (budget.active || finished) && (budget.terminal as u64) < TERMINAL_CUTS {
+        Ok(())
+    } else {
+        Err(BundleError::RunLimit)
+    }
+}
+
 pub(crate) fn terminal_progress(before: &RunProjection, update: &ValidatedRunUpdate) -> bool {
     let after = update.projection();
     if update.receipt().decision != CommandDecision::Applied {
@@ -426,9 +447,7 @@ impl crate::bundle::ProjectBundle {
                 .map_err(|_| BundleError::RunLimit)?;
             crate::orchestration_accounting::encode(update, TERMINAL_TRANSITION_BYTES)
                 .map_err(|_| BundleError::RunLimit)?;
-            if !budget.active || budget.terminal as u64 >= TERMINAL_CUTS {
-                return Err(BundleError::RunLimit);
-            }
+            terminal_authority(index.budgets.contains_key(run), &budget, before.as_ref())?;
             return Ok(arm.then(|| {
                 mint_terminal(
                     &self.store,

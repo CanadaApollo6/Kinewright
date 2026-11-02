@@ -443,7 +443,8 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             if accounting.tasks.iter().any(|task| task.sends != 0) {
                 report.lock().unwrap()["full_run_started"] = serde_json::json!(true);
             }
-            report.lock().unwrap()["mcp_refusals"] = mcp_refusals(&accounting);
+            report.lock().unwrap()["mcp_refusals"] =
+                mcp_refusals(accounting.tasks.iter().map(|task| task.refusals.as_slice()));
             report.lock().unwrap()["usage"] = serde_json::to_value(accounting).unwrap();
         }
         if budget_exceeded {
@@ -539,6 +540,10 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         .unwrap()
         .unwrap();
     let accounting = owner.native_accounting(&projection).unwrap().unwrap();
+    // Invocation 10: the held post-merge call is refused after Stop, so the
+    // refusal list is taken from the final accounting, not the last loop view.
+    report.lock().unwrap()["mcp_refusals"] =
+        mcp_refusals(accounting.tasks.iter().map(|task| task.refusals.as_slice()));
     report.lock().unwrap()["usage"] = serde_json::to_value(&accounting).unwrap();
     report.lock().unwrap()["outcome_after_stop"] =
         serde_json::to_value(&projection.outcome).unwrap();
@@ -1071,7 +1076,8 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
         let state = view.projection;
         let progressed = first_event.get().is_some() || initialized() || network(report);
         if let Some(accounting) = &view.accounting {
-            report.lock().unwrap()["mcp_refusals"] = mcp_refusals(accounting);
+            report.lock().unwrap()["mcp_refusals"] =
+                mcp_refusals(accounting.tasks.iter().map(|task| task.refusals.as_slice()));
         }
         if let Some(status) = &view.runtime_status {
             report.lock().unwrap()["runtime_status_code"] =
@@ -1330,14 +1336,15 @@ fn runtime_status_category(status: &str) -> &'static str {
 
 /// C5 fix 10: refused product MCP calls as witness evidence: task index,
 /// product tool name, fixed code and count only.
-fn mcp_refusals(accounting: &super::orchestration::DurableRunAccounting) -> serde_json::Value {
+fn mcp_refusals<'a>(
+    tasks: impl IntoIterator<Item = &'a [kinewright_project::orchestration_accounting::ToolRefusal]>,
+) -> serde_json::Value {
     serde_json::Value::Array(
-        accounting
-            .tasks
-            .iter()
+        tasks
+            .into_iter()
             .enumerate()
-            .flat_map(|(index, task)| {
-                task.refusals.iter().map(move |refusal| {
+            .flat_map(|(index, refusals)| {
+                refusals.iter().map(move |refusal| {
                     serde_json::json!({
                         "task_index": index,
                         "tool": refusal.tool,
