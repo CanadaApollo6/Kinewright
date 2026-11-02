@@ -294,8 +294,8 @@ pub fn run_installed_codex_local_policy_witness() {
 }
 
 fn live_invocation_authorized(number: u8, previous: Option<&serde_json::Value>) -> bool {
-    number == 7
-        || (number == 8
+    number == 8
+        || (number == 9
             && previous.is_some_and(|previous| {
                 previous["failure_origin"] == "witness" && previous["passed"] == false
             }))
@@ -313,20 +313,20 @@ fn live_invocation_authorized(number: u8, previous: Option<&serde_json::Value>) 
 )]
 pub fn run_installed_codex_director_witness() {
     let number = std::env::var("KINEWRIGHT_S4B_C5_RUN")
-        .unwrap_or_else(|_| "7".into())
+        .unwrap_or_else(|_| "8".into())
         .parse::<u8>()
         .unwrap();
     let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&evidence).unwrap();
-    let previous: Option<serde_json::Value> = (number == 8).then(|| {
+    let previous: Option<serde_json::Value> = (number == 9).then(|| {
         serde_json::from_slice(
-            &fs::read(evidence.join("live-7.json")).expect("C5 invocation 7 evidence"),
+            &fs::read(evidence.join("live-8.json")).expect("C5 invocation 8 evidence"),
         )
         .unwrap()
     });
     assert!(
         live_invocation_authorized(number, previous.as_ref()),
-        "C5 invocation 7 is authorized; invocation 8 requires a proved witness defect"
+        "C5 invocation 8 is authorized; invocation 9 requires a proved witness defect"
     );
     fs::OpenOptions::new()
         .write(true)
@@ -955,22 +955,22 @@ mod authorization_tests {
     use super::live_invocation_authorized;
 
     #[test]
-    fn s4b_c5_live_seventh_is_authorized_eighth_requires_proved_harness_defect() {
+    fn s4b_c5_live_eighth_is_authorized_ninth_requires_proved_harness_defect() {
         use serde_json::json;
-        assert!(live_invocation_authorized(7, None));
-        assert!(!live_invocation_authorized(6, None));
+        assert!(live_invocation_authorized(8, None));
+        assert!(!live_invocation_authorized(7, None));
+        assert!(!live_invocation_authorized(10, None));
         assert!(!live_invocation_authorized(9, None));
-        assert!(!live_invocation_authorized(8, None));
         for previous in [
             json!({"passed": true, "failure_origin": "witness"}),
             json!({"passed": false, "failure_origin": "product"}),
             json!({"passed": false, "failure_origin": "unresolved"}),
             json!({"passed": false}),
         ] {
-            assert!(!live_invocation_authorized(8, Some(&previous)));
+            assert!(!live_invocation_authorized(9, Some(&previous)));
         }
         assert!(live_invocation_authorized(
-            8,
+            9,
             Some(&json!({"passed": false, "failure_origin": "witness"}))
         ));
     }
