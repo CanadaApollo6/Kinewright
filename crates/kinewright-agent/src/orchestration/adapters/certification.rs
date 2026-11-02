@@ -607,9 +607,9 @@ static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
     authentication: AuthenticationMode::Subscription,
     auth_contract: super::CODEX_AUTH_CONTRACT,
     evidence: ReleaseEvidence {
-        source: "c0f00cf47c0cbe9e96dbab939f9f336ed2fb709671ea0c2d68fe19f988f83b6b",
-        guardian: "c2a77c3b85b4015e45251a1a428c12bad3f8835cd2034fcff70563ac5b30c271",
-        fixtures: "1316b78566e15ceffd3ade39d8c9a876e4da2c6ab912588bd18a08d8621b01da",
+        source: "824c34a53447ff0763180fbc54dd30607a0e7873e456447b619974c60318cd53",
+        guardian: "b006f86a1e0f5177bc1e642c669032cdaf5b0caece6126ea701b02974558de29",
+        fixtures: "d05939ad41321be52379e1f6ddc1ae55e6474b1a68f382c9d38eb7e63032a876",
         target: "x86_64-unknown-linux-gnu",
     },
 };
