@@ -49,6 +49,18 @@ impl ReplyDropProxy {
         commands: Vec<&'static str>,
         before: bool,
     ) -> Self {
+        Self::install_holding(client, identity, commands, before, None)
+    }
+    /// With `hold`, a matching request is not dropped: its headers and half its
+    /// body reach the host, which admits it, and the rest follows after `hold`.
+    /// `dropped` turns true once the host is holding it.
+    fn install_holding(
+        client: &mut HostClient,
+        identity: &str,
+        commands: Vec<&'static str>,
+        before: bool,
+        hold: Option<Duration>,
+    ) -> Self {
         let upstream = client.endpoint().address;
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -93,9 +105,23 @@ impl ReplyDropProxy {
                         .copied();
                     if let Some(command) = dropping {
                         losing.push(command);
-                        observed.store(true, Ordering::Release);
+                        if hold.is_none() {
+                            observed.store(true, Ordering::Release);
+                        }
                     }
                     drop(losing);
+                    if let (Some(hold), true) = (hold, dropping.is_some()) {
+                        let mut target = TcpStream::connect(upstream).unwrap();
+                        let half = header_end + (request.len() - header_end) / 2;
+                        target.write_all(&request[..half]).unwrap();
+                        std::thread::sleep(Duration::from_millis(200));
+                        observed.store(true, Ordering::Release);
+                        std::thread::sleep(hold);
+                        target.write_all(&request[half..]).unwrap();
+                        let response = packet(&mut target);
+                        let _ = downstream.write_all(&response);
+                        return;
+                    }
                     let dropping = dropping.is_some();
                     if dropping && before {
                         return;
@@ -162,6 +188,19 @@ impl HostAttachment {
     ) -> ReplyDropProxy {
         ReplyDropProxy::install(&mut self.client, &self.manual_client, commands, before)
     }
+    pub(in crate::ja1_attachment) fn hold_http_request(
+        &mut self,
+        command: &'static str,
+        hold: Duration,
+    ) -> ReplyDropProxy {
+        ReplyDropProxy::install_holding(
+            &mut self.client,
+            &self.manual_client,
+            vec![command],
+            false,
+            Some(hold),
+        )
+    }
 }
 thread_local! {
     static LAUNCH_DROP: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
@@ -203,6 +242,18 @@ impl crate::ja1_attachment::Ja1Attachment {
             .as_mut()
             .expect("launched host")
             .drop_http_reply(command, before)
+    }
+    /// Hold the next `command` request at the host for `hold`: the host has
+    /// admitted it and waits for the rest of its body (S4b C5 fix 12).
+    pub(crate) fn hold_host_request(
+        &mut self,
+        command: &'static str,
+        hold: Duration,
+    ) -> ReplyDropProxy {
+        self.host
+            .as_mut()
+            .expect("launched host")
+            .hold_http_request(command, hold)
     }
     /// Drop one HTTP reply of each of `commands`, in whatever order they come.
     pub(crate) fn drop_host_replies(&mut self, commands: Vec<&'static str>) -> ReplyDropProxy {

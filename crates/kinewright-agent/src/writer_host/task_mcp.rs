@@ -196,7 +196,7 @@ impl TaskMcp {
             let _ = host.record_tool_refusal(self.endpoint.authority(), tool, code);
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = (tool, code);
+        let _ = (self, tool, code);
     }
     pub(super) fn new(
         host: Weak<Mutex<HostCommandOwner>>,

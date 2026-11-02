@@ -34,9 +34,20 @@ pub(crate) enum SpendingChange {
 /// A top-level `error` that is exactly one of Codex 0.166's retry notices
 /// ([`codex_retry_notice`]) is Codex retrying its own transport while the
 /// turn goes on, not a failure (lead ruling on C5 fix 10, narrowed in fix
-/// 11). It is bounded anyway: Codex stops after its retries and sends
-/// `turn.failed`, which counts, and the first-progress and run deadlines
-/// still apply. Every other top-level `error` counts, network text or not.
+/// 11). The two notices are bounded differently:
+/// - `Reconnecting... N/M` is capped by Codex: M is at most 100
+///   (`MAX_STREAM_MAX_RETRIES`), and when the retries run out Codex sends
+///   `turn.failed`, which counts.
+/// - `Reconnecting... waiting for network` has no count cap upstream: Codex's
+///   `unbounded_connection_retries` feature, on by default, retries a failed
+///   connection with a delay of at most 60 s and never reaches `turn.failed`
+///   on its own. Its bound is the product's run clock: the accounting run
+///   deadline and elapsed budget the effect pump enforces, and the session
+///   wall time.
+///
+/// The first-progress deadline bounds only the silence before the first
+/// event, so it does not bound either kind of notice. Every other top-level
+/// `error` counts, network text or not.
 pub(crate) fn provider_failure(kind: &str, raw: &serde_json::Value) -> Option<String> {
     let detail = match kind {
         "turn.failed" => raw.get("error"),

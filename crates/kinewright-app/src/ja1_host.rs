@@ -69,13 +69,15 @@ pub(super) struct HostAttachment {
     pending_imported_media: Option<kinewright_core::AssetId>,
     child: Option<Child>,
     pub cut: Option<AcceptedCut>,
-    heartbeat: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
+    heartbeat: Option<StatusLane>,
     last_heartbeat: Instant,
     pub manual: Option<super::ManualProducerGate>,
     manual_client: String,
     manual_inflight:
         Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
 }
+
+type StatusLane = JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>;
 
 impl HostAttachment {
     pub fn import_unsaved_media(
@@ -638,6 +640,21 @@ impl HostAttachment {
         self.pending_operation.is_some()
     }
 
+    /// S4b C5 fix 12: the host admits one command at a time and answers a
+    /// second one with 429, which this App reads as a refused attachment. A
+    /// status heartbeat still in flight would refuse the next command, so a new
+    /// command first waits for it. Its reply is older than that command and is
+    /// discarded.
+    fn take_heartbeat(&mut self) -> Option<StatusLane> {
+        self.last_heartbeat = Instant::now();
+        self.heartbeat.take()
+    }
+    fn settle_heartbeat(&mut self) {
+        if let Some(heartbeat) = self.take_heartbeat() {
+            let _ = heartbeat.join();
+        }
+    }
+
     fn foreground_request(&mut self, command: HostCommand) -> Result<HostReply, BundleError> {
         let operation = self.next_operation;
         self.next_operation = operation
@@ -682,6 +699,9 @@ impl HostAttachment {
         action: Action,
         owner: &mut Ja1EditingSession,
     ) -> Result<HostReply, BundleError> {
+        // A status response issued before this command cannot replace its
+        // newer metadata, and must not hold the host's one ingress.
+        self.settle_heartbeat();
         if matches!(action, Action::Retry)
             && self.unsaved_import_pending()
             && self.pending_operation.is_none()
@@ -749,8 +769,6 @@ impl HostAttachment {
         ) {
             self.manual = None;
         }
-        // A status response issued before this command cannot replace its newer metadata.
-        self.heartbeat = None;
         self.last_heartbeat = Instant::now();
         if !self.status.retention_proven && !retry_original {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
@@ -995,10 +1013,13 @@ impl HostAttachment {
                 .map_err(|e| BundleError::Identity(e.to_string()))?;
             if !messages.is_empty() {
                 // Discard the stale status lane; only stream publication replies can mark Saved.
-                self.heartbeat = None;
+                let stale = self.take_heartbeat();
                 let client = self.client.clone();
                 let identity = self.manual_client.clone();
                 self.manual_inflight = Some(std::thread::spawn(move || {
+                    if let Some(stale) = stale {
+                        let _ = stale.join();
+                    }
                     client.request(HostCommand::CommitHistory {
                         client: identity,
                         messages,
@@ -1107,9 +1128,13 @@ impl HostAttachment {
         }
         let client = self.client.clone();
         self.hook_reply = None;
-        self.heartbeat = None;
-        self.last_heartbeat = Instant::now();
-        self.hook_inflight = Some(std::thread::spawn(move || client.request(command)));
+        let stale = self.take_heartbeat();
+        self.hook_inflight = Some(std::thread::spawn(move || {
+            if let Some(stale) = stale {
+                let _ = stale.join();
+            }
+            client.request(command)
+        }));
         Ok(())
     }
     #[allow(

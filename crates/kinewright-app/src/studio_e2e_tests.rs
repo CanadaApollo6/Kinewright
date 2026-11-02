@@ -1099,3 +1099,57 @@ fn s3_c11_current_edit_plays_host_attached() {
     drop(engine);
     retire.wait();
 }
+
+/// S4b C5 fix 12: the C11 Save As while the App's own status heartbeat is
+/// still at the host. The host admits one command at a time and answers a
+/// second with 429, which reads as `attachment_refused` (CI run 41451669158,
+/// `s3_c11_current_edit_plays_host_attached` at Save As). The App waits for
+/// its heartbeat first.
+#[test]
+fn s4b_c5_fix12_save_as_waits_for_the_heartbeat_at_the_host() {
+    let mut retire = Retire::default();
+    let (fixture, owner, _a, _b) = two_versions();
+    let attachment = launch(&fixture, owner, "fix12-heartbeat");
+    let (mut app, engine) = in1_harness(Document::default());
+    retire.arm(&engine);
+    install(&mut app, &fixture, attachment);
+    let ctx = egui::Context::default();
+    let held = Duration::from_secs(2);
+    let proxy = app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .hold_host_request("status", held);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !proxy.dropped.load(std::sync::atomic::Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "C5_FIX12_NO_HEARTBEAT");
+        app.focused_mut().ja1.as_mut().unwrap().poll_host();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let b = fixture.root.path("fix12-b.kinewright");
+    let started = Instant::now();
+    let saved = app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .apply(Action::SaveAs(b.clone()));
+    eprintln!("C5_FIX12_SAVE_AS {saved:?} after {:?}", started.elapsed());
+    saved.expect("C5_FIX12_SAVE_AS_REFUSED");
+    assert_eq!(
+        app.focused().ja1.as_ref().unwrap().project_path(),
+        Some(b),
+        "C5_FIX12_SAVE_AS_MOVED"
+    );
+    // The App reaches its host through the proxy until it lets go of it.
+    let host = app.focused().ja1.as_ref().unwrap().host_pid().unwrap();
+    close_host(&mut app, &ctx);
+    app.focused_mut().ja1 = None;
+    end_host(host);
+    drop(proxy);
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}
