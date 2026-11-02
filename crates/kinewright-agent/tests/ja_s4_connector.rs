@@ -24,3 +24,9 @@ fn s4b_installed_codex_network() {
 fn s4b_installed_codex_dry_launch() {
     kinewright_agent::writer_host::run_installed_codex_dry_launch();
 }
+
+#[test]
+#[ignore = "on-demand: unpaid policy egress and read-only sign-in witness, probe only"]
+fn s4b_c5_fix8_unpaid_policy() {
+    kinewright_agent::writer_host::run_unpaid_policy_witness();
+}

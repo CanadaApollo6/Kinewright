@@ -171,6 +171,9 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     let outcome = (|| -> io::Result<u32> {
         let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
         kinewright_job_sys::enter_payload_boundary()?;
+        if program.sandbox.unpaid().is_some() {
+            kinewright_job_sys::isolate_payload_network()?;
+        }
         let Some(pid) = kinewright_job_sys::fork_payload_init()? else {
             drop(read);
             let result = init(program, image, std::fs::File::from(write));
@@ -234,6 +237,7 @@ fn init(
     mut ready: std::fs::File,
 ) -> io::Result<i32> {
     use std::os::unix::net::UnixStream;
+    let unpaid = program.sandbox.unpaid().cloned();
     let pipes = program
         .pipe_directory
         .as_ref()
@@ -244,6 +248,13 @@ fn init(
                 .collect::<io::Result<Vec<_>>>()
         })
         .transpose()?;
+    // The relay channel is connected now, before any provider exists, so no
+    // later path lookup can be redirected. Its descriptor closes on exec.
+    let relay = match (&unpaid, &program.pipe_directory) {
+        (Some(_), Some(root)) => Some(UnixStream::connect(root.join(super::protocol::RELAY_PIPE))?),
+        (Some(_), None) => return Err(io::Error::other("unpaid relay pipe missing")),
+        (None, _) => None,
+    };
     kinewright_job_sys::close_payload_readiness()?;
     let boundary = kinewright_job_sys::mount_payload_proc().map_err(|error| error.to_string());
     if let ProviderSandbox::LinuxAllowlist {
@@ -251,8 +262,52 @@ fn init(
         ..
     } = &program.sandbox
     {
-        kinewright_job_sys::mount_credential_file(&mount.source, &mount.target, mount.identity)?;
+        if unpaid.is_some() {
+            kinewright_job_sys::mount_credential_file_read_only(
+                &mount.source,
+                &mount.target,
+                mount.identity,
+            )?;
+        } else {
+            kinewright_job_sys::mount_credential_file(
+                &mount.source,
+                &mount.target,
+                mount.identity,
+            )?;
+        }
     }
+    // Under the unpaid policy the private home must hold nothing of the
+    // person's but the one read-only sign-in, or nothing launches. The relay
+    // thread starts before launch restricts init's main thread, and it never
+    // runs provider code.
+    let boundary = match (boundary, &unpaid, relay, &program.sandbox) {
+        (
+            Ok(()),
+            Some(policy),
+            Some(relay),
+            ProviderSandbox::LinuxAllowlist {
+                credential_mount,
+                credential_store,
+                ..
+            },
+        ) => credential_mount
+            .as_ref()
+            .map_or(Ok(()), |mount| {
+                kinewright_job_sys::verify_unpaid_home(credential_store, mount.identity).and_then(
+                    |_| {
+                        kinewright_job_sys::verify_unpaid_mounts(
+                            &std::fs::read_to_string("/proc/self/mountinfo")?,
+                            credential_store,
+                            &mount.target,
+                        )
+                    },
+                )
+            })
+            .and_then(|()| loopback_relay(policy.mcp_port, relay))
+            .map_err(|error| error.to_string()),
+        (Ok(()), Some(_), ..) => Err("unpaid policy incomplete".to_owned()),
+        (boundary, ..) => boundary,
+    };
     write_ready(&mut ready, &boundary)?;
     drop(ready);
     boundary.map_err(io::Error::other)?;
@@ -274,6 +329,28 @@ fn init(
         let _ = status.write_all(super::protocol::guardian_status_record(&result).as_bytes());
     }
     result
+}
+
+/// Most loopback connections init hands over in one run.
+const RELAY_CONNECTIONS: usize = 4096;
+
+/// C5 fix 8: listen on loopback inside the payload's own network namespace
+/// and pass each accepted connection to the host. No bytes cross init.
+fn loopback_relay(port: u16, channel: std::os::unix::net::UnixStream) -> io::Result<()> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
+    std::thread::Builder::new()
+        .name("kinewright-loopback-relay".into())
+        .spawn(move || {
+            for connection in listener.incoming().take(RELAY_CONNECTIONS) {
+                let Ok(connection) = connection else {
+                    continue;
+                };
+                if kinewright_job_sys::send_descriptor(&channel, &connection).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(())
 }
 
 #[allow(

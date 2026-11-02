@@ -25,6 +25,10 @@ pub use windows::*;
 #[cfg(target_os = "linux")]
 mod credential;
 #[cfg(target_os = "linux")]
+pub use descriptor::*;
+#[cfg(target_os = "linux")]
+mod descriptor;
+#[cfg(target_os = "linux")]
 pub use credential::*;
 
 #[cfg(target_os = "linux")]

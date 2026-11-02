@@ -113,7 +113,38 @@ pub enum ProviderSandbox {
         scratch: PathBuf,
         credential_store: PathBuf,
         executable_identity: [u64; 2],
+        /// Absent from every production manifest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unpaid: Option<UnpaidPolicy>,
     },
+}
+
+/// C5 fix 8: the unpaid dry policy. The payload gets its own network
+/// namespace with only loopback. Namespace init listens on
+/// `127.0.0.1:mcp_port` there and hands each connection it accepts to the
+/// host over the private `relay` pipe; the host copies bytes to its real MCP
+/// listener. The mounted sign-in is a read-only bind, and init refuses to
+/// launch unless the private per-attempt home holds nothing else of the
+/// person's. The home itself stays writable for the provider's own state.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UnpaidPolicy {
+    pub mcp_port: u16,
+}
+
+/// The fifth provider pipe, present only under [`UnpaidPolicy`].
+#[cfg(target_os = "linux")]
+pub const RELAY_PIPE: &str = "relay";
+
+#[cfg(target_os = "linux")]
+impl ProviderSandbox {
+    #[must_use]
+    pub fn unpaid(&self) -> Option<&UnpaidPolicy> {
+        match self {
+            Self::LinuxAllowlist { unpaid, .. } => unpaid.as_ref(),
+            Self::ContainmentOnly => None,
+        }
+    }
 }
 impl Program {
     #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
@@ -187,6 +218,7 @@ impl Program {
             executable_identity,
             connect_tcp,
             credential_mount,
+            unpaid,
         } = &self.sandbox
             && (credential_mount.as_ref().is_some_and(|mount| {
                 self.credential_root.as_deref() != mount.source.parent()
@@ -198,6 +230,9 @@ impl Program {
                 || connect_tcp.is_empty()
                 || connect_tcp.len() > 2
                 || connect_tcp.contains(&0)
+                || unpaid
+                    .as_ref()
+                    .is_some_and(|policy| connect_tcp != &[policy.mcp_port])
                 || runtime.len() > 32
                 || runtime
                     .iter()

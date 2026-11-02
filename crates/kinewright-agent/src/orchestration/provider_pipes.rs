@@ -12,12 +12,15 @@ use std::{
 pub struct ProviderPipeListeners {
     root: PathBuf,
     listeners: [UnixListener; 4],
+    relay: Option<UnixListener>,
 }
 pub struct ProviderPipes {
     pub input: UnixStream,
     pub output: UnixStream,
     pub diagnostics: UnixStream,
     credentials: UnixStream,
+    relay_channel: Option<UnixStream>,
+    relay: Option<McpRelay>,
 }
 impl ProviderPipeListeners {
     /// # Errors
@@ -37,7 +40,18 @@ impl ProviderPipeListeners {
         Ok(Self {
             root: root.into(),
             listeners,
+            relay: None,
         })
+    }
+    /// C5 fix 8: also bind the unpaid dry policy's relay pipe.
+    ///
+    /// # Errors
+    /// Refuses an unavailable socket.
+    pub fn with_relay(mut self) -> io::Result<Self> {
+        let relay = UnixListener::bind(self.root.join(crate::job_guardian::protocol::RELAY_PIPE))?;
+        relay.set_nonblocking(true)?;
+        self.relay = Some(relay);
+        Ok(self)
     }
     #[must_use]
     pub fn directory(&self) -> &Path {
@@ -67,12 +81,24 @@ impl ProviderPipeListeners {
             output: accept(&self.listeners[1], deadline)?,
             diagnostics: accept(&self.listeners[2], deadline)?,
             credentials: accept(&self.listeners[3], deadline)?,
+            relay_channel: self
+                .relay
+                .as_ref()
+                .map(|relay| accept(relay, deadline))
+                .transpose()?,
+            relay: None,
         })
     }
 }
 impl Drop for ProviderPipeListeners {
     fn drop(&mut self) {
-        for name in ["stdin", "stdout", "stderr", "credentials"] {
+        for name in [
+            "stdin",
+            "stdout",
+            "stderr",
+            "credentials",
+            crate::job_guardian::protocol::RELAY_PIPE,
+        ] {
             let _ = fs::remove_file(self.root.join(name));
         }
         let _ = fs::remove_dir(&self.root);
@@ -112,16 +138,129 @@ impl ProviderPipes {
             output: self.output,
             diagnostics: self.diagnostics,
             guardian: GuardianChannel(self.credentials),
+            relay: self.relay,
         }
+    }
+    /// C5 fix 8: start copying each loopback connection init hands over to
+    /// the host's MCP listener on `127.0.0.1:port`.
+    ///
+    /// # Errors
+    /// Refuses a missing relay pipe or an unavailable thread.
+    pub fn start_relay(&mut self, port: u16) -> io::Result<()> {
+        let channel = self
+            .relay_channel
+            .take()
+            .ok_or_else(|| io::Error::other("unpaid relay pipe missing"))?;
+        self.relay = Some(McpRelay::start(
+            channel,
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+        )?);
+        Ok(())
     }
 }
 
-/// What the host owns once the provider runs: its stdout, its stderr and the
-/// guardian's status channel. The provider's stdin is not part of it.
+/// What the host owns once the provider runs: its stdout, its stderr, the
+/// guardian's status channel and, under the unpaid policy, the MCP relay.
+/// The provider's stdin is not part of it. Dropping it ends the relay.
 pub struct ProviderReader {
     pub output: UnixStream,
     pub diagnostics: UnixStream,
     pub guardian: GuardianChannel,
+    pub relay: Option<McpRelay>,
+}
+
+/// Most relayed connections open at once.
+pub const RELAY_OPEN: usize = 16;
+
+type RelayStreams = std::sync::Mutex<std::collections::BTreeMap<u64, [std::net::TcpStream; 2]>>;
+
+/// C5 fix 8: the host half of the unpaid dry policy's MCP bridge. Each
+/// descriptor init passes is one TCP connection the provider opened to
+/// `127.0.0.1:<port>` inside its own network namespace. The host connects to
+/// its real MCP listener and copies bytes both ways, nothing else: the bearer
+/// and every header check stay end to end. At most [`RELAY_OPEN`] are open
+/// at once; dropping the relay closes the channel and every connection.
+pub struct McpRelay {
+    channel: UnixStream,
+    open: std::sync::Arc<RelayStreams>,
+}
+impl McpRelay {
+    fn start(channel: UnixStream, target: std::net::SocketAddr) -> io::Result<Self> {
+        let open = std::sync::Arc::new(RelayStreams::default());
+        let receiver = channel.try_clone()?;
+        let table = std::sync::Arc::clone(&open);
+        std::thread::Builder::new()
+            .name("kinewright-mcp-relay".into())
+            .spawn(move || {
+                let mut next = 0_u64;
+                while let Ok(Some(descriptor)) = kinewright_job_sys::receive_descriptor(&receiver) {
+                    let inner = std::net::TcpStream::from(descriptor);
+                    match table.lock() {
+                        Ok(streams) if streams.len() < RELAY_OPEN => {}
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    }
+                    let Ok(outer) = std::net::TcpStream::connect_timeout(
+                        &target,
+                        crate::job_guardian::protocol::STARTUP,
+                    ) else {
+                        continue;
+                    };
+                    let (Ok(a), Ok(b), Ok(c), Ok(d)) = (
+                        inner.try_clone(),
+                        outer.try_clone(),
+                        inner.try_clone(),
+                        outer.try_clone(),
+                    ) else {
+                        continue;
+                    };
+                    next += 1;
+                    let Ok(mut streams) = table.lock() else {
+                        break;
+                    };
+                    streams.insert(next, [a, b]);
+                    drop(streams);
+                    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    for (from, to) in [(inner, outer), (d, c)] {
+                        let finished = std::sync::Arc::clone(&finished);
+                        let shared = std::sync::Arc::clone(&table);
+                        let key = next;
+                        let spawned = std::thread::Builder::new()
+                            .name("kinewright-mcp-relay-copy".into())
+                            .spawn(move || {
+                                let mut reader = &from;
+                                let mut writer = &to;
+                                let _ = io::copy(&mut reader, &mut writer);
+                                let _ = to.shutdown(std::net::Shutdown::Write);
+                                if finished.swap(true, std::sync::atomic::Ordering::SeqCst)
+                                    && let Ok(mut streams) = shared.lock()
+                                {
+                                    streams.remove(&key);
+                                }
+                            });
+                        if spawned.is_err()
+                            && let Ok(mut streams) = table.lock()
+                            && let Some(pair) = streams.remove(&key)
+                        {
+                            for stream in pair {
+                                let _ = stream.shutdown(std::net::Shutdown::Both);
+                            }
+                        }
+                    }
+                }
+            })?;
+        Ok(Self { channel, open })
+    }
+}
+impl Drop for McpRelay {
+    fn drop(&mut self) {
+        let _ = self.channel.shutdown(std::net::Shutdown::Both);
+        if let Ok(streams) = self.open.lock() {
+            for stream in streams.values().flatten() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
 }
 
 /// Init's private status channel. Only the guardian writes to it.

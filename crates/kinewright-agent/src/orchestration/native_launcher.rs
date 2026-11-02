@@ -62,10 +62,13 @@ pub(crate) fn environment(
     ])
 }
 
-/// C5 fix 7: while held, every native sandbox this process builds allows TCP
-/// only to the loopback MCP port, never 443. The dry launch holds it around
-/// the unpaid probe and launch so no provider request can leave the machine.
-/// Landlock mediates TCP connect by port; UDP is not mediated.
+/// C5 fix 7 and fix 8: while held, every native sandbox this process builds
+/// carries the unpaid policy. The provider gets its own network namespace in
+/// which only loopback exists, init relays `127.0.0.1:<MCP port>` to the
+/// host, Landlock allows TCP only to that port, and the sign-in is a
+/// read-only bind in a private home that holds nothing else of the
+/// person's. The dry launch holds it around the unpaid
+/// probe and launch so no provider request can leave the machine.
 #[cfg(feature = "eval-harness")]
 static DENY_PROVIDER_EGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -92,12 +95,59 @@ impl Drop for DenyProviderEgress {
         DENY_PROVIDER_EGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
+/// C5 fix 8: the host's view of the last unpaid launch's private home just
+/// before launch, names and kinds only. Init checks the same home and its
+/// mounts and refuses to launch any other shape; this is the report's list.
+#[cfg(feature = "eval-harness")]
+pub(crate) static UNPAID_HOME_BEFORE_LAUNCH: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(feature = "eval-harness")]
+fn record_unpaid_home(home: &std::path::Path) {
+    let mut names = Vec::new();
+    let mut pending = vec![home.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = entry.path();
+            let kind = match entry.file_type() {
+                Ok(kind) if kind.is_symlink() => "link",
+                Ok(kind) if kind.is_dir() => "dir",
+                Ok(kind) if kind.is_file() => "file",
+                _ => "other",
+            };
+            if kind == "dir" && names.len() < 256 {
+                pending.push(path.clone());
+            }
+            names.push(format!(
+                "{kind} {}",
+                path.strip_prefix(home).unwrap_or(&path).display()
+            ));
+        }
+    }
+    names.sort();
+    if let Ok(mut recorded) = UNPAID_HOME_BEFORE_LAUNCH.lock() {
+        *recorded = names;
+    }
+}
 fn provider_ports(mcp_port: u16) -> Vec<u16> {
-    #[cfg(feature = "eval-harness")]
-    if DenyProviderEgress::engaged() {
+    if unpaid_policy(mcp_port).is_some() {
         return vec![mcp_port];
     }
     vec![443, mcp_port]
+}
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "shipping builds never build the unpaid policy"
+)]
+fn unpaid_policy(mcp_port: u16) -> Option<crate::job_guardian::protocol::UnpaidPolicy> {
+    #[cfg(feature = "eval-harness")]
+    if DenyProviderEgress::engaged() {
+        return Some(crate::job_guardian::protocol::UnpaidPolicy { mcp_port });
+    }
+    let _ = mcp_port;
+    None
 }
 
 pub(crate) fn sandbox(
@@ -139,6 +189,7 @@ pub(crate) fn sandbox(
         scratch: scratch.to_path_buf(),
         credential_store: scope.root.clone(),
         executable_identity: executable.file_identity,
+        unpaid: unpaid_policy(mcp_port),
     })
 }
 
@@ -707,12 +758,28 @@ impl NativeGuardianLauncher {
             .verify_payload(&actual_reference, immutable.bytes())
             .map_err(io::Error::other)?;
         context_matches(invocation.profile(), &actual)?;
+        let unpaid = actual.sandbox.unpaid().map(|policy| policy.mcp_port);
+        #[cfg(feature = "eval-harness")]
+        if let (
+            Some(_),
+            ProviderSandbox::LinuxAllowlist {
+                credential_store, ..
+            },
+        ) = (unpaid, &actual.sandbox)
+        {
+            record_unpaid_home(credential_store);
+        }
         let pipes = ProviderPipeListeners::bind(
             actual
                 .pipe_directory
                 .as_ref()
                 .ok_or_else(|| io::Error::other("provider pipe directory"))?,
         )?;
+        let pipes = if unpaid.is_some() {
+            pipes.with_relay()?
+        } else {
+            pipes
+        };
         let mut owner = Owner {
             port: self.owner.as_ref(),
             invocation,
@@ -770,6 +837,9 @@ impl NativeGuardianLauncher {
         #[cfg(test)]
         self.fail_startup(StartupFailure::Pipes)?;
         let mut pipes = pipes.accept()?;
+        if let Some(port) = unpaid {
+            pipes.start_relay(port)?;
+        }
         #[cfg(test)]
         self.fail_startup(StartupFailure::Credentials)?;
         let credentials = crate::writer_host::mcp_credentials(immutable.binding().endpoint());
@@ -830,6 +900,7 @@ impl NativeGuardianLauncher {
                     output,
                     diagnostics,
                     guardian,
+                    relay,
                 } = pipes;
                 let diagnostics = crate::provider_stderr::stderr_summary(
                     diagnostics,
@@ -873,6 +944,8 @@ impl NativeGuardianLauncher {
                     Err(_) => sender.interrupt("native cleanup remains blocked"),
                 }
                 drop(native);
+                // The run has ended; so does its MCP relay.
+                drop(relay);
                 let diagnostics = diagnostics
                     .ok()
                     .and_then(|reader| reader.join().ok())

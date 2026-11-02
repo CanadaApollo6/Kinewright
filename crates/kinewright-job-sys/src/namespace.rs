@@ -64,6 +64,87 @@ pub fn enter_payload_boundary() -> io::Result<()> {
     Ok(())
 }
 
+/// C5 fix 8, the unpaid dry policy only: give the payload its own network
+/// namespace in which only loopback exists, is up and carries every route.
+/// Nothing sent inside it can leave the machine. Call right after
+/// [`enter_payload_boundary`], while the shim still holds its new user
+/// namespace's capabilities and before it forks namespace init.
+///
+/// # Errors
+/// Refuses an unavailable network namespace, a loopback that will not come
+/// up, or any interface or route besides loopback.
+pub fn isolate_payload_network() -> io::Result<()> {
+    let before = fs::metadata("/proc/self/ns/net")?.ino();
+    unshare_payload_namespace(thread::UnshareFlags::NEWNET)?;
+    if fs::metadata("/proc/self/ns/net")?.ino() == before {
+        return Err(io::Error::other("payload_network_namespace_unavailable"));
+    }
+    loopback_up()?;
+    verify_loopback_only(
+        &fs::read_to_string("/proc/self/net/dev")?,
+        &fs::read_to_string("/proc/self/net/route")?,
+        &fs::read_to_string("/proc/self/net/ipv6_route").unwrap_or_default(),
+    )
+}
+
+fn loopback_up() -> io::Result<()> {
+    // SAFETY: socket takes no pointers; ownership of the new descriptor is
+    // taken at once.
+    let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if socket < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: socket is a fresh, valid descriptor owned only here.
+    let socket = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(socket) };
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&socket);
+    // SAFETY: ifreq is plain data; all-zero is a valid value.
+    let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+    request.ifr_name[0] = b'l'.cast_signed();
+    request.ifr_name[1] = b'o'.cast_signed();
+    let flags = |request: &mut libc::ifreq| -> io::Result<libc::c_short> {
+        // SAFETY: request is a live ifreq naming "lo"; GIFFLAGS fills ifru_flags.
+        if unsafe { libc::ioctl(raw, libc::SIOCGIFFLAGS, std::ptr::from_mut(request)) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: GIFFLAGS initialised the flags member of the union.
+        Ok(unsafe { request.ifr_ifru.ifru_flags })
+    };
+    let up = libc::c_short::try_from(libc::IFF_UP).map_err(io::Error::other)?;
+    request.ifr_ifru.ifru_flags = flags(&mut request)? | up;
+    // SAFETY: request names "lo" and carries the flags to set.
+    if unsafe { libc::ioctl(raw, libc::SIOCSIFFLAGS, std::ptr::from_mut(&mut request)) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if flags(&mut request)? & up == 0 {
+        return Err(io::Error::other("payload_loopback_unavailable"));
+    }
+    Ok(())
+}
+
+/// Only `lo` exists, the IPv4 main table is empty and every IPv6 route
+/// leaves through `lo`.
+///
+/// # Errors
+/// Refuses any other interface or route.
+pub fn verify_loopback_only(dev: &str, route: &str, ipv6_route: &str) -> io::Result<()> {
+    let interfaces = dev
+        .lines()
+        .skip(2)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, _)| name.trim())
+        .collect::<Vec<_>>();
+    let routes = route.lines().skip(1).filter(|line| !line.trim().is_empty());
+    if interfaces != ["lo"]
+        || routes.count() != 0
+        || ipv6_route
+            .lines()
+            .any(|line| line.split_whitespace().last() != Some("lo"))
+    {
+        return Err(io::Error::other("payload_network_not_loopback_only"));
+    }
+    Ok(())
+}
+
 fn mask_host_ipc_files() -> io::Result<()> {
     for path in ["/dev/shm", "/dev/mqueue"] {
         let previous = fs::metadata(path)?;
@@ -277,6 +358,18 @@ pub fn verify_payload_pid_namespace(pid: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn s4b_c5_fix8_network_must_be_loopback_only() {
+        let header = "Inter-|   Receive\n face |bytes\n";
+        let lo = format!("{header}    lo: 0 0\n");
+        let v6 = "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000001 00000000 80200001       lo\n";
+        super::verify_loopback_only(&lo, "Iface\tDestination\n", v6).unwrap();
+        let eth = format!("{lo}  eth0: 0 0\n");
+        assert!(super::verify_loopback_only(&eth, "Iface\n", "").is_err());
+        assert!(super::verify_loopback_only(&lo, "Iface\neth0\t00000000\n", "").is_err());
+        let v6eth = v6.replace("       lo", "     eth0");
+        assert!(super::verify_loopback_only(&lo, "Iface\n", &v6eth).is_err());
+    }
     #[test]
     fn s4_unshare_failure_names_flag_and_errno() {
         let error = std::thread::spawn(|| {

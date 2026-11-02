@@ -145,6 +145,7 @@ fn host_ipc_case(restricted: bool) {
                 scratch: root.clone(),
                 credential_store: credentials,
                 executable_identity: [metadata.dev(), metadata.ino()],
+                unpaid: None,
             }
         } else {
             protocol::ProviderSandbox::ContainmentOnly
@@ -2721,6 +2722,7 @@ fn s4b_c2_provider_pipes_and_final_environment() {
             scratch,
             credential_store: credentials,
             executable_identity: [metadata.dev(), metadata.ino()],
+            unpaid: None,
         },
         pipe_directory: Some(pipes.directory().into()),
     };
@@ -2963,6 +2965,7 @@ fn s4b_c5_single_file_credentials() {
             scratch: scratch.clone(),
             credential_store: credentials,
             executable_identity: [metadata.dev(), metadata.ino()],
+            unpaid: None,
         },
         pipe_directory: Some(pipes.directory().into()),
     };
@@ -3056,6 +3059,7 @@ fn s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier() {
             scratch: scratch.clone(),
             credential_store: credentials,
             executable_identity: [metadata.dev(), metadata.ino()],
+            unpaid: None,
         },
     };
     let _image = program.fixture_image().unwrap();
@@ -3137,6 +3141,7 @@ fn s4b_c5_fix4_provider_cannot_read_namespace_init() {
             scratch: scratch.clone(),
             credential_store: credentials,
             executable_identity: [metadata.dev(), metadata.ino()],
+            unpaid: None,
         },
     };
     let _image = program.fixture_image().unwrap();
@@ -3260,6 +3265,7 @@ fn s4b_c5_fix1_unpaid_sealed_codex_version() {
             scratch: scratch.clone(),
             credential_store: home,
             executable_identity: [binary.dev(), binary.ino()],
+            unpaid: None,
             connect_tcp: vec![1],
             credential_mount: Some(Box::new(protocol::CredentialMount {
                 source: source.clone(),

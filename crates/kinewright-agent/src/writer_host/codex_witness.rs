@@ -149,6 +149,7 @@ fn local_probe(arguments: Vec<String>) -> (String, String) {
             scratch: scratch.clone(),
             credential_store: home,
             executable_identity: executable.file_identity,
+            unpaid: None,
         },
     };
     let _image = program.fixture_image().unwrap();
@@ -1123,6 +1124,11 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
     {
         let mut evidence = report.lock().unwrap();
         evidence["observed"] = observed;
+        evidence["home_before_launch"] = serde_json::json!(
+            *crate::native_launcher::UNPAID_HOME_BEFORE_LAUNCH
+                .lock()
+                .unwrap()
+        );
         evidence["refusal"] = serde_json::json!(refusal);
         evidence["final_phase"] = serde_json::to_value(final_state.phase).unwrap();
         evidence["final_outcome"] = serde_json::to_value(&final_state.outcome).unwrap();
@@ -1229,7 +1235,7 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
 
 #[path = "network_witness.rs"]
 mod network_witness;
-pub use network_witness::run_installed_codex_network_witness;
+pub use network_witness::{run_installed_codex_network_witness, run_unpaid_policy_witness};
 
 fn branch_history(
     owner: &Ja1EditingSession,
