@@ -294,11 +294,11 @@ pub fn run_installed_codex_local_policy_witness() {
     eprintln!("C5_LOCAL_POLICY subscription=true required_features_disabled=true paid=false");
 }
 
-/// Invocation 10 runs on the lead's grant after C5 fix 12. Invocation 11 is
-/// admitted only after a failed 10 is separately proved a witness defect.
+/// Invocation 11 runs on the lead's grant after C5 fix 14. Invocation 12 is
+/// admitted only after a failed 11 is separately proved a witness defect.
 fn live_invocation_authorized(number: u8, previous: Option<&serde_json::Value>) -> bool {
-    number == 10
-        || (number == 11
+    number == 11
+        || (number == 12
             && previous.is_some_and(|previous| {
                 previous["failure_origin"] == "witness" && previous["passed"] == false
             }))
@@ -316,20 +316,20 @@ fn live_invocation_authorized(number: u8, previous: Option<&serde_json::Value>) 
 )]
 pub fn run_installed_codex_director_witness() {
     let number = std::env::var("KINEWRIGHT_S4B_C5_RUN")
-        .unwrap_or_else(|_| "10".into())
+        .unwrap_or_else(|_| "11".into())
         .parse::<u8>()
         .unwrap();
     let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&evidence).unwrap();
-    let previous: Option<serde_json::Value> = (number == 11).then(|| {
+    let previous: Option<serde_json::Value> = (number == 12).then(|| {
         serde_json::from_slice(
-            &fs::read(evidence.join("live-10.json")).expect("C5 invocation 10 evidence"),
+            &fs::read(evidence.join("live-11.json")).expect("C5 invocation 11 evidence"),
         )
         .unwrap()
     });
     assert!(
         live_invocation_authorized(number, previous.as_ref()),
-        "C5 invocation 10 is authorized; invocation 11 requires a proved witness defect"
+        "C5 invocation 11 is authorized; invocation 12 requires a proved witness defect"
     );
     // C5 fix 7: the real CLI's startup through the real launch path is
     // exercised unpaid, egress denied, before any paid send. A failed dry
@@ -1362,22 +1362,22 @@ mod authorization_tests {
     use super::live_invocation_authorized;
 
     #[test]
-    fn s4b_c5_live_tenth_is_authorized_eleventh_requires_proved_harness_defect() {
+    fn s4b_c5_live_eleventh_is_authorized_twelfth_requires_proved_harness_defect() {
         use serde_json::json;
-        assert!(live_invocation_authorized(10, None));
-        assert!(!live_invocation_authorized(9, None));
+        assert!(live_invocation_authorized(11, None));
+        assert!(!live_invocation_authorized(10, None));
+        assert!(!live_invocation_authorized(13, None));
         assert!(!live_invocation_authorized(12, None));
-        assert!(!live_invocation_authorized(11, None));
         for previous in [
             json!({"passed": true, "failure_origin": "witness"}),
             json!({"passed": false, "failure_origin": "product"}),
             json!({"passed": false, "failure_origin": "unresolved"}),
             json!({"passed": false}),
         ] {
-            assert!(!live_invocation_authorized(11, Some(&previous)));
+            assert!(!live_invocation_authorized(12, Some(&previous)));
         }
         assert!(live_invocation_authorized(
-            11,
+            12,
             Some(&json!({"passed": false, "failure_origin": "witness"}))
         ));
     }
