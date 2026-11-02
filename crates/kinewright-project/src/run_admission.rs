@@ -237,24 +237,46 @@ use crate::{
     },
 };
 
-/// C5 fix 13: terminal authority for one terminal cut. A run with no admitted
-/// budget never gets it. An admitted run that has finished (its budget turns
-/// inactive once its outcome is final and cleanup settles) keeps its own
-/// terminal reserve, so it can still archive its retired attempts after Stop.
-/// `terminal_progress` admits no new task, effect or attempt, and
-/// `advance_run_budget` counts the cut as terminal escrow, so the 32-cut bound
-/// still holds.
+/// Terminal authority for one terminal cut (C5 fix 13, narrowed by fix 14).
+///
+/// A run with no admitted budget, or one that has used its 32 terminal cuts,
+/// never gets it. While the budget is active, fix 2's rule holds unchanged: the
+/// cut is bound to its one publication. Once the run has finished and its budget
+/// is inactive, only validated archival progress gets a terminal cut, so a
+/// finished run can still archive its retired attempts after Stop but cannot
+/// spend its reserve on any other change. `archival` is evaluated only then.
 fn terminal_authority(
     admitted: bool,
     budget: &RunBudget,
-    before: Option<&RunProjection>,
+    finished: bool,
+    archival: impl FnOnce() -> Result<bool, BundleError>,
 ) -> Result<(), BundleError> {
-    let finished = before.is_some_and(|before| before.outcome != RunOutcome::Pending);
-    if admitted && (budget.active || finished) && (budget.terminal as u64) < TERMINAL_CUTS {
-        Ok(())
-    } else {
-        Err(BundleError::RunLimit)
+    if !admitted || budget.terminal as u64 >= TERMINAL_CUTS {
+        return Err(BundleError::RunLimit);
     }
+    if budget.active || (finished && archival()?) {
+        return Ok(());
+    }
+    Err(BundleError::RunLimit)
+}
+
+/// C5 fix 14: a recorded refusal on a finished run changes nothing but the
+/// receipt's place in the history.
+fn refusal_only(before: &RunProjection, update: &ValidatedRunUpdate) -> bool {
+    let after = update.projection();
+    update.receipt().decision != CommandDecision::Applied
+        && after.run == before.run
+        && after.phase == before.phase
+        && after.outcome == before.outcome
+        && after.wait == before.wait
+        && after.cleanup == before.cleanup
+        && after.tasks == before.tasks
+        && after.effects == before.effects
+        && after.attempts == before.attempts
+        && after.deliveries == before.deliveries
+        && after.requests == before.requests
+        && after.results == before.results
+        && after.usage == before.usage
 }
 
 pub(crate) fn terminal_progress(before: &RunProjection, update: &ValidatedRunUpdate) -> bool {
@@ -428,6 +450,108 @@ impl crate::bundle::ProjectBundle {
             || transition.projection().cleanup != crate::orchestration_records::RunCleanup::Settled;
         Ok(())
     }
+    /// C5 fix 14: which cuts a run may make, by its state before the update.
+    /// A first cut and a pending or still-cleaning run are unchanged. A
+    /// terminal cut needs `terminal_authority`. A finished run whose budget is
+    /// inactive may otherwise only record a refusal that changes nothing.
+    fn cut_authority(
+        &self,
+        index: &crate::studio_records::RunIndex,
+        before: Option<&RunProjection>,
+        update: &ValidatedRunUpdate,
+        terminal: bool,
+    ) -> Result<(), BundleError> {
+        let Some(before) = before else {
+            return Ok(());
+        };
+        let budget = index.budgets.get(&before.run);
+        let finished = before.outcome != RunOutcome::Pending;
+        if terminal {
+            return terminal_authority(
+                budget.is_some(),
+                &budget.cloned().unwrap_or_default(),
+                finished,
+                || self.archival_progress(before, update.projection()),
+            );
+        }
+        if finished && budget.is_some_and(|b| !b.active) && !refusal_only(before, update) {
+            return Err(BundleError::RunLimit);
+        }
+        Ok(())
+    }
+    /// C5 fix 14: the update only archives retired attempts. Outcome, phase,
+    /// wait, cleanup, tasks, effects, deliveries, requests and results are
+    /// unchanged; the only attempts removed are retired; and the usage list
+    /// changes only by replacing the attempt archive with a new sealed archive
+    /// that holds the previous archive's attempts followed by exactly the
+    /// removed attempts. Accounting references in usage are therefore unchanged.
+    fn archival_progress(
+        &self,
+        before: &RunProjection,
+        after: &RunProjection,
+    ) -> Result<bool, BundleError> {
+        use crate::orchestration_records::OrchestrationPayload;
+        if after.run != before.run
+            || after.phase != before.phase
+            || after.outcome != before.outcome
+            || after.wait != before.wait
+            || after.cleanup != before.cleanup
+            || after.tasks != before.tasks
+            || after.effects != before.effects
+            || after.deliveries != before.deliveries
+            || after.requests != before.requests
+            || after.results != before.results
+        {
+            return Ok(false);
+        }
+        let removed = before
+            .attempts
+            .iter()
+            .filter(|a| !after.attempts.contains(a))
+            .cloned()
+            .collect::<Vec<_>>();
+        if removed.is_empty()
+            || removed
+                .iter()
+                .any(|a| !matches!(a.state, AttemptState::Retired(_)))
+            || !before
+                .attempts
+                .iter()
+                .filter(|a| after.attempts.contains(a))
+                .eq(after.attempts.iter())
+        {
+            return Ok(false);
+        }
+        let archive = |reference| -> Result<_, BundleError> {
+            Ok(match self.store.read_run_record(reference)?.payload {
+                OrchestrationPayload::AttemptArchive(archive) => Some(archive),
+                _ => None,
+            })
+        };
+        let mut previous = None;
+        for reference in before.usage.iter().rev() {
+            if let Some(found) = archive(reference)? {
+                previous = Some((reference, found));
+                break;
+            }
+        }
+        let Some((sealed, rest)) = after.usage.split_last() else {
+            return Ok(false);
+        };
+        let kept = before
+            .usage
+            .iter()
+            .filter(|r| previous.as_ref().is_none_or(|(p, _)| p != r));
+        if before.usage.contains(sealed) || !kept.eq(rest.iter()) {
+            return Ok(false);
+        }
+        let Some(next) = archive(sealed)? else {
+            return Ok(false);
+        };
+        let mut expected = previous.map(|(_, a)| a.attempts).unwrap_or_default();
+        expected.extend(removed);
+        Ok(next.run == before.run && next.attempts == expected)
+    }
     pub(crate) fn run_admission(
         &mut self,
         update: &ValidatedRunUpdate,
@@ -442,12 +566,12 @@ impl crate::bundle::ProjectBundle {
         let terminal = before
             .as_ref()
             .is_some_and(|before| terminal_progress(before, update));
+        self.cut_authority(&index, before.as_ref(), update, terminal)?;
         if terminal {
             crate::orchestration_accounting::encode(update.receipt(), TERMINAL_RECEIPT_BYTES)
                 .map_err(|_| BundleError::RunLimit)?;
             crate::orchestration_accounting::encode(update, TERMINAL_TRANSITION_BYTES)
                 .map_err(|_| BundleError::RunLimit)?;
-            terminal_authority(index.budgets.contains_key(run), &budget, before.as_ref())?;
             return Ok(arm.then(|| {
                 mint_terminal(
                     &self.store,
@@ -765,5 +889,46 @@ mod tests {
                 "C5_FIX1_TERMINAL_RECORD_HEADROOM decoded={decoded}"
             );
         }
+    }
+
+    /// C5 fix 14: each condition of `terminal_authority` refuses on its own.
+    #[test]
+    fn s4b_c5_fix14_terminal_authority_conditions() {
+        let active = RunBudget {
+            active: true,
+            ..RunBudget::default()
+        };
+        let inactive = RunBudget::default();
+        let spent = RunBudget {
+            active: true,
+            terminal: usize::try_from(TERMINAL_CUTS).unwrap(),
+            ..RunBudget::default()
+        };
+        let yes = || Ok(true);
+        let no = || Ok(false);
+        assert!(
+            terminal_authority(true, &active, false, no).is_ok(),
+            "C5_FIX14_ACTIVE_KEEPS_FIX2_RULE"
+        );
+        assert!(
+            terminal_authority(false, &active, true, yes).is_err(),
+            "C5_FIX14_UNADMITTED_REFUSED"
+        );
+        assert!(
+            terminal_authority(true, &spent, true, yes).is_err(),
+            "C5_FIX14_TERMINAL_BOUND_REFUSED"
+        );
+        assert!(
+            terminal_authority(true, &inactive, true, no).is_err(),
+            "C5_FIX14_FINISHED_NON_ARCHIVE_REFUSED"
+        );
+        assert!(
+            terminal_authority(true, &inactive, false, yes).is_err(),
+            "C5_FIX14_INACTIVE_PENDING_REFUSED"
+        );
+        assert!(
+            terminal_authority(true, &inactive, true, yes).is_ok(),
+            "C5_FIX14_FINISHED_ARCHIVE_ADMITTED"
+        );
     }
 }
