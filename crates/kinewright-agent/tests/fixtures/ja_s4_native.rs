@@ -194,6 +194,68 @@ fn main() {
             }
             return;
         }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"replan") {
+            // C5 fix 10: one classified failure, twice; the host pauses the
+            // task for a new plan and the reader kills this process.
+            for _ in 0..2 {
+                writeln!(
+                    std::io::stdout(),
+                    "{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"fixture repeated failure\"}}}}"
+                )
+                .unwrap();
+            }
+            std::io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(3));
+            fs::write(root.join("survived"), b"").unwrap();
+            while !root.join("exit").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            return;
+        }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"exhausted") {
+            // C5 fix 10 ruling: Codex's last retry notice, then the failed
+            // turn; Codex exits after it.
+            writeln!(
+                std::io::stdout(),
+                "{{\"type\":\"error\",\"message\":\"Reconnecting... 5/5\"}}"
+            )
+            .unwrap();
+            writeln!(
+                std::io::stdout(),
+                "{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"stream disconnected before completion\"}}}}"
+            )
+            .unwrap();
+            std::io::stdout().flush().unwrap();
+            return;
+        }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"reconnect") {
+            // C5 fix 10 ruling: three Codex retry notices while the turn
+            // goes on; the normal response and `turn.completed` follow.
+            for attempt in 1..=3 {
+                writeln!(
+                    std::io::stdout(),
+                    "{{\"type\":\"error\",\"message\":\"Reconnecting... {attempt}/5\"}}"
+                )
+                .unwrap();
+            }
+        }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"items") {
+            // C5 fix 10: Codex 0.166 `McpToolCallItem` for two refused
+            // calls: `status: failed`, `error: null`, different results.
+            for (id, text) in [
+                (
+                    "item_1",
+                    "orchestration_refused: result differs from the frozen task",
+                ),
+                ("item_2", "orchestration_refused: task is not frozen"),
+            ] {
+                writeln!(
+                    std::io::stdout(),
+                    "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"{id}\",\"type\":\"mcp_tool_call\",\"server\":\"kinewright\",\"tool\":\"invoke_capability\",\"arguments\":{{}},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}],\"structured_content\":null}},\"error\":null,\"status\":\"failed\"}}}}"
+                )
+                .unwrap();
+            }
+        }
         let fixture_full = fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"full");
         if fixture_full {
             writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"fixture gate\"}}}}").unwrap();

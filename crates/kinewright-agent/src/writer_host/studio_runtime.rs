@@ -23,6 +23,9 @@ use std::{
     time::Duration,
 };
 
+/// C5 fix 10: the fixed reason of a task paused for a repeated provider failure.
+pub(crate) const REPLAN_PAUSE: &str =
+    "replan: the provider failed the same way twice; the task is paused for a new plan";
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) mod fixture;
 #[cfg(any(test, feature = "test-util"))]
@@ -818,6 +821,61 @@ impl HostCommandOwner {
         run: &RunId,
         reason: &str,
     ) -> Result<(), super::HostError> {
+        self.record_runtime_stop(producer, run, reason, false)
+    }
+    /// C5 fix 10: the native reader refused the provider's stream and killed
+    /// it. A task the accounting paused for a repeated failure pauses the run
+    /// with that fixed reason; any other refusal interrupts it with the
+    /// reader's fixed reason. Provider text never reaches either.
+    pub(super) fn record_stream_refusal(
+        &mut self,
+        producer: &HostAuth,
+        identity: &crate::orchestration::ExecutionIdentity,
+        reason: &str,
+    ) -> Result<(), super::HostError> {
+        let state = self.spending_scope(producer, &identity.run)?;
+        let replan = self.native_accounting(&state)?.is_some_and(|accounting| {
+            accounting.tasks.iter().any(|task| {
+                task.task == identity.task.0
+                    && task.pause
+                        == Some(
+                            kinewright_project::orchestration_accounting::AccountingRefusal::Replan,
+                        )
+            })
+        });
+        if replan {
+            self.record_runtime_stop(producer, &identity.run, REPLAN_PAUSE, true)
+        } else {
+            self.record_runtime_stop(producer, &identity.run, reason, false)
+        }
+    }
+    /// C5 fix 10: a run that can make no progress and shows no reason why
+    /// (see [`crate::orchestration::machine::silently_stalled`]) is
+    /// interrupted with a fixed reason instead of sitting pending.
+    pub(crate) fn surface_silent_stall(
+        &mut self,
+        producer: &HostAuth,
+        run: &RunId,
+    ) -> Result<bool, super::HostError> {
+        let state = self.spending_scope(producer, run)?;
+        if !crate::orchestration::machine::silently_stalled(&state) {
+            return Ok(false);
+        }
+        self.record_runtime_stop(
+            producer,
+            run,
+            crate::orchestration::machine::SILENT_STALL,
+            false,
+        )?;
+        Ok(true)
+    }
+    fn record_runtime_stop(
+        &mut self,
+        producer: &HostAuth,
+        run: &RunId,
+        reason: &str,
+        pause: bool,
+    ) -> Result<(), super::HostError> {
         use crate::orchestration::orchestration_records::{
             RunOutcome, RunPhase, RunWait, WaitDetail,
         };
@@ -832,7 +890,9 @@ impl HostCommandOwner {
             missing: vec![],
             attempt: None,
         });
-        if state.phase != RunPhase::Paused {
+        if pause {
+            state.phase = RunPhase::Paused;
+        } else if state.phase != RunPhase::Paused {
             state.phase = RunPhase::Interrupted;
         }
         let identity = state

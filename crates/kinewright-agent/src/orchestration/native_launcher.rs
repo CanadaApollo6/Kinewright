@@ -583,6 +583,16 @@ pub(crate) trait InvocationOwner: Send + Sync {
     ) -> io::Result<()> {
         Ok(())
     }
+    /// C5 fix 10: the reader refused the provider's stream, so the provider
+    /// was killed. The owner shows a fixed reason once instead of leaving the
+    /// run pending with nothing to wake it.
+    fn stream_refused(
+        &self,
+        identity: &crate::orchestration::ExecutionIdentity,
+        reason: &str,
+    ) -> io::Result<()> {
+        self.launch_failed(identity, reason)
+    }
 }
 
 pub(crate) struct NativeGuardianLauncher {
@@ -907,17 +917,38 @@ impl NativeGuardianLauncher {
                     "kinewright-contained-stderr",
                 );
                 let mut output = FirstProgress::new(output, first_progress);
-                let mut completed =
-                    read_provider_output(&mut output, &sender, |raw, ordinal, eof| {
-                        usage_owner.raw(&execution, raw, ordinal, eof)
-                    });
+                let ProviderRead {
+                    completed,
+                    refusal,
+                    interrupt,
+                } = read_provider_stream(&mut output, &sender, |raw, ordinal, eof| {
+                    usage_owner.raw(&execution, raw, ordinal, eof)
+                });
+                let mut completed = completed;
                 let silent = output.bytes == 0;
                 let stalled = output.stalled;
+                // C5 fix 10: the reader refused the stream. The one
+                // publication of why comes before the interrupt (whose `Done`
+                // lets the pump drop the session) and before the cleanup below
+                // kills the provider, so the run is never seen with no live
+                // provider and no reason. A person's Stop already said why.
+                let refusal =
+                    refusal.filter(|_| !worker_stopped.load(std::sync::atomic::Ordering::SeqCst));
+                if let Some(reason) = refusal
+                    && usage_owner.stream_refused(&execution, reason).is_err()
+                {
+                    sender.interrupt("provider stream refusal remains unpublished");
+                }
+                if let Some(message) = interrupt {
+                    sender.interrupt(message);
+                }
                 let mut native = worker_control
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 native.close_lifetime();
-                match native.cleanup() {
+                let cleanup = native.cleanup();
+                let stopped = worker_stopped.load(std::sync::atomic::Ordering::SeqCst);
+                match cleanup {
                     Ok(proof) => {
                         if credential_mount.as_ref().is_some_and(|mount| {
                             crate::codex_credentials::verify_mount(mount).is_err()
@@ -951,10 +982,7 @@ impl NativeGuardianLauncher {
                     .and_then(|reader| reader.join().ok())
                     .unwrap_or_default();
                 let guardian = guardian.status();
-                if silent
-                    && !sender.failed()
-                    && !worker_stopped.load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if refusal.is_none() && silent && !sender.failed() && !stopped {
                     let reason = if stalled {
                         first_progress_failure(first_progress)
                     } else {
@@ -1121,47 +1149,88 @@ impl Drop for RestrictedSession {
     }
 }
 
+/// C5 fix 10: fixed reasons the reader refuses a provider's stream with.
+/// None carries the provider's bytes.
+pub(crate) const STREAM_ACCOUNTING_REFUSED: &str =
+    "provider stream refused: the host's accounting refused a provider event";
+pub(crate) const STREAM_NATIVE_TOOL_REFUSED: &str =
+    "provider stream refused: a provider-native tool is not allowed";
+pub(crate) const STREAM_MALFORMED: &str = "provider stream refused: malformed provider event";
+pub(crate) const STREAM_USAGE_UNRESOLVED: &str =
+    "provider stream refused: usage publication remains unresolved";
+
+/// What reading one provider's stream ended with.
+pub(crate) struct ProviderRead {
+    pub completed: bool,
+    /// The fixed reason the reader refused the stream, if it did.
+    pub refusal: Option<&'static str>,
+    /// The interrupt the caller owes for that refusal. It is not sent here,
+    /// so the native reader can publish why before `Done` lets the pump drop
+    /// the session.
+    pub interrupt: Option<&'static str>,
+}
+
 /// The native launch path and uncertified CI children share bounded framing,
 /// raw H1 accounting before display parsing, and terminal failure handling.
 pub(crate) fn read_provider_output(
     output: impl std::io::Read,
     sender: &crate::protocol::limits::EventSender,
-    mut record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
+    record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
 ) -> bool {
+    let read = read_provider_stream(output, sender, record);
+    if let Some(message) = read.interrupt {
+        sender.interrupt(message);
+    }
+    read.completed
+}
+
+pub(crate) fn read_provider_stream(
+    output: impl std::io::Read,
+    sender: &crate::protocol::limits::EventSender,
+    mut record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
+) -> ProviderRead {
     let mut parser = crate::protocol::CodexProtocol::default();
     let mut ordinal = 0_u64;
     let mut completed = false;
+    let mut refusal = None;
+    let mut interrupt = None;
     for line in crate::protocol::limits::Frames::new(output) {
-        let result = line.map_err(io::Error::other).and_then(|line| {
-            ordinal = ordinal
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("usage event capacity"))?;
-            let raw: serde_json::Value = serde_json::from_str(&line)?;
-            record(&raw, ordinal, false)?;
+        let result = (|| {
+            let line = line.map_err(|_| STREAM_MALFORMED)?;
+            ordinal = ordinal.checked_add(1).ok_or(STREAM_ACCOUNTING_REFUSED)?;
+            let raw: serde_json::Value =
+                serde_json::from_str(&line).map_err(|_| STREAM_MALFORMED)?;
+            record(&raw, ordinal, false).map_err(|_| STREAM_ACCOUNTING_REFUSED)?;
             if !native_item_allowed(&raw) {
-                return Err(io::Error::other("provider-native tool refused"));
+                return Err(STREAM_NATIVE_TOOL_REFUSED);
             }
             completed |=
                 raw.get("type").and_then(serde_json::Value::as_str) == Some("turn.completed");
-            parser.parse_line(&line).map_err(io::Error::other)
-        });
-        if let Ok(parsed) = result {
-            for event in parsed {
-                let event = match event {
-                    AgentEvent::Error(message) if transport_error(&message) => AgentEvent::Error(
-                        "network: provider transport failed or is reconnecting".into(),
-                    ),
-                    other => other,
-                };
-                if !matches!(event, AgentEvent::Done | AgentEvent::Cost { .. })
-                    && sender.send(event).is_err()
-                {
-                    break;
+            parser.parse_line(&line).map_err(|_| STREAM_MALFORMED)
+        })();
+        match result {
+            Ok(parsed) => {
+                for event in parsed {
+                    let event = match event {
+                        AgentEvent::Error(message) if transport_error(&message) => {
+                            AgentEvent::Error(
+                                "network: provider transport failed or is reconnecting".into(),
+                            )
+                        }
+                        other => other,
+                    };
+                    if !matches!(event, AgentEvent::Done | AgentEvent::Cost { .. })
+                        && sender.send(event).is_err()
+                    {
+                        break;
+                    }
                 }
             }
-        } else {
-            sender.interrupt("provider stream refused; cleanup pending");
-            break;
+            Err(reason) => {
+                refusal = Some(reason);
+                interrupt = Some("provider stream refused; cleanup pending");
+                break;
+            }
         }
         if sender.failed() {
             break;
@@ -1174,9 +1243,14 @@ pub(crate) fn read_provider_output(
     )
     .is_err()
     {
-        sender.interrupt("usage publication remains unresolved");
+        refusal.get_or_insert(STREAM_USAGE_UNRESOLVED);
+        interrupt.get_or_insert("usage publication remains unresolved");
     }
-    completed
+    ProviderRead {
+        completed,
+        refusal,
+        interrupt,
+    }
 }
 
 fn native_item_allowed(raw: &serde_json::Value) -> bool {
@@ -1199,7 +1273,10 @@ fn native_item_allowed(raw: &serde_json::Value) -> bool {
     }
 }
 
-fn transport_error(message: &str) -> bool {
+/// A provider message about its network transport: Codex's own retry
+/// notices (`Reconnecting... N/5`, `Reconnecting... waiting for network`)
+/// and transport failures. MCP messages never match.
+pub(crate) fn transport_error(message: &str) -> bool {
     let has = |needle: &[u8]| {
         message
             .as_bytes()

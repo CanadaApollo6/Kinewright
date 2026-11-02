@@ -323,8 +323,16 @@ fn s4b_c3_raw_waits_and_failures_reach_the_durable_budget() {
             false,
         )
         .unwrap();
-        host.ingest_native_raw(&producer,&execution,&serde_json::json!({"type":"item.completed","item":{"status":"failed","id":"first","error":{"message":"same scoped failure"}}}),2,false).unwrap();
-        assert!(host.ingest_native_raw(&producer,&execution,&serde_json::json!({"type":"item.completed","item":{"status":"failed","id":"second","error":{"message":"same scoped failure"}}}),3,false).is_err());
+        // C5 fix 10: Codex's own failure events count; a failed tool item does not.
+        host.ingest_native_raw(
+            &producer,
+            &execution,
+            &serde_json::json!({"type":"turn.failed","error":{"message":"same scoped failure"}}),
+            2,
+            false,
+        )
+        .unwrap();
+        assert!(host.ingest_native_raw(&producer,&execution,&serde_json::json!({"type":"turn.failed","error":{"message":"same scoped failure"}}),3,false).is_err());
     }
     let record = spending_record(&f, &run);
     assert_eq!(

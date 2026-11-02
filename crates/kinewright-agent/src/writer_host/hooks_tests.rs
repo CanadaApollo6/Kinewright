@@ -1125,4 +1125,5 @@ mod tests {
     include!("c5_tests.rs");
     include!("c5d_tests.rs");
     include!("c5e_tests.rs");
+    include!("c5_fix10_tests.rs");
 }

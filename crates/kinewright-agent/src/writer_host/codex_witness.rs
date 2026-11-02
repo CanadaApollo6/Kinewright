@@ -443,6 +443,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             if accounting.tasks.iter().any(|task| task.sends != 0) {
                 report.lock().unwrap()["full_run_started"] = serde_json::json!(true);
             }
+            report.lock().unwrap()["mcp_refusals"] = mcp_refusals(&accounting);
             report.lock().unwrap()["usage"] = serde_json::to_value(accounting).unwrap();
         }
         if budget_exceeded {
@@ -460,18 +461,20 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             break state;
         }
         if let Some(status) = &view.runtime_status {
-            let category = if status.contains("storage_backpressure") {
-                "storage_backpressure"
-            } else {
-                "native_runtime_refusal"
-            };
+            let category = runtime_status_category(status);
             report.lock().unwrap()["runtime_status_code"] = serde_json::json!(category);
             report.lock().unwrap()["error_kind"] = serde_json::json!(category);
+        } else if crate::orchestration::machine::silently_stalled(&state) {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("silent_stall");
+        }
+        if state.phase == RunPhase::Paused && report.lock().unwrap()["error_kind"].is_null() {
+            report.lock().unwrap()["error_kind"] = serde_json::json!("paused");
         }
         if Instant::now() >= deadline {
             report.lock().unwrap()["error_kind"] = serde_json::json!("deadline");
         }
-        if state.phase == RunPhase::Interrupted
+        if matches!(state.phase, RunPhase::Interrupted | RunPhase::Paused)
+            || crate::orchestration::machine::silently_stalled(&state)
             || Instant::now() >= deadline
             || view.runtime_status.is_some()
             || report.lock().unwrap()["error_kind"]
@@ -1067,16 +1070,17 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
         .unwrap();
         let state = view.projection;
         let progressed = first_event.get().is_some() || initialized() || network(report);
+        if let Some(accounting) = &view.accounting {
+            report.lock().unwrap()["mcp_refusals"] = mcp_refusals(accounting);
+        }
         if let Some(status) = &view.runtime_status {
             report.lock().unwrap()["runtime_status_code"] =
-                serde_json::json!(if status.contains("storage_backpressure") {
-                    "storage_backpressure"
-                } else {
-                    "native_runtime_refusal"
-                });
+                serde_json::json!(runtime_status_category(status));
             break state;
         }
-        if state.phase == RunPhase::Interrupted || state.outcome != RunOutcome::Pending {
+        if matches!(state.phase, RunPhase::Interrupted | RunPhase::Paused)
+            || state.outcome != RunOutcome::Pending
+        {
             if let crate::orchestration::orchestration_records::RunWait::Provider(reason) =
                 &state.wait
             {
@@ -1308,6 +1312,39 @@ fn merged_histories(
         child_history,
         saved.base.branch,
         candidate_history,
+    )
+}
+
+/// C5 fix 10: the fixed category of a run view's runtime status.
+fn runtime_status_category(status: &str) -> &'static str {
+    if status.contains("storage_backpressure") {
+        "storage_backpressure"
+    } else if status.starts_with("silent_stall") {
+        "silent_stall"
+    } else {
+        "native_runtime_refusal"
+    }
+}
+
+/// C5 fix 10: refused product MCP calls as witness evidence: task index,
+/// product tool name, fixed code and count only.
+fn mcp_refusals(accounting: &super::orchestration::DurableRunAccounting) -> serde_json::Value {
+    serde_json::Value::Array(
+        accounting
+            .tasks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, task)| {
+                task.refusals.iter().map(move |refusal| {
+                    serde_json::json!({
+                        "task_index": index,
+                        "tool": refusal.tool,
+                        "code": refusal.code,
+                        "count": refusal.count,
+                    })
+                })
+            })
+            .collect(),
     )
 }
 

@@ -123,6 +123,7 @@ impl HostCommandOwner {
                             totals: task.totals.clone(),
                             wait_reason: task.wait_reason.clone(),
                             pause: task.pause,
+                            refusals: task.refusals.clone(),
                         })
                         .collect(),
                 }));

@@ -33,6 +33,18 @@ pub enum ProtocolFixtureMode {
     ReadStdinFirst,
     /// C5 fix 7: the provider stays alive and never writes a first event.
     SilentAlive,
+    /// C5 fix 10: the provider's turn fails twice the same way, then it
+    /// stays alive and marks `survived` unless it is killed first.
+    RepeatedFailure,
+    /// C5 fix 10: Codex 0.166's real refused-call items (`status: failed`,
+    /// `error: null`) for two different refusals, then a completed turn.
+    FailedToolItems,
+    /// C5 fix 10 ruling: three Codex retry notices (top-level `error`,
+    /// `Reconnecting... N/5`), then a completed turn.
+    ReconnectNotices,
+    /// C5 fix 10 ruling: Codex's last retry notice, then `turn.failed`, then
+    /// the provider exits as Codex does.
+    ReconnectExhausted,
 }
 impl ProtocolFixtureMode {
     /// The fix 7 witnesses shorten the first-progress deadline so a held
@@ -240,6 +252,18 @@ impl ProfileFactory for Factory {
         }
         if self.0.mode == ProtocolFixtureMode::SilentAlive {
             std::fs::write(scratch.join("event-mode"), b"silent")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::RepeatedFailure {
+            std::fs::write(scratch.join("event-mode"), b"replan")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::FailedToolItems {
+            std::fs::write(scratch.join("event-mode"), b"items")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::ReconnectNotices {
+            std::fs::write(scratch.join("event-mode"), b"reconnect")?;
+        }
+        if self.0.mode == ProtocolFixtureMode::ReconnectExhausted {
+            std::fs::write(scratch.join("event-mode"), b"exhausted")?;
         }
         let credentials = scratch.join("credentials");
         std::fs::create_dir(&credentials)?;

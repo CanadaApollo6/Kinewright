@@ -91,7 +91,113 @@ struct Control {
 fn refused(reason: &str) -> HostError {
     HostRefusal::new("task_scope", reason).into()
 }
+
+/// C5 fix 10: the product's own name of an MCP call, for its refusal record.
+/// A task control invoked through `invoke_capability` keeps its control name;
+/// anything not on the product's fixed lists is `unknown_tool`.
+pub(crate) fn product_tool_name(name: &str, capability: Option<&str>) -> &'static str {
+    if name == "invoke_capability"
+        && let Some((control, _)) =
+            capability.and_then(|capability| CAPABILITIES.iter().find(|(c, _)| *c == capability))
+    {
+        return control;
+    }
+    crate::runtime::COMPACT_TOOL_NAMES
+        .iter()
+        .find(|tool| **tool == name)
+        .copied()
+        .unwrap_or("unknown_tool")
+}
+
+/// C5 fix 10: the fixed code of a refused product MCP call, read from the
+/// product's own refusal text. Only the code is kept, never the text.
+pub(crate) fn refusal_code(
+    text: &str,
+) -> kinewright_project::orchestration_accounting::ToolRefusalCode {
+    use kinewright_project::orchestration_accounting::ToolRefusalCode as Code;
+    let tokens = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let token = |names: &[&str]| tokens.iter().any(|token| names.contains(token));
+    let phrase = |phrases: &[&str]| phrases.iter().any(|phrase| text.contains(phrase));
+    if phrase(&["result differs from the frozen task"]) {
+        Code::StaleFreeze
+    } else if phrase(&["task is not frozen"]) {
+        Code::NotFrozen
+    } else if phrase(&["published result changed"]) {
+        Code::PublishedChanged
+    } else if token(&["StaleGeneration", "StaleControl"])
+        || phrase(&["control changed", "stale control"])
+    {
+        Code::StaleControl
+    } else if phrase(&["timeline revision", "prepared edit plan"]) {
+        Code::StaleRevision
+    } else if token(&[
+        "storage_backpressure",
+        "durability_unknown",
+        "unsettled",
+        "save_in_progress",
+        "PublicationUnknown",
+    ]) || phrase(&["another publication must reconcile"])
+    {
+        Code::Storage
+    } else if token(&[
+        "Sends",
+        "Tokens",
+        "Time",
+        "Replan",
+        "Capacity",
+        "DependencyCapacity",
+        "run_limit",
+    ]) {
+        Code::Budget
+    } else if token(&["RetiredUnresolved", "task_freezing"])
+        || phrase(&["already terminal", "run is not pending", "terminal slot"])
+    {
+        Code::TerminalReserved
+    } else if token(&["InvalidState"]) {
+        Code::InvalidState
+    } else if token(&[
+        "task_scope",
+        "task_authority_expired",
+        "ScopeConflict",
+        "root_refused",
+        "identity_refused",
+        "Unsupported",
+    ]) || phrase(&[
+        "internal capability",
+        "cannot be invoked",
+        "is not available",
+    ]) {
+        Code::NotAdmitted
+    } else if token(&["invalid_request", "invalid_params"])
+        || phrase(&["invalid bounded protocol value"])
+    {
+        Code::InvalidArguments
+    } else {
+        Code::Other
+    }
+}
+
 impl TaskMcp {
+    /// C5 fix 10: count one refused product MCP call in this task's durable
+    /// accounting. Best effort: it never changes the call's reply, and a
+    /// refusal the store itself cannot take is not retried.
+    pub(crate) fn record_refusal(
+        &self,
+        tool: &'static str,
+        code: kinewright_project::orchestration_accounting::ToolRefusalCode,
+    ) {
+        #[cfg(target_os = "linux")]
+        if let Some(host) = self.host.upgrade()
+            && let Ok(mut host) = host.lock()
+        {
+            let _ = host.record_tool_refusal(self.endpoint.authority(), tool, code);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (tool, code);
+    }
     pub(super) fn new(
         host: Weak<Mutex<HostCommandOwner>>,
         auth: HostAuth,
@@ -239,16 +345,14 @@ impl TaskMcp {
                     }
                 })
         {
-            let record = host.owner()?.store()?.read_run_record(reference)?;
-            if record.payload
-                != crate::orchestration::orchestration_records::OrchestrationPayload::Result(
-                    Box::new(publish.result.clone()),
-                )
-            {
-                return Err(refused("published result changed"));
-            }
+            // C5 fix 10: the task, base, head and delta identify a re-sent
+            // publication; its host-owned usage reference never does. The
+            // re-sent command is rebound to the stored result, so a replay of
+            // the original control finds its receipt and nothing new is written.
+            let reference = reference.clone();
+            let bound = host.bind_publication(&request)?;
             return Ok(
-                json!({"already_published":true,"result":reference,"receipt":host.owner()?.orchestration_replay(&request.envelope,None)?}),
+                json!({"already_published":true,"result":reference,"receipt":host.owner()?.orchestration_replay(&bound.envelope,None)?}),
             );
         }
         if let OrchestrationCommand::MergeTask(merge) = &request.envelope.command {
@@ -465,7 +569,9 @@ impl HostCommandOwner {
             artifacts: vec![],
             evidence: vec![],
             usage_ref: self.current_accounting_reference(&state)?,
-            explanation: self.owner_mut()?.admit_host_grant(b"task result")?,
+            explanation: self
+                .owner_mut()?
+                .admit_host_grant(super::orchestration::TASK_RESULT_EXPLANATION)?,
         };
         Ok(json!({"receipt":receipt,"history":history,"result":result}))
     }

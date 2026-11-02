@@ -234,6 +234,15 @@ impl EffectPump {
             let _ = self.sender.send(AgentEvent::Done);
             return Ok(());
         }
+        // C5 fix 10: with no session of this pump still reporting, a run
+        // nothing can wake is shown as interrupted, never left pending.
+        if self.active.is_empty()
+            && host
+                .surface_silent_stall(&self.producer, &self.run)
+                .map_err(io::Error::other)?
+        {
+            return Ok(());
+        }
         if !available {
             return Ok(());
         }

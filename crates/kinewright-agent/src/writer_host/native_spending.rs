@@ -15,6 +15,55 @@ pub(crate) enum SpendingChange {
         failure: String,
     },
     Usage(UsageSample),
+    /// C5 fix 10: one refused product MCP call, by tool and fixed code.
+    ToolRefusal {
+        tool: &'static str,
+        code: kinewright_project::orchestration_accounting::ToolRefusalCode,
+    },
+}
+
+/// C5 fix 10: the classification of a counted provider failure, or `None`
+/// when the event is not one. Only Codex 0.166's `turn.failed`
+/// (`{"error":{"message"}}`) and top-level `error` (`{"message"}`) events
+/// count. A failed tool-call item is the product refusing one call, which
+/// the model may answer by trying something else; it is not a provider
+/// failure. The classification is the event kind plus the first non-empty
+/// code or message; null, absent and empty values are never hashed, and a
+/// failure without either gets the fixed unclassified token.
+///
+/// A top-level `error` the reader's network-retry check recognizes is
+/// Codex retrying its own transport while the turn goes on, not a failure
+/// (lead ruling on C5 fix 10). It is bounded anyway: Codex stops after five
+/// retries and sends `turn.failed`, which counts, and the first-progress and
+/// run deadlines still apply.
+pub(crate) fn provider_failure(kind: &str, raw: &serde_json::Value) -> Option<String> {
+    let detail = match kind {
+        "turn.failed" => raw.get("error"),
+        "error"
+            if raw
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(crate::native_launcher::transport_error) =>
+        {
+            return None;
+        }
+        "error" => Some(raw),
+        _ => return None,
+    };
+    let field = |name: &str| {
+        detail
+            .and_then(|detail| detail.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| (name.to_owned(), value))
+    };
+    Some(field("code").or_else(|| field("message")).map_or_else(
+        || kinewright_project::orchestration_accounting::UNCLASSIFIED_FAILURE.into(),
+        |(name, value)| {
+            kinewright_media::sha256_bytes(format!("{kind}\0{name}\0{value}").as_bytes())
+        },
+    ))
 }
 impl HostCommandOwner {
     pub(crate) fn spending_scope(
@@ -47,10 +96,7 @@ impl HostCommandOwner {
     ) -> Result<(), HostError> {
         let mut keep = Vec::new();
         for previous in &state.usage {
-            let record = self
-                .owner()?
-                .store()?
-                .read_run_record(previous)?;
+            let record = self.owner()?.store()?.read_run_record(previous)?;
             if !matches!(record.payload, OrchestrationPayload::Accounting(_)) {
                 keep.push(previous.clone());
             }
@@ -104,6 +150,7 @@ impl HostCommandOwner {
                 task.repair(&delivery, &identity.attempt.0, failure)
             }
             SpendingChange::Usage(sample) => ingest_usage(task, sample).map(|_| ()),
+            SpendingChange::ToolRefusal { tool, code } => task.refuse_tool(tool, code),
         };
         if let Err(reason) = outcome
             && reason != AccountingRefusal::Replan
@@ -276,6 +323,43 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    /// C5 fix 10: count one refused product MCP call, by the product's tool
+    /// name and fixed code, in the calling task's durable accounting.
+    pub(crate) fn record_tool_refusal(
+        &mut self,
+        authority: &crate::orchestration::tasks::RuntimeTaskAuthority,
+        tool: &'static str,
+        code: kinewright_project::orchestration_accounting::ToolRefusalCode,
+    ) -> Result<(), HostError> {
+        let producer = self.run_producer(&authority.run)?;
+        let state = self.spending_scope(&producer, &authority.run)?;
+        let identity = state
+            .attempts
+            .iter()
+            .find(|a| a.identity.attempt == authority.attempt && a.identity.task == authority.task)
+            .map_or_else(
+                || ExecutionIdentity {
+                    version: 1,
+                    project: authority.project.clone(),
+                    run: authority.run.clone(),
+                    task: authority.task.clone(),
+                    attempt: authority.attempt.clone(),
+                    nonce: authority.run.0.clone(),
+                    owner_instance: authority.run.0.clone(),
+                },
+                |a| a.identity.clone(),
+            );
+        self.change_spending(
+            &producer,
+            &identity,
+            SpendingChange::ToolRefusal { tool, code },
+            ClockObservation {
+                unix_ms: super::spending::unix_ms()?,
+                monotonic_delta_ms: 0,
+                trusted: true,
+            },
+        )
+    }
     pub(crate) fn ingest_native_raw(
         &mut self,
         producer: &HostAuth,
@@ -317,12 +401,7 @@ impl HostCommandOwner {
                 },
             );
         }
-        if kind == "turn.failed"
-            || raw
-                .pointer("/item/status")
-                .and_then(serde_json::Value::as_str)
-                == Some("failed")
-        {
+        if let Some(failure) = provider_failure(kind, raw) {
             let effect = state
                 .effects
                 .iter()
@@ -333,19 +412,10 @@ impl HostCommandOwner {
                 .iter()
                 .find(|delivery| delivery.wake == effect.id)
                 .map_or_else(|| effect.id.0.clone(), |delivery| delivery.id.0.clone());
-            let failure = raw
-                .pointer("/error/message")
-                .or_else(|| raw.pointer("/item/error/message"))
-                .or_else(|| raw.pointer("/item/error"))
-                .or_else(|| raw.get("error"))
-                .ok_or_else(|| refused("unclassified provider failure"))?;
             return self.change_spending(
                 producer,
                 identity,
-                SpendingChange::Repair {
-                    delivery,
-                    failure: kinewright_media::sha256_bytes(&serde_json::to_vec(failure)?),
-                },
+                SpendingChange::Repair { delivery, failure },
                 ClockObservation {
                     unix_ms: super::spending::unix_ms()?,
                     monotonic_delta_ms: 0,
@@ -545,10 +615,7 @@ impl HostCommandOwner {
                     }
                 })
         {
-            let record = self
-                .owner()?
-                .store()?
-                .read_run_record(&reference)?;
+            let record = self.owner()?.store()?.read_run_record(&reference)?;
             if let OrchestrationPayload::Result(result) = &record.payload {
                 use crate::orchestration::orchestration_records::{
                     OutcomeDetail, RunOutcome, RunPhase, RunWait,

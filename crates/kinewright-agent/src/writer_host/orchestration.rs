@@ -73,6 +73,9 @@ pub struct DurableTaskAccounting {
     pub totals: kinewright_project::orchestration_accounting::UsageTotals,
     pub wait_reason: Option<String>,
     pub pause: Option<kinewright_project::orchestration_accounting::AccountingRefusal>,
+    /// C5 fix 10: refused product MCP calls, by tool and fixed code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refusals: Vec<kinewright_project::orchestration_accounting::ToolRefusal>,
 }
 #[derive(Clone)]
 pub(super) struct ProducerScope {
@@ -175,6 +178,8 @@ pub(super) enum PendingPublication {
 fn refused(reason: &str) -> HostError {
     HostRefusal::new("orchestration_refused", reason).into()
 }
+/// The fixed explanation grant of every frozen task result.
+pub(super) const TASK_RESULT_EXPLANATION: &[u8] = b"task result";
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Result::map_err supplies the owned refusal"
@@ -651,10 +656,73 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    /// C5 fix 10: bind a publication's host-owned `usage_ref`. The model may
+    /// echo any value; it is never compared or trusted. A first publication
+    /// names the accounting record current in this admission. A re-sent
+    /// publication of an already published task is identified by its task,
+    /// base, head and delta, and is rebound to the stored result, so it
+    /// replays the same publication however many accounting records followed.
+    pub(super) fn bind_publication(
+        &self,
+        request: &ScopedOrchestrationRequest,
+    ) -> Result<ScopedOrchestrationRequest, HostError> {
+        let OrchestrationCommand::PublishResult(publish) = &request.envelope.command else {
+            return Ok(request.clone());
+        };
+        let Some(run) = &request.run else {
+            return Ok(request.clone());
+        };
+        let Some(state) = self.owner()?.orchestration_projection(run)? else {
+            return Ok(request.clone());
+        };
+        let stored = state
+            .tasks
+            .iter()
+            .find(|task| task.id == publish.task)
+            .and_then(|task| {
+                if let TaskState::Terminal(reference) = &task.state {
+                    Some(reference.clone())
+                } else {
+                    None
+                }
+            });
+        let result = if let Some(reference) = stored {
+            let record = self.owner()?.store()?.read_run_record(&reference)?;
+            let crate::orchestration::orchestration_records::OrchestrationPayload::Result(stored) =
+                record.payload
+            else {
+                return Err(refused("published result changed"));
+            };
+            // Deltas are content-addressed, so equal references mean equal deltas.
+            if stored.base != publish.result.base
+                || stored.head != publish.result.head
+                || stored.delta_ref != publish.result.delta_ref
+            {
+                return Err(refused("published result changed"));
+            }
+            *stored
+        } else {
+            let mut result = publish.result.clone();
+            result.usage_ref = self.current_accounting_reference(&state)?;
+            result
+        };
+        let mut bound = request.clone();
+        bound.envelope.command = OrchestrationCommand::PublishResult(Box::new(
+            crate::orchestration::orchestration_records::PublishResult {
+                task: publish.task.clone(),
+                result,
+            },
+        ));
+        bound.envelope.digest = bound
+            .envelope
+            .computed_digest()
+            .map_err(|_| refused("invalid publication"))?;
+        Ok(bound)
+    }
     pub(super) fn dispatch_orchestration(
         &mut self,
         index: usize,
-        request: &ScopedOrchestrationRequest,
+        incoming: &ScopedOrchestrationRequest,
     ) -> Result<OrchestrationReceipt, HostError> {
         // Bounded owner reads/replay finish before ordinary staging begins.
         // Long-lived snapshot readers never receive this allowance.
@@ -662,12 +730,17 @@ impl HostCommandOwner {
             // An immutable attachment instance admitted this exact command before B4.
             // Scope records are unreadable while the namespace is uncertain; only that
             // still-live instance may reconcile, then all current policy runs again.
-            if !matches!(pending, PendingPublication::Wire(original, actor) if &**original == request && *actor == self.attachments[index].id)
+            if !matches!(pending, PendingPublication::Wire(original, actor) if &**original == incoming && *actor == self.attachments[index].id)
             {
                 return Err(refused("original uncertain command must reconcile first"));
             }
             self.owner_mut()?.reconcile_metadata()?;
         }
+        // A publication's usage reference is host bookkeeping, bound here in
+        // the same admission that writes it. Pending publication blocks every
+        // accounting change, so a reconciled retry binds the same reference.
+        let bound = self.bind_publication(incoming)?;
+        let request = &bound;
         self.authorize_orchestration(index, request)?;
         if let Some(receipt) = self
             .owner()?
@@ -727,39 +800,61 @@ impl HostCommandOwner {
         }
         let generation = self.owner()?.metadata_generation()?;
         let attention = self.live_attention_admission(request)?;
-        let transition =
-            if let OrchestrationCommand::PublishResult(publish) = &request.envelope.command {
-                let state = previous
-                    .as_ref()
-                    .ok_or_else(|| refused("result run missing"))?;
-                let history = self
-                    .saved_task_history(state, &publish.task)?
-                    .ok_or_else(|| refused("result history missing"))?;
-                let runtime = self
-                    .hooks
-                    .runs
-                    .get(&state.run)
-                    .and_then(|run| run.tasks.get(&publish.task))
-                    .ok_or_else(|| refused("result task missing"))?;
-                let delta = runtime
-                    .frozen_delta()
-                    .ok_or_else(|| refused("task is not frozen"))?;
-                let result = &publish.result;
-                if !history.frozen
-                    || result.base.as_ref() != Some(&history.base)
-                    || result.head.as_ref() != Some(&history.source)
-                    || result.usage_ref != self.current_accounting_reference(state)?
-                    || match &result.delta_ref {
-                        Some(reference) => {
-                            *self.owner()?.store()?.read_evidence(reference)?
-                                != serde_json::to_vec(delta)?
-                        }
-                        None => !delta.is_empty(),
+        let transition = if let OrchestrationCommand::PublishResult(publish) =
+            &request.envelope.command
+        {
+            let state = previous
+                .as_ref()
+                .ok_or_else(|| refused("result run missing"))?;
+            let history = self
+                .saved_task_history(state, &publish.task)?
+                .ok_or_else(|| refused("result history missing"))?;
+            // A host restart between freeze and publish reloads the frozen task.
+            if history.frozen {
+                self.restore_frozen_task(state, &publish.task)?;
+            }
+            let runtime = self
+                .hooks
+                .runs
+                .get(&state.run)
+                .and_then(|run| run.tasks.get(&publish.task))
+                .ok_or_else(|| refused("result task missing"))?;
+            let delta = runtime
+                .frozen_delta()
+                .ok_or_else(|| refused("task is not frozen"))?
+                .to_vec();
+            let result = &publish.result;
+            // `usage_ref` was bound by the host above; only base, head and
+            // delta identify the frozen task.
+            if !history.frozen
+                || result.base.as_ref() != Some(&history.base)
+                || result.head.as_ref() != Some(&history.source)
+                || match &result.delta_ref {
+                    // The delta is content-addressed: compare it with the
+                    // frozen delta by identity, then admit those bytes so
+                    // the publication's dependency is declared even when
+                    // a restart dropped the freeze-time grant.
+                    Some(reference) => {
+                        let bytes = serde_json::to_vec(&delta)?;
+                        reference.sha256 != kinewright_media::sha256_bytes(&bytes)
+                            || reference.byte_length != bytes.len() as u64
+                            || self.owner_mut()?.admit_host_grant(&bytes)? != *reference
                     }
-                {
-                    return Err(refused("result differs from the frozen task"));
+                    None => !delta.is_empty(),
                 }
-                let record = self.owner_mut()?.admit_scheduler_record(
+            {
+                return Err(refused("result differs from the frozen task"));
+            }
+            // A frozen result's explanation is the host's own fixed grant;
+            // declare it again so a restart since the freeze cannot leave
+            // the publication with a missing dependency.
+            if result.explanation.sha256 == kinewright_media::sha256_bytes(TASK_RESULT_EXPLANATION)
+                && result.explanation.byte_length == TASK_RESULT_EXPLANATION.len() as u64
+            {
+                self.owner_mut()?
+                    .admit_host_grant(TASK_RESULT_EXPLANATION)?;
+            }
+            let record = self.owner_mut()?.admit_scheduler_record(
                 &crate::orchestration::orchestration_records::OrchestrationRecord {
                     version: 1,
                     payload:
@@ -768,26 +863,26 @@ impl HostCommandOwner {
                         ),
                 },
             )?;
-                crate::orchestration::mailbox::prepare_result_update(
-                    state,
-                    &request.envelope.project,
-                    generation,
-                    &request.envelope,
-                    previous_segment,
-                    record.reference,
-                )
-                .map_err(scheduler_error)?
-            } else {
-                machine::prepare_with_attention(
-                    previous.as_ref(),
-                    &self.owner()?.active_manual_project()?,
-                    generation,
-                    &request.envelope,
-                    previous_segment,
-                    attention.as_ref().map(|(proof, _)| proof),
-                )
-                .map_err(scheduler_error)?
-            };
+            crate::orchestration::mailbox::prepare_result_update(
+                state,
+                &request.envelope.project,
+                generation,
+                &request.envelope,
+                previous_segment,
+                record.reference,
+            )
+            .map_err(scheduler_error)?
+        } else {
+            machine::prepare_with_attention(
+                previous.as_ref(),
+                &self.owner()?.active_manual_project()?,
+                generation,
+                &request.envelope,
+                previous_segment,
+                attention.as_ref().map(|(proof, _)| proof),
+            )
+            .map_err(scheduler_error)?
+        };
         self.owner_mut()?.run_transition_admission(&transition)?;
         let transition = self.seed_run_spending(transition)?;
         let transition = self.stage_control_freeze(transition)?;
@@ -803,7 +898,7 @@ impl HostCommandOwner {
         let continuable = transition.projection().outcome == RunOutcome::Pending
             || transition.projection().cleanup != RunCleanup::Settled;
         self.hooks.pending = Some(PendingPublication::Wire(
-            Box::new(request.clone()),
+            Box::new(incoming.clone()),
             self.attachments[index].id,
         ));
         let result = orchestration_commit::commit_orchestration(
@@ -883,7 +978,13 @@ impl HostCommandOwner {
             } else {
                 vec![]
             };
-        let runtime_status = runtime_status.or(self.owner()?.run_publication_status(run)?);
+        // C5 fix 10: the invariant witness. A stall the pump has not yet
+        // surfaced is still reported, never shown as a running run.
+        let runtime_status = runtime_status
+            .or(self.owner()?.run_publication_status(run)?)
+            .or_else(|| {
+                machine::silently_stalled(&projection).then(|| machine::SILENT_STALL.into())
+            });
         let accounting = self.durable_run_accounting(&projection)?;
         Ok(RunViewPage {
             accounting,

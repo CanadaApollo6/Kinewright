@@ -1362,6 +1362,45 @@ impl KinewrightMcp {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
+        let Some(control) = &self.task_control else {
+            return self.call_exposed_inner(request);
+        };
+        // C5 fix 10: every refused product call of a task is counted by the
+        // product's tool name and a fixed code; its text is never kept.
+        let capability = request
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("name"))
+            .and_then(serde_json::Value::as_str);
+        let tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
+        let reply = self.call_exposed_inner(request);
+        let code = match &reply {
+            Ok(result) if result.is_error == Some(true) => {
+                Some(crate::writer_host::task_mcp::refusal_code(
+                    &result
+                        .content
+                        .iter()
+                        .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ))
+            }
+            Ok(_) => None,
+            Err(error) if error.code == rmcp::model::ErrorCode::INVALID_PARAMS => Some(
+                kinewright_project::orchestration_accounting::ToolRefusalCode::InvalidArguments,
+            ),
+            Err(error) => Some(crate::writer_host::task_mcp::refusal_code(&error.message)),
+        };
+        if let Some(code) = code {
+            control.record_refusal(tool, code);
+        }
+        reply
+    }
+
+    fn call_exposed_inner(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, McpError> {
         if request.name == "invoke_capability" {
             let args: InvokeCapabilityArgs = decode_args(
                 "invoke_capability",

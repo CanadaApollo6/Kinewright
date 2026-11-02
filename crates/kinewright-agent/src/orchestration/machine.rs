@@ -208,6 +208,33 @@ pub fn eligible(state: &RunProjection, action: &RunAction) -> bool {
     }
 }
 
+/// C5 fix 10: the fixed reason and status of a silently stalled run.
+pub const SILENT_STALL: &str =
+    "silent_stall: no provider is running and nothing is scheduled to wake this run";
+
+/// C5 fix 10: a pending run that can make no progress and shows no reason
+/// why. It is not paused, interrupted, in review or waiting on files, the
+/// provider or a question; every attempt is retired, so no provider can still
+/// report; and no lane has an effect the pump could run. Nothing would ever
+/// wake it, and the person would see it as still running.
+#[must_use]
+pub fn silently_stalled(state: &RunProjection) -> bool {
+    use super::orchestration_records::AttemptState;
+    state.outcome == RunOutcome::Pending
+        && !matches!(
+            state.phase,
+            RunPhase::Paused | RunPhase::Interrupted | RunPhase::Reviewing | RunPhase::Finished
+        )
+        && matches!(state.wait, RunWait::None | RunWait::Children(_))
+        && state
+            .attempts
+            .iter()
+            .all(|attempt| matches!(attempt.state, AttemptState::Retired(_)))
+        && !state.effects.iter().any(|effect| {
+            super::outbox::next_effect(state, &effect.lane).is_some_and(|next| next.id == effect.id)
+        })
+}
+
 /// Prepare one complete cut. Replay and fresh endpoint authorization belong to
 /// H1/H3 in the owner, before this function, including on unknown-outcome retry.
 #[allow(clippy::too_many_lines, reason = "single envelope-to-cut transition")]

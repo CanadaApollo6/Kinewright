@@ -128,6 +128,57 @@ pub struct SendConsumption {
     pub payload: ObjectRef,
 }
 
+/// C5 fix 10: the failure token of a counted provider failure the host cannot
+/// classify. It still spends a repair round, but it is never a repeat of any
+/// failure, itself included.
+pub const UNCLASSIFIED_FAILURE: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+/// C5 fix 10: distinct (tool, code) tallies one task keeps.
+pub const TOOL_REFUSALS: usize = 64;
+const TOOL_NAME_BYTES: usize = 64;
+
+/// C5 fix 10: why the product refused one of its own MCP calls. The product
+/// owns this set; provider text, arguments and stderr are never kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRefusalCode {
+    /// The published result differs from the frozen task.
+    StaleFreeze,
+    NotFrozen,
+    /// A re-sent publication differs from the stored one.
+    PublishedChanged,
+    /// The control's generation, epoch or head is no longer current.
+    StaleControl,
+    /// The timeline revision or prepared plan is no longer current.
+    StaleRevision,
+    /// The caller's scope, authority or capability does not admit the call.
+    NotAdmitted,
+    /// The task or run already ended, or its terminal slot is taken.
+    TerminalReserved,
+    InvalidState,
+    /// A send, token, time or repair allowance refused the call.
+    Budget,
+    /// Durable storage refused or has not settled the call.
+    Storage,
+    InvalidArguments,
+    Other,
+}
+/// C5 fix 10: how many calls to one product tool were refused for one code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRefusal {
+    pub tool: String,
+    pub code: ToolRefusalCode,
+    pub count: u32,
+}
+impl ToolRefusal {
+    fn tool_valid(tool: &str) -> bool {
+        !tool.is_empty()
+            && tool.len() <= TOOL_NAME_BYTES
+            && tool.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepairCount {
@@ -154,6 +205,9 @@ pub struct TaskAccounting {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_until_unix_ms: Option<u64>,
     pub pause: Option<AccountingRefusal>,
+    /// C5 fix 10: refused product MCP calls, by tool and fixed code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refusals: Vec<ToolRefusal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +382,17 @@ impl AccountingRecord {
             if task.totals != normalize(&task.usage)? {
                 return Err(AccountingRefusal::Invalid);
             }
+            if task.refusals.len() > TOOL_REFUSALS
+                || task.refusals.iter().enumerate().any(|(n, refusal)| {
+                    refusal.count == 0
+                        || !ToolRefusal::tool_valid(&refusal.tool)
+                        || task.refusals[..n]
+                            .iter()
+                            .any(|r| r.tool == refusal.tool && r.code == refusal.code)
+                })
+            {
+                return Err(AccountingRefusal::Invalid);
+            }
             for (n, repair) in task.repairs.iter().enumerate() {
                 if repair.rounds > 2
                     || repair.repeated > 2
@@ -404,6 +469,13 @@ impl AccountingRecord {
                 || (old.pause.is_some() && new.pause != old.pause)
             {
                 return Err(AccountingRefusal::Scope);
+            }
+            for refusal in &old.refusals {
+                if !new.refusals.iter().any(|r| {
+                    r.tool == refusal.tool && r.code == refusal.code && r.count >= refusal.count
+                }) {
+                    return Err(AccountingRefusal::Scope);
+                }
             }
             for repair in &old.repairs {
                 if !new.repairs.iter().any(|r| {
@@ -523,6 +595,7 @@ impl AccountingRecord {
             wait_reason: None,
             wait_until_unix_ms: None,
             pause: None,
+            refusals: vec![],
         });
         Ok(())
     }
@@ -625,6 +698,34 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
 }
 
 impl TaskAccounting {
+    /// C5 fix 10: count one refused product MCP call. `tool` must be the
+    /// product's own tool name; nothing the provider wrote is kept.
+    pub fn refuse_tool(
+        &mut self,
+        tool: &str,
+        code: ToolRefusalCode,
+    ) -> Result<(), AccountingRefusal> {
+        if !ToolRefusal::tool_valid(tool) {
+            return Err(AccountingRefusal::Invalid);
+        }
+        if let Some(refusal) = self
+            .refusals
+            .iter_mut()
+            .find(|r| r.tool == tool && r.code == code)
+        {
+            refusal.count = refusal.count.saturating_add(1);
+            return Ok(());
+        }
+        if self.refusals.len() >= TOOL_REFUSALS {
+            return Err(AccountingRefusal::Capacity);
+        }
+        self.refusals.push(ToolRefusal {
+            tool: tool.into(),
+            code,
+            count: 1,
+        });
+        Ok(())
+    }
     /// Provision a positive ceiling before the first provider admission. A
     /// restart or later attempt cannot reset or raise an existing allowance.
     pub fn configure_token_limit(&mut self, limit: u64) -> Result<(), AccountingRefusal> {
@@ -773,7 +874,8 @@ impl TaskAccounting {
         if self.pause == Some(AccountingRefusal::Replan) {
             return Err(AccountingRefusal::Replan);
         }
-        self.repeated_failures = if self.last_failure.as_ref() == Some(&failure) {
+        let classified = failure != UNCLASSIFIED_FAILURE;
+        self.repeated_failures = if classified && self.last_failure.as_ref() == Some(&failure) {
             self.repeated_failures.saturating_add(1).min(2)
         } else {
             1
@@ -805,7 +907,7 @@ impl TaskAccounting {
             return Err(AccountingRefusal::Replan);
         }
         repair.rounds += 1;
-        repair.repeated = if repair.last_failure == failure {
+        repair.repeated = if classified && repair.last_failure == failure {
             repair.repeated.saturating_add(1)
         } else {
             1

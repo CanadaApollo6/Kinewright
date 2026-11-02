@@ -117,6 +117,16 @@ impl InvocationOwner for HostInvocationOwner {
             .record_runtime_refusal(&self.producer, &identity.run, reason)
             .map_err(transport)
     }
+    fn stream_refused(&self, identity: &ExecutionIdentity, reason: &str) -> io::Result<()> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| transport("host owner lost"))?;
+        host.lock()
+            .map_err(|_| transport("host owner poisoned"))?
+            .record_stream_refusal(&self.producer, identity, reason)
+            .map_err(transport)
+    }
     fn started(&self, identity: &ExecutionIdentity) -> io::Result<()> {
         let host = self
             .host
