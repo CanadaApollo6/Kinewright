@@ -180,6 +180,9 @@ impl Namespace {
                             &attempt.run,
                         )
                     })
+                    // Before anything starts, so a probe interrupted in any
+                    // state can be retired once the machine has rebooted.
+                    .and_then(|claim| write_boot(&root).map(|()| claim))
                     .map(|claim| (root, claim))
                     .map_err(|_| CertificationRefusal::SandboxUnavailable)
             });
@@ -209,7 +212,10 @@ impl Namespace {
                 Err(error) if error.to_string() == "studio_run_active" => continue,
                 Err(error) => return Err(error),
             };
-            settle(claim)?;
+            match prior_boot(&root)? {
+                Some(boot) => retire_prior_boot(claim, &boot)?,
+                None => settle(claim)?,
+            }
             std::fs::remove_dir_all(&root)?;
         }
         Ok(())
@@ -263,6 +269,50 @@ fn base_path() -> io::Result<PathBuf> {
 fn settle(mut claim: crate::execution_claim::MachineClaim) -> io::Result<()> {
     for identity in claim.recovery_identities().to_vec() {
         crate::guardian::cleanup_failed_prepare(&mut claim, &mut ProbeOwner, &identity)?;
+    }
+    claim.finish()
+}
+
+/// The kernel boot a probe root was made in.
+const BOOT: &str = "boot";
+
+fn write_boot(root: &Path) -> io::Result<()> {
+    use std::{io::Write as _, os::unix::fs::OpenOptionsExt};
+    let partial = root.join("boot.partial");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&partial)?;
+    file.write_all(crate::guardian::boot_id()?.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&partial, root.join(BOOT))?;
+    std::fs::File::open(root)?.sync_all()
+}
+
+/// The recorded boot, when it is not this one. A root with no record, or the
+/// same boot, has only the same-boot cleanup path; a malformed record is
+/// refused by the reboot proof itself, so ambiguity stays closed.
+fn prior_boot(root: &Path) -> io::Result<Option<String>> {
+    let recorded = match std::fs::read_to_string(root.join(BOOT)) {
+        Ok(recorded) => recorded,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let current = crate::guardian::boot_id()?;
+    Ok((!recorded.eq_ignore_ascii_case(&current)).then_some(recorded))
+}
+
+/// A probe made in an earlier boot: no process or systemd transport from that
+/// boot survives this one, so each retained attempt is retired through the
+/// runs' own reboot proof, whatever state it was interrupted in.
+fn retire_prior_boot(
+    mut claim: crate::execution_claim::MachineClaim,
+    boot: &str,
+) -> io::Result<()> {
+    for identity in claim.recovery_identities().to_vec() {
+        let proof = crate::guardian::RecoveryObserver::reboot_cleanup(identity, boot)?;
+        claim.retire_after_reboot(&proof)?;
     }
     claim.finish()
 }
@@ -849,6 +899,112 @@ mod tests {
             "C6_VERSION_PROBE_REFUSAL_NAMED"
         );
         assert!(forged.exists(), "C6_VERSION_PROBE_UNRESOLVED_KEPT");
+    }
+
+    /// A leftover probe root as a host lost mid-start leaves it, made in the
+    /// given boot. Unbound: `Starting` is persisted but the spawn was never
+    /// recorded. Bound: its native identity names a unit that is gone, on a
+    /// cgroup mount whose identity has changed.
+    fn leftover(base: &Base, boot: Option<&str>, bound: bool) -> PathBuf {
+        use crate::job_guardian::protocol::{RecoveryIdentity, VERSION};
+        use std::os::unix::fs::DirBuilderExt;
+        let attempt = super::fresh_attempt().unwrap();
+        let root = base.0.join(&attempt.nonce[..12]);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let mut claim = crate::execution_claim::MachineClaim::acquire_private(
+            &root.join("m"),
+            &attempt.project,
+            &attempt.run,
+        )
+        .unwrap();
+        claim.reserve(&attempt).unwrap();
+        if let Some(boot) = boot {
+            std::fs::write(root.join(super::BOOT), boot).unwrap();
+        }
+        if bound {
+            let mount = std::fs::metadata("/sys/fs/cgroup").unwrap().dev();
+            claim
+                .bind(&RecoveryIdentity {
+                    version: VERSION,
+                    containment: format!(
+                        "/sys/fs/cgroup/kinewright-kvp-test/{}/payload",
+                        attempt.unit()
+                    ),
+                    attempt,
+                    guardian_pid: std::process::id(),
+                    guardian_start: 1,
+                    device: mount + 1,
+                    inode: 1,
+                    service_device: mount + 1,
+                    service_inode: 1,
+                })
+                .unwrap();
+        } else {
+            claim.begin_transport(&attempt).unwrap();
+        }
+        // The host is lost here.
+        drop(claim);
+        root
+    }
+
+    /// Admit one probe in this thread's namespace, then release it.
+    fn admit(base: &Base) -> Result<(), CertificationRefusal> {
+        let namespace = super::Namespace::open().unwrap();
+        let (root, claim) = namespace.admit(&super::fresh_attempt().unwrap())?;
+        super::settle(claim).unwrap();
+        namespace.remove(&root).unwrap();
+        assert_eq!(base.roots(), 0, "C6_VERSION_PROBE_STATE_LEFT");
+        Ok(())
+    }
+
+    /// Astra's second re-check: a probe interrupted in either state, in an
+    /// earlier boot, is retired through the reboot proof, and the next probe
+    /// is admitted.
+    #[test]
+    fn s4b_c6_version_probe_prior_boot_leftovers_admit() {
+        let past = "00000000-0000-0000-0000-000000000000";
+        for (tag, bound) in [("ps", false), ("pb", true)] {
+            let base = Base::new(tag);
+            let root = leftover(&base, Some(past), bound);
+            assert_eq!(
+                admit(&base),
+                Ok(()),
+                "C6_VERSION_PROBE_PRIOR_BOOT_ADMITTED bound={bound}"
+            );
+            assert!(
+                !root.exists(),
+                "C6_VERSION_PROBE_PRIOR_BOOT_RETIRED bound={bound}"
+            );
+        }
+    }
+
+    /// The same leftovers in this boot, or with no or a malformed boot record,
+    /// stay closed: admission refuses and the records stay.
+    #[test]
+    fn s4b_c6_version_probe_same_boot_ambiguity_refuses() {
+        let current = crate::guardian::boot_id().unwrap();
+        for (tag, boot, bound) in [
+            ("ss", Some(current.as_str()), false),
+            ("sb", Some(current.as_str()), true),
+            ("ns", None, false),
+            ("mb", Some("not-a-boot"), true),
+        ] {
+            let base = Base::new(tag);
+            let root = leftover(&base, boot, bound);
+            assert_eq!(
+                admit(&base),
+                Err(CertificationRefusal::VersionProbePending),
+                "C6_VERSION_PROBE_SAME_BOOT_REFUSED {tag}"
+            );
+            assert!(
+                root.join("m").read_dir().unwrap().count() > 1,
+                "C6_VERSION_PROBE_SAME_BOOT_KEPT {tag}"
+            );
+        }
     }
 }
 
