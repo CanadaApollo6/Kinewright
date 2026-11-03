@@ -7,7 +7,10 @@ use crate::orchestration::adapters::{
 };
 use std::io;
 
-pub(crate) struct InstalledCodexChecks;
+pub(crate) struct InstalledCodexChecks {
+    /// The guardian that contains the `--version` probe.
+    pub guardian: std::path::PathBuf,
+}
 
 pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
     crate::native_runtime::installed_executable("codex", "Codex")
@@ -51,20 +54,31 @@ impl ConnectorRuntimeChecks for InstalledCodexChecks {
                 refresh: CODEX_AUTH_CONTRACT.refresh,
             },
         };
-        let mut runtime = RuntimeQualification {
-            version: crate::orchestration::adapters::installed_version(&executable, &[])?,
-            authentication: EffectiveAuthEvidence {
-                contract: CODEX_AUTH_CONTRACT,
-                context: context.clone(),
-                at_launch: AuthenticationMode::Subscription,
-                at_recheck: None,
-                observed_store: context.credential_store.clone(),
-            },
-            launch_context: context,
-            executable,
-            sandbox: Some(SandboxPolicy::LinuxFilesystemAndIpc),
-            model_available: true,
-        };
+        let mut runtime =
+            RuntimeQualification {
+                version: crate::version_probe::installed_version(
+                    &crate::version_probe::VersionProbe {
+                        guardian: &self.guardian,
+                        form: crate::version_probe::VersionForm::Codex,
+                        user_local_runtime: true,
+                        credential_root: context.credential_store.single_file.as_ref().and_then(
+                            |file| file.source.parent().map(std::path::Path::to_path_buf),
+                        ),
+                    },
+                    &executable,
+                )?,
+                authentication: EffectiveAuthEvidence {
+                    contract: CODEX_AUTH_CONTRACT,
+                    context: context.clone(),
+                    at_launch: AuthenticationMode::Subscription,
+                    at_recheck: None,
+                    observed_store: context.credential_store.clone(),
+                },
+                launch_context: context,
+                executable,
+                sandbox: Some(SandboxPolicy::LinuxFilesystemAndIpc),
+                model_available: true,
+            };
         let program = crate::native_launcher::recipe(
             codex_candidate(),
             binding,

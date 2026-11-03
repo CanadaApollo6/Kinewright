@@ -5,21 +5,18 @@ use crate::orchestration::adapters::{
     AttemptBinding, AuthenticationMode, CLAUDE_AUTH_CONTRACT, CertificationRefusal,
     ConnectorRuntimeChecks, ConnectorSpecification, CredentialStoreScope, EffectiveAuthEvidence,
     EffectiveLaunchContext, ExecutableIdentity, RuntimeQualification, SandboxPolicy,
-    claude_candidate, installed_version,
+    claude_candidate,
 };
 use std::io;
 
-pub(crate) struct InstalledClaudeChecks;
+pub(crate) struct InstalledClaudeChecks {
+    /// The guardian that contains the `--version` probe.
+    pub guardian: std::path::PathBuf,
+}
 
 pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
     crate::native_runtime::installed_executable("claude", "Claude Code")
 }
-
-/// Its `--version` read: no autoupdate and no nonessential traffic.
-const VERSION_ENVIRONMENT: &[(&str, &str)] = &[
-    ("DISABLE_AUTOUPDATER", "1"),
-    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
-];
 
 fn digest(value: &impl serde::Serialize) -> [u8; 32] {
     let hash = kinewright_media::sha256_bytes(&serde_json::to_vec(value).expect("recipe JSON"));
@@ -48,7 +45,18 @@ impl ConnectorRuntimeChecks for InstalledClaudeChecks {
             .and_then(|()| kinewright_job_sys::require_provider_landlock())
             .map_err(|_| CertificationRefusal::SandboxUnavailable)?;
         let executable = executable().map_err(|_| CertificationRefusal::ExecutableIdentity)?;
-        let version = installed_version(&executable, VERSION_ENVIRONMENT)?;
+        let version = crate::version_probe::installed_version(
+            &crate::version_probe::VersionProbe {
+                guardian: &self.guardian,
+                form: crate::version_probe::VersionForm::Claude,
+                user_local_runtime: false,
+                credential_root: Some(
+                    crate::claude_credentials::config_root()
+                        .map_err(|_| CertificationRefusal::UnknownAuthentication)?,
+                ),
+            },
+            &executable,
+        )?;
         let source = crate::claude_credentials::source_path()
             .map_err(|_| CertificationRefusal::UnknownAuthentication)?;
         // At launch and at the launch-time recheck the person's store must

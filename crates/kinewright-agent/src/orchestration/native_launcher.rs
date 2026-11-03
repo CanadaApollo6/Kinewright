@@ -202,6 +202,34 @@ fn unpaid_policy(mcp_port: u16) -> Option<crate::job_guardian::protocol::UnpaidP
     None
 }
 
+/// The read-only system and install paths a provider is granted. The
+/// contained `--version` probe gets exactly the same grants as a launch.
+pub(crate) fn runtime_grants(
+    executable: &adapters::ExecutableIdentity,
+    user_local_runtime: bool,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    Ok([
+        "/usr",
+        "/lib",
+        "/lib64",
+        "/dev/null",
+        "/dev/urandom",
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/nsswitch.conf",
+        "/etc/ld.so.cache",
+    ]
+    .map(Into::into)
+    .into_iter()
+    .chain(super::native_runtime::network_files()?)
+    .chain(if user_local_runtime {
+        super::native_runtime::runtime_tree(executable)?
+    } else {
+        None
+    })
+    .collect())
+}
+
 pub(crate) fn sandbox(
     executable: &adapters::ExecutableIdentity,
     scratch: &std::path::Path,
@@ -218,26 +246,7 @@ pub(crate) fn sandbox(
             })
         }),
         connect_tcp: provider_ports(mcp_port),
-        runtime: [
-            "/usr",
-            "/lib",
-            "/lib64",
-            "/dev/null",
-            "/dev/urandom",
-            "/etc/hosts",
-            "/etc/resolv.conf",
-            "/etc/nsswitch.conf",
-            "/etc/ld.so.cache",
-        ]
-        .map(Into::into)
-        .into_iter()
-        .chain(super::native_runtime::network_files()?)
-        .chain(if user_local_runtime {
-            super::native_runtime::runtime_tree(executable)?
-        } else {
-            None
-        })
-        .collect(),
+        runtime: runtime_grants(executable, user_local_runtime)?,
         scratch: scratch.to_path_buf(),
         credential_store: scope.root.clone(),
         executable_identity: executable.file_identity,
@@ -1436,9 +1445,16 @@ pub(crate) fn read_provider_stream_as(
             ordinal = ordinal.checked_add(1).ok_or(STREAM_ACCOUNTING_REFUSED)?;
             let raw: serde_json::Value =
                 serde_json::from_str(&line).map_err(|_| STREAM_MALFORMED)?;
-            record(&raw, ordinal, false).map_err(|_| STREAM_ACCOUNTING_REFUSED)?;
+            // Judged first, so a refused frame never becomes a usage sample.
             if dialect == StreamDialect::Claude {
                 claude_event_allowed(&raw, &mut initialized)?;
+            } else if !codex_event_known(&raw) {
+                return Err(STREAM_UNKNOWN_EVENT);
+            } else if !native_item_allowed(&raw) {
+                return Err(STREAM_NATIVE_TOOL_REFUSED);
+            }
+            record(&raw, ordinal, false).map_err(|_| STREAM_ACCOUNTING_REFUSED)?;
+            if dialect == StreamDialect::Claude {
                 if raw.get("type").and_then(serde_json::Value::as_str) == Some("result") {
                     if initialized
                         && raw.get("subtype").and_then(serde_json::Value::as_str) == Some("success")
@@ -1451,12 +1467,6 @@ pub(crate) fn read_provider_stream_as(
                     }
                 }
                 return claude.parse_line(&line).map_err(|_| STREAM_MALFORMED);
-            }
-            if !codex_event_known(&raw) {
-                return Err(STREAM_UNKNOWN_EVENT);
-            }
-            if !native_item_allowed(&raw) {
-                return Err(STREAM_NATIVE_TOOL_REFUSED);
             }
             match raw.get("type").and_then(serde_json::Value::as_str) {
                 Some("turn.completed") => {
@@ -1599,8 +1609,50 @@ fn claude_init_allowed(raw: &serde_json::Value) -> Result<(), &'static str> {
     {
         return Err(STREAM_AMBIENT_REFUSED);
     }
+    // F3: a field this build has not read is refused, so ambient surface a
+    // newer CLI reports under a new name never passes unread.
+    if raw
+        .as_object()
+        .ok_or(STREAM_MALFORMED)?
+        .keys()
+        .any(|key| !CLAUDE_INIT_FIELDS.contains(&key.as_str()))
+    {
+        return Err(STREAM_UNKNOWN_EVENT);
+    }
     Ok(())
 }
+
+/// Every field of Claude Code 2.1.317's `system/init`, as the S4b C6 dry
+/// launch observed it on 2026-11-03.
+const CLAUDE_INIT_FIELDS: [&str; 27] = [
+    "additional_directories",
+    "agents",
+    "analytics_disabled",
+    "apiKeySource",
+    "capabilities",
+    "claude_code_version",
+    "cwd",
+    "fast_mode_disabled_reason",
+    "fast_mode_state",
+    "mcp_servers",
+    "model",
+    "original_cwd",
+    "output_style",
+    "per_turn_effort_active",
+    "permissionMode",
+    "plugins",
+    "product_feedback_disabled",
+    "session_id",
+    "skills",
+    "slash_commands",
+    "subtype",
+    "tools",
+    "type",
+    "ultrathink_available",
+    "ultrathink_typed_raises",
+    "uuid",
+    "view_mode",
+];
 
 /// Claude Code's `system`/`ui_invalidate` render notice; 2.1.317 sends one
 /// before `init`. Bare, it names only the `ui.render` event and carries no
@@ -1780,12 +1832,18 @@ mod tests {
                 StreamDialect::Codex,
                 vec![
                     r#"{"type":"thread.started","thread_id":"t"}"#,
-                    r#"{"type":"thread.summarized"}"#,
+                    r#"{"type":"thread.summarized","usage":{"input_tokens":7,"output_tokens":3}}"#,
                 ],
             ),
             (
                 StreamDialect::Claude,
                 vec![init, r#"{"type":"session_title","title":"x"}"#],
+            ),
+            (
+                StreamDialect::Claude,
+                vec![
+                    r#"{"type":"system","subtype":"init","apiKeySource":"none","tools":["mcp__kinewright__get_timeline_state"],"mcp_servers":[{"name":"kinewright","status":"connected"}],"permissionMode":"dontAsk","plugins":[],"skills":[],"hooks_loaded":["person"]}"#,
+                ],
             ),
             (
                 StreamDialect::Claude,
@@ -1802,11 +1860,15 @@ mod tests {
             let (sender, _events) = crate::protocol::limits::event_channel();
             let mut bytes = lines.join("\n").into_bytes();
             bytes.push(b'\n');
+            let mut accounted = Vec::new();
             let read = read_provider_stream_as(
                 dialect,
                 std::io::Cursor::new(bytes),
                 &sender,
-                |_, _, _| Ok(()),
+                |raw, _, _| {
+                    accounted.push(raw.to_string());
+                    Ok(())
+                },
             );
             assert_eq!(
                 read.refusal,
@@ -1814,6 +1876,18 @@ mod tests {
                 "UNKNOWN_EVENT_REFUSED {dialect:?} {lines:?}"
             );
             assert!(!read.completed);
+            // F4: the refused frame is judged before accounting, so it never
+            // becomes a usage sample; only the frames before it and the EOF are.
+            let refused: serde_json::Value = serde_json::from_str(lines[lines.len() - 1]).unwrap();
+            assert!(
+                !accounted.contains(&refused.to_string()),
+                "C6_REFUSED_FRAME_ACCOUNTED {dialect:?} {lines:?}"
+            );
+            assert_eq!(
+                accounted.len(),
+                lines.len(),
+                "C6_ACCOUNTED_FRAMES {accounted:?}"
+            );
         }
     }
 

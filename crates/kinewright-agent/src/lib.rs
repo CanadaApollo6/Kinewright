@@ -29,6 +29,9 @@ mod native_runtime;
 #[cfg(target_os = "linux")]
 #[path = "orchestration/provider_pipes.rs"]
 pub mod provider_pipes;
+#[cfg(target_os = "linux")]
+#[path = "orchestration/version_probe.rs"]
+mod version_probe;
 
 mod acp;
 mod acp_drivers;

@@ -13,24 +13,8 @@ use std::{
 /// hold a newer CLI to the same contract.
 pub(crate) fn installed_executable(command: &str, product: &str) -> io::Result<ExecutableIdentity> {
     use std::io::Read;
-    let path = crate::drivers::find_on_path(command)
+    let path = resolve_without_running(command)
         .ok_or_else(|| io::Error::other(format!("Install {product}")))?;
-    let mut path = std::fs::canonicalize(path)?;
-    if path.file_name().is_some_and(|name| name == "mise") {
-        let output = std::process::Command::new(&path)
-            .args(["which", command])
-            .output()?;
-        if !output.status.success() || output.stdout.len() > 4096 {
-            return Err(io::Error::other(format!(
-                "Check again: {product} resolution failed"
-            )));
-        }
-        path = std::fs::canonicalize(
-            String::from_utf8(output.stdout)
-                .map_err(io::Error::other)?
-                .trim(),
-        )?;
-    }
     let mut file = std::fs::File::open(&path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
@@ -48,6 +32,32 @@ pub(crate) fn installed_executable(command: &str, product: &str) -> io::Result<E
     Ok(ExecutableIdentity {
         path,
         file_identity: [metadata.dev(), metadata.ino()],
+    })
+}
+
+/// The first `command` on PATH that is not a mise shim. A shim is never run
+/// to resolve it: when PATH holds only shims, the newest install mise keeps
+/// (its `installs/<command>/latest` link) is used, read from the filesystem.
+fn resolve_without_running(command: &str) -> Option<PathBuf> {
+    let is_shim = |path: &Path| path.file_name().is_some_and(|name| name == "mise");
+    let found = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(command))
+        .filter(|candidate| candidate.is_file())
+        .filter_map(|candidate| std::fs::canonicalize(candidate).ok())
+        .find(|path| !is_shim(path));
+    found.or_else(|| {
+        let data = std::env::var_os("MISE_DATA_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|d| PathBuf::from(d).join("mise")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/mise"))
+            })?;
+        let latest = data.join("installs").join(command).join("latest");
+        [latest.join("bin").join(command), latest.join(command)]
+            .into_iter()
+            .filter(|candidate| candidate.is_file())
+            .filter_map(|candidate| std::fs::canonicalize(candidate).ok())
+            .find(|path| !is_shim(path))
     })
 }
 

@@ -1014,9 +1014,13 @@ fn candidate_checks(
         candidate,
         crate::orchestration::adapters::claude_candidate(),
     ) {
-        Arc::new(crate::claude_qualification::InstalledClaudeChecks)
+        Arc::new(crate::claude_qualification::InstalledClaudeChecks {
+            guardian: guardian(),
+        })
     } else {
-        Arc::new(crate::codex_qualification::InstalledCodexChecks)
+        Arc::new(crate::codex_qualification::InstalledCodexChecks {
+            guardian: guardian(),
+        })
     }
 }
 

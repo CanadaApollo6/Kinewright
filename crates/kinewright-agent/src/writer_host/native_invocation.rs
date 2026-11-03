@@ -130,7 +130,7 @@ fn init_shape(raw: &serde_json::Value) -> String {
             .map_or_else(|| "absent".to_owned(), |values| values.len().to_string())
     };
     format!(
-        "tools_outside=[{}] servers=[{}] plugins={} skills={} mode={} plugin_sources=[{}]",
+        "tools_outside=[{}] servers=[{}] plugins={} skills={} mode={} plugin_sources=[{}] keys=[{}]",
         list("tools", &|name| !name.starts_with("mcp__kinewright__")),
         list("mcp_servers", &|_| true),
         count("plugins"),
@@ -138,6 +138,14 @@ fn init_shape(raw: &serde_json::Value) -> String {
         raw.get("permissionMode")
             .map_or_else(|| "absent".to_owned(), name),
         plugins(raw),
+        raw.as_object().map_or_else(String::new, |object| object
+            .keys()
+            .filter(|key| key.len() <= 64
+                && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .take(48)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")),
     )
 }
 

@@ -60,6 +60,16 @@ impl MachineClaim {
         Self::acquire_at(root, project, run)
     }
 
+    /// S4b C6: one contained `--version` probe holds its own private
+    /// namespace, so it never enters a run's claim or its recovery.
+    ///
+    /// # Errors
+    /// Returns the same admission refusals as production acquisition.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn acquire_private(root: &Path, project: &str, run: &str) -> io::Result<Self> {
+        Self::acquire_at(root, project, run)
+    }
+
     /// # Errors
     /// Returns `studio_run_active` for a held lock or unreconciled recovery record.
     fn acquire_at(root: &Path, project: &str, run: &str) -> io::Result<Self> {

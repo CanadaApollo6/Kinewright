@@ -57,12 +57,15 @@ pub(super) struct RuntimePorts {
 }
 impl Default for RuntimePorts {
     fn default() -> Self {
+        let guardian = std::env::current_exe()
+            .unwrap_or_default()
+            .with_file_name("kinewright-job-guardian");
         Self {
             profiles: None,
-            checks: Arc::new(crate::codex_qualification::InstalledCodexChecks),
-            guardian: std::env::current_exe()
-                .unwrap_or_default()
-                .with_file_name("kinewright-job-guardian"),
+            checks: Arc::new(crate::codex_qualification::InstalledCodexChecks {
+                guardian: guardian.clone(),
+            }),
+            guardian,
             ceiling: Some(
                 crate::orchestration::adapters::codex_candidate().default_token_ceiling(),
             ),
