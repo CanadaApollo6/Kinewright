@@ -78,8 +78,15 @@ pub(crate) struct TaskMcp {
     issuer: Arc<Mutex<Option<IssuerId>>>,
     #[cfg(target_os = "linux")]
     measurements: Arc<Mutex<kinewright_project::usage_measurement::Measurements>>,
+    #[cfg(all(test, target_os = "linux"))]
+    size_gate: Option<Arc<SizeObservationGate>>,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
     stop_gate: Option<Arc<super::qualification_gate::MergeStopGate>>,
+}
+#[cfg(all(test, target_os = "linux"))]
+pub(super) struct SizeObservationGate {
+    pub(super) entered: std::sync::Barrier,
+    pub(super) proceed: std::sync::Barrier,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,24 +190,34 @@ pub(crate) fn refusal_code(
 }
 
 impl TaskMcp {
-    pub(crate) fn record_size(&self, tool: &'static str, bytes: Option<u64>) -> bool {
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "native observation is unavailable off Linux; wire completeness remains independent"
+    )]
+    pub(crate) fn record_size(&self, tool: &'static str, bytes: Option<u64>) -> Option<bool> {
         #[cfg(target_os = "linux")]
         {
             use kinewright_project::usage_measurement::ToolResult;
             let authority = self.endpoint.authority();
-            // Retain this task's bounded observer even during host/run teardown.
-            // Check host first to preserve the host -> measurement lock order.
-            let attached = self.host.upgrade().is_some_and(|owner| {
-                owner.lock().is_ok_and(|host| {
-                    host.hooks.runs.get(&authority.run).is_some_and(|run| {
-                        run.tasks.contains_key(&authority.task)
-                            && run
-                                .measurements
-                                .get(&authority.task)
-                                .is_some_and(|observer| Arc::ptr_eq(observer, &self.measurements))
-                    })
+            // Hold host -> measurement locks through the write so final publication
+            // and teardown cannot land between attachment validation and recording.
+            let owner = self.host.upgrade();
+            let host = owner.as_ref().and_then(|owner| owner.lock().ok());
+            let attached = host.as_ref().is_some_and(|host| {
+                host.hooks.runs.get(&authority.run).is_some_and(|run| {
+                    run.tasks.contains_key(&authority.task)
+                        && run
+                            .measurements
+                            .get(&authority.task)
+                            .is_some_and(|observer| Arc::ptr_eq(observer, &self.measurements))
                 })
             });
+            let _attachment_guard = host;
+            #[cfg(all(test, target_os = "linux"))]
+            if let Some(gate) = &self.size_gate {
+                gate.entered.wait();
+                gate.proceed.wait();
+            }
             let mut measurements = self.measurements.lock().unwrap_or_else(|error| {
                 let mut measurements = error.into_inner();
                 measurements.incomplete = true;
@@ -219,13 +236,18 @@ impl TaskMcp {
             } else {
                 measurements.incomplete = true;
             }
-            !measurements.incomplete
+            Some(!measurements.incomplete)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (self, tool, bytes);
-            false
+            None
         }
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn with_size_gate(mut self, gate: Arc<SizeObservationGate>) -> Self {
+        self.size_gate = Some(gate);
+        self
     }
     /// C5 fix 10: count one refused product MCP call in this task's durable
     /// accounting. Best effort: it never changes the call's reply, and a
@@ -262,6 +284,8 @@ impl TaskMcp {
             issuer: Arc::default(),
             #[cfg(target_os = "linux")]
             measurements,
+            #[cfg(all(test, target_os = "linux"))]
+            size_gate: None,
             #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
             stop_gate,
         }

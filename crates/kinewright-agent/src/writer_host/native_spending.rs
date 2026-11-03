@@ -217,6 +217,8 @@ impl HostCommandOwner {
             task.measurements = Some(observed);
         }
         let observes_usage = matches!(&change, SpendingChange::Usage(_));
+        let observes_projection =
+            matches!(&change, SpendingChange::Usage(sample) if sample.snapshot.is_some());
         let measurements_changed = task.measurements
             != previous
                 .tasks
@@ -245,15 +247,16 @@ impl HostCommandOwner {
             SpendingChange::Usage(sample) => ingest_usage(task, sample).map(|_| ()),
             SpendingChange::ToolRefusal { tool, code } => task.refuse_tool(tool, code),
         };
+        if (observes_projection || measurements_changed)
+            && (outcome.is_ok() || outcome == Err(AccountingRefusal::Replan))
+        {
+            Self::finish_accounting_observation(&previous, &mut next)?;
+        }
+        let validated_size = (observes_usage || measurements_changed)
+            .then(|| next.validate_successor_size(&previous));
         if outcome == Err(AccountingRefusal::Capacity)
-            || ((observes_usage || measurements_changed)
-                && (next.tasks.iter().map(|t| t.usage.len()).sum::<usize>()
-                    > kinewright_project::run_admission::USAGE_SAMPLES
-                    || kinewright_project::orchestration_accounting::encode(
-                        &next,
-                        kinewright_project::run_admission::ACCOUNTING_BYTES - 4096,
-                    )
-                    .is_err()))
+            || matches!(validated_size, Some(Err(AccountingRefusal::Capacity)))
+            || matches!(validated_size, Some(Ok(size)) if size > kinewright_project::run_admission::ACCOUNTING_BYTES - 4096)
         {
             return self.refuse_measurement_capacity(producer, identity, &previous, clock);
         }
@@ -275,7 +278,11 @@ impl HostCommandOwner {
                 attempt.control.close();
             }
         }
-        next.validate_successor(&previous).map_err(refused)?;
+        if let Some(result) = validated_size {
+            result.map_err(refused)?;
+        } else {
+            next.validate_successor(&previous).map_err(refused)?;
+        }
         let revision = next.revision;
         next.revision = previous.revision;
         if next == previous {
@@ -559,6 +566,21 @@ impl HostCommandOwner {
                     trusted: true,
                 },
             );
+        }
+        if kind == "turn.started"
+            && !eof
+            && raw.get("usage").is_none()
+            && raw.get("total_cost_usd").is_none()
+            && (task.usage.is_empty()
+                || task
+                    .usage
+                    .iter()
+                    .rev()
+                    .find(|sample| sample.attempt == identity.attempt.0 && sample.turn == 1)
+                    .is_some_and(|sample| !sample.complete))
+        {
+            // Coverage is already incomplete in the durable record.
+            return Ok(());
         }
         if !eof && raw.get("usage").is_none() && !matches!(kind, "turn.completed" | "turn.started")
         {

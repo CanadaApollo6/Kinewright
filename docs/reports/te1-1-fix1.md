@@ -4,6 +4,11 @@ Follow-up to `25e4fe7dcc3f230f284322dbef4e853173b3ad33` on local branch `te1`.
 This report supersedes the corresponding review findings in the original TE1.1 report;
 that report remains a record of the original commit's gates. No push or provider CLI run.
 
+The subsequent [fix-2 report](te1-1-fix2.md) completes the full wake metadata
+compatibility correction, implements Muse's mandatory encode/clone removals, and
+records final-source gates and paired timing. The body-only wake golden and
+no-performance-patch statements below describe this first fix commit only.
+
 ## Paired performance result
 
 A is `b4e9abc8884c0c0260ca4d85b79710b34867a37c`; B is `25e4fe7d`.

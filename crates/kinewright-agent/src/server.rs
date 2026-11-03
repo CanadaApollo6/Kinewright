@@ -12257,12 +12257,12 @@ impl ServerHandler for KinewrightMcp {
             };
             let native_recorded = size_control
                 .as_ref()
-                .is_none_or(|control| control.record_size(size_tool, bytes));
+                .and_then(|control| control.record_size(size_tool, bytes));
             let mut metrics = size_metrics
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             metrics.record(size_tool, bytes);
-            metrics.incomplete |= !native_recorded;
+            metrics.incomplete |= native_recorded == Some(false);
             drop(metrics);
             reply.map(Into::into)
         }

@@ -219,6 +219,9 @@ pub struct TaskAccounting {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountingRecord {
+    /// Additional publications that leave the legacy provider body unchanged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub observer_publications: u64,
     pub version: u32,
     pub project: ProjectId,
     pub run: SessionId,
@@ -274,9 +277,18 @@ fn reference(reference: &ObjectRef) -> Result<(), AccountingRefusal> {
     Ok(())
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes fields by reference to skip_serializing_if"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl AccountingRecord {
     pub fn new(project: ProjectId, run: SessionId, now: u64) -> Result<Self, AccountingRefusal> {
         Ok(Self {
+            observer_publications: 0,
             version: 3,
             project,
             run,
@@ -304,12 +316,17 @@ impl AccountingRecord {
         Ok(refs)
     }
 
+    pub fn validate(&self) -> Result<(), AccountingRefusal> {
+        self.validate_size().map(|_| ())
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one boundary validates the bounded accounting record"
     )]
-    pub fn validate(&self) -> Result<(), AccountingRefusal> {
+    fn validate_size(&self) -> Result<usize, AccountingRefusal> {
         if self.version != 3
+            || self.observer_publications > self.revision
             || self.deadline_unix_ms.checked_sub(self.start_unix_ms) != Some(RUN_MILLIS)
             || self.last_unix_ms < self.start_unix_ms
             || self.elapsed_ms < self.last_unix_ms - self.start_unix_ms
@@ -421,8 +438,7 @@ impl AccountingRecord {
                 }
             }
         }
-        encode(self, crate::run_admission::ACCOUNTING_BYTES)?;
-        Ok(())
+        encode(self, crate::run_admission::ACCOUNTING_BYTES).map(|bytes| bytes.len())
     }
 
     /// Replace cumulative state; retain original sends and usage in flat arrays.
@@ -449,11 +465,21 @@ impl AccountingRecord {
     }
 
     pub fn validate_successor(&self, previous: &Self) -> Result<(), AccountingRefusal> {
-        self.validate()?;
-        let expected = previous.successor()?;
+        self.validate_successor_size(previous).map(|_| ())
+    }
+
+    /// Validate the successor and return its already measured serialized length.
+    pub fn validate_successor_size(&self, previous: &Self) -> Result<usize, AccountingRefusal> {
+        let bytes = self.validate_size()?;
+        previous.validate()?;
+        let revision = previous
+            .revision
+            .checked_add(1)
+            .ok_or(AccountingRefusal::Capacity)?;
         if self.project != previous.project
+            || self.observer_publications < previous.observer_publications
             || self.run != previous.run
-            || self.revision != expected.revision
+            || self.revision != revision
             || self.start_unix_ms != previous.start_unix_ms
             || self.deadline_unix_ms != previous.deadline_unix_ms
             || self.last_unix_ms < previous.last_unix_ms
@@ -532,7 +558,7 @@ impl AccountingRecord {
                 admitted.consume_send(send.clone())?;
             }
         }
-        Ok(())
+        Ok(bytes)
     }
 
     /// Canonical bytes of `OrchestrationRecord::Accounting`, including its tag.
@@ -774,27 +800,34 @@ impl TaskAccounting {
         &mut self,
         binding: crate::usage_stream::StreamBinding,
     ) -> Result<(), AccountingRefusal> {
-        if self.streams.len() >= TASK_SENDS {
+        self.validate_binding(&binding, &self.streams)?;
+        self.streams.push(binding);
+        Ok(())
+    }
+
+    fn validate_binding(
+        &self,
+        binding: &crate::usage_stream::StreamBinding,
+        prefix: &[crate::usage_stream::StreamBinding],
+    ) -> Result<(), AccountingRefusal> {
+        if prefix.len() >= TASK_SENDS {
             return Err(AccountingRefusal::Capacity);
         }
-        if self.streams.iter().any(|b| b.attempt == binding.attempt)
+        if prefix.iter().any(|b| b.attempt == binding.attempt)
             || !self.providers.iter().any(|p| p.attempt == binding.attempt)
         {
             return Err(AccountingRefusal::Scope);
         }
-        let prior = self.streams.iter().find(|b| b.stream == binding.stream);
+        let prior = prefix.iter().find(|b| b.stream == binding.stream);
         if binding.resumed != prior.is_some() || prior.is_some_and(|b| b.adapter != binding.adapter)
         {
             return Err(AccountingRefusal::Scope);
         }
-        self.streams.push(binding);
         Ok(())
     }
     fn validate_streams(&self) -> Result<(), AccountingRefusal> {
-        let mut check = self.clone();
-        check.streams.clear();
-        for binding in &self.streams {
-            check.bind_stream(binding.clone())?;
+        for (index, binding) in self.streams.iter().enumerate() {
+            self.validate_binding(binding, &self.streams[..index])?;
         }
         for sample in &self.usage {
             if let Some(snapshot) = &sample.snapshot {

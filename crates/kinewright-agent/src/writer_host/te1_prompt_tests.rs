@@ -122,7 +122,7 @@ fn te1_review_wake_accounting_expansion_is_frozen_at_b4e9abc8() {
         })
         .unwrap();
     // Exercise the production wake's actual record expansion, including its store read.
-    let mut actual = owner.expanded_result_contents(&admitted.reference).unwrap();
+    let mut actual = owner.expanded_result(&admitted.reference).unwrap().contents;
     actual["payload"]["record"]["project"] = serde_json::json!("1".repeat(32));
     legacy.project = serde_json::from_value(serde_json::json!("1".repeat(32))).unwrap();
     let expected = serde_json::to_value(OrchestrationRecord {

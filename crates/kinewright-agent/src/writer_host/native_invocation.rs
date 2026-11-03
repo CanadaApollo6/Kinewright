@@ -474,57 +474,6 @@ impl HostCommandOwner {
         }
         Ok(state)
     }
-    pub(super) fn expanded_result_contents(
-        &self,
-        reference: &ObjectRef,
-    ) -> Result<serde_json::Value, HostError> {
-        if reference.byte_length > (crate::protocol::limits::FRAME_BYTES / 2) as u64 {
-            return Err(refused("expanded result capacity"));
-        }
-        if reference.record_kind == kinewright_project::bundle_records::RecordKind::OwnedEvidence {
-            let bytes = self.owner()?.store()?.read_evidence(reference)?;
-            Ok(match std::str::from_utf8(&bytes) {
-                Ok(text) => serde_json::Value::String(text.into()),
-                Err(_) => {
-                    serde_json::json!({"encoding":"bytes", "contents":bytes.to_vec()})
-                }
-            })
-        } else {
-            use kinewright_project::bundle_records::{RecordKind, SpecialistBaseRecord};
-            Ok(match reference.record_kind {
-                RecordKind::RunIndex => {
-                    let mut record = (*self.owner()?.store()?.read_run_record(reference)?).clone();
-                    // TE1 observer detail is report data, outside the frozen provider prompt.
-                    if let OrchestrationPayload::Accounting(accounting) = &mut record.payload {
-                        for task in &mut accounting.tasks {
-                            task.measurements = None;
-                            task.streams.clear();
-                            task.usage.retain(|s| !s.event.starts_with("turn.started:"));
-                            for sample in &mut task.usage {
-                                if let Some(snapshot) = &sample.snapshot
-                                    && let Some((kind, identity)) = sample.event.rsplit_once(':')
-                                    && identity.len() == 16
-                                    && identity.bytes().all(|byte| byte.is_ascii_hexdigit())
-                                {
-                                    // The base wake used the raw payload hash for id-less events.
-                                    sample.event = format!("{kind}:{}", snapshot.payload_sha256);
-                                }
-                                sample.snapshot = None;
-                            }
-                        }
-                    }
-                    serde_json::to_value(record)?
-                }
-                RecordKind::SpecialistBase => serde_json::to_value(
-                    &*self
-                        .owner()?
-                        .store()?
-                        .read_record::<SpecialistBaseRecord>(reference)?,
-                )?,
-                _ => return Err(refused("unsupported expanded result record")),
-            })
-        }
-    }
 
     pub(crate) fn charge_native_invocation(
         &mut self,
@@ -615,23 +564,7 @@ impl HostCommandOwner {
                 .filter(|delivery| &delivery.wake == effect)
                 .map(|delivery| &delivery.result)
                 .collect();
-            let mut expanded = Vec::new();
-            for reference in references {
-                let record = self.owner()?.store()?.read_run_record(reference)?;
-                let OrchestrationPayload::Result(result) = &record.payload else {
-                    return Err(refused("wake reference is not a task result"));
-                };
-                let contents = |reference: &ObjectRef| self.expanded_result_contents(reference);
-                expanded.push(serde_json::json!({
-                    "result": result,
-                    "explanation": contents(&result.explanation)?,
-                    "delta": result.delta_ref.as_ref().map(contents).transpose()?,
-                    "artifacts": result.artifacts.iter().map(contents).collect::<Result<Vec<_>,_>>()?,
-                    "evidence": result.evidence.iter().map(contents).collect::<Result<Vec<_>,_>>()?,
-                    "usage": contents(&result.usage_ref)?,
-                }));
-            }
-            serde_json::to_vec(&expanded)?
+            self.result_wake_payload(&references)?
         } else {
             self.owner()?
                 .store()?
@@ -882,3 +815,4 @@ include!("native_spending.rs");
 include!("effect_execution.rs");
 
 include!("codex_prompt.rs");
+include!("native_wake.rs");

@@ -8,6 +8,47 @@ use serde_json::{Value, json};
 fn id(n: u64) -> SessionId {
     serde_json::from_value(json!(format!("{n:032x}"))).unwrap()
 }
+
+#[test]
+fn te1_observer_revision_offset_is_bounded_and_persists() {
+    let previous = AccountingRecord::new(
+        serde_json::from_value(json!(format!("{:032x}", 1))).unwrap(),
+        id(2),
+        1000,
+    )
+    .unwrap();
+    assert!(
+        serde_json::to_value(&previous)
+            .unwrap()
+            .get("observer_publications")
+            .is_none()
+    );
+    let mut invalid = previous.clone();
+    invalid.observer_publications = 1;
+    assert_eq!(invalid.validate(), Err(AccountingRefusal::Invalid));
+    let mut observed = previous.successor().unwrap();
+    observed.observer_publications = 1;
+    observed.validate_successor(&previous).unwrap();
+    let restored: AccountingRecord =
+        serde_json::from_slice(&serde_json::to_vec(&observed).unwrap()).unwrap();
+    assert_eq!(restored, observed);
+    assert_ne!(
+        observed.record_reference().unwrap(),
+        previous.record_reference().unwrap()
+    );
+    let mut regressed = restored.successor().unwrap();
+    regressed.observer_publications = 0;
+    assert_eq!(
+        regressed.validate_successor(&restored),
+        Err(AccountingRefusal::Scope)
+    );
+    let mut foreign = restored.successor().unwrap();
+    foreign.run = id(3);
+    assert_eq!(
+        foreign.validate_successor(&restored),
+        Err(AccountingRefusal::Scope)
+    );
+}
 fn task(adapter: Adapter) -> TaskAccounting {
     task_with_limit(adapter, None)
 }
@@ -441,5 +482,38 @@ fn te1_review_stream_cost_is_preserved_once_and_missing_cost_stays_unknown() {
         raw(&mut t, 4, 5, next, true).unwrap();
         assert_eq!(t.totals.known.cost_micros, Some(300_000));
         assert!(t.totals.complete[5]);
+    }
+}
+
+#[test]
+fn te1_persisted_stream_bindings_keep_scope_checks() {
+    let mut t = task(Adapter::Claude21316V1);
+    raw(&mut t, 4, 1, claude(10, 20, 5, 3), true).unwrap();
+    bind(&mut t, Adapter::Claude21316V1, 5, 4, true).unwrap();
+    let mut record = AccountingRecord::new(
+        serde_json::from_value(json!(format!("{:032x}", 1))).unwrap(),
+        id(2),
+        1000,
+    )
+    .unwrap();
+    record.tasks.push(t);
+    record.validate().unwrap();
+    for mode in 0..5 {
+        let mut forged = record.clone();
+        let bindings = &mut forged.tasks[0].streams;
+        match mode {
+            0 => bindings[0].resumed = true,
+            1 => bindings[1].resumed = false,
+            2 => bindings[1].attempt = id(4),
+            3 => bindings[1].attempt = id(99),
+            _ => bindings[1].adapter = Adapter::Codex01660V1,
+        }
+        let restored: AccountingRecord =
+            serde_json::from_slice(&serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert_eq!(
+            restored.validate(),
+            Err(AccountingRefusal::Scope),
+            "TE1_PERSISTED_STREAM_SCOPE_REFUSED"
+        );
     }
 }
