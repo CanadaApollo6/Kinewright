@@ -12,7 +12,10 @@ fn te1_sizes_do_not_stale_controls_and_flush_with_accounting() {
     let observed = {
         let host = f.host.owner.upgrade().unwrap();
         let owner = host.lock().unwrap();
-        owner.hooks.runs[&run].measurements[&execution.task].clone()
+        owner.hooks.runs[&run].measurements[&execution.task]
+            .lock()
+            .unwrap()
+            .clone()
     };
     assert_eq!(observed.result_count, 1);
     assert!(observed.result_bytes > 0);
@@ -27,6 +30,133 @@ fn te1_sizes_do_not_stale_controls_and_flush_with_accounting() {
     .unwrap();
     let saved = spending_record(&f, &run);
     assert_eq!(saved.tasks[0].measurements.as_ref().unwrap(), &observed);
+}
+
+#[test]
+fn te1_review_native_size_loss_is_visible_and_sticky_after_detach() {
+    for missing_run in [false, true] {
+        let f = Fixture::new();
+        let (run, execution, director) = c4_director(&f);
+        let _status = director.status();
+        let mut held_task = None;
+        let mut held_run = None;
+        {
+            let host = f.host.owner.upgrade().unwrap();
+            let mut owner = host.lock().unwrap();
+            if missing_run {
+                held_run = owner.hooks.runs.remove(&run);
+            } else {
+                held_task = owner
+                    .hooks
+                    .runs
+                    .get_mut(&run)
+                    .unwrap()
+                    .tasks
+                    .remove(&execution.task);
+            }
+        }
+        let _reply = director.runtime.block_on(
+            director.client.call_tool(
+                rmcp::model::CallToolRequestParams::new("invoke_capability".to_owned())
+                    .with_arguments(
+                        serde_json::json!({"name":"task_status","arguments":{}})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+            ),
+        );
+        {
+            let host = f.host.owner.upgrade().unwrap();
+            let mut owner = host.lock().unwrap();
+            if let Some(held) = held_run {
+                owner.hooks.runs.insert(run.clone(), held);
+            }
+            if let Some(held) = held_task {
+                owner
+                    .hooks
+                    .runs
+                    .get_mut(&run)
+                    .unwrap()
+                    .tasks
+                    .insert(execution.task.clone(), held);
+            }
+        }
+        let sizes = director.server.result_sizes();
+        assert!(sizes.incomplete, "TE1_NATIVE_SIZE_LOSS_MUST_BE_VISIBLE");
+        assert_eq!(sizes.requests, 2);
+        assert_eq!(sizes.count, 2);
+        spending_change(
+            &f,
+            &execution,
+            super::super::native_invocation::SpendingChange::Clock,
+            native_now(&f, &run),
+            0,
+            true,
+        )
+        .unwrap();
+        assert!(
+            spending_record(&f, &run).tasks[0]
+                .measurements
+                .as_ref()
+                .unwrap()
+                .incomplete
+        );
+    }
+}
+
+#[test]
+fn te1_review_native_size_observer_survives_missing_host_and_poison() {
+    for missing_host in [false, true] {
+        let f = Fixture::new();
+        let (run, execution, director) = c4_director(&f);
+        let _status = director.status();
+        let host = f.host.owner.upgrade().unwrap();
+        let control = {
+            let owner = host.lock().unwrap();
+            let retained = &owner.hooks.runs[&run];
+            super::super::task_mcp::TaskMcp::new(
+                if missing_host {
+                    std::sync::Weak::new()
+                } else {
+                    Arc::downgrade(&host)
+                },
+                owner.run_producer(&run).unwrap(),
+                retained.tasks[&execution.task].endpoint(),
+                retained.measurements[&execution.task].clone(),
+                None,
+            )
+        };
+        if !missing_host {
+            let poisoned = host.clone();
+            assert!(
+                std::thread::spawn(move || {
+                    let _guard = poisoned.lock().unwrap();
+                    panic!("intentional fixture mutex poison");
+                })
+                .join()
+                .is_err()
+            );
+        }
+        assert!(!control.record_size("task_status", Some(13)));
+        host.clear_poison();
+        let retained = host.lock().unwrap().hooks.runs[&run].measurements[&execution.task].clone();
+        assert_eq!(retained.lock().unwrap().result_count, 2);
+        assert!(retained.lock().unwrap().incomplete);
+        spending_change(
+            &f,
+            &execution,
+            super::super::native_invocation::SpendingChange::Clock,
+            native_now(&f, &run),
+            0,
+            true,
+        )
+        .unwrap();
+        let record = spending_record(&f, &run);
+        let saved = record.tasks[0].measurements.as_ref().unwrap();
+        assert_eq!(saved.result_count, 2);
+        assert!(saved.incomplete);
+    }
 }
 
 #[test]
@@ -100,7 +230,7 @@ fn te1_observation_capacity_is_durable_and_sticky() {
             .get_mut(&run)
             .unwrap()
             .measurements
-            .insert(execution.task.clone(), buffered);
+            .insert(execution.task.clone(), Arc::new(Mutex::new(buffered)));
     }
     spending_change(
         &f,

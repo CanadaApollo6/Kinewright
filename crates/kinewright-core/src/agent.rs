@@ -92,6 +92,11 @@ pub struct AgentUsage {
     pub reasoning: Option<u64>,
     pub lower_bound: u64,
     pub complete: bool,
+    /// Known cumulative provider estimate, retained across missing cost reports.
+    #[serde(default)]
+    pub cost_micros: Option<u64>,
+    #[serde(default)]
+    pub cost_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -333,5 +338,20 @@ impl RuntimeResponseControl {
     #[must_use]
     pub const fn response(&self) -> &RuntimeResponse {
         &self.response
+    }
+}
+
+#[cfg(test)]
+mod usage_observation_tests {
+    use super::AgentUsage;
+
+    #[test]
+    fn old_usage_events_leave_cost_unobserved() {
+        let raw = serde_json::json!({"stream":"fixture","adapter":"codex-0.166.0-v1",
+            "input":1,"direct":null,"cache_read":null,"cache_write":null,"output":1,
+            "reasoning":null,"lower_bound":2,"complete":true});
+        let usage: AgentUsage = serde_json::from_value(raw).unwrap();
+        assert_eq!(usage.cost_micros, None);
+        assert!(!usage.cost_complete);
     }
 }

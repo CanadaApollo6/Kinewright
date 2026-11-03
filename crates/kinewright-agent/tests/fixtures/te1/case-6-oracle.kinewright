@@ -47,10 +47,10 @@
           "id": 3,
           "asset": 1,
           "source_range": {
-            "start": 60,
+            "start": 61,
             "end": 100
           },
-          "timeline_start": 50,
+          "timeline_start": 51,
           "effects": [],
           "transition_in": null,
           "link": 3
@@ -78,10 +78,10 @@
           "id": 6,
           "asset": 2,
           "source_range": {
-            "start": 60,
+            "start": 61,
             "end": 100
           },
-          "timeline_start": 50,
+          "timeline_start": 51,
           "effects": [],
           "transition_in": null,
           "link": 3

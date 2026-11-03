@@ -637,18 +637,6 @@ impl AccountingRecord {
     }
 }
 
-/// Replay the bounded identified samples. Missing categories remain unavailable.
-fn validate_watermarks(samples: &[UsageSample]) -> Result<(), AccountingRefusal> {
-    let mut watermarks = std::collections::BTreeMap::<_, crate::usage_stream::Snapshot>::new();
-    for sample in samples {
-        if let Some(snapshot) = &sample.snapshot {
-            let next = snapshot.advance_watermark(watermarks.get(&snapshot.stream))?;
-            watermarks.insert(snapshot.stream.clone(), next);
-        }
-    }
-    Ok(())
-}
-
 struct UsageWatermark {
     values: [Option<u64>; 6],
     covered: [bool; 6],
@@ -658,6 +646,10 @@ struct UsageWatermark {
     reasoning_included: bool,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep ordered identity, watermark and coverage checks in one normalization pass"
+)]
 pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefusal> {
     use std::collections::{BTreeMap, BTreeSet};
     if samples.len() > USAGE_EVENTS {
@@ -665,7 +657,7 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
     }
     let mut identities = BTreeSet::new();
     let mut turns = BTreeMap::new();
-    validate_watermarks(samples)?;
+    let mut watermarks = BTreeMap::<_, crate::usage_stream::Snapshot>::new();
     for (position, sample) in samples.iter().enumerate() {
         let key = sample
             .snapshot
@@ -693,29 +685,47 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
         {
             return Err(AccountingRefusal::Invalid);
         }
-        for (index, value) in sample.values.values().iter().copied().enumerate() {
-            if let Some(value) = value {
-                let old = turn.values[index].unwrap_or(0);
-                turn.values[index] = Some(match sample.mode {
-                    UsageMode::Incremental => {
-                        old.checked_add(value).ok_or(AccountingRefusal::Capacity)?
-                    }
-                    UsageMode::Cumulative => {
-                        turn.covered[index] |= value >= old;
-                        old.max(value)
-                    }
-                });
-            } else {
-                turn.covered[index] = false;
-            }
-        }
         if let Some(snapshot) = &sample.snapshot {
-            for index in 0..6 {
+            if sample.mode != UsageMode::Cumulative {
+                return Err(AccountingRefusal::Scope);
+            }
+            let watermark = snapshot.advance_watermark(watermarks.get(&snapshot.stream))?;
+            let previous_cost = turn.values[5];
+            if sample
+                .values
+                .cost_micros
+                .zip(previous_cost)
+                .is_some_and(|(next, old)| next < old)
+            {
+                return Err(AccountingRefusal::Scope);
+            }
+            turn.values = watermark.values()?.values();
+            turn.values[5] = sample.values.cost_micros.or(previous_cost);
+            watermarks.insert(snapshot.stream.clone(), watermark);
+            for index in 0..5 {
                 turn.covered[index] = !snapshot.models.is_empty()
                     && snapshot
                         .models
                         .iter()
                         .all(|m| m.values.values()[index].is_some());
+            }
+            turn.covered[5] = sample.values.cost_micros.is_some();
+        } else {
+            for (index, value) in sample.values.values().iter().copied().enumerate() {
+                if let Some(value) = value {
+                    let old = turn.values[index].unwrap_or(0);
+                    turn.values[index] = Some(match sample.mode {
+                        UsageMode::Incremental => {
+                            old.checked_add(value).ok_or(AccountingRefusal::Capacity)?
+                        }
+                        UsageMode::Cumulative => {
+                            turn.covered[index] |= value >= old;
+                            old.max(value)
+                        }
+                    });
+                } else {
+                    turn.covered[index] = false;
+                }
             }
         }
         turn.ordinal = ordinal;
@@ -787,17 +797,21 @@ impl TaskAccounting {
             check.bind_stream(binding.clone())?;
         }
         for sample in &self.usage {
-            if let Some(snapshot) = &sample.snapshot
-                && (!self.streams.iter().any(|b| {
+            if let Some(snapshot) = &sample.snapshot {
+                let mut values = snapshot.values()?;
+                // Cost is a stream-wide cumulative observation, separate from model tokens.
+                values.cost_micros = sample.values.cost_micros;
+                if !self.streams.iter().any(|b| {
                     b.attempt == sample.attempt
                         && b.stream == snapshot.stream
                         && b.adapter == snapshot.adapter
                 }) || sample.mode != UsageMode::Cumulative
-                    || snapshot.values()? != sample.values
+                    || values != sample.values
                     || sample.input_includes_cache
-                        != (snapshot.adapter == crate::usage_stream::Adapter::Codex01660V1))
-            {
-                return Err(AccountingRefusal::Scope);
+                        != (snapshot.adapter == crate::usage_stream::Adapter::Codex01660V1)
+                {
+                    return Err(AccountingRefusal::Scope);
+                }
             }
         }
         if let Some(m) = &self.measurements {

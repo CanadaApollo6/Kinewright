@@ -1096,7 +1096,9 @@ pub struct SessionMetrics {
 impl SessionMetrics {
     #[must_use]
     pub fn usage_coverage(&self) -> UsageCoverage {
-        if self.authoritative_usage.is_empty() {
+        if self.observations_incomplete {
+            UsageCoverage::Incomplete
+        } else if self.authoritative_usage.is_empty() {
             UsageCoverage::Unobserved
         } else if self.authoritative_usage.values().any(|u| !u.complete) {
             UsageCoverage::Incomplete
@@ -1111,17 +1113,36 @@ impl SessionMetrics {
     }
 
     #[must_use]
-    pub const fn total_tokens(&self) -> u64 {
-        self.input_tokens.saturating_add(self.output_tokens)
+    pub fn total_tokens(&self) -> u64 {
+        observed_token_total(
+            &self.authoritative_usage,
+            self.input_tokens,
+            self.output_tokens,
+        )
     }
 
     #[must_use]
     pub fn uncached_input_tokens(&self) -> Option<u64> {
-        if self.authoritative_usage.values().any(|u| !u.complete) {
+        if !self.authoritative_usage.is_empty() && self.usage_coverage() != UsageCoverage::Complete
+        {
             return None;
         }
         self.cached_input_tokens
             .map(|cached| self.input_tokens.saturating_sub(cached))
+    }
+}
+
+fn observed_token_total(
+    usage: &BTreeMap<String, kinewright_core::AgentUsage>,
+    input: u64,
+    output: u64,
+) -> u64 {
+    if usage.is_empty() {
+        input.saturating_add(output)
+    } else {
+        usage
+            .values()
+            .fold(0_u64, |sum, u| sum.saturating_add(u.lower_bound))
     }
 }
 
@@ -1588,8 +1609,12 @@ impl EvalResult {
     }
 
     #[must_use]
-    pub const fn total_tokens(&self) -> u64 {
-        self.input_tokens.saturating_add(self.output_tokens)
+    pub fn total_tokens(&self) -> u64 {
+        observed_token_total(
+            &self.authoritative_usage,
+            self.input_tokens,
+            self.output_tokens,
+        )
     }
 }
 
@@ -3892,6 +3917,11 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// harness's and live here. `max_tokens` and `max_undos` are still scored after
 /// the fact, exactly as they were, so `EvalBudgets`' seven fields keep their
 /// meanings across the rewrite (IN2 §3.5 rule 31).
+enum SendUsageState {
+    Inactive,
+    AwaitingFinal,
+}
+
 struct EvalSessionObserver<'a, F> {
     metrics: SessionMetrics,
     budgets: &'a EvalBudgets,
@@ -3901,6 +3931,8 @@ struct EvalSessionObserver<'a, F> {
     operation_error: Option<EvalError>,
     cost_is_complete: bool,
     saw_usage: bool,
+    uncovered_sends: u64,
+    send_usage: SendUsageState,
     trace_events: bool,
 }
 
@@ -3915,13 +3947,13 @@ where
         SessionFlow::Stop(reason)
     }
     fn observe_usage(&mut self, usage: &kinewright_core::AgentUsage) -> SessionFlow {
+        let covers_send = usage.complete;
         if self.metrics.authoritative_usage.len() >= 80
             && !self.metrics.authoritative_usage.contains_key(&usage.stream)
         {
             self.metrics.observations_incomplete = true;
             return self.stop("raw usage stream capacity".into());
         }
-        self.metrics.cost_usd = None;
         self.cost_is_complete = false;
         self.saw_usage = true;
         self.metrics
@@ -3943,6 +3975,18 @@ where
             .authoritative_usage
             .values()
             .collect::<Vec<_>>();
+        let (Some(_), Some(cost_lower_bound)) = (
+            sum_known(usage.iter().map(|u| Some(u.lower_bound)).collect()),
+            sum_known(usage.iter().map(|u| u.cost_micros).collect()),
+        ) else {
+            self.metrics.observations_incomplete = true;
+            return self.stop("usage counter overflow".into());
+        };
+        let cost_is_complete = usage
+            .iter()
+            .all(|u| u.cost_complete && u.cost_micros.is_some());
+        let reported_cost = crate::usage_observer::cost_usd(cost_lower_bound);
+        self.metrics.cost_usd = cost_is_complete.then_some(reported_cost);
         let (Some(input), Some(output)) = (
             sum_known(usage.iter().map(|u| u.input).collect()),
             sum_known(usage.iter().map(|u| u.output).collect()),
@@ -3959,6 +4003,25 @@ where
         self.metrics.reasoning_output_tokens =
             sum_optional(usage.iter().map(|u| u.reasoning).collect());
 
+        if matches!(self.send_usage, SendUsageState::AwaitingFinal) && covers_send {
+            self.uncovered_sends = self.uncovered_sends.saturating_sub(1);
+            self.send_usage = SendUsageState::Inactive;
+        }
+
+        self.check_cost_budget(reported_cost)
+    }
+
+    fn check_cost_budget(&mut self, cost: f64) -> SessionFlow {
+        if self
+            .budgets
+            .max_cost_usd
+            .is_some_and(|maximum| cost > maximum)
+        {
+            return self.stop(format!(
+                "cost ceiling exceeded (${cost:.4} > ${:.2})",
+                self.budgets.max_cost_usd.unwrap_or_default()
+            ));
+        }
         SessionFlow::Continue
     }
 }
@@ -3968,6 +4031,8 @@ where
     F: FnMut() -> Result<usize, EvalError>,
 {
     fn on_send(&mut self, bytes: u64) {
+        self.uncovered_sends = self.uncovered_sends.saturating_add(1);
+        self.send_usage = SendUsageState::AwaitingFinal;
         if self.metrics.application_send_bytes.len() < 1024 {
             self.metrics.application_send_bytes.push(bytes);
         } else {
@@ -3980,8 +4045,11 @@ where
             AgentEvent::Error(error) => {
                 if error.ends_with("raw_usage_refused") {
                     self.metrics.observations_incomplete = true;
+                    self.metrics.cost_usd = None;
+                    self.cost_is_complete = false;
                     for usage in self.metrics.authoritative_usage.values_mut() {
                         usage.complete = false;
+                        usage.cost_complete = false;
                     }
                 }
                 self.metrics.errors.push(error.clone());
@@ -4060,7 +4128,7 @@ where
                     eprintln!("EVAL TRACE tool_result {name}: {}", bounded_trace(result));
                 }
             }
-            AgentEvent::Done => {}
+            AgentEvent::Done => self.send_usage = SendUsageState::Inactive,
         }
         SessionFlow::Continue
     }
@@ -4135,6 +4203,8 @@ where
         operation_error: None,
         cost_is_complete: true,
         saw_usage: false,
+        uncovered_sends: 0,
+        send_usage: SendUsageState::Inactive,
         trace_events: std::env::var_os("KINEWRIGHT_EVAL_TRACE").is_some(),
     };
     let limits = SessionLimits {
@@ -4162,6 +4232,11 @@ where
         return Err(error);
     }
     let mut metrics = observer.metrics;
+    metrics.observations_incomplete |=
+        !metrics.authoritative_usage.is_empty() && observer.uncovered_sends != 0;
+    if !metrics.authoritative_usage.is_empty() && observer.uncovered_sends != 0 {
+        metrics.cost_usd = None;
+    }
     metrics.observations_incomplete |= metrics.authoritative_usage.values().any(|u| !u.complete);
     metrics.turns = spent.turns;
     match stop {
@@ -9341,7 +9416,10 @@ pub fn render_scoreboard(results: &[EvalResult]) -> String {
         "| **TOTAL** | **{status}** | **{assertion_passes}/{assertion_total}** | **{}** | **{}** | **{}** | **{cached}** | **{reasoning}** | **{} B** | **{usd}** | **{}** | **{}** |",
         totals.turns,
         totals.tool_calls,
-        totals.input_tokens.saturating_add(totals.output_tokens),
+        results
+            .iter()
+            .map(EvalResult::total_tokens)
+            .fold(0_u64, u64::saturating_add),
         totals.tool_schema_bytes,
         format_millis(totals.wall_time_ms),
         totals.operations_applied,
@@ -10600,6 +10678,379 @@ mod tests {
         Err(EvalError::Fixture("unused by unit test".to_owned()))
     }
 
+    enum UsageFixtureProtocol {
+        Codex(crate::protocol::CodexProtocol),
+        Claude(crate::protocol::ClaudeProtocol),
+    }
+
+    impl UsageFixtureProtocol {
+        fn new(adapter: kinewright_project::usage_stream::Adapter) -> Self {
+            match adapter {
+                kinewright_project::usage_stream::Adapter::Codex01660V1 => {
+                    Self::Codex(crate::protocol::CodexProtocol::default())
+                }
+                kinewright_project::usage_stream::Adapter::Claude21316V1 => {
+                    Self::Claude(crate::protocol::ClaudeProtocol::default())
+                }
+            }
+        }
+        fn parse(&mut self, raw: &serde_json::Value) -> Result<Vec<AgentEvent>, AgentError> {
+            let line = serde_json::to_string(raw).unwrap();
+            match self {
+                Self::Codex(protocol) => protocol.parse_line(&line),
+                Self::Claude(protocol) => protocol.parse_line(&line),
+            }
+        }
+    }
+
+    struct UsageFixtureDriver {
+        adapter: kinewright_project::usage_stream::Adapter,
+        fresh_each_send: bool,
+        frames: Vec<Vec<serde_json::Value>>,
+    }
+
+    struct UsageFixtureSession {
+        adapter: kinewright_project::usage_stream::Adapter,
+        fresh_each_send: bool,
+        protocol: UsageFixtureProtocol,
+        frames: std::collections::VecDeque<Vec<serde_json::Value>>,
+        sends: usize,
+        sender: Sender<AgentEvent>,
+        receiver: Receiver<AgentEvent>,
+    }
+
+    impl AgentDriver for UsageFixtureDriver {
+        fn id(&self) -> HarnessId {
+            HarnessId::new("usage-fixture")
+        }
+        fn detect(&self) -> Option<HarnessInfo> {
+            FakeDriver { events: vec![] }.detect()
+        }
+        fn start_session(&self, _cfg: SessionConfig) -> Result<Box<dyn AgentSession>, AgentError> {
+            let (sender, receiver) = unbounded();
+            Ok(Box::new(UsageFixtureSession {
+                adapter: self.adapter,
+                fresh_each_send: self.fresh_each_send,
+                protocol: UsageFixtureProtocol::new(self.adapter),
+                frames: self.frames.clone().into(),
+                sends: 0,
+                sender,
+                receiver,
+            }))
+        }
+    }
+
+    impl AgentSession for UsageFixtureSession {
+        fn send_user_message(&mut self, _text: String) -> Result<(), AgentError> {
+            if self.fresh_each_send && self.sends != 0 {
+                self.protocol = UsageFixtureProtocol::new(self.adapter);
+            }
+            self.sends += 1;
+            for raw in self.frames.pop_front().unwrap_or_default() {
+                for event in self.protocol.parse(&raw)? {
+                    if event != AgentEvent::Done {
+                        self.sender.send(event).unwrap();
+                    }
+                }
+            }
+            // A clean reader EOF also emits Done without inventing raw usage.
+            self.sender.send(AgentEvent::Done).unwrap();
+            Ok(())
+        }
+        fn events(&self) -> Receiver<AgentEvent> {
+            self.receiver.clone()
+        }
+        fn interrupt(&mut self) {}
+    }
+
+    fn usage_fixture_result(
+        adapter: kinewright_project::usage_stream::Adapter,
+        n: u64,
+    ) -> serde_json::Value {
+        let identity = format!("{n:08x}-c2a4-45a4-96e7-341109556d01");
+        match adapter {
+            kinewright_project::usage_stream::Adapter::Codex01660V1 => serde_json::json!({
+                "type":"turn.completed","id":identity,
+                "usage":{"input_tokens":150,"cached_input_tokens":120,"output_tokens":18}}),
+            kinewright_project::usage_stream::Adapter::Claude21316V1 => serde_json::json!({
+                "type":"result","subtype":"success","uuid":identity,"is_error":false,
+                "modelUsage":{"main":{"inputTokens":30,"cacheReadInputTokens":100,
+                    "cacheCreationInputTokens":20,"outputTokens":18}}}),
+        }
+    }
+
+    #[test]
+    fn te1_two_send_missing_final_keeps_coverage_incomplete_for_both_providers() {
+        use kinewright_project::usage_stream::Adapter;
+        for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {
+            for fresh_each_send in [false, true] {
+                for missing_first in [false, true] {
+                    let final_frame = vec![usage_fixture_result(adapter, 1)];
+                    let frames = if missing_first {
+                        vec![vec![], final_frame]
+                    } else {
+                        vec![final_frame, vec![]]
+                    };
+                    let driver = UsageFixtureDriver {
+                        adapter,
+                        fresh_each_send,
+                        frames,
+                    };
+                    let mut limits = budgets();
+                    limits.max_turns = 2;
+                    let metrics = collect_session(
+                        &driver,
+                        SessionConfig::default(),
+                        &["first", "second"],
+                        &limits,
+                        None,
+                        || Ok(0),
+                    )
+                    .unwrap();
+                    assert_eq!(metrics.turns, 2);
+                    assert_eq!(metrics.application_send_bytes, [5, 6]);
+                    assert_eq!(metrics.total_tokens(), 168);
+                    assert_eq!(
+                        metrics
+                            .authoritative_usage
+                            .values()
+                            .map(|u| u.lower_bound)
+                            .sum::<u64>(),
+                        168
+                    );
+                    assert_eq!(
+                        metrics.usage_coverage(),
+                        UsageCoverage::Incomplete,
+                        "TE1_EVERY_ACCEPTED_SEND_NEEDS_FINAL: {adapter:?}, fresh={fresh_each_send}, missing_first={missing_first}"
+                    );
+                    assert!(metrics.observations_incomplete);
+                    assert_eq!(metrics.uncached_input_tokens(), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn te1_two_send_distinct_finals_cover_both_provider_stream_modes() {
+        use kinewright_project::usage_stream::Adapter;
+        for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {
+            for fresh_each_send in [false, true] {
+                let driver = UsageFixtureDriver {
+                    adapter,
+                    fresh_each_send,
+                    frames: vec![
+                        vec![usage_fixture_result(adapter, 1)],
+                        vec![usage_fixture_result(adapter, 2)],
+                    ],
+                };
+                let mut limits = budgets();
+                limits.max_turns = 2;
+                let metrics = collect_session(
+                    &driver,
+                    SessionConfig::default(),
+                    &["first", "second"],
+                    &limits,
+                    None,
+                    || Ok(0),
+                )
+                .unwrap();
+                assert_eq!(metrics.usage_coverage(), UsageCoverage::Complete);
+                assert!(!metrics.observations_incomplete);
+                assert_eq!(
+                    metrics.total_tokens(),
+                    if fresh_each_send { 336 } else { 168 }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn te1_two_send_replayed_final_cannot_cover_a_later_send() {
+        use kinewright_project::usage_stream::Adapter;
+        for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {
+            let frame = usage_fixture_result(adapter, 1);
+            let driver = UsageFixtureDriver {
+                adapter,
+                fresh_each_send: false,
+                frames: vec![vec![frame.clone()], vec![frame]],
+            };
+            let mut limits = budgets();
+            limits.max_turns = 2;
+            let metrics = collect_session(
+                &driver,
+                SessionConfig::default(),
+                &["first", "second"],
+                &limits,
+                None,
+                || Ok(0),
+            )
+            .unwrap();
+            assert_eq!(metrics.total_tokens(), 168);
+            assert_eq!(
+                metrics.usage_coverage(),
+                UsageCoverage::Incomplete,
+                "TE1_OLD_FINAL_CANNOT_COVER_NEW_SEND"
+            );
+            assert!(metrics.observations_incomplete);
+        }
+    }
+
+    #[test]
+    fn te1_partial_multi_model_lower_bound_reaches_evaluation_totals() {
+        use kinewright_project::usage_stream::Adapter;
+        let frame = |a, b, n| {
+            serde_json::json!({"type":"result","uuid":n,"modelUsage":{
+            "A":{"inputTokens":a,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"outputTokens":0},
+            "B":{"inputTokens":b,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"outputTokens":0}}})
+        };
+        let driver = UsageFixtureDriver {
+            adapter: Adapter::Claude21316V1,
+            fresh_each_send: false,
+            frames: vec![vec![frame(Some(100), 100, 1), frame(None, 150, 2)]],
+        };
+        let metrics = collect_session(
+            &driver,
+            SessionConfig::default(),
+            &["first"],
+            &budgets(),
+            None,
+            || Ok(0),
+        )
+        .unwrap();
+        assert_eq!(
+            metrics.total_tokens(),
+            250,
+            "TE1_EVAL_RETAINS_KNOWN_LOWER_BOUND"
+        );
+        assert_eq!(metrics.usage_coverage(), UsageCoverage::Incomplete);
+        assert!(metrics.observations_incomplete);
+        let mut result = cc7_result_without_measurements();
+        result.input_tokens = metrics.input_tokens;
+        result.output_tokens = metrics.output_tokens;
+        result.usage_coverage = metrics.usage_coverage();
+        result.observations_incomplete = metrics.observations_incomplete;
+        result.authoritative_usage = metrics.authoritative_usage;
+        assert_eq!(result.total_tokens(), 250);
+        let scoreboard = render_scoreboard(&[result]);
+        let footer = scoreboard.lines().last().unwrap();
+        assert_eq!(
+            footer.split('|').nth(6).unwrap().trim(),
+            "**250**",
+            "TE1_SCOREBOARD_RETAINS_KNOWN_LOWER_BOUND"
+        );
+    }
+
+    #[test]
+    fn te1_review_raw_cost_is_cumulative_and_enforces_the_eval_ceiling() {
+        use kinewright_project::usage_stream::Adapter;
+        for fresh_each_send in [false, true] {
+            let mut first = usage_fixture_result(Adapter::Claude21316V1, 1);
+            let mut second = usage_fixture_result(Adapter::Claude21316V1, 2);
+            first["total_cost_usd"] = serde_json::json!(0.1);
+            second["total_cost_usd"] = serde_json::json!(0.2);
+            let driver = UsageFixtureDriver {
+                adapter: Adapter::Claude21316V1,
+                fresh_each_send,
+                frames: vec![vec![first], vec![second]],
+            };
+            let mut limits = budgets();
+            limits.max_turns = 2;
+            limits.max_cost_usd = Some(1.0);
+            let metrics = collect_session(
+                &driver,
+                SessionConfig::default(),
+                &["first", "second"],
+                &limits,
+                None,
+                || Ok(0),
+            )
+            .unwrap();
+            let expected = if fresh_each_send { 0.3 } else { 0.2 };
+            assert!(
+                metrics
+                    .cost_usd
+                    .is_some_and(|cost| (cost - expected).abs() < 1e-8),
+                "TE1_RAW_COST_WATERMARK: {:?}",
+                metrics.cost_usd
+            );
+            assert_eq!(
+                metrics.total_tokens(),
+                if fresh_each_send { 336 } else { 168 }
+            );
+            limits.max_cost_usd = Some(0.15);
+            let stopped = collect_session(
+                &driver,
+                SessionConfig::default(),
+                &["first", "second"],
+                &limits,
+                None,
+                || Ok(0),
+            );
+            let stopped = stopped.unwrap();
+            assert!(
+                stopped.interrupted
+                    && stopped
+                        .errors
+                        .iter()
+                        .any(|message| message.contains("cost ceiling exceeded")),
+                "TE1_RAW_COST_BUDGET"
+            );
+            assert_eq!(stopped.application_send_bytes.len(), 2);
+        }
+    }
+
+    #[test]
+    fn te1_review_usage_capacity_preserves_done_and_reports_refusal() {
+        use kinewright_project::usage_stream::Adapter;
+        for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {
+            let mut protocol = UsageFixtureProtocol::new(adapter);
+            for n in 0..1024 {
+                protocol.parse(&usage_fixture_result(adapter, n)).unwrap();
+            }
+            let events = protocol
+                .parse(&usage_fixture_result(adapter, 1024))
+                .unwrap_or_else(|error| panic!("TE1_CAPACITY_MUST_NOT_HIDE_DONE: {error}"));
+            assert!(events.iter().any(|event| matches!(event, AgentEvent::Done)));
+            assert!(events.iter().any(|event| matches!(event, AgentEvent::Error(message) if message.ends_with("raw_usage_refused"))));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Usage(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn te1_review_refused_raw_usage_never_falls_back_to_cost_projection() {
+        use kinewright_project::usage_stream::Adapter;
+        for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {
+            let mut raw = usage_fixture_result(adapter, 1);
+            raw["total_cost_usd"] = serde_json::json!(-0.1);
+            let driver = UsageFixtureDriver {
+                adapter,
+                fresh_each_send: false,
+                frames: vec![vec![raw]],
+            };
+            let metrics = collect_session(
+                &driver,
+                SessionConfig::default(),
+                &["first"],
+                &budgets(),
+                None,
+                || Ok(0),
+            )
+            .unwrap();
+            assert_eq!(
+                metrics.total_tokens(),
+                0,
+                "TE1_REFUSED_RAW_HAS_NO_LEGACY_FALLBACK"
+            );
+            assert_eq!(metrics.cost_usd, None);
+            assert!(metrics.observations_incomplete);
+            assert_eq!(metrics.usage_coverage(), UsageCoverage::Incomplete);
+        }
+    }
+
     #[test]
     fn te1_evaluation_uses_raw_watermarks_and_marks_refused_observations_incomplete() {
         let usage = |input, cache_read, output| {
@@ -10614,6 +11065,8 @@ mod tests {
                 reasoning: None,
                 lower_bound: input + output,
                 complete: true,
+                cost_micros: None,
+                cost_complete: false,
             }))
         };
         let projection = AgentEvent::Cost {

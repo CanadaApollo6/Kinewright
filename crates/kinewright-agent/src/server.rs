@@ -12206,12 +12206,10 @@ impl ServerHandler for KinewrightMcp {
             .and_then(|a| a.get("name"))
             .and_then(serde_json::Value::as_str);
         let size_tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
-        if size_control.is_none() {
-            size_metrics
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .begin();
-        }
+        size_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin();
         let service = self.clone();
         #[cfg(feature = "eval-harness")]
         let ja_counts = Arc::clone(&self.ja_request_counts);
@@ -12257,14 +12255,15 @@ impl ServerHandler for KinewrightMcp {
                 }
                 Err(value) => crate::runtime::serialized_size(value),
             };
-            if let Some(control) = size_control {
-                control.record_size(size_tool, bytes);
-            } else {
-                size_metrics
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .record(size_tool, bytes);
-            }
+            let native_recorded = size_control
+                .as_ref()
+                .is_none_or(|control| control.record_size(size_tool, bytes));
+            let mut metrics = size_metrics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            metrics.record(size_tool, bytes);
+            metrics.incomplete |= !native_recorded;
+            drop(metrics);
             reply.map(Into::into)
         }
     }

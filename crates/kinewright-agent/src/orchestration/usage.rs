@@ -96,6 +96,9 @@ pub fn decode_usage(
     }
     identity.input_includes_cache = !matches!(adapter, UsageAdapter::Claude);
     identity.output_includes_reasoning = true;
+    if let Some(snapshot) = &identity.snapshot {
+        identity.values = snapshot.values()?;
+    }
     if let Some(cost) = raw
         .get("total_cost_usd")
         .or_else(|| raw.get("cost_usd"))
@@ -110,9 +113,6 @@ pub fn decode_usage(
                 .parse()
                 .map_err(|_| AccountingRefusal::Invalid)?,
         );
-    }
-    if let Some(snapshot) = &identity.snapshot {
-        identity.values = snapshot.values()?;
     }
     Ok(identity)
 }

@@ -135,7 +135,8 @@ impl RuntimeGrantBinding {
 }
 pub(super) struct HostRun {
     #[cfg(target_os = "linux")]
-    pub measurements: BTreeMap<TaskId, kinewright_project::usage_measurement::Measurements>,
+    pub measurements:
+        BTreeMap<TaskId, Arc<Mutex<kinewright_project::usage_measurement::Measurements>>>,
     pub producer: HostAuth,
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,
@@ -1291,7 +1292,7 @@ impl HostCommandOwner {
         Ok((auth, endpoint))
     }
     pub fn start_task_server(
-        &self,
+        &mut self,
         producer: &HostAuth,
         run: &RunId,
         task: &TaskId,
@@ -1316,9 +1317,38 @@ impl HostCommandOwner {
             .ok_or_else(|| refused("task is not retained"))?;
         let endpoint = task.endpoint();
         endpoint.check_live().map_err(|error| refused(&error))?;
+        let core = task.core().clone();
+        #[cfg(target_os = "linux")]
+        let measurements = {
+            let authority = endpoint.authority();
+            let retained = self
+                .hooks
+                .runs
+                .get(run)
+                .ok_or_else(|| refused("size observation run missing"))?;
+            let previous = if retained.measurements.contains_key(&authority.task) {
+                None
+            } else {
+                let state = self
+                    .owner()?
+                    .orchestration_projection(run)?
+                    .ok_or_else(|| refused("size observation run missing"))?;
+                self.native_accounting(&state)?
+                    .and_then(|r| r.tasks.into_iter().find(|t| t.task == authority.task.0))
+                    .and_then(|t| t.measurements)
+            };
+            self.hooks
+                .runs
+                .get_mut(run)
+                .ok_or_else(|| refused("size observation run missing"))?
+                .measurements
+                .entry(authority.task.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(previous.unwrap_or_default())))
+                .clone()
+        };
         let media = std::sync::Arc::new(super::LazyHostMedia::default());
         crate::McpServer::start_task_isolated(
-            task.core().clone(),
+            core,
             media.clone(),
             media,
             &self.config.project,
@@ -1337,6 +1367,8 @@ impl HostCommandOwner {
                     .auth
                     .clone(),
                 endpoint,
+                #[cfg(target_os = "linux")]
+                measurements,
                 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
                 self.qualification_stop.clone(),
             )),

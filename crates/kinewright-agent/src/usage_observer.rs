@@ -6,6 +6,14 @@ use kinewright_project::{
     usage_stream::{Adapter, Snapshot},
 };
 
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "provider USD estimates use f64; retained counters remain integer micros"
+)]
+pub(crate) fn cost_usd(micros: u64) -> f64 {
+    micros as f64 / 1_000_000.0
+}
+
 pub(crate) struct UsageObserver {
     stream: SessionId,
     samples: Vec<UsageSample>,
@@ -32,6 +40,7 @@ impl UsageObserver {
             cache_creation_input_tokens,
             output_tokens,
             reasoning_output_tokens,
+            cost_usd: projected_cost,
             ..
         } = event
         else {
@@ -44,6 +53,9 @@ impl UsageObserver {
             value.map(|v| v.saturating_sub(previous.unwrap_or(0)))
         };
         let old = self.projected.as_ref();
+        let old_cost = old.and_then(|u| u.cost_micros);
+        let cost = now.cost_complete.then_some(now.cost_micros).flatten();
+        *projected_cost = delta(cost, old_cost).map(cost_usd);
         *input_tokens = delta(now.input, old.and_then(|u| u.input)).unwrap_or(0);
         *output_tokens = delta(now.output, old.and_then(|u| u.output)).unwrap_or(0);
         *cached_input_tokens = delta(now.cache_read, old.and_then(|u| u.cache_read));
@@ -55,6 +67,8 @@ impl UsageObserver {
         watermark.cache_read = now.cache_read.or(watermark.cache_read);
         watermark.cache_write = now.cache_write.or(watermark.cache_write);
         watermark.reasoning = now.reasoning.or(watermark.reasoning);
+        watermark.cost_micros = cost.or(old_cost);
+        watermark.cost_complete = now.cost_complete;
         self.projected = Some(watermark);
     }
 
@@ -73,12 +87,16 @@ impl UsageObserver {
         ) {
             return Ok(None);
         }
-        if self.samples.len() >= 1024 {
-            return Err(AccountingRefusal::Capacity);
-        }
-        self.ordinal += 1;
-        let event = raw.get("id").map_or_else(
-            || format!("{kind}:{:064x}", self.ordinal),
+        let ordinal = self
+            .ordinal
+            .checked_add(1)
+            .ok_or(AccountingRefusal::Capacity)?;
+        let identity_field = match adapter {
+            Adapter::Codex01660V1 => "id",
+            Adapter::Claude21316V1 => "uuid",
+        };
+        let event = raw.get(identity_field).map_or_else(
+            || format!("{kind}:{ordinal:064x}"),
             |id| {
                 format!(
                     "{kind}:{}",
@@ -87,6 +105,9 @@ impl UsageObserver {
             },
         );
         let old = self.samples.iter().find(|s| s.event == event);
+        if old.is_none() && self.samples.len() >= 1024 {
+            return Err(AccountingRefusal::Capacity);
+        }
         let sample = crate::protocol::limits::usage::decode_usage(
             match adapter {
                 Adapter::Codex01660V1 => crate::protocol::limits::usage::UsageAdapter::Codex,
@@ -103,7 +124,7 @@ impl UsageObserver {
                 attempt: self.stream.clone(),
                 turn: 1,
                 event,
-                ordinal: old.map_or(self.ordinal, |s| s.ordinal),
+                ordinal: old.map_or(ordinal, |s| s.ordinal),
                 mode: UsageMode::Cumulative,
                 values: UsageValues::default(),
                 complete: matches!(kind, "turn.completed" | "result"),
@@ -115,10 +136,17 @@ impl UsageObserver {
             if old != &sample {
                 return Err(AccountingRefusal::Scope);
             }
-        } else {
-            self.samples.push(sample);
+            return Ok(None);
         }
-        let usage = self.observation(adapter)?;
+        self.samples.push(sample);
+        let usage = match self.observation(adapter) {
+            Ok(usage) => usage,
+            Err(reason) => {
+                self.samples.pop();
+                return Err(reason);
+            }
+        };
+        self.ordinal = ordinal;
         self.current = Some(usage.clone());
         Ok(Some(AgentEvent::Usage(Box::new(usage))))
     }
@@ -152,6 +180,8 @@ impl UsageObserver {
             reasoning: category(4, totals.known.reasoning),
             lower_bound: totals.token_lower_bound,
             complete: totals.tokens_complete,
+            cost_micros: totals.known.cost_micros,
+            cost_complete: totals.complete[5],
         })
     }
 }
@@ -169,6 +199,93 @@ mod tests {
             reasoning_output_tokens: None,
             cost_usd: None,
         }
+    }
+    fn claude_result(
+        uuid: &str,
+        direct: u64,
+        read: u64,
+        write: u64,
+        output: u64,
+    ) -> serde_json::Value {
+        json!({
+            "type":"result", "subtype":"success", "uuid":uuid,
+            "session_id":"fixture-session", "is_error":false,
+            "duration_ms":1, "duration_api_ms":1, "num_turns":1,
+            "result":"fixture response",
+            "modelUsage":{"main":{"inputTokens":direct,"cacheReadInputTokens":read,
+                "cacheCreationInputTokens":write,"outputTokens":output}}
+        })
+    }
+    #[test]
+    fn te1_claude_uuid_replay_and_changed_payload_are_checked_at_ingress() {
+        let mut observer = UsageObserver::default();
+        let raw = claude_result("f347b5fa-c2a4-45a4-96e7-341109556d01", 14, 50, 7, 8);
+        assert!(
+            matches!(observer.observe(Adapter::Claude21316V1, &raw).unwrap(),
+            Some(AgentEvent::Usage(u)) if u.lower_bound == 79 && u.complete)
+        );
+        assert!(
+            observer
+                .observe(Adapter::Claude21316V1, &raw)
+                .unwrap()
+                .is_none(),
+            "TE1_UUID_REPLAY_HAS_NO_NEW_OBSERVATION"
+        );
+        let mut changed_text = raw.clone();
+        changed_text["result"] = json!("changed fixture response");
+        assert_eq!(
+            observer.observe(Adapter::Claude21316V1, &changed_text),
+            Err(AccountingRefusal::Scope),
+            "TE1_UUID_PAYLOAD_HASH_REFUSED"
+        );
+        let changed = claude_result("f347b5fa-c2a4-45a4-96e7-341109556d01", 20, 60, 10, 10);
+        assert_eq!(
+            observer.observe(Adapter::Claude21316V1, &changed),
+            Err(AccountingRefusal::Scope),
+            "TE1_UUID_CHANGED_PAYLOAD_REFUSED"
+        );
+        assert_eq!(observer.current.as_ref().unwrap().lower_bound, 79);
+        assert_eq!(observer.samples.len(), 1);
+    }
+    #[test]
+    fn te1_claude_uuid_duplicates_do_not_consume_capacity_even_when_full() {
+        let mut observer = UsageObserver::default();
+        for n in 0..1024 {
+            observer
+                .observe(
+                    Adapter::Claude21316V1,
+                    &claude_result(
+                        &format!("{n:08x}-c2a4-45a4-96e7-341109556d01"),
+                        14,
+                        50,
+                        7,
+                        8,
+                    ),
+                )
+                .unwrap();
+        }
+        let last = claude_result("000003ff-c2a4-45a4-96e7-341109556d01", 14, 50, 7, 8);
+        for _ in 0..1025 {
+            assert!(
+                observer
+                    .observe(Adapter::Claude21316V1, &last)
+                    .unwrap()
+                    .is_none(),
+                "TE1_UUID_DUPLICATE_AT_CAPACITY"
+            );
+        }
+        let changed = claude_result("000003ff-c2a4-45a4-96e7-341109556d01", 20, 60, 10, 10);
+        assert_eq!(
+            observer.observe(Adapter::Claude21316V1, &changed),
+            Err(AccountingRefusal::Scope)
+        );
+        let extra = claude_result("00000400-c2a4-45a4-96e7-341109556d01", 14, 50, 7, 8);
+        assert_eq!(
+            observer.observe(Adapter::Claude21316V1, &extra),
+            Err(AccountingRefusal::Capacity)
+        );
+        assert_eq!(observer.current.as_ref().unwrap().lower_bound, 79);
+        assert_eq!(observer.samples.len(), 1024);
     }
     #[test]
     fn te1_missing_category_is_unobserved_without_resetting_display_watermarks() {

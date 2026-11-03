@@ -15,6 +15,24 @@
       }
     },
     {
+      "TrimClip": {
+        "clip": 3,
+        "new_source": {
+          "start": 61,
+          "end": 100
+        }
+      }
+    },
+    {
+      "TrimClip": {
+        "clip": 6,
+        "new_source": {
+          "start": 61,
+          "end": 100
+        }
+      }
+    },
+    {
       "SetTitleParam": {
         "clip": 7,
         "name": "text",
@@ -27,7 +45,8 @@
     "transcript_neighbours",
     "media_neighbours",
     "revision_refresh",
-    "preview"
+    "preview",
+    "caption_boundaries"
   ],
   "preview_before_commit": true,
   "reject_incomplete_child": false,
@@ -36,5 +55,29 @@
     1,
     4
   ],
-  "notes": []
+  "notes": [],
+  "trim_expectations": [
+    {
+      "clip": 3,
+      "source_start": 61,
+      "source_end": 100,
+      "timeline_start": 51,
+      "timeline_end": 90
+    },
+    {
+      "clip": 6,
+      "source_start": 61,
+      "source_end": 100,
+      "timeline_start": 51,
+      "timeline_end": 90
+    }
+  ],
+  "caption_alignment": {
+    "clip": 8,
+    "timeline_start": 52,
+    "timeline_end": 90,
+    "source_start": 0,
+    "source_end": 38,
+    "maximum_lead_frames": 1
+  }
 }

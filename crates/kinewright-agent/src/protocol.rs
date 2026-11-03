@@ -22,15 +22,19 @@ impl ClaudeProtocol {
             AgentError::Protocol(format!("invalid Claude stream JSON: {error}"))
         })?;
         let mut events = Vec::new();
-        if let Some(event) = self
-            .usage
-            .observe(
-                kinewright_project::usage_stream::Adapter::Claude21316V1,
-                &value,
-            )
-            .map_err(|_| AgentError::Protocol("raw_usage_refused".into()))?
-        {
-            events.push(event);
+        let mut usage_refused = false;
+        match self.usage.observe(
+            kinewright_project::usage_stream::Adapter::Claude21316V1,
+            &value,
+        ) {
+            Ok(Some(event)) => events.push(event),
+            Ok(None) => {}
+            Err(_) => {
+                usage_refused = true;
+                events.push(AgentEvent::Error(
+                    "protocol error: raw_usage_refused".into(),
+                ));
+            }
         }
         match value.get("type").and_then(Value::as_str) {
             Some("assistant") => self.parse_assistant(&value, &mut events)?,
@@ -43,6 +47,9 @@ impl ClaudeProtocol {
                 )));
             }
             Some(_) | None => {}
+        }
+        if usage_refused {
+            events.retain(|event| !matches!(event, AgentEvent::Cost { .. }));
         }
         for event in &mut events {
             self.usage.project(event);
@@ -163,16 +170,21 @@ impl CodexProtocol {
         let value: Value = serde_json::from_str(line)
             .map_err(|error| AgentError::Protocol(format!("invalid Codex JSONL: {error}")))?;
         let mut events = Vec::new();
-        if !self.display_only
-            && let Some(event) = self
-                .usage
-                .observe(
-                    kinewright_project::usage_stream::Adapter::Codex01660V1,
-                    &value,
-                )
-                .map_err(|_| AgentError::Protocol("raw_usage_refused".into()))?
-        {
-            events.push(event);
+        let mut usage_refused = false;
+        if !self.display_only {
+            match self.usage.observe(
+                kinewright_project::usage_stream::Adapter::Codex01660V1,
+                &value,
+            ) {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(_) => {
+                    usage_refused = true;
+                    events.push(AgentEvent::Error(
+                        "protocol error: raw_usage_refused".into(),
+                    ));
+                }
+            }
         }
         match value.get("type").and_then(Value::as_str) {
             Some("item.started" | "item.completed") => self.parse_item(&value, &mut events)?,
@@ -220,6 +232,9 @@ impl CodexProtocol {
                 events.push(AgentEvent::Done);
             }
             _ => {}
+        }
+        if usage_refused {
+            events.retain(|event| !matches!(event, AgentEvent::Cost { .. }));
         }
         for event in &mut events {
             self.usage.project(event);

@@ -172,7 +172,7 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
     let (_actor, _endpoint) = task_actor(&f, &run, &execution, &producer);
     let (server, core) = {
         let owner = f.host.owner.upgrade().unwrap();
-        let host = owner.lock().unwrap();
+        let mut host = owner.lock().unwrap();
         let core = host.hooks.runs[&run].tasks[&execution.task].core().clone();
         (
             host.start_task_server(&producer.bootstrap.auth, &run, &execution.task)

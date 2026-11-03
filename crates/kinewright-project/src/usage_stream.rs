@@ -57,6 +57,7 @@ impl Snapshot {
         }
         for (n, model) in self.models.iter().enumerate() {
             if model.model.len() != 64
+                || model.values.cost_micros.is_some()
                 || !model.model.bytes().all(|b| b.is_ascii_hexdigit())
                 || self.models[..n].iter().any(|m| m.model == model.model)
             {
@@ -225,7 +226,7 @@ impl crate::orchestration_accounting::TaskAccounting {
                 adapter: binding.adapter,
                 attempts: bindings.iter().map(|b| b.attempt.clone()).collect(),
                 inclusive_input: complete.then_some(inclusive).flatten(),
-                direct_input: direct,
+                direct_input: complete.then_some(direct).flatten(),
                 uncached_input: complete.then_some(uncached).flatten(),
                 output: complete.then_some(totals.known.output).flatten(),
                 lower_bound: totals.token_lower_bound,

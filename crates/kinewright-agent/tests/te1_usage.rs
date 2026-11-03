@@ -9,13 +9,16 @@ fn id(n: u64) -> SessionId {
     serde_json::from_value(json!(format!("{n:032x}"))).unwrap()
 }
 fn task(adapter: Adapter) -> TaskAccounting {
+    task_with_limit(adapter, None)
+}
+fn task_with_limit(adapter: Adapter, token_limit: Option<u64>) -> TaskAccounting {
     let mut r = AccountingRecord::new(
         serde_json::from_value(json!(format!("{:032x}", 1))).unwrap(),
         id(2),
         1000,
     )
     .unwrap();
-    r.add_task(id(3), None).unwrap();
+    r.add_task(id(3), token_limit).unwrap();
     let mut t = r.tasks.remove(0);
     bind(&mut t, adapter, 4, 4, false).unwrap();
     t
@@ -330,4 +333,113 @@ fn te1_all_required_categories_and_payload_collisions() {
         raw(&mut t, 4, 1, p, true).is_err(),
         "TE1_WHOLE_PAYLOAD_COLLISION_REFUSED"
     );
+}
+
+fn two_model_claude(a: Option<u64>, b: u64) -> Value {
+    json!({"type":"result","modelUsage":{
+        "A":{"inputTokens":a,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"outputTokens":0},
+        "B":{"inputTokens":b,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"outputTokens":0}
+    }})
+}
+
+#[test]
+fn te1_partial_multi_model_snapshot_retains_each_known_watermark() {
+    let mut t = task_with_limit(Adapter::Claude21316V1, Some(225));
+    raw(&mut t, 4, 1, two_model_claude(Some(100), 100), true).unwrap();
+    assert_eq!(t.totals.token_lower_bound, 200);
+    raw(&mut t, 4, 2, two_model_claude(None, 150), false).unwrap();
+    assert_eq!(t.totals.known.input, Some(250), "TE1_MODEL_WATERMARK_SUM");
+    assert_eq!(t.totals.token_lower_bound, 250);
+    assert!(
+        t.totals.token_lower_bound >= 225,
+        "known ceiling crossing survives a partial snapshot"
+    );
+    assert_eq!(t.pause, Some(AccountingRefusal::Tokens));
+    assert!(!t.totals.tokens_complete);
+    assert!(!t.totals.complete[0]);
+    assert_eq!(t.stream_reports().unwrap()[0].lower_bound, 250);
+}
+
+#[test]
+fn te1_partial_multi_model_watermarks_recover_after_restart_and_resume() {
+    let mut t = task(Adapter::Claude21316V1);
+    raw(&mut t, 4, 1, two_model_claude(Some(100), 100), true).unwrap();
+    raw(&mut t, 4, 2, two_model_claude(None, 150), true).unwrap();
+    assert_eq!(
+        t.totals.token_lower_bound, 250,
+        "TE1_MODEL_WATERMARK_RECOVERY"
+    );
+    assert!(
+        !t.totals.tokens_complete,
+        "TE1_CURRENT_SNAPSHOT_DEFINES_COMPLETENESS"
+    );
+    let saved = serde_json::to_vec(&t).unwrap();
+    t = serde_json::from_slice(&saved).unwrap();
+    bind(&mut t, Adapter::Claude21316V1, 5, 4, true).unwrap();
+    raw(&mut t, 5, 3, json!({}), false).unwrap();
+    assert_eq!(t.totals.token_lower_bound, 250);
+    assert!(
+        raw(&mut t, 5, 4, two_model_claude(Some(99), 175), true).is_err(),
+        "TE1_MODEL_REGRESSION_REFUSED_AFTER_RECOVERY"
+    );
+    raw(&mut t, 5, 5, two_model_claude(Some(125), 175), true).unwrap();
+    assert_eq!(t.totals.known.input, Some(300));
+    assert_eq!(t.totals.token_lower_bound, 300);
+    assert!(t.totals.tokens_complete);
+    assert_eq!(t.stream_reports().unwrap()[0].inclusive_input, Some(300));
+    assert!(t.stream_reports().unwrap()[0].reported_complete);
+}
+
+#[test]
+fn te1_review_stream_report_does_not_present_incomplete_direct_input_as_known() {
+    let mut t = task(Adapter::Claude21316V1);
+    raw(&mut t, 4, 1, two_model_claude(Some(100), 100), true).unwrap();
+    raw(&mut t, 4, 2, two_model_claude(None, 150), true).unwrap();
+    let report = &t.stream_reports().unwrap()[0];
+    assert_eq!(report.lower_bound, 250);
+    assert_eq!(
+        report.direct_input, None,
+        "TE1_PARTIAL_DIRECT_INPUT_IS_UNKNOWN"
+    );
+    assert!(!report.reported_complete);
+}
+
+#[test]
+fn te1_review_stream_cost_is_preserved_once_and_missing_cost_stays_unknown() {
+    for (adapter, mut first, mut next) in [
+        (
+            Adapter::Claude21316V1,
+            two_model_claude(Some(100), 100),
+            two_model_claude(Some(125), 175),
+        ),
+        (
+            Adapter::Codex01660V1,
+            codex(150, 120, 18),
+            codex(200, 160, 20),
+        ),
+    ] {
+        let mut t = task(adapter);
+        first["total_cost_usd"] = json!(0.125);
+        raw(&mut t, 4, 1, first, true).unwrap();
+        assert_eq!(
+            t.usage[0].values.cost_micros,
+            Some(125_000),
+            "TE1_STREAM_COST_IS_RETAINED"
+        );
+        assert_eq!(t.totals.known.cost_micros, Some(125_000));
+        next["total_cost_usd"] = json!(0.25);
+        raw(&mut t, 4, 2, next.clone(), true).unwrap();
+        assert_eq!(t.totals.known.cost_micros, Some(250_000));
+        assert!(t.totals.complete[5]);
+        next.as_object_mut().unwrap().remove("total_cost_usd");
+        raw(&mut t, 4, 3, next.clone(), true).unwrap();
+        assert_eq!(t.totals.known.cost_micros, Some(250_000));
+        assert!(!t.totals.complete[5]);
+        next["total_cost_usd"] = json!(0.2);
+        assert!(raw(&mut t, 4, 4, next.clone(), true).is_err());
+        next["total_cost_usd"] = json!(0.3);
+        raw(&mut t, 4, 5, next, true).unwrap();
+        assert_eq!(t.totals.known.cost_micros, Some(300_000));
+        assert!(t.totals.complete[5]);
+    }
 }

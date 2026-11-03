@@ -191,8 +191,26 @@ impl HostCommandOwner {
             .get(&identity.run)
             .and_then(|run| run.measurements.get(&identity.task))
         {
-            let mut observed = observed.clone();
+            let mut observed = match observed.lock() {
+                Ok(observed) => observed.clone(),
+                Err(error) => {
+                    let mut observed = error.into_inner().clone();
+                    observed.incomplete = true;
+                    observed
+                }
+            };
             if let Some(saved) = &task.measurements {
+                if !observed.results.starts_with(&saved.results)
+                    || observed.result_count < saved.result_count
+                    || observed.result_bytes < saved.result_bytes
+                {
+                    let count = observed.result_count.max(saved.result_count);
+                    let bytes = observed.result_bytes.max(saved.result_bytes);
+                    observed = saved.clone();
+                    observed.result_count = count;
+                    observed.result_bytes = bytes;
+                    observed.incomplete = true;
+                }
                 observed.incomplete |= saved.incomplete;
                 observed.sends.clone_from(&saved.sends);
             }
@@ -289,6 +307,9 @@ impl HostCommandOwner {
             .get(&identity.run)
             .and_then(|r| r.measurements.get(&identity.task))
         {
+            let observed = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             measurements.result_count = measurements.result_count.max(observed.result_count);
             measurements.result_bytes = measurements.result_bytes.max(observed.result_bytes);
         }

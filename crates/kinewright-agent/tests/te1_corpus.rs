@@ -18,7 +18,7 @@ fn root() -> PathBuf {
 fn base() -> BranchBinding {
     serde_json::from_value(json!({"branch":"1".repeat(32),"head":"2".repeat(32),"checkpoint":{"sha256":"3".repeat(64),"byte_length":1,"record_kind":"owned_evidence"},"document_hash":"4".repeat(64)})).unwrap()
 }
-fn verified_reads(
+fn scripted_requirements_met(
     case: &Value,
     reads: &[String],
     revision: u64,
@@ -37,6 +37,92 @@ fn verified_reads(
 }
 fn snapshot(doc: &Document) -> Vec<u8> {
     serde_json::to_vec(doc).unwrap()
+}
+fn verify_combined_trim(
+    case: &Value,
+    original: &Document,
+    edited: &Document,
+    operations: &[Operation],
+) {
+    let trimmed: Vec<_> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::TrimClip { clip, .. } => Some(clip.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(trimmed, [3, 6], "TE1_CASE6_REQUIRES_REAL_ALIGNED_TRIMS");
+    let find = |doc: &Document, id| {
+        doc.tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id.0 == id)
+            .unwrap()
+            .clone()
+    };
+    for expectation in case["trim_expectations"].as_array().unwrap() {
+        let id = expectation["clip"].as_u64().unwrap();
+        let before = find(original, id);
+        let after = find(edited, id);
+        assert_eq!(
+            after.source_range.start.0,
+            expectation["source_start"].as_i64().unwrap()
+        );
+        assert_eq!(
+            after.source_range.end.0,
+            expectation["source_end"].as_i64().unwrap()
+        );
+        assert!(after.source_range.start > before.source_range.start);
+        assert!(after.source_range.end <= before.source_range.end);
+        assert_eq!(after.timeline_start.0, 51);
+        assert_eq!(
+            after.timeline_start.0 + after.source_range.end.0 - after.source_range.start.0,
+            90
+        );
+        if let Some(asset) = original
+            .media_pool
+            .iter()
+            .find(|asset| asset.id == after.asset)
+        {
+            assert!(
+                after.source_range.end <= asset.duration,
+                "TE1_CASE6_SOURCE_BOUND"
+            );
+        }
+    }
+    assert_eq!(case["trim_expectations"].as_array().unwrap().len(), 2);
+    let video = find(edited, 3);
+    let audio = find(edited, 6);
+    let caption = find(edited, 8);
+    // Authored corpus requirements; native TE1.4 commit enforcement is separate.
+    assert_eq!(video.link, audio.link);
+    assert_eq!(video.source_range, audio.source_range);
+    assert_eq!(video.timeline_start, audio.timeline_start);
+    assert_eq!(caption.source_range, find(original, 8).source_range);
+    assert_eq!(
+        caption.timeline_start.0,
+        case["caption_alignment"]["timeline_start"]
+            .as_i64()
+            .unwrap()
+    );
+    assert_eq!(
+        caption.source_range.start.0,
+        case["caption_alignment"]["source_start"].as_i64().unwrap()
+    );
+    assert_eq!(
+        caption.source_range.end.0,
+        case["caption_alignment"]["source_end"].as_i64().unwrap()
+    );
+    assert_eq!(
+        caption.timeline_start.0 + caption.source_range.end.0 - caption.source_range.start.0,
+        case["caption_alignment"]["timeline_end"].as_i64().unwrap()
+    );
+    assert_eq!(case["caption_alignment"]["maximum_lead_frames"], 1);
+    assert_eq!(caption.timeline_start.0 - video.timeline_start.0, 1);
+    assert_eq!(
+        video.timeline_start.0 + video.source_range.end.0 - video.source_range.start.0,
+        caption.timeline_start.0 + caption.source_range.end.0 - caption.source_range.start.0
+    );
 }
 fn replay_history(path: &Path, core: &Core) {
     let expected = core.export_history().unwrap();
@@ -76,12 +162,17 @@ fn verify_child_result(case: &Value, reads: &[String], original: &Document) {
     let complete =
         child["unmet_notes"].as_array().unwrap().is_empty() && child["proof"]["status"] == "passed";
     assert!(
-        !verified_reads(case, reads, 7, 7, true, complete),
-        "a plausible completed child with an unmet note and failed proof is rejected"
+        !scripted_requirements_met(case, reads, 7, 7, true, complete),
+        "the scripted case oracle requires an unmet note and failed proof to remain unsatisfied"
     );
 }
 
-fn verify_scope_and_decision(n: u64, case: &Value, original: &Document, operations: &[Operation]) {
+fn verify_scope_and_scripted_requirements(
+    n: u64,
+    case: &Value,
+    original: &Document,
+    operations: &[Operation],
+) {
     let mut scope = director_scope(original, base()).unwrap();
     let policy = TaskPolicy {
         role: Role::Director,
@@ -120,19 +211,19 @@ fn verify_scope_and_decision(n: u64, case: &Value, original: &Document, operatio
         .iter()
         .map(|v| v.as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    assert!(verified_reads(case, &reads, 7, 7, true, true));
+    assert!(scripted_requirements_met(case, &reads, 7, 7, true, true));
     if !reads.is_empty() {
         assert!(
-            !verified_reads(case, &[], 7, 7, true, true),
-            "missing expansion/evidence refuses commitment"
+            !scripted_requirements_met(case, &[], 7, 7, true, true),
+            "the scripted case oracle requires all declared evidence"
         );
     }
     if n == 5 {
         verify_child_result(case, &reads, original);
     }
     if n == 6 {
-        assert!(!verified_reads(case, &reads, 6, 7, true, true));
-        assert!(!verified_reads(case, &reads, 7, 7, false, true));
+        assert!(!scripted_requirements_met(case, &reads, 6, 7, true, true));
+        assert!(!scripted_requirements_met(case, &reads, 7, 7, false, true));
     }
 }
 
@@ -163,7 +254,7 @@ fn te1_frozen_six_case_operations_documents_histories_and_evidence() {
             .0;
         let operations: Vec<Operation> =
             serde_json::from_value(case["operations"].clone()).unwrap();
-        verify_scope_and_decision(n, &case, &original, &operations);
+        verify_scope_and_scripted_requirements(n, &case, &original, &operations);
         let manual = Core::spawn(original.clone()).unwrap();
         manual
             .request(Command::Do(Operation::MoveMarker {
@@ -177,6 +268,9 @@ fn te1_frozen_six_case_operations_documents_histories_and_evidence() {
         let task = Core::spawn(original.clone()).unwrap();
         task.request(Command::DoBatch(operations.clone())).unwrap();
         let edited = task.export_history().unwrap();
+        if n == 6 {
+            verify_combined_trim(&case, &original, &edited.document, &operations);
+        }
         assert_eq!(*edited.document, expected, "case {n} document oracle");
         assert_eq!(
             edited.cursor.undo.last().unwrap().operations,

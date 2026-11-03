@@ -1,7 +1,7 @@
 struct C4Mcp {
     runtime: tokio::runtime::Runtime,
     client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
-    _server: crate::McpServer,
+    server: crate::McpServer,
 }
 impl C4Mcp {
     fn new(f: &Fixture, run: &RunId, task: &TaskId) -> Self {
@@ -16,10 +16,9 @@ impl C4Mcp {
             },
         };
         let host = host.owner.upgrade().unwrap();
-        let owner = host.lock().unwrap();
-        let server = owner
-            .start_task_server(&owner.run_producer(run).unwrap(), run, task)
-            .unwrap();
+        let mut owner = host.lock().unwrap();
+        let producer = owner.run_producer(run).unwrap();
+        let server = owner.start_task_server(&producer, run, task).unwrap();
         drop(owner);
         let bootstrap = mcp_credentials(server.endpoint()).unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.endpoint().to_owned())
@@ -43,7 +42,7 @@ impl C4Mcp {
         Self {
             runtime,
             client,
-            _server: server,
+            server,
         }
     }
     #[allow(
