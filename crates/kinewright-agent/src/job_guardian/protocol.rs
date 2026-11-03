@@ -199,6 +199,15 @@ impl Program {
                         | "TMPDIR"
                         | "CODEX_HOME"
                         | "XDG_RUNTIME_DIR"
+                        // S4b C6: Claude Code's fixed isolation switches.
+                        | "CLAUDE_CONFIG_DIR"
+                        | "ENABLE_TOOL_SEARCH"
+                        | "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+                        | "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+                        | "CLAUDE_CODE_DISABLE_CLAUDE_MDS"
+                        | "DISABLE_AUTOUPDATER"
+                        | "DISABLE_TELEMETRY"
+                        | "DISABLE_ERROR_REPORTING"
                 ) || value.contains('\0')
             })
             || self

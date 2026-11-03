@@ -144,6 +144,22 @@ impl InvocationOwner for HostInvocationOwner {
         ordinal: u64,
         eof: bool,
     ) -> io::Result<()> {
+        self.raw_as(
+            native_launcher::StreamDialect::Codex,
+            identity,
+            raw,
+            ordinal,
+            eof,
+        )
+    }
+    fn raw_as(
+        &self,
+        dialect: native_launcher::StreamDialect,
+        identity: &ExecutionIdentity,
+        raw: &serde_json::Value,
+        ordinal: u64,
+        eof: bool,
+    ) -> io::Result<()> {
         #[cfg(any(test, feature = "test-util"))]
         if let Some(witness) = &self.raw_witness {
             witness(raw_event_type(raw, eof));
@@ -154,7 +170,7 @@ impl InvocationOwner for HostInvocationOwner {
             .ok_or_else(|| transport("host owner lost"))?;
         host.lock()
             .map_err(|_| transport("host owner poisoned"))?
-            .ingest_native_raw(&self.producer, identity, raw, ordinal, eof)
+            .ingest_native_raw_as(dialect, &self.producer, identity, raw, ordinal, eof)
             .map_err(transport)
     }
     fn completed(
@@ -617,7 +633,8 @@ impl HostCommandOwner {
                 .read_evidence(&next.payload)?
                 .to_vec()
         };
-        let payload = if profile.specification().provider() == "codex" {
+        // S4b C6: Claude takes the same provider-neutral task prompt as Codex.
+        let payload = if matches!(profile.specification().provider(), "codex" | "claude") {
             self.codex_prompt(task, &payload)?
         } else {
             payload

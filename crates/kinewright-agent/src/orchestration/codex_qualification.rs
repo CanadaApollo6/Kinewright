@@ -5,51 +5,12 @@ use crate::orchestration::adapters::{
     EffectiveAuthEvidence, EffectiveLaunchContext, ExecutableIdentity, RuntimeQualification,
     SandboxPolicy, codex_candidate,
 };
-use std::{
-    fs,
-    io::{self, Read},
-    os::unix::fs::MetadataExt,
-};
+use std::io;
 
 pub(crate) struct InstalledCodexChecks;
 
 pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
-    let path =
-        crate::drivers::find_on_path("codex").ok_or_else(|| io::Error::other("Install Codex"))?;
-    let mut path = fs::canonicalize(path)?;
-    if path.file_name().is_some_and(|name| name == "mise") {
-        let output = std::process::Command::new(&path)
-            .args(["which", "codex"])
-            .output()?;
-        if !output.status.success() || output.stdout.len() > 4096 {
-            return Err(io::Error::other("Check again: Codex resolution failed"));
-        }
-        path = fs::canonicalize(
-            String::from_utf8(output.stdout)
-                .map_err(io::Error::other)?
-                .trim(),
-        )?;
-    }
-    let mut file = fs::File::open(&path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
-        return Err(io::Error::other(
-            "Check again: Codex executable size refused",
-        ));
-    }
-    // Measured whole while its size and mtime hold still; the launch seals
-    // the bytes it measures again into a private image.
-    kinewright_media::sha256_reader(&mut file.by_ref().take(512 * 1024 * 1024 + 1))?;
-    let after = file.metadata()?;
-    if metadata.len() != after.len() || metadata.modified()? != after.modified()? {
-        return Err(io::Error::other(
-            "Check again: Codex executable changed while it was checked",
-        ));
-    }
-    Ok(ExecutableIdentity {
-        path,
-        file_identity: [metadata.dev(), metadata.ino()],
-    })
+    crate::native_runtime::installed_executable("codex", "Codex")
 }
 
 fn digest(value: &impl serde::Serialize) -> [u8; 32] {

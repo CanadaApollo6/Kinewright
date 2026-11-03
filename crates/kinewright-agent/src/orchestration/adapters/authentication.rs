@@ -34,7 +34,8 @@ pub struct ProviderAuthContract {
     pub refresh: CredentialRefreshContract,
 }
 
-const REFRESH: CredentialRefreshContract = CredentialRefreshContract {
+/// The protocol fixtures' store: locks, sibling temp files and atomic replace.
+pub(crate) const REFRESH: CredentialRefreshContract = CredentialRefreshContract {
     operations: &[
         CredentialStoreOperation::ReadCredentials,
         CredentialStoreOperation::ExclusiveStoreLocks,
@@ -55,10 +56,17 @@ pub const CODEX_AUTH_CONTRACT: ProviderAuthContract = ProviderAuthContract {
         ],
     },
 };
+/// C6: Claude never refreshes inside the sandbox. The host writes a private
+/// per-attempt store holding only the subscription sign-in, without its
+/// refresh token, so no refresh can rotate the person's own sign-in and no
+/// write can reach their store. The provider may rewrite its private copy;
+/// nothing reads it back.
 pub const CLAUDE_AUTH_CONTRACT: ProviderAuthContract = ProviderAuthContract {
     provider: "claude",
     proof: SubscriptionProof::ClaudeSubscriptionBillingAndPrecedence,
-    refresh: REFRESH,
+    refresh: CredentialRefreshContract {
+        operations: &[CredentialStoreOperation::ReadCredentials],
+    },
 };
 
 /// Exact sandbox allowlist required by one qualified provider/version/OS.
@@ -94,7 +102,8 @@ pub struct EffectiveLaunchContext {
 }
 
 /// Both observations use the same effective context. Codex rechecks in-place saves;
-/// Claude still requires its atomic-refresh qualification. No refresh is inferred from two reads.
+/// Claude refreshes only a private copy that holds no refresh token, so nothing it
+/// writes reaches the person's store. No refresh is inferred from two reads.
 /// A loggedIn flag or ambient login-status text cannot populate subscription proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveAuthEvidence {
@@ -142,7 +151,9 @@ impl EffectiveAuthEvidence {
             || scope.credential_files.is_empty()
             || scope.credential_files.len() > 32
             || scope.lock_files.len() > 32
-            || (scope.temporary_file_prefixes.is_empty() && scope.single_file.is_none())
+            || (scope.temporary_file_prefixes.is_empty()
+                && scope.single_file.is_none()
+                && contract.proof != SubscriptionProof::ClaudeSubscriptionBillingAndPrecedence)
             || scope.temporary_file_prefixes.len() > 32
             || !scope
                 .credential_files
@@ -158,6 +169,11 @@ impl EffectiveAuthEvidence {
                         .single_file
                         .as_ref()
                         .is_some_and(|file| file.source.is_absolute() && file.identity != [0, 0])))
+            || (contract.proof == SubscriptionProof::ClaudeSubscriptionBillingAndPrecedence
+                && (scope.credential_files != [PathBuf::from(".credentials.json")]
+                    || !scope.lock_files.is_empty()
+                    || !scope.temporary_file_prefixes.is_empty()
+                    || scope.single_file.is_some()))
             || scope.refresh != contract.refresh
             || self.observed_store != *scope
         {
@@ -215,6 +231,11 @@ mod tests {
             evidence.contract = contract;
             let mut context = context;
             context.credential_store.refresh = contract.refresh;
+            if contract.proof == SubscriptionProof::ClaudeSubscriptionBillingAndPrecedence {
+                context.credential_store.credential_files = vec![".credentials.json".into()];
+                context.credential_store.lock_files.clear();
+                context.credential_store.temporary_file_prefixes.clear();
+            }
             if contract.proof == SubscriptionProof::CodexSubscriptionLoginMethod {
                 context.credential_store.credential_files = vec!["auth.json".into()];
                 context.credential_store.lock_files.clear();
@@ -257,6 +278,35 @@ mod tests {
                 changed.validate(contract, &context, &executable),
                 Err(CertificationRefusal::EffectiveAuthentication)
             );
+            if contract.proof == SubscriptionProof::ClaudeSubscriptionBillingAndPrecedence {
+                // C6: no lock, temporary file, mounted store or write
+                // operation is ever allowed for Claude.
+                for field in 0..4 {
+                    let mut changed = context.clone();
+                    let scope = &mut changed.credential_store;
+                    match field {
+                        0 => scope.lock_files.push(".credentials.lock".into()),
+                        1 => scope
+                            .temporary_file_prefixes
+                            .push(".credentials.tmp-".into()),
+                        2 => {
+                            scope.single_file = Some(CredentialFile {
+                                source: std::env::current_dir().unwrap().join("person.json"),
+                                identity: [1, 2],
+                            });
+                        }
+                        _ => scope.refresh = REFRESH,
+                    }
+                    let mut forged = evidence.clone();
+                    forged.context = changed.clone();
+                    forged.observed_store = changed.credential_store.clone();
+                    assert_eq!(
+                        forged.validate(contract, &changed, &executable),
+                        Err(CertificationRefusal::EffectiveAuthentication),
+                        "C6_CLAUDE_STORE_SHAPE {field}"
+                    );
+                }
+            }
             changed = evidence.clone();
             changed.at_recheck = Some(AuthenticationMode::ApiKey);
             assert_eq!(

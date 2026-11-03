@@ -114,38 +114,52 @@ fn parse_claude_result(value: &Value, events: &mut Vec<AgentEvent>) {
     {
         events.push(AgentEvent::Text(format!("Claude error: {result}")));
     }
+    if let Some(cost) = claude_display_cost(value) {
+        events.push(cost);
+    }
+    events.push(AgentEvent::Done);
+}
+
+/// The legacy driver's display-only Cost. C6: values come from exactly one
+/// source, the top-level `usage` when it has any token field, else the
+/// per-model `modelUsage` totals; the two are never mixed. When input or
+/// output is unknown no Cost is shown rather than a zero. The native reader
+/// drops this event; spending never reads it. TE1.1 replaces it with the
+/// certified Claude `modelUsage` adapter.
+fn claude_display_cost(value: &Value) -> Option<AgentEvent> {
+    const FIELDS: [(&str, &str); 5] = [
+        ("input_tokens", "inputTokens"),
+        ("cache_read_input_tokens", "cacheReadInputTokens"),
+        ("cache_creation_input_tokens", "cacheCreationInputTokens"),
+        ("output_tokens", "outputTokens"),
+        ("reasoning_output_tokens", "reasoningOutputTokens"),
+    ];
     let usage = value.get("usage").unwrap_or(&Value::Null);
-    let direct_input_tokens = token_value(usage, "input_tokens", "inputTokens")
-        .or_else(|| model_usage_total(value, "inputTokens"))
-        .unwrap_or(0);
-    let cached_input_tokens = token_value(usage, "cache_read_input_tokens", "cacheReadInputTokens")
-        .or_else(|| model_usage_total(value, "cacheReadInputTokens"));
-    let cache_creation_input_tokens = token_value(
-        usage,
-        "cache_creation_input_tokens",
-        "cacheCreationInputTokens",
-    )
-    .or_else(|| model_usage_total(value, "cacheCreationInputTokens"));
-    let input_tokens = direct_input_tokens
-        .saturating_add(cached_input_tokens.unwrap_or(0))
-        .saturating_add(cache_creation_input_tokens.unwrap_or(0));
-    let output_tokens = token_value(usage, "output_tokens", "outputTokens")
-        .or_else(|| model_usage_total(value, "outputTokens"))
-        .unwrap_or(0);
-    events.push(AgentEvent::Cost {
-        input_tokens,
+    let direct = FIELDS
+        .iter()
+        .any(|(snake, camel)| token_value(usage, snake, camel).is_some());
+    let read = |index: usize| {
+        let (snake, camel) = FIELDS[index];
+        if direct {
+            token_value(usage, snake, camel)
+        } else {
+            model_usage_total(value, camel)
+        }
+    };
+    let direct_input_tokens = read(0)?;
+    let output_tokens = read(3)?;
+    let cached_input_tokens = read(1);
+    let cache_creation_input_tokens = read(2);
+    Some(AgentEvent::Cost {
+        input_tokens: direct_input_tokens
+            .saturating_add(cached_input_tokens.unwrap_or(0))
+            .saturating_add(cache_creation_input_tokens.unwrap_or(0)),
         cached_input_tokens,
         cache_creation_input_tokens,
         output_tokens,
-        reasoning_output_tokens: token_value(
-            usage,
-            "reasoning_output_tokens",
-            "reasoningOutputTokens",
-        )
-        .or_else(|| model_usage_total(value, "reasoningOutputTokens")),
+        reasoning_output_tokens: read(4),
         cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
-    });
-    events.push(AgentEvent::Done);
+    })
 }
 
 fn model_usage_total(value: &Value, key: &str) -> Option<u64> {
@@ -655,6 +669,47 @@ mod tests {
                 reasoning_output_tokens: None,
                 cost_usd: Some(0.01),
             }
+        );
+    }
+
+    #[test]
+    fn s4b_c6_claude_display_cost_never_mixes_sources_or_zero_fills() {
+        let cost = |line: &str| {
+            ClaudeProtocol::default()
+                .parse_line(line)
+                .unwrap()
+                .into_iter()
+                .find(|event| matches!(event, AgentEvent::Cost { .. }))
+        };
+        // Top-level usage wins whole; modelUsage never fills its gaps.
+        assert_eq!(
+            cost(
+                r#"{"type":"result","usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"m":{"inputTokens":9,"cacheReadInputTokens":70,"outputTokens":9}}}"#
+            ),
+            Some(AgentEvent::Cost {
+                input_tokens: 5,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                output_tokens: 2,
+                reasoning_output_tokens: None,
+                cost_usd: None,
+            }),
+            "C6_NO_MIXED_USAGE_SOURCES"
+        );
+        // Unknown input or output shows no Cost instead of a zero.
+        for line in [
+            r#"{"type":"result","is_error":false}"#,
+            r#"{"type":"result","usage":{"output_tokens":2}}"#,
+            r#"{"type":"result","modelUsage":{"m":{"inputTokens":3}}}"#,
+        ] {
+            assert_eq!(cost(line), None, "C6_NO_ZERO_FILLED_COST {line}");
+        }
+        // Done still ends the legacy turn either way.
+        assert_eq!(
+            ClaudeProtocol::default()
+                .parse_line(r#"{"type":"result","is_error":false}"#)
+                .unwrap(),
+            vec![AgentEvent::Done]
         );
     }
 

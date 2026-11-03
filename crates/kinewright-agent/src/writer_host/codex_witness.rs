@@ -422,7 +422,11 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         client,
         owner_arc,
         run,
-    } = start_director(witness, "C5 disposable live");
+    } = start_director(
+        witness,
+        "C5 disposable live",
+        crate::orchestration::adapters::codex_candidate(),
+    );
     let deadline = Instant::now() + Duration::from_mins(15);
     let mut failure = false;
     let final_state = loop {
@@ -748,7 +752,11 @@ struct DirectorRun {
     clippy::too_many_lines,
     reason = "the disposable project, publication, note and ReviseCut stay in product order"
 )]
-fn start_director(witness: Arc<studio_runtime::RuntimeWitness>, project: &str) -> DirectorRun {
+fn start_director(
+    witness: Arc<studio_runtime::RuntimeWitness>,
+    project: &str,
+    candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
+) -> DirectorRun {
     let temp = kinewright_media::test_support::TempDirectory::new_in(&std::env::temp_dir(), "l5");
     let path = temp.path("project.kinewright");
     let mut document = Document::default();
@@ -806,7 +814,9 @@ fn start_director(witness: Arc<studio_runtime::RuntimeWitness>, project: &str) -
         studio_runtime::RuntimePorts {
             witness: Some(witness),
             stop_gate: Some(stop_gate.clone()),
-            qualification: true,
+            qualification: Some(candidate),
+            checks: candidate_checks(candidate),
+            ceiling: Some(candidate.default_token_ceiling()),
             guardian: guardian(),
             fixture_claim: Some(claim.clone()),
             ..Default::default()
@@ -935,6 +945,20 @@ fn start_director(witness: Arc<studio_runtime::RuntimeWitness>, project: &str) -
     }
 }
 
+/// The installed-provider probes for one qualification candidate.
+fn candidate_checks(
+    candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
+) -> Arc<dyn crate::orchestration::adapters::ConnectorRuntimeChecks + Send + Sync> {
+    if std::ptr::eq(
+        candidate,
+        crate::orchestration::adapters::claude_candidate(),
+    ) {
+        Arc::new(crate::claude_qualification::InstalledClaudeChecks)
+    } else {
+        Arc::new(crate::codex_qualification::InstalledCodexChecks)
+    }
+}
+
 /// The person's Stop, through the same scoped orchestration dispatch.
 fn stop_director(
     client: &HostClient,
@@ -1057,7 +1081,11 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
         client,
         owner_arc,
         run,
-    } = start_director(witness, "C5 dry launch");
+    } = start_director(
+        witness,
+        "C5 dry launch",
+        crate::orchestration::adapters::codex_candidate(),
+    );
     let launched = Instant::now();
     // Startup must show progress before the product's own first-progress
     // deadline; a little slack lets that deadline's refusal be read.

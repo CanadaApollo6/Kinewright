@@ -139,7 +139,9 @@ impl ConnectorSpecification {
             .iter()
             .any(|spec| std::ptr::eq(*spec, self));
         #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-        let known = known || std::ptr::eq(self, codex_candidate());
+        let known = known
+            || std::ptr::eq(self, codex_candidate())
+            || std::ptr::eq(self, claude_candidate());
         known
     }
 
@@ -242,6 +244,7 @@ fn execution_specifications() -> Vec<&'static ConnectorSpecification> {
     let specifications: Vec<_> = specifications
         .into_iter()
         .chain(fixture_connectors())
+        .chain([&CLAUDE_FIXTURE_SPECIFICATION])
         .collect();
     specifications
 }
@@ -628,7 +631,32 @@ static FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
     auth_contract: ProviderAuthContract {
         provider: "scripted",
         proof: super::SubscriptionProof::Fixture,
-        refresh: super::CLAUDE_AUTH_CONTRACT.refresh,
+        refresh: super::authentication::REFRESH,
+    },
+};
+
+/// C6: the protocol fixture child speaking Claude's `stream-json` dialect,
+/// under the same guardian, sealed image and sandbox as `scripted`.
+#[cfg(any(test, feature = "test-util"))]
+static CLAUDE_FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
+    provider: "scripted-claude",
+    minimum_version: FIXTURE_SPECIFICATION.minimum_version,
+    session: SessionPolicy {
+        model: "fixture",
+        options: &[],
+        effort: None,
+        service_tier: None,
+        max_turns: 1,
+        tools: FIXTURE_SPECIFICATION.session.tools,
+    },
+    mcp: McpPolicy::HostEndpointOnly,
+    default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
+    sandbox: SandboxPolicy::Fixture,
+    authentication: AuthenticationMode::Subscription,
+    auth_contract: ProviderAuthContract {
+        provider: "scripted",
+        proof: super::SubscriptionProof::Fixture,
+        refresh: super::authentication::REFRESH,
     },
 };
 
@@ -637,13 +665,45 @@ pub(crate) fn codex_candidate() -> &'static ConnectorSpecification {
     &CODEX_CANDIDATE
 }
 
+/// Binds an unregistered candidate for its own end-to-end tests only.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-pub(crate) fn certify_codex_candidate(
+pub(crate) fn certify_candidate(
+    candidate: &'static ConnectorSpecification,
     binding: AttemptBinding,
     checks: &dyn ConnectorRuntimeChecks,
 ) -> Result<CertifiedConnectorProfile, CertificationRefusal> {
-    codex_candidate().bind(binding, checks)
+    if !std::ptr::eq(candidate, codex_candidate()) && !std::ptr::eq(candidate, claude_candidate()) {
+        return Err(CertificationRefusal::UnqualifiedSpecification);
+    }
+    candidate.bind(binding, checks)
 }
+
+/// C6: the Claude Code candidate. It is not in [`available_connectors`]
+/// yet: it binds only in test and harness builds, for the unpaid dry launch
+/// and a lead-granted live run. Nothing advertises or registers it.
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+pub(crate) fn claude_candidate() -> &'static ConnectorSpecification {
+    &CLAUDE_CANDIDATE
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+static CLAUDE_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
+    provider: "claude",
+    minimum_version: CliVersion(2, 1, 316),
+    session: SessionPolicy {
+        model: "claude-opus-5-5",
+        options: &[("effort", "high")],
+        effort: Some("high"),
+        service_tier: None,
+        max_turns: 1,
+        tools: CODEX_CANDIDATE.session.tools,
+    },
+    mcp: McpPolicy::HostEndpointOnly,
+    default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
+    sandbox: SandboxPolicy::LinuxFilesystemAndIpc,
+    authentication: AuthenticationMode::Subscription,
+    auth_contract: super::CLAUDE_AUTH_CONTRACT,
+};
 
 #[cfg(target_os = "linux")]
 static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {

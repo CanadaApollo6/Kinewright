@@ -6,6 +6,51 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The installed CLI named `command` on PATH, through a mise shim when there
+/// is one. It is measured whole while its size and mtime hold still; the
+/// launch seals the bytes it measures again into a private image. No exact
+/// build is required: the version floor and the fail-closed stream readers
+/// hold a newer CLI to the same contract.
+pub(crate) fn installed_executable(command: &str, product: &str) -> io::Result<ExecutableIdentity> {
+    use std::io::Read;
+    let path = crate::drivers::find_on_path(command)
+        .ok_or_else(|| io::Error::other(format!("Install {product}")))?;
+    let mut path = std::fs::canonicalize(path)?;
+    if path.file_name().is_some_and(|name| name == "mise") {
+        let output = std::process::Command::new(&path)
+            .args(["which", command])
+            .output()?;
+        if !output.status.success() || output.stdout.len() > 4096 {
+            return Err(io::Error::other(format!(
+                "Check again: {product} resolution failed"
+            )));
+        }
+        path = std::fs::canonicalize(
+            String::from_utf8(output.stdout)
+                .map_err(io::Error::other)?
+                .trim(),
+        )?;
+    }
+    let mut file = std::fs::File::open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
+        return Err(io::Error::other(format!(
+            "Check again: {product} executable size refused"
+        )));
+    }
+    kinewright_media::sha256_reader(&mut file.by_ref().take(512 * 1024 * 1024 + 1))?;
+    let after = file.metadata()?;
+    if metadata.len() != after.len() || metadata.modified()? != after.modified()? {
+        return Err(io::Error::other(format!(
+            "Check again: {product} executable changed while it was checked"
+        )));
+    }
+    Ok(ExecutableIdentity {
+        path,
+        file_identity: [metadata.dev(), metadata.ino()],
+    })
+}
+
 pub(crate) fn runtime_tree(executable: &ExecutableIdentity) -> io::Result<Option<PathBuf>> {
     let root = crate::codex_credentials::source_path()?;
     runtime_tree_for(

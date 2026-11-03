@@ -13,6 +13,13 @@ mod codex_credentials;
 #[cfg(target_os = "linux")]
 #[path = "orchestration/codex_qualification.rs"]
 mod codex_qualification;
+// S4b C6: the unregistered Claude candidate binds only in test and harness builds.
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+#[path = "orchestration/claude_credentials.rs"]
+mod claude_credentials;
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+#[path = "orchestration/claude_qualification.rs"]
+mod claude_qualification;
 #[cfg(target_os = "linux")]
 #[path = "orchestration/native_launcher.rs"]
 pub(crate) mod native_launcher;
