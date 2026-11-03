@@ -646,9 +646,9 @@ fn provider_card(
     theme::paint_raised_lighting(ui.painter(), card.response.rect, radius::px(radius::MD));
 }
 
-/// Only these two release-qualified providers have local, non-inference probes.
+/// Only these two providers have local, non-inference readiness probes.
 fn director_harness(selection: &ProviderSelectionRecord) -> Option<AgentHarnessChoice> {
-    let provider = kinewright_agent::orchestration::adapters::certified_connectors()
+    let provider = kinewright_agent::orchestration::adapters::available_connectors()
         .iter()
         .find(|spec| spec.selection() == *selection)?
         .provider();

@@ -388,7 +388,11 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
             serde_json::from_slice(&fs::read(path).expect("C5 prelive source manifest")).unwrap();
         evidence["source_manifest"] = source["sha256"].clone();
         evidence["source_head"] = source["head"].clone();
-        evidence["cli_sha256"] = serde_json::json!(crate::codex_qualification::CODEX_BINARY_SHA256);
+        evidence["cli_sha256"] = serde_json::json!(
+            crate::codex_qualification::executable()
+                .ok()
+                .and_then(|executable| kinewright_media::sha256_file(&executable.path).ok())
+        );
         let network = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/s4b-c5c/network-contained.json");
         evidence["network_report"] = serde_json::from_slice(&fs::read(network).unwrap()).unwrap();

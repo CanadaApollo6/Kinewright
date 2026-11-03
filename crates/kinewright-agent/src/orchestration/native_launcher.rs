@@ -422,11 +422,8 @@ pub(crate) fn recipe(
     }
     let result = Program {
         image: Some(crate::job_guardian::protocol::ExecutableImage {
-            digest: if specification.provider() == "codex" {
-                crate::codex_qualification::CODEX_BINARY_SHA256.into()
-            } else {
-                kinewright_media::sha256_file(&runtime.executable.path).map_err(io::Error::other)?
-            },
+            digest: kinewright_media::sha256_file(&runtime.executable.path)
+                .map_err(io::Error::other)?,
             source: None,
         }),
         credential_root: scope

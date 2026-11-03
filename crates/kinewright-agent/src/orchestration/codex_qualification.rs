@@ -1,6 +1,6 @@
-//! Local probes for one candidate release. Registry publication follows the live gate.
+//! Local probes for the installed Codex CLI, run at every native admission.
 use crate::orchestration::adapters::{
-    AttemptBinding, AuthenticationMode, CODEX_AUTH_CONTRACT, CertificationRefusal, CliVersion,
+    AttemptBinding, AuthenticationMode, CODEX_AUTH_CONTRACT, CertificationRefusal,
     ConnectorRuntimeChecks, ConnectorSpecification, CredentialFile, CredentialStoreScope,
     EffectiveAuthEvidence, EffectiveLaunchContext, ExecutableIdentity, RuntimeQualification,
     SandboxPolicy, codex_candidate,
@@ -11,8 +11,6 @@ use std::{
     os::unix::fs::MetadataExt,
 };
 
-pub(crate) const CODEX_BINARY_SHA256: &str =
-    "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8";
 pub(crate) struct InstalledCodexChecks;
 
 pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
@@ -39,14 +37,13 @@ pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
             "Check again: Codex executable size refused",
         ));
     }
-    let hash = kinewright_media::sha256_reader(&mut file.by_ref().take(512 * 1024 * 1024 + 1))?;
+    // Measured whole while its size and mtime hold still; the launch seals
+    // the bytes it measures again into a private image.
+    kinewright_media::sha256_reader(&mut file.by_ref().take(512 * 1024 * 1024 + 1))?;
     let after = file.metadata()?;
-    if hash != CODEX_BINARY_SHA256
-        || metadata.len() != after.len()
-        || metadata.modified()? != after.modified()?
-    {
+    if metadata.len() != after.len() || metadata.modified()? != after.modified()? {
         return Err(io::Error::other(
-            "Check again: Codex executable is not the qualified release",
+            "Check again: Codex executable changed while it was checked",
         ));
     }
     Ok(ExecutableIdentity {
@@ -94,7 +91,7 @@ impl ConnectorRuntimeChecks for InstalledCodexChecks {
             },
         };
         let mut runtime = RuntimeQualification {
-            version: CliVersion(0, 166, 0),
+            version: crate::orchestration::adapters::installed_version(&executable, &[])?,
             authentication: EffectiveAuthEvidence {
                 contract: CODEX_AUTH_CONTRACT,
                 context: context.clone(),

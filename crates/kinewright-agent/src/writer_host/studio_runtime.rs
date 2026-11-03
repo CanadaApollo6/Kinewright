@@ -287,7 +287,7 @@ impl StudioRuntime {
                     continue;
                 }
                 let selection = &state.tasks[0].brief.provider;
-                let qualified = crate::orchestration::adapters::certified_connectors()
+                let qualified = crate::orchestration::adapters::available_connectors()
                     .iter()
                     .any(|spec| spec.selection() == *selection && spec.provider() != "scripted");
                 #[cfg(any(test, feature = "test-util"))]
@@ -773,11 +773,11 @@ impl ProfileFactory for RegisteredProfiles {
         #[cfg(not(any(test, feature = "test-util")))]
         let candidate = false;
         if !candidate
-            && !crate::orchestration::adapters::certified_connectors()
+            && !crate::orchestration::adapters::available_connectors()
                 .iter()
                 .any(|spec| spec.selection() == selection)
         {
-            return Err(io::Error::other("saved connector is not qualified"));
+            return Err(io::Error::other("saved connector is not available"));
         }
         let scratch = std::env::temp_dir().join(format!("k-{}", attempt.identity().nonce.as_str()));
         std::fs::create_dir(&scratch)?;
