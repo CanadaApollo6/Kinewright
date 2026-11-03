@@ -219,6 +219,28 @@ pub fn unit_tree_absent(unit: &str) -> io::Result<bool> {
         return Err(invalid("unbound recovery needs cgroup-v2"));
     }
     let device = file.metadata()?.dev();
+    if cgroup_tree_names(mount, device, unit, |_| {})? {
+        return Ok(false);
+    }
+    scan_process_cgroups(None, |text| {
+        text.lines().any(|line| {
+            line.strip_prefix("0::/").is_some_and(|path| {
+                path.split('/')
+                    .any(|part| part.strip_suffix(" (deleted)").unwrap_or(part) == unit)
+            })
+        })
+    })
+}
+
+/// Whether a directory named `unit` is anywhere under `mount`. `visit` runs
+/// before each directory is read; production passes a no-op.
+fn cgroup_tree_names(
+    mount: &Path,
+    device: u64,
+    unit: &str,
+    mut visit: impl FnMut(&Path),
+) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
     let mut pending = vec![mount.to_path_buf()];
     let mut visited = 0usize;
     while let Some(path) = pending.pop() {
@@ -226,7 +248,16 @@ pub fn unit_tree_absent(unit: &str) -> io::Result<bool> {
         if visited > 65_536 {
             return Err(invalid("cgroup observation capacity"));
         }
-        for entry in fs::read_dir(path)? {
+        visit(&path);
+        // A cgroup removed after it was queued had no child cgroup and no
+        // process left, so no unit lives below it; a process still in a
+        // deleted cgroup is found by the process scan.
+        let entries = match fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
             let entry = entry?;
             let metadata = match fs::symlink_metadata(entry.path()) {
                 Ok(m) => m,
@@ -238,7 +269,7 @@ pub fn unit_tree_absent(unit: &str) -> io::Result<bool> {
             }
             if metadata.is_dir() {
                 if entry.file_name() == unit {
-                    return Ok(false);
+                    return Ok(true);
                 }
                 pending.push(entry.path());
                 if pending.len() > 65_536 {
@@ -247,14 +278,7 @@ pub fn unit_tree_absent(unit: &str) -> io::Result<bool> {
             }
         }
     }
-    scan_process_cgroups(None, |text| {
-        text.lines().any(|line| {
-            line.strip_prefix("0::/").is_some_and(|path| {
-                path.split('/')
-                    .any(|part| part.strip_suffix(" (deleted)").unwrap_or(part) == unit)
-            })
-        })
-    })
+    Ok(false)
 }
 
 fn start_time(pid: u32) -> io::Result<u64> {
@@ -511,4 +535,31 @@ pub fn lifetime_alive() -> io::Result<bool> {
     Ok(!descriptors[0]
         .revents()
         .intersects(rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, os::unix::fs::MetadataExt};
+
+    /// A cgroup removed between being queued and being read (another unit's
+    /// teardown) is gone, not a failed observation.
+    #[test]
+    fn s4b_c6_unit_walk_passes_a_cgroup_removed_mid_walk() {
+        let root = std::env::temp_dir().join(format!("kinewright-walk-{}", std::process::id()));
+        let (a, b) = (root.join("a"), root.join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let device = fs::metadata(&root).unwrap().dev();
+        let mut removed = false;
+        let found = super::cgroup_tree_names(&root, device, "kinewright-job-x.service", |path| {
+            if path != root && !removed {
+                removed = true;
+                let other = if path == a { &b } else { &a };
+                fs::remove_dir(other).unwrap();
+            }
+        });
+        let _ = fs::remove_dir_all(&root);
+        assert!(removed);
+        assert!(!found.unwrap_or_else(|e| panic!("C6_WALK_REFUSED_A_REMOVED_CGROUP: {e}")));
+    }
 }

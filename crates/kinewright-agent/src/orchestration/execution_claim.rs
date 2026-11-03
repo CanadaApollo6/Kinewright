@@ -267,7 +267,19 @@ impl MachineClaim {
         let lock = options.open(root.join(lock_name))?;
         lock.try_lock()
             .map_err(|_| io::Error::other("studio_run_active"))?;
-        let mut attempts = Vec::new();
+        // Owned at once, so every refusal below also unlocks on drop.
+        let mut claim = Self {
+            lock,
+            root: root.into(),
+            run: RunClaim {
+                project: String::new(),
+                run: String::new(),
+                locator: None,
+            },
+            attempts: Vec::new(),
+            recovering: true,
+        };
+        let attempts = &mut claim.attempts;
         for entry in fs::read_dir(root)? {
             let path = entry?.path();
             if path
@@ -289,17 +301,7 @@ impl MachineClaim {
                 attempts.push(identity);
             }
         }
-        Ok(Self {
-            lock,
-            root: root.into(),
-            run: RunClaim {
-                project: String::new(),
-                run: String::new(),
-                locator: None,
-            },
-            attempts,
-            recovering: true,
-        })
+        Ok(claim)
     }
 
     /// # Errors
@@ -570,6 +572,18 @@ impl MachineClaim {
         Ok(())
     }
 }
+
+/// Unlock before the close. The lock belongs to the open file description,
+/// and a child that another thread is forking or spawning holds a copy of it
+/// until its `exec`. A bare close would leave the claim held through that
+/// window, so a release followed at once by an acquisition, on any thread,
+/// could refuse with `studio_run_active`. An explicit unlock releases it
+/// whatever copies exist, as the project lock file does.
+impl Drop for MachineClaim {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
+    }
+}
 #[allow(
     clippy::unnecessary_wraps,
     reason = "Windows can lack its OS-local state directory"
@@ -629,4 +643,25 @@ fn write_record(path: &Path, value: &impl Serialize) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::other("record parent"))?,
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::MachineClaim;
+
+    /// A copy of the lock's descriptor, as a child holds between its fork and
+    /// its `exec`, must not keep a dropped claim held.
+    #[test]
+    fn s4b_c6_dropped_claim_releases_past_a_descriptor_copy() {
+        let root =
+            std::env::temp_dir().join(format!("kinewright-claim-dup-{}", std::process::id()));
+        let claim = MachineClaim::acquire_fixture(&root, "a1", "b2").unwrap();
+        let copy = claim.lock.try_clone().unwrap();
+        drop(claim);
+        let recovered = MachineClaim::recover_fixture(&root);
+        drop(copy);
+        let recovered = recovered.unwrap_or_else(|error| panic!("C6_CLAIM_HELD_BY_COPY: {error}"));
+        recovered.finish().unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
