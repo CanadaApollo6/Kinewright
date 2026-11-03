@@ -1157,6 +1157,9 @@ pub(crate) const STREAM_ACCOUNTING_REFUSED: &str =
 pub(crate) const STREAM_NATIVE_TOOL_REFUSED: &str =
     "provider stream refused: a provider-native tool is not allowed";
 pub(crate) const STREAM_MALFORMED: &str = "provider stream refused: malformed provider event";
+/// An event type or subtype this build does not know, typically from a newer
+/// CLI. It is refused rather than skipped, so nothing unread passes.
+pub(crate) const STREAM_UNKNOWN_EVENT: &str = "provider stream refused: unknown provider event";
 pub(crate) const STREAM_USAGE_UNRESOLVED: &str =
     "provider stream refused: usage publication remains unresolved";
 /// C5 fix 11: the provider ended after a counted `turn.failed` that paused
@@ -1210,6 +1213,9 @@ pub(crate) fn read_provider_stream(
             let raw: serde_json::Value =
                 serde_json::from_str(&line).map_err(|_| STREAM_MALFORMED)?;
             record(&raw, ordinal, false).map_err(|_| STREAM_ACCOUNTING_REFUSED)?;
+            if !codex_event_known(&raw) {
+                return Err(STREAM_UNKNOWN_EVENT);
+            }
             if !native_item_allowed(&raw) {
                 return Err(STREAM_NATIVE_TOOL_REFUSED);
             }
@@ -1269,6 +1275,26 @@ pub(crate) fn read_provider_stream(
     }
 }
 
+/// The top-level event types `codex exec --json` writes (its `ThreadEvent`,
+/// [rust-v0.166.0](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/exec/src/exec_events.rs)).
+/// A newer CLI is admitted by version floor, so an event type it adds is
+/// refused instead of passing unread.
+fn codex_event_known(raw: &serde_json::Value) -> bool {
+    matches!(
+        raw.get("type").and_then(serde_json::Value::as_str),
+        Some(
+            "thread.started"
+                | "turn.started"
+                | "turn.completed"
+                | "turn.failed"
+                | "item.started"
+                | "item.updated"
+                | "item.completed"
+                | "error"
+        )
+    )
+}
+
 fn native_item_allowed(raw: &serde_json::Value) -> bool {
     let Some(item) = raw.get("item") else {
         return true;
@@ -1315,6 +1341,39 @@ fn transport_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Riel 2026-11-02: no exact CLI pin. A newer CLI passes the version
+    /// floor, and an event type it adds is refused by the stream reader
+    /// instead of passing unread.
+    #[test]
+    fn s4b_newer_cli_passes_the_floor_and_its_unknown_event_is_refused() {
+        use crate::orchestration::adapters::{
+            CertificationRefusal, CliVersion, codex_candidate, test_runtime,
+        };
+        let spec = codex_candidate();
+        let mut check = test_runtime();
+        check.version = CliVersion(0, 200, 0);
+        assert_ne!(
+            spec.validate_runtime(&check),
+            Err(CertificationRefusal::UnqualifiedVersion),
+            "NEWER_CLI_PASSES_THE_FLOOR"
+        );
+        check.version = CliVersion(0, 165, 9);
+        assert_eq!(
+            spec.validate_runtime(&check),
+            Err(CertificationRefusal::UnqualifiedVersion),
+            "OLDER_CLI_REFUSED"
+        );
+        let (sender, _events) = crate::protocol::limits::event_channel();
+        let bytes = b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"thread.summarized\"}\n";
+        let read = read_provider_stream(&bytes[..], &sender, |_, _, _| Ok(()));
+        assert_eq!(
+            read.refusal,
+            Some(STREAM_UNKNOWN_EVENT),
+            "UNKNOWN_EVENT_REFUSED"
+        );
+        assert!(!read.completed);
+    }
+
     fn c5_fix4_reason(stderr: &[u8], record: &[u8]) -> String {
         let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
         let summary = crate::provider_stderr::stderr_summary(reader, "fix4-test").unwrap();

@@ -166,7 +166,10 @@ impl ConnectorSpecification {
         })
     }
 
-    fn validate_runtime(&self, runtime: &RuntimeQualification) -> Result<(), CertificationRefusal> {
+    pub(crate) fn validate_runtime(
+        &self,
+        runtime: &RuntimeQualification,
+    ) -> Result<(), CertificationRefusal> {
         if runtime.version < self.minimum_version {
             return Err(CertificationRefusal::UnqualifiedVersion);
         }
@@ -188,6 +191,25 @@ impl ConnectorSpecification {
             return Err(CertificationRefusal::ModelUnavailable);
         }
         Ok(())
+    }
+}
+
+/// A fixture runtime for tests: a real executable path with fixture
+/// authentication and sandbox. Tests change one field to probe one check.
+#[cfg(test)]
+pub(crate) fn test_runtime() -> RuntimeQualification {
+    let executable = ExecutableIdentity {
+        path: std::env::current_exe().unwrap(),
+        file_identity: [1, 2],
+    };
+    let (launch_context, authentication) = super::authentication::fixture(&executable);
+    RuntimeQualification {
+        version: CliVersion(0, 147, 0),
+        authentication,
+        launch_context,
+        executable,
+        sandbox: Some(SandboxPolicy::Fixture),
+        model_available: true,
     }
 }
 
@@ -672,19 +694,7 @@ mod tests {
         }
     }
     fn runtime() -> RuntimeQualification {
-        let executable = ExecutableIdentity {
-            path: std::env::current_exe().unwrap(),
-            file_identity: [1, 2],
-        };
-        let (launch_context, authentication) = super::super::authentication::fixture(&executable);
-        RuntimeQualification {
-            version: CliVersion(0, 147, 0),
-            authentication,
-            launch_context,
-            executable,
-            sandbox: Some(SandboxPolicy::Fixture),
-            model_available: true,
-        }
+        test_runtime()
     }
     impl ConnectorRuntimeChecks for RuntimeQualification {
         fn probe(
