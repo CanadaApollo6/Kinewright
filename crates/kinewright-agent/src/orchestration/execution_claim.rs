@@ -568,6 +568,8 @@ impl MachineClaim {
             fs::remove_file(self.root.join("run.json"))?;
             sync_directory(&self.root)?;
         }
+        // The same unlock `Drop` makes, here so a failure is reported. Keep
+        // both: `Drop` covers every claim that is not finished.
         self.lock.unlock()?;
         Ok(())
     }
@@ -578,7 +580,8 @@ impl MachineClaim {
 /// until its `exec`. A bare close would leave the claim held through that
 /// window, so a release followed at once by an acquisition, on any thread,
 /// could refuse with `studio_run_active`. An explicit unlock releases it
-/// whatever copies exist, as the project lock file does.
+/// whatever copies exist, as the project lock file does. `finish()` unlocks
+/// first to report a failure; this one covers every other release.
 impl Drop for MachineClaim {
     fn drop(&mut self) {
         let _ = self.lock.unlock();
@@ -653,8 +656,10 @@ mod tests {
     /// its `exec`, must not keep a dropped claim held.
     #[test]
     fn s4b_c6_dropped_claim_releases_past_a_descriptor_copy() {
-        let root =
-            std::env::temp_dir().join(format!("kinewright-claim-dup-{}", std::process::id()));
+        // Unique per run and removed on drop, so a crashed run leaves no
+        // root that a later one could reuse.
+        let directory = kinewright_media::test_support::TempDirectory::new("claim-dup");
+        let root = directory.path("m");
         let claim = MachineClaim::acquire_fixture(&root, "a1", "b2").unwrap();
         let copy = claim.lock.try_clone().unwrap();
         drop(claim);
@@ -662,6 +667,5 @@ mod tests {
         drop(copy);
         let recovered = recovered.unwrap_or_else(|error| panic!("C6_CLAIM_HELD_BY_COPY: {error}"));
         recovered.finish().unwrap();
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }

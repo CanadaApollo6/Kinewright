@@ -539,13 +539,43 @@ pub fn lifetime_alive() -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::MetadataExt};
+    use std::{
+        fs,
+        os::unix::fs::MetadataExt,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    /// A temporary root unique to one test run, removed on drop.
+    struct Root(PathBuf);
+    impl Root {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            let path = std::env::temp_dir().join(format!(
+                "kinewright-{label}-{}-{nanos}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// A cgroup removed between being queued and being read (another unit's
     /// teardown) is gone, not a failed observation.
     #[test]
     fn s4b_c6_unit_walk_passes_a_cgroup_removed_mid_walk() {
-        let root = std::env::temp_dir().join(format!("kinewright-walk-{}", std::process::id()));
+        let directory = Root::new("walk");
+        let root = directory.0.clone();
         let (a, b) = (root.join("a"), root.join("b"));
         fs::create_dir_all(&a).unwrap();
         fs::create_dir_all(&b).unwrap();
@@ -558,7 +588,6 @@ mod tests {
                 fs::remove_dir(other).unwrap();
             }
         });
-        let _ = fs::remove_dir_all(&root);
         assert!(removed);
         assert!(!found.unwrap_or_else(|e| panic!("C6_WALK_REFUSED_A_REMOVED_CGROUP: {e}")));
     }
