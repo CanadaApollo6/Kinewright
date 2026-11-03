@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "case": 2,
+  "fixture": "talking-head.kinewright",
+  "oracle": "case-2-oracle.kinewright",
+  "operations": [
+    {
+      "DeleteClip": {
+        "clip": 5
+      }
+    },
+    {
+      "RippleDeleteClip": {
+        "clip": 2
+      }
+    }
+  ],
+  "required_reads": [
+    "dependency_closure"
+  ],
+  "preview_before_commit": false,
+  "reject_incomplete_child": false,
+  "unchanged_clips": [
+    9,
+    1,
+    4
+  ],
+  "notes": []
+}

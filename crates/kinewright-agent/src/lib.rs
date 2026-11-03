@@ -60,6 +60,7 @@ mod muse;
 pub mod orchestration;
 mod pacing;
 mod protocol;
+mod usage_observer;
 #[cfg(feature = "eval-harness")]
 #[doc(hidden)]
 pub use detection_probe::witness as detection_probe_witness;
@@ -107,7 +108,8 @@ pub use render::{
 };
 pub use runtime::{
     CapabilityDescriptor, CapabilityKind, EditPlanPreview, INVESTIGATOR_TOOL_NAMES, PreparedPlanId,
-    ToolSurfaceMetrics, compact_tool_names, is_destructive_operation,
+    ResultSize, ResultSizeMetrics, ToolSurfaceMetrics, compact_tool_names,
+    is_destructive_operation,
 };
 pub use schema::{capability_tool_names, operation_tool_name, operation_tools};
 pub use scripted::{

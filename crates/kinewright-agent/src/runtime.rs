@@ -71,6 +71,7 @@ pub struct CapabilityDescriptor {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ToolSurfaceMetrics {
+    pub manifest_sha256: [u8; 32],
     pub tool_count: usize,
     pub serialized_bytes: u64,
     pub input_schema_bytes: u64,
@@ -81,6 +82,13 @@ impl ToolSurfaceMetrics {
     #[must_use]
     pub fn measure(tools: &[Tool]) -> Self {
         Self {
+            manifest_sha256: {
+                let hash =
+                    kinewright_media::sha256_bytes(&serde_json::to_vec(tools).unwrap_or_default());
+                std::array::from_fn(|i| {
+                    u8::from_str_radix(&hash[2 * i..2 * i + 2], 16).unwrap_or_default()
+                })
+            },
             tool_count: tools.len(),
             serialized_bytes: tools
                 .iter()
@@ -486,6 +494,63 @@ pub(crate) enum PreparePlanError {
     UnsupportedOperation(String),
     #[error("edit plan is invalid: {0}")]
     InvalidPlan(BatchError),
+}
+
+/// Full serialized tool-result sizes. Provider request identities remain unobserved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ResultSizeMetrics {
+    pub requests: u64,
+    pub count: u64,
+    pub bytes: u64,
+    pub results: Vec<ResultSize>,
+    pub incomplete: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResultSize {
+    pub host_call: u64,
+    pub tool: &'static str,
+    pub bytes: u64,
+}
+impl ResultSizeMetrics {
+    pub(crate) fn begin(&mut self) {
+        self.requests = self.requests.saturating_add(1);
+    }
+    pub(crate) fn record(&mut self, tool: &'static str, bytes: Option<u64>) {
+        self.count = self.count.saturating_add(1);
+        if let Some(bytes) = bytes {
+            self.bytes = self.bytes.saturating_add(bytes);
+            if self.results.len() < kinewright_project::usage_measurement::DETAILS {
+                self.results.push(ResultSize {
+                    host_call: self.count,
+                    tool,
+                    bytes,
+                });
+            } else {
+                self.incomplete = true;
+            }
+        } else {
+            self.incomplete = true;
+        }
+    }
+}
+
+pub(crate) fn serialized_size(value: &impl Serialize) -> Option<u64> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| std::io::Error::other("size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.0)
 }
 
 #[cfg(test)]

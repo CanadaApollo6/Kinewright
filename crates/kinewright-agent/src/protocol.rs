@@ -9,6 +9,7 @@ use serde_json::Value;
 
 #[derive(Default)]
 pub(crate) struct ClaudeProtocol {
+    usage: crate::usage_observer::UsageObserver,
     tool_names: HashMap<String, String>,
 }
 
@@ -21,6 +22,16 @@ impl ClaudeProtocol {
             AgentError::Protocol(format!("invalid Claude stream JSON: {error}"))
         })?;
         let mut events = Vec::new();
+        if let Some(event) = self
+            .usage
+            .observe(
+                kinewright_project::usage_stream::Adapter::Claude21316V1,
+                &value,
+            )
+            .map_err(|_| AgentError::Protocol("raw_usage_refused".into()))?
+        {
+            events.push(event);
+        }
         match value.get("type").and_then(Value::as_str) {
             Some("assistant") => self.parse_assistant(&value, &mut events)?,
             Some("user") => self.parse_tool_results(&value, &mut events),
@@ -32,6 +43,9 @@ impl ClaudeProtocol {
                 )));
             }
             Some(_) | None => {}
+        }
+        for event in &mut events {
+            self.usage.project(event);
         }
         Ok(events)
     }
@@ -114,59 +128,34 @@ fn parse_claude_result(value: &Value, events: &mut Vec<AgentEvent>) {
     {
         events.push(AgentEvent::Text(format!("Claude error: {result}")));
     }
-    let usage = value.get("usage").unwrap_or(&Value::Null);
-    let direct_input_tokens = token_value(usage, "input_tokens", "inputTokens")
-        .or_else(|| model_usage_total(value, "inputTokens"))
-        .unwrap_or(0);
-    let cached_input_tokens = token_value(usage, "cache_read_input_tokens", "cacheReadInputTokens")
-        .or_else(|| model_usage_total(value, "cacheReadInputTokens"));
-    let cache_creation_input_tokens = token_value(
-        usage,
-        "cache_creation_input_tokens",
-        "cacheCreationInputTokens",
-    )
-    .or_else(|| model_usage_total(value, "cacheCreationInputTokens"));
-    let input_tokens = direct_input_tokens
-        .saturating_add(cached_input_tokens.unwrap_or(0))
-        .saturating_add(cache_creation_input_tokens.unwrap_or(0));
-    let output_tokens = token_value(usage, "output_tokens", "outputTokens")
-        .or_else(|| model_usage_total(value, "outputTokens"))
-        .unwrap_or(0);
     events.push(AgentEvent::Cost {
-        input_tokens,
-        cached_input_tokens,
-        cache_creation_input_tokens,
-        output_tokens,
-        reasoning_output_tokens: token_value(
-            usage,
-            "reasoning_output_tokens",
-            "reasoningOutputTokens",
-        )
-        .or_else(|| model_usage_total(value, "reasoningOutputTokens")),
+        input_tokens: 0,
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        output_tokens: 0,
+        reasoning_output_tokens: None,
         cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
     });
     events.push(AgentEvent::Done);
 }
 
-fn model_usage_total(value: &Value, key: &str) -> Option<u64> {
-    let usage = value
-        .get("modelUsage")
-        .or_else(|| value.get("model_usage"))?
-        .as_object()?;
-    let values = usage
-        .values()
-        .filter_map(|model| model.get(key).and_then(Value::as_u64))
-        .collect::<Vec<_>>();
-    (!values.is_empty()).then(|| values.into_iter().sum())
-}
-
 #[derive(Default)]
 pub(crate) struct CodexProtocol {
+    display_only: bool,
+    usage: crate::usage_observer::UsageObserver,
     tool_names: HashMap<String, String>,
     announced: HashSet<String>,
 }
 
 impl CodexProtocol {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn native_display() -> Self {
+        Self {
+            display_only: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
         if line.len() > limits::FRAME_BYTES {
             return Err(AgentError::Protocol("ingress: frame_capacity".into()));
@@ -174,6 +163,17 @@ impl CodexProtocol {
         let value: Value = serde_json::from_str(line)
             .map_err(|error| AgentError::Protocol(format!("invalid Codex JSONL: {error}")))?;
         let mut events = Vec::new();
+        if !self.display_only
+            && let Some(event) = self
+                .usage
+                .observe(
+                    kinewright_project::usage_stream::Adapter::Codex01660V1,
+                    &value,
+                )
+                .map_err(|_| AgentError::Protocol("raw_usage_refused".into()))?
+        {
+            events.push(event);
+        }
         match value.get("type").and_then(Value::as_str) {
             Some("item.started" | "item.completed") => self.parse_item(&value, &mut events)?,
             Some("turn.completed") => {
@@ -220,6 +220,9 @@ impl CodexProtocol {
                 events.push(AgentEvent::Done);
             }
             _ => {}
+        }
+        for event in &mut events {
+            self.usage.project(event);
         }
         Ok(events)
     }
@@ -533,10 +536,10 @@ mod tests {
             result: "project fps=30/1".to_owned(),
         }));
         assert!(events.contains(&AgentEvent::Cost {
-            input_tokens: 120,
+            input_tokens: 0,
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
-            output_tokens: 34,
+            output_tokens: 0,
             reasoning_output_tokens: None,
             cost_usd: Some(0.0042),
         }));
@@ -646,7 +649,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            events[0],
+            events[1],
             AgentEvent::Cost {
                 input_tokens: 110,
                 cached_input_tokens: Some(80),

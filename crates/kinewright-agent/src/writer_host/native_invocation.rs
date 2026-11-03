@@ -588,9 +588,25 @@ impl HostCommandOwner {
                             RecordKind, SpecialistBaseRecord,
                         };
                         Ok(match reference.record_kind {
-                            RecordKind::RunIndex => serde_json::to_value(
-                                &*self.owner()?.store()?.read_run_record(reference)?,
-                            )?,
+                            RecordKind::RunIndex => {
+                                let mut record =
+                                    (*self.owner()?.store()?.read_run_record(reference)?).clone();
+                                // TE1 observer detail is report data, outside the frozen provider prompt.
+                                if let OrchestrationPayload::Accounting(accounting) =
+                                    &mut record.payload
+                                {
+                                    for task in &mut accounting.tasks {
+                                        task.measurements = None;
+                                        task.streams.clear();
+                                        task.usage
+                                            .retain(|s| !s.event.starts_with("turn.started:"));
+                                        for sample in &mut task.usage {
+                                            sample.snapshot = None;
+                                        }
+                                    }
+                                }
+                                serde_json::to_value(record)?
+                            }
                             RecordKind::SpecialistBase => serde_json::to_value(
                                 &*self
                                     .owner()?
@@ -617,6 +633,7 @@ impl HostCommandOwner {
                 .read_evidence(&next.payload)?
                 .to_vec()
         };
+        let wake_bytes = if wake { payload.len() as u64 } else { 0 };
         let payload = if profile.specification().provider() == "codex" {
             self.codex_prompt(task, &payload)?
         } else {
@@ -698,6 +715,37 @@ impl HostCommandOwner {
                 cli_version: format!("{}.{}.{}", version.0, version.1, version.2),
             })
             .map_err(refused)?;
+        // This launcher always constructs a new exec, without resume arguments.
+        let stream = identity.attempt.0.clone();
+        let measured = accounting.task_mut(&identity.task.0).map_err(refused)?;
+        measured
+            .bind_stream(kinewright_project::usage_stream::StreamBinding {
+                attempt: identity.attempt.0.clone(),
+                stream: stream.clone(),
+                adapter: kinewright_project::usage_stream::Adapter::Codex01660V1,
+                resumed: false,
+            })
+            .map_err(refused)?;
+        let surface = crate::server::te1_surface();
+        let role = serde_json::to_value(task.brief.role)?
+            .as_str()
+            .ok_or_else(|| refused("task role"))?
+            .to_owned();
+        let prefix_identity = kinewright_media::sha256_bytes(CODEX_INSTRUCTIONS.as_bytes());
+        measured
+            .measurements
+            .get_or_insert_with(Default::default)
+            .sends
+            .push(kinewright_project::usage_measurement::Send {
+                attempt: identity.attempt.0.clone(),
+                role,
+                stream,
+                turn: 1,
+                prompt_bytes: payload.len() as u64,
+                wake_bytes,
+                prefix_identity,
+                surface,
+            });
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let issued = self.issue_metadata(index, None)?;
         let send = SendConsumption {

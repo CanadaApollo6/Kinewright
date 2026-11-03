@@ -99,6 +99,8 @@ pub enum UsageMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageSample {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<crate::usage_stream::Snapshot>,
     pub attempt: SessionId,
     pub turn: u64,
     pub event: String,
@@ -192,6 +194,10 @@ pub struct RepairCount {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskAccounting {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<crate::usage_stream::StreamBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurements: Option<crate::usage_measurement::Measurements>,
     pub task: SessionId,
     pub token_limit: Option<u64>,
     pub sends: Vec<SendConsumption>,
@@ -321,6 +327,14 @@ impl AccountingRecord {
             return Err(AccountingRefusal::Capacity);
         }
         for (index, task) in self.tasks.iter().enumerate() {
+            if task.streams.iter().any(|b| {
+                self.tasks[..index]
+                    .iter()
+                    .any(|t| t.streams.iter().any(|other| other.stream == b.stream))
+            }) {
+                return Err(AccountingRefusal::Scope);
+            }
+
             if self.tasks[..index].iter().any(|old| old.task == task.task) {
                 return Err(AccountingRefusal::Scope);
             }
@@ -370,6 +384,7 @@ impl AccountingRecord {
                 }
                 provider.validate_selection()?;
             }
+            task.validate_streams()?;
             for sample in &task.usage {
                 if sample.event.is_empty()
                     || sample.event.len() > 256
@@ -466,9 +481,21 @@ impl AccountingRecord {
                 || !new.sends.starts_with(&old.sends)
                 || !new.providers.starts_with(&old.providers)
                 || !new.usage.starts_with(&old.usage)
+                || !new.streams.starts_with(&old.streams)
                 || (old.pause.is_some() && new.pause != old.pause)
             {
                 return Err(AccountingRefusal::Scope);
+            }
+            if let Some(before) = &old.measurements {
+                let after = new.measurements.as_ref().ok_or(AccountingRefusal::Scope)?;
+                if !after.sends.starts_with(&before.sends)
+                    || !after.results.starts_with(&before.results)
+                    || after.result_count < before.result_count
+                    || after.result_bytes < before.result_bytes
+                    || (before.incomplete && !after.incomplete)
+                {
+                    return Err(AccountingRefusal::Scope);
+                }
             }
             for refusal in &old.refusals {
                 if !new.refusals.iter().any(|r| {
@@ -583,6 +610,8 @@ impl AccountingRecord {
             return Err(AccountingRefusal::Invalid);
         }
         self.tasks.push(TaskAccounting {
+            streams: vec![],
+            measurements: None,
             task,
             token_limit,
             sends: vec![],
@@ -609,26 +638,48 @@ impl AccountingRecord {
 }
 
 /// Replay the bounded identified samples. Missing categories remain unavailable.
+fn validate_watermarks(samples: &[UsageSample]) -> Result<(), AccountingRefusal> {
+    let mut watermarks = std::collections::BTreeMap::<_, crate::usage_stream::Snapshot>::new();
+    for sample in samples {
+        if let Some(snapshot) = &sample.snapshot {
+            let next = snapshot.advance_watermark(watermarks.get(&snapshot.stream))?;
+            watermarks.insert(snapshot.stream.clone(), next);
+        }
+    }
+    Ok(())
+}
+
+struct UsageWatermark {
+    values: [Option<u64>; 6],
+    covered: [bool; 6],
+    ordinal: u64,
+    finished: bool,
+    cache_included: bool,
+    reasoning_included: bool,
+}
+
 pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefusal> {
     use std::collections::{BTreeMap, BTreeSet};
-    struct Turn {
-        values: [Option<u64>; 6],
-        covered: [bool; 6],
-        ordinal: u64,
-        finished: bool,
-        cache_included: bool,
-        reasoning_included: bool,
-    }
     if samples.len() > USAGE_EVENTS {
         return Err(AccountingRefusal::Capacity);
     }
     let mut identities = BTreeSet::new();
     let mut turns = BTreeMap::new();
-    for sample in samples {
-        if !identities.insert((&sample.attempt, sample.turn, &sample.event)) {
+    validate_watermarks(samples)?;
+    for (position, sample) in samples.iter().enumerate() {
+        let key = sample
+            .snapshot
+            .as_ref()
+            .map_or((&sample.attempt, sample.turn), |s| (&s.stream, 0));
+        if !identities.insert((key, &sample.event)) {
             return Err(AccountingRefusal::Scope);
         }
-        let turn = turns.entry((&sample.attempt, sample.turn)).or_insert(Turn {
+        let ordinal = if sample.snapshot.is_some() {
+            position as u64 + 1
+        } else {
+            sample.ordinal
+        };
+        let turn = turns.entry(key).or_insert(UsageWatermark {
             values: [None; 6],
             covered: [true; 6],
             ordinal: 0,
@@ -636,7 +687,7 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
             cache_included: sample.input_includes_cache,
             reasoning_included: sample.output_includes_reasoning,
         });
-        if sample.ordinal <= turn.ordinal
+        if ordinal <= turn.ordinal
             || sample.input_includes_cache != turn.cache_included
             || sample.output_includes_reasoning != turn.reasoning_included
         {
@@ -658,7 +709,16 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
                 turn.covered[index] = false;
             }
         }
-        turn.ordinal = sample.ordinal;
+        if let Some(snapshot) = &sample.snapshot {
+            for index in 0..6 {
+                turn.covered[index] = !snapshot.models.is_empty()
+                    && snapshot
+                        .models
+                        .iter()
+                        .all(|m| m.values.values()[index].is_some());
+            }
+        }
+        turn.ordinal = ordinal;
         turn.finished = sample.complete;
     }
     let mut known = [None::<u64>; 6];
@@ -698,6 +758,54 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
 }
 
 impl TaskAccounting {
+    /// The owner proves freshness by constructing a launch without resume arguments.
+    /// A resumed attempt must bind an existing owned stream before sending.
+    pub fn bind_stream(
+        &mut self,
+        binding: crate::usage_stream::StreamBinding,
+    ) -> Result<(), AccountingRefusal> {
+        if self.streams.len() >= TASK_SENDS {
+            return Err(AccountingRefusal::Capacity);
+        }
+        if self.streams.iter().any(|b| b.attempt == binding.attempt)
+            || !self.providers.iter().any(|p| p.attempt == binding.attempt)
+        {
+            return Err(AccountingRefusal::Scope);
+        }
+        let prior = self.streams.iter().find(|b| b.stream == binding.stream);
+        if binding.resumed != prior.is_some() || prior.is_some_and(|b| b.adapter != binding.adapter)
+        {
+            return Err(AccountingRefusal::Scope);
+        }
+        self.streams.push(binding);
+        Ok(())
+    }
+    fn validate_streams(&self) -> Result<(), AccountingRefusal> {
+        let mut check = self.clone();
+        check.streams.clear();
+        for binding in &self.streams {
+            check.bind_stream(binding.clone())?;
+        }
+        for sample in &self.usage {
+            if let Some(snapshot) = &sample.snapshot
+                && (!self.streams.iter().any(|b| {
+                    b.attempt == sample.attempt
+                        && b.stream == snapshot.stream
+                        && b.adapter == snapshot.adapter
+                }) || sample.mode != UsageMode::Cumulative
+                    || snapshot.values()? != sample.values
+                    || sample.input_includes_cache
+                        != (snapshot.adapter == crate::usage_stream::Adapter::Codex01660V1))
+            {
+                return Err(AccountingRefusal::Scope);
+            }
+        }
+        if let Some(m) = &self.measurements {
+            m.validate()?;
+        }
+        Ok(())
+    }
+
     /// C5 fix 10: count one refused product MCP call. `tool` must be the
     /// product's own tool name; nothing the provider wrote is kept.
     pub fn refuse_tool(
@@ -1082,6 +1190,7 @@ mod tests {
             current = next;
             let mut next = current.successor().unwrap();
             next.tasks[0].usage.push(UsageSample {
+                snapshot: None,
                 attempt: id(3),
                 turn,
                 event: format!("turn-{turn}"),

@@ -1129,4 +1129,6 @@ mod tests {
     include!("c5_fix11_tests.rs");
     include!("c5_fix13_tests.rs");
     include!("c5_fix14_tests.rs");
+    include!("te1_tests.rs");
+    include!("te1_prompt_tests.rs");
 }

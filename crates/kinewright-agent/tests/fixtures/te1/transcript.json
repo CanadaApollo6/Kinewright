@@ -1,0 +1,49 @@
+{
+  "words": [
+    {
+      "word": "we",
+      "start": 0,
+      "end": 8
+    },
+    {
+      "word": "chose",
+      "start": 8,
+      "end": 18
+    },
+    {
+      "word": "their",
+      "start": 18,
+      "end": 28
+    },
+    {
+      "word": "design",
+      "start": 28,
+      "end": 50
+    },
+    {
+      "word": "because",
+      "start": 62,
+      "end": 74
+    },
+    {
+      "word": "it",
+      "start": 74,
+      "end": 82
+    },
+    {
+      "word": "worked",
+      "start": 82,
+      "end": 100
+    }
+  ],
+  "initial_view": [
+    0,
+    50
+  ],
+  "outside_dependency": [
+    "clip:3",
+    "clip:6",
+    "clip:8"
+  ],
+  "audio_claim": "timing-only synthetic track; no spoken-word quality claim"
+}

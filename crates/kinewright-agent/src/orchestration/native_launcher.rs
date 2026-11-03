@@ -1200,7 +1200,7 @@ pub(crate) fn read_provider_stream(
     sender: &crate::protocol::limits::EventSender,
     mut record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
 ) -> ProviderRead {
-    let mut parser = crate::protocol::CodexProtocol::default();
+    let mut parser = crate::protocol::CodexProtocol::native_display();
     let mut ordinal = 0_u64;
     let mut completed = false;
     let mut refusal = None;
@@ -1221,7 +1221,14 @@ pub(crate) fn read_provider_stream(
                     completed = true;
                     failed_turn = false;
                 }
-                Some("turn.failed") => failed_turn = true,
+                Some("turn.started") => {
+                    completed = false;
+                    failed_turn = false;
+                }
+                Some("turn.failed") => {
+                    failed_turn = true;
+                    completed = false;
+                }
                 _ => {}
             }
             parser.parse_line(&line).map_err(|_| STREAM_MALFORMED)

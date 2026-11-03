@@ -1062,8 +1062,23 @@ impl PreparedFixture {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCoverage {
+    #[default]
+    Unobserved,
+    Incomplete,
+    Complete,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SessionMetrics {
+    /// Versioned cumulative raw stream totals. Empty means unobserved.
+    pub authoritative_usage: BTreeMap<String, kinewright_core::AgentUsage>,
+    pub serialized_results: crate::ResultSizeMetrics,
+    pub application_send_bytes: Vec<u64>,
+    pub observations_incomplete: bool,
+    pub provider_steps: Option<u64>,
     pub turns: u32,
     pub tool_calls: BTreeMap<String, u32>,
     pub input_tokens: u64,
@@ -1080,6 +1095,17 @@ pub struct SessionMetrics {
 
 impl SessionMetrics {
     #[must_use]
+    pub fn usage_coverage(&self) -> UsageCoverage {
+        if self.authoritative_usage.is_empty() {
+            UsageCoverage::Unobserved
+        } else if self.authoritative_usage.values().any(|u| !u.complete) {
+            UsageCoverage::Incomplete
+        } else {
+            UsageCoverage::Complete
+        }
+    }
+
+    #[must_use]
     pub fn tool_call_count(&self) -> u32 {
         self.tool_calls.values().copied().sum()
     }
@@ -1091,6 +1117,9 @@ impl SessionMetrics {
 
     #[must_use]
     pub fn uncached_input_tokens(&self) -> Option<u64> {
+        if self.authoritative_usage.values().any(|u| !u.complete) {
+            return None;
+        }
         self.cached_input_tokens
             .map(|cached| self.input_tokens.saturating_sub(cached))
     }
@@ -1130,6 +1159,13 @@ pub struct AssertionResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalResult {
+    pub usage_coverage: UsageCoverage,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub authoritative_usage: BTreeMap<String, kinewright_core::AgentUsage>,
+    pub serialized_results: crate::ResultSizeMetrics,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub application_send_bytes: Vec<u64>,
+    pub observations_incomplete: bool,
     pub name: String,
     pub rationale: String,
     pub passed: bool,
@@ -1512,6 +1548,11 @@ impl EvalResult {
     #[must_use]
     pub fn execution_failure(definition: &EvalDefinition, error: &EvalError) -> Self {
         Self {
+            usage_coverage: UsageCoverage::Unobserved,
+            authoritative_usage: BTreeMap::new(),
+            serialized_results: crate::ResultSizeMetrics::default(),
+            application_send_bytes: vec![],
+            observations_incomplete: true,
             name: definition.name.to_owned(),
             rationale: definition.rationale.to_owned(),
             passed: false,
@@ -1658,6 +1699,9 @@ pub fn run_eval_with_artifacts(
         || query_operations(&fixture.core).map(|operations| operations.len()),
     )?;
     session.tool_surface = server.tool_surface_metrics();
+    let sizes = server.result_sizes();
+    session.observations_incomplete |= sizes.incomplete;
+    session.serialized_results = sizes;
     let final_document = query_document(&fixture.core)?;
     let operations = query_operations(&fixture.core)?;
     let final_timeline_words = dedup_timeline_words(
@@ -3870,15 +3914,78 @@ where
         self.metrics.errors.push(reason.clone());
         SessionFlow::Stop(reason)
     }
+    fn observe_usage(&mut self, usage: &kinewright_core::AgentUsage) -> SessionFlow {
+        if self.metrics.authoritative_usage.len() >= 80
+            && !self.metrics.authoritative_usage.contains_key(&usage.stream)
+        {
+            self.metrics.observations_incomplete = true;
+            return self.stop("raw usage stream capacity".into());
+        }
+        self.metrics.cost_usd = None;
+        self.cost_is_complete = false;
+        self.saw_usage = true;
+        self.metrics
+            .authoritative_usage
+            .insert(usage.stream.clone(), usage.clone());
+        let sum_known = |values: Vec<Option<u64>>| {
+            values
+                .into_iter()
+                .flatten()
+                .try_fold(0_u64, u64::checked_add)
+        };
+        let sum_optional = |values: Vec<Option<u64>>| {
+            values
+                .into_iter()
+                .try_fold(0_u64, |sum, value| sum.checked_add(value?))
+        };
+        let usage = self
+            .metrics
+            .authoritative_usage
+            .values()
+            .collect::<Vec<_>>();
+        let (Some(input), Some(output)) = (
+            sum_known(usage.iter().map(|u| u.input).collect()),
+            sum_known(usage.iter().map(|u| u.output).collect()),
+        ) else {
+            self.metrics.observations_incomplete = true;
+            return self.stop("usage counter overflow".into());
+        };
+        self.metrics.input_tokens = input;
+        self.metrics.output_tokens = output;
+        self.metrics.cached_input_tokens =
+            sum_optional(usage.iter().map(|u| u.cache_read).collect());
+        self.metrics.cache_creation_input_tokens =
+            sum_optional(usage.iter().map(|u| u.cache_write).collect());
+        self.metrics.reasoning_output_tokens =
+            sum_optional(usage.iter().map(|u| u.reasoning).collect());
+
+        SessionFlow::Continue
+    }
 }
 
 impl<F> SessionObserver for EvalSessionObserver<'_, F>
 where
     F: FnMut() -> Result<usize, EvalError>,
 {
+    fn on_send(&mut self, bytes: u64) {
+        if self.metrics.application_send_bytes.len() < 1024 {
+            self.metrics.application_send_bytes.push(bytes);
+        } else {
+            self.metrics.observations_incomplete = true;
+        }
+    }
     fn on_event(&mut self, event: &AgentEvent) -> SessionFlow {
         match event {
-            AgentEvent::Error(error) => self.metrics.errors.push(error.clone()),
+            AgentEvent::Usage(usage) => return self.observe_usage(usage),
+            AgentEvent::Error(error) => {
+                if error.ends_with("raw_usage_refused") {
+                    self.metrics.observations_incomplete = true;
+                    for usage in self.metrics.authoritative_usage.values_mut() {
+                        usage.complete = false;
+                    }
+                }
+                self.metrics.errors.push(error.clone());
+            }
             AgentEvent::ToolCall { name, arguments } => {
                 if self.trace_events {
                     eprintln!("EVAL TRACE tool_call {name}: {}", bounded_trace(arguments));
@@ -3901,6 +4008,9 @@ where
                 reasoning_output_tokens,
                 cost_usd,
             } => {
+                if !self.metrics.authoritative_usage.is_empty() {
+                    return SessionFlow::Continue;
+                }
                 self.saw_usage = true;
                 self.metrics.input_tokens = self.metrics.input_tokens.saturating_add(*input_tokens);
                 accumulate_optional_tokens(
@@ -4052,6 +4162,7 @@ where
         return Err(error);
     }
     let mut metrics = observer.metrics;
+    metrics.observations_incomplete |= metrics.authoritative_usage.values().any(|u| !u.complete);
     metrics.turns = spent.turns;
     match stop {
         SessionStop::Completed => {}
@@ -4121,6 +4232,20 @@ pub fn evaluate(definition: &EvalDefinition, outcome: &EvalOutcome) -> EvalResul
         .map(|assertion| evaluate_assertion(assertion, definition, outcome))
         .collect::<Vec<_>>();
     assertions.extend(evaluate_budgets(&definition.budgets, outcome));
+    if outcome.session.observations_incomplete
+        || outcome
+            .session
+            .authoritative_usage
+            .values()
+            .any(|u| !u.complete)
+    {
+        assertions.push(AssertionResult {
+            assertion: "complete_raw_usage_observations".into(),
+            passed: false,
+            detail: "incomplete raw usage or size observations; retained tokens are a lower bound"
+                .into(),
+        });
+    }
     let mut measurements = definition
         .assertions
         .iter()
@@ -4129,6 +4254,11 @@ pub fn evaluate(definition: &EvalDefinition, outcome: &EvalOutcome) -> EvalResul
     measurements.extend(ungated_color_measurements(outcome));
     let passed = assertions.iter().all(|assertion| assertion.passed);
     EvalResult {
+        usage_coverage: outcome.session.usage_coverage(),
+        authoritative_usage: outcome.session.authoritative_usage.clone(),
+        serialized_results: outcome.session.serialized_results.clone(),
+        application_send_bytes: outcome.session.application_send_bytes.clone(),
+        observations_incomplete: outcome.session.observations_incomplete,
         name: definition.name.to_owned(),
         rationale: definition.rationale.to_owned(),
         passed,
@@ -10471,6 +10601,77 @@ mod tests {
     }
 
     #[test]
+    fn te1_evaluation_uses_raw_watermarks_and_marks_refused_observations_incomplete() {
+        let usage = |input, cache_read, output| {
+            AgentEvent::Usage(Box::new(kinewright_core::AgentUsage {
+                stream: "1".repeat(32),
+                adapter: "codex-0.166.0-v1".into(),
+                input: Some(input),
+                direct: None,
+                cache_read: Some(cache_read),
+                cache_write: None,
+                output: Some(output),
+                reasoning: None,
+                lower_bound: input + output,
+                complete: true,
+            }))
+        };
+        let projection = AgentEvent::Cost {
+            input_tokens: 150,
+            cached_input_tokens: Some(120),
+            cache_creation_input_tokens: None,
+            output_tokens: 18,
+            reasoning_output_tokens: None,
+            cost_usd: None,
+        };
+        for refused in [false, true] {
+            let mut events = vec![
+                usage(100, 80, 10),
+                projection.clone(),
+                usage(150, 120, 18),
+                projection.clone(),
+                usage(150, 120, 18),
+                projection.clone(),
+            ];
+            if refused {
+                events.push(AgentEvent::Error(
+                    "protocol error: raw_usage_refused".into(),
+                ));
+            }
+            events.push(AgentEvent::Done);
+            let metrics = collect_session(
+                &FakeDriver { events },
+                SessionConfig::default(),
+                &["edit it"],
+                &budgets(),
+                None,
+                || Ok(0),
+            )
+            .unwrap();
+            assert_eq!(metrics.total_tokens(), 168);
+            assert_eq!(
+                metrics
+                    .authoritative_usage
+                    .values()
+                    .next()
+                    .unwrap()
+                    .lower_bound,
+                168
+            );
+            assert_eq!(metrics.observations_incomplete, refused);
+            assert_eq!(
+                metrics.usage_coverage(),
+                if refused {
+                    UsageCoverage::Incomplete
+                } else {
+                    UsageCoverage::Complete
+                }
+            );
+            assert_eq!(metrics.uncached_input_tokens(), (!refused).then_some(30));
+        }
+    }
+
+    #[test]
     fn fake_driver_metrics_are_collected_without_a_subscription_call() {
         let driver = FakeDriver {
             events: vec![
@@ -10680,6 +10881,11 @@ mod tests {
             remaining_scenes: Vec::new(),
             context,
             session: SessionMetrics {
+                authoritative_usage: BTreeMap::new(),
+                serialized_results: crate::ResultSizeMetrics::default(),
+                application_send_bytes: vec![],
+                observations_incomplete: false,
+                provider_steps: None,
                 turns: 1,
                 tool_calls: BTreeMap::from([
                     ("apply_edit_plan".to_owned(), 1),
@@ -10691,6 +10897,7 @@ mod tests {
                 output_tokens: 20,
                 reasoning_output_tokens: Some(10),
                 tool_surface: crate::ToolSurfaceMetrics {
+                    manifest_sha256: [0; 32],
                     tool_count: 7,
                     serialized_bytes: 2_048,
                     input_schema_bytes: 1_024,
@@ -11900,6 +12107,11 @@ mod tests {
 
     fn cc7_result_without_measurements() -> EvalResult {
         EvalResult {
+            usage_coverage: UsageCoverage::Unobserved,
+            authoritative_usage: BTreeMap::new(),
+            serialized_results: crate::ResultSizeMetrics::default(),
+            application_send_bytes: vec![],
+            observations_incomplete: false,
             name: "g3 mixed footage".to_owned(),
             rationale: "a pre-CC7 record".to_owned(),
             passed: true,

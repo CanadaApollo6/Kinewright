@@ -2598,6 +2598,7 @@ impl crate::SessionObserver for HostObserver {
                 "cost",
                 format!("{input_tokens} input, {output_tokens} output tokens"),
             ),
+            AgentEvent::Usage(_) => ("usage", String::new()),
             AgentEvent::Done => ("done", String::new()),
         };
         if let Ok(mut state) = self.state.lock() {

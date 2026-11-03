@@ -185,6 +185,26 @@ impl HostCommandOwner {
         }
         let deadline_unix_ms = next.deadline_unix_ms;
         let task = next.task_mut(&identity.task.0).map_err(refused)?;
+        if let Some(observed) = self
+            .hooks
+            .runs
+            .get(&identity.run)
+            .and_then(|run| run.measurements.get(&identity.task))
+        {
+            let mut observed = observed.clone();
+            if let Some(saved) = &task.measurements {
+                observed.incomplete |= saved.incomplete;
+                observed.sends.clone_from(&saved.sends);
+            }
+            task.measurements = Some(observed);
+        }
+        let observes_usage = matches!(&change, SpendingChange::Usage(_));
+        let measurements_changed = task.measurements
+            != previous
+                .tasks
+                .iter()
+                .find(|t| t.task == identity.task.0)
+                .and_then(|t| t.measurements.clone());
         let outcome = match change {
             SpendingChange::Clock => Ok(()),
             SpendingChange::Ceiling(limit) => task.configure_token_limit(limit),
@@ -207,6 +227,18 @@ impl HostCommandOwner {
             SpendingChange::Usage(sample) => ingest_usage(task, sample).map(|_| ()),
             SpendingChange::ToolRefusal { tool, code } => task.refuse_tool(tool, code),
         };
+        if outcome == Err(AccountingRefusal::Capacity)
+            || ((observes_usage || measurements_changed)
+                && (next.tasks.iter().map(|t| t.usage.len()).sum::<usize>()
+                    > kinewright_project::run_admission::USAGE_SAMPLES
+                    || kinewright_project::orchestration_accounting::encode(
+                        &next,
+                        kinewright_project::run_admission::ACCOUNTING_BYTES - 4096,
+                    )
+                    .is_err()))
+        {
+            return self.refuse_measurement_capacity(producer, identity, &previous, clock);
+        }
         if let Err(reason) = outcome
             && reason != AccountingRefusal::Replan
         {
@@ -235,6 +267,38 @@ impl HostCommandOwner {
         self.publish_accounting(producer, identity, &next)?;
         clock_result.and(outcome).map_err(refused)
     }
+    fn refuse_measurement_capacity(
+        &mut self,
+        producer: &HostAuth,
+        identity: &ExecutionIdentity,
+        previous: &AccountingRecord,
+        clock: ClockObservation,
+    ) -> Result<(), HostError> {
+        let mut bounded = previous.successor().map_err(refused)?;
+        let _clock = bounded.observe_clock(clock.unix_ms, clock.monotonic_delta_ms, clock.trusted);
+        if !bounded.tasks.iter().any(|t| t.task == identity.task.0) {
+            bounded
+                .add_task(identity.task.0.clone(), None)
+                .map_err(refused)?;
+        }
+        let task = bounded.task_mut(&identity.task.0).map_err(refused)?;
+        let measurements = task.measurements.get_or_insert_with(Default::default);
+        if let Some(observed) = self
+            .hooks
+            .runs
+            .get(&identity.run)
+            .and_then(|r| r.measurements.get(&identity.task))
+        {
+            measurements.result_count = measurements.result_count.max(observed.result_count);
+            measurements.result_bytes = measurements.result_bytes.max(observed.result_bytes);
+        }
+        measurements.incomplete = true;
+        task.pause.get_or_insert(AccountingRefusal::Capacity);
+        bounded.validate_successor(previous).map_err(refused)?;
+        self.publish_accounting(producer, identity, &bounded)?;
+        Err(refused(AccountingRefusal::Capacity))
+    }
+
     pub(super) fn publish_accounting(
         &mut self,
         producer: &HostAuth,
@@ -475,21 +539,33 @@ impl HostCommandOwner {
                 },
             );
         }
-        if !eof && raw.get("usage").is_none() && kind != "turn.completed" {
+        if !eof && raw.get("usage").is_none() && !matches!(kind, "turn.completed" | "turn.started")
+        {
             return Ok(());
         }
         if eof
             && task
                 .usage
                 .iter()
-                .any(|s| s.attempt == identity.attempt.0 && s.turn == 1 && s.complete)
+                .rev()
+                .find(|s| s.attempt == identity.attempt.0 && s.turn == 1)
+                .is_some_and(|s| s.complete)
         {
             return Ok(());
         }
         let event = format!(
             "{}:{}",
-            kind.chars().take(64).collect::<String>(),
-            kinewright_media::sha256_bytes(&serde_json::to_vec(raw.get("id").unwrap_or(raw))?)
+            match kind {
+                "turn.completed" => "turn.completed",
+                "turn.usage" => "turn.usage",
+                "turn.started" => "turn.started",
+                "native.eof" => "native.eof",
+                _ => "provider_usage",
+            },
+            raw.get("id").map_or_else(
+                || Ok(format!("{ordinal:016x}")),
+                |id| serde_json::to_vec(id).map(|bytes| kinewright_media::sha256_bytes(&bytes))
+            )?
         );
         let old = task
             .usage
@@ -499,6 +575,16 @@ impl HostCommandOwner {
             UsageAdapter::Codex,
             raw,
             UsageSample {
+                snapshot: task
+                    .streams
+                    .iter()
+                    .find(|b| b.attempt == identity.attempt.0)
+                    .map(|b| kinewright_project::usage_stream::Snapshot {
+                        payload_sha256: "0".repeat(64),
+                        stream: b.stream.clone(),
+                        adapter: b.adapter,
+                        models: vec![],
+                    }),
                 attempt: identity.attempt.0.clone(),
                 turn: 1,
                 event,

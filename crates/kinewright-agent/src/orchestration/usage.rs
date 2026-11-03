@@ -33,21 +33,14 @@ pub fn decode_usage(
     raw: &serde_json::Value,
     mut identity: UsageSample,
 ) -> Result<UsageSample, AccountingRefusal> {
-    encode(raw, super::FRAME_BYTES)?;
+    let raw_identity = kinewright_media::sha256_bytes(&encode(raw, super::FRAME_BYTES)?);
     let usage = raw.get("usage").unwrap_or(raw);
     let token = |keys: &[&str]| {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(serde_json::Value::as_u64))
     };
     identity.values = match adapter {
-        UsageAdapter::Claude => UsageValues {
-            input: token(&["input_tokens", "inputTokens"]),
-            output: token(&["output_tokens", "outputTokens"]),
-            cache_read: token(&["cache_read_input_tokens", "cacheReadInputTokens"]),
-            cache_write: token(&["cache_creation_input_tokens", "cacheCreationInputTokens"]),
-            reasoning: token(&["reasoning_output_tokens", "reasoningOutputTokens"]),
-            cost_micros: None,
-        },
+        UsageAdapter::Claude => claude_models(raw, &identity)?.values()?,
         UsageAdapter::Codex => UsageValues {
             input: token(&["input_tokens", "inputTokens"]),
             output: token(&["output_tokens", "outputTokens"]),
@@ -76,6 +69,31 @@ pub fn decode_usage(
             cost_micros: None,
         },
     };
+    if matches!(adapter, UsageAdapter::Claude | UsageAdapter::Codex)
+        && let Some(snapshot) = &identity.snapshot
+    {
+        let stream = snapshot.stream.clone();
+        identity.snapshot = Some(match adapter {
+            UsageAdapter::Claude => claude_models(raw, &identity)?,
+            UsageAdapter::Codex => kinewright_project::usage_stream::Snapshot {
+                payload_sha256: "0".repeat(64),
+                stream,
+                adapter: kinewright_project::usage_stream::Adapter::Codex01660V1,
+                models: if usage.is_null() {
+                    vec![]
+                } else {
+                    vec![kinewright_project::usage_stream::ModelSnapshot {
+                        model: kinewright_media::sha256_bytes(b"codex-thread"),
+                        values: identity.values.clone(),
+                    }]
+                },
+            },
+            UsageAdapter::Muse => unreachable!(),
+        });
+    }
+    if let Some(snapshot) = &mut identity.snapshot {
+        snapshot.payload_sha256 = raw_identity;
+    }
     identity.input_includes_cache = !matches!(adapter, UsageAdapter::Claude);
     identity.output_includes_reasoning = true;
     if let Some(cost) = raw
@@ -93,7 +111,47 @@ pub fn decode_usage(
                 .map_err(|_| AccountingRefusal::Invalid)?,
         );
     }
+    if let Some(snapshot) = &identity.snapshot {
+        identity.values = snapshot.values()?;
+    }
     Ok(identity)
+}
+
+fn claude_models(
+    raw: &serde_json::Value,
+    identity: &UsageSample,
+) -> Result<kinewright_project::usage_stream::Snapshot, AccountingRefusal> {
+    use kinewright_project::usage_stream::{Adapter, MODELS, ModelSnapshot, Snapshot};
+    let mut models = Vec::new();
+    if let Some(usage) = raw.get("modelUsage").and_then(serde_json::Value::as_object) {
+        if usage.len() > MODELS {
+            return Err(AccountingRefusal::Capacity);
+        }
+        for (model, usage) in usage {
+            let token = |name| usage.get(name).and_then(serde_json::Value::as_u64);
+            models.push(ModelSnapshot {
+                model: kinewright_media::sha256_bytes(model.as_bytes()),
+                values: UsageValues {
+                    input: token("inputTokens"),
+                    output: token("outputTokens"),
+                    cache_read: token("cacheReadInputTokens"),
+                    cache_write: token("cacheCreationInputTokens"),
+                    reasoning: None,
+                    cost_micros: None,
+                },
+            });
+        }
+    }
+    models.sort_by(|a, b| a.model.cmp(&b.model));
+    Ok(Snapshot {
+        payload_sha256: "0".repeat(64),
+        stream: identity
+            .snapshot
+            .as_ref()
+            .map_or_else(|| identity.attempt.clone(), |s| s.stream.clone()),
+        adapter: Adapter::Claude21316V1,
+        models,
+    })
 }
 
 pub fn ingest_usage(
@@ -102,6 +160,28 @@ pub fn ingest_usage(
 ) -> Result<bool, AccountingRefusal> {
     if sample.event.is_empty() || sample.event.len() > 256 || sample.ordinal == 0 {
         return Err(AccountingRefusal::Invalid);
+    }
+    if let Some(snapshot) = &sample.snapshot {
+        for old in &task.usage {
+            if old
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.stream == snapshot.stream)
+                && old.event == sample.event
+            {
+                return if old.snapshot == sample.snapshot
+                    && old.values == sample.values
+                    && old.complete == sample.complete
+                    && old.mode == sample.mode
+                    && old.input_includes_cache == sample.input_includes_cache
+                    && old.output_includes_reasoning == sample.output_includes_reasoning
+                {
+                    Ok(false)
+                } else {
+                    Err(AccountingRefusal::Scope)
+                };
+            }
+        }
     }
     if let Some(old) = task.usage.iter().find(|old| {
         old.attempt == sample.attempt && old.turn == sample.turn && old.event == sample.event
@@ -113,6 +193,9 @@ pub fn ingest_usage(
         };
     }
     if task.usage.len() >= USAGE_EVENTS {
+        task.measurements
+            .get_or_insert_with(Default::default)
+            .incomplete = true;
         return Err(AccountingRefusal::Capacity);
     }
     if !task.providers.iter().any(|p| p.attempt == sample.attempt) {

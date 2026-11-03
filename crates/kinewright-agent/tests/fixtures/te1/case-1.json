@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "case": 1,
+  "fixture": "talking-head.kinewright",
+  "oracle": "case-1-oracle.kinewright",
+  "operations": [
+    {
+      "MoveMarker": {
+        "marker": 1,
+        "to": 6
+      }
+    }
+  ],
+  "required_reads": [],
+  "preview_before_commit": false,
+  "reject_incomplete_child": false,
+  "unchanged_clips": [
+    9,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "notes": []
+}

@@ -181,6 +181,58 @@ pub(crate) fn refusal_code(
 }
 
 impl TaskMcp {
+    pub(crate) fn record_size(&self, tool: &'static str, bytes: Option<u64>) {
+        #[cfg(target_os = "linux")]
+        if let Some(host) = self.host.upgrade()
+            && let Ok(mut host) = host.lock()
+        {
+            let authority = self.endpoint.authority();
+            // Observation cannot publish after issuing a control: that would stale it.
+            let initialized = host
+                .hooks
+                .runs
+                .get(&authority.run)
+                .is_some_and(|run| run.measurements.contains_key(&authority.task));
+            let previous = if initialized {
+                kinewright_project::usage_measurement::Measurements::default()
+            } else {
+                host.owner()
+                    .ok()
+                    .and_then(|owner| {
+                        owner
+                            .orchestration_projection(&authority.run)
+                            .ok()
+                            .flatten()
+                    })
+                    .and_then(|state| host.native_accounting(&state).ok().flatten())
+                    .and_then(|r| r.tasks.into_iter().find(|t| t.task == authority.task.0))
+                    .and_then(|t| t.measurements)
+                    .unwrap_or_default()
+            };
+            if let Some(run) = host.hooks.runs.get_mut(&authority.run)
+                && run.tasks.contains_key(&authority.task)
+            {
+                let measurements = run
+                    .measurements
+                    .entry(authority.task.clone())
+                    .or_insert(previous);
+                if let Some(bytes) = bytes {
+                    measurements.result(kinewright_project::usage_measurement::ToolResult {
+                        attempt: authority.attempt.0.clone(),
+                        turn: None,
+                        provider_call: None,
+                        host_call: 0,
+                        tool: tool.into(),
+                        serialized_bytes: bytes,
+                    });
+                } else {
+                    measurements.incomplete = true;
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (self, tool, bytes);
+    }
     /// C5 fix 10: count one refused product MCP call in this task's durable
     /// accounting. Best effort: it never changes the call's reply, and a
     /// refusal the store itself cannot take is not retried.

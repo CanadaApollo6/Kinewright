@@ -1147,6 +1147,9 @@ mod tests {
         let (sender, events) = event_channel();
         let done = Arc::new(AtomicBool::new(false));
         let reader=spawn_codex_reader(HeldEof {bytes:std::io::Cursor::new(b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n".to_vec()),release:Arc::clone(&release)},std::io::empty(),Arc::clone(&child),sender,Arc::clone(&done),1).unwrap();
+        assert!(
+            matches!(events.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), AgentEvent::Usage(usage) if usage.input == Some(1) && usage.output == Some(2))
+        );
         assert!(matches!(
             events
                 .recv_timeout(std::time::Duration::from_secs(5))

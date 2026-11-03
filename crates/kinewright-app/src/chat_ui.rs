@@ -1577,6 +1577,7 @@ impl KinewrightApp {
                         output_tokens,
                         reasoning_output_tokens,
                     }),
+                AgentEvent::Usage(_) => {}
                 AgentEvent::Done => {
                     let thread = &mut self.projects[project_index].threads[thread_index];
                     thread.running = false;

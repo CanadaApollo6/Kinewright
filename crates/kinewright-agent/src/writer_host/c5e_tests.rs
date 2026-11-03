@@ -311,7 +311,7 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                 ] {
                     let sample=crate::protocol::limits::usage::decode_usage(crate::protocol::limits::usage::UsageAdapter::Codex,
                         &serde_json::json!({"usage":{"input_tokens":input,"cached_input_tokens":1,"output_tokens":output,"reasoning_output_tokens":1}}),
-                        UsageSample {attempt:execution.attempt.0.clone(),turn,event:event.into(),ordinal,mode:UsageMode::Cumulative,values:UsageValues::default(),complete,input_includes_cache:true,output_includes_reasoning:true}).unwrap();
+                        UsageSample { snapshot: None,attempt:execution.attempt.0.clone(),turn,event:event.into(),ordinal,mode:UsageMode::Cumulative,values:UsageValues::default(),complete,input_includes_cache:true,output_includes_reasoning:true}).unwrap();
                     spending_change(
                         &f,
                         &execution,

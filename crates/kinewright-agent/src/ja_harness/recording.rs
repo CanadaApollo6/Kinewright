@@ -158,6 +158,7 @@ impl SessionObserver for Observer {
 
 fn event_value(event: &AgentEvent) -> Value {
     match event {
+        AgentEvent::Usage(usage) => json!({"kind":"raw_usage","usage":usage}),
         AgentEvent::Text(text) => json!({"kind":"text","text":text}),
         AgentEvent::Error(text) => json!({"kind":"error","text":text}),
         AgentEvent::ToolCall { name, arguments } => {
@@ -330,7 +331,7 @@ pub fn scripted_session(server: &McpServer, bytes: &[u8]) -> Result<Value, Strin
     }
     let after = server.ja_request_counts();
     Ok(
-        json!({"sessions":results,"server_requests":after[0]-before[0],"server_results":after[1]-before[1]}),
+        json!({"sessions":results,"server_requests":after[0]-before[0],"server_results":after[1]-before[1],"serialized_results":server.result_sizes()}),
     )
 }
 

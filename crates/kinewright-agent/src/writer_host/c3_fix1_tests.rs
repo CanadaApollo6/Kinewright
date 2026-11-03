@@ -130,6 +130,7 @@ fn s4b_c3_fix1_commit_rechecks_monotonic_and_usage() {
             }
             let change = {
                 SpendingChange::Usage(UsageSample {
+                    snapshot: None,
                     attempt: identity.attempt.0.clone(),
                     turn: 1,
                     event: "late-usage-before-commit".into(),

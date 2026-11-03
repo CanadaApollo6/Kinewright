@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "case": 4,
+  "fixture": "talking-head.kinewright",
+  "oracle": "case-4-oracle.kinewright",
+  "operations": [
+    {
+      "SetTitleParam": {
+        "clip": 7,
+        "name": "text",
+        "value": "we chose their design"
+      }
+    }
+  ],
+  "required_reads": [
+    "transcript_neighbours",
+    "media_neighbours"
+  ],
+  "preview_before_commit": false,
+  "reject_incomplete_child": false,
+  "unchanged_clips": [
+    9,
+    1,
+    4
+  ],
+  "notes": []
+}

@@ -1,0 +1,250 @@
+{
+  "format_version": 2,
+  "tracks": [
+    {
+      "id": 4,
+      "kind": "Video",
+      "sync_lock": false,
+      "clips": [
+        {
+          "id": 9,
+          "asset": 0,
+          "source_range": {
+            "start": 0,
+            "end": 100
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null,
+          "content": {
+            "solid": {
+              "r": 0,
+              "g": 0,
+              "b": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "kind": "Video",
+      "sync_lock": true,
+      "clips": [
+        {
+          "id": 1,
+          "asset": 1,
+          "source_range": {
+            "start": 0,
+            "end": 50
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null,
+          "link": 1
+        },
+        {
+          "id": 2,
+          "asset": 1,
+          "source_range": {
+            "start": 50,
+            "end": 60
+          },
+          "timeline_start": 50,
+          "effects": [],
+          "transition_in": null,
+          "link": 2
+        },
+        {
+          "id": 3,
+          "asset": 1,
+          "source_range": {
+            "start": 60,
+            "end": 100
+          },
+          "timeline_start": 60,
+          "effects": [],
+          "transition_in": null,
+          "link": 3
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "kind": "Audio",
+      "sync_lock": true,
+      "clips": [
+        {
+          "id": 4,
+          "asset": 2,
+          "source_range": {
+            "start": 0,
+            "end": 50
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null,
+          "link": 1
+        },
+        {
+          "id": 5,
+          "asset": 2,
+          "source_range": {
+            "start": 50,
+            "end": 60
+          },
+          "timeline_start": 50,
+          "effects": [],
+          "transition_in": null,
+          "link": 2
+        },
+        {
+          "id": 6,
+          "asset": 2,
+          "source_range": {
+            "start": 60,
+            "end": 100
+          },
+          "timeline_start": 60,
+          "effects": [],
+          "transition_in": null,
+          "link": 3
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "kind": "Video",
+      "sync_lock": true,
+      "clips": [
+        {
+          "id": 7,
+          "asset": 0,
+          "source_range": {
+            "start": 0,
+            "end": 50
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null,
+          "content": {
+            "title": {
+              "text": "we chose there design"
+            }
+          }
+        },
+        {
+          "id": 8,
+          "asset": 0,
+          "source_range": {
+            "start": 0,
+            "end": 38
+          },
+          "timeline_start": 62,
+          "effects": [],
+          "transition_in": null,
+          "content": {
+            "title": {
+              "text": "because it worked"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "talking-head.ppm",
+      "name": "Authored synthetic talking head",
+      "duration": 100,
+      "fps": {
+        "numerator": 25,
+        "denominator": 1
+      },
+      "kind": "Image",
+      "resolution": [
+        160,
+        90
+      ],
+      "color_description": {
+        "primaries": "srgb",
+        "transfer": "srgb",
+        "matrix": "rgb",
+        "range": "full",
+        "white_point": "d65",
+        "bit_depth": 8,
+        "confidence_basis_points": 10000,
+        "provenance": "user_override"
+      }
+    },
+    {
+      "id": 2,
+      "path": "talking-head.wav",
+      "name": "Authored pause timing track, not speech recognition evidence",
+      "duration": 100,
+      "fps": {
+        "numerator": 25,
+        "denominator": 1
+      },
+      "kind": "Audio",
+      "resolution": null
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "fps": {
+    "numerator": 25,
+    "denominator": 1
+  },
+  "resolution": [
+    160,
+    90
+  ],
+  "duration": 100,
+  "markers": [
+    {
+      "id": 1,
+      "position": 6,
+      "label": "note 1",
+      "color_token": 0
+    },
+    {
+      "id": 2,
+      "position": 95,
+      "label": "unchanged except ripple",
+      "color_token": 1
+    }
+  ]
+}

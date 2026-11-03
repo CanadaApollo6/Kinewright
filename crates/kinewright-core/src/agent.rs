@@ -51,6 +51,8 @@ pub struct SessionConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
+    /// Authoritative raw-adapter totals, before the legacy Cost projection.
+    Usage(Box<AgentUsage>),
     Text(String),
     Error(String),
     ToolCall {
@@ -75,6 +77,21 @@ pub enum AgentEvent {
         cost_usd: Option<f64>,
     },
     Done,
+}
+
+/// Size-only cumulative accounting delivered by a versioned provider adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUsage {
+    pub stream: String,
+    pub adapter: String,
+    pub input: Option<u64>,
+    pub direct: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    pub output: Option<u64>,
+    pub reasoning: Option<u64>,
+    pub lower_bound: u64,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

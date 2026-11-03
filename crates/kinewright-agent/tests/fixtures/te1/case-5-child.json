@@ -1,0 +1,26 @@
+{
+  "outcome": "completed",
+  "document": "case-5-child.kinewright",
+  "operations": [
+    {
+      "MoveMarker": {
+        "marker": 1,
+        "to": 6
+      }
+    }
+  ],
+  "claimed_satisfied_notes": [
+    "marker-one-frame",
+    "correct-homophone"
+  ],
+  "satisfied_notes": [
+    "marker-one-frame"
+  ],
+  "unmet_notes": [
+    "correct-homophone"
+  ],
+  "proof": {
+    "status": "failed",
+    "kind": "caption_alignment"
+  }
+}

@@ -266,7 +266,7 @@ impl Report {
             "controller_pid":std::process::id(),"controller_os_start_identity":os_start_identity(std::process::id()),
             "command_line":std::env::args().take(16).collect::<Vec<_>>(),
             "time_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis().to_string(),
-            "rss_bytes":rss_bytes(std::process::id()),"vram_bytes":null,"unobserved_counters":null});
+            "rss_bytes":rss_bytes(std::process::id()),"vram_bytes":null,"unobserved_counters":["provider_steps","provider_request_order","unreported_helper_tokens","provider_cache_request_order"]});
         self.json_file("run.json", &identity)?;
         if let Some(f) = fixture {
             self.artifact("fixture.json", &f.bytes)?;

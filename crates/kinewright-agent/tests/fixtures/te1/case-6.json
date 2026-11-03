@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "case": 6,
+  "fixture": "talking-head.kinewright",
+  "oracle": "case-6-oracle.kinewright",
+  "operations": [
+    {
+      "DeleteClip": {
+        "clip": 5
+      }
+    },
+    {
+      "RippleDeleteClip": {
+        "clip": 2
+      }
+    },
+    {
+      "SetTitleParam": {
+        "clip": 7,
+        "name": "text",
+        "value": "we chose their design"
+      }
+    }
+  ],
+  "required_reads": [
+    "dependency_closure",
+    "transcript_neighbours",
+    "media_neighbours",
+    "revision_refresh",
+    "preview"
+  ],
+  "preview_before_commit": true,
+  "reject_incomplete_child": false,
+  "unchanged_clips": [
+    9,
+    1,
+    4
+  ],
+  "notes": []
+}

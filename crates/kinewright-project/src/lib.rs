@@ -31,6 +31,8 @@ pub mod receipts;
 pub mod source_boundary;
 pub mod storage_budget;
 pub mod store;
+pub mod usage_measurement;
+pub mod usage_stream;
 // JA-1 S3 C1 shared metadata and S4 receiving contracts.
 pub mod studio_records;
 pub mod studio_store;

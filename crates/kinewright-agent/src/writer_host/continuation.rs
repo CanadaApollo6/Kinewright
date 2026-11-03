@@ -88,6 +88,8 @@ impl HostCommandOwner {
         self.hooks.runs.insert(
             run.clone(),
             HostRun {
+                #[cfg(target_os = "linux")]
+                measurements: BTreeMap::new(),
                 producer,
                 inputs: HostOwnedInputClosure { context, inputs },
                 tasks: BTreeMap::new(),

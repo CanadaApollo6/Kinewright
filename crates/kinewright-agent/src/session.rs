@@ -392,6 +392,8 @@ impl StudioResponseQueue {
 }
 
 pub trait SessionObserver {
+    /// Accepted application send size; internal provider requests remain unobserved.
+    fn on_send(&mut self, _bytes: u64) {}
     /// Every event, after the pump's own accounting has seen it.
     fn on_event(&mut self, event: &AgentEvent) -> SessionFlow;
     /// Once per tick, with the counters as they stand.
@@ -691,10 +693,12 @@ pub fn pump_session(
                     stop = SessionStop::Budget(BudgetKind::WallTime);
                     break;
                 }
+                let prompt_bytes = prompt.len() as u64;
                 if let Err(error) = session.send_user_message(prompt) {
                     stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
                     break;
                 }
+                observer.on_send(prompt_bytes);
                 spent.turns = spent.turns.saturating_add(1);
                 spent.elapsed = started.elapsed();
                 counters.publish(&spent);

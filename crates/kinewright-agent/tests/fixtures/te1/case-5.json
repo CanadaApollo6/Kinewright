@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "case": 5,
+  "fixture": "talking-head.kinewright",
+  "oracle": "case-5-oracle.kinewright",
+  "operations": [
+    {
+      "MoveMarker": {
+        "marker": 1,
+        "to": 6
+      }
+    },
+    {
+      "SetTitleParam": {
+        "clip": 7,
+        "name": "text",
+        "value": "we chose their design"
+      }
+    }
+  ],
+  "required_reads": [
+    "child_result",
+    "unmet_notes",
+    "failed_proof"
+  ],
+  "preview_before_commit": false,
+  "reject_incomplete_child": true,
+  "unchanged_clips": [
+    9,
+    1,
+    4
+  ],
+  "notes": [
+    "marker-one-frame",
+    "correct-homophone"
+  ],
+  "child_result": "case-5-child.json"
+}

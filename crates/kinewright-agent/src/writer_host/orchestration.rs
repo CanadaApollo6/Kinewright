@@ -134,6 +134,8 @@ impl RuntimeGrantBinding {
     }
 }
 pub(super) struct HostRun {
+    #[cfg(target_os = "linux")]
+    pub measurements: BTreeMap<TaskId, kinewright_project::usage_measurement::Measurements>,
     pub producer: HostAuth,
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,

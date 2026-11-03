@@ -7273,6 +7273,11 @@ mod tests {
         fs::write(&output_path, b"finished-media").expect("finished media");
         fs::write(&proof_path, b"proof-sheet").expect("proof sheet");
         EvalResult {
+            usage_coverage: kinewright_agent::eval::UsageCoverage::Unobserved,
+            authoritative_usage: BTreeMap::new(),
+            serialized_results: kinewright_agent::ResultSizeMetrics::default(),
+            application_send_bytes: vec![],
+            observations_incomplete: false,
             name: name.to_owned(),
             rationale: "colour workflow".to_owned(),
             passed: true,

@@ -58,7 +58,7 @@ pub use actor::{
 #[cfg(any(test, feature = "test-util"))]
 pub use actor::{HistoryEntryObservation, HistoryObservation};
 pub use agent::{
-    AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
+    AgentDriver, AgentError, AgentEvent, AgentSession, AgentUsage, AuthenticationStatus, HarnessId,
     HarnessInfo, RuntimeRequest, RuntimeRequestBinding, RuntimeRequestKind, RuntimeResponse,
     RuntimeResponseControl, SessionConfig,
 };

@@ -68,6 +68,7 @@ fn sample(
     output: Option<u64>,
 ) -> UsageSample {
     UsageSample {
+        snapshot: None,
         attempt: id(attempt),
         turn,
         event: format!("event-{event}"),
@@ -330,7 +331,7 @@ fn s4_raw_usage_preserves_unavailable_and_subset_categories() {
     )
     .unwrap();
     assert_eq!(absent.values, UsageValues::default());
-    let claude=decode_usage(UsageAdapter::Claude,&serde_json::json!({"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":8,"reasoning_output_tokens":3}}),identity.clone()).unwrap();
+    let claude=decode_usage(UsageAdapter::Claude,&serde_json::json!({"modelUsage":{"claude":{"inputTokens":10,"outputTokens":4,"cacheReadInputTokens":8,"cacheCreationInputTokens":0}}}),identity.clone()).unwrap();
     assert_eq!(normalize(&[claude]).unwrap().token_lower_bound, 22);
     let codex=decode_usage(UsageAdapter::Codex,&serde_json::json!({"usage":{"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":8},"output_tokens_details":{"reasoning_tokens":3}}}),identity.clone()).unwrap();
     assert_eq!(normalize(&[codex]).unwrap().token_lower_bound, 14);

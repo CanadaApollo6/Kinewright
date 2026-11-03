@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "case": 3,
+  "fixture": "talking-head.kinewright",
+  "oracle": "case-3-oracle.kinewright",
+  "operations": [
+    {
+      "TrimClip": {
+        "clip": 3,
+        "new_source": {
+          "start": 61,
+          "end": 100
+        }
+      }
+    },
+    {
+      "TrimClip": {
+        "clip": 6,
+        "new_source": {
+          "start": 61,
+          "end": 100
+        }
+      }
+    }
+  ],
+  "required_reads": [
+    "caption_boundaries"
+  ],
+  "preview_before_commit": false,
+  "reject_incomplete_child": false,
+  "unchanged_clips": [
+    9,
+    1,
+    4
+  ],
+  "notes": []
+}

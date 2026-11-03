@@ -494,6 +494,7 @@ pub enum McpServerError {
 pub type IncidentLogHandle = Arc<RwLock<IncidentLog>>;
 
 pub struct McpServer {
+    result_sizes: Arc<Mutex<crate::runtime::ResultSizeMetrics>>,
     #[cfg(feature = "eval-harness")]
     ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
     endpoint: String,
@@ -591,6 +592,7 @@ impl McpServer {
             ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools().map_err(|_| {
                 crate::writer_host::HostError::Protocol("MCP tool schema unavailable".into())
             })?);
+        let result_sizes = Arc::clone(&handler.result_sizes);
         #[cfg(feature = "eval-harness")]
         let ja_request_counts = Arc::clone(&handler.ja_request_counts);
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -602,6 +604,7 @@ impl McpServer {
             })?;
         crate::writer_host::register_mcp(&endpoint, auth);
         Ok(Self {
+            result_sizes,
             #[cfg(feature = "eval-harness")]
             ja_request_counts,
             endpoint,
@@ -962,6 +965,7 @@ impl McpServer {
         .with_capability_denylist(capability_denylist)
         .with_investigator_context(investigator)
         .with_served_tool_allowlist(served_tool_allowlist);
+        let result_sizes = Arc::clone(&handler.result_sizes);
         #[cfg(feature = "eval-harness")]
         let ja_request_counts = Arc::clone(&handler.ja_request_counts);
         let server_thread = thread::Builder::new()
@@ -969,6 +973,7 @@ impl McpServer {
             .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads, None))
             .map_err(McpServerError::Thread)?;
         Ok(Self {
+            result_sizes,
             #[cfg(feature = "eval-harness")]
             ja_request_counts,
             endpoint,
@@ -1028,6 +1033,19 @@ impl McpServer {
         if let Ok(mut slot) = self.project_path.write() {
             *slot = path;
         }
+    }
+
+    #[must_use]
+    pub fn result_sizes(&self) -> crate::runtime::ResultSizeMetrics {
+        let mut result = self.result_sizes.lock().map_or_else(
+            |_| crate::runtime::ResultSizeMetrics {
+                incomplete: true,
+                ..Default::default()
+            },
+            |v| v.clone(),
+        );
+        result.incomplete |= result.requests != result.count;
+        result
     }
 
     #[must_use]
@@ -1183,6 +1201,7 @@ fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
 
 #[derive(Clone)]
 struct KinewrightMcp {
+    result_sizes: Arc<Mutex<crate::runtime::ResultSizeMetrics>>,
     #[cfg(feature = "eval-harness")]
     ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
     core: Core,
@@ -1252,6 +1271,7 @@ impl KinewrightMcp {
     ) -> Self {
         Self {
             core,
+            result_sizes: Arc::default(),
             #[cfg(feature = "eval-harness")]
             ja_request_counts: Arc::new(std::array::from_fn(|_| {
                 std::sync::atomic::AtomicU64::new(0)
@@ -12174,6 +12194,24 @@ impl ServerHandler for KinewrightMcp {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
+        let legacy_peer = context
+            .protocol_version()
+            .as_ref()
+            .is_none_or(|v| v.as_str() < rmcp::model::ProtocolVersion::V_2026_07_28.as_str());
+        let size_control = self.task_control.clone();
+        let size_metrics = Arc::clone(&self.result_sizes);
+        let capability = request
+            .arguments
+            .as_ref()
+            .and_then(|a| a.get("name"))
+            .and_then(serde_json::Value::as_str);
+        let size_tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
+        if size_control.is_none() {
+            size_metrics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .begin();
+        }
         let service = self.clone();
         #[cfg(feature = "eval-harness")]
         let ja_counts = Arc::clone(&self.ja_request_counts);
@@ -12198,13 +12236,35 @@ impl ServerHandler for KinewrightMcp {
                     None,
                 ))
             });
-            let reply = if solo {
+            let mut reply = if solo {
                 bound_solo_reply(context.id, reply)
             } else {
                 reply
             };
             #[cfg(feature = "eval-harness")]
             ja_counts[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let bytes = match &mut reply {
+                Ok(value) => {
+                    // rmcp strips this discriminator after dispatch for legacy peers.
+                    let removed = value
+                        .result_type
+                        .take_if(|t| legacy_peer && t.is_complete());
+                    let bytes = crate::runtime::serialized_size(value);
+                    if removed.is_some() {
+                        value.result_type = removed;
+                    }
+                    bytes
+                }
+                Err(value) => crate::runtime::serialized_size(value),
+            };
+            if let Some(control) = size_control {
+                control.record_size(size_tool, bytes);
+            } else {
+                size_metrics
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record(size_tool, bytes);
+            }
             reply.map(Into::into)
         }
     }
@@ -13725,6 +13785,19 @@ fn compact_discard_edit_plan_tool() -> Tool {
             .idempotent(true)
             .open_world(false),
     )
+}
+
+/// Measure the frozen surface for the Linux native task host.
+#[cfg(target_os = "linux")]
+pub(crate) fn te1_surface() -> kinewright_project::usage_measurement::Surface {
+    let tools = compact_tools_cached();
+    let m = ToolSurfaceMetrics::measure(&tools);
+    kinewright_project::usage_measurement::Surface {
+        definitions: m.serialized_bytes,
+        schemas: m.input_schema_bytes,
+        descriptions: m.description_bytes,
+        identity: kinewright_media::sha256_bytes(&serde_json::to_vec(&tools).unwrap_or_default()),
+    }
 }
 
 /// Build the 7 compact descriptors in served (filtered-registry) order.
@@ -36198,4 +36271,37 @@ fn task_control_tools() -> Vec<Tool> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod te1_surface_tests {
+    #[test]
+    fn te1_surface_is_frozen_at_b4e9abc8() {
+        let served = serde_json::to_vec(&super::compact_tools_cached()).unwrap();
+        let registry =
+            serde_json::to_vec(&super::KinewrightMcp::capability_tools().unwrap()).unwrap();
+        let controls = serde_json::to_vec(
+            &crate::writer_host::task_mcp::CAPABILITIES
+                .iter()
+                .map(|(n, _)| (n, crate::writer_host::task_mcp::schema::capability(n)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let hashes = [
+            kinewright_media::sha256_bytes(&served),
+            kinewright_media::sha256_bytes(&registry),
+            kinewright_media::sha256_bytes(&controls),
+        ];
+        println!("TE1_SURFACE {hashes:?}");
+        let expected: Vec<String> =
+            serde_json::from_str(include_str!("../tests/fixtures/te1-surface.json")).unwrap();
+        assert_eq!(hashes.as_slice(), expected.as_slice());
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            kinewright_media::sha256_bytes(
+                crate::writer_host::native_invocation::CODEX_INSTRUCTIONS.as_bytes()
+            ),
+            "28b1932b2b866b88ecef978943e57ed3546685f29f1a35ab016b19aaab117d0f"
+        );
+    }
 }
