@@ -102,8 +102,43 @@ struct JournalHeader {
 struct JournalWriter {
     authority: Option<kinewright_project::LockfileHandle>,
     _directory: kinewright_project::legacy_io::PinnedDirectory,
-    file: File,
+    file: LockedJournal,
     sync_each_record: bool,
+}
+
+/// A journal under its lock. It unlocks before the close: the lock belongs to
+/// the open file description, which a child that another thread is forking
+/// or spawning holds a copy of until its `exec`. A bare close would keep the
+/// journal locked through that window, and a discard at once after the
+/// recorder ends would be refused as if a recorder still lived.
+struct LockedJournal(File);
+
+impl LockedJournal {
+    fn lock(file: File) -> Result<Self, String> {
+        kinewright_project::legacy_io::lock_journal(&file).map_err(|e| e.to_string())?;
+        Ok(Self(file))
+    }
+}
+
+impl std::ops::Deref for LockedJournal {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LockedJournal {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.0
+    }
+}
+
+impl Drop for LockedJournal {
+    fn drop(&mut self) {
+        // Windows recorders hold no lock; they deny deletion by share mode.
+        #[cfg(unix)]
+        let _ = self.0.unlock();
+    }
 }
 
 impl JournalWriter {
@@ -174,13 +209,12 @@ impl JournalWriter {
         // Deny deletion while the recorder lives; named writes also hold the project lock.
         #[cfg(windows)]
         std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 3);
-        let mut file = options.open(&owned_path).map_err(|error| {
+        let mut file = LockedJournal::lock(options.open(&owned_path).map_err(|error| {
             format!(
                 "could not create recovery journal {}: {error}",
                 path.display()
             )
-        })?;
-        kinewright_project::legacy_io::lock_journal(&file).map_err(|e| e.to_string())?;
+        })?)?;
         // G5: new headers persist the absolute canonical identity, so the
         // takeover scan never has to guess which spelling a relative header
         // meant — legacy relative headers stay readable but never claim.
@@ -1128,12 +1162,13 @@ impl Recovery {
             {
                 return Err("journal is not a regular file".into());
             }
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|e| e.to_string())?;
-            kinewright_project::legacy_io::lock_journal(&file).map_err(|e| e.to_string())?;
+            let mut file = LockedJournal::lock(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(|e| e.to_string())?,
+            )?;
             let mut bytes = vec![];
             file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
             if entry.sha256.as_deref() != Some(&kinewright_media::sha256_bytes(&bytes)) {
@@ -1914,6 +1949,21 @@ mod tests {
             drop(recovery);
         }
         assert!(!path.exists());
+    }
+
+    /// A copy of the journal's descriptor, as a child holds between its fork
+    /// and its `exec`, must not keep an ended recorder's journal locked.
+    #[cfg(unix)]
+    #[test]
+    fn s4b_c6_ended_journal_unlocks_past_a_descriptor_copy() {
+        let directory = TestDirectory::new("journal-dup");
+        let path = directory.journal();
+        let writer = JournalWriter::create(&path, None, &Document::default()).unwrap();
+        let copy = writer.file.try_clone().unwrap();
+        drop(writer);
+        let next = kinewright_project::legacy_io::lock_journal(&File::open(&path).unwrap());
+        drop(copy);
+        assert!(next.is_ok(), "C6_JOURNAL_HELD_BY_COPY: {next:?}");
     }
 
     #[test]
