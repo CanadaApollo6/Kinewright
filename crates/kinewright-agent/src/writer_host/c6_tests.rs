@@ -257,6 +257,51 @@ fn c6_cases() -> Vec<(&'static str, Vec<String>, Option<&'static str>, bool)> {
             false,
         ),
         (
+            "ui-invalidate-mod",
+            vec![line(
+                r#"{"type":"system","subtype":"ui_invalidate","event":"ui.render","prompts_screened":true}"#,
+            )],
+            Some(AMBIENT),
+            false,
+        ),
+        (
+            "ui-invalidate-plugin-state",
+            vec![line(
+                r#"{"type":"system","subtype":"ui_invalidate","event":"ui.render","instances":[]}"#,
+            )],
+            Some(AMBIENT),
+            false,
+        ),
+        (
+            "ui-invalidate-unknown-field",
+            vec![line(
+                r#"{"type":"system","subtype":"ui_invalidate","event":"ui.render","note":"x"}"#,
+            )],
+            Some(UNKNOWN),
+            false,
+        ),
+        (
+            "ui-invalidate-unknown-event",
+            vec![line(
+                r#"{"type":"system","subtype":"ui_invalidate","event":"ui.toast"}"#,
+            )],
+            Some(UNKNOWN),
+            false,
+        ),
+        (
+            "ui-invalidate-before-init",
+            vec![
+                line(
+                    r#"{"type":"system","subtype":"ui_invalidate","event":"ui.render","session_id":"s","uuid":"u"}"#,
+                ),
+                normal.clone(),
+                line(C6_TEXT),
+                line(C6_RESULT),
+            ],
+            None,
+            true,
+        ),
+        (
             "known-informational",
             vec![
                 normal.clone(),
@@ -327,6 +372,15 @@ fn s4b_c6_claude_argv_and_environment_are_isolated() {
     assert_eq!(
         settings["forceLoginMethod"], "claudeai",
         "SUBSCRIPTION_SIGN_IN_ONLY"
+    );
+    assert_eq!(
+        settings["enabledPlugins"],
+        serde_json::json!({
+            "cc-plugin-agents-md@builtin": false,
+            "cc-plugin-privacy@builtin": false,
+            "cc-plugin-plugin-authoring@builtin": false,
+        }),
+        "BUILTIN_PLUGINS_OFF"
     );
     assert_eq!(
         argv[argv.len() - 2..],
@@ -774,6 +828,14 @@ fn s4b_c6_claude_stop_cancels_the_whole_unit() {
             "C6_DESCENDANT_SURVIVED_STOP"
         );
     }
+    // The guardian's own cancellation empties the unit within its cleanup
+    // deadline. A later backstop (the guardian giving up, then the unit
+    // being removed) also silences the descendant, but only after it.
+    let beating_after_stop = quiet_since.saturating_duration_since(stopped);
+    assert!(
+        beating_after_stop < crate::job_guardian::protocol::CLEANUP,
+        "C6_DESCENDANT_OUTLIVED_GUARDIAN_CLEANUP {beating_after_stop:?}"
+    );
     c4_wait(
         || {
             let _ = f.editor.request(HostCommand::Status);

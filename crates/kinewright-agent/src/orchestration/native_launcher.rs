@@ -278,6 +278,15 @@ fn claude_arguments(
     claude_argv(&mcp, config, prompt)
 }
 
+/// The built-in plugins Claude Code 2.1.317 loads in a print-mode session,
+/// as its own `system/init` lists them.
+#[cfg(any(test, feature = "test-util"))]
+const CLAUDE_BUILTIN_PLUGINS: [&str; 3] = [
+    "cc-plugin-agents-md",
+    "cc-plugin-privacy",
+    "cc-plugin-plugin-authoring",
+];
+
 /// The argv around a given MCP configuration; [`claude_arguments`] supplies
 /// the host endpoint's.
 #[cfg(any(test, feature = "test-util"))]
@@ -295,10 +304,18 @@ pub(crate) fn claude_argv(
         .map(|name| format!("mcp__kinewright__{name}"))
         .collect::<Vec<_>>()
         .join(",");
+    // Claude Code ships built-in plugins (`<name>@builtin`) that load even in
+    // safe mode, and `--bare` would force API-key auth. They are turned off
+    // here by name. A built-in this list does not name (a newer CLI's) still
+    // shows in `system/init` and is refused there.
     let settings = serde_json::json!({
         "disableAllHooks": true,
         "forceLoginMethod": "claudeai",
         "enableAllProjectMcpServers": false,
+        "enabledPlugins": CLAUDE_BUILTIN_PLUGINS
+            .iter()
+            .map(|name| (format!("{name}@builtin"), serde_json::Value::Bool(false)))
+            .collect::<serde_json::Map<_, _>>(),
     });
     let mut arguments: Vec<String> = [
         "-p",
@@ -1585,6 +1602,33 @@ fn claude_init_allowed(raw: &serde_json::Value) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Claude Code's `system`/`ui_invalidate` render notice; 2.1.317 sends one
+/// before `init`. Bare, it names only the `ui.render` event and carries no
+/// tool, text or configuration. `prompts_screened`, `instances` or
+/// `client_modules` say a mod or plugin acts on the session, which the
+/// recipe never loads. Any other field is unknown.
+fn claude_ui_invalidate_allowed(raw: &serde_json::Value) -> Result<(), &'static str> {
+    let object = raw.as_object().ok_or(STREAM_MALFORMED)?;
+    if ["prompts_screened", "instances", "client_modules"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+    {
+        return Err(STREAM_AMBIENT_REFUSED);
+    }
+    if raw.get("event").and_then(serde_json::Value::as_str) == Some("ui.render")
+        && object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "type" | "subtype" | "event" | "session_id" | "uuid"
+            )
+        })
+    {
+        Ok(())
+    } else {
+        Err(STREAM_UNKNOWN_EVENT)
+    }
+}
+
 /// C6: the Claude stream allowlist. Hooks, background tasks, subagent
 /// messages, host control requests and provider-native tools are refused;
 /// the listed informational events pass unchanged; any other type, system
@@ -1624,6 +1668,7 @@ fn claude_event_allowed(
                 Ok(())
             }
             Some("api_retry" | "status" | "compact_boundary") => Ok(()),
+            Some("ui_invalidate") => claude_ui_invalidate_allowed(raw),
             Some(subtype)
                 if subtype.starts_with("hook_")
                     || subtype.starts_with("task_")

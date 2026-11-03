@@ -3400,6 +3400,7 @@ mod codex_witness;
 #[cfg(all(target_os = "linux", feature = "eval-harness"))]
 #[doc(hidden)]
 pub use codex_witness::{
+    run_installed_claude_director_witness, run_installed_claude_dry_launch,
     run_installed_codex_director_witness, run_installed_codex_dry_launch,
     run_installed_codex_local_policy_witness, run_installed_codex_network_witness,
     run_unpaid_policy_witness,

@@ -59,7 +59,9 @@ pub fn run_unpaid_policy_witness() {
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
     fs::create_dir_all(&out).unwrap();
     let deny = crate::native_launcher::DenyProviderEgress::engage();
-    let evidence = std::panic::catch_unwind(run_dry_network_witness);
+    let evidence = std::panic::catch_unwind(|| {
+        run_dry_network_witness(&crate::codex_qualification::executable().unwrap())
+    });
     drop(deny);
     let passed = evidence.is_ok();
     fs::write(
@@ -87,7 +89,9 @@ pub fn run_unpaid_policy_witness() {
 /// # Panics
 /// Refuses unless egress is provably denied and the sign-in provably
 /// read-only.
-pub(super) fn run_dry_network_witness() -> serde_json::Value {
+/// The provider's own executable decides the sandbox's runtime paths; the
+/// network policy under proof is the same for every provider.
+pub(super) fn run_dry_network_witness(provider: &ExecutableIdentity) -> serde_json::Value {
     assert!(
         crate::native_launcher::DenyProviderEgress::engaged(),
         "C5 fix7 dry probe without the dry policy"
@@ -115,6 +119,7 @@ pub(super) fn run_dry_network_witness() -> serde_json::Value {
     };
     let control_arguments = [vec!["unpaid-control".to_owned()], common()].concat();
     let probe: Probe<crate::network_probe::UnpaidReport> = run_probe(
+        provider,
         "dry-network",
         port,
         &control_arguments,
@@ -387,6 +392,7 @@ fn probe_reports(
 ) {
     let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let probe: Probe<crate::network_probe::Report> = run_probe(
+        &crate::codex_qualification::executable().unwrap(),
         label,
         endpoint.local_addr().unwrap().port(),
         &[],
@@ -421,6 +427,7 @@ fn credential_state(path: &std::path::Path) -> (Vec<u8>, [i64; 6]) {
     reason = "one probe crosses the same guardian barriers as a launch"
 )]
 fn run_probe<T: serde::de::DeserializeOwned + serde::Serialize>(
+    provider: &ExecutableIdentity,
     label: &str,
     mcp_port: u16,
     control_arguments: &[String],
@@ -456,13 +463,12 @@ fn run_probe<T: serde::de::DeserializeOwned + serde::Serialize>(
     };
     let probe = guardian().with_file_name("kinewright-network-probe");
     let meta = fs::metadata(&probe).unwrap();
-    let codex = crate::codex_qualification::executable().unwrap();
     let executable = ExecutableIdentity {
         path: probe.clone(),
         file_identity: [meta.dev(), meta.ino()],
     };
     let mut sandbox =
-        crate::native_launcher::sandbox(&codex, &scratch, &scope, mcp_port, true).unwrap();
+        crate::native_launcher::sandbox(provider, &scratch, &scope, mcp_port, true).unwrap();
     if let ProviderSandbox::LinuxAllowlist {
         executable_identity,
         ..

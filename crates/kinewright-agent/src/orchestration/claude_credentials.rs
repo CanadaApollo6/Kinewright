@@ -527,7 +527,8 @@ mod tests {
         );
         let scratch = temp.path("scratch");
         fs::create_dir(&scratch).unwrap();
-        let root = prepare_store_at(&scratch, &path, identity, NOW).unwrap();
+        let root = prepare_store_at(&scratch, &path, identity, NOW)
+            .expect("C6_PRIVATE_STORE_PREPARED (a store of any other shape is refused)");
         assert_eq!(root, scratch.join("claude-config"));
         let names: Vec<_> = fs::read_dir(&root)
             .unwrap()

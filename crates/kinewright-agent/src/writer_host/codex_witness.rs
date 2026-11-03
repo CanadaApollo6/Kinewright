@@ -205,13 +205,16 @@ fn local_probe(arguments: Vec<String>) -> (String, String) {
 
 fn local_version_probe() {
     let (output, _) = local_probe(vec!["--version".into()]);
-    assert_eq!(
-        output.trim(),
-        "codex-cli 0.166.0",
-        "C5 installed version through guardian"
+    let version = output
+        .split_whitespace()
+        .find_map(|token| crate::orchestration::adapters::CliVersion::parse(token).ok())
+        .expect("C5 installed version through guardian");
+    assert!(
+        version >= crate::orchestration::adapters::codex_candidate().minimum_version(),
+        "C5 installed version below the floor"
     );
     eprintln!(
-        "C5_LOCAL_VERSION version=0.166.0 guardian=true subscription=true credential_identity=true paid=false"
+        "C5_LOCAL_VERSION version={version:?} guardian=true subscription=true credential_identity=true paid=false"
     );
 }
 
@@ -345,7 +348,7 @@ pub fn run_installed_codex_director_witness() {
         .open(evidence.join(format!("live-{number}.started")))
         .expect("C5 live run id already used");
     let report = Arc::new(Mutex::new(
-        serde_json::json!({"run":number,"full_run_started":false,"usage":null,"refresh_live":"NOT RUN","version":"0.166.0","model":"gpt-6.1-sol","reasoning":"high","token_ceiling":crate::orchestration::adapters::codex_candidate().default_token_ceiling().get()}),
+        serde_json::json!({"run":number,"full_run_started":false,"usage":null,"refresh_live":"NOT RUN","minimum_version":"0.166.0","model":"gpt-6.1-sol","reasoning":"high","token_ceiling":crate::orchestration::adapters::codex_candidate().default_token_ceiling().get()}),
     ));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| live_body(&report)));
     report.lock().unwrap()["passed"] = serde_json::json!(result.is_ok());
@@ -362,6 +365,66 @@ pub fn run_installed_codex_director_witness() {
         result.is_ok(),
         "C5 installed witness failed; usage retained in live report"
     );
+}
+
+/// Lead grants for paid Claude Director runs, by run label. Empty: no paid
+/// Claude run is granted, so the witness stops before its dry launch, before
+/// any provider starts and before anything is sent. A grant is a reviewed
+/// source change, never an environment variable alone.
+const CLAUDE_LIVE_GRANTS: &[&str] = &[];
+
+/// C6: the installed Claude Code Director, end to end, as an ordinary
+/// on-demand test. It runs only under a compiled lead grant, after an unpaid
+/// dry launch passes in the same process, and spends each run label once.
+///
+/// # Panics
+/// Refuses without a lead grant (`C6_NO_LEAD_GRANT`), on a failed dry launch,
+/// a reused run label, or a failed live run.
+#[doc(hidden)]
+pub fn run_installed_claude_director_witness() {
+    let label = std::env::var("KINEWRIGHT_S4B_C6_RUN").unwrap_or_default();
+    assert!(
+        claude_live_granted(&label),
+        "C6_NO_LEAD_GRANT: a paid Claude Director run needs a lead grant in CLAUDE_LIVE_GRANTS"
+    );
+    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c6");
+    fs::create_dir_all(&evidence).unwrap();
+    run_installed_claude_dry_launch();
+    assert!(
+        CLAUDE_DRY_LAUNCH_PASSED.load(std::sync::atomic::Ordering::SeqCst),
+        "C6 dry launch must pass in this process before a paid run"
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(evidence.join(format!("live-{label}.started")))
+        .expect("C6 live run label already used");
+    let candidate = crate::orchestration::adapters::claude_candidate();
+    let report = Arc::new(Mutex::new(serde_json::json!({
+        "run": label,
+        "provider": candidate.provider(),
+        "full_run_started": false,
+        "usage": null,
+        "model": candidate.selection().model,
+        "token_ceiling": candidate.default_token_ceiling().get(),
+    })));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        live_run(&report, candidate);
+    }));
+    report.lock().unwrap()["passed"] = serde_json::json!(result.is_ok());
+    fs::write(
+        evidence.join(format!("live-{label}.json")),
+        serde_json::to_vec_pretty(&*report.lock().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        result.is_ok(),
+        "C6 installed Claude Director failed; report retained"
+    );
+}
+
+fn claude_live_granted(label: &str) -> bool {
+    !label.is_empty() && CLAUDE_LIVE_GRANTS.contains(&label)
 }
 
 #[allow(
@@ -400,16 +463,24 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         evidence["unpaid_network_passed"] = serde_json::json!(true);
     }
     local_version_probe();
-    let credential_source = crate::codex_credentials::source_path().unwrap();
-    let credential_identity = crate::codex_credentials::inspect(&credential_source, None).unwrap();
-    let credential_before = fs::metadata(&credential_source)
-        .unwrap()
-        .modified()
-        .unwrap();
     assert!(
         DRY_LAUNCH_PASSED.load(std::sync::atomic::Ordering::SeqCst),
         "C5 fix7 paid run without a passed dry launch in this process"
     );
+    live_run(report, crate::orchestration::adapters::codex_candidate());
+}
+
+/// The paid Director run itself, shared by both providers after their own
+/// unpaid preludes.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the live gate keeps ReviseCut, history and cleanup assertions together"
+)]
+fn live_run(
+    report: &Arc<Mutex<serde_json::Value>>,
+    candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
+) {
+    let sign_in = PersonSignIn::open(candidate);
     let witness = director_witness(report, &Arc::default());
     let DirectorRun {
         temp: _temp,
@@ -422,11 +493,7 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
         client,
         owner_arc,
         run,
-    } = start_director(
-        witness,
-        "C5 disposable live",
-        crate::orchestration::adapters::codex_candidate(),
-    );
+    } = start_director(witness, "disposable live", candidate);
     let deadline = Instant::now() + Duration::from_mins(15);
     let mut failure = false;
     let final_state = loop {
@@ -574,14 +641,8 @@ fn live_body(report: &Arc<Mutex<serde_json::Value>>) {
     );
     report.lock().unwrap()["cleanup"] = serde_json::json!(true);
     report.lock().unwrap()["manual_exact"] = serde_json::json!(true);
-    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
-    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(
-        fs::metadata(&credential_source)
-            .unwrap()
-            .modified()
-            .unwrap()
-            != credential_before
-    );
+    sign_in.recheck();
+    report.lock().unwrap()["credential_write_observed"] = serde_json::json!(!sign_in.unchanged());
     report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
     assert!(!failure, "C5 provider/runtime failure; no automatic retry");
     assert!(
@@ -1020,23 +1081,60 @@ static DRY_LAUNCH_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 /// or is refused before turn start.
 #[doc(hidden)]
 pub fn run_installed_codex_dry_launch() {
-    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/s4b-c5");
+    run_dry_launch(
+        crate::orchestration::adapters::codex_candidate(),
+        "s4b-c5",
+        "KINEWRIGHT_S4B_C5_DRY_LABEL",
+    );
+    DRY_LAUNCH_PASSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// C6: the same unpaid launch for the installed Claude Code CLI: its real
+/// recipe, guardian, sealed image and sandbox, with provider egress denied
+/// on the machine and proved denied first. Nothing is charged.
+///
+/// # Panics
+/// Refuses when egress is not provably denied, when the person's sign-in is
+/// not a subscription, or when the CLI dies, hangs or is refused before
+/// turn start.
+#[doc(hidden)]
+pub fn run_installed_claude_dry_launch() {
+    run_dry_launch(
+        crate::orchestration::adapters::claude_candidate(),
+        "s4b-c6",
+        "KINEWRIGHT_S4B_C6_DRY_LABEL",
+    );
+    CLAUDE_DRY_LAUNCH_PASSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+static CLAUDE_DRY_LAUNCH_PASSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn run_dry_launch(
+    candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
+    folder: &str,
+    label_variable: &str,
+) {
+    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../target/{folder}"));
     fs::create_dir_all(&evidence).unwrap();
-    let label = std::env::var("KINEWRIGHT_S4B_C5_DRY_LABEL").unwrap_or_else(|_| "dry".into());
+    let label = std::env::var(label_variable).unwrap_or_else(|_| "dry".into());
     assert!(
         !label.is_empty()
             && label.len() <= 32
             && label
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-        "C5 fix7 dry label"
+        "dry label"
     );
     let report = Arc::new(Mutex::new(serde_json::json!({
         "paid": false,
+        "provider": candidate.provider(),
         "label": label,
         "first_progress_seconds": crate::native_launcher::FIRST_PROGRESS.as_secs(),
     })));
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dry_body(&report)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        dry_body(&report, candidate);
+    }));
     report.lock().unwrap()["passed"] = serde_json::json!(result.is_ok());
     fs::write(
         evidence.join(format!("dry-launch-{label}.json")),
@@ -1046,22 +1144,80 @@ pub fn run_installed_codex_dry_launch() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
-    DRY_LAUNCH_PASSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The person's own sign-in file, by file identity and times only. The
+/// product's mode-field inspection runs on it before and after; nothing here
+/// reads, logs or copies its contents.
+struct PersonSignIn {
+    candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
+    source: PathBuf,
+    identity: [u64; 2],
+    before: fs::Metadata,
+}
+impl PersonSignIn {
+    fn claude(candidate: &crate::orchestration::adapters::ConnectorSpecification) -> bool {
+        std::ptr::eq(
+            candidate,
+            crate::orchestration::adapters::claude_candidate(),
+        )
+    }
+    fn open(candidate: &'static crate::orchestration::adapters::ConnectorSpecification) -> Self {
+        let (source, identity) = if Self::claude(candidate) {
+            let source = crate::claude_credentials::source_path().unwrap();
+            let sign_in = crate::claude_credentials::inspect(&source, None)
+                .unwrap_or_else(|refusal| panic!("C6 sign-in refused: {refusal:?}"));
+            (source, sign_in.identity)
+        } else {
+            let source = crate::codex_credentials::source_path().unwrap();
+            let identity = crate::codex_credentials::inspect(&source, None).unwrap();
+            (source, identity)
+        };
+        let before = fs::metadata(&source).unwrap();
+        Self {
+            candidate,
+            source,
+            identity,
+            before,
+        }
+    }
+    fn recheck(&self) {
+        if Self::claude(self.candidate) {
+            crate::claude_credentials::inspect(&self.source, Some(self.identity))
+                .unwrap_or_else(|refusal| panic!("C6 sign-in changed: {refusal:?}"));
+        } else {
+            crate::codex_credentials::inspect(&self.source, Some(self.identity)).unwrap();
+        }
+    }
+    fn unchanged(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let after = fs::metadata(&self.source).unwrap();
+        after.modified().unwrap() == self.before.modified().unwrap()
+            && after.ctime() == self.before.ctime()
+            && after.ctime_nsec() == self.before.ctime_nsec()
+    }
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "the denied-egress launch keeps its proof, observation and cleanup together"
 )]
-fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
+fn dry_body(
+    report: &Arc<Mutex<serde_json::Value>>,
+    candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
+) {
     let deny = crate::native_launcher::DenyProviderEgress::engage();
-    // Prove, in this exact policy, that TCP 443 to every provider host is
-    // refused before anything is launched.
-    let egress = network_witness::run_dry_network_witness();
+    // Prove, in this exact policy and for this provider's executable, that
+    // TCP 443 to every provider host is refused before anything is launched.
+    let executable = if PersonSignIn::claude(candidate) {
+        crate::claude_qualification::executable()
+    } else {
+        crate::codex_qualification::executable()
+    }
+    .expect("installed provider executable");
+    let egress = network_witness::run_dry_network_witness(&executable);
     report.lock().unwrap()["egress"] = egress;
-    let credential_source = crate::codex_credentials::source_path().unwrap();
-    let credential_identity = crate::codex_credentials::inspect(&credential_source, None).unwrap();
-    let credential_before = fs::metadata(&credential_source).unwrap();
+    let sign_in = PersonSignIn::open(candidate);
     let first_event = Arc::new(std::sync::OnceLock::new());
     let witness = director_witness(report, &first_event);
     let mcp = || {
@@ -1081,11 +1237,7 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
         client,
         owner_arc,
         run,
-    } = start_director(
-        witness,
-        "C5 dry launch",
-        crate::orchestration::adapters::codex_candidate(),
-    );
+    } = start_director(witness, "dry launch", candidate);
     let launched = Instant::now();
     // Startup must show progress before the product's own first-progress
     // deadline; a little slack lets that deadline's refusal be read.
@@ -1256,13 +1408,8 @@ fn dry_body(report: &Arc<Mutex<serde_json::Value>>) {
     drop(temp);
     // Only after the dry host is gone may a sandbox allow 443 again.
     drop(deny);
-    crate::codex_credentials::inspect(&credential_source, Some(credential_identity)).unwrap();
-    let credential_after = fs::metadata(&credential_source).unwrap();
-    let unchanged = credential_after.modified().unwrap() == credential_before.modified().unwrap()
-        && std::os::unix::fs::MetadataExt::ctime(&credential_after)
-            == std::os::unix::fs::MetadataExt::ctime(&credential_before)
-        && std::os::unix::fs::MetadataExt::ctime_nsec(&credential_after)
-            == std::os::unix::fs::MetadataExt::ctime_nsec(&credential_before);
+    sign_in.recheck();
+    let unchanged = sign_in.unchanged();
     report.lock().unwrap()["credential_identity_exit"] = serde_json::json!(true);
     report.lock().unwrap()["credential_write_observed"] = serde_json::json!(!unchanged);
     assert!(unchanged, "C5 fix7 dry credential written");
