@@ -70,6 +70,16 @@ impl MachineClaim {
         Self::acquire_at(root, project, run)
     }
 
+    /// S4b C6 fix 2: reopen a leftover probe namespace to stop and retire
+    /// what it retained, even when its run record vanished.
+    ///
+    /// # Errors
+    /// Returns `studio_run_active` for a held lock, or a malformed-state refusal.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn inspect_private(root: &Path) -> io::Result<Self> {
+        Self::inspect_at(root)
+    }
+
     /// # Errors
     /// Returns `studio_run_active` for a held lock or unreconciled recovery record.
     fn acquire_at(root: &Path, project: &str, run: &str) -> io::Result<Self> {

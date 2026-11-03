@@ -6,6 +6,13 @@
 //! relay goes nowhere. It has no credentials: the private store is empty and
 //! nothing is mounted. Its output is read for a bounded time and size, and the
 //! whole unit is terminated and reaped before the version is accepted.
+//!
+//! Each probe holds its own claim in a findable per-user namespace. Its
+//! records go only after independent proof that its unit is empty; when the
+//! guardian cannot prove that, the kept recovery identity stops the whole
+//! service, as a run's recovery does. A probe that still cannot be proven
+//! stopped stays on disk: the next probe stops and retires it first, and
+//! refuses admission while it cannot.
 use crate::orchestration::adapters::{CertificationRefusal, CliVersion, ExecutableIdentity};
 use std::{
     io::{self, Read},
@@ -82,29 +89,182 @@ impl crate::guardian::DurableAttemptOwner for ProbeOwner {
 
 /// The installed CLI's version, read under the guardian. The executable's
 /// identity is checked before its bytes are measured and sealed, and again
-/// after the unit is gone.
+/// after the unit is gone. Leftover probes are stopped and retired first; an
+/// unresolved one refuses admission.
 pub(crate) fn installed_version(
     probe: &VersionProbe<'_>,
     executable: &ExecutableIdentity,
 ) -> Result<CliVersion, CertificationRefusal> {
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "kvp-{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .map_err(|_| CertificationRefusal::SandboxUnavailable)?;
-    let run = contained(probe, executable, &root);
-    let _ = std::fs::remove_dir_all(&root);
-    let run = run?;
+    let attempt = fresh_attempt()?;
+    let namespace = Namespace::open().map_err(|_| CertificationRefusal::SandboxUnavailable)?;
+    let (root, claim) = namespace.admit(&attempt)?;
+    let run = contained(probe, executable, &namespace, &root, claim, attempt)?;
     identity(executable)?;
     if !run.exited_zero {
         return Err(CertificationRefusal::UnqualifiedVersion);
     }
     probe.form.parse(&run.output)
+}
+
+fn fresh_attempt() -> Result<crate::job_guardian::protocol::AttemptIdentity, CertificationRefusal> {
+    let fresh = || {
+        kinewright_project::bundle_records::SessionId::fresh()
+            .map(|id| id.as_str().to_owned())
+            .map_err(|_| CertificationRefusal::SandboxUnavailable)
+    };
+    Ok(crate::job_guardian::protocol::AttemptIdentity {
+        project: fresh()?,
+        run: fresh()?,
+        task: fresh()?,
+        attempt: fresh()?,
+        nonce: fresh()?,
+        owner_instance: fresh()?,
+    })
+}
+
+/// The probes' own findable namespace: one private per-user folder holding a
+/// root per probe, each with its own claim. Its lock makes reconciling,
+/// admitting and removing roots exclusive, so no probe sees another's root
+/// half made or half removed.
+struct Namespace {
+    base: PathBuf,
+    lock: std::fs::File,
+}
+
+impl Namespace {
+    fn open() -> io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let base = base_path()?;
+        match std::fs::DirBuilder::new().mode(0o700).create(&base) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = std::fs::symlink_metadata(&base)?;
+        if !metadata.is_dir()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(io::Error::other("version probe namespace owner or mode"));
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+            .mode(0o600)
+            .open(base.join("lock"))?;
+        Ok(Self { base, lock })
+    }
+
+    /// Stop and retire every leftover probe, then make and claim a new root.
+    fn admit(
+        &self,
+        attempt: &crate::job_guardian::protocol::AttemptIdentity,
+    ) -> Result<(PathBuf, crate::execution_claim::MachineClaim), CertificationRefusal> {
+        self.lock
+            .lock()
+            .map_err(|_| CertificationRefusal::SandboxUnavailable)?;
+        let admitted = self
+            .reconcile()
+            .map_err(|_| CertificationRefusal::VersionProbePending)
+            .and_then(|()| {
+                let root = self.base.join(&attempt.nonce[..12]);
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&root)
+                    .and_then(|()| {
+                        crate::execution_claim::MachineClaim::acquire_private(
+                            &root.join("m"),
+                            &attempt.project,
+                            &attempt.run,
+                        )
+                    })
+                    .map(|claim| (root, claim))
+                    .map_err(|_| CertificationRefusal::SandboxUnavailable)
+            });
+        let _ = self.lock.unlock();
+        admitted
+    }
+
+    /// A root whose claim is held belongs to a probe still running. Any other
+    /// is stopped and retired through its own records, then removed; the first
+    /// that cannot be is kept and refuses admission.
+    fn reconcile(&self) -> io::Result<()> {
+        for entry in std::fs::read_dir(&self.base)? {
+            let entry = entry?;
+            let named = entry.file_name().to_str().is_some_and(|name| {
+                name.len() == 12 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            });
+            if !named {
+                continue;
+            }
+            let root = entry.path();
+            if !std::fs::symlink_metadata(&root)?.is_dir() {
+                return Err(io::Error::other("version probe root replaced"));
+            }
+            let claim = match crate::execution_claim::MachineClaim::inspect_private(&root.join("m"))
+            {
+                Ok(claim) => claim,
+                Err(error) if error.to_string() == "studio_run_active" => continue,
+                Err(error) => return Err(error),
+            };
+            settle(claim)?;
+            std::fs::remove_dir_all(&root)?;
+        }
+        Ok(())
+    }
+
+    /// Removed only after its claim was released with nothing retained.
+    fn remove(&self, root: &Path) -> io::Result<()> {
+        self.lock.lock()?;
+        let removed = match std::fs::remove_dir_all(root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        };
+        let _ = self.lock.unlock();
+        removed
+    }
+}
+
+/// The person's state folder, stable across launches. Not `/run/user/<uid>`:
+/// the payload sees that runtime folder masked by an empty tmpfs, so a
+/// probe's scratch there would vanish for the provider.
+#[cfg(not(test))]
+fn base_path() -> io::Result<PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join(".local/state"))
+        })
+        .ok_or_else(|| io::Error::other("version probe state folder unavailable"))?;
+    let parent = state.join("kinewright");
+    std::fs::create_dir_all(&parent)?;
+    Ok(parent.join("kvp"))
+}
+
+/// Tests keep their state under the build's temporary folder, and a test may
+/// give its own thread a private namespace.
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps, reason = "the production path can fail")]
+fn base_path() -> io::Result<PathBuf> {
+    Ok(hooks::BASE.with_borrow(Clone::clone).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("kvp-{}", rustix::process::getuid().as_raw()))
+    }))
+}
+
+/// Stop and retire every attempt the claim retains, each through independent
+/// observation of its unit, then release the claim. Any failure keeps the
+/// claim's records where the next probe finds them.
+fn settle(mut claim: crate::execution_claim::MachineClaim) -> io::Result<()> {
+    for identity in claim.recovery_identities().to_vec() {
+        crate::guardian::cleanup_failed_prepare(&mut claim, &mut ProbeOwner, &identity)?;
+    }
+    claim.finish()
 }
 
 fn identity(executable: &ExecutableIdentity) -> Result<std::fs::File, CertificationRefusal> {
@@ -122,9 +282,33 @@ fn identity(executable: &ExecutableIdentity) -> Result<std::fs::File, Certificat
 fn contained(
     probe: &VersionProbe<'_>,
     executable: &ExecutableIdentity,
+    namespace: &Namespace,
     root: &Path,
+    mut claim: crate::execution_claim::MachineClaim,
+    attempt: crate::job_guardian::protocol::AttemptIdentity,
 ) -> Result<Run, CertificationRefusal> {
-    use crate::job_guardian::protocol::AttemptIdentity;
+    let run = launched(probe, executable, root, &mut claim, attempt);
+    #[cfg(test)]
+    if hooks::ABANDON.get() {
+        // The host is lost here: nothing below runs.
+        return Err(CertificationRefusal::VersionProbePending);
+    }
+    // Only independent proof that the unit is empty releases the probe's
+    // records; an unproven claim stays for the next probe to reconcile.
+    let settled = settle(claim);
+    settled
+        .and_then(|()| namespace.remove(root))
+        .map_err(|_| CertificationRefusal::VersionProbePending)?;
+    run
+}
+
+fn launched(
+    probe: &VersionProbe<'_>,
+    executable: &ExecutableIdentity,
+    root: &Path,
+    claim: &mut crate::execution_claim::MachineClaim,
+    attempt: crate::job_guardian::protocol::AttemptIdentity,
+) -> Result<Run, CertificationRefusal> {
     let sandbox = |_| CertificationRefusal::SandboxUnavailable;
     // The sealed image holds exactly the bytes of the identity-checked file.
     let digest =
@@ -153,29 +337,10 @@ fn contained(
         &image,
     )
     .map_err(sandbox)?;
-    let fresh = || {
-        kinewright_project::bundle_records::SessionId::fresh()
-            .map(|id| id.as_str().to_owned())
-            .map_err(|_| CertificationRefusal::SandboxUnavailable)
-    };
-    let attempt = AttemptIdentity {
-        project: fresh()?,
-        run: fresh()?,
-        task: fresh()?,
-        attempt: fresh()?,
-        nonce: fresh()?,
-        owner_instance: fresh()?,
-    };
-    // A private namespace: the probe never enters a run's claim or recovery.
-    let mut claim = crate::execution_claim::MachineClaim::acquire_private(
-        &root.join("m"),
-        &attempt.project,
-        &attempt.run,
-    )
-    .map_err(sandbox)?;
     let mut owner = ProbeOwner;
+    // A failed prepare keeps any reservation it could not prove stopped.
     let mut session = crate::guardian::ContainedSession::prepare(
-        &mut claim,
+        claim,
         &mut owner,
         attempt,
         program,
@@ -190,16 +355,18 @@ fn contained(
         // probe's namespace reaches nothing.
         let reader = pipes.into_reader();
         session.commit(&mut owner).map_err(sandbox)?;
+        #[cfg(test)]
+        hooks::committed(session.recovery());
         bounded(reader)
     })();
-    // Whatever happened, the whole unit is stopped and reaped first.
+    // Whatever happened, the whole unit is stopped and reaped first. A
+    // cleanup that cannot prove it leaves the attempt retained for `settle`.
     session.close_lifetime();
-    let cleaned = session
-        .cleanup()
-        .and_then(|proof| claim.retire(&proof))
-        .and_then(|()| claim.finish());
+    if let Ok(proof) = session.cleanup() {
+        let _ = claim.retire(&proof);
+    }
+    drop(session);
     drop(image);
-    cleaned.map_err(sandbox)?;
     run
 }
 
@@ -321,11 +488,13 @@ fn bounded(reader: crate::provider_pipes::ProviderReader) -> Result<Run, Certifi
 
 #[cfg(test)]
 mod tests {
-    use super::{VersionForm, VersionProbe, installed_version};
+    use super::{VersionForm, VersionProbe, hooks, installed_version};
+    use crate::job_guardian::protocol::RecoveryIdentity;
     use crate::orchestration::adapters::{CertificationRefusal, CliVersion, ExecutableIdentity};
     use std::{
         os::unix::fs::MetadataExt,
         path::{Path, PathBuf},
+        sync::mpsc,
         time::{Duration, Instant},
     };
 
@@ -520,5 +689,195 @@ mod tests {
             "C6_VERSION_PROBE_UNBOUNDED {:?}",
             started.elapsed()
         );
+    }
+    /// This thread's own probe namespace, removed afterwards.
+    struct Base(PathBuf);
+    impl Base {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("kvt-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            hooks::BASE.set(Some(path.clone()));
+            Self(path)
+        }
+        fn roots(&self) -> usize {
+            std::fs::read_dir(&self.0).map_or(0, |entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name() != "lock")
+                    .count()
+            })
+        }
+    }
+    impl Drop for Base {
+        fn drop(&mut self) {
+            hooks::BASE.set(None);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The probe's unit is gone: its guardian reaped and its whole tree removed.
+    fn unit_gone(recovery: &RecoveryIdentity, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            let gone = kinewright_job_sys::process_identity_reaped(
+                recovery.guardian_pid,
+                recovery.guardian_start,
+            )
+            .unwrap_or(false)
+                && kinewright_job_sys::unit_tree_absent(&recovery.attempt.unit()).unwrap_or(false);
+            if gone || Instant::now() >= deadline {
+                return gone;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A red run never leaves its unit behind.
+    fn outlived(recovery: &RecoveryIdentity) -> bool {
+        let outlived = !unit_gone(recovery, Duration::from_secs(3));
+        if outlived {
+            let _ = crate::guardian::RecoveryObserver::recover_cleanup(recovery);
+        }
+        outlived
+    }
+
+    /// Astra re-check: a guardian that stops answering during cleanup no longer
+    /// takes the probe's records with it. The kept recovery identity stops the
+    /// whole service, and only then are the records removed.
+    #[test]
+    #[ignore = "on-demand: equipped Linux guardian test"]
+    fn s4b_c6_version_probe_stalled_guardian_is_stopped_before_its_records_go() {
+        let temp = folder("c6-vp-stall");
+        let guardian = guardian();
+        let (_, executable) = fixture(temp.root(), "codex-hang");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let base = Base::new("st");
+            hooks::STOP_GUARDIAN.set(true);
+            let version = installed_version(&probe(&guardian, VersionForm::Codex), &executable);
+            let _ = sender.send((version, hooks::RECOVERY.take(), base.roots()));
+        });
+        let (version, recovery, roots) = receiver
+            .recv_timeout(Duration::from_secs(40))
+            .expect("C6_VERSION_PROBE_UNBOUNDED");
+        let recovery = recovery.expect("C6_VERSION_PROBE_COMMITTED");
+        assert!(!outlived(&recovery), "C6_VERSION_PROBE_UNIT_OUTLIVED");
+        assert_eq!(
+            version,
+            Err(CertificationRefusal::UnqualifiedVersion),
+            "C6_VERSION_PROBE_STALL_REFUSED"
+        );
+        assert_eq!(roots, 0, "C6_VERSION_PROBE_STATE_LEFT");
+    }
+
+    /// A probe whose host is lost before it can stop its unit leaves its
+    /// records findable, and the next probe stops and retires it before it
+    /// runs.
+    #[test]
+    #[ignore = "on-demand: equipped Linux guardian test"]
+    fn s4b_c6_version_probe_reconciles_a_leftover_before_admitting() {
+        let temp = folder("c6-vp-leftover");
+        let guardian = guardian();
+        let (_, hang) = fixture(temp.root(), "codex-hang");
+        let (_, ok) = fixture(temp.root(), "codex-ok");
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let base = Base::new("lo");
+            hooks::STOP_GUARDIAN.set(true);
+            hooks::ABANDON.set(true);
+            let first = installed_version(&probe(&guardian, VersionForm::Codex), &hang);
+            hooks::STOP_GUARDIAN.set(false);
+            hooks::ABANDON.set(false);
+            let recovery = hooks::RECOVERY.take();
+            let kept = base.roots();
+            let alive = recovery
+                .as_ref()
+                .is_some_and(|recovery| !unit_gone(recovery, Duration::ZERO));
+            let second = installed_version(&probe(&guardian, VersionForm::Codex), &ok);
+            let _ = sender.send((first, recovery, kept, alive, second, base.roots()));
+        });
+        let (first, recovery, kept, alive, second, roots) = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("C6_VERSION_PROBE_UNBOUNDED");
+        let recovery = recovery.expect("C6_VERSION_PROBE_COMMITTED");
+        let outlived = outlived(&recovery);
+        assert_eq!(
+            first,
+            Err(CertificationRefusal::VersionProbePending),
+            "C6_VERSION_PROBE_ABANDONED"
+        );
+        assert!(
+            kept == 1 && alive,
+            "C6_VERSION_PROBE_RECORDS_KEPT {kept} {alive}"
+        );
+        assert!(!outlived, "C6_VERSION_PROBE_LEFTOVER_STOPPED");
+        assert_eq!(
+            second,
+            Ok(CliVersion(0, 166, 0)),
+            "C6_VERSION_PROBE_READ_AFTER_RECONCILE"
+        );
+        assert_eq!(roots, 0, "C6_VERSION_PROBE_STATE_LEFT");
+    }
+
+    /// A leftover that cannot be read refuses admission with a clear reason,
+    /// before anything runs, and stays where the next probe finds it.
+    #[test]
+    fn s4b_c6_version_probe_unresolved_leftover_refuses_admission() {
+        use std::os::unix::fs::DirBuilderExt;
+        let base = Base::new("un");
+        let claim = base.0.join("0123456789ab").join("m");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&claim)
+            .unwrap();
+        let forged = claim.join("attempt-forged.json");
+        std::fs::write(&forged, b"{").unwrap();
+        let missing = PathBuf::from("/nonexistent/kinewright-job-guardian");
+        let executable = ExecutableIdentity {
+            path: missing.clone(),
+            file_identity: [0, 0],
+        };
+        let refusal = installed_version(&probe(&missing, VersionForm::Codex), &executable);
+        assert_eq!(
+            refusal,
+            Err(CertificationRefusal::VersionProbePending),
+            "C6_VERSION_PROBE_UNRESOLVED_REFUSED"
+        );
+        assert!(
+            refusal.unwrap_err().to_string().contains("version check"),
+            "C6_VERSION_PROBE_REFUSAL_NAMED"
+        );
+        assert!(forged.exists(), "C6_VERSION_PROBE_UNRESOLVED_KEPT");
+    }
+}
+
+/// Test-only fault hooks, per thread so parallel tests never see each other's.
+#[cfg(test)]
+mod hooks {
+    use crate::job_guardian::protocol::RecoveryIdentity;
+    use std::{
+        cell::{Cell, RefCell},
+        path::PathBuf,
+    };
+
+    thread_local! {
+        /// This thread's private probe namespace.
+        pub(super) static BASE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        /// Stop the guardian once the provider runs, as Astra's reproduction did.
+        pub(super) static STOP_GUARDIAN: Cell<bool> = const { Cell::new(false) };
+        /// Lose the host after the run, before anything is settled.
+        pub(super) static ABANDON: Cell<bool> = const { Cell::new(false) };
+        /// The last committed probe's recovery identity.
+        pub(super) static RECOVERY: RefCell<Option<RecoveryIdentity>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn committed(recovery: &RecoveryIdentity) {
+        RECOVERY.set(Some(recovery.clone()));
+        if STOP_GUARDIAN.get()
+            && let Some(pid) = rustix::process::Pid::from_raw(recovery.guardian_pid.cast_signed())
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::STOP);
+        }
     }
 }

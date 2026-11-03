@@ -6,15 +6,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The installed CLI named `command` on PATH, through a mise shim when there
-/// is one. It is measured whole while its size and mtime hold still; the
-/// launch seals the bytes it measures again into a private image. No exact
-/// build is required: the version floor and the fail-closed stream readers
-/// hold a newer CLI to the same contract.
+/// The installed CLI named `command`: the person's explicit path, or the one
+/// their shell runs from PATH, or, behind a mise shim, mise's only install.
+/// It is measured whole while its size and mtime hold still; the launch seals
+/// the bytes it measures again into a private image. No exact build is
+/// required: the version floor and the fail-closed stream readers hold a newer
+/// CLI to the same contract.
 pub(crate) fn installed_executable(command: &str, product: &str) -> io::Result<ExecutableIdentity> {
     use std::io::Read;
-    let path = resolve_without_running(command)
-        .ok_or_else(|| io::Error::other(format!("Install {product}")))?;
+    let path = resolve_without_running(&Resolution::from_environment(command, product))?;
     let mut file = std::fs::File::open(&path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
@@ -35,30 +35,117 @@ pub(crate) fn installed_executable(command: &str, product: &str) -> io::Result<E
     })
 }
 
-/// The first `command` on PATH that is not a mise shim. A shim is never run
-/// to resolve it: when PATH holds only shims, the newest install mise keeps
-/// (its `installs/<command>/latest` link) is used, read from the filesystem.
-fn resolve_without_running(command: &str) -> Option<PathBuf> {
-    let is_shim = |path: &Path| path.file_name().is_some_and(|name| name == "mise");
-    let found = std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(command))
-        .filter(|candidate| candidate.is_file())
-        .filter_map(|candidate| std::fs::canonicalize(candidate).ok())
-        .find(|path| !is_shim(path));
-    found.or_else(|| {
+/// What one resolution reads: everything comes from the environment and the
+/// filesystem, and nothing is executed.
+struct Resolution<'a> {
+    command: &'a str,
+    product: &'a str,
+    /// `KINEWRIGHT_<COMMAND>_EXECUTABLE`, the person's explicit choice.
+    explicit: Option<std::ffi::OsString>,
+    path: Option<std::ffi::OsString>,
+    /// mise's data folder.
+    data: Option<PathBuf>,
+}
+
+impl<'a> Resolution<'a> {
+    fn from_environment(command: &'a str, product: &'a str) -> Self {
         let data = std::env::var_os("MISE_DATA_DIR")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|d| PathBuf::from(d).join("mise")))
             .or_else(|| {
                 std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/mise"))
-            })?;
-        let latest = data.join("installs").join(command).join("latest");
-        [latest.join("bin").join(command), latest.join(command)]
-            .into_iter()
-            .filter(|candidate| candidate.is_file())
-            .filter_map(|candidate| std::fs::canonicalize(candidate).ok())
-            .find(|path| !is_shim(path))
-    })
+            });
+        Self {
+            command,
+            product,
+            explicit: std::env::var_os(explicit_variable(command)),
+            path: std::env::var_os("PATH"),
+            data,
+        }
+    }
+}
+
+fn explicit_variable(command: &str) -> String {
+    format!("KINEWRIGHT_{}_EXECUTABLE", command.to_ascii_uppercase())
+}
+
+/// Never runs a shim and never picks silently. An explicit path wins. Else
+/// the first `command` on PATH is the one the person's shell runs; when it is
+/// a mise shim (or PATH has none), mise's selection would decide, and that is
+/// read only when it needs no execution: exactly one real install folder. A
+/// later PATH entry is never used in a shim's place, a `latest` or other link
+/// is never followed, and an install whose executable leaves its own folder is
+/// refused. Several installs refuse with how to name the executable.
+fn resolve_without_running(resolution: &Resolution<'_>) -> io::Result<PathBuf> {
+    let Resolution {
+        command, product, ..
+    } = *resolution;
+    let variable = explicit_variable(command);
+    let is_shim = |path: &Path| path.file_name().is_some_and(|name| name == "mise");
+    if let Some(explicit) = &resolution.explicit {
+        let explicit = Path::new(explicit);
+        return std::fs::canonicalize(explicit)
+            .ok()
+            .filter(|path| explicit.is_absolute() && path.is_file() && !is_shim(path))
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{variable} must name the {product} executable by its full path"
+                ))
+            });
+    }
+    let first = resolution.path.as_ref().and_then(|path| {
+        std::env::split_paths(path)
+            .map(|directory| directory.join(command))
+            .find(|candidate| candidate.is_file())
+    });
+    if let Some(path) = first.and_then(|first| std::fs::canonicalize(first).ok())
+        && !is_shim(&path)
+    {
+        return Ok(path);
+    }
+    let missing = || io::Error::other(format!("Install {product}"));
+    let installs = resolution
+        .data
+        .as_ref()
+        .ok_or_else(missing)?
+        .join("installs")
+        .join(command);
+    let mut found = Vec::new();
+    match std::fs::read_dir(&installs) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let real = entry.file_type()?.is_dir();
+                if real && !entry.file_name().to_string_lossy().starts_with('.') {
+                    found.push(entry.path());
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let install = match found.as_slice() {
+        [] => return Err(missing()),
+        [install] => std::fs::canonicalize(install)?,
+        _ => {
+            return Err(io::Error::other(format!(
+                "Several {product} installs are kept by mise, and Kinewright cannot tell which one \
+                 mise selects without running it. Set {variable} to the full path of the {product} \
+                 executable to use."
+            )));
+        }
+    };
+    [install.join("bin").join(command), install.join(command)]
+        .into_iter()
+        .filter(|candidate| candidate.is_file())
+        .find_map(|candidate| std::fs::canonicalize(candidate).ok())
+        .filter(|path| path.starts_with(&install) && !is_shim(path))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "The {product} install kept by mise has no executable inside its own folder. Set \
+                 {variable} to the full path of the {product} executable to use."
+            ))
+        })
 }
 
 pub(crate) fn runtime_tree(executable: &ExecutableIdentity) -> io::Result<Option<PathBuf>> {
@@ -264,5 +351,126 @@ mod tests {
         );
         assert!(write_model_catalog_from(&scratch, &source, Some("unknown")).is_err());
         write_model_catalog_from(&scratch, &source, Some("chosen")).unwrap();
+    }
+    /// Astra re-check: the resolver never runs mise and never picks silently.
+    /// A shim decides through mise's only install, never through a later PATH
+    /// entry; several installs refuse with the explicit path to set; a
+    /// redirected `latest` link is never followed.
+    #[test]
+    fn s4b_c6_resolver_follows_the_shim_or_refuses() {
+        use std::os::unix::fs::symlink;
+        let root = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c6-resolver",
+        );
+        let file = |path: PathBuf| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+            std::fs::canonicalize(path).unwrap()
+        };
+        // A shim first on PATH (its canonical name is `mise`), then a decoy.
+        let shims = root.path("shims");
+        file(shims.join("mise"));
+        symlink("mise", shims.join("claude")).unwrap();
+        let decoy = file(root.path("decoy/claude"));
+        let path = std::env::join_paths([&shims, &decoy.parent().unwrap().to_path_buf()]).unwrap();
+        let resolve = |data: &Path, explicit: Option<&Path>| {
+            resolve_without_running(&Resolution {
+                command: "claude",
+                product: "Claude Code",
+                explicit: explicit.map(|path| path.as_os_str().to_owned()),
+                path: Some(path.clone()),
+                data: Some(data.to_path_buf()),
+            })
+        };
+
+        // One real install: it, not the later decoy.
+        let one = root.path("one");
+        let selected = file(one.join("installs/claude/2.1.317/claude"));
+        assert_eq!(
+            resolve(&one, None).unwrap(),
+            selected,
+            "C6_RESOLVER_SHIM_INSTALL"
+        );
+
+        // A redirected `latest` link beside it is never followed, and an
+        // install that is only a link is not an install.
+        let outside = file(root.path("outside/claude"));
+        symlink(
+            outside.parent().unwrap(),
+            one.join("installs/claude/latest"),
+        )
+        .unwrap();
+        symlink(outside.parent().unwrap(), one.join("installs/claude/9.9.9")).unwrap();
+        assert_eq!(
+            resolve(&one, None).unwrap(),
+            selected,
+            "C6_RESOLVER_LATEST_REDIRECT"
+        );
+        let links = root.path("links");
+        std::fs::create_dir_all(links.join("installs/claude")).unwrap();
+        symlink(
+            outside.parent().unwrap(),
+            links.join("installs/claude/latest"),
+        )
+        .unwrap();
+        let refused = resolve(&links, None).unwrap_err().to_string();
+        assert_eq!(refused, "Install Claude Code", "C6_RESOLVER_LINK_ONLY");
+
+        // The only install's executable may not leave its own folder.
+        let escaping = root.path("escaping");
+        std::fs::create_dir_all(escaping.join("installs/claude/2.1.317/bin")).unwrap();
+        symlink(
+            &outside,
+            escaping.join("installs/claude/2.1.317/bin/claude"),
+        )
+        .unwrap();
+        let refused = resolve(&escaping, None).unwrap_err().to_string();
+        assert!(
+            refused.contains("inside its own folder"),
+            "C6_RESOLVER_INSTALL_ESCAPE {refused}"
+        );
+
+        // Several installs and no readable selection: refused, naming the
+        // explicit path, never the decoy or the newest.
+        let several = root.path("several");
+        file(several.join("installs/claude/2.1.316/claude"));
+        let newest = file(several.join("installs/claude/2.1.317/claude"));
+        symlink("./2.1.317", several.join("installs/claude/latest")).unwrap();
+        let refused = resolve(&several, None).unwrap_err().to_string();
+        assert!(
+            refused.contains("Several Claude Code installs")
+                && refused.contains("KINEWRIGHT_CLAUDE_EXECUTABLE"),
+            "C6_RESOLVER_SEVERAL_REFUSED {refused}"
+        );
+
+        // The explicit path wins, and must be a full path to a non-shim file.
+        assert_eq!(
+            resolve(&several, Some(&newest)).unwrap(),
+            newest,
+            "C6_RESOLVER_EXPLICIT"
+        );
+        for bad in [
+            Path::new("claude"),
+            shims.join("claude").as_path(),
+            Path::new("/nonexistent/claude"),
+        ] {
+            let refused = resolve(&several, Some(bad)).unwrap_err().to_string();
+            assert!(
+                refused.contains("KINEWRIGHT_CLAUDE_EXECUTABLE must name"),
+                "C6_RESOLVER_EXPLICIT_REFUSED {bad:?} {refused}"
+            );
+        }
+
+        // A direct install first on PATH is what the shell runs.
+        let direct = std::env::join_paths([decoy.parent().unwrap(), &shims]).unwrap();
+        let found = resolve_without_running(&Resolution {
+            command: "claude",
+            product: "Claude Code",
+            explicit: None,
+            path: Some(direct),
+            data: Some(several.clone()),
+        });
+        assert_eq!(found.unwrap(), decoy, "C6_RESOLVER_DIRECT_FIRST");
     }
 }

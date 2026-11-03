@@ -395,6 +395,10 @@ pub enum CertificationRefusal {
     SandboxUnavailable,
     #[error("the connector's model is unavailable")]
     ModelUnavailable,
+    #[error(
+        "an earlier CLI version check could not be proven stopped; it is stopped and cleaned up before another check is admitted"
+    )]
+    VersionProbePending,
 }
 
 /// Immutable and runtime-only. Only a registered specification can construct it.
