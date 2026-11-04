@@ -11000,6 +11000,82 @@ mod tests {
     }
 
     #[test]
+    fn te1_zero_final_does_not_authenticate_a_generic_send() {
+        use kinewright_project::usage_stream::Adapter;
+        let codex =
+            serde_json::from_str(include_str!("../tests/fixtures/te1-codex-zero-final.json"))
+                .unwrap();
+        let mut claude = usage_fixture_result(Adapter::Claude21316V1, 1);
+        claude["modelUsage"]["main"] = serde_json::json!({"inputTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"outputTokens":0});
+        for (adapter, mut zero) in [
+            (Adapter::Codex01660V1, codex),
+            (Adapter::Claude21316V1, claude),
+        ] {
+            zero["total_cost_usd"] = serde_json::json!(0.0);
+            let driver = UsageFixtureDriver {
+                adapter,
+                fresh_each_send: false,
+                frames: vec![vec![zero]],
+            };
+            let metrics = collect_session(
+                &driver,
+                SessionConfig::default(),
+                &["accepted send"],
+                &budgets(),
+                None,
+                || Ok(0),
+            )
+            .unwrap();
+            assert!(!metrics.interrupted);
+            assert!(metrics.errors.is_empty());
+            assert_eq!(metrics.application_send_bytes.len(), 1);
+            assert_eq!(metrics.authoritative_usage.len(), 1);
+            let usage = metrics.authoritative_usage.values().next().unwrap();
+            assert_eq!(usage.lower_bound, 0);
+            assert_eq!(usage.input, None);
+            assert_eq!(usage.output, None);
+            assert!(!usage.complete, "TE1_ZERO_FINAL_CANNOT_COVER_ACCEPTED_SEND");
+            assert_eq!(metrics.usage_coverage(), UsageCoverage::Incomplete);
+            assert_eq!(metrics.cost_usd, None);
+        }
+    }
+
+    #[test]
+    fn te1_budget_scores_the_retained_118_token_lower_bound() {
+        use kinewright_project::usage_stream::Adapter;
+        let driver = UsageFixtureDriver {
+            adapter: Adapter::Codex01660V1,
+            fresh_each_send: false,
+            frames: vec![vec![
+                serde_json::json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10}}),
+                serde_json::json!({"type":"turn.completed","usage":{"output_tokens":18}}),
+            ]],
+        };
+        let mut limits = budgets();
+        limits.max_tokens = 20;
+        let metrics = collect_session(
+            &driver,
+            SessionConfig::default(),
+            &["work"],
+            &limits,
+            None,
+            || Ok(0),
+        )
+        .unwrap();
+        assert_eq!(metrics.total_tokens(), 118);
+        assert_eq!(metrics.usage_coverage(), UsageCoverage::Incomplete);
+        let outcome = EvalOutcome {
+            session: metrics,
+            ..outcome_for(Document::default(), FixtureContext::default())
+        };
+        let token_budget = evaluate_budgets(&limits, &outcome)
+            .into_iter()
+            .find(|result| result.assertion == "token budget")
+            .unwrap();
+        assert!(!token_budget.passed, "TE1_BUDGET_USES_KNOWN_LOWER_BOUND");
+        assert_eq!(token_budget.detail, "118 <= 20");
+    }
+    #[test]
     fn te1_review_usage_capacity_preserves_done_and_reports_refusal() {
         use kinewright_project::usage_stream::Adapter;
         for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {

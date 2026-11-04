@@ -423,3 +423,67 @@ fn te1_native_new_turn_requires_a_new_final_even_when_totals_replay() {
     );
     std::fs::remove_dir_all(scratch).unwrap();
 }
+
+#[test]
+fn te1_native_zero_final_keeps_eof_gap_open_under_a_ceiling() {
+    use kinewright_project::orchestration_accounting::AccountingRefusal;
+    let f = Fixture::new();
+    let (run, execution, _) = reserve(&f);
+    spending_change(
+        &f,
+        &execution,
+        super::super::native_invocation::SpendingChange::Ceiling(1000),
+        native_now(&f, &run),
+        0,
+        true,
+    )
+    .unwrap();
+    let admitted = native_admitted(&f, &execution);
+    let (profile, _, scratch) = native_profile(&f, &admitted);
+    let _charge = native_charge(&f, &admitted, profile);
+    let producer = f.producer(&run);
+    let host = f.host.owner.upgrade().unwrap();
+    let zero = serde_json::from_str(include_str!(
+        "../../tests/fixtures/te1-codex-zero-final.json"
+    ))
+    .unwrap();
+    host.lock()
+        .unwrap()
+        .ingest_native_raw(&producer, &execution, &zero, 1, false)
+        .unwrap();
+    let before_eof = spending_record(&f, &run);
+    assert!(
+        !before_eof.tasks[0].usage[0].complete,
+        "TE1_ZERO_CANNOT_SUPPRESS_EOF"
+    );
+    assert_eq!(before_eof.tasks[0].pause, None);
+    host.lock()
+        .unwrap()
+        .ingest_native_raw(
+            &producer,
+            &execution,
+            &serde_json::json!({"type":"native.eof"}),
+            2,
+            true,
+        )
+        .unwrap();
+    let saved = spending_record(&f, &run);
+    let task = &saved.tasks[0];
+    assert_eq!(task.usage.len(), 2);
+    assert!(task.usage[1].event.starts_with("native.eof:"));
+    assert_eq!(task.totals.token_lower_bound, 0);
+    assert_eq!(task.totals.known.input, None);
+    assert!(!task.totals.tokens_complete);
+    assert_eq!(task.pause, Some(AccountingRefusal::UsageUnavailable));
+    let mut restored: kinewright_project::orchestration_accounting::AccountingRecord =
+        serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+    restored.validate().unwrap();
+    let mut next_send = task.sends[0].clone();
+    next_send.turn += 1;
+    next_send.command.sequence += 1;
+    assert_eq!(
+        restored.tasks[0].consume_send(next_send),
+        Err(AccountingRefusal::UsageUnavailable)
+    );
+    std::fs::remove_dir_all(scratch).unwrap();
+}

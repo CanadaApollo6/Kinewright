@@ -255,16 +255,6 @@ fn te1_frozen_six_case_operations_documents_histories_and_evidence() {
         let operations: Vec<Operation> =
             serde_json::from_value(case["operations"].clone()).unwrap();
         verify_scope_and_scripted_requirements(n, &case, &original, &operations);
-        let manual = Core::spawn(original.clone()).unwrap();
-        manual
-            .request(Command::Do(Operation::MoveMarker {
-                marker: kinewright_core::MarkerId(2),
-                to: TimeCode(94),
-            }))
-            .unwrap();
-        manual.request(Command::Undo).unwrap();
-        let manual_before = manual.export_history().unwrap();
-        assert!(!manual_before.cursor.redo.is_empty());
         let task = Core::spawn(original.clone()).unwrap();
         task.request(Command::DoBatch(operations.clone())).unwrap();
         let edited = task.export_history().unwrap();
@@ -296,15 +286,6 @@ fn te1_frozen_six_case_operations_documents_histories_and_evidence() {
         replay_history(&dir.path(&format!("task-{n}.json")), &task);
         task.request(Command::Redo).unwrap();
         assert_eq!(*task.export_history().unwrap().document, expected);
-        assert_eq!(manual.export_history().unwrap(), manual_before);
-        replay_history(&dir.path(&format!("manual-{n}.json")), &manual);
-        manual.request(Command::Redo).unwrap();
-        assert_eq!(
-            manual.export_history().unwrap().document.markers[1].position,
-            TimeCode(94)
-        );
-        manual.request(Command::Undo).unwrap();
-        assert_eq!(*manual.export_history().unwrap().document, original);
         let path = dir.path(&format!("case-{n}.kinewright"));
         write_project_document(&expected, &path, None).unwrap();
         assert_eq!(load_document(&path).unwrap().0, expected);
@@ -353,4 +334,109 @@ fn te1_six_case_rendered_evidence_uses_production_preview() {
             "talking-head source must be rendered: {forehead:?}"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
+    use kinewright_project::{
+        bundle_records::BranchCheckpoint, editing_session::Ja1EditingSession,
+        storage_budget::StorageLimits,
+    };
+    let dir = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "te1-corpus-history",
+    );
+    let source = load_document(&root().join("talking-head.kinewright"))
+        .unwrap()
+        .0;
+    let oracle = load_document(&root().join("case-1-oracle.kinewright"))
+        .unwrap()
+        .0;
+    // Case 1 changes only markers; media provenance is covered by the full corpus test.
+    let original = Document {
+        markers: source.markers,
+        ..Document::default()
+    };
+    let expected = Document {
+        markers: oracle.markers,
+        ..Document::default()
+    };
+    let case: Value =
+        serde_json::from_slice(&std::fs::read(root().join("case-1.json")).unwrap()).unwrap();
+    let operations: Vec<Operation> = serde_json::from_value(case["operations"].clone()).unwrap();
+    let manual = Core::spawn(original.clone()).unwrap();
+    manual
+        .request(Command::Do(Operation::MoveMarker {
+            marker: kinewright_core::MarkerId(2),
+            to: TimeCode(94),
+        }))
+        .unwrap();
+    manual.request(Command::Undo).unwrap();
+    let before = manual.export_history().unwrap();
+    assert!(!before.cursor.redo.is_empty());
+    let mut owner = Ja1EditingSession::new(dir.root(), &manual, StorageLimits::default()).unwrap();
+    owner
+        .first_save(&dir.path("source.kinewright"), StorageLimits::default())
+        .unwrap();
+    let mut task = owner.fork_durable_branch("TE1 case 1 task").unwrap();
+    let source_history = {
+        let checkpoint = owner
+            .store()
+            .unwrap()
+            .read_record::<BranchCheckpoint>(&task.base().frozen_checkpoint_ref)
+            .unwrap();
+        let source = owner
+            .store()
+            .unwrap()
+            .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+            .unwrap();
+        (*source).clone()
+    };
+    assert_eq!(
+        source_history, before,
+        "TE1_TASK_SHARES_THE_ACTUAL_MANUAL_HISTORY_CUT"
+    );
+    assert!(matches!(
+        task.core()
+            .request(Command::DoBatch(operations.clone()))
+            .unwrap(),
+        kinewright_core::Event::DocumentChanged { .. }
+    ));
+    let edited = task.core().export_history().unwrap();
+    assert_eq!(*edited.document, expected);
+    assert_eq!(edited.cursor.undo.last().unwrap().operations, operations);
+    task.core().request(Command::Undo).unwrap();
+    assert_eq!(*task.core().export_history().unwrap().document, original);
+    replay_history(&dir.path("task-history.json"), task.core());
+    task.core().request(Command::Redo).unwrap();
+    assert_eq!(*task.core().export_history().unwrap().document, expected);
+    owner.persist_durable_branch(&mut task).unwrap();
+    assert_eq!(
+        manual.export_history().unwrap(),
+        before,
+        "TE1_TASK_EDIT_PRESERVES_MANUAL_REDO"
+    );
+    replay_history(&dir.path("manual-history.json"), &manual);
+    owner.close_durable_branch(&task).unwrap();
+    let lease = owner
+        .issue_manual_lease("person".into(), "corpus-history".into())
+        .unwrap();
+    let person = owner
+        .bind_manual_producer(lease, owner.manual_input_context().unwrap())
+        .unwrap();
+    assert!(matches!(
+        person.request(Command::Redo).unwrap(),
+        kinewright_core::Event::DocumentChanged { .. }
+    ));
+    let redone = manual.export_history().unwrap();
+    assert_eq!(redone.document.markers[1].position, TimeCode(94));
+    assert_eq!(
+        redone.document.markers[0].position,
+        original.markers[0].position
+    );
+    assert_eq!(
+        task.core().export_history().unwrap().document.markers[0].position,
+        TimeCode(6)
+    );
 }

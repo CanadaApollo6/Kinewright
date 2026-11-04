@@ -137,6 +137,87 @@ fn claude(d: u64, r: u64, w: u64, o: u64) -> Value {
 fn codex(i: u64, r: u64, o: u64) -> Value {
     json!({"type":"turn.completed","usage":{"input_tokens":i,"cached_input_tokens":r,"output_tokens":o}})
 }
+fn fixture_send(turn: u64) -> SendConsumption {
+    SendConsumption {
+        attempt: id(4),
+        turn,
+        command: serde_json::from_value(json!({"issuer":"8".repeat(32),"sequence":turn})).unwrap(),
+        payload: serde_json::from_value(
+            json!({"sha256":"9".repeat(64),"byte_length":1,"record_kind":"owned_evidence"}),
+        )
+        .unwrap(),
+    }
+}
+#[test]
+fn te1_zero_final_after_accepted_send_is_unobserved_and_refuses_next_send() {
+    for (adapter, zero) in [
+        (
+            Adapter::Codex01660V1,
+            serde_json::from_str(include_str!("fixtures/te1-codex-zero-final.json")).unwrap(),
+        ),
+        (Adapter::Claude21316V1, claude(0, 0, 0, 0)),
+    ] {
+        let mut t = task_with_limit(adapter, Some(100));
+        t.consume_send(fixture_send(1)).unwrap();
+        raw(&mut t, 4, 1, zero.clone(), true).unwrap();
+        assert!(!t.usage[0].complete, "TE1_ZERO_FINAL_IS_UNOBSERVED");
+        assert!(!t.totals.tokens_complete);
+        assert_eq!(t.totals.token_lower_bound, 0);
+        assert_eq!(t.totals.known.input, None);
+        assert_eq!(t.totals.known.output, None);
+        assert_eq!(
+            t.pause, None,
+            "EOF, rather than a placeholder final, opens the gap"
+        );
+        let report = &t.stream_reports().unwrap()[0];
+        assert!(!report.reported_complete);
+        assert_eq!(report.inclusive_input, None);
+        assert_eq!(report.output, None);
+        assert!(!raw(&mut t, 4, 1, zero, true).unwrap());
+        let mut restored: TaskAccounting =
+            serde_json::from_slice(&serde_json::to_vec(&t).unwrap()).unwrap();
+        assert_eq!(
+            restored.consume_send(fixture_send(2)),
+            Err(AccountingRefusal::UsageUnavailable)
+        );
+        assert_eq!(restored.sends.len(), 1);
+    }
+}
+#[test]
+fn te1_zero_final_retains_prior_usage_and_accepts_positive_recovery() {
+    for (adapter, first, zero, recovery) in [
+        (
+            Adapter::Codex01660V1,
+            codex(71, 50, 8),
+            codex(0, 0, 0),
+            codex(90, 60, 10),
+        ),
+        (
+            Adapter::Claude21316V1,
+            claude(14, 50, 7, 8),
+            claude(0, 0, 0, 0),
+            claude(20, 60, 10, 10),
+        ),
+    ] {
+        let mut t = task(adapter);
+        raw(&mut t, 4, 1, first, true).unwrap();
+        raw(&mut t, 4, 2, zero, true).unwrap();
+        assert_eq!(t.totals.token_lower_bound, 79);
+        assert!(!t.totals.tokens_complete);
+        raw(&mut t, 4, 3, recovery, true).unwrap();
+        assert_eq!(t.totals.token_lower_bound, 100);
+        assert!(t.totals.tokens_complete);
+    }
+    for (adapter, positive) in [
+        (Adapter::Codex01660V1, codex(0, 0, 1)),
+        (Adapter::Claude21316V1, claude(0, 1, 0, 0)),
+    ] {
+        let mut t = task(adapter);
+        raw(&mut t, 4, 1, positive, true).unwrap();
+        assert_eq!(t.totals.token_lower_bound, 1);
+        assert!(t.totals.tokens_complete);
+    }
+}
 fn uncached(t: &TaskAccounting) -> Option<u64> {
     t.stream_reports().ok()?.last()?.uncached_input
 }

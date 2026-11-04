@@ -1,8 +1,11 @@
 # TE1.1 fix 2
 
+The latest spending qualification is the [Grok follow-up](te1-1-fix2-grok.md).
+The sections below record the earlier wake and GLM rounds.
+
 Fix-2 work is published as afda1f0d and 0845690a. The latter has the exact tree
 of the worker's earlier local replacement 30296bce; it preserves the published
-history. This GLM follow-up is a new local commit above 0845690a, not pushed.
+history. The GLM follow-up is published as 67c41a73 above 0845690a.
 The unpushed performance commit 2e8acc88 was consolidated into that fix-2 work.
 The first fix's findings, counters, corpus pins and historical A/B remain in
 [the first fix report](te1-1-fix1.md) and [the counter report](te1-1.md).

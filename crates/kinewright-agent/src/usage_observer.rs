@@ -288,6 +288,29 @@ mod tests {
         assert_eq!(observer.samples.len(), 1024);
     }
     #[test]
+    fn te1_refused_regression_does_not_poison_later_valid_observations() {
+        for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {
+            let raw = |identity: &str, input| match adapter {
+                Adapter::Codex01660V1 => {
+                    json!({"type":"turn.completed", "id":identity, "usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":10}})
+                }
+                Adapter::Claude21316V1 => claude_result(identity, input, 0, 0, 10),
+            };
+            let mut observer = UsageObserver::default();
+            assert!(
+                matches!(observer.observe(adapter, &raw("first", 90)).unwrap(), Some(AgentEvent::Usage(u)) if u.complete && u.lower_bound==100)
+            );
+            assert_eq!(
+                observer.observe(adapter, &raw("regressed", 40)),
+                Err(AccountingRefusal::Scope)
+            );
+            assert!(
+                matches!(observer.observe(adapter, &raw("recovered", 190)).unwrap(), Some(AgentEvent::Usage(u)) if u.complete && u.lower_bound==200),
+                "TE1_REFUSAL_ROLLS_BACK_OBSERVER"
+            );
+        }
+    }
+    #[test]
     fn te1_missing_category_is_unobserved_without_resetting_display_watermarks() {
         let mut observer = UsageObserver::default();
         observer.observe(Adapter::Codex01660V1,&json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10}})).unwrap();

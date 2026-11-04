@@ -99,6 +99,7 @@ pub fn decode_usage(
     if let Some(snapshot) = &identity.snapshot {
         identity.values = snapshot.values()?;
     }
+    mark_zero_final_unobserved(adapter, &mut identity);
     if let Some(cost) = raw
         .get("total_cost_usd")
         .or_else(|| raw.get("cost_usd"))
@@ -115,6 +116,32 @@ pub fn decode_usage(
         );
     }
     Ok(identity)
+}
+
+fn mark_zero_final_unobserved(adapter: UsageAdapter, identity: &mut UsageSample) {
+    // A completed Codex turn serializes default zeros when no token update arrived.
+    // Neither adapter can authenticate an accepted send from an all-zero final.
+    if identity.complete
+        && matches!(adapter, UsageAdapter::Claude | UsageAdapter::Codex)
+        && identity.values.input == Some(0)
+        && identity.values.output == Some(0)
+        && [
+            identity.values.cache_read,
+            identity.values.cache_write,
+            identity.values.reasoning,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| value == 0)
+    {
+        identity.complete = false;
+        identity.values = UsageValues::default();
+        if let Some(snapshot) = &mut identity.snapshot {
+            for model in &mut snapshot.models {
+                model.values = UsageValues::default();
+            }
+        }
+    }
 }
 
 fn claude_models(
