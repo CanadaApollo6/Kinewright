@@ -1365,7 +1365,7 @@ impl KinewrightMcp {
     fn served_tools_for_instance(&self) -> Result<Vec<Tool>, SchemaError> {
         let tools = if let Some(control) = &self.task_control {
             match control.role() {
-                Ok(role) => task_role_tools(role),
+                Ok(role) => task_role_tools(role)?,
                 Err(_) => return Ok(Vec::new()),
             }
         } else {
@@ -1401,6 +1401,7 @@ impl KinewrightMcp {
             .and_then(serde_json::Value::as_str);
         let tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
         let has_receipt = crate::writer_host::task_mcp::is_capability(&request.name);
+        let is_publication = request.name == "publish_result";
         let reply = self.call_exposed_inner(request);
         let code = match &reply {
             Ok(result) if result.is_error == Some(true) => {
@@ -1425,7 +1426,7 @@ impl KinewrightMcp {
         // Preserve the operation's result even if live authorization/refresh
         // fails after a commit. Only the optional metadata may disappear.
         let original_content = reply.as_ref().ok().map(|result| result.content.clone());
-        let (outcome, failed) = match reply {
+        let (mut outcome, failed) = match reply {
             Ok(result) => {
                 let failed = result.is_error == Some(true);
                 let outcome = result.structured_content.unwrap_or_else(|| {
@@ -1445,7 +1446,18 @@ impl KinewrightMcp {
         } else {
             None
         };
-        let mut result = success_structured("task reply", control.reply(outcome, receipt));
+        let publication_status = if is_publication && !failed {
+            outcome
+                .as_object_mut()
+                .and_then(|value| value.remove("publication_status"))
+        } else {
+            None
+        };
+        let mut value = control.reply(outcome, receipt);
+        if let Some(status) = publication_status {
+            value["publication_status"] = status;
+        }
+        let mut result = success_structured("task reply", value);
         result.is_error = Some(failed);
         if let Some(content) = original_content {
             result.content = content;
@@ -13866,7 +13878,7 @@ fn compact_discard_edit_plan_tool() -> Tool {
 pub(crate) fn te1_surface(
     role: crate::orchestration::orchestration_records::Role,
 ) -> kinewright_project::usage_measurement::Surface {
-    let tools = task_role_tools(role);
+    let tools = task_role_tools(role).unwrap_or_default();
     let m = ToolSurfaceMetrics::measure(&tools);
     kinewright_project::usage_measurement::Surface {
         definitions: m.serialized_bytes,
@@ -36350,32 +36362,49 @@ fn task_control_tools() -> Vec<Tool> {
 }
 
 /// Fixed v1 schemas shared across every task with the same durable role.
-fn task_role_tools(role: crate::orchestration::orchestration_records::Role) -> Vec<Tool> {
+fn task_role_tools(
+    role: crate::orchestration::orchestration_records::Role,
+) -> Result<Vec<Tool>, SchemaError> {
     use crate::orchestration::orchestration_records::Role;
-    static DIRECTOR: OnceLock<Vec<Tool>> = OnceLock::new();
-    static EDITOR: OnceLock<Vec<Tool>> = OnceLock::new();
-    static REVIEWER: OnceLock<Vec<Tool>> = OnceLock::new();
+    static DIRECTOR: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
+    static EDITOR: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
+    static REVIEWER: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
     let cache = match role {
         Role::Director => &DIRECTOR,
         Role::Reviewer => &REVIEWER,
         Role::Editor | Role::Motion | Role::Audio | Role::Colour => &EDITOR,
     };
-    cache.get_or_init(|| {
-        crate::writer_host::task_mcp::manifest::names(role).iter().map(|name| {
+    cache
+        .get_or_init(|| {
+            task_role_tools_uncached(crate::writer_host::task_mcp::manifest::names(role))
+        })
+        .clone()
+        .map_err(SchemaError::UnknownTool)
+}
+
+fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String> {
+    let controls = task_control_tools();
+    names
+        .iter()
+        .map(|name| {
             match *name {
-                "get_timeline_state" => compact_get_timeline_state_tool(),
-                "prepare_edit_plan" => task_prepare_edit_plan_tool(),
-                "commit_edit_plan" => compact_commit_edit_plan_tool(),
-                "discard_edit_plan" => compact_discard_edit_plan_tool(),
+                "get_timeline_state" => Some(compact_get_timeline_state_tool()),
+                "prepare_edit_plan" => Some(task_prepare_edit_plan_tool()),
+                "commit_edit_plan" => Some(compact_commit_edit_plan_tool()),
+                "discard_edit_plan" => Some(compact_discard_edit_plan_tool()),
                 "read_task_result" | "read_task_evidence" => {
                     let schema = crate::writer_host::task_mcp::schema::read_reference();
-                    Tool::new(*name, "Read one host-owned result or evidence reference authorized by this task.",
-                        Arc::new(schema.as_object().unwrap().clone()))
+                    Some(Tool::new(
+                        *name,
+                        "Read one host-owned result or evidence reference authorized by this task.",
+                        Arc::new(schema.as_object().unwrap().clone()),
+                    ))
                 }
-                _ => task_control_tools().into_iter().find(|tool| tool.name == *name).unwrap(),
+                _ => controls.iter().find(|tool| tool.name == *name).cloned(),
             }
-        }).collect()
-    }).clone()
+            .ok_or_else(|| (*name).to_owned())
+        })
+        .collect()
 }
 
 fn task_prepare_edit_plan_tool() -> Tool {
@@ -36404,6 +36433,17 @@ fn task_prepare_edit_plan_tool() -> Tool {
 
 #[cfg(test)]
 mod te1_surface_tests {
+    #[test]
+    fn te12_missing_role_descriptor_is_refused_without_a_partial_manifest() {
+        let result = std::panic::catch_unwind(|| {
+            super::task_role_tools_uncached(&["task_status", "missing_task_tool"])
+        })
+        .unwrap_or_else(|_| panic!("TE12_SCHEMA_DRIFT_REFUSED: assembly panicked"));
+        assert!(
+            matches!(result, Err(name) if name == "missing_task_tool"),
+            "TE12_SCHEMA_DRIFT_REFUSED"
+        );
+    }
     #[test]
     fn te12_role_manifests_and_unrelated_surface_are_frozen() {
         // The old hashes remain the TE1.5 eval baseline record. Production task
@@ -36435,7 +36475,7 @@ mod te1_surface_tests {
             crate::orchestration::orchestration_records::Role::Reviewer,
         ]
         .map(|role| {
-            let tools = super::task_role_tools(role);
+            let tools = super::task_role_tools(role).unwrap();
             assert_eq!(
                 tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
                 crate::writer_host::task_mcp::manifest::names(role)

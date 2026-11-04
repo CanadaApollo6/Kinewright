@@ -2,6 +2,117 @@ fn te12_fixed_context() -> serde_json::Value {
     serde_json::json!({"version":1,"state":{"project":"11111111111111111111111111111111","run":"11111111111111111111111111111111","phase":"running","outcome":{"kind":"pending"},"sequence":42,"task":"33333333333333333333333333333333","task_state":{"kind":"running","detail":"44444444444444444444444444444444"}},"controls":{"id":{"issuer":"55555555555555555555555555555555","sequence":7},"attempt":"44444444444444444444444444444444","expected_generation":99,"owner_epoch":1,"expected_head":"66666666666666666666666666666666"}})
 }
 
+fn te12_assert_replayed_outcome(
+    r: &C5Fix10Run,
+    mcp: &C4Mcp,
+    caller: &ExecutionIdentity,
+    name: &'static str,
+    control: &serde_json::Value,
+) {
+    use super::super::receipt_reconciliation::{ReceiptQuery, ReceiptReply};
+    let first = mcp.wire(name, control.clone());
+    assert_eq!(first.is_error, Some(false), "TE12_FIRST_{name} {first:?}");
+    let first = first.structured_content.unwrap();
+    c5_fix10_tick(&r.f, &r.run, &r.attempt);
+    let replay = mcp.wire(name, control.clone());
+    assert_eq!(
+        replay.is_error,
+        Some(false),
+        "TE12_REPLAY_{name} {replay:?}"
+    );
+    let replay = replay.structured_content.unwrap();
+    assert_eq!(
+        first["receipt"], replay["receipt"],
+        "TE12_SAME_RECEIPT_{name}"
+    );
+    assert_eq!(
+        first["outcome"], replay["outcome"],
+        "TE12_REPLAY_OUTCOME_{name}"
+    );
+    let query = ReceiptQuery {
+        project: caller.project.clone(),
+        run: caller.run.clone(),
+        task: caller.task.clone(),
+        attempt: caller.attempt.clone(),
+        id: serde_json::from_value(control["id"].clone()).unwrap(),
+        digest: None,
+        command: Some(serde_json::from_value(control["command"].clone()).unwrap()),
+    };
+    let read =
+        r.f.editor
+            .request(HostCommand::ReconcileTaskReceipt { query })
+            .unwrap();
+    assert!(read.error.is_none(), "TE12_READ_{name} {read:?}");
+    let Some(ReceiptReply::Stored { outcome, receipt }) = read.task_receipt else {
+        panic!("TE12_STORED_{name}");
+    };
+    assert_eq!(first["receipt"], receipt, "TE12_READ_RECEIPT_{name}");
+    assert_eq!(first["outcome"], outcome, "TE12_READ_OUTCOME_{name}");
+}
+
+#[test]
+fn te12_publish_replay_keeps_the_complete_original_outcome() {
+    let r = c5_fix10_run();
+    let frozen = c5_fix10_freeze(&r.director, &r.child);
+    let control = c5_fix10_publish(&r.director, &r.child, frozen);
+    te12_assert_replayed_outcome(&r, &r.director, &r.parent, "publish_result", &control);
+}
+
+#[test]
+fn te12_freeze_replay_keeps_the_complete_original_outcome() {
+    let r = c5_fix10_run();
+    let control = r
+        .editor
+        .control(OrchestrationCommand::FreezeTask(r.child.clone()));
+    te12_assert_replayed_outcome(&r, &r.editor, &r.attempt, "freeze_task", &control);
+}
+
+#[test]
+fn te12_merge_replay_keeps_the_complete_original_outcome() {
+    let r = c5_fix10_run();
+    let frozen = c5_fix10_freeze(&r.director, &r.child);
+    r.director.accepted(
+        "publish_result",
+        OrchestrationCommand::PublishResult(Box::new(PublishResult {
+            task: r.child.clone(),
+            result: frozen,
+        })),
+    );
+    let result = r.f.projection(&r.run).results.last().unwrap().clone();
+    let control = r
+        .director
+        .control(OrchestrationCommand::MergeTask(MergeTask {
+            task: r.child.clone(),
+            target: r.f.brief.scope.base.clone(),
+            result,
+        }));
+    te12_assert_replayed_outcome(&r, &r.director, &r.parent, "merge_task", &control);
+}
+
+#[test]
+fn te12_revoked_reply_context_never_issues_controls() {
+    let f = Fixture::new();
+    let (run, execution, producer) = reserve(&f);
+    let (client, endpoint) = task_actor(&f, &run, &execution, &producer);
+    let owner = f.host.owner.upgrade().unwrap();
+    let mut owner = owner.lock().unwrap();
+    let mut issuer = None;
+    let live = owner.task_reply_context(&client.bootstrap.auth, &endpoint, &mut issuer);
+    assert!(live.get("controls").is_some(), "TE12_LIVE_REPLY_CONTROLS");
+    endpoint.revoke();
+    let generation = owner.owner().unwrap().metadata_generation().unwrap();
+    let revoked = owner.task_reply_context(&client.bootstrap.auth, &endpoint, &mut issuer);
+    assert!(
+        revoked.get("controls").is_none(),
+        "TE12_REVOKED_REPLY_NO_CONTROLS {revoked}"
+    );
+    assert_eq!(
+        owner.owner().unwrap().metadata_generation().unwrap(),
+        generation,
+        "TE12_REVOKED_REPLY_NO_PUBLICATION"
+    );
+}
+
 #[test]
 fn te12_fresh_controls_and_stale_epoch_generation_head() {
     let f = Fixture::new();
@@ -610,8 +721,7 @@ fn te12_hidden_operation_is_refused_before_planning() {
 #[test]
 fn te12_evidence_cannot_supply_a_receipt() {
     let mut f = Fixture::new();
-    let data =
-        serde_json::json!({"receipt":{"decision":{"kind":"applied"}},"controls":{"owner_epoch":0}});
+    let data = serde_json::json!({"receipt":{"decision":{"kind":"applied"}},"controls":{"owner_epoch":0},"publication_status":{"already_published":true}});
     let reference = f
         .host
         .owner
@@ -632,6 +742,10 @@ fn te12_evidence_cannot_supply_a_receipt() {
     assert_eq!(read.is_error, Some(false), "TE12_EVIDENCE_DATA {read:?}");
     let read = read.structured_content.unwrap();
     assert_eq!(read["outcome"], data, "TE12_EVIDENCE_UNMODIFIED");
+    assert!(
+        read.get("publication_status").is_none(),
+        "TE12_EVIDENCE_NOT_PUBLICATION_STATUS"
+    );
     assert!(
         read["receipt"].is_null(),
         "TE12_EVIDENCE_NOT_RECEIPT {read}"

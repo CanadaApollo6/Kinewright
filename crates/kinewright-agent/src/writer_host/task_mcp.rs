@@ -480,7 +480,7 @@ impl TaskMcp {
             let reference = reference.clone();
             let bound = host.bind_publication(&request)?;
             return Ok(
-                json!({"already_published":true,"result":reference,"receipt":host.owner()?.orchestration_replay(&bound.envelope,None)?}),
+                json!({"publication_status":{"already_published":true,"result":reference},"receipt":host.owner()?.orchestration_replay(&bound.envelope,None)?}),
             );
         }
         if let OrchestrationCommand::MergeTask(merge) = &request.envelope.command {

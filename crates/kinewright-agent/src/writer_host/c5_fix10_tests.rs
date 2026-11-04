@@ -235,7 +235,7 @@ fn s4b_c5_fix10_replay_after_ticks_returns_the_same_publication() {
     let r = c5_fix10_run();
     let result = c5_fix10_freeze(&r.director, &r.child);
     let control = c5_fix10_publish(&r.director, &r.child, result.clone());
-    let first = r.director.invoke("publish_result", control.clone());
+    let first = r.director.wire("publish_result", control.clone());
     assert_eq!(
         first.is_error,
         Some(false),
@@ -246,7 +246,7 @@ fn s4b_c5_fix10_replay_after_ticks_returns_the_same_publication() {
     let counts = c5_fix10_counts(&r.f, &r.run);
     for round in 0..2 {
         c5_fix10_tick(&r.f, &r.run, &r.attempt);
-        let again = r.director.invoke("publish_result", control.clone());
+        let again = r.director.wire("publish_result", control.clone());
         assert_eq!(
             again.is_error,
             Some(false),
@@ -255,11 +255,11 @@ fn s4b_c5_fix10_replay_after_ticks_returns_the_same_publication() {
         );
         let again = again.structured_content.unwrap();
         assert_eq!(
-            again["already_published"], true,
+            again["publication_status"]["already_published"], true,
             "C5_FIX10_SAME_CONTROL_NEW"
         );
         assert_eq!(
-            again["result"],
+            again["publication_status"]["result"],
             serde_json::to_value(&published).unwrap(),
             "C5_FIX10_SAME_CONTROL_OTHER_RESULT"
         );
@@ -267,7 +267,12 @@ fn s4b_c5_fix10_replay_after_ticks_returns_the_same_publication() {
             !again["receipt"].is_null(),
             "C5_FIX10_SAME_CONTROL_NO_RECEIPT"
         );
-        let fresh = r.director.invoke(
+        assert_eq!(
+            again["outcome"],
+            first.structured_content.as_ref().unwrap()["outcome"],
+            "C5_FIX10_SAME_CONTROL_IMMUTABLE_OUTCOME"
+        );
+        let fresh = r.director.wire(
             "publish_result",
             c5_fix10_publish(&r.director, &r.child, result.clone()),
         );
@@ -278,7 +283,7 @@ fn s4b_c5_fix10_replay_after_ticks_returns_the_same_publication() {
             c5_fix10_text(&fresh)
         );
         assert_eq!(
-            fresh.structured_content.unwrap()["result"],
+            fresh.structured_content.unwrap()["publication_status"]["result"],
             serde_json::to_value(&published).unwrap(),
             "C5_FIX10_FRESH_CONTROL_OTHER_RESULT"
         );

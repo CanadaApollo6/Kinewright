@@ -42,8 +42,8 @@ for field, expression, marker in [
     add('stale-' + field, MCP, CONTROL,
         CONTROL.replace('let control:', 'let mut control:') + f'\n        control.{field} = {expression};',
         'te12_fresh_controls_and_stale_epoch_generation_head', marker)
-add('list-allowed', SERVER, 'Ok(role) => task_role_tools(role),',
-    'Ok(_) => task_role_tools(crate::orchestration::orchestration_records::Role::Reviewer),',
+add('list-allowed', SERVER, 'Ok(role) => task_role_tools(role)?,',
+    'Ok(_) => task_role_tools(crate::orchestration::orchestration_records::Role::Reviewer)?,',
     'te12_list_allowed', 'TE12_LIST_ALLOWED')
 add('list-hidden', MANIFEST, '    "assign_task",', '    "prepare_edit_plan",\n    "assign_task",',
     'te12_list_hidden', 'TE12_LIST_HIDDEN')
@@ -87,9 +87,20 @@ add('old-dispatcher', SERVER, DISPATCH,
 add('committed-refresh-failure', REPLY, '        reply\n    }',
     '        if reply.get("controls").is_none() { return json!({"outcome":{"error":"refresh failed"}}); }\n        reply\n    }',
     'te12_terminal_reply_keeps_receipt_and_state_without_controls', 'TE12_TERMINAL_RECEIPT')
-add('terminal-controls', REPLY, '        reply\n    }',
-    '        if reply.get("controls").is_none() { reply["controls"] = json!({}); }\n        reply\n    }',
-    'te12_terminal_reply_keeps_receipt_and_state_without_controls', 'TE12_TERMINAL_NO_CONTROLS')
+add('terminal-controls', REPLY,
+    '            let (index, _, _) = self.resolve_task_mcp(auth, endpoint)?;',
+    '            let _ = (auth, endpoint);',
+    'te12_revoked_reply_context_never_issues_controls', 'TE12_REVOKED_REPLY_NO_CONTROLS')
+
+add('publish-replay-outcome', SERVER, 'if is_publication && !failed {',
+    'if false && is_publication && !failed {',
+    'te12_publish_replay_keeps_the_complete_original_outcome', 'TE12_REPLAY_OUTCOME_publish_result')
+MUTATIONS.append(('missing-role-descriptor', SERVER,
+    '.ok_or_else(|| (*name).to_owned())', '.ok_or_else(|| (*name).to_owned()).or_else(|_| Ok(controls[0].clone()))',
+    'server::te1_surface_tests::te12_missing_role_descriptor_is_refused_without_a_partial_manifest',
+    'TE12_SCHEMA_DRIFT_REFUSED', AGENT))
+add('publication-status-scope', SERVER, 'if is_publication && !failed {',
+    'if !failed {', 'te12_evidence_cannot_supply_a_receipt', 'TE12_EVIDENCE_UNMODIFIED')
 add('freeze-outcome-rewrite', RECONCILE,
     '''                return Ok(
                     serde_json::json!({"receipt":receipt,"history":history,"result":result}),
