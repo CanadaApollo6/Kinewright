@@ -130,6 +130,17 @@ mutations = [
      'match kind { "turn.completed" | "turn.usage" | "turn.started" | "native.eof" => kind.to_owned(), _ => "provider_usage".to_owned() },',
      ["--lib"], "writer_host::hooks_tests::tests::te1_full_director_wake_matches_b4e9abc8"),
 
+    ('raw-overflow-claude', "crates/kinewright-agent/src/protocol.rs",
+     'events.push(AgentEvent::Error(\n                    "protocol error: raw_usage_refused".into(),\n                ));',
+     'return Err(AgentError::Protocol("raw_usage_refused".into()));',
+     ["--lib"], "eval::tests::te1_raw_observer_overflow_keeps_lower_bound_and_session_alive"),
+    ('raw-overflow-codex', "crates/kinewright-agent/src/protocol.rs",
+     'events.push(AgentEvent::Error(\n                        "protocol error: raw_usage_refused".into(),\n                    ));',
+     'return Err(AgentError::Protocol("raw_usage_refused".into()));',
+     ["--lib"], "eval::tests::te1_raw_observer_overflow_keeps_lower_bound_and_session_alive"),
+    ("cross-platform-instructions", "crates/kinewright-agent/src/writer_host/codex_instructions.rs",
+     "You are a Kinewright task agent.", "You are a Kinewright fixture agent.",
+     ["--lib"], "server::te1_surface_tests::te1_surface_is_frozen_at_b4e9abc8"),
 ]
 proof = []
 for name, relative, before, after, target, witness in mutations:

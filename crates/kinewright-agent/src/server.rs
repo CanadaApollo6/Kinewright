@@ -36295,10 +36295,9 @@ mod te1_surface_tests {
         let expected: Vec<String> =
             serde_json::from_str(include_str!("../tests/fixtures/te1-surface.json")).unwrap();
         assert_eq!(hashes.as_slice(), expected.as_slice());
-        #[cfg(target_os = "linux")]
         assert_eq!(
             kinewright_media::sha256_bytes(
-                crate::writer_host::native_invocation::CODEX_INSTRUCTIONS.as_bytes()
+                crate::writer_host::codex_instructions::CODEX_INSTRUCTIONS.as_bytes()
             ),
             "28b1932b2b866b88ecef978943e57ed3546685f29f1a35ab016b19aaab117d0f"
         );

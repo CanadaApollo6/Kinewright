@@ -11021,6 +11021,70 @@ mod tests {
     }
 
     #[test]
+    fn te1_raw_observer_overflow_keeps_lower_bound_and_session_alive() {
+        use kinewright_project::usage_stream::Adapter;
+        for (adapter, sample_capacity) in [
+            (Adapter::Codex01660V1, true),
+            (Adapter::Claude21316V1, true),
+            (Adapter::Claude21316V1, false),
+        ] {
+            let initial = (0..if sample_capacity { 1024 } else { 1 })
+                .map(|n| usage_fixture_result(adapter, n))
+                .collect();
+            let mut overflow = usage_fixture_result(adapter, 1024);
+            if !sample_capacity {
+                let model = overflow["modelUsage"]["main"].clone();
+                for n in 0..32 {
+                    overflow["modelUsage"][format!("extra-{n}")] = model.clone();
+                }
+                assert_eq!(overflow["modelUsage"].as_object().unwrap().len(), 33);
+            }
+            let continuation = match adapter {
+                Adapter::Codex01660V1 => serde_json::json!({
+                    "type":"item.completed", "item":{"type":"agent_message", "text":"after overflow"}}),
+                Adapter::Claude21316V1 => serde_json::json!({
+                    "type":"assistant", "message":{"content":[{"type":"text", "text":"after overflow"}]}}),
+            };
+            let driver = UsageFixtureDriver {
+                adapter,
+                fresh_each_send: false,
+                frames: vec![initial, vec![overflow], vec![continuation]],
+            };
+            let mut limits = budgets();
+            limits.max_turns = 3;
+            limits.max_wall_time = Duration::from_secs(30);
+            let metrics = collect_session(
+                &driver,
+                SessionConfig::default(),
+                &["fill observer", "overflow observer", "continue session"],
+                &limits,
+                None,
+                || Ok(0),
+            )
+            .unwrap();
+            assert!(
+                !metrics.interrupted,
+                "TE1_OVERFLOW_IS_NOT_A_SESSION_FAILURE"
+            );
+            assert_eq!(metrics.turns, 3);
+            assert_eq!(metrics.application_send_bytes.len(), 3);
+            assert_eq!(metrics.total_tokens(), 168);
+            assert_eq!(metrics.authoritative_usage.len(), 1);
+            assert!(
+                metrics
+                    .authoritative_usage
+                    .values()
+                    .all(|usage| !usage.complete)
+            );
+            assert!(metrics.observations_incomplete);
+            assert_eq!(metrics.usage_coverage(), UsageCoverage::Incomplete);
+            assert_eq!(metrics.cost_usd, None);
+            assert_eq!(metrics.errors.len(), 1);
+            assert!(metrics.errors[0].ends_with("raw_usage_refused"));
+        }
+    }
+
+    #[test]
     fn te1_review_refused_raw_usage_never_falls_back_to_cost_projection() {
         use kinewright_project::usage_stream::Adapter;
         for adapter in [Adapter::Codex01660V1, Adapter::Claude21316V1] {

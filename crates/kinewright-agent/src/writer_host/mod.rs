@@ -6,6 +6,8 @@ mod hooks_tests;
 mod issuer;
 pub use issuer::HostIssuer;
 mod auth;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) mod codex_instructions;
 mod context_publication;
 mod continuation;
 mod manual;
