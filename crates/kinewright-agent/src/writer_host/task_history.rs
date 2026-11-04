@@ -73,7 +73,7 @@ impl HostCommandOwner {
         }
         Ok(None)
     }
-    fn attempt_archive(
+    pub(super) fn attempt_archive(
         &self,
         state: &RunProjection,
     ) -> Result<(Option<ObjectRef>, RetiredAttemptArchive), HostError> {
@@ -329,6 +329,35 @@ impl HostCommandOwner {
             let candidate_base_ref = self
                 .owner_mut()?
                 .persist_registered_task_checkpoint(&mut candidate)?;
+            let frozen_result = if frozen {
+                if let Some(history) = previous.as_ref().filter(|history| history.frozen) {
+                    // Legacy freezes did not retain their returned result.
+                    // A checkpoint must not invent one from current accounting.
+                    history.frozen_result.clone()
+                } else {
+                    let delta = runtime
+                        .frozen_delta()
+                        .ok_or_else(|| refused("frozen delta missing"))?;
+                    let delta_ref = self
+                        .owner_mut()?
+                        .admit_host_grant(&serde_json::to_vec(delta)?)?;
+                    Some(crate::orchestration::orchestration_records::TaskResult {
+                        outcome:
+                            crate::orchestration::orchestration_records::AttemptOutcome::Completed,
+                        base: Some(brief.scope.base.clone()),
+                        head: Some(source.clone()),
+                        delta_ref: Some(delta_ref),
+                        artifacts: vec![],
+                        evidence: vec![],
+                        usage_ref: self.current_accounting_reference(state)?,
+                        explanation: self
+                            .owner_mut()?
+                            .admit_host_grant(super::orchestration::TASK_RESULT_EXPLANATION)?,
+                    })
+                }
+            } else {
+                None
+            };
             let history = TaskHistoryRecord {
                 project: identity.project.clone(),
                 run: state.run.clone(),
@@ -339,7 +368,11 @@ impl HostCommandOwner {
                 base_ref,
                 candidate_base_ref,
                 frozen,
+                frozen_result,
                 merge_envelope: runtime.original_merge_envelope().cloned(),
+                merge_authority: previous
+                    .as_ref()
+                    .and_then(|history| history.merge_authority.clone()),
             };
             if previous.as_ref().is_some_and(|old| {
                 old.source.branch != history.source.branch

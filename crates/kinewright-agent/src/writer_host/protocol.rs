@@ -177,6 +177,10 @@ pub struct RecoveryBarrier {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    /// Project-read recovery route; never authorizes a task mutation.
+    ReconcileTaskReceipt {
+        query: super::receipt_reconciliation::ReceiptQuery,
+    },
     IssueMetadataIssuer {
         issuer: Option<kinewright_project::receipts::IssuerId>,
     },
@@ -615,6 +619,8 @@ pub struct FeedbackMapping {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_receipt: Option<super::receipt_reconciliation::ReceiptReply>,
     pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_edit_lease: Option<kinewright_project::store::snapshot_reader::CurrentEditLease>,

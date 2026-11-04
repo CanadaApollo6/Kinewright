@@ -572,11 +572,40 @@ impl HostCommandOwner {
                 .to_vec()
         };
         let wake_bytes = if wake { payload.len() as u64 } else { 0 };
-        let payload = if profile.specification().provider() == "codex" {
-            self.codex_prompt(task, &payload)?
+        let live = if let Some(endpoint) = self
+            .hooks
+            .runs
+            .get(&identity.run)
+            .and_then(|run| run.tasks.get(&identity.task))
+            .map(crate::orchestration::tasks::EditorTask::endpoint)
+        {
+            let auth = self
+                .attachments
+                .iter()
+                .find(|attachment| {
+                    attachment.producer_scope.as_ref().is_some_and(|scope| {
+                        scope.endpoint.as_ref() == Some(&endpoint.authority().endpoint)
+                    })
+                })
+                .ok_or_else(|| refused("task prompt attachment missing"))?
+                .auth
+                .clone();
+            let live = self.task_reply_context(&auth, &endpoint, &mut None);
+            if live.get("controls").is_none() {
+                return Err(refused("live prompt controls unavailable"));
+            }
+            live
         } else {
-            payload
+            #[cfg(any(test, feature = "test-util"))]
+            if profile.specification().provider() == "scripted" {
+                serde_json::json!({"version":1})
+            } else {
+                return Err(refused("task prompt endpoint missing"));
+            }
+            #[cfg(not(any(test, feature = "test-util")))]
+            return Err(refused("task prompt endpoint missing"));
         };
+        let payload = self.codex_prompt(task, &payload, &live)?;
         if payload.len() > crate::protocol::limits::FRAME_BYTES / 2 {
             return Err(refused("native prompt capacity"));
         }
@@ -664,7 +693,7 @@ impl HostCommandOwner {
                 resumed: false,
             })
             .map_err(refused)?;
-        let surface = crate::server::te1_surface();
+        let surface = crate::server::te1_surface(task.brief.role);
         let role = serde_json::to_value(task.brief.role)?
             .as_str()
             .ok_or_else(|| refused("task role"))?

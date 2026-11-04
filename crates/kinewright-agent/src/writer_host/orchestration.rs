@@ -193,7 +193,8 @@ fn scheduler_error(reason: Refusal) -> HostError {
 pub(super) fn is_hook(command: &HostCommand) -> bool {
     matches!(
         command,
-        HostCommand::IssueMetadataIssuer { .. }
+        HostCommand::ReconcileTaskReceipt { .. }
+            | HostCommand::IssueMetadataIssuer { .. }
             | HostCommand::DispatchOrchestration { .. }
             | HostCommand::ObserveRun { .. }
             | HostCommand::ResolveAttention { .. }
@@ -366,11 +367,7 @@ impl HostCommandOwner {
         // closed ordinary admission leaves them as an unpublished description,
         // which the first validated publication commits under its own admission.
         let owner = self.owner_mut()?;
-        let published = match issuer {
-            Some(issuer) => Ok(issuer.clone()),
-            None => owner.reuse_metadata_issuer_for(&subject),
-        }
-        .and_then(|issuer| Ok((issuer, owner.admit_host_grant(&grant)?)));
+        let published = owner.issue_metadata_authority(&subject, issuer, &grant);
         let (issuer, grant_ref) = match published {
             Ok(published) => published,
             Err(BundleError::RunLimit) => {
@@ -410,7 +407,9 @@ impl HostCommandOwner {
         let mut reply = HostReply::default();
         let read = matches!(
             command,
-            HostCommand::ObserveRun { .. } | HostCommand::DetachForContinuation
+            HostCommand::ObserveRun { .. }
+                | HostCommand::ReconcileTaskReceipt { .. }
+                | HostCommand::DetachForContinuation
         );
         let result = (|| {
             if !read {
@@ -441,6 +440,9 @@ impl HostCommandOwner {
                 }
             }
             match command {
+                HostCommand::ReconcileTaskReceipt { query } => {
+                    reply.task_receipt = Some(self.reconcile_task_receipt(index, &query)?);
+                }
                 HostCommand::IssueMetadataIssuer { issuer } => {
                     reply.metadata_issuer = Some(self.issue_metadata(index, issuer.as_ref())?);
                 }
@@ -697,10 +699,9 @@ impl HostCommandOwner {
                 return Err(refused("published result changed"));
             };
             // Deltas are content-addressed, so equal references mean equal deltas.
-            if stored.base != publish.result.base
-                || stored.head != publish.result.head
-                || stored.delta_ref != publish.result.delta_ref
-            {
+            let mut original = publish.result.clone();
+            original.usage_ref = stored.usage_ref.clone();
+            if *stored != original {
                 return Err(refused("published result changed"));
             }
             *stored

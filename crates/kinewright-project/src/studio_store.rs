@@ -1919,3 +1919,34 @@ impl crate::store::ProjectStore {
         })
     }
 }
+
+impl crate::editing_session::Ja1EditingSession {
+    /// Publish a reply's issuer and grant together. Refreshing an already durable
+    /// grant performs no maintenance publication and cannot save manual edits.
+    pub fn issue_metadata_authority(
+        &mut self,
+        subject: &str,
+        requested: Option<&crate::receipts::IssuerId>,
+        grant: &[u8],
+    ) -> Result<(crate::receipts::IssuerId, ObjectRef), BundleError> {
+        let reference = self.admit_host_grant(grant)?;
+        let issuer = match requested {
+            Some(issuer) => {
+                if self.metadata_issuer_subject(issuer)?.as_deref() != Some(subject) {
+                    return Err(BundleError::HistoryChanged);
+                }
+                issuer.clone()
+            }
+            None => self.reuse_metadata_issuer_for(subject)?,
+        };
+        let bundle = self.active_bundle_mut()?;
+        if bundle
+            .pending_evidence
+            .iter()
+            .any(|pin| pin.contains_reference(&reference))
+        {
+            BundleCommit::publish_maintenance(bundle)?;
+        }
+        Ok((issuer, reference))
+    }
+}

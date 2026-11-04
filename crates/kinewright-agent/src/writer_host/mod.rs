@@ -6,7 +6,6 @@ mod hooks_tests;
 mod issuer;
 pub use issuer::HostIssuer;
 mod auth;
-#[cfg(any(test, target_os = "linux"))]
 pub(crate) mod codex_instructions;
 mod context_publication;
 mod continuation;
@@ -16,6 +15,7 @@ pub(crate) mod native_invocation;
 mod orchestration;
 mod owned_media;
 mod protocol;
+pub mod receipt_reconciliation;
 mod recovery;
 mod resolve;
 mod revise;
@@ -1683,7 +1683,8 @@ impl HostCommandOwner {
             self.dispatches += 1;
         }
         match command {
-            HostCommand::IssueMetadataIssuer { .. }
+            HostCommand::ReconcileTaskReceipt { .. }
+            | HostCommand::IssueMetadataIssuer { .. }
             | HostCommand::DispatchOrchestration { .. }
             | HostCommand::ObserveRun { .. }
             | HostCommand::ResolveAttention { .. }

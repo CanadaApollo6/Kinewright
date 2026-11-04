@@ -5,6 +5,7 @@ impl HostCommandOwner {
         &self,
         task: &crate::orchestration::orchestration_records::TaskRecord,
         payload: &[u8],
+        live: &serde_json::Value,
     ) -> Result<Vec<u8>, HostError> {
         use kinewright_project::studio_records::{FeedbackBatch, FeedbackRevision};
         let store = self.owner()?.store()?;
@@ -28,7 +29,7 @@ impl HostCommandOwner {
         }
 
         Ok(serde_json::to_vec(
-            &serde_json::json!({"instructions":CODEX_INSTRUCTIONS,"task":task.id,"brief":task.brief,"notes":notes,"payload":std::str::from_utf8(payload).map_err(refused)?}),
+            &serde_json::json!({"instructions":CODEX_INSTRUCTIONS,"live":live,"task":task.id,"brief":task.brief,"notes":notes,"payload":std::str::from_utf8(payload).map_err(refused)?}),
         )?)
     }
 }

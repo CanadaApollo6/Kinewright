@@ -635,6 +635,18 @@ pub struct TaskHistoryRecord {
     pub candidate_base_ref: ObjectRef,
     pub frozen: bool,
     pub merge_envelope: Option<crate::receipts::CommandEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_authority: Option<TaskMergeAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_result: Option<TaskResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMergeAuthority {
+    pub caller: ExecutionIdentity,
+    pub id: CommandId,
+    pub digest: CommandDigest,
 }
 
 /// Retired records retain their original identities and native recovery facts.
@@ -775,4 +787,20 @@ pub fn validate_reference(reference: &ObjectRef) -> Result<(), Refusal> {
         return Err(Refusal::Unsupported);
     }
     Ok(())
+}
+
+/// Client-known logical identity for receipt reconciliation. Admission controls
+/// and host grant fields are outside this digest. Only the host-owned usage
+/// reference is omitted from a publication's otherwise exact typed command.
+pub fn task_command_digest(command: &OrchestrationCommand) -> Result<CommandDigest, Refusal> {
+    let mut value = serde_json::to_value(command).map_err(|_| Refusal::InvalidState)?;
+    if matches!(command, OrchestrationCommand::PublishResult(_)) {
+        value["value"]["result"]
+            .as_object_mut()
+            .ok_or(Refusal::InvalidState)?
+            .remove("usage_ref");
+    }
+    let mut bytes = b"kinewright.task-command.v1\0".to_vec();
+    bytes.extend(encoded(&value, CONTROL_BYTES)?);
+    Ok(CommandDigest(kinewright_media::sha256_bytes(&bytes)))
 }

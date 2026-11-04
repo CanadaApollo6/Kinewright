@@ -24,3 +24,5 @@ scripts/ja1-s3-c1-followups-mutation-cases.json text eol=lf
 # TE1 frozen corpus and oracle bytes.
 crates/kinewright-agent/tests/fixtures/te1/** -text
 crates/kinewright-agent/tests/fixtures/te1-*.json -text
+
+crates/kinewright-agent/tests/fixtures/te12-*.json -text

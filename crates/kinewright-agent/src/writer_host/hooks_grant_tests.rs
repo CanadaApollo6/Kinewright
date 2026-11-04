@@ -168,8 +168,20 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
     f.brief.scope.objects.insert("track:1".into());
     f.brief.scope.fields.insert("track.sync_lock".into());
     f.brief.scope.tracks.insert("track:1".into());
-    let (run, execution, producer) = reserve(&f);
-    let (_actor, _endpoint) = task_actor(&f, &run, &execution, &producer);
+    let (run, parent, director) = c4_director(&f);
+    let mut brief = f.brief.clone();
+    brief.role = Role::Editor;
+    director.accepted(
+        "assign_task",
+        OrchestrationCommand::AssignTask(Box::new(AssignTask {
+            run: run.clone(),
+            parent: parent.task,
+            brief,
+        })),
+    );
+    let task = f.projection(&run).tasks[1].id.clone();
+    let (execution, _actor, _endpoint, _core) = c4_reserve_task(&f, &run, &task);
+    let producer = f.producer_client(&run);
     let (server, core) = {
         let owner = f.host.owner.upgrade().unwrap();
         let mut host = owner.lock().unwrap();
@@ -200,14 +212,20 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
         })
         .unwrap();
     let call_mcp = |name: &str, args: serde_json::Value| {
-        runtime
+        let mut reply = runtime
             .block_on(
                 client.call_tool(
                     CallToolRequestParams::new(name.to_owned())
                         .with_arguments(args.as_object().unwrap().clone()),
                 ),
             )
-            .unwrap()
+            .unwrap();
+        if let Some(value) = reply.structured_content.as_mut()
+            && let Some(outcome) = value.get("outcome").cloned()
+        {
+            *value = outcome;
+        }
+        reply
     };
     let prepare = |revision, locked| json!({"expected_revision":revision,"operations":[{"op":"set_track_sync_lock","track":1,"locked":locked}]});
     let revision = grant_test_revision(&core);
@@ -229,9 +247,22 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
     assert_eq!(pending.is_error, Some(false), "HF1_MCP_PENDING_PREPARE");
     let pending = json!({"plan_id":pending.structured_content.unwrap()["plan_id"],"expected_revision":revision});
     let mut state = f.projection(&run);
-    state.attempts[0].state = AttemptState::Retired(AttemptOutcome::Failed);
-    state.cleanup = RunCleanup::Settled;
-    assert_eq!(state.tasks[0].state, TaskState::Preparing);
+    state
+        .attempts
+        .iter_mut()
+        .find(|attempt| attempt.identity == execution)
+        .unwrap()
+        .state = AttemptState::Retired(AttemptOutcome::Failed);
+    crate::orchestration::tasks::refresh_cleanup(&mut state);
+    assert_eq!(
+        state
+            .tasks
+            .iter()
+            .find(|record| record.id == task)
+            .unwrap()
+            .state,
+        TaskState::Preparing
+    );
     assert_eq!(state.phase, RunPhase::Running);
     assert_eq!(state.outcome, RunOutcome::Pending);
     let ack = publish_projection(&f, &producer, &run, state.clone(), None);

@@ -1,5 +1,5 @@
 #[test]
-fn te1_full_prompt_bytes_are_frozen_at_b4e9abc8() {
+fn te12_full_prompt_pins_the_reply_contract() {
     let f = Fixture::new();
     let (run, _, _) = reserve(&f);
     let mut task = f.projection(&run).tasks[0].clone();
@@ -14,12 +14,12 @@ fn te1_full_prompt_bytes_are_frozen_at_b4e9abc8() {
     let host = f.host.owner.upgrade().unwrap();
     let owner = host.lock().unwrap();
     let bytes = owner
-        .codex_prompt(&task, b"frozen application payload")
+        .codex_prompt(&task, b"frozen application payload", &te12_fixed_context())
         .unwrap();
     let hash = kinewright_media::sha256_bytes(&bytes);
     println!("TE1_FULL_PROMPT {hash}");
     let expected: String =
-        serde_json::from_str(include_str!("../../tests/fixtures/te1-prompt.json")).unwrap();
+        serde_json::from_str(include_str!("../../tests/fixtures/te12-prompt.json")).unwrap();
     assert_eq!(hash, expected);
 }
 

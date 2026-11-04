@@ -110,6 +110,9 @@ impl Attachment {
     pub fn permits(&self, command: &super::HostCommand) -> bool {
         use super::{AttachmentRole, HostCommand};
         match command {
+            HostCommand::ReconcileTaskReceipt { .. } => {
+                matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+            }
             HostCommand::IssueMetadataIssuer { .. } | HostCommand::ObserveRun { .. } => true,
             HostCommand::DispatchOrchestration { .. }
             | HostCommand::ResolveAttention { .. }

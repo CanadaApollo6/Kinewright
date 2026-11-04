@@ -3,7 +3,7 @@
     clippy::too_many_lines,
     reason = "fixed complete wakes cover pending, recovered and unpinned child publications"
 )]
-fn te1_full_director_wake_matches_b4e9abc8() {
+fn te12_full_director_wake_moves_only_reply_metadata() {
     use crate::protocol::limits::usage::{UsageAdapter, decode_usage, ingest_usage};
     use kinewright_project::{bundle_records::SessionId, orchestration_accounting::*};
     let observed = true;
@@ -152,7 +152,9 @@ fn te1_full_director_wake_matches_b4e9abc8() {
             })
             .unwrap();
         let payload = owner.result_wake_payload(&[&stored.reference]).unwrap();
-        let prompt = owner.codex_prompt(&task, &payload).unwrap();
+        let prompt = owner
+            .codex_prompt(&task, &payload, &te12_fixed_context())
+            .unwrap();
         let name = match ordinal {
             3 => "pending",
             4 => "complete",
@@ -163,6 +165,20 @@ fn te1_full_director_wake_matches_b4e9abc8() {
             prompt.len(),
             kinewright_media::sha256_bytes(&prompt)
         );
+        let baseline: &[u8] = match ordinal {
+            3 => include_bytes!("../../tests/fixtures/te1-director-wake-pending.json"),
+            4 => include_bytes!("../../tests/fixtures/te1-director-wake-complete.json"),
+            _ => include_bytes!("../../tests/fixtures/te1-director-wake-unpinned.json"),
+        };
+        let mut legacy: serde_json::Value = serde_json::from_slice(baseline).unwrap();
+        legacy["instructions"] =
+            serde_json::json!(super::super::codex_instructions::CODEX_INSTRUCTIONS);
+        legacy["live"] = te12_fixed_context();
+        assert_eq!(
+            prompt,
+            serde_json::to_vec(&legacy).unwrap(),
+            "TE12_ONLY_REPLY_METADATA_MOVED_{name}"
+        );
         if let Some(path) = std::env::var_os("KINEWRIGHT_TE1_CAPTURE_BASE") {
             assert!(!observed, "only the pinned base may create the oracle");
             std::fs::write(
@@ -172,11 +188,11 @@ fn te1_full_director_wake_matches_b4e9abc8() {
             .unwrap();
         } else {
             let expected: &[u8] = if ordinal == 3 {
-                include_bytes!("../../tests/fixtures/te1-director-wake-pending.json")
+                include_bytes!("../../tests/fixtures/te12-director-wake-pending.json")
             } else if ordinal == 4 {
-                include_bytes!("../../tests/fixtures/te1-director-wake-complete.json")
+                include_bytes!("../../tests/fixtures/te12-director-wake-complete.json")
             } else {
-                include_bytes!("../../tests/fixtures/te1-director-wake-unpinned.json")
+                include_bytes!("../../tests/fixtures/te12-director-wake-unpinned.json")
             };
             assert_eq!(
                 std::str::from_utf8(&prompt).unwrap(),

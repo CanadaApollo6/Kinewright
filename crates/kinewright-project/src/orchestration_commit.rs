@@ -645,6 +645,31 @@ fn task_history_refs(
     {
         return Err(Refusal::ScopeConflict);
     }
+    if let Some(result) = &history.frozen_result {
+        if !history.frozen
+            || result.base.as_ref() != Some(&history.base)
+            || result.head.as_ref() != Some(&history.source)
+        {
+            return Err(Refusal::ScopeConflict);
+        }
+        refs.extend(
+            OrchestrationRecord {
+                version: 1,
+                payload: OrchestrationPayload::Result(Box::new(result.clone())),
+            }
+            .dependencies()?,
+        );
+    }
+    if let Some(binding) = &history.merge_authority {
+        binding.caller.validate()?;
+        if binding.caller.project != history.project
+            || binding.caller.run != history.run
+            || binding.caller.task == history.task
+            || binding.id.sequence == 0
+        {
+            return Err(Refusal::ScopeConflict);
+        }
+    }
     if let Some(envelope) = &history.merge_envelope {
         envelope
             .encoded_bytes()

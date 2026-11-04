@@ -634,8 +634,10 @@ fn s4b_c2_specialist_steering_and_coalesced_wakes_are_charged() {
             "S4B_C2_ALL_SEND_ROUTES"
         );
         if kind == SendKind::AutomaticResultWake {
-            let values: Vec<serde_json::Value> =
+            let prompt: serde_json::Value =
                 serde_json::from_slice(invocation.invocation().bytes()).unwrap();
+            let values: Vec<serde_json::Value> =
+                serde_json::from_str(prompt["payload"].as_str().unwrap()).unwrap();
             let actual: Vec<_> = values
                 .iter()
                 .map(|value| value["explanation"].as_str().unwrap().to_owned())

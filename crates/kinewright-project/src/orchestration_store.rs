@@ -261,6 +261,42 @@ impl ProjectBundle {
         };
         Ok(Some((**projection).clone()))
     }
+    /// Read-only lookup. A known command cannot be relabelled as another run.
+    pub fn orchestration_receipt(
+        &self,
+        run: &RunId,
+        id: &crate::receipts::CommandId,
+    ) -> Result<Option<OrchestrationReceipt>, BundleError> {
+        let _reading = crate::run_admission::reading(&self.store);
+        for (original_run, cuts) in &self.run_index()?.orchestration {
+            for cut in cuts {
+                if &cut.receipt.envelope.id == id {
+                    if original_run != run {
+                        return Err(invalid("receipt identity changed"));
+                    }
+                    return Ok(Some(cut.receipt.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+    pub fn orchestration_receipt_projection(
+        &self,
+        receipt: &OrchestrationReceipt,
+    ) -> Result<RunProjection, BundleError> {
+        let _reading = crate::run_admission::reading(&self.store);
+        for cut in self.run_index()?.orchestration.values().flatten() {
+            if cut.receipt == *receipt {
+                let record = self
+                    .store
+                    .read_record::<OrchestrationRecord>(&cut.snapshot)?;
+                if let OrchestrationPayload::Snapshot(state) = &record.payload {
+                    return Ok((**state).clone());
+                }
+            }
+        }
+        Err(invalid("original receipt projection missing"))
+    }
     pub fn orchestration_replay(
         &self,
         envelope: &OrchestrationEnvelope,
@@ -322,6 +358,20 @@ impl crate::editing_session::Ja1EditingSession {
         run: &RunId,
     ) -> Result<Option<RunProjection>, BundleError> {
         self.active_bundle()?.orchestration_projection(run)
+    }
+    pub fn orchestration_receipt(
+        &self,
+        run: &RunId,
+        id: &crate::receipts::CommandId,
+    ) -> Result<Option<OrchestrationReceipt>, BundleError> {
+        self.active_bundle()?.orchestration_receipt(run, id)
+    }
+    pub fn orchestration_receipt_projection(
+        &self,
+        receipt: &OrchestrationReceipt,
+    ) -> Result<RunProjection, BundleError> {
+        self.active_bundle()?
+            .orchestration_receipt_projection(receipt)
     }
     pub fn orchestration_replay(
         &self,

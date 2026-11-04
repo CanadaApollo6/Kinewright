@@ -177,6 +177,10 @@ fn astra_c4_merge_retry_after_reopen() {
     }
     let merged = director.invoke("merge_task", merge.clone());
     assert_eq!(merged.is_error, Some(false), "C4_MCP_MERGE {merged:?}");
+    let query: super::super::receipt_reconciliation::ReceiptQuery = serde_json::from_value(
+        merged.structured_content.as_ref().unwrap()["reconciliation"].clone(),
+    )
+    .unwrap();
 
     drop(director);
     drop(third_core);
@@ -190,14 +194,51 @@ fn astra_c4_merge_retry_after_reopen() {
     let fresh = director.status()["control"].clone();
     retry["owner_epoch"] = fresh["owner_epoch"].clone();
     retry["expected_head"] = fresh["expected_head"].clone();
-    let repeated = director.invoke("merge_task", retry);
-    eprintln!("ASTRA_MERGE_RESTART_REPLY {repeated:?}");
+    let refused = director.invoke("merge_task", retry);
     assert_eq!(
-        repeated.is_error,
-        Some(false),
-        "ASTRA_MERGE_RECEIPT_AFTER_RESTART"
+        refused.is_error,
+        Some(true),
+        "TE12_STALE_ATTEMPT_AFTER_REOPEN"
     );
-    assert_eq!(merged.structured_content, repeated.structured_content);
+    let read = f
+        .editor
+        .request(HostCommand::ReconcileTaskReceipt {
+            query: query.clone(),
+        })
+        .unwrap();
+    assert!(
+        read.error.is_none(),
+        "ASTRA_MERGE_RECEIPT_AFTER_RESTART {read:?}"
+    );
+    let Some(super::super::receipt_reconciliation::ReceiptReply::Stored { outcome, .. }) =
+        read.task_receipt
+    else {
+        panic!("ASTRA_MERGE_RECEIPT_AFTER_RESTART");
+    };
+    assert_eq!(
+        merged.structured_content.unwrap(),
+        outcome,
+        "ASTRA_MERGE_ORIGINAL_AFTER_REOPEN"
+    );
+    let mut changed = query;
+    changed.attempt = director.status()["run"]["projection"]["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| {
+            a["identity"]["task"] == serde_json::to_value(&parent.task).unwrap()
+                && a["state"]["kind"] == "reserved"
+        })
+        .map(|a| serde_json::from_value(a["identity"]["attempt"].clone()).unwrap())
+        .unwrap();
+    assert!(
+        f.editor
+            .request(HostCommand::ReconcileTaskReceipt { query: changed })
+            .unwrap()
+            .error
+            .is_some(),
+        "TE12_MERGE_ORIGINAL_ATTEMPT_BINDING"
+    );
 }
 
 #[test]
@@ -519,7 +560,8 @@ fn s4b_c4_fix1_foreign_missing_and_live_original_retry() {
         )
         .unwrap();
         claim.record_project_locator(&original).unwrap();
-        assert!(native_save_as(&f, "copy.kinewright").error.is_none());
+        let copied = native_save_as(&f, "copy.kinewright");
+        assert!(copied.error.is_none(), "C4_FOREIGN_COPY {copied:?}");
         drop(director);
         drop(claim);
         let Fixture {
@@ -866,12 +908,76 @@ fn s4b_c4_fix1_merge_crash_cuts() {
         for field in ["owner_epoch", "expected_head"] {
             retry[field] = fresh[field].clone();
         }
-        let merged = director.invoke("merge_task", retry.clone());
+        let refused = director.invoke("merge_task", retry);
         assert_eq!(
-            merged.is_error,
-            Some(false),
-            "C4_MERGE_CRASH_RETRY {cut}: {merged:?}"
+            refused.is_error,
+            Some(true),
+            "TE12_CRASH_STALE_ATTEMPT {cut}"
         );
+        let query = {
+            let owner = host.owner.upgrade().unwrap();
+            let owner = owner.lock().unwrap();
+            let state = owner
+                .owner()
+                .unwrap()
+                .orchestration_projection(&run)
+                .unwrap()
+                .unwrap();
+            let origin = owner
+                .saved_task_history(&state, &child)
+                .unwrap()
+                .unwrap()
+                .merge_authority
+                .unwrap();
+            super::super::receipt_reconciliation::ReceiptQuery {
+                project: origin.caller.project,
+                run: origin.caller.run,
+                task: origin.caller.task,
+                attempt: origin.caller.attempt,
+                id: origin.id,
+                digest: Some(origin.digest),
+                command: None,
+            }
+        };
+        let read = || {
+            host.client()
+                .request(HostCommand::ReconcileTaskReceipt {
+                    query: query.clone(),
+                })
+                .unwrap()
+        };
+        let observed = read();
+        assert!(
+            observed.error.is_none(),
+            "TE12_CRASH_RECEIPT_READ {cut} {observed:?}"
+        );
+        if !matches!(
+            observed.task_receipt,
+            Some(super::super::receipt_reconciliation::ReceiptReply::Stored { .. })
+        ) {
+            // Explicit trusted host recovery completes the missing journal step.
+            // The read-only query and the stale task endpoint perform no merge.
+            let owner = host.owner.upgrade().unwrap();
+            let mut owner = owner.lock().unwrap();
+            let producer = owner.run_producer(&run).unwrap();
+            let state = owner
+                .owner()
+                .unwrap()
+                .orchestration_projection(&run)
+                .unwrap()
+                .unwrap();
+            owner.restore_frozen_task(&state, &child).unwrap();
+            owner
+                .merge_task_history(&producer, &run, &child, query.id.clone())
+                .unwrap();
+        }
+        let Some(super::super::receipt_reconciliation::ReceiptReply::Stored {
+            outcome: merged,
+            ..
+        }) = read().task_receipt
+        else {
+            panic!("C4_MERGE_CRASH_RETRY {cut}");
+        };
         let history = {
             let owner = host.owner.upgrade().unwrap();
             let owner = owner.lock().unwrap();
@@ -893,7 +999,7 @@ fn s4b_c4_fix1_merge_crash_cuts() {
             };
             assert_eq!(
                 serde_json::to_value(receipt).unwrap(),
-                merged.structured_content.as_ref().unwrap()["receipt"],
+                merged["receipt"],
                 "C4_MERGE_ORIGINAL_ENVELOPE_RECEIPT"
             );
             let guard = owner
@@ -906,12 +1012,13 @@ fn s4b_c4_fix1_merge_crash_cuts() {
                 .1;
             guard.core().export_history().unwrap()
         };
-        let again = director.invoke("merge_task", retry);
-        assert_eq!(again.is_error, Some(false), "C4_MERGE_CRASH_REPLAY {cut}");
-        assert_eq!(
-            again.structured_content, merged.structured_content,
-            "C4_MERGE_EXACTLY_ONCE {cut}"
-        );
+        let Some(super::super::receipt_reconciliation::ReceiptReply::Stored {
+            outcome: again, ..
+        }) = read().task_receipt
+        else {
+            panic!("C4_MERGE_CRASH_REPLAY {cut}");
+        };
+        assert_eq!(again, merged, "C4_MERGE_EXACTLY_ONCE {cut}");
         drop(director);
         drop(host);
         let reopened = crash_host(&root);

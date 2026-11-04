@@ -1,0 +1,21 @@
+/// Extra native-provider allowlist; the server applies the narrower durable role.
+pub(crate) const TASK_TOOL_NAMES: &[&str] = &[
+    "get_timeline_state",
+    "read_task_evidence",
+    "read_task_result",
+    "prepare_edit_plan",
+    "commit_edit_plan",
+    "discard_edit_plan",
+    "undo_task_edit",
+    "redo_task_edit",
+    "task_status",
+    "wait_task",
+    "assign_task",
+    "freeze_task",
+    "publish_result",
+    "merge_task",
+    "observe_delivery",
+    "cancel_task",
+    "answer_question",
+    "send_message",
+];

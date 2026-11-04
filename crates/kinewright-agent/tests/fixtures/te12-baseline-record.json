@@ -1,0 +1,14 @@
+{
+  "commit": "b4e9abc8884c0c0260ca4d85b79710b34867a37c",
+  "served_tools_sha256": "a2264f777e319785d75225a82263547ebe23bcd68f3c49815d135c5f403b8f97",
+  "registry_sha256": "9d253fa364f5d62c44aea49999b3a8680f674302e56d9a3b3889f0d41b38817e",
+  "task_control_schemas_sha256": "38e7fb3446e6ac709aa90f080b1702611605cc256a3b7873af46f37525054311",
+  "instructions_sha256": "28b1932b2b866b88ecef978943e57ed3546685f29f1a35ab016b19aaab117d0f",
+  "prompt_sha256": "28ee4c764852eb6e828ca20a34fbc8d4e387eb48cc9c8fb4feef08aef29d67c9",
+  "wakes": {
+    "pending": "343395316528fb70c60003430447de1fff922b8b01c28d8bd79af7b8278e7cd1",
+    "complete": "46faed1cf29baa5523b6f106dc4916a7b7b3dd08f5ee0293dd840cd6bd36426d",
+    "unpinned": "7c5e495f5c103258f2977dce3f8d3aa8bd132ce09c5171ddb4021f71aa674f2b"
+  },
+  "evaluation_arm": "Deferred to TE1.5. Reconstruct only in the eval harness from this immutable commit; never select a legacy surface in production."
+}

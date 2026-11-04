@@ -1,10 +1,13 @@
-//! The seven MCP tools carry controls bound to one H3 task attachment.
+//! Versioned task tools use durable roles and separately refreshed live controls.
+pub(crate) mod manifest;
+mod reply;
 pub(crate) mod schema;
 use super::{HostAuth, HostCommandOwner, HostError, HostRefusal};
 use crate::orchestration::{
     orchestration_commit::CommandDecision,
     orchestration_records::{
-        AuthorityBinding, OrchestrationCommand, OrchestrationEnvelope, RunId, RunProjection, TaskId,
+        AuthorityBinding, OrchestrationCommand, OrchestrationEnvelope, Role, RunId, RunProjection,
+        TaskId,
     },
     tasks::TaskEndpoint,
 };
@@ -76,6 +79,7 @@ pub(crate) struct TaskMcp {
     auth: HostAuth,
     endpoint: TaskEndpoint,
     issuer: Arc<Mutex<Option<IssuerId>>>,
+    terminal_state: Arc<Mutex<Option<Value>>>,
     #[cfg(target_os = "linux")]
     measurements: Arc<Mutex<kinewright_project::usage_measurement::Measurements>>,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
@@ -85,6 +89,7 @@ pub(crate) struct TaskMcp {
 #[serde(deny_unknown_fields)]
 struct Control {
     id: CommandId,
+    attempt: crate::orchestration::orchestration_records::AttemptId,
     expected_generation: u64,
     owner_epoch: u64,
     expected_head: HeadId,
@@ -103,6 +108,14 @@ pub(crate) fn product_tool_name(name: &str, capability: Option<&str>) -> &'stati
             capability.and_then(|capability| CAPABILITIES.iter().find(|(c, _)| *c == capability))
     {
         return control;
+    }
+    if let Some((tool, _)) = CAPABILITIES.iter().find(|(tool, _)| *tool == name) {
+        return tool;
+    }
+    match name {
+        "read_task_evidence" => return "read_task_evidence",
+        "read_task_result" => return "read_task_result",
+        _ => {}
     }
     crate::runtime::COMPACT_TOOL_NAMES
         .iter()
@@ -260,6 +273,7 @@ impl TaskMcp {
             auth,
             endpoint,
             issuer: Arc::default(),
+            terminal_state: Arc::default(),
             #[cfg(target_os = "linux")]
             measurements,
             #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
@@ -283,13 +297,63 @@ impl TaskMcp {
     }
     fn call_inner(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
         let host = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
-        let mut issuer = self
-            .issuer
-            .lock()
-            .map_err(|_| refused("control issuer unavailable"))?;
         let mut host = host.lock().map_err(|_| refused("host owner unavailable"))?;
         host.prove_retention()?;
         let (index, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
+        let role = state
+            .tasks
+            .iter()
+            .find(|record| record.id == task)
+            .ok_or_else(|| refused("task missing"))?
+            .brief
+            .role;
+        if !manifest::names(role).contains(&name) {
+            return Err(refused("tool hidden for durable task role"));
+        }
+        if matches!(name, "read_task_result" | "read_task_evidence") {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Read {
+                reference: kinewright_project::bundle_records::ObjectRef,
+            }
+            let read: Read = serde_json::from_value(arguments)?;
+            let record = state.tasks.iter().find(|record| record.id == task).unwrap();
+            let result_allowed = |reference: &kinewright_project::bundle_records::ObjectRef| {
+                state.deliveries.iter().any(|delivery| {
+                    &delivery.result == reference
+                        && state.tasks.iter().any(|child| {
+                            child.id == delivery.task && child.parent.as_ref() == Some(&task)
+                        })
+                }) || matches!(&record.state, crate::orchestration::orchestration_records::TaskState::Terminal(result) if result == reference)
+            };
+            let allowed = if name == "read_task_result" {
+                result_allowed(&read.reference)
+            } else {
+                [
+                    &record.brief.plan,
+                    &record.brief.script,
+                    &record.brief.inputs,
+                    &record.brief.assignment,
+                ]
+                .contains(&&read.reference)
+                    || record.brief.scope.asset_roots.contains(&read.reference)
+                    || record.brief.scope.consent_refs.contains(&read.reference)
+                    || state.results.iter().filter(|reference| result_allowed(reference)).any(|reference| {
+                        host.owner().and_then(|owner| Ok(owner.store()?.read_run_record(reference)?))
+                            .is_ok_and(|record| match &record.payload {
+                                crate::orchestration::orchestration_records::OrchestrationPayload::Result(result) => {
+                                    result.evidence.contains(&read.reference) || result.artifacts.contains(&read.reference)
+                                        || result.delta_ref.as_ref() == Some(&read.reference)
+                                        || result.usage_ref == read.reference || result.explanation == read.reference
+                                }, _ => false,
+                            })
+                    })
+            };
+            if !allowed {
+                return Err(refused("read reference outside task scope"));
+            }
+            return host.read_task_reference(&read.reference);
+        }
         if matches!(name, "task_status" | "wait_task") {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -298,12 +362,8 @@ impl TaskMcp {
                 after_sequence: u64,
             }
             let observe: Observe = serde_json::from_value(arguments)?;
-            let metadata = host.issue_metadata(index, issuer.as_ref())?;
-            *issuer = Some(metadata.envelope.id.issuer.clone());
             return Ok(
                 json!({"run": host.observe_run(index, &state.run, observe.after_sequence)?,
-                "control": {"id": metadata.envelope.id, "expected_generation": metadata.root_generation,
-                    "owner_epoch": metadata.envelope.owner_epoch, "expected_head": self.endpoint.head()},
                 "waiting": state.sequence <= observe.after_sequence}),
             );
         }
@@ -322,7 +382,8 @@ impl TaskMcp {
             return Ok(json!({"history":history}));
         }
         let control: Control = serde_json::from_value(arguments)?;
-        if control.owner_epoch != self.endpoint.authority().owner_epoch
+        if control.attempt != self.endpoint.authority().attempt
+            || control.owner_epoch != self.endpoint.authority().owner_epoch
             || control.expected_head != *self.endpoint.head()
         {
             return Err(refused("control epoch or candidate head changed"));
@@ -371,6 +432,22 @@ impl TaskMcp {
         };
         // Authorize before receipt lookup or any freeze/merge side effect.
         host.authorize_orchestration(index, &request)?;
+        let bound = host.bind_publication(&request)?;
+        let replay = host.owner()?.orchestration_replay(&bound.envelope, None)?;
+        let merge_replay = if let OrchestrationCommand::MergeTask(merge) = &request.envelope.command
+        {
+            host.saved_task_history(&state, &merge.task)?
+                .and_then(|history| history.merge_envelope)
+                .is_some_and(|original| original.id == request.envelope.id)
+        } else {
+            false
+        };
+        if control.expected_generation != host.owner()?.metadata_generation()?
+            && replay.is_none()
+            && !merge_replay
+        {
+            return Err(refused("stale control generation"));
+        }
         if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command
             && let Some(history) = host.saved_task_history(&state, target)?
             && history.frozen
@@ -431,6 +508,12 @@ impl TaskMcp {
             {
                 return Err(refused("merge target/result changed"));
             }
+            let reconciliation = host.bind_merge_receipt(
+                &state,
+                &merge.task,
+                &request.envelope,
+                self.endpoint.authority(),
+            )?;
             host.restore_frozen_task(&state, &merge.task)?;
             let producer = host.run_producer(&state.run)?;
             let receipt = host.merge_task_history(
@@ -444,7 +527,7 @@ impl TaskMcp {
             else {
                 return Err(refused("merge outcome is not settled"));
             };
-            return Ok(json!({"receipt": receipt}));
+            return Ok(json!({"receipt": receipt,"reconciliation":reconciliation}));
         }
         let freeze = if let OrchestrationCommand::FreezeTask(task) = &request.envelope.command {
             Some(task.clone())
@@ -452,6 +535,7 @@ impl TaskMcp {
             None
         };
         let receipt = host.dispatch_orchestration(index, &request)?;
+        self.remember_terminal_state(&host);
         if receipt.decision == CommandDecision::Applied
             && let Some(task) = freeze
         {
@@ -482,9 +566,16 @@ impl HostCommandOwner {
         auth: &HostAuth,
         endpoint: &TaskEndpoint,
     ) -> Result<(usize, RunProjection, TaskId), HostError> {
-        endpoint
-            .check_live()
-            .map_err(|_| refused("task authority expired"))?;
+        #[cfg(target_os = "linux")]
+        if self.native_recovery_pending || self.recovery_only {
+            return Err(HostRefusal::new("recovery_frozen", "native recovery is pending").into());
+        }
+        endpoint.check_live().map_err(|_| {
+            HostError::from(HostRefusal::new(
+                "task_authority_expired",
+                "task authority expired",
+            ))
+        })?;
         let index = self.resolve_attachment(Some(&auth.bearer()))?;
         let authority = endpoint.authority();
         let scope = self.attachments[index]
@@ -528,7 +619,10 @@ impl HostCommandOwner {
             })
             .live_in(&state, Some(scope.owner_epoch))
         {
-            return Err(refused("task no longer live"));
+            return Err(HostError::from(HostRefusal::new(
+                "task_authority_expired",
+                "task no longer live",
+            )));
         }
         Ok((index, state, authority.task.clone()))
     }
@@ -597,14 +691,20 @@ impl HostCommandOwner {
         task: &TaskId,
         receipt: Option<&crate::orchestration::orchestration_commit::OrchestrationReceipt>,
     ) -> Result<Value, HostError> {
-        let state = self
-            .owner()?
-            .orchestration_projection(run)?
-            .ok_or_else(|| refused("run missing"))?;
+        let state = if let Some(receipt) = receipt {
+            self.owner()?.orchestration_receipt_projection(receipt)?
+        } else {
+            self.owner()?
+                .orchestration_projection(run)?
+                .ok_or_else(|| refused("run missing"))?
+        };
         self.restore_frozen_task(&state, task)?;
         let history = self
             .saved_task_history(&state, task)?
             .ok_or_else(|| refused("frozen history missing"))?;
+        if let Some(result) = &history.frozen_result {
+            return Ok(json!({"receipt":receipt,"history":history,"result":result}));
+        }
         let delta = self.hooks.runs[run].tasks[task]
             .frozen_delta()
             .ok_or_else(|| refused("frozen delta missing"))?
@@ -625,5 +725,36 @@ impl HostCommandOwner {
                 .admit_host_grant(super::orchestration::TASK_RESULT_EXPLANATION)?,
         };
         Ok(json!({"receipt":receipt,"history":history,"result":result}))
+    }
+}
+
+impl HostCommandOwner {
+    fn read_task_reference(
+        &self,
+        reference: &kinewright_project::bundle_records::ObjectRef,
+    ) -> Result<Value, HostError> {
+        use kinewright_project::bundle_records::RecordKind;
+        if reference.byte_length > (crate::protocol::limits::FRAME_BYTES / 2) as u64 {
+            return Err(refused("task evidence capacity"));
+        }
+        let store = self.owner()?.store()?;
+        match reference.record_kind {
+            RecordKind::OwnedEvidence => {
+                let bytes = store.read_evidence(reference)?;
+                Ok(serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                    match std::str::from_utf8(&bytes) {
+                        Ok(text) => Value::String(text.into()),
+                        Err(_) => json!({"encoding":"bytes","contents":bytes.to_vec()}),
+                    }
+                }))
+            }
+            RecordKind::InputManifest => Ok(serde_json::to_value(
+                &*store.read_record::<kinewright_project::owned_inputs::OwnedInputManifest>(
+                    reference,
+                )?,
+            )?),
+            RecordKind::RunIndex => Ok(serde_json::to_value(&*store.read_run_record(reference)?)?),
+            _ => Err(refused("unsupported task evidence record")),
+        }
     }
 }

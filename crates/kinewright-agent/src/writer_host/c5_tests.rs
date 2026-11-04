@@ -214,7 +214,9 @@ fn s4b_c5_opening_prompt_contains_bound_brief_and_notes() {
         .unwrap()
         .read_evidence(&state.tasks[0].brief.assignment)
         .unwrap();
-    let prompt = owner.codex_prompt(&state.tasks[0], &assignment).unwrap();
+    let prompt = owner
+        .codex_prompt(&state.tasks[0], &assignment, &te12_fixed_context())
+        .unwrap();
     let prompt: serde_json::Value = serde_json::from_slice(&prompt).unwrap();
     assert_eq!(
         prompt["brief"],

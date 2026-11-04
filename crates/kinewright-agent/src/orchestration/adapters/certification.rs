@@ -7,6 +7,10 @@ use super::{EffectiveAuthEvidence, EffectiveLaunchContext, ProviderAuthContract}
 use kinewright_core::SessionConfig;
 use std::path::{Path, PathBuf};
 
+#[path = "../../writer_host/task_tool_names.rs"]
+mod task_tool_names;
+use task_tool_names::TASK_TOOL_NAMES;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CliVersion(pub u32, pub u32, pub u32);
 impl CliVersion {
@@ -538,15 +542,7 @@ static FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
         effort: None,
         service_tier: None,
         max_turns: 1,
-        tools: &[
-            "get_timeline_state",
-            "search_capabilities",
-            "get_capability",
-            "invoke_capability",
-            "prepare_edit_plan",
-            "commit_edit_plan",
-            "discard_edit_plan",
-        ],
+        tools: TASK_TOOL_NAMES,
     },
     mcp: McpPolicy::HostEndpointOnly,
     default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
@@ -591,15 +587,7 @@ static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
         effort: Some("high"),
         service_tier: None,
         max_turns: 1,
-        tools: &[
-            "get_timeline_state",
-            "search_capabilities",
-            "get_capability",
-            "invoke_capability",
-            "prepare_edit_plan",
-            "commit_edit_plan",
-            "discard_edit_plan",
-        ],
+        tools: TASK_TOOL_NAMES,
     },
     mcp: McpPolicy::HostEndpointOnly,
     default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),

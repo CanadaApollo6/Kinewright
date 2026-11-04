@@ -27,6 +27,11 @@ impl C4Mcp {
                     .unwrap()
                     .into_iter()
                     .filter_map(|(name, value)| name.map(|name| (name, value)))
+                    // A forged role header must never widen tools/list or dispatch.
+                    .chain(std::iter::once((
+                        reqwest::header::HeaderName::from_static("x-kinewright-role"),
+                        reqwest::header::HeaderValue::from_static("director"),
+                    )))
                     .collect(),
             );
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -49,7 +54,7 @@ impl C4Mcp {
         clippy::needless_pass_by_value,
         reason = "test requests take owned JSON values"
     )]
-    fn raw(&self, name: &str, arguments: serde_json::Value) -> rmcp::model::CallToolResult {
+    fn wire(&self, name: &str, arguments: serde_json::Value) -> rmcp::model::CallToolResult {
         self.runtime
             .block_on(
                 self.client.call_tool(
@@ -59,15 +64,27 @@ impl C4Mcp {
             )
             .unwrap()
     }
+    // Existing C4/C5 invariants inspect immutable outcomes. TE1.2 witnesses use
+    // wire() to inspect the complete provider reply, including optional controls.
+    fn raw(&self, name: &str, arguments: serde_json::Value) -> rmcp::model::CallToolResult {
+        let mut result = self.wire(name, arguments);
+        if let Some(reply) = result.structured_content.as_mut() {
+            let controls = reply.get("controls").cloned();
+            if let Some(mut outcome) = reply.get("outcome").cloned() {
+                if name == "task_status" {
+                    outcome["control"] = controls.unwrap_or(serde_json::Value::Null);
+                }
+                *reply = outcome;
+            }
+        }
+        result
+    }
     #[allow(
         clippy::needless_pass_by_value,
         reason = "test requests take owned JSON values"
     )]
     fn invoke(&self, name: &str, arguments: serde_json::Value) -> rmcp::model::CallToolResult {
-        self.raw(
-            "invoke_capability",
-            serde_json::json!({"name":name,"arguments":arguments}),
-        )
+        self.raw(name, arguments)
     }
     fn status(&self) -> serde_json::Value {
         let reply = self.invoke("task_status", serde_json::json!({}));
@@ -100,7 +117,7 @@ fn c4_director(f: &Fixture) -> (RunId, ExecutionIdentity, C4Mcp) {
     (run, execution, mcp)
 }
 #[test]
-fn s4b_c4_mcp_narrows_assignment_and_keeps_seven_tools() {
+fn s4b_c4_mcp_narrows_assignment_and_exposes_director_manifest() {
     let mut f = Fixture::new();
     f.brief.scope.operations.insert("add_marker".into());
     let (run, execution, director) = c4_director(&f);
@@ -110,16 +127,13 @@ fn s4b_c4_mcp_narrows_assignment_and_keeps_seven_tools() {
         .unwrap();
     assert_eq!(
         listed.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
-        crate::runtime::COMPACT_TOOL_NAMES
+        crate::writer_host::task_mcp::manifest::DIRECTOR
     );
-    let schemas = director.raw(
-        "get_capability",
-        serde_json::json!({"names":["assign_task","freeze_task","merge_task","task_status"]}),
-    );
-    assert_eq!(
-        schemas.is_error,
-        Some(false),
-        "C4_CONTROL_DISCOVERY {schemas:?}"
+    assert!(
+        listed
+            .iter()
+            .all(|tool| tool.input_schema.get("type").is_some()),
+        "C4_CONTROL_SCHEMAS"
     );
     let mut child = f.brief.clone();
     child.role = Role::Editor;

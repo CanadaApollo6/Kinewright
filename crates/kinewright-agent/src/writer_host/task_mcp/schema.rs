@@ -1,4 +1,4 @@
-//! Wire schemas for internal capabilities. The served MCP tool set stays seven.
+//! Fixed v1 task operation schemas, independent of task scope.
 use serde_json::{Value, json};
 fn object(properties: Value, required: &[&str]) -> Value {
     let mut schema = json!({"type":"object","required":required,"additionalProperties":false});
@@ -78,15 +78,22 @@ pub(crate) fn capability(name: &str) -> Value {
         name
     };
     let mut schema = object(
-        json!({"id":reference("command_id"),"expected_generation":{"type":"integer","minimum":0},"owner_epoch":{"type":"integer","minimum":1},"expected_head":reference("identity"),"command":object(json!({"kind":{"const":kind},"value":value}),&["kind","value"])}),
+        json!({"id":reference("command_id"),"attempt":reference("identity"),"expected_generation":{"type":"integer","minimum":0},"owner_epoch":{"type":"integer","minimum":1},"expected_head":reference("identity"),"command":object(json!({"kind":{"const":kind},"value":value}),&["kind","value"])}),
         &[
             "id",
+            "attempt",
             "expected_generation",
             "owner_epoch",
             "expected_head",
             "command",
         ],
     );
+    schema["$defs"] = definitions();
+    schema
+}
+
+pub(crate) fn read_reference() -> Value {
+    let mut schema = object(json!({"reference":reference("object_ref")}), &["reference"]);
     schema["$defs"] = definitions();
     schema
 }

@@ -1856,6 +1856,9 @@ impl<R: Read> Read for CountingReader<'_, R> {
     }
 }
 impl StorePin {
+    pub(crate) fn contains_reference(&self, reference: &ObjectRef) -> bool {
+        self.objects.contains(&reference.sha256)
+    }
     /// Pins may be shared only within the same IO owner's ledger.
     #[must_use]
     pub fn shares_owner_with(&self, other: &Self) -> bool {

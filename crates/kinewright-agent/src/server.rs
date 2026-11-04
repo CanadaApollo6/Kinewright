@@ -1363,7 +1363,14 @@ impl KinewrightMcp {
     /// This instance's served tools: the static served surface, filtered
     /// through the per-instance allowlist when one is set (H0).
     fn served_tools_for_instance(&self) -> Result<Vec<Tool>, SchemaError> {
-        let tools = Self::served_tools()?;
+        let tools = if let Some(control) = &self.task_control {
+            match control.role() {
+                Ok(role) => task_role_tools(role),
+                Err(_) => return Ok(Vec::new()),
+            }
+        } else {
+            Self::served_tools()?
+        };
         match self.served_tool_allowlist {
             Some(allowlist) => Ok(tools
                 .into_iter()
@@ -1393,6 +1400,7 @@ impl KinewrightMcp {
             .and_then(|arguments| arguments.get("name"))
             .and_then(serde_json::Value::as_str);
         let tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
+        let has_receipt = crate::writer_host::task_mcp::is_capability(&request.name);
         let reply = self.call_exposed_inner(request);
         let code = match &reply {
             Ok(result) if result.is_error == Some(true) => {
@@ -1414,26 +1422,82 @@ impl KinewrightMcp {
         if let Some(code) = code {
             control.record_refusal(tool, code);
         }
-        reply
+        // Preserve the operation's result even if live authorization/refresh
+        // fails after a commit. Only the optional metadata may disappear.
+        let original_content = reply.as_ref().ok().map(|result| result.content.clone());
+        let (outcome, failed) = match reply {
+            Ok(result) => {
+                let failed = result.is_error == Some(true);
+                let outcome = result.structured_content.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "content": result.content, "is_error": failed
+                    })
+                });
+                (outcome, failed)
+            }
+            Err(error) => (
+                serde_json::json!({"error":error.message,"code":error.code}),
+                true,
+            ),
+        };
+        let receipt = if has_receipt && !failed {
+            outcome.get("receipt").cloned()
+        } else {
+            None
+        };
+        let mut result = success_structured("task reply", control.reply(outcome, receipt));
+        result.is_error = Some(failed);
+        if let Some(content) = original_content {
+            result.content = content;
+        }
+        Ok(result)
     }
 
     fn call_exposed_inner(
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
-        if request.name == "invoke_capability" {
+        // Preserve the unrelated compact endpoint's existing refusal contract.
+        if self.task_control.is_none() && request.name == "invoke_capability" {
             let args: InvokeCapabilityArgs = decode_args(
                 "invoke_capability",
                 request.arguments.clone().unwrap_or_default(),
             )?;
             if crate::writer_host::task_mcp::is_capability(&args.name) {
-                return Ok(match &self.task_control {
-                    Some(control) => match control.call(&args.name, args.arguments) {
-                        Ok(result) => success_structured("task control", result),
+                return Ok(error_text("task_scope: no task control attachment"));
+            }
+        }
+        if let Some(control) = &self.task_control {
+            let role = match control.role() {
+                Ok(role) => role,
+                Err(error) => return Ok(error_text(error.to_string())),
+            };
+            if request
+                .arguments
+                .as_ref()
+                .is_some_and(|arguments| arguments.contains_key("role"))
+            {
+                return Ok(error_text("task_scope: caller role is not authority"));
+            }
+            if !crate::writer_host::task_mcp::manifest::names(role).contains(&request.name.as_ref())
+            {
+                return Ok(error_text("task_scope: tool hidden for durable task role"));
+            }
+            if crate::writer_host::task_mcp::is_capability(&request.name)
+                || matches!(
+                    request.name.as_ref(),
+                    "read_task_result" | "read_task_evidence"
+                )
+            {
+                return Ok(
+                    match control.call(
+                        &request.name,
+                        serde_json::Value::Object(request.arguments.unwrap_or_default()),
+                    ) {
+                        Ok(result) => success_structured("task outcome", result),
                         Err(error) => error_text(error.to_string()),
                     },
-                    None => error_text("task_scope: no task control attachment"),
-                });
+                );
             }
         }
         let _task_admission = if let Some(endpoint) = &self.task_endpoint {
@@ -12163,6 +12227,15 @@ fn normalization_bus(
 
 impl ServerHandler for KinewrightMcp {
     fn get_info(&self) -> ServerInfo {
+        if let Some(control) = &self.task_control {
+            return ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(Implementation::new("kinewright", env!("CARGO_PKG_VERSION")))
+                .with_instructions(format!(
+                    "{}\nCurrent live reply metadata: {}",
+                    crate::writer_host::codex_instructions::CODEX_INSTRUCTIONS,
+                    control.reply(serde_json::json!({"initialized":true}), None)
+                ));
+        }
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("kinewright", env!("CARGO_PKG_VERSION")))
             .with_instructions(
@@ -12183,10 +12256,12 @@ impl ServerHandler for KinewrightMcp {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        Self::served_tools()
-            .ok()?
-            .into_iter()
-            .find(|tool| tool.name == name)
+        let tools = if self.task_control.is_some() {
+            self.served_tools_for_instance().ok()?
+        } else {
+            Self::served_tools().ok()?
+        };
+        tools.into_iter().find(|tool| tool.name == name)
     }
 
     fn call_tool(
@@ -13788,8 +13863,10 @@ fn compact_discard_edit_plan_tool() -> Tool {
 
 /// Measure the frozen surface for the Linux native task host.
 #[cfg(target_os = "linux")]
-pub(crate) fn te1_surface() -> kinewright_project::usage_measurement::Surface {
-    let tools = compact_tools_cached();
+pub(crate) fn te1_surface(
+    role: crate::orchestration::orchestration_records::Role,
+) -> kinewright_project::usage_measurement::Surface {
+    let tools = task_role_tools(role);
     let m = ToolSurfaceMetrics::measure(&tools);
     kinewright_project::usage_measurement::Surface {
         definitions: m.serialized_bytes,
@@ -36272,34 +36349,113 @@ fn task_control_tools() -> Vec<Tool> {
         .collect()
 }
 
+/// Fixed v1 schemas shared across every task with the same durable role.
+fn task_role_tools(role: crate::orchestration::orchestration_records::Role) -> Vec<Tool> {
+    use crate::orchestration::orchestration_records::Role;
+    static DIRECTOR: OnceLock<Vec<Tool>> = OnceLock::new();
+    static EDITOR: OnceLock<Vec<Tool>> = OnceLock::new();
+    static REVIEWER: OnceLock<Vec<Tool>> = OnceLock::new();
+    let cache = match role {
+        Role::Director => &DIRECTOR,
+        Role::Reviewer => &REVIEWER,
+        Role::Editor | Role::Motion | Role::Audio | Role::Colour => &EDITOR,
+    };
+    cache.get_or_init(|| {
+        crate::writer_host::task_mcp::manifest::names(role).iter().map(|name| {
+            match *name {
+                "get_timeline_state" => compact_get_timeline_state_tool(),
+                "prepare_edit_plan" => task_prepare_edit_plan_tool(),
+                "commit_edit_plan" => compact_commit_edit_plan_tool(),
+                "discard_edit_plan" => compact_discard_edit_plan_tool(),
+                "read_task_result" | "read_task_evidence" => {
+                    let schema = crate::writer_host::task_mcp::schema::read_reference();
+                    Tool::new(*name, "Read one host-owned result or evidence reference authorized by this task.",
+                        Arc::new(schema.as_object().unwrap().clone()))
+                }
+                _ => task_control_tools().into_iter().find(|tool| tool.name == *name).unwrap(),
+            }
+        }).collect()
+    }).clone()
+}
+
+fn task_prepare_edit_plan_tool() -> Tool {
+    let mut tool = compact_prepare_edit_plan_tool();
+    let mut schema = serde_json::to_value(&tool.input_schema).unwrap();
+    let operations = operation_tools().expect("compiled operation schemas");
+    let mut variants = Vec::new();
+    for definition in operations {
+        let input = serde_json::to_value(&definition.tool.input_schema).unwrap();
+        if schema.get("$defs").is_none() {
+            schema["$defs"] = input["$defs"].clone();
+        }
+        let mut variant = input["allOf"][0].clone();
+        variant["properties"]["op"] = serde_json::json!({"const":definition.tool.name});
+        if let Some(required) = variant["required"].as_array_mut() {
+            required.push(serde_json::json!("op"));
+        } else {
+            variant["required"] = serde_json::json!(["op"]);
+        }
+        variants.push(variant);
+    }
+    schema["properties"]["operations"]["items"] = serde_json::json!({"oneOf":variants});
+    tool.input_schema = Arc::new(schema.as_object().unwrap().clone());
+    tool
+}
+
 #[cfg(test)]
 mod te1_surface_tests {
     #[test]
-    fn te1_surface_is_frozen_at_b4e9abc8() {
-        let served = serde_json::to_vec(&super::compact_tools_cached()).unwrap();
-        let registry =
-            serde_json::to_vec(&super::KinewrightMcp::capability_tools().unwrap()).unwrap();
-        let controls = serde_json::to_vec(
-            &crate::writer_host::task_mcp::CAPABILITIES
-                .iter()
-                .map(|(n, _)| (n, crate::writer_host::task_mcp::schema::capability(n)))
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let hashes = [
-            kinewright_media::sha256_bytes(&served),
-            kinewright_media::sha256_bytes(&registry),
-            kinewright_media::sha256_bytes(&controls),
-        ];
-        println!("TE1_SURFACE {hashes:?}");
-        let expected: Vec<String> =
+    fn te12_role_manifests_and_unrelated_surface_are_frozen() {
+        // The old hashes remain the TE1.5 eval baseline record. Production task
+        // endpoints only reach the versioned role manifests below.
+        let baseline: Vec<String> =
             serde_json::from_str(include_str!("../tests/fixtures/te1-surface.json")).unwrap();
-        assert_eq!(hashes.as_slice(), expected.as_slice());
+        assert_eq!(baseline.len(), 3);
         assert_eq!(
             kinewright_media::sha256_bytes(
-                crate::writer_host::codex_instructions::CODEX_INSTRUCTIONS.as_bytes()
+                &serde_json::to_vec(&super::compact_tools_cached()).unwrap()
             ),
-            "28b1932b2b866b88ecef978943e57ed3546685f29f1a35ab016b19aaab117d0f"
+            baseline[0],
+            "TE12_UNRELATED_SERVED_SURFACE"
         );
+        assert_eq!(
+            kinewright_media::sha256_bytes(
+                &serde_json::to_vec(&super::KinewrightMcp::capability_tools().unwrap()).unwrap()
+            ),
+            baseline[1],
+            "TE12_UNRELATED_REGISTRY"
+        );
+
+        let hashes = [
+            crate::orchestration::orchestration_records::Role::Director,
+            crate::orchestration::orchestration_records::Role::Editor,
+            crate::orchestration::orchestration_records::Role::Motion,
+            crate::orchestration::orchestration_records::Role::Audio,
+            crate::orchestration::orchestration_records::Role::Colour,
+            crate::orchestration::orchestration_records::Role::Reviewer,
+        ]
+        .map(|role| {
+            let tools = super::task_role_tools(role);
+            assert_eq!(
+                tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
+                crate::writer_host::task_mcp::manifest::names(role)
+            );
+            kinewright_media::sha256_bytes(&serde_json::to_vec(&tools).unwrap())
+        });
+        println!("TE12_MANIFESTS {hashes:?}");
+        let expected: Vec<String> =
+            serde_json::from_str(include_str!("../tests/fixtures/te12-manifests.json")).unwrap();
+        assert_eq!(
+            hashes.as_slice(),
+            expected.as_slice(),
+            "TE12_ROLE_SCHEMA_GOLDENS"
+        );
+        let instructions = kinewright_media::sha256_bytes(
+            crate::writer_host::codex_instructions::CODEX_INSTRUCTIONS.as_bytes(),
+        );
+        println!("TE12_INSTRUCTIONS {instructions}");
+        let expected: String =
+            serde_json::from_str(include_str!("../tests/fixtures/te12-instructions.json")).unwrap();
+        assert_eq!(instructions, expected, "TE12_CROSS_PLATFORM_INSTRUCTIONS");
     }
 }
