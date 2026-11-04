@@ -197,7 +197,7 @@ fn s4b_c5_opening_prompt_contains_bound_brief_and_notes() {
         .unwrap()
         .lock()
         .unwrap()
-        .qualification_director = true;
+        .qualification_director = Some(crate::orchestration::adapters::codex_candidate());
     let batch = manual_batch(&f);
     let request = submitted_request(&f, &batch);
     let result = revise_result(revise(&f, &f.editor, &request), "C5_PROMPT_REVISE");

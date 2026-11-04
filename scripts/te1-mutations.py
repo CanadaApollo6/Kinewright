@@ -47,6 +47,26 @@ def run(name, target, witness, expect_failure):
     return {"exit": result.returncode, "summary": summary[0]}
 
 
+def raw_overflow_mutation(adapter):
+    before = '''            match self.usage.observe(
+                kinewright_project::usage_stream::Adapter::ADAPTER,
+                &value,
+            ) {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(_) => {
+                    usage_refused = true;
+                    events.push(AgentEvent::Error(
+                        "protocol error: raw_usage_refused".into(),
+                    ));
+                }
+            }'''.replace('ADAPTER', adapter)
+    after = before.replace('''events.push(AgentEvent::Error(
+                        "protocol error: raw_usage_refused".into(),
+                    ));''', 'return Err(AgentError::Protocol("raw_usage_refused".into()));')
+    return before, after
+
+
 ACCOUNTING = "crates/kinewright-project/src/orchestration_accounting.rs"
 mutations = [
     ("replay", ACCOUNTING, "turn.values = watermark.values()?.values();",
@@ -131,12 +151,10 @@ mutations = [
      ["--lib"], "writer_host::hooks_tests::tests::te12_full_director_wake_moves_only_reply_metadata"),
 
     ('raw-overflow-claude', "crates/kinewright-agent/src/protocol.rs",
-     'events.push(AgentEvent::Error(\n                    "protocol error: raw_usage_refused".into(),\n                ));',
-     'return Err(AgentError::Protocol("raw_usage_refused".into()));',
+     *raw_overflow_mutation('Claude21316V1'),
      ["--lib"], "eval::tests::te1_raw_observer_overflow_keeps_lower_bound_and_session_alive"),
     ('raw-overflow-codex', "crates/kinewright-agent/src/protocol.rs",
-     'events.push(AgentEvent::Error(\n                        "protocol error: raw_usage_refused".into(),\n                    ));',
-     'return Err(AgentError::Protocol("raw_usage_refused".into()));',
+     *raw_overflow_mutation('Codex01660V1'),
      ["--lib"], "eval::tests::te1_raw_observer_overflow_keeps_lower_bound_and_session_alive"),
     ("cross-platform-instructions", "crates/kinewright-agent/src/writer_host/codex_instructions.rs",
      "You are a Kinewright task agent.", "You are a Kinewright fixture agent.",

@@ -1,58 +1,19 @@
-//! Local probes for one candidate release. Registry publication follows the live gate.
+//! Local probes for the installed Codex CLI, run at every native admission.
 use crate::orchestration::adapters::{
-    AttemptBinding, AuthenticationMode, CODEX_AUTH_CONTRACT, CertificationRefusal, CliVersion,
+    AttemptBinding, AuthenticationMode, CODEX_AUTH_CONTRACT, CertificationRefusal,
     ConnectorRuntimeChecks, ConnectorSpecification, CredentialFile, CredentialStoreScope,
     EffectiveAuthEvidence, EffectiveLaunchContext, ExecutableIdentity, RuntimeQualification,
     SandboxPolicy, codex_candidate,
 };
-use std::{
-    fs,
-    io::{self, Read},
-    os::unix::fs::MetadataExt,
-};
+use std::io;
 
-pub(crate) const CODEX_BINARY_SHA256: &str =
-    "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8";
-pub(crate) struct InstalledCodexChecks;
+pub(crate) struct InstalledCodexChecks {
+    /// The guardian that contains the `--version` probe.
+    pub guardian: std::path::PathBuf,
+}
 
 pub(crate) fn executable() -> io::Result<ExecutableIdentity> {
-    let path =
-        crate::drivers::find_on_path("codex").ok_or_else(|| io::Error::other("Install Codex"))?;
-    let mut path = fs::canonicalize(path)?;
-    if path.file_name().is_some_and(|name| name == "mise") {
-        let output = std::process::Command::new(&path)
-            .args(["which", "codex"])
-            .output()?;
-        if !output.status.success() || output.stdout.len() > 4096 {
-            return Err(io::Error::other("Check again: Codex resolution failed"));
-        }
-        path = fs::canonicalize(
-            String::from_utf8(output.stdout)
-                .map_err(io::Error::other)?
-                .trim(),
-        )?;
-    }
-    let mut file = fs::File::open(&path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
-        return Err(io::Error::other(
-            "Check again: Codex executable size refused",
-        ));
-    }
-    let hash = kinewright_media::sha256_reader(&mut file.by_ref().take(512 * 1024 * 1024 + 1))?;
-    let after = file.metadata()?;
-    if hash != CODEX_BINARY_SHA256
-        || metadata.len() != after.len()
-        || metadata.modified()? != after.modified()?
-    {
-        return Err(io::Error::other(
-            "Check again: Codex executable is not the qualified release",
-        ));
-    }
-    Ok(ExecutableIdentity {
-        path,
-        file_identity: [metadata.dev(), metadata.ino()],
-    })
+    crate::native_runtime::installed_executable("codex", "Codex")
 }
 
 fn digest(value: &impl serde::Serialize) -> [u8; 32] {
@@ -93,20 +54,31 @@ impl ConnectorRuntimeChecks for InstalledCodexChecks {
                 refresh: CODEX_AUTH_CONTRACT.refresh,
             },
         };
-        let mut runtime = RuntimeQualification {
-            version: CliVersion(0, 166, 0),
-            authentication: EffectiveAuthEvidence {
-                contract: CODEX_AUTH_CONTRACT,
-                context: context.clone(),
-                at_launch: AuthenticationMode::Subscription,
-                at_recheck: None,
-                observed_store: context.credential_store.clone(),
-            },
-            launch_context: context,
-            executable,
-            sandbox: Some(SandboxPolicy::LinuxFilesystemAndIpc),
-            model_available: true,
-        };
+        let mut runtime =
+            RuntimeQualification {
+                version: crate::version_probe::installed_version(
+                    &crate::version_probe::VersionProbe {
+                        guardian: &self.guardian,
+                        form: crate::version_probe::VersionForm::Codex,
+                        user_local_runtime: true,
+                        credential_root: context.credential_store.single_file.as_ref().and_then(
+                            |file| file.source.parent().map(std::path::Path::to_path_buf),
+                        ),
+                    },
+                    &executable,
+                )?,
+                authentication: EffectiveAuthEvidence {
+                    contract: CODEX_AUTH_CONTRACT,
+                    context: context.clone(),
+                    at_launch: AuthenticationMode::Subscription,
+                    at_recheck: None,
+                    observed_store: context.credential_store.clone(),
+                },
+                launch_context: context,
+                executable,
+                sandbox: Some(SandboxPolicy::LinuxFilesystemAndIpc),
+                model_available: true,
+            };
         let program = crate::native_launcher::recipe(
             codex_candidate(),
             binding,

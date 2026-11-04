@@ -1,4 +1,4 @@
-//! Release policy is compiled data. Host bindings and probe results are attempt-local.
+//! Connector policy is compiled data. Host bindings and probe results are attempt-local.
 #![allow(clippy::missing_errors_doc)]
 use super::super::{
     AdmittedAttempt, ExecutionIdentity, orchestration_records::ProviderSelectionRecord,
@@ -7,9 +7,7 @@ use super::{EffectiveAuthEvidence, EffectiveLaunchContext, ProviderAuthContract}
 use kinewright_core::SessionConfig;
 use std::path::{Path, PathBuf};
 
-#[path = "../../writer_host/task_tool_names.rs"]
-mod task_tool_names;
-use task_tool_names::TASK_TOOL_NAMES;
+use super::super::task_tool_names::TASK_TOOL_NAMES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CliVersion(pub u32, pub u32, pub u32);
@@ -34,13 +32,6 @@ impl CliVersion {
     }
 }
 
-/// Both ends are inclusive; open-ended version qualifications cannot be represented.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QualifiedVersions {
-    pub first: CliVersion,
-    pub last: CliVersion,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthenticationMode {
     Subscription,
@@ -61,14 +52,6 @@ pub enum SandboxPolicy {
     Fixture,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReleaseEvidence {
-    pub source: &'static str,
-    pub guardian: &'static str,
-    pub fixtures: &'static str,
-    pub target: &'static str,
-}
-
 #[derive(Debug)]
 struct SessionPolicy {
     model: &'static str,
@@ -79,18 +62,20 @@ struct SessionPolicy {
     tools: &'static [&'static str],
 }
 
-/// No deserializer or public constructor. C5/C6 register only witnessed releases.
+/// No deserializer or public constructor. Only connectors with a real adapter
+/// and launch recipe exist; a newer CLI is allowed, and its unknown stream
+/// events, sign-in modes or ambient sources fail closed at run time.
 #[derive(Debug)]
 pub struct ConnectorSpecification {
     provider: &'static str,
-    versions: QualifiedVersions,
+    /// The oldest CLI whose stream, flags and sign-in this adapter knows.
+    minimum_version: CliVersion,
     session: SessionPolicy,
     default_token_ceiling: std::num::NonZeroU64,
     mcp: McpPolicy,
     sandbox: SandboxPolicy,
     authentication: AuthenticationMode,
     auth_contract: ProviderAuthContract,
-    evidence: ReleaseEvidence,
 }
 impl ConnectorSpecification {
     #[must_use]
@@ -120,8 +105,8 @@ impl ConnectorSpecification {
         self.default_token_ceiling
     }
     #[must_use]
-    pub fn versions(&self) -> QualifiedVersions {
-        self.versions
+    pub fn minimum_version(&self) -> CliVersion {
+        self.minimum_version
     }
     #[must_use]
     pub fn mcp_policy(&self) -> McpPolicy {
@@ -139,11 +124,6 @@ impl ConnectorSpecification {
     pub fn auth_contract(&self) -> ProviderAuthContract {
         self.auth_contract
     }
-    #[must_use]
-    pub fn evidence(&self) -> ReleaseEvidence {
-        self.evidence
-    }
-
     pub(crate) fn session_config(&self, binding: &AttemptBinding) -> SessionConfig {
         SessionConfig {
             model: Some(self.session.model.into()),
@@ -161,7 +141,9 @@ impl ConnectorSpecification {
             .iter()
             .any(|spec| std::ptr::eq(*spec, self));
         #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-        let known = known || std::ptr::eq(self, codex_candidate());
+        let known = known
+            || std::ptr::eq(self, codex_candidate())
+            || std::ptr::eq(self, claude_candidate());
         known
     }
 
@@ -188,11 +170,11 @@ impl ConnectorSpecification {
         })
     }
 
-    fn validate_runtime(&self, runtime: &RuntimeQualification) -> Result<(), CertificationRefusal> {
-        if self.versions.first > self.versions.last
-            || runtime.version < self.versions.first
-            || runtime.version > self.versions.last
-        {
+    pub(crate) fn validate_runtime(
+        &self,
+        runtime: &RuntimeQualification,
+    ) -> Result<(), CertificationRefusal> {
+        if runtime.version < self.minimum_version {
             return Err(CertificationRefusal::UnqualifiedVersion);
         }
         runtime.authentication.validate(
@@ -216,9 +198,30 @@ impl ConnectorSpecification {
     }
 }
 
-/// Director choices are witnessed release policy, independent of local detection.
+/// A fixture runtime for tests: a real executable path with fixture
+/// authentication and sandbox. Tests change one field to probe one check.
+#[cfg(test)]
+pub(crate) fn test_runtime() -> RuntimeQualification {
+    let executable = ExecutableIdentity {
+        path: std::env::current_exe().unwrap(),
+        file_identity: [1, 2],
+    };
+    let (launch_context, authentication) = super::authentication::fixture(&executable);
+    RuntimeQualification {
+        version: CliVersion(0, 147, 0),
+        authentication,
+        launch_context,
+        executable,
+        sandbox: Some(SandboxPolicy::Fixture),
+        model_available: true,
+    }
+}
+
+/// Every connector this build can launch: a real adapter and launch recipe on
+/// this platform. Independent of local detection; the person picks one
+/// explicitly and nothing is substituted for a saved choice.
 #[must_use]
-pub fn certified_connectors() -> Vec<&'static ConnectorSpecification> {
+pub fn available_connectors() -> Vec<&'static ConnectorSpecification> {
     #[cfg(target_os = "linux")]
     {
         vec![codex_candidate()]
@@ -238,11 +241,12 @@ pub fn fixture_connectors() -> Vec<&'static ConnectorSpecification> {
 }
 
 fn execution_specifications() -> Vec<&'static ConnectorSpecification> {
-    let specifications = certified_connectors();
+    let specifications = available_connectors();
     #[cfg(any(test, feature = "test-util"))]
     let specifications: Vec<_> = specifications
         .into_iter()
         .chain(fixture_connectors())
+        .chain([&CLAUDE_FIXTURE_SPECIFICATION])
         .collect();
     specifications
 }
@@ -369,11 +373,11 @@ pub enum ConnectorReadiness {
 pub enum CertificationRefusal {
     #[error("unknown connector provider")]
     UnknownProvider,
-    #[error("connector specification is not release-qualified")]
+    #[error("connector specification is not available in this build")]
     UnqualifiedSpecification,
     #[error("connector profile was forged or modified")]
     ForgedProfile,
-    #[error("CLI version is not qualified")]
+    #[error("CLI version is older than the oldest one this connector supports")]
     UnqualifiedVersion,
     #[error("API-key authentication is not allowed")]
     ApiAuthentication,
@@ -385,14 +389,18 @@ pub enum CertificationRefusal {
     InvalidBinding,
     #[error("host attempt binding changed after certification")]
     BindingChanged,
-    #[error("session policy differs from the qualified specification")]
+    #[error("session policy differs from the connector specification")]
     FixedPolicyChanged,
     #[error("executable identity is unavailable or changed")]
     ExecutableIdentity,
-    #[error("qualified sandbox is unavailable")]
+    #[error("the connector's sandbox is unavailable")]
     SandboxUnavailable,
-    #[error("qualified model is unavailable")]
+    #[error("the connector's model is unavailable")]
     ModelUnavailable,
+    #[error(
+        "an earlier CLI version check could not be proven stopped; it is stopped and cleaned up before another check is admitted"
+    )]
+    VersionProbePending,
 }
 
 /// Immutable and runtime-only. Only a registered specification can construct it.
@@ -532,10 +540,7 @@ impl CertifiedConnectorProfile {
 #[cfg(any(test, feature = "test-util"))]
 static FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
     provider: "scripted",
-    versions: QualifiedVersions {
-        first: CliVersion(0, 147, 0),
-        last: CliVersion(0, 147, 1),
-    },
+    minimum_version: CliVersion(0, 147, 0),
     session: SessionPolicy {
         model: "fixture",
         options: &[],
@@ -551,13 +556,32 @@ static FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
     auth_contract: ProviderAuthContract {
         provider: "scripted",
         proof: super::SubscriptionProof::Fixture,
-        refresh: super::CLAUDE_AUTH_CONTRACT.refresh,
+        refresh: super::authentication::REFRESH,
     },
-    evidence: ReleaseEvidence {
-        source: "test-only-source",
-        guardian: "test-only-guardian",
-        fixtures: "test-only-fixtures",
-        target: "test-only",
+};
+
+/// C6: the protocol fixture child speaking Claude's `stream-json` dialect,
+/// under the same guardian, sealed image and sandbox as `scripted`.
+#[cfg(any(test, feature = "test-util"))]
+static CLAUDE_FIXTURE_SPECIFICATION: ConnectorSpecification = ConnectorSpecification {
+    provider: "scripted-claude",
+    minimum_version: FIXTURE_SPECIFICATION.minimum_version,
+    session: SessionPolicy {
+        model: "fixture",
+        options: &[],
+        effort: None,
+        service_tier: None,
+        max_turns: 1,
+        tools: FIXTURE_SPECIFICATION.session.tools,
+    },
+    mcp: McpPolicy::HostEndpointOnly,
+    default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
+    sandbox: SandboxPolicy::Fixture,
+    authentication: AuthenticationMode::Subscription,
+    auth_contract: ProviderAuthContract {
+        provider: "scripted",
+        proof: super::SubscriptionProof::Fixture,
+        refresh: super::authentication::REFRESH,
     },
 };
 
@@ -566,21 +590,50 @@ pub(crate) fn codex_candidate() -> &'static ConnectorSpecification {
     &CODEX_CANDIDATE
 }
 
+/// Binds an unregistered candidate for its own end-to-end tests only.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-pub(crate) fn certify_codex_candidate(
+pub(crate) fn certify_candidate(
+    candidate: &'static ConnectorSpecification,
     binding: AttemptBinding,
     checks: &dyn ConnectorRuntimeChecks,
 ) -> Result<CertifiedConnectorProfile, CertificationRefusal> {
-    codex_candidate().bind(binding, checks)
+    if !std::ptr::eq(candidate, codex_candidate()) && !std::ptr::eq(candidate, claude_candidate()) {
+        return Err(CertificationRefusal::UnqualifiedSpecification);
+    }
+    candidate.bind(binding, checks)
 }
+
+/// C6: the Claude Code candidate. It is not in [`available_connectors`]
+/// yet: it binds only in test and harness builds, for the unpaid dry launch
+/// and a lead-granted live run. Nothing advertises or registers it.
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+pub(crate) fn claude_candidate() -> &'static ConnectorSpecification {
+    &CLAUDE_CANDIDATE
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+static CLAUDE_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
+    provider: "claude",
+    minimum_version: CliVersion(2, 1, 316),
+    session: SessionPolicy {
+        model: "claude-opus-5-5",
+        options: &[("effort", "high")],
+        effort: Some("high"),
+        service_tier: None,
+        max_turns: 1,
+        tools: CODEX_CANDIDATE.session.tools,
+    },
+    mcp: McpPolicy::HostEndpointOnly,
+    default_token_ceiling: std::num::NonZeroU64::new(2_000_000).unwrap(),
+    sandbox: SandboxPolicy::LinuxFilesystemAndIpc,
+    authentication: AuthenticationMode::Subscription,
+    auth_contract: super::CLAUDE_AUTH_CONTRACT,
+};
 
 #[cfg(target_os = "linux")]
 static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
     provider: "codex",
-    versions: QualifiedVersions {
-        first: CliVersion(0, 166, 0),
-        last: CliVersion(0, 166, 0),
-    },
+    minimum_version: CliVersion(0, 166, 0),
     session: SessionPolicy {
         model: "gpt-6.1-sol",
         options: &[("model_reasoning_effort", "high")],
@@ -594,12 +647,6 @@ static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
     sandbox: SandboxPolicy::LinuxFilesystemAndIpc,
     authentication: AuthenticationMode::Subscription,
     auth_contract: super::CODEX_AUTH_CONTRACT,
-    evidence: ReleaseEvidence {
-        source: "824c34a53447ff0763180fbc54dd30607a0e7873e456447b619974c60318cd53",
-        guardian: "b006f86a1e0f5177bc1e642c669032cdaf5b0caece6126ea701b02974558de29",
-        fixtures: "d05939ad41321be52379e1f6ddc1ae55e6474b1a68f382c9d38eb7e63032a876",
-        target: "x86_64-unknown-linux-gnu",
-    },
 };
 
 #[cfg(test)]
@@ -624,19 +671,7 @@ mod tests {
         }
     }
     fn runtime() -> RuntimeQualification {
-        let executable = ExecutableIdentity {
-            path: std::env::current_exe().unwrap(),
-            file_identity: [1, 2],
-        };
-        let (launch_context, authentication) = super::super::authentication::fixture(&executable);
-        RuntimeQualification {
-            version: CliVersion(0, 147, 0),
-            authentication,
-            launch_context,
-            executable,
-            sandbox: Some(SandboxPolicy::Fixture),
-            model_available: true,
-        }
+        test_runtime()
     }
     impl ConnectorRuntimeChecks for RuntimeQualification {
         fn probe(
@@ -742,19 +777,26 @@ mod tests {
     }
 
     #[test]
-    fn s4b_c1_only_bounded_qualified_release_versions_pass() {
+    fn s4b_c1_versions_below_the_minimum_are_refused_and_newer_ones_pass() {
+        for version in [CliVersion(0, 146, 9), CliVersion(0, 0, 1)] {
+            let mut check = runtime();
+            check.version = version;
+            assert_eq!(refusal(&check), CertificationRefusal::UnqualifiedVersion);
+        }
+        // A newer CLI is allowed: its stream is held to the same fail-closed
+        // allowlists at run time.
         for version in [
-            CliVersion(0, 146, 9),
+            CliVersion(0, 147, 0),
             CliVersion(0, 147, 2),
             CliVersion(1, 0, 0),
         ] {
             let mut check = runtime();
             check.version = version;
-            assert_eq!(refusal(&check), CertificationRefusal::UnqualifiedVersion);
+            assert!(
+                certify_connector("scripted", binding(), &check).is_ok(),
+                "NEWER_CLI_ACCEPTED {version:?}"
+            );
         }
-        let mut check = runtime();
-        check.version = CliVersion(0, 147, 1);
-        assert!(certify_connector("scripted", binding(), &check).is_ok());
         assert_eq!(CliVersion::parse("0.147.0"), Ok(CliVersion(0, 147, 0)));
         for version in [
             ">= 0.147.0",
@@ -842,10 +884,7 @@ mod tests {
     fn s4b_c1_unknown_provider_and_unregistered_specification_are_refused() {
         static FORGED: ConnectorSpecification = ConnectorSpecification {
             provider: "scripted",
-            versions: QualifiedVersions {
-                first: CliVersion(0, 147, 0),
-                last: CliVersion(0, 147, 1),
-            },
+            minimum_version: CliVersion(0, 147, 0),
             session: SessionPolicy {
                 model: "fixture",
                 options: &[],
@@ -859,12 +898,6 @@ mod tests {
             sandbox: SandboxPolicy::Fixture,
             authentication: AuthenticationMode::Subscription,
             auth_contract: super::super::CODEX_AUTH_CONTRACT,
-            evidence: ReleaseEvidence {
-                source: "forged",
-                guardian: "forged",
-                fixtures: "forged",
-                target: "forged",
-            },
         };
         for provider in ["claude", "unknown"] {
             assert_eq!(
@@ -917,8 +950,8 @@ mod tests {
     }
 
     #[test]
-    fn s4b_c1_readiness_never_changes_release_registration() {
-        let registered: Vec<_> = certified_connectors()
+    fn s4b_c1_readiness_never_changes_the_registry() {
+        let registered: Vec<_> = available_connectors()
             .iter()
             .map(|spec| spec.provider())
             .collect();
@@ -937,7 +970,7 @@ mod tests {
             ConnectorReadiness::Ready,
         ] {
             assert_eq!(
-                certified_connectors()
+                available_connectors()
                     .iter()
                     .map(|spec| spec.provider())
                     .collect::<Vec<_>>(),

@@ -125,7 +125,17 @@ fn refuse_volatile(_directory: &Path) -> Result<(), String> {
 /// removed, so no unlink can race a new owner.
 #[derive(Debug)]
 pub struct FeedbackStateLock {
-    _file: fs::File,
+    file: fs::File,
+}
+
+/// Unlock before the close: the lock belongs to the open file description,
+/// which a child being forked or spawned on another thread holds a copy of
+/// until its `exec`. A bare close would keep the notes owned through that
+/// window and refuse the next owner with `Held`.
+impl Drop for FeedbackStateLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
 }
 
 /// Why a feedback state lock was not taken.
@@ -162,7 +172,7 @@ pub fn lock_feedback_state(
         .open(directory.join(format!("{project}.lock")))
         .map_err(failed)?;
     match file.try_lock_exclusive() {
-        Ok(()) => Ok(FeedbackStateLock { _file: file }),
+        Ok(()) => Ok(FeedbackStateLock { file }),
         Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
             Err(FeedbackStateRefusal::Held)
         }
@@ -555,6 +565,19 @@ mod tests {
     use kinewright_media::test_support::TempDirectory;
 
     use super::*;
+
+    /// A copy of the lock's descriptor, as a child holds between its fork and
+    /// its `exec`, must not keep a released feedback lock held.
+    #[test]
+    fn s4b_c6_released_feedback_lock_passes_a_descriptor_copy() {
+        let dir = TempDirectory::new("s4b-c6-feedback-dup");
+        let owner = lock_feedback_state(&dir.path("feedback"), "p1").expect("the lock is taken");
+        let copy = owner.file.try_clone().expect("the descriptor copies");
+        drop(owner);
+        let next = lock_feedback_state(&dir.path("feedback"), "p1");
+        drop(copy);
+        assert!(next.is_ok(), "C6_FEEDBACK_LOCK_HELD_BY_COPY: {next:?}");
+    }
 
     /// G5/RB3: a legacy raw-path-hash journal refuses by NAME even with a
     /// torn header — and so does its allocator `-N` suffix.

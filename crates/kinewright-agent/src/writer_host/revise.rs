@@ -131,8 +131,8 @@ impl HostCommandOwner {
             director
         };
         #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-        let director = if self.qualification_director {
-            Ok(crate::orchestration::adapters::codex_candidate().selection())
+        let director = if let Some(candidate) = self.qualification_director {
+            Ok(candidate.selection())
         } else {
             director
         };

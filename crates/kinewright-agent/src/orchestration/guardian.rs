@@ -1018,8 +1018,12 @@ impl RecoveryObserver {
     }
 }
 
+/// Stop and retire one retained attempt through independent observation: a
+/// bound attempt's whole service is killed through its kept recovery identity
+/// and proven empty; an unbound one must have no unit at all. Any ambiguity
+/// keeps the attempt.
 #[cfg(target_os = "linux")]
-fn cleanup_failed_prepare(
+pub(crate) fn cleanup_failed_prepare(
     claim: &mut MachineClaim,
     owner: &mut impl DurableAttemptOwner,
     identity: &AttemptIdentity,

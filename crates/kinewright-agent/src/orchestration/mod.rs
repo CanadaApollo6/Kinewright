@@ -18,6 +18,8 @@ pub mod mailbox;
 pub mod outbox;
 pub mod policy;
 pub mod requests;
+#[path = "../writer_host/task_tool_names.rs"]
+pub(crate) mod task_tool_names;
 pub mod tasks;
 
 /// The complete upstream MIT notice is retained in the shipping agent library.

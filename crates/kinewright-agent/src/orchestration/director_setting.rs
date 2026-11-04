@@ -1,8 +1,9 @@
-//! The person's Director choice: which certified connector and model S4 starts
-//! a Revise cut run with. The choices are the certified connector registry's
-//! (`adapters::certified_connectors`); nothing else can be chosen or used.
+//! The person's Director choice: which connector and model S4 starts a Revise
+//! cut run with. The choices are the connectors this build can launch
+//! (`adapters::available_connectors`); nothing else can be chosen or used, and
+//! a saved choice is never replaced by another.
 #![allow(clippy::missing_errors_doc)]
-use super::{adapters::certified_connectors, orchestration_records::ProviderSelectionRecord};
+use super::{adapters::available_connectors, orchestration_records::ProviderSelectionRecord};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
@@ -26,7 +27,8 @@ pub struct DirectorSetting {
 pub enum DirectorStatus {
     Set(ProviderSelectionRecord),
     Missing,
-    /// A choice this build no longer certifies. Runs wait until another is chosen.
+    /// A choice this build does not offer. It is kept, never substituted;
+    /// runs wait until the person picks another.
     NoLongerOffered(ProviderSelectionRecord),
     /// The file exists but cannot be used. It is never overwritten unasked.
     Unreadable(String),
@@ -41,10 +43,10 @@ pub fn scheduler_settings_directory() -> Result<PathBuf, String> {
     .with_file_name("scheduler"))
 }
 
-/// Every Director the person may choose: one per qualified release specification.
+/// Every Director the person may choose: one per available connector.
 #[must_use]
 pub fn director_choices() -> Vec<ProviderSelectionRecord> {
-    certified_connectors()
+    available_connectors()
         .iter()
         .map(|specification| specification.selection())
         .collect()

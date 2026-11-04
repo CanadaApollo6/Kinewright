@@ -282,7 +282,7 @@ fn main() {
             ] {
                 writeln!(
                     std::io::stdout(),
-                    "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"{id}\",\"type\":\"mcp_tool_call\",\"server\":\"kinewright\",\"tool\":\"invoke_capability\",\"arguments\":{{}},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}],\"structured_content\":null}},\"error\":null,\"status\":\"failed\"}}}}"
+                    "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"{id}\",\"type\":\"mcp_tool_call\",\"server\":\"kinewright\",\"tool\":\"task_status\",\"arguments\":{{}},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}],\"structured_content\":null}},\"error\":null,\"status\":\"failed\"}}}}"
                 )
                 .unwrap();
             }
@@ -318,6 +318,19 @@ fn main() {
         while !root.join("exit").exists() {
             thread::sleep(Duration::from_millis(1));
         }
+        return;
+    }
+    if role == "s4b-heartbeat" {
+        // C6: a grandchild of the host's launch, outside the provider's
+        // direct reach. It beats until something kills it.
+        for _ in 0..12_000 {
+            fs::write(root.join("heartbeat"), b"").unwrap();
+            thread::sleep(Duration::from_millis(50));
+        }
+        return;
+    }
+    if role == "s4b-claude" {
+        claude(root, args[3].to_str().unwrap());
         return;
     }
     if role == "s4b-pipes" {
@@ -668,4 +681,247 @@ fn main() {
     loop {
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// S4b C6: Claude Code's `stream-json` shapes, written by the protocol child
+/// under the real guardian. Synthetic only; it never reads a credential.
+fn claude(root: &Path, prompt: &str) {
+    let mode = fs::read_to_string(root.join("event-mode")).unwrap_or_default();
+    let mut executions = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("executions"))
+        .unwrap();
+    writeln!(executions, "execution").unwrap();
+    executions.sync_all().unwrap();
+    // Names and the fixed switches only: never a value that could be a secret.
+    let leaked = env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| {
+            name.starts_with("ANTHROPIC_")
+                || name.starts_with("CLAUDE_CODE_OAUTH")
+                || name.starts_with("CLAUDE_CODE_USE_")
+                || name.starts_with("AWS_")
+                || name == "OPENAI_API_KEY"
+        })
+        .count();
+    let report = format!(
+        "{{\"tool_search\":{:?},\"config_dir\":{:?},\"home\":{:?},\"api_overrides\":{leaked},\"token\":{}}}",
+        env::var("ENABLE_TOOL_SEARCH").unwrap_or_default(),
+        env::var("CLAUDE_CONFIG_DIR").unwrap_or_default(),
+        env::var("HOME").unwrap_or_default(),
+        env::var_os("KINEWRIGHT_HOST_MCP_TOKEN").is_some(),
+    );
+    fs::write(root.join("env-report.partial"), report).unwrap();
+    fs::rename(
+        root.join("env-report.partial"),
+        root.join("env-report.json"),
+    )
+    .unwrap();
+    fs::write(root.join("execution-ready"), b"").unwrap();
+    if mode == "stdin" {
+        // Claude `-p` with a positional prompt reads a piped stdin first.
+        let mut appended = Vec::new();
+        std::io::stdin().read_to_end(&mut appended).unwrap();
+        fs::write(root.join("stdin-eof"), b"").unwrap();
+    }
+    if mode == "silent" {
+        while !root.join("exit").exists() {
+            thread::sleep(Duration::from_millis(5));
+        }
+        return;
+    }
+    let mut out = std::io::stdout().lock();
+    let tools = [
+        "get_timeline_state",
+        "read_task_evidence",
+        "read_task_result",
+        "task_status",
+        "wait_task",
+        "assign_task",
+        "freeze_task",
+        "publish_result",
+        "merge_task",
+        "observe_delivery",
+        "cancel_task",
+        "answer_question",
+        "send_message",
+    ]
+    .map(|tool| format!("\"mcp__kinewright__{tool}\""))
+    .join(",");
+    let tools = if mode == "ambient-tool" {
+        format!("{tools},\"Bash\"")
+    } else {
+        tools
+    };
+    let mut servers = r#"{"name":"kinewright","status":"connected"}"#.to_owned();
+    if mode == "ambient-server" {
+        servers.push_str(r#",{"name":"person-server","status":"connected","source":"user"}"#);
+    }
+    let plugins = if mode == "ambient-plugin" {
+        r#"[{"name":"person-plugin","path":"/fixture/plugin"}]"#
+    } else {
+        "[]"
+    };
+    let skills = if mode == "ambient-skill" {
+        r#"["person-skill"]"#
+    } else {
+        "[]"
+    };
+    let key = if mode == "apikey" {
+        "ANTHROPIC_API_KEY"
+    } else {
+        "none"
+    };
+    if mode == "hook" {
+        writeln!(
+            out,
+            r#"{{"type":"system","subtype":"hook_started","hook_id":"h","hook_name":"SessionStart:startup","hook_event":"SessionStart"}}"#
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        r#"{{"type":"system","subtype":"init","cwd":"/fixture","session_id":"s","apiKeySource":"{key}","tools":[{tools}],"mcp_servers":[{servers}],"model":"fixture","permissionMode":"dontAsk","slash_commands":[],"skills":{skills},"plugins":{plugins},"agents":[],"output_style":"default","uuid":"u0"}}"#
+    )
+    .unwrap();
+    let text = |out: &mut std::io::StdoutLock, text: &str| {
+        writeln!(
+            out,
+            r#"{{"type":"assistant","message":{{"id":"m","type":"message","role":"assistant","model":"fixture","content":[{{"type":"text","text":"{text}"}}]}},"parent_tool_use_id":null,"session_id":"s","uuid":"u1"}}"#
+        )
+        .unwrap();
+    };
+    let stay = |survive: bool| {
+        if survive {
+            thread::sleep(Duration::from_secs(3));
+            fs::write(root.join("survived"), b"").unwrap();
+        }
+        while !root.join("exit").exists() {
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    match mode.as_str() {
+        "subagent" => writeln!(
+            out,
+            r#"{{"type":"assistant","message":{{"id":"m","type":"message","role":"assistant","model":"fixture","content":[{{"type":"text","text":"from a subagent"}}]}},"parent_tool_use_id":"toolu_fixture","session_id":"s","uuid":"u1"}}"#
+        )
+        .unwrap(),
+        "nativetool" => writeln!(
+            out,
+            r#"{{"type":"assistant","message":{{"id":"m","type":"message","role":"assistant","model":"fixture","content":[{{"type":"tool_use","id":"toolu_1","name":"Bash","input":{{"command":"true"}}}}]}},"parent_tool_use_id":null,"session_id":"s","uuid":"u1"}}"#
+        )
+        .unwrap(),
+        "malformed" => writeln!(out, "{{\"type\":\"assistant\",").unwrap(),
+        "overflow" => {
+            // One frame past the reader's 64 KiB bound.
+            let long = "x".repeat(96 * 1024);
+            writeln!(out, "{{\"type\":\"assistant\",\"pad\":\"{long}\"}}").unwrap();
+        }
+        "eof" => {
+            // The provider ends with no `result`: the turn did not complete.
+            out.flush().unwrap();
+            return;
+        }
+        _ => {}
+    }
+    if matches!(
+        mode.as_str(),
+        "subagent"
+            | "nativetool"
+            | "malformed"
+            | "overflow"
+            | "ambient-tool"
+            | "ambient-server"
+            | "ambient-plugin"
+            | "ambient-skill"
+            | "hook"
+            | "apikey"
+    ) {
+        out.flush().unwrap();
+        drop(out);
+        stay(true);
+        return;
+    }
+    if mode == "descendant" {
+        // A grandchild outside the provider's direct reach: only the
+        // guardian's whole-unit cancellation ends it.
+        // The sandbox refuses every exec, even of the sealed image; record
+        // that, then fork a grandchild that beats until something kills it.
+        if let Err(error) = Command::new("/proc/self/exe")
+            .arg(root)
+            .arg("s4b-heartbeat")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            fs::write(
+                root.join("exec-errno"),
+                error.raw_os_error().unwrap_or(0).to_string(),
+            )
+            .unwrap();
+        }
+        out.flush().unwrap();
+        #[cfg(target_os = "linux")]
+        let forked = fork_heartbeat(&root.join("heartbeat")) >= 0;
+        #[cfg(not(target_os = "linux"))]
+        let forked = false;
+        if !forked {
+            fs::write(root.join("heartbeat-error"), b"fork").unwrap();
+        }
+        text(&mut out, "fixture descendant running");
+        out.flush().unwrap();
+        drop(out);
+        stay(false);
+        return;
+    }
+    if mode == "full" {
+        text(&mut out, "fixture gate");
+        out.flush().unwrap();
+        while !root.join("event-release").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..30 {
+            text(&mut out, "bounded fixture event");
+        }
+        out.flush().unwrap();
+        drop(out);
+        stay(false);
+        return;
+    }
+    let _ = prompt;
+    text(&mut out, "fixture response");
+    writeln!(
+        out,
+        r#"{{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"result":"fixture response","session_id":"s","total_cost_usd":0.001,"usage":{{"input_tokens":1,"output_tokens":1}},"modelUsage":{{"fixture":{{"inputTokens":1,"outputTokens":1}}}},"uuid":"u2"}}"#
+    )
+    .unwrap();
+    out.flush().unwrap();
+    drop(out);
+    stay(false);
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn fork() -> i32;
+    fn _exit(status: i32) -> !;
+}
+/// C6: a forked grandchild, single-threaded at the fork, that beats until it
+/// is killed. It never returns into the parent's code.
+#[cfg(target_os = "linux")]
+fn fork_heartbeat(beat: &Path) -> i32 {
+    // SAFETY: the provider is single-threaded here; the child only writes a
+    // file and sleeps, then exits without unwinding.
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        for _ in 0..12_000 {
+            let _ = fs::write(beat, b"");
+            thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: ends the forked child without running the parent's
+        // destructors.
+        unsafe { _exit(0) }
+    }
+    pid
 }

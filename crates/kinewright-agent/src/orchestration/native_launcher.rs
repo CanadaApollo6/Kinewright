@@ -62,6 +62,58 @@ pub(crate) fn environment(
     ])
 }
 
+/// C6: Claude Code's complete final environment. The guardian clears the
+/// host's environment and sets exactly these (plus the MCP bearer), so no
+/// API key, helper, base URL, third-party provider or config folder reaches
+/// it. Tool search stays off so every tool schema the model sees is the
+/// fixed `--tools ""` plus the host's own MCP tools.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn claude_environment(
+    scratch: &std::path::Path,
+    store: &std::path::Path,
+) -> BTreeMap<String, String> {
+    BTreeMap::from(
+        [
+            ("PATH", "/usr/bin:/bin".to_owned()),
+            ("LANG", "C.UTF-8".to_owned()),
+            ("HOME", scratch.to_string_lossy().into_owned()),
+            ("TMPDIR", scratch.to_string_lossy().into_owned()),
+            ("CLAUDE_CONFIG_DIR", store.to_string_lossy().into_owned()),
+            ("ENABLE_TOOL_SEARCH", "false".to_owned()),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".to_owned()),
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".to_owned()),
+            ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1".to_owned()),
+            ("DISABLE_AUTOUPDATER", "1".to_owned()),
+            ("DISABLE_TELEMETRY", "1".to_owned()),
+            ("DISABLE_ERROR_REPORTING", "1".to_owned()),
+        ]
+        .map(|(name, value)| (name.to_owned(), value)),
+    )
+}
+
+/// C6: the Claude-only system prompt. It replaces Claude Code's default
+/// coding-agent prompt, which describes tools this session does not have.
+/// The task itself is the shared native prompt, sent as the user message.
+#[cfg(any(test, feature = "test-util"))]
+const CLAUDE_SYSTEM_PROMPT: &str = "You are a Kinewright task agent working on one video project. \
+Your only tools are the kinewright MCP tools. Follow the task in the user message, \
+use the tools it names, and end with a short plain-text summary.";
+
+/// C6: the stream dialect a native provider writes. Codex's reader is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StreamDialect {
+    Codex,
+    Claude,
+}
+impl StreamDialect {
+    pub(crate) fn of(provider: &str) -> Self {
+        match provider {
+            "claude" | "scripted-claude" => Self::Claude,
+            _ => Self::Codex,
+        }
+    }
+}
+
 /// C5 fix 7 and fix 8: while held, every native sandbox this process builds
 /// carries the unpaid policy. The provider gets its own network namespace in
 /// which only loopback exists, init relays `127.0.0.1:<MCP port>` to the
@@ -150,6 +202,34 @@ fn unpaid_policy(mcp_port: u16) -> Option<crate::job_guardian::protocol::UnpaidP
     None
 }
 
+/// The read-only system and install paths a provider is granted. The
+/// contained `--version` probe gets exactly the same grants as a launch.
+pub(crate) fn runtime_grants(
+    executable: &adapters::ExecutableIdentity,
+    user_local_runtime: bool,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    Ok([
+        "/usr",
+        "/lib",
+        "/lib64",
+        "/dev/null",
+        "/dev/urandom",
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/nsswitch.conf",
+        "/etc/ld.so.cache",
+    ]
+    .map(Into::into)
+    .into_iter()
+    .chain(super::native_runtime::network_files()?)
+    .chain(if user_local_runtime {
+        super::native_runtime::runtime_tree(executable)?
+    } else {
+        None
+    })
+    .collect())
+}
+
 pub(crate) fn sandbox(
     executable: &adapters::ExecutableIdentity,
     scratch: &std::path::Path,
@@ -166,31 +246,124 @@ pub(crate) fn sandbox(
             })
         }),
         connect_tcp: provider_ports(mcp_port),
-        runtime: [
-            "/usr",
-            "/lib",
-            "/lib64",
-            "/dev/null",
-            "/dev/urandom",
-            "/etc/hosts",
-            "/etc/resolv.conf",
-            "/etc/nsswitch.conf",
-            "/etc/ld.so.cache",
-        ]
-        .map(Into::into)
-        .into_iter()
-        .chain(super::native_runtime::network_files()?)
-        .chain(if user_local_runtime {
-            super::native_runtime::runtime_tree(executable)?
-        } else {
-            None
-        })
-        .collect(),
+        runtime: runtime_grants(executable, user_local_runtime)?,
         scratch: scratch.to_path_buf(),
         credential_store: scope.root.clone(),
         executable_identity: executable.file_identity,
         unpaid: unpaid_policy(mcp_port),
     })
+}
+
+/// C6: Claude Code's fixed argv. The prompt is last, after `--`, so the
+/// variadic flags cannot swallow it and `context_matches` can drop it.
+/// `--tools ""` removes every built-in tool schema; `--allowedTools` only
+/// grants permission to the host's MCP tools and filters no schema.
+/// `--strict-mcp-config` loads only the host endpoint; `--restricted` skips
+/// user, project and local settings; `--settings` turns hooks off and forces
+/// subscription sign-in. The MCP bearer is expanded by Claude from the
+/// environment the guardian sets; argv carries only the reference.
+#[cfg(any(test, feature = "test-util"))]
+fn claude_arguments(
+    binding: &adapters::AttemptBinding,
+    config: &kinewright_core::SessionConfig,
+    prompt: &str,
+) -> io::Result<Vec<String>> {
+    let bootstrap = crate::writer_host::mcp_credentials(binding.endpoint())
+        .ok_or_else(|| io::Error::other("private host MCP credentials unavailable"))?;
+    let mcp = serde_json::json!({
+        "mcpServers": {
+            "kinewright": {
+                "type": "http",
+                "url": binding.endpoint(),
+                "headers": {
+                    "authorization": "Bearer ${KINEWRIGHT_HOST_MCP_TOKEN}",
+                    "x-kinewright-project": bootstrap.endpoint.project,
+                    "x-kinewright-protocol": crate::writer_host::HOST_PROTOCOL.to_string(),
+                    "x-kinewright-roots": bootstrap.roots.wire_header().map_err(io::Error::other)?,
+                }
+            }
+        }
+    });
+    claude_argv(&mcp, config, prompt)
+}
+
+/// The built-in plugins Claude Code 2.1.317 loads in a print-mode session,
+/// as its own `system/init` lists them.
+#[cfg(any(test, feature = "test-util"))]
+const CLAUDE_BUILTIN_PLUGINS: [&str; 3] = [
+    "cc-plugin-agents-md",
+    "cc-plugin-privacy",
+    "cc-plugin-plugin-authoring",
+];
+
+/// The argv around a given MCP configuration; [`claude_arguments`] supplies
+/// the host endpoint's.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) fn claude_argv(
+    mcp: &serde_json::Value,
+    config: &kinewright_core::SessionConfig,
+    prompt: &str,
+) -> io::Result<Vec<String>> {
+    let allowed = config
+        .tool_names
+        .as_ref()
+        .filter(|names| !names.is_empty())
+        .ok_or_else(|| io::Error::other("provider tool list missing"))?
+        .iter()
+        .map(|name| format!("mcp__kinewright__{name}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // Claude Code ships built-in plugins (`<name>@builtin`) that load even in
+    // safe mode, and `--bare` would force API-key auth. They are turned off
+    // here by name. A built-in this list does not name (a newer CLI's) still
+    // shows in `system/init` and is refused there.
+    let settings = serde_json::json!({
+        "disableAllHooks": true,
+        "forceLoginMethod": "claudeai",
+        "enableAllProjectMcpServers": false,
+        "enabledPlugins": CLAUDE_BUILTIN_PLUGINS
+            .iter()
+            .map(|name| (format!("{name}@builtin"), serde_json::Value::Bool(false)))
+            .collect::<serde_json::Map<_, _>>(),
+    });
+    let mut arguments: Vec<String> = [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--input-format",
+        "text",
+        "--restricted",
+        "--strict-mcp-config",
+        "--mcp-config",
+    ]
+    .map(str::to_owned)
+    .into();
+    arguments.push(mcp.to_string());
+    arguments.extend(["--tools".into(), String::new()]);
+    arguments.extend(["--allowedTools".into(), allowed]);
+    arguments.extend(
+        [
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+            "--settings",
+        ]
+        .map(str::to_owned),
+    );
+    arguments.push(settings.to_string());
+    arguments.extend(["--system-prompt".into(), CLAUDE_SYSTEM_PROMPT.into()]);
+    if let Some(model) = &config.model {
+        arguments.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(effort) = &config.effort {
+        arguments.extend(["--effort".into(), effort.clone()]);
+    }
+    arguments.extend(["--".into(), prompt.into()]);
+    Ok(arguments)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -246,6 +419,10 @@ pub(crate) fn recipe(
     let scope = &runtime.launch_context.credential_store;
     if let Some(mount) = &scope.single_file {
         crate::codex_credentials::inspect(&mount.source, Some(mount.identity))?;
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    if specification.provider() == "claude" {
+        crate::claude_credentials::verify_private_store(&credentials)?;
     }
     let mut pending = if scope.single_file.is_some() {
         vec![]
@@ -305,7 +482,14 @@ pub(crate) fn recipe(
             "provider scratch overlaps project authority",
         ));
     }
-    let environment = environment(&scratch, &credentials);
+    let dialect = StreamDialect::of(specification.provider());
+    let environment = match dialect {
+        StreamDialect::Codex => environment(&scratch, &credentials),
+        #[cfg(any(test, feature = "test-util"))]
+        StreamDialect::Claude => claude_environment(&scratch, &credentials),
+        #[cfg(not(any(test, feature = "test-util")))]
+        StreamDialect::Claude => return Err(io::Error::other("provider recipe unavailable")),
+    };
     let mut arguments = vec![];
     match specification.provider() {
         "codex" => {
@@ -413,26 +597,40 @@ pub(crate) fn recipe(
             arguments.push(prompt.into());
         }
         #[cfg(any(test, feature = "test-util"))]
+        "claude" => arguments.extend(claude_arguments(binding, config, prompt)?),
+        #[cfg(any(test, feature = "test-util"))]
         "scripted" => arguments.extend([
             scratch.to_string_lossy().into_owned(),
             "s4b-codex".into(),
             prompt.into(),
         ]),
+        #[cfg(any(test, feature = "test-util"))]
+        "scripted-claude" => arguments.extend([
+            scratch.to_string_lossy().into_owned(),
+            "s4b-claude".into(),
+            prompt.into(),
+        ]),
         _ => return Err(io::Error::other("provider recipe unavailable")),
     }
-    let result = Program {
-        image: Some(crate::job_guardian::protocol::ExecutableImage {
-            digest: if specification.provider() == "codex" {
-                crate::codex_qualification::CODEX_BINARY_SHA256.into()
-            } else {
-                kinewright_media::sha256_file(&runtime.executable.path).map_err(io::Error::other)?
-            },
-            source: None,
-        }),
-        credential_root: scope
+    // The guardian seals exactly the bytes measured here into its memfd.
+    let digest =
+        kinewright_media::sha256_file(&runtime.executable.path).map_err(io::Error::other)?;
+    // C6: Claude's sign-in is a private copy inside scratch, so its person's
+    // configuration folder is the root no grant may reach.
+    let credential_root = match specification.provider() {
+        #[cfg(any(test, feature = "test-util"))]
+        "claude" => Some(crate::claude_credentials::config_root()?),
+        _ => scope
             .single_file
             .as_ref()
             .and_then(|mount| mount.source.parent().map(std::path::Path::to_path_buf)),
+    };
+    let result = Program {
+        image: Some(crate::job_guardian::protocol::ExecutableImage {
+            digest,
+            source: None,
+        }),
+        credential_root,
         executable: runtime.executable.path.clone(),
         arguments,
         environment,
@@ -558,6 +756,22 @@ pub(crate) trait InvocationOwner: Send + Sync {
         ordinal: u64,
         eof: bool,
     ) -> io::Result<()>;
+    /// C6: raw events by dialect. An owner with no Claude accounting refuses
+    /// Claude events, so the reader refuses the stream rather than counting
+    /// them as Codex.
+    fn raw_as(
+        &self,
+        dialect: StreamDialect,
+        identity: &crate::orchestration::ExecutionIdentity,
+        raw: &serde_json::Value,
+        ordinal: u64,
+        eof: bool,
+    ) -> io::Result<()> {
+        match dialect {
+            StreamDialect::Codex => self.raw(identity, raw, ordinal, eof),
+            StreamDialect::Claude => Err(io::Error::other("Claude usage owner unavailable")),
+        }
+    }
     fn completed(
         &self,
         identity: &crate::orchestration::ExecutionIdentity,
@@ -903,6 +1117,7 @@ impl NativeGuardianLauncher {
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
         let first_progress = self.first_progress;
+        let dialect = StreamDialect::of(invocation.profile().specification().provider());
         thread::Builder::new()
             .name("kinewright-contained-codex".into())
             .spawn(move || {
@@ -922,8 +1137,8 @@ impl NativeGuardianLauncher {
                     refusal,
                     interrupt,
                     failed_turn,
-                } = read_provider_stream(&mut output, &sender, |raw, ordinal, eof| {
-                    usage_owner.raw(&execution, raw, ordinal, eof)
+                } = read_provider_stream_as(dialect, &mut output, &sender, |raw, ordinal, eof| {
+                    usage_owner.raw_as(dialect, &execution, raw, ordinal, eof)
                 });
                 let mut completed = completed;
                 let silent = output.bytes == 0;
@@ -1160,6 +1375,9 @@ pub(crate) const STREAM_ACCOUNTING_REFUSED: &str =
 pub(crate) const STREAM_NATIVE_TOOL_REFUSED: &str =
     "provider stream refused: a provider-native tool is not allowed";
 pub(crate) const STREAM_MALFORMED: &str = "provider stream refused: malformed provider event";
+/// An event type or subtype this build does not know, typically from a newer
+/// CLI. It is refused rather than skipped, so nothing unread passes.
+pub(crate) const STREAM_UNKNOWN_EVENT: &str = "provider stream refused: unknown provider event";
 pub(crate) const STREAM_USAGE_UNRESOLVED: &str =
     "provider stream refused: usage publication remains unresolved";
 /// C5 fix 11: the provider ended after a counted `turn.failed` that paused
@@ -1198,9 +1416,24 @@ pub(crate) fn read_provider_output(
 pub(crate) fn read_provider_stream(
     output: impl std::io::Read,
     sender: &crate::protocol::limits::EventSender,
+    record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
+) -> ProviderRead {
+    read_provider_stream_as(StreamDialect::Codex, output, sender, record)
+}
+
+/// C6: one reader for both dialects. Framing, accounting before display,
+/// refusal and end-of-stream handling are shared; only the allowlist and the
+/// terminal event differ. A Claude refusal takes the same path as a Codex
+/// one: a fixed reason, then guardian cleanup by the caller.
+pub(crate) fn read_provider_stream_as(
+    dialect: StreamDialect,
+    output: impl std::io::Read,
+    sender: &crate::protocol::limits::EventSender,
     mut record: impl FnMut(&serde_json::Value, u64, bool) -> io::Result<()>,
 ) -> ProviderRead {
     let mut parser = crate::protocol::CodexProtocol::native_display();
+    let mut claude = crate::protocol::ClaudeProtocol::native_display();
+    let mut initialized = false;
     let mut ordinal = 0_u64;
     let mut completed = false;
     let mut refusal = None;
@@ -1212,9 +1445,28 @@ pub(crate) fn read_provider_stream(
             ordinal = ordinal.checked_add(1).ok_or(STREAM_ACCOUNTING_REFUSED)?;
             let raw: serde_json::Value =
                 serde_json::from_str(&line).map_err(|_| STREAM_MALFORMED)?;
-            record(&raw, ordinal, false).map_err(|_| STREAM_ACCOUNTING_REFUSED)?;
-            if !native_item_allowed(&raw) {
+            // Judged first, so a refused frame never becomes a usage sample.
+            if dialect == StreamDialect::Claude {
+                claude_event_allowed(&raw, &mut initialized)?;
+            } else if !codex_event_known(&raw) {
+                return Err(STREAM_UNKNOWN_EVENT);
+            } else if !native_item_allowed(&raw) {
                 return Err(STREAM_NATIVE_TOOL_REFUSED);
+            }
+            record(&raw, ordinal, false).map_err(|_| STREAM_ACCOUNTING_REFUSED)?;
+            if dialect == StreamDialect::Claude {
+                if raw.get("type").and_then(serde_json::Value::as_str) == Some("result") {
+                    if initialized
+                        && raw.get("subtype").and_then(serde_json::Value::as_str) == Some("success")
+                        && raw.get("is_error").and_then(serde_json::Value::as_bool) != Some(true)
+                    {
+                        completed = true;
+                        failed_turn = false;
+                    } else {
+                        failed_turn = true;
+                    }
+                }
+                return claude.parse_line(&line).map_err(|_| STREAM_MALFORMED);
             }
             match raw.get("type").and_then(serde_json::Value::as_str) {
                 Some("turn.completed") => {
@@ -1279,6 +1531,26 @@ pub(crate) fn read_provider_stream(
     }
 }
 
+/// The top-level event types `codex exec --json` writes (its `ThreadEvent`,
+/// [rust-v0.166.0](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/exec/src/exec_events.rs)).
+/// A newer CLI is admitted by version floor, so an event type it adds is
+/// refused instead of passing unread.
+fn codex_event_known(raw: &serde_json::Value) -> bool {
+    matches!(
+        raw.get("type").and_then(serde_json::Value::as_str),
+        Some(
+            "thread.started"
+                | "turn.started"
+                | "turn.completed"
+                | "turn.failed"
+                | "item.started"
+                | "item.updated"
+                | "item.completed"
+                | "error"
+        )
+    )
+}
+
 fn native_item_allowed(raw: &serde_json::Value) -> bool {
     let Some(item) = raw.get("item") else {
         return true;
@@ -1291,11 +1563,211 @@ fn native_item_allowed(raw: &serde_json::Value) -> bool {
                     .get("tool")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|tool| {
-                        crate::runtime::COMPACT_TOOL_NAMES
+                        crate::orchestration::task_tool_names::TASK_TOOL_NAMES
                             .contains(&crate::protocol::display_tool_name(tool).as_str())
                     })
         }
         _ => false,
+    }
+}
+
+/// C6: Claude Code loaded a tool, MCP server, plugin, skill, hook, subagent
+/// or permission mode that its recipe does not give it.
+pub(crate) const STREAM_AMBIENT_REFUSED: &str =
+    "provider stream refused: the provider loaded configuration outside its recipe";
+/// C6: Claude Code reported a sign-in other than the subscription.
+pub(crate) const STREAM_AUTH_REFUSED: &str =
+    "provider stream refused: the provider is not using subscription sign-in";
+
+fn claude_tool_allowed(name: &str) -> bool {
+    name.strip_prefix("mcp__kinewright__")
+        .is_some_and(|tool| crate::orchestration::task_tool_names::TASK_TOOL_NAMES.contains(&tool))
+}
+
+/// C6: Claude's `system/init` lists what the session actually loaded. Only
+/// subscription sign-in (`apiKeySource` "none" with the private OAuth store
+/// and every API override cleared), only the host's MCP tools, only the host
+/// server, no plugins or skills, and the recipe's permission mode pass.
+fn claude_init_allowed(raw: &serde_json::Value) -> Result<(), &'static str> {
+    use serde_json::Value;
+    if raw.get("apiKeySource").and_then(Value::as_str) != Some("none") {
+        return Err(STREAM_AUTH_REFUSED);
+    }
+    let tools = raw
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or(STREAM_MALFORMED)?;
+    let servers = raw
+        .get("mcp_servers")
+        .and_then(Value::as_array)
+        .ok_or(STREAM_MALFORMED)?;
+    let empty = |key: &str| {
+        raw.get(key)
+            .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+    };
+    if !tools
+        .iter()
+        .all(|tool| tool.as_str().is_some_and(claude_tool_allowed))
+        || servers.len() != 1
+        || servers[0].get("name").and_then(Value::as_str) != Some("kinewright")
+        || !empty("plugins")
+        || !empty("skills")
+        || raw.get("permissionMode").and_then(Value::as_str) != Some("dontAsk")
+    {
+        return Err(STREAM_AMBIENT_REFUSED);
+    }
+    // F3: a field this build has not read is refused, so ambient surface a
+    // newer CLI reports under a new name never passes unread.
+    if raw
+        .as_object()
+        .ok_or(STREAM_MALFORMED)?
+        .keys()
+        .any(|key| !CLAUDE_INIT_FIELDS.contains(&key.as_str()))
+    {
+        return Err(STREAM_UNKNOWN_EVENT);
+    }
+    Ok(())
+}
+
+/// Every field of Claude Code 2.1.317's `system/init`, as the S4b C6 dry
+/// launch observed it on 2026-11-03.
+const CLAUDE_INIT_FIELDS: [&str; 27] = [
+    "additional_directories",
+    "agents",
+    "analytics_disabled",
+    "apiKeySource",
+    "capabilities",
+    "claude_code_version",
+    "cwd",
+    "fast_mode_disabled_reason",
+    "fast_mode_state",
+    "mcp_servers",
+    "model",
+    "original_cwd",
+    "output_style",
+    "per_turn_effort_active",
+    "permissionMode",
+    "plugins",
+    "product_feedback_disabled",
+    "session_id",
+    "skills",
+    "slash_commands",
+    "subtype",
+    "tools",
+    "type",
+    "ultrathink_available",
+    "ultrathink_typed_raises",
+    "uuid",
+    "view_mode",
+];
+
+/// Claude Code's `system`/`ui_invalidate` render notice; 2.1.317 sends one
+/// before `init`. Bare, it names only the `ui.render` event and carries no
+/// tool, text or configuration. `prompts_screened`, `instances` or
+/// `client_modules` say a mod or plugin acts on the session, which the
+/// recipe never loads. Any other field is unknown.
+fn claude_ui_invalidate_allowed(raw: &serde_json::Value) -> Result<(), &'static str> {
+    let object = raw.as_object().ok_or(STREAM_MALFORMED)?;
+    if ["prompts_screened", "instances", "client_modules"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+    {
+        return Err(STREAM_AMBIENT_REFUSED);
+    }
+    if raw.get("event").and_then(serde_json::Value::as_str) == Some("ui.render")
+        && object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "type" | "subtype" | "event" | "session_id" | "uuid"
+            )
+        })
+    {
+        Ok(())
+    } else {
+        Err(STREAM_UNKNOWN_EVENT)
+    }
+}
+
+/// C6: the Claude stream allowlist. Hooks, background tasks, subagent
+/// messages, host control requests and provider-native tools are refused;
+/// the listed informational events pass unchanged; any other type, system
+/// subtype or content block is unknown and refused, since a newer CLI is
+/// admitted by version floor rather than by exact build.
+fn claude_event_allowed(
+    raw: &serde_json::Value,
+    initialized: &mut bool,
+) -> Result<(), &'static str> {
+    use serde_json::Value;
+    let kind = raw
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(STREAM_MALFORMED)?;
+    let blocks = |allowed: &dyn Fn(&Value) -> Result<(), &'static str>| {
+        if raw
+            .get("parent_tool_use_id")
+            .is_some_and(|parent| !parent.is_null())
+        {
+            return Err(STREAM_AMBIENT_REFUSED);
+        }
+        if !*initialized {
+            return Err(STREAM_MALFORMED);
+        }
+        match raw.pointer("/message/content") {
+            Some(Value::String(_)) if kind == "user" => Ok(()),
+            Some(Value::Array(content)) => content.iter().try_for_each(allowed),
+            _ => Err(STREAM_MALFORMED),
+        }
+    };
+    match kind {
+        "system" => match raw.get("subtype").and_then(Value::as_str) {
+            Some("init") if *initialized => Err(STREAM_MALFORMED),
+            Some("init") => {
+                claude_init_allowed(raw)?;
+                *initialized = true;
+                Ok(())
+            }
+            Some("api_retry" | "status" | "compact_boundary") => Ok(()),
+            Some("ui_invalidate") => claude_ui_invalidate_allowed(raw),
+            Some(subtype)
+                if subtype.starts_with("hook_")
+                    || subtype.starts_with("task_")
+                    || subtype.starts_with("remote_")
+                    || matches!(subtype, "local_command" | "plugin_install") =>
+            {
+                Err(STREAM_AMBIENT_REFUSED)
+            }
+            Some(_) => Err(STREAM_UNKNOWN_EVENT),
+            None => Err(STREAM_MALFORMED),
+        },
+        "assistant" => blocks(&|block| match block.get("type").and_then(Value::as_str) {
+            Some("text" | "thinking" | "redacted_thinking") => Ok(()),
+            Some("tool_use")
+                if block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(claude_tool_allowed) =>
+            {
+                Ok(())
+            }
+            Some("tool_use" | "server_tool_use" | "mcp_tool_use") => {
+                Err(STREAM_NATIVE_TOOL_REFUSED)
+            }
+            Some(kind) if kind.ends_with("_tool_result") => Err(STREAM_NATIVE_TOOL_REFUSED),
+            Some(_) => Err(STREAM_UNKNOWN_EVENT),
+            None => Err(STREAM_MALFORMED),
+        }),
+        "user" => blocks(&|block| match block.get("type").and_then(Value::as_str) {
+            Some("text" | "tool_result") => Ok(()),
+            _ => Err(STREAM_MALFORMED),
+        }),
+        // Informational events that carry no tool, text or usage the reader
+        // acts on; accounting reads `result` and `assistant` only. Partial
+        // `stream_event`s are never requested, so they are unknown here.
+        "result" | "rate_limit_event" | "keep_alive" | "tool_progress" | "tool_use_summary"
+        | "prompt_suggestion" => Ok(()),
+        "auth_status" => Err(STREAM_AUTH_REFUSED),
+        "control_request" => Err(STREAM_AMBIENT_REFUSED),
+        _ => Err(STREAM_UNKNOWN_EVENT),
     }
 }
 
@@ -1325,6 +1797,107 @@ fn transport_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Riel 2026-11-02: no exact CLI pin. A newer CLI passes the version
+    /// floor, and an event type it adds is refused by the stream reader
+    /// instead of passing unread.
+    #[test]
+    fn s4b_newer_cli_passes_the_floor_and_its_unknown_event_is_refused() {
+        use crate::orchestration::adapters::{
+            CertificationRefusal, CliVersion, claude_candidate, codex_candidate, test_runtime,
+        };
+        for (spec, newer, older) in [
+            (
+                codex_candidate(),
+                CliVersion(0, 200, 0),
+                CliVersion(0, 165, 9),
+            ),
+            (
+                claude_candidate(),
+                CliVersion(2, 2, 0),
+                CliVersion(2, 1, 315),
+            ),
+        ] {
+            let mut check = test_runtime();
+            check.version = newer;
+            assert_ne!(
+                spec.validate_runtime(&check),
+                Err(CertificationRefusal::UnqualifiedVersion),
+                "NEWER_CLI_PASSES_THE_FLOOR {}",
+                spec.provider()
+            );
+            check.version = older;
+            assert_eq!(
+                spec.validate_runtime(&check),
+                Err(CertificationRefusal::UnqualifiedVersion),
+                "OLDER_CLI_REFUSED {}",
+                spec.provider()
+            );
+        }
+        let init = r#"{"type":"system","subtype":"init","apiKeySource":"none","tools":["mcp__kinewright__get_timeline_state"],"mcp_servers":[{"name":"kinewright","status":"connected"}],"permissionMode":"dontAsk","plugins":[],"skills":[]}"#;
+        for (dialect, lines) in [
+            (
+                StreamDialect::Codex,
+                vec![
+                    r#"{"type":"thread.started","thread_id":"t"}"#,
+                    r#"{"type":"thread.summarized","usage":{"input_tokens":7,"output_tokens":3}}"#,
+                ],
+            ),
+            (
+                StreamDialect::Claude,
+                vec![init, r#"{"type":"session_title","title":"x"}"#],
+            ),
+            (
+                StreamDialect::Claude,
+                vec![
+                    r#"{"type":"system","subtype":"init","apiKeySource":"none","tools":["mcp__kinewright__get_timeline_state"],"mcp_servers":[{"name":"kinewright","status":"connected"}],"permissionMode":"dontAsk","plugins":[],"skills":[],"hooks_loaded":["person"]}"#,
+                ],
+            ),
+            (
+                StreamDialect::Claude,
+                vec![init, r#"{"type":"system","subtype":"memory_saved"}"#],
+            ),
+            (
+                StreamDialect::Claude,
+                vec![
+                    init,
+                    r#"{"type":"assistant","message":{"content":[{"type":"citation_card"}]},"parent_tool_use_id":null}"#,
+                ],
+            ),
+        ] {
+            let (sender, _events) = crate::protocol::limits::event_channel();
+            let mut bytes = lines.join("\n").into_bytes();
+            bytes.push(b'\n');
+            let mut accounted = Vec::new();
+            let read = read_provider_stream_as(
+                dialect,
+                std::io::Cursor::new(bytes),
+                &sender,
+                |raw, _, _| {
+                    accounted.push(raw.to_string());
+                    Ok(())
+                },
+            );
+            assert_eq!(
+                read.refusal,
+                Some(STREAM_UNKNOWN_EVENT),
+                "UNKNOWN_EVENT_REFUSED {dialect:?} {lines:?}"
+            );
+            assert!(!read.completed);
+            // F4: the refused frame is judged before accounting, so it never
+            // becomes a usage sample; only the frames before it and the EOF are.
+            let refused: serde_json::Value = serde_json::from_str(lines[lines.len() - 1]).unwrap();
+            assert!(
+                !accounted.contains(&refused.to_string()),
+                "C6_REFUSED_FRAME_ACCOUNTED {dialect:?} {lines:?}"
+            );
+            assert_eq!(
+                accounted.len(),
+                lines.len(),
+                "C6_ACCOUNTED_FRAMES {accounted:?}"
+            );
+        }
+    }
+
     fn c5_fix4_reason(stderr: &[u8], record: &[u8]) -> String {
         let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
         let summary = crate::provider_stderr::stderr_summary(reader, "fix4-test").unwrap();

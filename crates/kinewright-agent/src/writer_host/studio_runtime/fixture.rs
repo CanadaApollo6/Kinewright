@@ -70,6 +70,10 @@ pub struct ProtocolObservation {
 struct State {
     root: PathBuf,
     mode: ProtocolFixtureMode,
+    /// C6: `scripted` speaks Codex's dialect, `scripted-claude` Claude's.
+    connector: &'static str,
+    /// C6: the Claude child's event mode, written after the shared one.
+    claude_event: Option<&'static str>,
     released: AtomicBool,
     startup: AtomicBool,
     event: AtomicBool,
@@ -81,9 +85,25 @@ pub struct ProtocolFixture(Arc<State>);
 impl ProtocolFixture {
     #[must_use]
     pub fn new(root: &Path, mode: ProtocolFixtureMode) -> Self {
+        Self::with_connector(root, mode, "scripted", None)
+    }
+    /// C6: the protocol child in Claude Code's `stream-json` dialect. The run's
+    /// brief must select [`claude_fixture_selection`].
+    #[must_use]
+    pub fn claude(root: &Path, mode: ProtocolFixtureMode, event: Option<&'static str>) -> Self {
+        Self::with_connector(root, mode, "scripted-claude", event)
+    }
+    fn with_connector(
+        root: &Path,
+        mode: ProtocolFixtureMode,
+        connector: &'static str,
+        event: Option<&'static str>,
+    ) -> Self {
         Self(Arc::new(State {
             root: root.into(),
             mode,
+            connector,
+            claude_event: event,
             released: AtomicBool::new(mode == ProtocolFixtureMode::Normal),
             startup: AtomicBool::new(false),
             event: AtomicBool::new(false),
@@ -147,7 +167,7 @@ impl ProtocolFixture {
             first_progress: self.0.mode.first_progress(),
             fixture_claim: Some(self.claim_root()),
             fixture_autostart: self.0.mode != ProtocolFixtureMode::Dormant,
-            qualification: false,
+            qualification: None,
             stop_gate: None,
             witness: Some(Arc::new(super::RuntimeWitness {
                 on_event: Arc::new(move |_| {
@@ -272,6 +292,9 @@ impl ProfileFactory for Factory {
         if self.0.mode == ProtocolFixtureMode::TerminalNetworkErrors {
             std::fs::write(scratch.join("event-mode"), b"terminal")?;
         }
+        if let Some(event) = self.0.claude_event {
+            std::fs::write(scratch.join("event-mode"), event)?;
+        }
         let credentials = scratch.join("credentials");
         std::fs::create_dir(&credentials)?;
         std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700))?;
@@ -301,7 +324,7 @@ impl ProfileFactory for Factory {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(identity.nonce.as_str().into(), runtime);
         let profile =
-            certify_connector("scripted", binding.clone(), self).map_err(io::Error::other)?;
+            certify_connector(self.0.connector, binding.clone(), self).map_err(io::Error::other)?;
         let program = crate::native_launcher::program(&profile, "placeholder")?;
         let mut options = program.arguments;
         options.pop();
@@ -324,7 +347,7 @@ impl ProfileFactory for Factory {
                 endpoint: endpoint.into(),
                 identity: identity.clone(),
             });
-        certify_connector("scripted", binding, self).map_err(io::Error::other)
+        certify_connector(self.0.connector, binding, self).map_err(io::Error::other)
     }
 }
 impl ConnectorRuntimeChecks for Factory {
@@ -340,6 +363,18 @@ impl ConnectorRuntimeChecks for Factory {
             .get(binding.identity().nonce.as_str())
             .cloned()
             .ok_or(CertificationRefusal::ExecutableIdentity)
+    }
+}
+
+/// C6: the brief selection the Claude protocol child certifies as.
+#[cfg(test)]
+#[must_use]
+pub fn claude_fixture_selection()
+-> crate::orchestration::orchestration_records::ProviderSelectionRecord {
+    crate::orchestration::orchestration_records::ProviderSelectionRecord {
+        connector: "scripted-claude".into(),
+        model: "fixture".into(),
+        options: vec![],
     }
 }
 

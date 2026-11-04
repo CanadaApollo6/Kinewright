@@ -1133,4 +1133,5 @@ mod tests {
     include!("c5_fix14_tests.rs");
     include!("te1_tests.rs");
     include!("te1_prompt_tests.rs");
+    include!("c6_tests.rs");
 }

@@ -47,8 +47,9 @@ pub(super) struct RuntimePorts {
     pub fixture_claim: Option<PathBuf>,
     #[cfg(any(test, feature = "test-util"))]
     pub fixture_autostart: bool,
+    /// The unregistered candidate a qualification witness binds, if any.
     #[cfg(any(test, feature = "test-util"))]
-    pub qualification: bool,
+    pub qualification: Option<&'static crate::orchestration::adapters::ConnectorSpecification>,
     #[cfg(any(test, feature = "test-util"))]
     pub witness: Option<Arc<RuntimeWitness>>,
     #[cfg(any(test, feature = "test-util"))]
@@ -56,12 +57,15 @@ pub(super) struct RuntimePorts {
 }
 impl Default for RuntimePorts {
     fn default() -> Self {
+        let guardian = std::env::current_exe()
+            .unwrap_or_default()
+            .with_file_name("kinewright-job-guardian");
         Self {
             profiles: None,
-            checks: Arc::new(crate::codex_qualification::InstalledCodexChecks),
-            guardian: std::env::current_exe()
-                .unwrap_or_default()
-                .with_file_name("kinewright-job-guardian"),
+            checks: Arc::new(crate::codex_qualification::InstalledCodexChecks {
+                guardian: guardian.clone(),
+            }),
+            guardian,
             ceiling: Some(
                 crate::orchestration::adapters::codex_candidate().default_token_ceiling(),
             ),
@@ -72,7 +76,7 @@ impl Default for RuntimePorts {
             #[cfg(any(test, feature = "test-util"))]
             fixture_autostart: false,
             #[cfg(any(test, feature = "test-util"))]
-            qualification: false,
+            qualification: None,
             #[cfg(any(test, feature = "test-util"))]
             witness: None,
             #[cfg(any(test, feature = "test-util"))]
@@ -287,15 +291,16 @@ impl StudioRuntime {
                     continue;
                 }
                 let selection = &state.tasks[0].brief.provider;
-                let qualified = crate::orchestration::adapters::certified_connectors()
+                let qualified = crate::orchestration::adapters::available_connectors()
                     .iter()
                     .any(|spec| spec.selection() == *selection && spec.provider() != "scripted");
                 #[cfg(any(test, feature = "test-util"))]
                 let qualified = qualified
                     || (self.ports.fixture_claim.is_some() && self.ports.fixture_autostart)
-                    || (self.ports.qualification
-                        && *selection
-                            == crate::orchestration::adapters::codex_candidate().selection());
+                    || self
+                        .ports
+                        .qualification
+                        .is_some_and(|candidate| *selection == candidate.selection());
                 if qualified {
                     candidate = Some((
                         id.clone(),
@@ -719,7 +724,7 @@ impl ProfileFactory for TaskProfiles {
 
 struct RegisteredProfiles {
     #[cfg(any(test, feature = "test-util"))]
-    qualification: bool,
+    qualification: Option<&'static crate::orchestration::adapters::ConnectorSpecification>,
     host: Weak<Mutex<HostCommandOwner>>,
     checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
 }
@@ -768,16 +773,17 @@ impl ProfileFactory for RegisteredProfiles {
             )
         };
         #[cfg(any(test, feature = "test-util"))]
-        let candidate = self.qualification
-            && crate::orchestration::adapters::codex_candidate().selection() == selection;
+        let candidate = self
+            .qualification
+            .filter(|candidate| candidate.selection() == selection);
         #[cfg(not(any(test, feature = "test-util")))]
-        let candidate = false;
-        if !candidate
-            && !crate::orchestration::adapters::certified_connectors()
+        let candidate: Option<()> = None;
+        if candidate.is_none()
+            && !crate::orchestration::adapters::available_connectors()
                 .iter()
                 .any(|spec| spec.selection() == selection)
         {
-            return Err(io::Error::other("saved connector is not qualified"));
+            return Err(io::Error::other("saved connector is not available"));
         }
         let scratch = std::env::temp_dir().join(format!("k-{}", attempt.identity().nonce.as_str()));
         std::fs::create_dir(&scratch)?;
@@ -793,8 +799,12 @@ impl ProfileFactory for RegisteredProfiles {
             .map_err(io::Error::other)?;
         let scratch = binding.working_directory().to_path_buf();
         #[cfg(any(test, feature = "test-util"))]
-        let certify = if candidate {
-            crate::orchestration::adapters::certify_codex_candidate(binding, self.checks.as_ref())
+        let certify = if let Some(candidate) = candidate {
+            crate::orchestration::adapters::certify_candidate(
+                candidate,
+                binding,
+                self.checks.as_ref(),
+            )
         } else {
             certify_connector(&selection.connector, binding, self.checks.as_ref())
         };

@@ -458,7 +458,7 @@ fn c5_fix10_raw(
 /// Codex 0.166 `McpToolCallItem` for a refused product call.
 fn c5_fix10_failed_item(id: &str, text: &str) -> serde_json::Value {
     serde_json::json!({"type":"item.completed","item":{
-        "id":id,"type":"mcp_tool_call","server":"kinewright","tool":"invoke_capability",
+        "id":id,"type":"mcp_tool_call","server":"kinewright","tool":"task_status",
         "arguments":{},"result":{"content":[{"type":"text","text":text}],"structured_content":null},
         "error":null,"status":"failed"}})
 }

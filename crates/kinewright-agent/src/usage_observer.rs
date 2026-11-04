@@ -33,6 +33,11 @@ impl Default for UsageObserver {
     }
 }
 impl UsageObserver {
+    pub(crate) fn has_known_tokens(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|usage| usage.input.is_some() && usage.output.is_some())
+    }
     pub(crate) fn project(&mut self, event: &mut AgentEvent) {
         let AgentEvent::Cost {
             input_tokens,

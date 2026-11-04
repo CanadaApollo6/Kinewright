@@ -90,6 +90,17 @@ fn native_profile_at(
     NativeChecks,
     std::path::PathBuf,
 ) {
+    native_profile_for(root, admitted, "scripted")
+}
+fn native_profile_for(
+    root: &std::path::Path,
+    admitted: &crate::orchestration::AdmittedAttempt,
+    provider: &str,
+) -> (
+    crate::orchestration::adapters::CertifiedConnectorProfile,
+    NativeChecks,
+    std::path::PathBuf,
+) {
     use crate::orchestration::adapters::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let scratch = kinewright_media::test_support::workspace_target_dir().join(format!(
@@ -121,14 +132,14 @@ fn native_profile_at(
     runtime.authentication.context = runtime.launch_context.clone();
     runtime.authentication.observed_store = runtime.launch_context.credential_store.clone();
     let mut checks = NativeChecks(runtime);
-    let profile = certify_connector("scripted", binding.clone(), &checks).unwrap();
+    let profile = certify_connector(provider, binding.clone(), &checks).unwrap();
     let program = crate::native_launcher::program(&profile, "placeholder").unwrap();
     checks.0.launch_context.environment_digest = native_digest(&program.environment);
     let mut arguments = program.arguments;
     arguments.pop();
     checks.0.launch_context.settings_digest = native_digest(&arguments);
     checks.0.authentication.context = checks.0.launch_context.clone();
-    let profile = certify_connector("scripted", binding, &checks).unwrap();
+    let profile = certify_connector(provider, binding, &checks).unwrap();
     (profile, checks, scratch)
 }
 fn native_now(f: &Fixture, run: &RunId) -> u64 {

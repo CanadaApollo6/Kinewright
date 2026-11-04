@@ -89,6 +89,95 @@ impl HostInvocationOwner {
         self
     }
 }
+/// The configuration shape of a Claude `system/init`, for the dry-launch
+/// report: tool names outside the host MCP server, MCP server names, plugin
+/// and skill counts, and the permission mode. Names only, bounded; never a
+/// credential or conversation content.
+#[cfg(any(test, feature = "test-util"))]
+fn init_shape(raw: &serde_json::Value) -> String {
+    let name = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .or_else(|| value.get("name").and_then(serde_json::Value::as_str))
+            .filter(|name| {
+                name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+            })
+            .unwrap_or("?")
+            .to_owned()
+    };
+    let list = |key: &str, keep: &dyn Fn(&str) -> bool| {
+        raw.get(key)
+            .and_then(serde_json::Value::as_array)
+            .map_or_else(
+                || "absent".to_owned(),
+                |values| {
+                    values
+                        .iter()
+                        .map(name)
+                        .filter(|name| keep(name))
+                        .take(16)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                },
+            )
+    };
+    let count = |key: &str| {
+        raw.get(key)
+            .and_then(serde_json::Value::as_array)
+            .map_or_else(|| "absent".to_owned(), |values| values.len().to_string())
+    };
+    format!(
+        "tools_outside=[{}] servers=[{}] plugins={} skills={} mode={} plugin_sources=[{}] keys=[{}]",
+        list("tools", &|name| !name.starts_with("mcp__kinewright__")),
+        list("mcp_servers", &|_| true),
+        count("plugins"),
+        count("skills"),
+        raw.get("permissionMode")
+            .map_or_else(|| "absent".to_owned(), name),
+        plugins(raw),
+        raw.as_object().map_or_else(String::new, |object| object
+            .keys()
+            .filter(|key| key.len() <= 64
+                && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .take(48)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",")),
+    )
+}
+
+/// Each loaded plugin's name and where it was loaded from, with the person's
+/// home shown as `~`, so a plugin leaking in from their configuration shows.
+#[cfg(any(test, feature = "test-util"))]
+fn plugins(raw: &serde_json::Value) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let field = |plugin: &serde_json::Value, key: &str| {
+        let value = plugin
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let value = match value.strip_prefix(home.as_str()) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => value.to_owned(),
+        };
+        value.chars().take(160).collect::<String>()
+    };
+    raw.get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .map(|plugins| {
+            plugins
+                .iter()
+                .take(8)
+                .map(|plugin| format!("{}@{}", field(plugin, "name"), field(plugin, "path")))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
+}
+
 /// A bounded type token from a raw provider event; anything else is `other`.
 #[cfg(any(test, feature = "test-util"))]
 fn raw_event_type(raw: &serde_json::Value, eof: bool) -> &str {
@@ -144,9 +233,42 @@ impl InvocationOwner for HostInvocationOwner {
         ordinal: u64,
         eof: bool,
     ) -> io::Result<()> {
+        self.raw_as(
+            native_launcher::StreamDialect::Codex,
+            identity,
+            raw,
+            ordinal,
+            eof,
+        )
+    }
+    fn raw_as(
+        &self,
+        dialect: native_launcher::StreamDialect,
+        identity: &ExecutionIdentity,
+        raw: &serde_json::Value,
+        ordinal: u64,
+        eof: bool,
+    ) -> io::Result<()> {
         #[cfg(any(test, feature = "test-util"))]
         if let Some(witness) = &self.raw_witness {
-            witness(raw_event_type(raw, eof));
+            // A system event also names its subtype, a fixed classifier,
+            // so a refused startup event can be identified without content.
+            let kind = raw_event_type(raw, eof);
+            match raw
+                .get("subtype")
+                .and_then(serde_json::Value::as_str)
+                .filter(|subtype| {
+                    kind == "system"
+                        && !subtype.is_empty()
+                        && subtype.len() <= 48
+                        && subtype
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                }) {
+                Some("init") => witness(&format!("system.init:{}", init_shape(raw))),
+                Some(subtype) => witness(&format!("system.{subtype}")),
+                None => witness(kind),
+            }
         }
         let host = self
             .host
@@ -154,7 +276,7 @@ impl InvocationOwner for HostInvocationOwner {
             .ok_or_else(|| transport("host owner lost"))?;
         host.lock()
             .map_err(|_| transport("host owner poisoned"))?
-            .ingest_native_raw(&self.producer, identity, raw, ordinal, eof)
+            .ingest_native_raw_as(dialect, &self.producer, identity, raw, ordinal, eof)
             .map_err(transport)
     }
     fn completed(
@@ -597,7 +719,10 @@ impl HostCommandOwner {
             live
         } else {
             #[cfg(any(test, feature = "test-util"))]
-            if profile.specification().provider() == "scripted" {
+            if matches!(
+                profile.specification().provider(),
+                "scripted" | "scripted-claude"
+            ) {
                 serde_json::json!({"version":1})
             } else {
                 return Err(refused("task prompt endpoint missing"));
@@ -689,7 +814,13 @@ impl HostCommandOwner {
             .bind_stream(kinewright_project::usage_stream::StreamBinding {
                 attempt: identity.attempt.0.clone(),
                 stream: stream.clone(),
-                adapter: kinewright_project::usage_stream::Adapter::Codex01660V1,
+                adapter: if native_launcher::StreamDialect::of(profile.specification().provider())
+                    == native_launcher::StreamDialect::Claude
+                {
+                    kinewright_project::usage_stream::Adapter::Claude21316V1
+                } else {
+                    kinewright_project::usage_stream::Adapter::Codex01660V1
+                },
                 resumed: false,
             })
             .map_err(refused)?;

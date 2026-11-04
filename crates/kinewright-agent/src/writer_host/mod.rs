@@ -1176,7 +1176,7 @@ pub struct HostCommandOwner {
     #[cfg(any(test, feature = "test-util"))]
     fixture_director: bool,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-    qualification_director: bool,
+    qualification_director: Option<&'static crate::orchestration::adapters::ConnectorSpecification>,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
     qualification_stop: Option<Arc<qualification_gate::MergeStopGate>>,
     #[cfg(target_os = "linux")]
@@ -1347,7 +1347,7 @@ impl HostCommandOwner {
             #[cfg(any(test, feature = "test-util"))]
             fixture_director: false,
             #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-            qualification_director: false,
+            qualification_director: None,
             #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
             qualification_stop: None,
             #[cfg(target_os = "linux")]
@@ -3404,6 +3404,7 @@ mod codex_witness;
 #[cfg(all(target_os = "linux", feature = "eval-harness"))]
 #[doc(hidden)]
 pub use codex_witness::{
+    run_installed_claude_director_witness, run_installed_claude_dry_launch,
     run_installed_codex_director_witness, run_installed_codex_dry_launch,
     run_installed_codex_local_policy_witness, run_installed_codex_network_witness,
     run_unpaid_policy_witness,

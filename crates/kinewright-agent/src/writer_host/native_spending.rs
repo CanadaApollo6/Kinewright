@@ -77,6 +77,34 @@ pub(crate) fn provider_failure(kind: &str, raw: &serde_json::Value) -> Option<St
         },
     ))
 }
+/// S4b C6: a Claude `result` that is not a clean success. The classifier is
+/// the fixed `subtype` (`error_during_execution`, `error_max_turns`, or
+/// `success` with `is_error` for an API failure); no provider text is kept.
+pub(crate) fn claude_provider_failure(kind: &str, raw: &serde_json::Value) -> Option<String> {
+    if kind != "result" {
+        return None;
+    }
+    let subtype = raw
+        .get("subtype")
+        .and_then(serde_json::Value::as_str)
+        .filter(|subtype| {
+            !subtype.is_empty()
+                && subtype.len() <= 64
+                && subtype.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        });
+    let is_error = raw.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
+    if subtype == Some("success") && !is_error {
+        return None;
+    }
+    Some(subtype.map_or_else(
+        || kinewright_project::orchestration_accounting::UNCLASSIFIED_FAILURE.into(),
+        |subtype| {
+            kinewright_media::sha256_bytes(
+                format!("result\0subtype\0{subtype}\0{is_error}").as_bytes(),
+            )
+        },
+    ))
+}
 /// C5 fix 11: exactly Codex 0.166's retry notices, as its JSONL stream
 /// writes them. `core/src/responses_retry.rs` sends `Reconnecting...
 /// {retry_count}/{max_retries}` and `Reconnecting... waiting for network`
@@ -129,10 +157,11 @@ impl HostCommandOwner {
         Ok(format!(
             "{}:{}",
             kind.chars().take(64).collect::<String>(),
-            raw.get("id").map_or_else(
-                || Ok(format!("{ordinal:016x}")),
-                |id| serde_json::to_vec(id).map(|bytes| kinewright_media::sha256_bytes(&bytes))
-            )?
+            raw.get(if kind == "result" { "uuid" } else { "id" })
+                .map_or_else(
+                    || Ok(format!("{ordinal:016x}")),
+                    |id| serde_json::to_vec(id).map(|bytes| kinewright_media::sha256_bytes(&bytes))
+                )?
         ))
     }
 
@@ -527,6 +556,25 @@ impl HostCommandOwner {
         ordinal: u64,
         eof: bool,
     ) -> Result<(), HostError> {
+        self.ingest_native_raw_as(
+            native_launcher::StreamDialect::Codex,
+            producer,
+            identity,
+            raw,
+            ordinal,
+            eof,
+        )
+    }
+    /// Both dialects use TE1.1's authoritative, stream-bound usage adapter.
+    pub(crate) fn ingest_native_raw_as(
+        &mut self,
+        dialect: native_launcher::StreamDialect,
+        producer: &HostAuth,
+        identity: &ExecutionIdentity,
+        raw: &serde_json::Value,
+        ordinal: u64,
+        eof: bool,
+    ) -> Result<(), HostError> {
         let state = self.spending_scope(producer, &identity.run)?;
         if !state.attempts.iter().any(|a| a.identity == *identity) {
             return Err(refused("usage attempt missing"));
@@ -543,11 +591,13 @@ impl HostCommandOwner {
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("native.eof");
-        if kind == "rate_limit"
-            || raw
-                .pointer("/error/code")
-                .and_then(serde_json::Value::as_str)
-                == Some("rate_limit_exceeded")
+        let claude = dialect == native_launcher::StreamDialect::Claude;
+        if !claude
+            && (kind == "rate_limit"
+                || raw
+                    .pointer("/error/code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("rate_limit_exceeded"))
         {
             return self.change_spending(
                 producer,
@@ -560,7 +610,12 @@ impl HostCommandOwner {
                 },
             );
         }
-        if let Some(failure) = provider_failure(kind, raw) {
+        let failure = if claude {
+            claude_provider_failure(kind, raw)
+        } else {
+            provider_failure(kind, raw)
+        };
+        if let Some(failure) = failure {
             let effect = state
                 .effects
                 .iter()
@@ -582,6 +637,7 @@ impl HostCommandOwner {
                 },
             );
         }
+        let terminal = if claude { "result" } else { "turn.completed" };
         if kind == "turn.started"
             && !eof
             && raw.get("usage").is_none()
@@ -597,7 +653,12 @@ impl HostCommandOwner {
             // Coverage is already incomplete in the durable record.
             return Ok(());
         }
-        if !eof && raw.get("usage").is_none() && !matches!(kind, "turn.completed" | "turn.started")
+        if !eof
+            && if claude {
+                kind != terminal
+            } else {
+                raw.get("usage").is_none() && !matches!(kind, "turn.completed" | "turn.started")
+            }
         {
             return Ok(());
         }
@@ -617,7 +678,11 @@ impl HostCommandOwner {
             .iter()
             .find(|s| s.attempt == identity.attempt.0 && s.turn == 1 && s.event == event);
         let sample = decode_usage(
-            UsageAdapter::Codex,
+            if claude {
+                UsageAdapter::Claude
+            } else {
+                UsageAdapter::Codex
+            },
             raw,
             UsageSample {
                 snapshot: task
@@ -636,7 +701,7 @@ impl HostCommandOwner {
                 ordinal: old.map_or(ordinal, |s| s.ordinal),
                 mode: UsageMode::Cumulative,
                 values: UsageValues::default(),
-                complete: eof || kind == "turn.completed",
+                complete: eof || kind == terminal,
                 input_includes_cache: true,
                 output_includes_reasoning: true,
             },

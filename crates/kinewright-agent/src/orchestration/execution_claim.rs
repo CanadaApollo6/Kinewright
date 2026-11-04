@@ -60,6 +60,26 @@ impl MachineClaim {
         Self::acquire_at(root, project, run)
     }
 
+    /// S4b C6: one contained `--version` probe holds its own private
+    /// namespace, so it never enters a run's claim or its recovery.
+    ///
+    /// # Errors
+    /// Returns the same admission refusals as production acquisition.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn acquire_private(root: &Path, project: &str, run: &str) -> io::Result<Self> {
+        Self::acquire_at(root, project, run)
+    }
+
+    /// S4b C6 fix 2: reopen a leftover probe namespace to stop and retire
+    /// what it retained, even when its run record vanished.
+    ///
+    /// # Errors
+    /// Returns `studio_run_active` for a held lock, or a malformed-state refusal.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn inspect_private(root: &Path) -> io::Result<Self> {
+        Self::inspect_at(root)
+    }
+
     /// # Errors
     /// Returns `studio_run_active` for a held lock or unreconciled recovery record.
     fn acquire_at(root: &Path, project: &str, run: &str) -> io::Result<Self> {
@@ -247,7 +267,19 @@ impl MachineClaim {
         let lock = options.open(root.join(lock_name))?;
         lock.try_lock()
             .map_err(|_| io::Error::other("studio_run_active"))?;
-        let mut attempts = Vec::new();
+        // Owned at once, so every refusal below also unlocks on drop.
+        let mut claim = Self {
+            lock,
+            root: root.into(),
+            run: RunClaim {
+                project: String::new(),
+                run: String::new(),
+                locator: None,
+            },
+            attempts: Vec::new(),
+            recovering: true,
+        };
+        let attempts = &mut claim.attempts;
         for entry in fs::read_dir(root)? {
             let path = entry?.path();
             if path
@@ -269,17 +301,7 @@ impl MachineClaim {
                 attempts.push(identity);
             }
         }
-        Ok(Self {
-            lock,
-            root: root.into(),
-            run: RunClaim {
-                project: String::new(),
-                run: String::new(),
-                locator: None,
-            },
-            attempts,
-            recovering: true,
-        })
+        Ok(claim)
     }
 
     /// # Errors
@@ -546,8 +568,23 @@ impl MachineClaim {
             fs::remove_file(self.root.join("run.json"))?;
             sync_directory(&self.root)?;
         }
+        // The same unlock `Drop` makes, here so a failure is reported. Keep
+        // both: `Drop` covers every claim that is not finished.
         self.lock.unlock()?;
         Ok(())
+    }
+}
+
+/// Unlock before the close. The lock belongs to the open file description,
+/// and a child that another thread is forking or spawning holds a copy of it
+/// until its `exec`. A bare close would leave the claim held through that
+/// window, so a release followed at once by an acquisition, on any thread,
+/// could refuse with `studio_run_active`. An explicit unlock releases it
+/// whatever copies exist, as the project lock file does. `finish()` unlocks
+/// first to report a failure; this one covers every other release.
+impl Drop for MachineClaim {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
     }
 }
 #[allow(
@@ -609,4 +646,26 @@ fn write_record(path: &Path, value: &impl Serialize) -> io::Result<()> {
         path.parent()
             .ok_or_else(|| io::Error::other("record parent"))?,
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::MachineClaim;
+
+    /// A copy of the lock's descriptor, as a child holds between its fork and
+    /// its `exec`, must not keep a dropped claim held.
+    #[test]
+    fn s4b_c6_dropped_claim_releases_past_a_descriptor_copy() {
+        // Unique per run and removed on drop, so a crashed run leaves no
+        // root that a later one could reuse.
+        let directory = kinewright_media::test_support::TempDirectory::new("claim-dup");
+        let root = directory.path("m");
+        let claim = MachineClaim::acquire_fixture(&root, "a1", "b2").unwrap();
+        let copy = claim.lock.try_clone().unwrap();
+        drop(claim);
+        let recovered = MachineClaim::recover_fixture(&root);
+        drop(copy);
+        let recovered = recovered.unwrap_or_else(|error| panic!("C6_CLAIM_HELD_BY_COPY: {error}"));
+        recovered.finish().unwrap();
+    }
 }

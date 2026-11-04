@@ -9,11 +9,19 @@ use serde_json::Value;
 
 #[derive(Default)]
 pub(crate) struct ClaudeProtocol {
+    display_only: bool,
     usage: crate::usage_observer::UsageObserver,
     tool_names: HashMap<String, String>,
 }
 
 impl ClaudeProtocol {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn native_display() -> Self {
+        Self {
+            display_only: true,
+            ..Self::default()
+        }
+    }
     pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
         if line.len() > limits::FRAME_BYTES {
             return Err(AgentError::Protocol("ingress: frame_capacity".into()));
@@ -23,17 +31,19 @@ impl ClaudeProtocol {
         })?;
         let mut events = Vec::new();
         let mut usage_refused = false;
-        match self.usage.observe(
-            kinewright_project::usage_stream::Adapter::Claude21316V1,
-            &value,
-        ) {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) => {}
-            Err(_) => {
-                usage_refused = true;
-                events.push(AgentEvent::Error(
-                    "protocol error: raw_usage_refused".into(),
-                ));
+        if !self.display_only {
+            match self.usage.observe(
+                kinewright_project::usage_stream::Adapter::Claude21316V1,
+                &value,
+            ) {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(_) => {
+                    usage_refused = true;
+                    events.push(AgentEvent::Error(
+                        "protocol error: raw_usage_refused".into(),
+                    ));
+                }
             }
         }
         match value.get("type").and_then(Value::as_str) {
@@ -53,6 +63,9 @@ impl ClaudeProtocol {
         }
         for event in &mut events {
             self.usage.project(event);
+        }
+        if !self.usage.has_known_tokens() {
+            events.retain(|event| !matches!(event, AgentEvent::Cost { .. }));
         }
         Ok(events)
     }
@@ -550,14 +563,20 @@ mod tests {
             name: "get_timeline_state".to_owned(),
             result: "project fps=30/1".to_owned(),
         }));
-        assert!(events.contains(&AgentEvent::Cost {
-            input_tokens: 0,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            output_tokens: 0,
-            reasoning_output_tokens: None,
-            cost_usd: Some(0.0042),
-        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Cost { .. })),
+            "C6_UNKNOWN_TOKENS_ARE_NOT_DISPLAY_ZERO"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Usage(usage)
+            if usage.input.is_none() && usage.output.is_none() && !usage.complete
+                && usage.cost_micros == Some(4200))),
+            "C6_UNKNOWN_TOKENS_KEEP_REPORTED_COST"
+        );
         assert_eq!(events.last(), Some(&AgentEvent::Done));
     }
 
@@ -674,6 +693,48 @@ mod tests {
                 cost_usd: Some(0.01),
             }
         );
+    }
+
+    #[test]
+    fn s4b_c6_claude_display_cost_never_mixes_sources_or_zero_fills() {
+        let cost = |line: &str| {
+            ClaudeProtocol::default()
+                .parse_line(line)
+                .unwrap()
+                .into_iter()
+                .find(|event| matches!(event, AgentEvent::Cost { .. }))
+        };
+        // Only modelUsage is authoritative; overlapping main-loop usage is ignored.
+        assert_eq!(
+            cost(
+                r#"{"type":"result","usage":{"input_tokens":5,"output_tokens":2},"modelUsage":{"m":{"inputTokens":9,"cacheReadInputTokens":70,"cacheCreationInputTokens":3,"outputTokens":9}}}"#
+            ),
+            Some(AgentEvent::Cost {
+                input_tokens: 82,
+                cached_input_tokens: Some(70),
+                cache_creation_input_tokens: Some(3),
+                output_tokens: 9,
+                reasoning_output_tokens: None,
+                cost_usd: None,
+            }),
+            "C6_NO_MIXED_USAGE_SOURCES"
+        );
+        // Unknown input or output shows no Cost instead of a zero.
+        for line in [
+            r#"{"type":"result","is_error":false}"#,
+            r#"{"type":"result","usage":{"output_tokens":2}}"#,
+            r#"{"type":"result","modelUsage":{"m":{"inputTokens":3}}}"#,
+        ] {
+            assert_eq!(cost(line), None, "C6_NO_ZERO_FILLED_COST {line}");
+        }
+        // Done still ends the legacy turn either way.
+        assert!(matches!(
+            ClaudeProtocol::default()
+                .parse_line(r#"{"type":"result","is_error":false}"#)
+                .unwrap()
+                .last(),
+            Some(AgentEvent::Done)
+        ));
     }
 
     #[test]
