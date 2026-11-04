@@ -1,7 +1,7 @@
 #[test]
 #[allow(
     clippy::too_many_lines,
-    reason = "fixed complete wakes cover pending and recovered child publications"
+    reason = "fixed complete wakes cover pending, recovered and unpinned child publications"
 )]
 fn te1_full_director_wake_matches_b4e9abc8() {
     use crate::protocol::limits::usage::{UsageAdapter, decode_usage, ingest_usage};
@@ -65,6 +65,7 @@ fn te1_full_director_wake_matches_b4e9abc8() {
         serde_json::json!({"type":"turn.completed","usage":{"input_tokens":71,"cached_input_tokens":50,"output_tokens":8}}),
         serde_json::json!({"type":"turn.started"}),
         serde_json::json!({"type":"turn.completed","usage":{"input_tokens":90,"cached_input_tokens":65,"output_tokens":15}}),
+        serde_json::json!({"type":"future.codex.usage.kind.with.a.long.identifier.that.exceeds.sixty.four.characters", "usage":{"input_tokens":110,"cached_input_tokens":70,"output_tokens":20}}),
     ];
     for (index, raw) in lines.iter().enumerate() {
         let ordinal = index as u64 + 1;
@@ -79,14 +80,7 @@ fn te1_full_director_wake_matches_b4e9abc8() {
                 // TE1_HEAD_END
                 attempt: id(4),
                 turn: 1,
-                event: format!(
-                    "{kind}:{}",
-                    if observed {
-                        format!("{ordinal:016x}")
-                    } else {
-                        kinewright_media::sha256_bytes(&serde_json::to_vec(raw).unwrap())
-                    }
-                ),
+                event: HostCommandOwner::native_usage_event(kind, raw, ordinal).unwrap(),
                 ordinal,
                 mode: UsageMode::Cumulative,
                 values: UsageValues::default(),
@@ -159,7 +153,11 @@ fn te1_full_director_wake_matches_b4e9abc8() {
             .unwrap();
         let payload = owner.result_wake_payload(&[&stored.reference]).unwrap();
         let prompt = owner.codex_prompt(&task, &payload).unwrap();
-        let name = if ordinal == 3 { "pending" } else { "complete" };
+        let name = match ordinal {
+            3 => "pending",
+            4 => "complete",
+            _ => "unpinned",
+        };
         println!(
             "TE1_FULL_WAKE {name} {} bytes {}",
             prompt.len(),
@@ -175,8 +173,10 @@ fn te1_full_director_wake_matches_b4e9abc8() {
         } else {
             let expected: &[u8] = if ordinal == 3 {
                 include_bytes!("../../tests/fixtures/te1-director-wake-pending.json")
-            } else {
+            } else if ordinal == 4 {
                 include_bytes!("../../tests/fixtures/te1-director-wake-complete.json")
+            } else {
+                include_bytes!("../../tests/fixtures/te1-director-wake-unpinned.json")
             };
             assert_eq!(
                 std::str::from_utf8(&prompt).unwrap(),

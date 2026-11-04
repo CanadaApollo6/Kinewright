@@ -121,6 +121,21 @@ pub(crate) fn codex_retry_notice(message: &str) -> bool {
             .is_some_and(|details| !details.is_empty())
 }
 impl HostCommandOwner {
+    pub(super) fn native_usage_event(
+        kind: &str,
+        raw: &serde_json::Value,
+        ordinal: u64,
+    ) -> Result<String, HostError> {
+        Ok(format!(
+            "{}:{}",
+            kind.chars().take(64).collect::<String>(),
+            raw.get("id").map_or_else(
+                || Ok(format!("{ordinal:016x}")),
+                |id| serde_json::to_vec(id).map(|bytes| kinewright_media::sha256_bytes(&bytes))
+            )?
+        ))
+    }
+
     pub(crate) fn spending_scope(
         &mut self,
         producer: &HostAuth,
@@ -596,20 +611,7 @@ impl HostCommandOwner {
         {
             return Ok(());
         }
-        let event = format!(
-            "{}:{}",
-            match kind {
-                "turn.completed" => "turn.completed",
-                "turn.usage" => "turn.usage",
-                "turn.started" => "turn.started",
-                "native.eof" => "native.eof",
-                _ => "provider_usage",
-            },
-            raw.get("id").map_or_else(
-                || Ok(format!("{ordinal:016x}")),
-                |id| serde_json::to_vec(id).map(|bytes| kinewright_media::sha256_bytes(&bytes))
-            )?
-        );
+        let event = Self::native_usage_event(kind, raw, ordinal)?;
         let old = task
             .usage
             .iter()

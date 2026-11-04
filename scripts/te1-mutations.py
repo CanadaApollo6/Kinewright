@@ -97,7 +97,7 @@ mutations = [
      "measurements.incomplete |= !attached;", "measurements.incomplete |= !attached && false;",
      ["--lib"], "writer_host::hooks_tests::tests::te1_review_native_size_observer_survives_missing_host_and_poison"),
     ("native-size-loss", "crates/kinewright-agent/src/server.rs",
-     "metrics.incomplete |= native_recorded == Some(false);", "metrics.incomplete |= native_recorded == Some(false) && false;",
+     "metrics.incomplete |= !native_recorded;", "metrics.incomplete |= !native_recorded && false;",
      ["--lib"], "writer_host::hooks_tests::tests::te1_review_native_size_loss_is_visible_and_sticky_after_detach"),
     ("serialized-reserve", "crates/kinewright-agent/src/writer_host/native_spending.rs",
      "size > kinewright_project::run_admission::ACCOUNTING_BYTES - 4096",
@@ -125,13 +125,10 @@ mutations = [
     ("observer-revision", ACCOUNTING,
      "|| self.observer_publications < previous.observer_publications", "|| false",
      ["--test", "te1_usage"], "te1_observer_revision_offset_is_bounded_and_persists"),
-    ("size-teardown", "crates/kinewright-agent/src/writer_host/task_mcp.rs",
-     "let _attachment_guard = host;", "drop(host);",
-     ["--lib"], "writer_host::hooks_tests::tests::te1_size_observation_cannot_cross_host_teardown"),
-
-    ("wire-unobserved", "crates/kinewright-agent/src/server.rs",
-     "metrics.incomplete |= native_recorded == Some(false);", "metrics.incomplete |= native_recorded != Some(true);",
-     ["--test", "te1_results"], "te1_result_bytes_match_the_result_received_over_mcp"),
+    ("full-wake-kind", "crates/kinewright-agent/src/writer_host/native_spending.rs",
+     'kind.chars().take(64).collect::<String>(),',
+     'match kind { "turn.completed" | "turn.usage" | "turn.started" | "native.eof" => kind.to_owned(), _ => "provider_usage".to_owned() },',
+     ["--lib"], "writer_host::hooks_tests::tests::te1_full_director_wake_matches_b4e9abc8"),
 
 ]
 proof = []

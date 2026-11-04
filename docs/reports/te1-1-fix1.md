@@ -246,3 +246,20 @@ release evidence refresh, Windows runtime execution, or final-head hosted CI.
 Full workspace fast/slow runners and ignored equipped-session witnesses remain CI
 scope as in the original brief; full changed-crate suites and the required Windows
 compile/lint script are local gates. No subagents were used. No push.
+
+
+## Deferred Minors from Muse's recheck of 9a2b93b2
+
+Per the lead's fix-2 scope, these are follow-ups, not fixes in this round:
+
+- **New Minor 4, native result sizes:** off Linux `record_size` returns false,
+  conservatively marking wire size metrics incomplete. On Linux, host attachment
+  is checked before recording into the retained observer; teardown can land
+  between those steps, leaving counts without a later durable publication or
+  incomplete flag. This affects result-size reporting, not token ceilings.
+  Follow up with independent off-Linux wire coverage and a teardown-race witness.
+- **New Minor 5, native ordinal resume:** current native launches are fresh,
+  with `stream = attempt` and no resume arguments. Before enabling native resume,
+  bind identities to the attempt or seed ordinals from the retained stream ledger.
+  Otherwise an ordinal reused with a changed payload refuses closed. Add native
+  resume/replay/collision witnesses when that launcher support is introduced.

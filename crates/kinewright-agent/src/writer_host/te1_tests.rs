@@ -33,40 +33,6 @@ fn te1_sizes_do_not_stale_controls_and_flush_with_accounting() {
 }
 
 #[test]
-fn te1_size_observation_cannot_cross_host_teardown() {
-    use super::super::task_mcp::{SizeObservationGate, TaskMcp};
-    let f = Fixture::new();
-    let (run, execution, _director) = c4_director(&f);
-    let host = f.host.owner.upgrade().unwrap();
-    let gate = Arc::new(SizeObservationGate {
-        entered: std::sync::Barrier::new(2),
-        proceed: std::sync::Barrier::new(2),
-    });
-    let control = {
-        let owner = host.lock().unwrap();
-        let retained = &owner.hooks.runs[&run];
-        TaskMcp::new(
-            Arc::downgrade(&host),
-            owner.run_producer(&run).unwrap(),
-            retained.tasks[&execution.task].endpoint(),
-            retained.measurements[&execution.task].clone(),
-            None,
-        )
-        .with_size_gate(gate.clone())
-    };
-    let worker = std::thread::spawn(move || control.record_size("task_status", Some(17)));
-    gate.entered.wait();
-    let teardown_excluded = matches!(host.try_lock(), Err(std::sync::TryLockError::WouldBlock));
-    gate.proceed.wait();
-    let result = worker.join().unwrap();
-    assert!(
-        teardown_excluded,
-        "host teardown must remain excluded through the measurement write"
-    );
-    assert_eq!(result, Some(true));
-}
-
-#[test]
 fn te1_review_native_size_loss_is_visible_and_sticky_after_detach() {
     for missing_run in [false, true] {
         let f = Fixture::new();
@@ -172,7 +138,7 @@ fn te1_review_native_size_observer_survives_missing_host_and_poison() {
                 .is_err()
             );
         }
-        assert_eq!(control.record_size("task_status", Some(13)), Some(false));
+        assert!(!control.record_size("task_status", Some(13)));
         host.clear_poison();
         let retained = host.lock().unwrap().hooks.runs[&run].measurements[&execution.task].clone();
         assert_eq!(retained.lock().unwrap().result_count, 2);

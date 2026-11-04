@@ -1,7 +1,8 @@
 # TE1.1 fix 2
 
 This consolidates the unpushed performance commit `2e8acc88` with Astra's full-wake
-recheck correction and Muse's applicable size-observer corrections. Parent is
+recheck correction and Muse's wake compatibility and validation cleanup Minors.
+Parent is
 `9a2b93b284ac3f8677e9f97c849ee27feb7d2015`. One local fix-2 commit, no push.
 The first fix's findings, counters, corpus pins and historical A/B remain in
 [the first fix report](te1-1-fix1.md) and [the counter report](te1-1.md).
@@ -18,19 +19,24 @@ production decode, ingestion, successor validation, real store admission, the
 complete wake assembler and the ordinary Codex wrapper. The base harness compiles
 these against `b4e9abc8`, using the exact wake assembly copied from that source.
 The base uses its legacy event naming and skips starts; the head adds snapshot
-and size observations and their corresponding publications. Initial start, first final, a size-only
-publication, another start and a recovered final produce pending and recovered
-wakes. No identities or metadata are removed or normalized in the comparison.
+and size observations and their corresponding publications. Initial start, first
+final, a size-only publication, another start and a recovered final produce pending
+and recovered
+wakes. An unpinned usage-bearing event with a kind longer than 64 characters
+then exercises the exact base truncation and kind label. No identities or metadata
+are removed or normalized in the comparison.
 
 | Full base prompt | Bytes | SHA-256 |
 | --- | ---: | --- |
 | Pending child | 5494 | 343395316528fb70c60003430447de1fff922b8b01c28d8bd79af7b8278e7cd1 |
 | Recovered child | 5892 | 46faed1cf29baa5523b6f106dc4916a7b7b3dd08f5ee0293dd840cd6bd36426d |
+| Unpinned kind | 6345 | 7c5e495f5c103258f2977dce3f8d3aa8bd132ce09c5171ddb4021f71aa674f2b |
 
-The pre-fix full-prompt witness failed, 0 passed / 1 failed. The repaired witness
-matches both base captures. The earlier accounting-body golden remains a separate
-boundary and is retained. The base capture, harness patch, driver, exact-source
-fragment hash and logs are under `target/te1-fix2-wake/`.
+The earlier pre-fix full-prompt witness failed, 0 passed / 1 failed (historical
+logs under `target/te1-fix2-wake/`). The final-source golden matches all three
+base captures and all four full-wake mutants fail before restoration. The earlier
+accounting-body golden remains a separate boundary and is retained. The base capture, harness patch, driver, exact-source
+fragment hash and logs are under `target/te1-fix2-muse/`.
 
 The actual stored `TaskResult` and its real host-owned `usage_ref` are unchanged.
 The wake first reads and verifies those real records. A Serialize-only wire
@@ -77,33 +83,29 @@ for the superseded source. Its report is archived under
 
 ## Muse recheck
 
-Muse's recheck approves the original spending fixes and identifies minor residuals.
-The full-wake projection recomputes displayed totals after stripping starts.
-The redundant encode/task clone removals above were already in fix 2.
+Muse approves the original spending fixes. New Minors 1–3 are included here:
 
-Size recording now retains the host lock through the measurement write in the
-existing host-to-measurement lock order. Final publication or teardown cannot
-interleave between attachment validation and recording. A two-barrier fixture
-holds the recorder at that boundary and verifies teardown remains excluded; it
-releases and joins its worker before asserting, including under the mutant.
+- Native usage identities retain the actual provider kind, truncated to the base
+  limit of 64 characters, alongside the ordinal. The complete production wake
+  restores its base hash identity. The full-prompt golden includes an unpinned
+  usage-bearing kind and a mutation that substitutes `provider_usage`.
+- The provider view normalizes totals after stripping starts. The pending golden
+  follows a completed result with another start: authoritative coverage is
+  incomplete, while displayed samples and totals match the complete base wake.
+- Validation borrows stream prefixes instead of cloning the entire task.
 
-Native size recording returns an optional observation. Off Linux it is unobserved,
-which does not poison independently observed wire request/result completeness.
-A known native failure still marks wire metrics incomplete. The real-MCP byte
-witness covers that independent wire path. No per-tool publication or fsync is added.
-Windows runtime remains unrun; the required Windows compile/lint gate is below.
-
-Future unpinned event kinds and native resume assumptions are explicit follow-ups
-in [the counter report](te1-1.md). No arbitrary raw kind text is newly retained,
-and no native resume route is enabled.
+New Minors 4 and 5 are explicitly deferred in
+[the first fix report](te1-1-fix1.md#deferred-minors-from-muses-recheck-of-9a2b93b2).
+The unpushed size-recording changes previously included in fix 2 were reverted to
+9a2b93b2 as directed. No native size portability/race fix or resume route is added.
 
 ## Mutation pairs
 
-All 27 final-source mutation pairs pass. Each RED executes exactly one witness
+All 26 final-source mutation pairs pass. Each RED executes exactly one witness
 and fails it; each byte-identically restored GREEN executes exactly that witness
 and passes it. The runner checks restored bytes and SHA-256 before and after
 GREEN. All subject files match their backups after the last pair. Full proofs,
-byte backups and RED/GREEN logs are in `target/te1-fix2-wake/mutations/`, indexed
+byte backups and RED/GREEN logs are in `target/te1-fix2-muse/mutations/`, indexed
 by `pairs.json`.
 
 | Mutation | RED | Byte-identical restore / GREEN |
@@ -133,13 +135,12 @@ by `pairs.json`.
 | `full-wake-revision` | 0 passed / 1 failed | 1 passed / 0 failed |
 | `full-wake-totals` | 0 passed / 1 failed | 1 passed / 0 failed |
 | `observer-revision` | 0 passed / 1 failed | 1 passed / 0 failed |
-| `size-teardown` | 0 passed / 1 failed | 1 passed / 0 failed |
-| `wire-unobserved` | 0 passed / 1 failed | 1 passed / 0 failed |
+| `full-wake-kind` | 0 passed / 1 failed | 1 passed / 0 failed |
 
-The six additions are complete-wake reference projection, complete-wake revision,
-stripped wake totals, durable observer-counter regression, size-teardown exclusion,
-and unobserved-native versus complete wire metrics. All original 21 pairs remain,
-with the moved wake sites and optional native-size API reflected in their anchors.
+The five additions to the original 21 are complete-wake reference projection,
+complete-wake revision, stripped wake totals, durable observer-counter regression
+and the unpinned native kind. Original size-loss witnesses remain; deferred
+size-teardown and off-Linux corrections have no fix-2 mutation claims.
 
 ## Full gates
 
@@ -147,20 +148,20 @@ with the moved wake sites and optional native-size API reflected in their anchor
 | --- | ---: | ---: | ---: | ---: |
 | core | 815 | 0 | 1 | 20 |
 | project | 426 | 0 | 2 | 18 |
-| agent | 1304 | 0 | 70 | 28 |
+| agent | 1303 | 0 | 70 | 28 |
 | app | 971 | 0 | 5 | 1 |
 
-All 3,516 tests pass with zero failures and 78 ignored across 67 targets. Formatting
+All 3,515 tests pass with zero failures and 78 ignored across 67 targets. Formatting
 and Linux workspace all-targets clippy pass. The Windows script passes workspace
 all-targets and Agent slow-feature all-targets compilation/lint for MSVC. Manifest
 lint reports 118 tests, 121 well-formed allowlist entries and 27 equipped-session
 skip sites. All 44 Python self-tests pass. Windows runtime was not exercised.
 
-All 716 pinned crate/source/fixture, Cargo and gate-helper files match
+All 717 pinned crate/source/fixture, Cargo and gate-helper files match
 after the gates. The manifest SHA-256 is
-`c2db921bca0558888e7ab322753b5cbd74694e4404dffe82ba7042d92c2cae23`.
+`122a15866dc845d739aea8ef0dcbe1779b863fb9cc7421405aca4280ca89ae62`.
 Exact logs, start/end stamps, exit files and counts are under
-`target/te1-fix2-wake/`. The earlier 2e8acc88 gate evidence is historical.
+`target/te1-fix2-muse/`. Earlier fix-2 evidence is historical.
 
 The commands remain the original TE1.1 full gate commands. Every Cargo command
 sources FFmpeg in the same shell and uses the shared flock, four build jobs and
@@ -169,9 +170,8 @@ LOCALAPPDATA are under the owning physical target.
 
 ## Final maximal and paired qualification
 
-Both final-source pairs pass the approximate 10% upper budget. Pair 1 was near
-the boundary and triggered the predeclared repeat; pair 2 used the same frozen
-source and binaries. Neither pair waited for a quiet machine. Both selected
+The final-source pair passes the approximate 10% upper budget. No repeat was required.
+No pair waited for a quiet machine. Both selected
 library-test binaries use opt-level 0, line-tables-only debug information, debug
 assertions and overflow checks, with default, eval-harness, slow-tests and test-util
 features. All 308 shared artifact profiles/features match; both compilers are
@@ -179,8 +179,7 @@ identical (saved toolchain-A/B.txt). A uses its own physical target/w/target.
 
 | Pair | A fixture seconds | B fixture seconds | Wall B/A | CPU B/A | A load 1m | B load 1m |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
-| pair1 | 2970.71 | 3265.89 | 1.0993 | 1.0707 | 2.31 → 23.97 | 23.97 → 3.69 |
-| pair2 | 2530.72 | 2519.59 | 0.9956 | 0.9971 | 3.28 → 3.11 | 3.11 → 1.75 |
+| pair1 | 2551.17 | 2512.70 | 0.9849 | 0.9857 | 4.43 → 1.98 | 1.98 → 1.41 |
 
 Each run exits zero and passes this exact work/recovery summary:
 
@@ -188,8 +187,7 @@ Each run exits zero and passes this exact work/recovery summary:
 C5_FIX1_MAXIMAL clocks=720 tasks=8 sends=128 attempts=24 max_depth=7 stop=true cleanup=true reopen_exact=true
 ```
 
-Both B runs gate the final-source maximal fixture. Their durations are **3265.89 s**, **2519.59 s**,
-each 1 passed / 0 failed / 0 ignored. The managed processes are awaited directly
+The final-source B maximal passes in **2512.70 s**: 1 passed / 0 failed / 0 ignored. The managed processes are awaited directly
 through exit, with no other build or test from this worker during timing. The
 ignored library test is invoked directly with its full exact name and
 `--exact --ignored --nocapture`; build and shared-lock wait are outside the timers.
@@ -203,14 +201,10 @@ a statistically significant speedup from any individual removal.
 
 | Run / boundary | UTC | `uptime` output | Raw `/proc/loadavg` |
 | --- | --- | --- | --- |
-| pair1-A start | 2026-11-03T20:41:01.757644+00:00 | `15:41:01 up 20:53,  1 user,  load average: 2.31, 3.95, 4.67` | `2.31 3.95 4.67 3/2419 617641` |
-| pair1-A end | 2026-11-03T21:30:32.875378+00:00 | `16:30:32 up 21:43,  1 user,  load average: 23.97, 12.83, 11.83` | `23.97 12.83 11.83 22/3001 1264900` |
-| pair1-B start | 2026-11-03T21:30:33.246201+00:00 | `16:30:33 up 21:43,  1 user,  load average: 23.97, 12.83, 11.83` | `23.97 12.83 11.83 27/2972 1265127` |
-| pair1-B end | 2026-11-03T22:24:59.275619+00:00 | `17:24:59 up 22:37,  1 user,  load average: 3.69, 11.54, 14.88` | `3.69 11.54 14.88 2/2910 2967092` |
-| pair2-A start | 2026-11-03T22:25:16.333282+00:00 | `17:25:16 up 22:37,  1 user,  load average: 3.28, 10.94, 14.61` | `3.28 10.94 14.61 2/2883 2973783` |
-| pair2-A end | 2026-11-03T23:07:27.151143+00:00 | `18:07:27 up 23:20,  1 user,  load average: 3.11, 2.99, 3.63` | `3.11 2.99 3.63 2/2473 4079015` |
-| pair2-B start | 2026-11-03T23:07:27.215094+00:00 | `18:07:27 up 23:20,  1 user,  load average: 3.11, 2.99, 3.63` | `3.11 2.99 3.63 3/2472 4079054` |
-| pair2-B end | 2026-11-03T23:49:26.889093+00:00 | `18:49:26 up 1 day, 2 min,  1 user,  load average: 1.75, 1.76, 2.05` | `1.75 1.76 2.05 1/2415 975782` |
+| pair1-A start | 2026-11-04T00:44:43.977657+00:00 | `19:44:43 up 1 day, 57 min,  1 user,  load average: 4.43, 3.24, 3.16` | `4.43 3.24 3.16 2/2444 3366881` |
+| pair1-A end | 2026-11-04T01:27:15.238396+00:00 | `20:27:15 up 1 day,  1:39,  1 user,  load average: 1.98, 1.70, 1.77` | `1.98 1.70 1.77 2/2335 276269` |
+| pair1-B start | 2026-11-04T01:27:15.762463+00:00 | `20:27:15 up 1 day,  1:39,  1 user,  load average: 1.98, 1.70, 1.77` | `1.98 1.70 1.77 1/2334 276535` |
+| pair1-B end | 2026-11-04T02:09:08.605140+00:00 | `21:09:08 up 1 day,  2:21,  1 user,  load average: 1.41, 1.57, 1.67` | `1.41 1.57 1.67 1/2362 1359893` |
 
 Snapshots also retain CPU affinity/count and CPU/I/O pressure. The following are
 last own-PID samples; dividing by 128 is an aggregate per-fixture-send measure,
@@ -218,24 +212,22 @@ not instrumentation of individual sends, tool calls or fsyncs.
 
 | Run | Logical write bytes | Write calls | Logical bytes / send | Calls / send | Sample to end snapshot, seconds |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| pair1-A | 566,186,429 | 19,264 | 4,423,331.48 | 150.50 | 0.829 |
-| pair1-B | 567,210,215 | 19,307 | 4,431,329.80 | 150.84 | 0.150 |
-| pair2-A | 566,160,159 | 19,229 | 4,423,126.24 | 150.23 | 1.021 |
-| pair2-B | 567,182,425 | 19,222 | 4,431,112.70 | 150.17 | 0.931 |
+| pair1-A | 565,989,856 | 19,240 | 4,421,795.75 | 150.31 | 0.509 |
+| pair1-B | 567,187,597 | 19,271 | 4,431,153.10 | 150.55 | 0.116 |
 
 Store verification counters, full process I/O samples, exact CPU/wall timers,
 matched build JSON and all fixture logs are retained under
-`target/te1-fix2-wake/ab/`, indexed by `results.json`. Verification calls/bytes are
+`target/te1-fix2-muse/ab/`, indexed by `results.json`. Verification calls/bytes are
 not cumulative-store write or fsync counts. Fsync and observer records per send
 were not separately instrumented. No new per-tool durable publication is added.
 
-All 716 gated source inputs and both binary hashes match before and after timing.
-The B library-test binary SHA-256 is `7d96a2f233c8690c40cec00032baeb8dc8e3fcf2516218eb28a9b76d4d087b7e`; A is
-`bf51976cc5c5881a983d45cb6618ca23c09ebab9a6065a136c82499c50431645`.
+All 717 gated source inputs and both binary hashes match before and after timing.
+The B library-test binary SHA-256 is `b2967556471546807d16de19c2909d990db2c2123bf5260f970a80aa0be09cc0`; A is
+`b32b2cda7a2603f8eeba2ff1dcf1141559f27ce47fcedc40b24cd43486c42df8`.
 The review copy is checked clean at b4e9abc8 before deletion, then removed with
 its independent target. The shared lock file is retained. No product source
 changes after timing. Final source, restore and cleanup proofs are under
-`target/te1-fix2-wake/`.
+`target/te1-fix2-muse/`.
 
 Only maximal fixtures use managed background execution and are awaited directly,
 as explicitly approved. Build and lock wait are outside the paired timers. Each
@@ -246,17 +238,16 @@ CPU/wall disagreement about the approximate 1.10 upper budget.
 
 ## File list
 
-- `crates/kinewright-agent/src/server.rs`
 - `crates/kinewright-agent/src/writer_host/hooks_tests.rs`
 - `crates/kinewright-agent/src/writer_host/native_invocation.rs`
 - `crates/kinewright-agent/src/writer_host/native_spending.rs`
 - `crates/kinewright-agent/src/writer_host/native_wake.rs`
-- `crates/kinewright-agent/src/writer_host/task_mcp.rs`
 - `crates/kinewright-agent/src/writer_host/te1_prompt_tests.rs`
 - `crates/kinewright-agent/src/writer_host/te1_tests.rs`
 - `crates/kinewright-agent/src/writer_host/te1_wake_tests.rs`
 - `crates/kinewright-agent/tests/fixtures/te1-director-wake-complete.json`
 - `crates/kinewright-agent/tests/fixtures/te1-director-wake-pending.json`
+- `crates/kinewright-agent/tests/fixtures/te1-director-wake-unpinned.json`
 - `crates/kinewright-agent/tests/te1_usage.rs`
 - `crates/kinewright-project/src/orchestration_accounting.rs`
 - `docs/reports/te1-1-fix1.md`
