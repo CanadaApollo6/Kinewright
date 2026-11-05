@@ -144,6 +144,55 @@ pub struct PublishResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FinishTask {
+    pub task: TaskId,
+    pub expected_revision: kinewright_core::TimelineRevision,
+}
+
+/// Accepted before either completion side effect. Substep identities never
+/// depend on a retry's clock, generation, endpoint or owner incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionIntent {
+    pub id: CommandId,
+    pub digest: CommandDigest,
+    pub attempt: AttemptId,
+    pub request: FinishTask,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionStep {
+    Freeze,
+    Publication,
+}
+impl CompletionIntent {
+    pub fn step_id(&self, step: CompletionStep) -> Result<CommandId, Refusal> {
+        // Leave room for the issuer cursor after the final publication, too.
+        self.id.sequence.checked_add(3).ok_or(Refusal::Capacity)?;
+        Ok(CommandId {
+            issuer: self.id.issuer.clone(),
+            sequence: self.id.sequence
+                + match step {
+                    CompletionStep::Freeze => 1,
+                    CompletionStep::Publication => 2,
+                },
+        })
+    }
+    pub fn validate(&self, task: &TaskId) -> Result<(), Refusal> {
+        if self.id.sequence == 0
+            || &self.request.task != task
+            || self.digest
+                != task_command_digest(&OrchestrationCommand::FinishTask(self.request.clone()))?
+        {
+            return Err(Refusal::ScopeConflict);
+        }
+        self.step_id(CompletionStep::Publication)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnswerQuestion {
     pub question: QuestionId,
     pub answer: ObjectRef,
@@ -169,6 +218,7 @@ pub enum OrchestrationCommand {
     AssignTask(Box<AssignTask>),
     FreezeTask(TaskId),
     PublishResult(Box<PublishResult>),
+    FinishTask(FinishTask),
     ObserveDelivery(DeliveryId),
     AnswerQuestion(AnswerQuestion),
     CancelTask(TaskId),
@@ -476,6 +526,8 @@ pub struct TaskProgress {
     pub background: u32,
     pub feedback: Vec<ObjectRef>,
     pub decisions: Vec<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<Box<CompletionIntent>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -21,6 +21,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 pub(crate) const CAPABILITIES: &[(&str, &str)] = &[
     (
+        "finish_task",
+        "Freeze and publish the current revision with one durable completion identity. Retry the original id and payload. Frozen-only work is pending; completion also requires any parent delivery to be observed.",
+    ),
+    (
         "undo_task_edit",
         "Undo a scoped edit while retaining the exact redo history.",
     ),
@@ -392,6 +396,7 @@ impl TaskMcp {
             OrchestrationCommand::AssignTask(_) => "assign_task",
             OrchestrationCommand::FreezeTask(_) => "freeze_task",
             OrchestrationCommand::PublishResult(_) => "publish_result",
+            OrchestrationCommand::FinishTask(_) => "finish_task",
             OrchestrationCommand::MergeTask(_) => "merge_task",
             OrchestrationCommand::ObserveDelivery(_) => "observe_delivery",
             OrchestrationCommand::CancelTask(_) => "cancel_task",
@@ -536,6 +541,10 @@ impl TaskMcp {
         };
         let receipt = host.dispatch_orchestration(index, &request)?;
         self.remember_terminal_state(&host);
+        if let OrchestrationCommand::FinishTask(finish) = &request.envelope.command {
+            let status = host.completion_reply_status(&state.run, finish, &receipt.envelope.id);
+            return Ok(json!({"receipt":receipt,"completion_status":status}));
+        }
         if receipt.decision == CommandDecision::Applied
             && let Some(task) = freeze
         {
@@ -656,8 +665,15 @@ impl HostCommandOwner {
             .ok_or_else(|| refused("freeze attempt missing"))?
             .identity
             .clone();
+        let expected = update
+            .projection()
+            .tasks
+            .iter()
+            .find(|task| task.id == *target)
+            .and_then(|task| task.progress.completion.as_deref())
+            .map(|intent| intent.request.expected_revision);
         let frozen = runtime
-            .freeze(self.owner_mut()?)
+            .freeze_at_revision(self.owner_mut()?, expected)
             .map(|_| ())
             .map_err(HostError::from);
         self.hooks

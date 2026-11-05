@@ -492,6 +492,7 @@ pub(crate) trait FeedbackPort {
     }
     fn run_view(&self, run: &RunId) -> Result<RunViewPage, String> {
         Ok(RunViewPage {
+            completions: vec![],
             projection: self.observe(run)?,
             accounting: None,
             runtime_status: None,
@@ -3325,6 +3326,7 @@ impl KinewrightApp {
                             for task in &state.view.tasks {
                                 ui.colored_label(po0::TEXT_2, format!("{} · {}", task.provider, task.model));
                                 ui.small(&task.usage);
+                                if let Some(completion) = &task.completion { ui.small(completion); }
                             }
                             ui.small(&state.view.elapsed);
                             if let Some(status) = &state.view.runtime_status { ui.small(status); }

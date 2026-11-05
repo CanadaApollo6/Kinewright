@@ -522,6 +522,9 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
         return Err(Refusal::InvalidState);
     }
     for task in &state.tasks {
+        if let Some(intent) = &task.progress.completion {
+            intent.validate(&task.id)?;
+        }
         if let super::orchestration_records::DependencyReservation::Backed(id) =
             &task.progress.capacity
             && !state

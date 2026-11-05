@@ -88,6 +88,7 @@ impl HostCommandOwner {
         self.hooks.runs.insert(
             run.clone(),
             HostRun {
+                recovery_blocks: vec![],
                 #[cfg(target_os = "linux")]
                 measurements: BTreeMap::new(),
                 producer,

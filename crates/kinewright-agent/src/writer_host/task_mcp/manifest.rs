@@ -16,6 +16,7 @@ pub(crate) const DIRECTOR: &[&str] = &[
     "cancel_task",
     "answer_question",
     "send_message",
+    "finish_task",
 ];
 pub(crate) const EDITOR: &[&str] = &[
     "get_timeline_state",
@@ -30,6 +31,7 @@ pub(crate) const EDITOR: &[&str] = &[
     "wait_task",
     "freeze_task",
     "publish_result",
+    "finish_task",
 ];
 pub(crate) const REVIEWER: &[&str] = &[
     "get_timeline_state",
@@ -39,6 +41,7 @@ pub(crate) const REVIEWER: &[&str] = &[
     "wait_task",
     "freeze_task",
     "publish_result",
+    "finish_task",
 ];
 pub(crate) fn names(role: Role) -> &'static [&'static str] {
     match role {

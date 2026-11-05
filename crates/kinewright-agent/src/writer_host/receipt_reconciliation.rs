@@ -44,6 +44,8 @@ pub enum ReceiptReply {
     Stored {
         outcome: serde_json::Value,
         receipt: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<Box<super::CompletionStatus>>,
     },
     Pending,
     Unknown,
@@ -142,6 +144,22 @@ impl HostCommandOwner {
             let outcome = self.stored_task_outcome(&receipt)?;
             return Ok(ReceiptReply::Stored {
                 outcome,
+                completion: if let OrchestrationCommand::FinishTask(finish) =
+                    &receipt.envelope.command
+                {
+                    let intent = state
+                        .tasks
+                        .iter()
+                        .find(|task| task.id == finish.task)
+                        .and_then(|task| task.progress.completion.as_deref())
+                        .ok_or_else(refused)?;
+                    if intent.id != query.id {
+                        return Err(refused());
+                    }
+                    Some(Box::new(self.completion_status(&state, intent)?))
+                } else {
+                    None
+                },
                 receipt: serde_json::to_value(receipt)?,
             });
         }
@@ -186,6 +204,7 @@ impl HostCommandOwner {
                         ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => {
                             let receipt = serde_json::to_value(receipt)?;
                             Ok(ReceiptReply::Stored {
+                                completion: None,
                                 outcome: serde_json::json!({"receipt":receipt,"reconciliation":ReceiptQuery {
                                     project:origin.caller.project.clone(),run:origin.caller.run.clone(),task:origin.caller.task.clone(),attempt:origin.caller.attempt.clone(),id:origin.id.clone(),digest:Some(origin.digest.clone()),command:None,
                                 }}),

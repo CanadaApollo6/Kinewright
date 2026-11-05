@@ -156,6 +156,7 @@ pub fn decide(
         (
             Some(state),
             OrchestrationCommand::RecordContext { .. }
+            | OrchestrationCommand::FinishTask(_)
             | OrchestrationCommand::SettleExpiredBackground(_)
             | OrchestrationCommand::WaitTimeout(_)
             | OrchestrationCommand::CancelTask(_),
@@ -163,6 +164,7 @@ pub fn decide(
         (
             Some(_),
             OrchestrationCommand::RecordContext { .. }
+            | OrchestrationCommand::FinishTask(_)
             | OrchestrationCommand::BeginTurn(_)
             | OrchestrationCommand::EndTurn(_)
             | OrchestrationCommand::BackgroundWork(_, _)

@@ -1402,6 +1402,7 @@ impl KinewrightMcp {
         let tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
         let has_receipt = crate::writer_host::task_mcp::is_capability(&request.name);
         let is_publication = request.name == "publish_result";
+        let is_completion = request.name == "finish_task";
         let reply = self.call_exposed_inner(request);
         let code = match &reply {
             Ok(result) if result.is_error == Some(true) => {
@@ -1453,7 +1454,17 @@ impl KinewrightMcp {
         } else {
             None
         };
+        let completion_status = if is_completion && !failed {
+            outcome
+                .as_object_mut()
+                .and_then(|value| value.remove("completion_status"))
+        } else {
+            None
+        };
         let mut value = control.reply(outcome, receipt);
+        if let Some(status) = completion_status {
+            value["completion_status"] = status;
+        }
         if let Some(status) = publication_status {
             value["publication_status"] = status;
         }
@@ -2721,19 +2732,22 @@ impl KinewrightMcp {
                     self.request_asset_analysis(asset);
                 }
                 let footer = self.remaining_silence_footer(&doc);
-                success_text(format!(
-                    "{}{footer}",
-                    render_plan_outcomes(
-                        operations,
-                        None,
-                        Some(state_delta(
-                            "apply_edit_plan",
-                            Some(&before),
-                            &doc,
-                            revision,
-                        )),
-                    )
-                ))
+                success_structured(
+                    format!(
+                        "{}{footer}",
+                        render_plan_outcomes(
+                            operations,
+                            None,
+                            Some(state_delta(
+                                "apply_edit_plan",
+                                Some(&before),
+                                &doc,
+                                revision,
+                            )),
+                        )
+                    ),
+                    serde_json::json!({"revision":revision,"affected_scope":committed_scope(&before,&doc,operations)}),
+                )
             }
             Event::BatchRejected { error, .. } => {
                 error_text(render_plan_outcomes(operations, Some(&error), None))
@@ -17943,6 +17957,74 @@ fn compose_contact_sheet(
         height,
         pixels,
     })
+}
+
+/// Conservative JSON-pointer scope of the exact committed before/after pair.
+/// Changed collections are covered by their parent path. Oversize or unavailable
+/// projections cover the document root; reporting cannot undo an accepted edit.
+fn committed_scope(
+    before: &Document,
+    after: &Document,
+    operations: &[Operation],
+) -> serde_json::Value {
+    fn paths(
+        before: &serde_json::Value,
+        after: &serde_json::Value,
+        path: &str,
+        out: &mut Vec<String>,
+        bytes: &mut usize,
+    ) {
+        if before == after || out.first().is_some_and(String::is_empty) {
+            return;
+        }
+        if out.len() >= 256 || *bytes > 16_384 {
+            out.clear();
+            out.push(String::new());
+            return;
+        }
+        match (before, after) {
+            (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+                let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).collect();
+                for key in keys {
+                    let next = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                    if let (Some(a), Some(b)) = (a.get(key), b.get(key)) {
+                        paths(a, b, &next, out, bytes);
+                    } else {
+                        *bytes += next.len();
+                        out.push(next);
+                    }
+                    if out.first().is_some_and(String::is_empty) {
+                        break;
+                    }
+                }
+            }
+            (serde_json::Value::Array(a), serde_json::Value::Array(b)) if a.len() == b.len() => {
+                for (index, (a, b)) in a.iter().zip(b).enumerate() {
+                    paths(a, b, &format!("{path}/{index}"), out, bytes);
+                    if out.first().is_some_and(String::is_empty) {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                *bytes += path.len();
+                out.push(path.into());
+            }
+        }
+    }
+    let mut changed = Vec::new();
+    match (serde_json::to_value(before), serde_json::to_value(after)) {
+        (Ok(before), Ok(after)) => paths(&before, &after, "", &mut changed, &mut 0),
+        _ => changed.push(String::new()),
+    }
+    if changed.len() > 256 || changed.iter().map(String::len).sum::<usize>() > 16_384 {
+        changed = vec![String::new()];
+    }
+    let names: std::collections::BTreeSet<_> = operations
+        .iter()
+        .map(crate::orchestration::policy::operation_name)
+        .collect();
+    serde_json::json!({"operations":names,"paths":changed})
 }
 
 fn state_delta(

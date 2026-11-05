@@ -33,6 +33,9 @@ impl HostCommandOwner {
             return Err(refused("recovery-only owner cannot reserve sends"));
         }
         let mut state = self.spending_scope(producer, run)?;
+        if !self.run_recovery_blocks(&state)?.is_empty() {
+            return Ok(None);
+        }
         self.archive_retired_attempts(&mut state)?;
         if state
             .attempts
@@ -228,6 +231,12 @@ impl HostCommandOwner {
             .brief
             .clone();
         self.retain_run(run, &brief)?;
+        let blocks = self.inspect_recovery_blocks(&state)?;
+        self.hooks
+            .runs
+            .get_mut(run)
+            .ok_or_else(|| refused("recovery run missing"))?
+            .recovery_blocks = blocks;
         Ok((self.run_producer(run)?, state))
     }
 }

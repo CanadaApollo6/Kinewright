@@ -414,11 +414,35 @@ impl EditorTask {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<&FrozenTaskResult, BundleError> {
+        self.freeze_at_revision(owner, None)
+    }
+    pub(crate) fn freeze_at_revision(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+        expected: Option<kinewright_core::TimelineRevision>,
+    ) -> Result<&FrozenTaskResult, BundleError> {
+        let _drain = self
+            .endpoint
+            .close_and_drain()
+            .map_err(BundleError::Unsupported)?;
+        if let Some(expected) = expected {
+            let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
+                revision,
+                ..
+            }) = self
+                .core()
+                .request(kinewright_core::Command::Query(
+                    kinewright_core::Query::Snapshot,
+                ))
+                .map_err(|error| BundleError::Corrupt(error.to_string()))?
+            else {
+                return Err(BundleError::HistoryChanged);
+            };
+            if revision != expected {
+                return Err(BundleError::Unsupported("timeline revision changed".into()));
+            }
+        }
         if self.frozen.is_none() {
-            let _drain = self
-                .endpoint
-                .close_and_drain()
-                .map_err(BundleError::Unsupported)?;
             self.frozen = Some(owner.freeze_registered_task_checkpoint(&mut self.registration)?);
         }
         self.frozen.as_ref().ok_or(BundleError::HistoryChanged)
@@ -643,13 +667,20 @@ fn validate_owner_authority(
 
 #[must_use]
 pub fn ready(state: &super::orchestration_records::RunProjection, id: &TaskId) -> bool {
+    ready_for_completion(state, id, false)
+}
+fn ready_for_completion(
+    state: &super::orchestration_records::RunProjection,
+    id: &TaskId,
+    explicit_end_turn: bool,
+) -> bool {
     use super::orchestration_records::{
         DeliveryState, QuestionStatus, RuntimeRequest, TaskState, TurnPurpose,
     };
     let Some(task) = state.tasks.iter().find(|task| &task.id == id) else {
         return false;
     };
-    task.progress.turn_ended
+    (task.progress.turn_ended || explicit_end_turn)
         && !task.progress.expired
         && task.progress.turn.as_ref().is_some_and(|turn| turn.purpose == TurnPurpose::Work)
         && task.progress.background == 0
@@ -849,6 +880,43 @@ pub fn apply_lifecycle(
         RunOutcome, RunPhase, RuntimeRequest, TaskState, validate_reference,
     };
     match &envelope.command {
+        OrchestrationCommand::FinishTask(request) => {
+            // Do not reserve completion identities while the parent still needs
+            // ordinary commands to settle children, questions or background work.
+            if !ready_for_completion(state, &request.task, true) {
+                return Err(Refusal::InvalidState);
+            }
+            let task = state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == request.task)
+                .ok_or(Refusal::ScopeConflict)?;
+            if task.progress.completion.is_some()
+                || task.progress.expired
+                || matches!(
+                    task.state,
+                    TaskState::Freezing
+                        | TaskState::Terminal(_)
+                        | TaskState::Cancelled
+                        | TaskState::Cancelling
+                        | TaskState::CleanupBlocked(_)
+                )
+            {
+                return Err(Refusal::InvalidState);
+            }
+            let intent = super::orchestration_records::CompletionIntent {
+                id: envelope.id.clone(),
+                digest: super::orchestration_records::task_command_digest(&envelope.command)?,
+                attempt: envelope
+                    .authority
+                    .attempt
+                    .clone()
+                    .ok_or(Refusal::ScopeConflict)?,
+                request: request.clone(),
+            };
+            intent.validate(&task.id)?;
+            task.progress.completion = Some(Box::new(intent));
+        }
         OrchestrationCommand::BeginTurn(turn) => {
             let task = state
                 .tasks

@@ -612,6 +612,11 @@ impl HostCommandOwner {
             .map_err(refused)?;
         let identity = admitted.identity();
         let mut state = self.native_projection(producer, identity)?;
+        if !self.run_recovery_blocks(&state)?.is_empty() {
+            return Err(refused(
+                "recovery_requires_person: unfinished task completion or merge",
+            ));
+        }
         let next = state
             .effects
             .iter()

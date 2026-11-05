@@ -24,7 +24,9 @@ pub(crate) mod spending;
 pub(crate) mod studio_runtime;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use studio_runtime::fixture::{ProtocolFixture, ProtocolFixtureMode, ProtocolObservation};
+mod task_completion;
 mod task_history;
+pub use task_completion::{CompletionPhase, CompletionState, CompletionStatus};
 pub(crate) mod task_mcp;
 pub use crate::orchestration::director_setting::{
     DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,

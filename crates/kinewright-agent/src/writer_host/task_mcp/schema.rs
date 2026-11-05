@@ -44,6 +44,10 @@ pub(crate) fn capability(name: &str) -> Value {
         );
     }
     let value = match name {
+        "finish_task" => object(
+            json!({"task":reference("identity"),"expected_revision":{"type":"integer","minimum":0}}),
+            &["task", "expected_revision"],
+        ),
         "assign_task" => object(
             json!({"run":reference("identity"),"parent":reference("identity"),"brief":reference("brief")}),
             &["run", "parent", "brief"],

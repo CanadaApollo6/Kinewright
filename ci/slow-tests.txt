@@ -185,3 +185,5 @@ ja_s4_guardian s4_c2_service_identity_refused crates/kinewright-agent/tests/ja_s
 ja_s4_guardian s4_c2_service_events_session crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 ja_s4_guardian s4_c2_service_events_recovery crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end crates/kinewright-app/src/studio_e2e_tests.rs linux-only # C10 start-to-finish Studio, host-attached
+
+kinewright_agent writer_host::hooks_tests::tests::te13_finish_cannot_spend_the_terminal_reserve crates/kinewright-agent/src/writer_host/te13_tests.rs linux-only # TE1.3 ordinary intent vs terminal reserve; 67 s locally

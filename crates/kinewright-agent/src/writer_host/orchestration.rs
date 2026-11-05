@@ -49,6 +49,8 @@ pub struct RunViewPage {
     pub accounting: Option<DurableRunAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completions: Vec<super::CompletionStatus>,
     pub full_refresh: bool,
     pub allowed_actions: Vec<RunActionKind>,
 }
@@ -134,6 +136,7 @@ impl RuntimeGrantBinding {
     }
 }
 pub(super) struct HostRun {
+    pub recovery_blocks: Vec<super::task_completion::RecoveryBlock>,
     #[cfg(target_os = "linux")]
     pub measurements:
         BTreeMap<TaskId, Arc<Mutex<kinewright_project::usage_measurement::Measurements>>>,
@@ -144,6 +147,13 @@ pub(super) struct HostRun {
 }
 #[derive(Default)]
 pub(super) struct Hooks {
+    pub completion_failure: Option<(CommandId, String)>,
+    #[cfg(test)]
+    pub completion_cut: Option<crate::orchestration::orchestration_records::CompletionStep>,
+    #[cfg(test)]
+    pub completion_before_freeze: bool,
+    #[cfg(test)]
+    pub completion_status_read_failure: bool,
     pub runs: BTreeMap<RunId, HostRun>,
     pub pending: Option<PendingPublication>,
     pub attention: Arc<Mutex<super::attention::AttentionState>>,
@@ -525,6 +535,13 @@ impl HostCommandOwner {
                         .owner()?
                         .orchestration_projection(&intent.run_id)?
                         .ok_or_else(|| refused("unknown run"))?;
+                    if intent.action == RunAction::Continue
+                        && !self.run_recovery_blocks(&state)?.is_empty()
+                    {
+                        return Err(refused(
+                            "recovery_requires_person: unfinished task completion or merge",
+                        ));
+                    }
                     for task in &state.tasks {
                         self.owner()?
                             .validate_orchestration_scope(&request.envelope.project, &task.brief)?;
@@ -606,6 +623,7 @@ impl HostCommandOwner {
                 })
         };
         let allowed = match &request.envelope.command {
+            OrchestrationCommand::FinishTask(finish) => own_task(&finish.task),
             OrchestrationCommand::AssignTask(assignment) => {
                 assignment.run == scope.run
                     && own_task(&assignment.parent)
@@ -659,6 +677,7 @@ impl HostCommandOwner {
             )
             .into());
         }
+        Self::authorize_completion_command(&state, &request.envelope)?;
         Ok(())
     }
     /// C5 fix 10: bind a publication's host-owned `usage_ref`. The model may
@@ -762,6 +781,7 @@ impl HostCommandOwner {
                 }
             }
             self.hooks.pending = None;
+            self.drive_completion(index, request, &receipt);
             return Ok(receipt);
         }
         if request.envelope.authority.owner_epoch != self.owner()?.store()?.owner_epoch()
@@ -803,6 +823,7 @@ impl HostCommandOwner {
             }
         }
         let generation = self.owner()?.metadata_generation()?;
+        self.check_finish_revision(request)?;
         let attention = self.live_attention_admission(request)?;
         let transition = if let OrchestrationCommand::PublishResult(publish) =
             &request.envelope.command
@@ -917,6 +938,7 @@ impl HostCommandOwner {
                 if let Some(run) = self.hooks.runs.get_mut(&run_id) {
                     run.continuable = continuable;
                 }
+                self.drive_completion(index, request, &receipt);
                 Ok(receipt)
             }
             Err(error) => {
@@ -971,7 +993,13 @@ impl HostCommandOwner {
                     },
                 ]
                 .into_iter()
-                .filter(|action| machine::eligible(&projection, action))
+                .filter(|action| {
+                    machine::eligible(&projection, action)
+                        && (!matches!(action, RunAction::Continue)
+                            || self
+                                .run_recovery_blocks(&projection)
+                                .is_ok_and(|blocks| blocks.is_empty()))
+                })
                 .map(|action| match action {
                     RunAction::Pause => RunActionKind::Pause,
                     RunAction::Stop => RunActionKind::Stop,
@@ -986,11 +1014,13 @@ impl HostCommandOwner {
         // surfaced is still reported, never shown as a running run.
         let runtime_status = runtime_status
             .or(self.owner()?.run_publication_status(run)?)
+            .or(self.run_recovery_message(&projection)?)
             .or_else(|| {
                 machine::silently_stalled(&projection).then(|| machine::SILENT_STALL.into())
             });
         let accounting = self.durable_run_accounting(&projection)?;
         Ok(RunViewPage {
+            completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,
             full_refresh: after_sequence == 0

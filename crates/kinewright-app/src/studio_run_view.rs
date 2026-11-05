@@ -11,6 +11,7 @@ pub(crate) struct RunView {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TaskView {
+    pub(crate) completion: Option<String>,
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) usage: String,
@@ -45,6 +46,31 @@ impl RunView {
                     });
                     let provider = record.and_then(|record| record.provider.as_ref());
                     TaskView {
+                        completion: page
+                            .completions
+                            .iter()
+                            .find(|status| status.task == task.id)
+                            .map(|status| {
+                                use kinewright_agent::writer_host::{
+                                    CompletionPhase, CompletionState,
+                                };
+                                match status.state {
+                                    CompletionState::Completed => "Completion complete".into(),
+                                    CompletionState::Blocked => "Completion needs review".into(),
+                                    CompletionState::Pending => match status.phase {
+                                        CompletionPhase::Freeze => {
+                                            "Completion pending: freeze".into()
+                                        }
+                                        CompletionPhase::Publication => {
+                                            "Completion pending: publication".into()
+                                        }
+                                        CompletionPhase::Delivery => {
+                                            "Completion pending: parent delivery".into()
+                                        }
+                                        CompletionPhase::Settled => "Completion pending".into(),
+                                    },
+                                }
+                            }),
                         provider: provider.map_or_else(
                             || "unavailable".into(),
                             |provider| provider.resolved.connector.clone(),

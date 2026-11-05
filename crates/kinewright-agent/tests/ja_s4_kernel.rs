@@ -527,6 +527,7 @@ fn task_assignment_result_cuts() -> [RunProjection; 3] {
         background: 0,
         feedback: vec![],
         decisions: vec![],
+        completion: None,
     };
     let mut freezing = assignment.clone();
     freezing.id.sequence += 1;

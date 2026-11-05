@@ -43,7 +43,10 @@ fn te12_assert_replayed_outcome(
             .request(HostCommand::ReconcileTaskReceipt { query })
             .unwrap();
     assert!(read.error.is_none(), "TE12_READ_{name} {read:?}");
-    let Some(ReceiptReply::Stored { outcome, receipt }) = read.task_receipt else {
+    let Some(ReceiptReply::Stored {
+        outcome, receipt, ..
+    }) = read.task_receipt
+    else {
         panic!("TE12_STORED_{name}");
     };
     assert_eq!(first["receipt"], receipt, "TE12_READ_RECEIPT_{name}");

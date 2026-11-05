@@ -18,4 +18,5 @@ pub(crate) const TASK_TOOL_NAMES: &[&str] = &[
     "cancel_task",
     "answer_question",
     "send_message",
+    "finish_task",
 ];
