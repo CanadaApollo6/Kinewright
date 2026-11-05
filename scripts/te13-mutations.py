@@ -43,7 +43,7 @@ add('retry-stop', C, 'if published.is_some() && settled {',
     'if (published.is_some() || state.outcome != RunOutcome::Pending) && settled {',
     'te13_stop_blocks_missing_work_but_retains_original_freeze', 'TE13_STOP_BLOCKS_COMPLETION')
 add('retry-restart', C, 'Ok(endpoint.is_some_and(|endpoint| {', 'Ok(endpoint.is_none_or(|endpoint| {',
-    'te13_restart_retains_completion_and_never_revives_authority', 'TE13_RESTART_BLOCKED_NO_AUTHORITY')
+    'te13_restart_retains_completion_and_never_revives_authority', 'TE13_RESTART_MISSING_AUTHORITY_REASON')
 add('payload-collision', 'crates/kinewright-project/src/orchestration_store.rs',
     'if &cut.receipt.envelope != envelope || cut.consumed_batch.as_ref() != consume_batch',
     'if cut.consumed_batch.as_ref() != consume_batch',
@@ -60,8 +60,8 @@ publication = '        self.completion_step(\n            index,\n            ru
 add('manual-history', C, publication,
     '        self.owner()?.core().request(kinewright_core::Command::Undo).unwrap();\n' + publication,
     'te13_finish_preserves_exact_task_and_person_redo_histories', 'TE13_EXACT_MANUAL_REDO_HISTORY')
-add('revision-bound', T, 'if revision != expected {\n                return Err(BundleError::Unsupported("timeline revision changed".into()));', 'if false && revision != expected {\n                return Err(BundleError::Unsupported("timeline revision changed".into()));',
-    'te13_revision_change_refuses_to_rebase_the_accepted_intent', 'TE13_REVISION_BOUND_TO_INTENT')
+add('revision-bound', C, 'Ok(revision == finish.expected_revision)', 'Ok(true)',
+    'te13_revision_change_refuses_without_stranding_the_task', 'TE13_REVISION_BOUND_TO_INTENT')
 stop = 'if matches!(&update.envelope().command, OrchestrationCommand::ControlRun(intent) if intent.action==RunAction::Stop)'
 add('terminal-reserve', 'crates/kinewright-project/src/run_admission.rs', stop,
     'if matches!(&update.envelope().command, OrchestrationCommand::FinishTask(_)) || ' + stop[3:],

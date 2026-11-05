@@ -560,6 +560,8 @@ pub struct HostStatus {
     pub unresolved: bool,
     pub recovery_points: Vec<HostRecoverySelection>,
     pub branches: Vec<(BranchId, HeadId, Vec<String>)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_task_work: Vec<kinewright_project::editing_session::RetainedTaskWork>,
     pub retirement_candidates: Vec<BranchId>,
     pub destinations: Vec<(PathBuf, HostPublication)>,
     pub close_disclosure: String,

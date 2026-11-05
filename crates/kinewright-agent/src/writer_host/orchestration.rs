@@ -781,6 +781,16 @@ impl HostCommandOwner {
                 }
             }
             self.hooks.pending = None;
+            if receipt.decision == orchestration_commit::CommandDecision::Applied
+                && let OrchestrationCommand::FinishTask(finish) = &request.envelope.command
+                && let Some(actor) = self
+                    .hooks
+                    .runs
+                    .get(&run)
+                    .and_then(|runtime| runtime.tasks.get(&finish.task))
+            {
+                actor.endpoint().seal_accepted_finish();
+            }
             self.drive_completion(index, request, &receipt);
             return Ok(receipt);
         }
@@ -789,6 +799,7 @@ impl HostCommandOwner {
         {
             return Err(refused("fresh epoch or attachment grant changed"));
         }
+        let mut finish_drain = self.begin_finish_ingress(request)?;
         let owner = self.owner()?;
         let mut previous = request
             .run
@@ -823,11 +834,43 @@ impl HostCommandOwner {
             }
         }
         let generation = self.owner()?.metadata_generation()?;
-        self.check_finish_revision(request)?;
+        let revision_matches = self.finish_revision_matches(request)?;
         let attention = self.live_attention_admission(request)?;
-        let transition = if let OrchestrationCommand::PublishResult(publish) =
-            &request.envelope.command
-        {
+        let transition = if !revision_matches {
+            // Consume the refused control identity without reserving completion
+            // substeps or changing the task. The next status issues a fresh id.
+            let mut state = previous
+                .as_ref()
+                .ok_or_else(|| refused("run missing"))?
+                .clone();
+            state.sequence = state
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| refused("sequence capacity"))?;
+            let segment = crate::orchestration::orchestration_records::EventSegment {
+                run: state.run.clone(),
+                first_sequence: state.sequence,
+                previous: previous_segment,
+                events: vec![
+                    crate::orchestration::orchestration_records::OrchestrationEvent {
+                        command: request.envelope.id.clone(),
+                        sequence: state.sequence,
+                        projection: state.clone(),
+                    },
+                ],
+            };
+            orchestration_commit::ValidatedRunUpdate::new(
+                &request.envelope.project,
+                generation,
+                &request.envelope,
+                state,
+                segment,
+                orchestration_commit::CommandDecision::Refused(
+                    orchestration_commit::RecordedRefusal::StaleControl,
+                ),
+            )
+            .map_err(scheduler_error)?
+        } else if let OrchestrationCommand::PublishResult(publish) = &request.envelope.command {
             let state = previous
                 .as_ref()
                 .ok_or_else(|| refused("result run missing"))?;
@@ -910,6 +953,7 @@ impl HostCommandOwner {
         };
         self.owner_mut()?.run_transition_admission(&transition)?;
         let transition = self.seed_run_spending(transition)?;
+        let transition = self.stage_completion_history(transition)?;
         let transition = self.stage_control_freeze(transition)?;
         if let Some((_, bytes)) = attention {
             self.owner_mut()?.admit_host_grant(&bytes)?;
@@ -933,6 +977,11 @@ impl HostCommandOwner {
         );
         match result {
             Ok(receipt) => {
+                if receipt.decision == orchestration_commit::CommandDecision::Applied
+                    && let Some(drain) = &mut finish_drain
+                {
+                    drain.accept();
+                }
                 self.sync_runtime_grants(&published);
                 self.hooks.pending = None;
                 if let Some(run) = self.hooks.runs.get_mut(&run_id) {
@@ -942,10 +991,14 @@ impl HostCommandOwner {
                 Ok(receipt)
             }
             Err(error) => {
-                if !matches!(
+                if matches!(
                     error,
                     BundleError::DurabilityUnknown | BundleError::Unsettled
                 ) {
+                    if let Some(drain) = &mut finish_drain {
+                        drain.publication_unknown();
+                    }
+                } else {
                     self.hooks.pending = None;
                     if newly_retained && let Some(runtime) = self.hooks.runs.remove(&run_id) {
                         self.attachments.retain(|attachment| {

@@ -176,7 +176,7 @@ impl HostCommandOwner {
                 reply.manual_lease = Some(lease);
                 reply.manual_inputs = Some(inputs);
                 self.message =
-                    "Current working edit and resources confirmed; fresh manual authority granted."
+                    "Your selected work is open on the timeline. Your prior edit remains saved in its working branch."
                         .into();
                 Ok(())
             }

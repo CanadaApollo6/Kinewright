@@ -591,46 +591,79 @@ fn te13_commit_returns_its_revision_and_affected_scope() {
 }
 
 #[test]
-fn te13_revision_change_refuses_to_rebase_the_accepted_intent() {
+fn te13_revision_change_refuses_without_stranding_the_task() {
     let r = c5_fix10_run();
-    let control = te13_control(&r.editor, &r.child, &r.core);
-    let host = r.f.host.owner.upgrade().unwrap();
-    let manual = host.lock().unwrap().core().export_history().unwrap();
-    host.lock().unwrap().hooks.completion_before_freeze = true;
-    r.editor.wire("finish_task", control.clone());
+    let stale = te13_control(&r.editor, &r.child, &r.core);
+    let undo = r.editor.wire(
+        "undo_task_edit",
+        serde_json::json!({"expected_revision":grant_test_revision(&r.core)}),
+    );
+    assert_eq!(undo.is_error, Some(false));
+    let reply = r.editor.wire("finish_task", stale.clone());
+    let projection = r.f.projection(&r.run);
     assert!(
-        r.f.projection(&r.run).tasks[1]
-            .progress
-            .completion
-            .is_some(),
-        "TE13_INTENT_FIRST"
+        projection.tasks[1].progress.completion.is_none(),
+        "TE13_REVISION_BOUND_TO_INTENT {reply:?}"
+    );
+    assert!(
+        reply.structured_content.unwrap()["outcome"]["receipt"]["decision"]
+            .to_string()
+            .contains("refused"),
+        "TE13_FIX1_STALE_RECEIPT"
+    );
+    let endpoint = r.f.host.owner.upgrade().unwrap().lock().unwrap().hooks.runs[&r.run].tasks
+        [&r.child]
+        .endpoint();
+    assert!(
+        !endpoint.is_closed_for_fixture(),
+        "TE13_FIX1_REFUSED_FENCE_OPEN"
+    );
+    let redo = r.editor.wire(
+        "redo_task_edit",
+        serde_json::json!({"expected_revision":grant_test_revision(&r.core)}),
+    );
+    assert_eq!(
+        redo.is_error,
+        Some(false),
+        "TE13_FIX1_REFUSED_REDO {redo:?}"
     );
     let undo = r.editor.wire(
         "undo_task_edit",
         serde_json::json!({"expected_revision":grant_test_revision(&r.core)}),
     );
-    assert_eq!(undo.is_error, Some(false), "TE13_CONCURRENT_UNDO {undo:?}");
-    let edited = r.core.export_history().unwrap();
-    r.editor.wire("finish_task", control.clone());
-    let (_, status) = te13_read(&r.f.editor, te13_query(&r.attempt, &control));
     assert_eq!(
-        status.state,
-        super::super::CompletionState::Blocked,
-        "TE13_REVISION_BOUND_TO_INTENT"
+        undo.is_error,
+        Some(false),
+        "TE13_FIX1_REFUSED_UNDO {undo:?}"
+    );
+    let redo = r.editor.wire(
+        "redo_task_edit",
+        serde_json::json!({"expected_revision":grant_test_revision(&r.core)}),
+    );
+    assert_eq!(redo.is_error, Some(false));
+    let revision = grant_test_revision(&r.core);
+    let prepared = r.editor.raw("prepare_edit_plan", serde_json::json!({"expected_revision":revision,"operations":[{"op":"move_marker","marker":1,"to":3}]}));
+    assert_eq!(prepared.is_error, Some(false), "TE13_FIX1_REFUSED_PREPARE");
+    let committed = r.editor.raw("commit_edit_plan",serde_json::json!({"expected_revision":revision,"plan_id":prepared.structured_content.unwrap()["plan_id"]}));
+    assert_eq!(
+        committed.is_error,
+        Some(false),
+        "TE13_FIX1_REFUSED_EDIT {committed:?}"
+    );
+    let fresh = te13_control(&r.editor, &r.child, &r.core);
+    assert_ne!(fresh["id"], stale["id"], "TE13_FIX1_NEW_FINISH_ID");
+    let reply = r.editor.wire("finish_task", fresh);
+    assert_eq!(
+        reply.is_error,
+        Some(false),
+        "TE13_FIX1_FRESH_FINISH {reply:?}"
     );
     assert!(
-        status.publication_receipt.is_none() && status.freeze_receipt.is_none(),
-        "TE13_NO_REBASED_RESULT"
-    );
-    assert_eq!(
-        r.core.export_history().unwrap(),
-        edited,
-        "TE13_TASK_HISTORY_UNCHANGED"
-    );
-    assert_eq!(
-        host.lock().unwrap().core().export_history().unwrap(),
-        manual,
-        "TE13_MANUAL_HISTORY_UNCHANGED"
+        r.f.projection(&r.run).tasks[1]
+            .progress
+            .completion
+            .is_some(),
+        "TE13_FIX1_NEW_INTENT"
     );
 }
 
@@ -772,21 +805,69 @@ fn te13_finish_crash_child() {
     let Ok(handoff) = std::env::var("KINEWRIGHT_TE13_HANDOFF") else {
         return;
     };
-    let f = te13_fixture();
-    let (run, execution, mcp) = te13_director(&f);
-    let control = te13_control(&mcp, &execution.task, &te13_core(&f, &run, &execution.task));
     let phase = std::env::var("KINEWRIGHT_TE13_PHASE").unwrap();
-    te13_cut(
-        &f,
-        if phase == "freeze" {
-            CompletionStep::Freeze
-        } else {
-            CompletionStep::Publication
-        },
-    );
+    if phase == "published-child" {
+        let r = c5_fix10_run();
+        let revision = grant_test_revision(&r.core);
+        let prepared = r.editor.raw("prepare_edit_plan", serde_json::json!({"expected_revision":revision,"operations":[{"op":"move_marker","marker":1,"to":2}]}));
+        assert_eq!(prepared.is_error, Some(false));
+        let committed = r.editor.raw("commit_edit_plan",serde_json::json!({"expected_revision":revision,"plan_id":prepared.structured_content.unwrap()["plan_id"]}));
+        assert_eq!(committed.is_error, Some(false));
+        let undone = r.editor.wire(
+            "undo_task_edit",
+            serde_json::json!({"expected_revision":grant_test_revision(&r.core)}),
+        );
+        assert_eq!(undone.is_error, Some(false));
+        let result = c5_fix10_freeze(&r.editor, &r.child);
+        r.editor.accepted(
+            "publish_result",
+            OrchestrationCommand::PublishResult(Box::new(PublishResult {
+                task: r.child.clone(),
+                result,
+            })),
+        );
+        std::fs::write(handoff,serde_json::to_vec(&serde_json::json!({"root":r.f.temp.root(),"run":r.run,"history":r.core.export_history().unwrap()})).unwrap()).unwrap();
+        std::process::exit(86);
+    }
+    let mut f = te13_fixture();
+    let mut scoped = Document::default();
+    for id in [1, 2] {
+        if let kinewright_core::Operation::AddMarker { marker } = history_marker(id) {
+            scoped.markers.push(marker);
+        }
+    }
+    f.brief.scope =
+        crate::orchestration::policy::director_scope(&scoped, f.brief.scope.base.clone()).unwrap();
+    let (run, execution, mcp) = te13_director(&f);
+    let core = te13_core(&f, &run, &execution.task);
+    for id in [1, 2] {
+        core.request(kinewright_core::Command::Do(history_marker(id)))
+            .unwrap();
+    }
+    core.request(kinewright_core::Command::Undo).unwrap();
+    let control = te13_control(&mcp, &execution.task, &core);
+    if phase == "before-freeze" {
+        f.host
+            .owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .hooks
+            .completion_before_freeze = true;
+    } else {
+        te13_cut(
+            &f,
+            if phase == "freeze" {
+                CompletionStep::Freeze
+            } else {
+                CompletionStep::Publication
+            },
+        );
+    }
     let reply = mcp.wire("finish_task", control.clone());
     assert_eq!(reply.is_error, Some(false), "TE13_CRASH_ACK");
-    std::fs::write(handoff,serde_json::to_vec(&serde_json::json!({"root":f.temp.root(),"run":run,"execution":execution,"control":control,"reply":reply.structured_content.unwrap()})).unwrap()).unwrap();
+    std::fs::write(handoff,serde_json::to_vec(&serde_json::json!({"root":f.temp.root(),"run":run,"execution":execution,"control":control,"reply":reply.structured_content.unwrap(),"history":core.export_history().unwrap()})).unwrap()).unwrap();
     std::process::exit(86);
 }
 
@@ -858,6 +939,11 @@ fn te13_restart_retains_completion_and_never_revives_authority() {
                 status.state,
                 super::super::CompletionState::Blocked,
                 "TE13_RESTART_BLOCKED_NO_AUTHORITY"
+            );
+            assert_eq!(
+                status.reason.as_deref(),
+                Some("task_authority_unavailable"),
+                "TE13_RESTART_MISSING_AUTHORITY_REASON"
             );
             assert!(
                 status.publication_receipt.is_none(),

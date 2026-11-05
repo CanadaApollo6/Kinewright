@@ -2446,7 +2446,9 @@ fn service_proof_refused(caller: ProofCaller, zombie: bool, isolate_events: bool
     session.close_lifetime();
     leaf.kill().unwrap();
     let deadline = Instant::now() + protocol::CLEANUP;
-    while !guardian_process.reaped().unwrap() || !payload.reaped().unwrap() {
+    // /proc can disappear between open and read. An inconclusive observation
+    // never proves reaping; retry it within the same cleanup deadline.
+    while !guardian_process.reaped().unwrap_or(false) || !payload.reaped().unwrap_or(false) {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(1));
     }

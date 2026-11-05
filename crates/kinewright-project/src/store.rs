@@ -688,6 +688,10 @@ impl ProjectStore {
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn exhaust_run_budget_probe(&self) {
+        self.note_run_limit();
+    }
     pub(crate) fn note_run_limit(&self) {
         self.inner
             .run_limit

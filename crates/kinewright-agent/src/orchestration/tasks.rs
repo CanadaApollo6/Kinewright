@@ -19,7 +19,7 @@ use kinewright_project::{
 use std::{
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Instant,
 };
@@ -36,9 +36,52 @@ pub struct RuntimeTaskAuthority {
     pub expires_at: Instant,
 }
 
+const INGRESS_OPEN: u8 = 0;
+const INGRESS_FINISH_DRAINING: u8 = 1;
+const INGRESS_SEALED: u8 = 2;
+const INGRESS_FINISH_UNCERTAIN: u8 = 3;
+
+/// Only a not-yet-accepted finish may release its own temporary ingress fence.
+/// The gate is quiescent before construction. Keeping this token blocks future
+/// edits without holding the mutex across nested host checkpoint operations.
+pub(crate) struct FinishDrain {
+    endpoint: TaskEndpoint,
+}
+impl FinishDrain {
+    pub(crate) fn accept(&mut self) {
+        self.endpoint
+            .0
+            .phase
+            .store(INGRESS_SEALED, Ordering::SeqCst);
+    }
+    pub(crate) fn publication_unknown(&mut self) {
+        let _ = self.endpoint.0.phase.compare_exchange(
+            INGRESS_FINISH_DRAINING,
+            INGRESS_FINISH_UNCERTAIN,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+    fn reopen_refused_finish(&self) {
+        let _ = self.endpoint.0.phase.compare_exchange(
+            INGRESS_FINISH_DRAINING,
+            INGRESS_OPEN,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+}
+impl Drop for FinishDrain {
+    fn drop(&mut self) {
+        self.reopen_refused_finish();
+    }
+}
+
 struct Ingress {
     gate: Mutex<()>,
-    closed: AtomicBool,
+    #[cfg(test)]
+    admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    phase: AtomicU8,
     revoked: AtomicBool,
     paused: AtomicBool,
     authority: RuntimeTaskAuthority,
@@ -58,7 +101,9 @@ impl TaskEndpoint {
     ) -> Self {
         Self(Arc::new(Ingress {
             gate: Mutex::new(()),
-            closed: AtomicBool::new(false),
+            #[cfg(test)]
+            admission_hook: Mutex::new(None),
+            phase: AtomicU8::new(INGRESS_OPEN),
             revoked: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             policy,
@@ -102,17 +147,60 @@ impl TaskEndpoint {
     pub(crate) fn admit(&self) -> Result<MutexGuard<'_, ()>, String> {
         let guard = self.0.gate.lock().map_err(|_| "task_ingress_poisoned")?;
         self.check_live()?;
-        if self.0.closed.load(Ordering::SeqCst) {
+        if self.0.phase.load(Ordering::SeqCst) != INGRESS_OPEN {
             return Err("task_freezing".into());
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.0.admission_hook.lock().unwrap().take() {
+            hook();
         }
         Ok(guard)
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn hold_next_admission_for_fixture(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.0.admission_hook.lock().unwrap() = Some(hook);
+    }
     #[cfg(test)]
     pub(crate) fn is_closed_for_fixture(&self) -> bool {
-        self.0.closed.load(Ordering::SeqCst)
+        self.0.phase.load(Ordering::SeqCst) != INGRESS_OPEN
+    }
+    /// Called only after exact-envelope reconciliation proved no accepted intent.
+    pub(crate) fn reconcile_unapplied_finish(&self) {
+        let _ = self.0.phase.compare_exchange(
+            INGRESS_FINISH_UNCERTAIN,
+            INGRESS_OPEN,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+    pub(crate) fn seal_accepted_finish(&self) {
+        self.0.phase.store(INGRESS_SEALED, Ordering::SeqCst);
+    }
+    pub(crate) fn begin_finish(&self) -> Result<FinishDrain, String> {
+        // Host dispatch owns the host mutex. Waiting here could deadlock an
+        // admitted edit whose reply still needs that owner; refuse and retry.
+        let _gate = self.0.gate.try_lock().map_err(|_| "task_ingress_busy")?;
+        self.check_live()?;
+        if self.0.phase.load(Ordering::SeqCst) == INGRESS_SEALED {
+            return Ok(FinishDrain {
+                endpoint: self.clone(),
+            });
+        }
+        self.0
+            .phase
+            .compare_exchange(
+                INGRESS_OPEN,
+                INGRESS_FINISH_DRAINING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .map_err(|_| "task_freezing")?;
+        Ok(FinishDrain {
+            endpoint: self.clone(),
+        })
     }
     pub(crate) fn close_and_drain(&self) -> Result<MutexGuard<'_, ()>, String> {
-        self.0.closed.store(true, Ordering::SeqCst);
+        self.0.phase.store(INGRESS_SEALED, Ordering::SeqCst);
         self.0
             .gate
             .lock()
@@ -149,9 +237,14 @@ impl TaskEndpoint {
             history.cursor.undo.last()
         }
         .ok_or("history cursor is empty")?;
-        self.0
-            .policy
-            .validate_batch(&boundary.document, &boundary.operations)?;
+        self.0.policy.validate_batch(
+            if redo {
+                &history.document
+            } else {
+                &boundary.document
+            },
+            &boundary.operations,
+        )?;
         let private = Core::spawn((*history.baseline).clone()).map_err(|e| e.to_string())?;
         private
             .restore_history(history.clone())
@@ -329,7 +422,10 @@ impl EditorTask {
             self.registration.core(),
         );
         if self.frozen.is_some() {
-            self.endpoint.0.closed.store(true, Ordering::SeqCst);
+            self.endpoint
+                .0
+                .phase
+                .store(INGRESS_SEALED, Ordering::SeqCst);
         }
         Ok(self)
     }

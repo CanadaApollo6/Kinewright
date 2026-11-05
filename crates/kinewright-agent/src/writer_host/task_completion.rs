@@ -39,9 +39,9 @@ pub struct CompletionStatus {
     pub result: Option<TaskResult>,
 }
 
-/// Cached only on trusted restore. It carries no publication capability and
-/// cannot make an old task endpoint or issuer current again.
-#[derive(Debug, Clone)]
+/// A trusted restore or a permanent live failure records a recovery cause.
+/// It carries no publication capability and cannot revive a task endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RecoveryBlock {
     Completion(TaskId),
     Merge(TaskId),
@@ -57,9 +57,6 @@ impl HostCommandOwner {
         use crate::orchestration::orchestration_records::OrchestrationPayload;
         use kinewright_project::{bundle_records::RecordKind, receipts::ReceiptLookup};
         let mut blocks = Vec::new();
-        if state.outcome != RunOutcome::Pending {
-            return Ok(blocks);
-        }
         for task in &state.tasks {
             if let Some(intent) = task.progress.completion.as_deref() {
                 let id = intent
@@ -112,7 +109,16 @@ impl HostCommandOwner {
             return Ok(Vec::new());
         }
         if let Some(run) = self.hooks.runs.get(&state.run) {
-            return Ok(run.recovery_blocks.clone());
+            if run.recovery_blocks.is_empty() {
+                return Ok(Vec::new());
+            }
+            let current = self.inspect_recovery_blocks(state)?;
+            return Ok(run
+                .recovery_blocks
+                .iter()
+                .filter(|block| current.contains(block))
+                .cloned()
+                .collect());
         }
         self.inspect_recovery_blocks(state)
     }
@@ -120,9 +126,39 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<Option<String>, HostError> {
-        Ok(self.run_recovery_blocks(state)?.first().map(|block| match block {
-            RecoveryBlock::Completion(task) => format!("completion_recovery_requires_person: task {} has unfinished completion. Its work is retained. Stop this run and review it before starting another run.", task.0.as_str()),
-            RecoveryBlock::Merge(task) => format!("merge_recovery_requires_person: task {} has an uncommitted frozen merge. Its work is retained. Stop this run and review it before starting another run.", task.0.as_str()),
+        let blocks = if state.outcome == RunOutcome::Pending {
+            self.run_recovery_blocks(state)?
+        } else {
+            self.inspect_recovery_blocks(state)?
+        };
+        let Some(block) = blocks.first() else {
+            if state.outcome == RunOutcome::Pending {
+                return Ok(None);
+            }
+            return Ok(self
+                .owner()?
+                .retained_task_work()?
+                .into_iter()
+                .filter(|work| work.run == state.run)
+                .min_by_key(|work| (work.open_on_timeline, !work.frozen))
+                .map(|work| format!("retained_task_work: {}", work.disclosure)));
+        };
+        let (task, code) = match block {
+            RecoveryBlock::Completion(task) => (task, "completion_recovery_requires_person"),
+            RecoveryBlock::Merge(task) => (task, "merge_recovery_requires_person"),
+        };
+        let retained = self
+            .owner()?
+            .retained_task_work()?
+            .into_iter()
+            .find(|work| work.run == state.run && &work.task == task);
+        Ok(Some(if let Some(work) = retained {
+            format!("{code}: {}", work.disclosure)
+        } else {
+            format!(
+                "{code}: task {} has retained work. Stop and wait for cleanup before reviewing its saved task branch.",
+                task.0.as_str()
+            )
         }))
     }
     /// Reserve the fixed identities on every public Producer route, not only MCP.
@@ -155,12 +191,45 @@ impl HostCommandOwner {
         }
         Ok(())
     }
-    pub(super) fn check_finish_revision(
+    pub(super) fn begin_finish_ingress(
         &self,
         request: &ScopedOrchestrationRequest,
-    ) -> Result<(), HostError> {
+    ) -> Result<Option<crate::orchestration::tasks::FinishDrain>, HostError> {
         let OrchestrationCommand::FinishTask(finish) = &request.envelope.command else {
-            return Ok(());
+            return Ok(None);
+        };
+        let run = request.run.as_ref().ok_or_else(|| refused("run missing"))?;
+        let endpoint = self
+            .hooks
+            .runs
+            .get(run)
+            .and_then(|run| run.tasks.get(&finish.task))
+            .ok_or_else(|| refused("task actor missing"))?
+            .endpoint();
+        let owner = self.owner()?;
+        let state = owner
+            .orchestration_projection(run)?
+            .ok_or_else(|| refused("run missing"))?;
+        if !owner.has_unresolved_publication()
+            && state
+                .tasks
+                .iter()
+                .find(|task| task.id == finish.task)
+                .is_some_and(|task| task.progress.completion.is_none())
+        {
+            endpoint.reconcile_unapplied_finish();
+        }
+        endpoint
+            .begin_finish()
+            .map(Some)
+            .map_err(|reason| refused(&reason))
+    }
+    pub(super) fn finish_revision_matches(
+        &self,
+        request: &ScopedOrchestrationRequest,
+    ) -> Result<bool, HostError> {
+        let OrchestrationCommand::FinishTask(finish) = &request.envelope.command else {
+            return Ok(true);
         };
         let actor = self
             .hooks
@@ -180,10 +249,7 @@ impl HostCommandOwner {
         else {
             return Err(refused("task revision unavailable"));
         };
-        if revision != finish.expected_revision {
-            return Err(refused("timeline revision changed"));
-        }
-        Ok(())
+        Ok(revision == finish.expected_revision)
     }
     /// Never let a later failure replace the already committed immutable outcome.
     pub(super) fn drive_completion(
@@ -202,14 +268,46 @@ impl HostCommandOwner {
         }
         self.hooks.completion_failure = None;
         if let Err(error) = self.drive_completion_inner(index, request) {
+            let retryable = Self::completion_failure_retryable(&error);
+            if !retryable
+                && let (Some(run), OrchestrationCommand::FinishTask(finish)) =
+                    (&request.run, &request.envelope.command)
+                && let Some(runtime) = self.hooks.runs.get_mut(run)
+            {
+                let block = RecoveryBlock::Completion(finish.task.clone());
+                if !runtime.recovery_blocks.contains(&block) {
+                    runtime.recovery_blocks.push(block);
+                }
+            }
             self.hooks.completion_failure = Some((
                 receipt.envelope.id.clone(),
                 format!(
-                    "substep_refused:{:?}",
+                    "{}:{:?}",
+                    if retryable {
+                        "retryable_substep_refused"
+                    } else {
+                        "permanent_substep_refused"
+                    },
                     super::task_mcp::refusal_code(&error.to_string())
                 ),
             ));
         }
+    }
+    fn completion_failure_retryable(error: &HostError) -> bool {
+        let refusal = error.refusal();
+        #[cfg(test)]
+        if refusal.message.contains("fixture lost reply") {
+            return true;
+        }
+        matches!(
+            refusal.code.as_str(),
+            "io" | "durability_unknown"
+                | "unsettled"
+                | "save_in_progress"
+                | "storage_backpressure"
+                | "contention"
+                | "cleanup_pending"
+        )
     }
     fn drive_completion_inner(
         &mut self,
@@ -423,7 +521,10 @@ impl HostCommandOwner {
                 return Err(refused("completion publication changed"));
             };
             Some(result.result.clone())
-        } else if let Some(receipt) = &freeze_receipt {
+        } else if let Some(receipt) = freeze_receipt
+            .as_ref()
+            .filter(|receipt| receipt.decision == CommandDecision::Applied)
+        {
             let original = self.owner()?.orchestration_receipt_projection(receipt)?;
             self.saved_task_history(&original, &task.id)?
                 .and_then(|history| history.frozen_result)
@@ -449,11 +550,18 @@ impl HostCommandOwner {
                 (CompletionState::Pending, CompletionPhase::Delivery, None)
             }
         } else {
-            let phase = if freeze_receipt.is_some() {
+            let phase = if freeze_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.decision == CommandDecision::Applied)
+            {
                 CompletionPhase::Publication
             } else {
                 CompletionPhase::Freeze
             };
+            let retained_block = self.hooks.runs.get(&state.run).is_some_and(|run| {
+                run.recovery_blocks
+                    .contains(&RecoveryBlock::Completion(task.id.clone()))
+            });
             let reason = if state.outcome != RunOutcome::Pending {
                 Some("run_stopped".into())
             } else if !self.completion_authority_live(state, intent)? {
@@ -464,6 +572,9 @@ impl HostCommandOwner {
                     .as_ref()
                     .filter(|(id, _)| *id == intent.id)
                     .map(|(_, reason)| reason.clone())
+                    .or_else(|| {
+                        retained_block.then(|| "completion_recovery_requires_person".into())
+                    })
             };
             (
                 if reason.is_some() {

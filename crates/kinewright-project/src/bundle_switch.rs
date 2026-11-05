@@ -179,7 +179,18 @@ impl PreparedProjectSelection {
         self.published_root.is_some()
     }
     pub(crate) fn protects_branch(&self, branch: &BranchId) -> bool {
-        self.existing_head.is_some() && &self.target_branch == branch
+        self.existing_head.is_some()
+            && matches!(&self.target, RecoverySelection::WorkingBranch(source) if source == branch)
+    }
+    pub(crate) fn fork_retained_target(&mut self) -> Result<(), BundleError> {
+        if self.publication_started() || self.existing_head.is_none() {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.target_branch = BranchId::fresh()?;
+        Ok(())
+    }
+    pub(crate) fn reuses_checkpoint(&self) -> bool {
+        matches!(&self.target, RecoverySelection::WorkingBranch(source) if source == &self.target_branch)
     }
     #[must_use]
     pub const fn target_branch(&self) -> &BranchId {
@@ -367,7 +378,10 @@ impl ProjectBundle {
                 == Some(prepared.source_generation)
             && prepared.existing_head.as_ref().is_none_or(|head| {
                 self.branches
-                    .get(&prepared.target_branch)
+                    .get(match &prepared.target {
+                        RecoverySelection::WorkingBranch(source) => source,
+                        RecoverySelection::Checkpoint { branch, .. } => branch,
+                    })
                     .is_some_and(|c| c.head_id == *head)
             });
         if !valid {

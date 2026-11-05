@@ -714,6 +714,107 @@ impl crate::editing_session::Ja1EditingSession {
 mod tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one table compares all three ordinary completion updates"
+    )]
+    fn te13_fix1_finish_freeze_publish_are_never_terminal_progress() {
+        use crate::{
+            bundle_records::{ObjectRef, RecordKind},
+            orchestration_commit::{CommandDecision, ValidatedRunUpdate},
+            orchestration_records::*,
+            receipts::CommandId,
+        };
+        fn id<T: serde::de::DeserializeOwned>() -> T {
+            serde_json::from_value(serde_json::json!("1".repeat(32))).unwrap()
+        }
+        let reference = ObjectRef {
+            sha256: "0".repeat(64),
+            byte_length: 0,
+            record_kind: RecordKind::OwnedEvidence,
+        };
+        let state = RunProjection {
+            run: id(),
+            sequence: 0,
+            control_revision: id(),
+            phase: RunPhase::Running,
+            outcome: RunOutcome::Pending,
+            wait: RunWait::None,
+            cleanup: RunCleanup::Settled,
+            tasks: vec![],
+            effects: vec![],
+            attempts: vec![],
+            deliveries: vec![],
+            requests: vec![],
+            results: vec![],
+            usage: vec![],
+        };
+        for command in [
+            OrchestrationCommand::FinishTask(FinishTask {
+                task: id(),
+                expected_revision: kinewright_core::TimelineRevision(0),
+            }),
+            OrchestrationCommand::FreezeTask(id()),
+            OrchestrationCommand::PublishResult(Box::new(PublishResult {
+                task: id(),
+                result: TaskResult {
+                    outcome: AttemptOutcome::Completed,
+                    base: None,
+                    head: None,
+                    delta_ref: None,
+                    artifacts: vec![],
+                    evidence: vec![],
+                    usage_ref: reference.clone(),
+                    explanation: reference.clone(),
+                },
+            })),
+        ] {
+            let mut envelope = OrchestrationEnvelope {
+                id: CommandId {
+                    issuer: id(),
+                    sequence: 1,
+                },
+                digest: serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap(),
+                project: id(),
+                expected_generation: 1,
+                authority: AuthorityBinding {
+                    grant_ref: reference.clone(),
+                    owner_epoch: 1,
+                    endpoint: None,
+                    attempt: None,
+                },
+                command,
+            };
+            envelope.digest = envelope.computed_digest().unwrap();
+            let mut next = state.clone();
+            next.sequence += 1;
+            let segment = EventSegment {
+                run: state.run.clone(),
+                first_sequence: next.sequence,
+                previous: None,
+                events: vec![OrchestrationEvent {
+                    command: envelope.id.clone(),
+                    sequence: next.sequence,
+                    projection: next.clone(),
+                }],
+            };
+            let update = ValidatedRunUpdate::new(
+                &envelope.project,
+                1,
+                &envelope,
+                next,
+                segment,
+                CommandDecision::Applied,
+            )
+            .unwrap();
+            assert!(
+                !terminal_progress(&state, &update),
+                "TE13_FIX1_NO_TERMINAL_COMPLETION {:?}",
+                envelope.command
+            );
+        }
+    }
+    #[test]
     fn s4b_c5_fix1_ordinary_reads_cannot_spend_terminal_memory() {
         let temp = kinewright_media::test_support::TempDirectory::new_in(
             &kinewright_media::test_support::workspace_target_dir(),

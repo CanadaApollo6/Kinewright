@@ -657,12 +657,8 @@ impl BundleCommit {
         let copy_branch = bundle.prepare_plain_copy(branch_id)?;
         let branch_id = copy_branch.as_ref().unwrap_or(branch_id);
         let existing_selection = metadata_only
-            || selection.is_some_and(|selected| {
-                matches!(
-                    selected.target(),
-                    crate::bundle_recovery::RecoverySelection::WorkingBranch(_)
-                )
-            });
+            || selection
+                .is_some_and(crate::bundle_switch::PreparedProjectSelection::reuses_checkpoint);
         let manual_branch_id = selection.map_or_else(
             || bundle.manual_branch_id.clone(),
             |s| s.target_branch.clone(),

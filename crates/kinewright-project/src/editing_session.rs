@@ -25,6 +25,8 @@ mod manual;
 mod owned_media;
 pub use manual::ManualRecoveryEndpoint;
 mod recovery;
+mod retained_work;
+pub use retained_work::{RetainedTaskWork, RetainedWorkKind};
 mod switch;
 pub use switch::PreparedGuiSwitch;
 mod rescue;
@@ -208,6 +210,7 @@ pub struct Ja1EditingSession {
     retained_destinations: Vec<(RetainedDestination, Core)>,
     originating_session: crate::bundle_records::SessionId,
     dirty_cache: std::cell::RefCell<HistoryDigestCache>,
+    retained_task_work_cache: std::cell::RefCell<Option<(String, Vec<RetainedTaskWork>)>>,
     save_disclosure_cache: std::cell::RefCell<
         Option<(
             kinewright_core::ActorIdentity,
@@ -832,6 +835,7 @@ impl Ja1EditingSession {
             retained_destinations: vec![],
             originating_session: crate::bundle_records::SessionId::fresh()?,
             dirty_cache: std::cell::RefCell::new(None),
+            retained_task_work_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
             host_attached: false,
             host_retention_lost: false,
@@ -872,6 +876,7 @@ impl Ja1EditingSession {
             pending_candidate: None,
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
+            retained_task_work_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
             host_attached: false,
@@ -956,6 +961,7 @@ impl Ja1EditingSession {
             pending_candidate: None,
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
+            retained_task_work_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
             host_attached: false,

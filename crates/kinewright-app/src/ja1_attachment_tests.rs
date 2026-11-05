@@ -3280,3 +3280,236 @@ fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
 }
 
 include!("ja1_hooks_tests.rs");
+
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "a persisted H1 retained history drives both real Studio modes"
+)]
+fn te13_fix1_retained_app(
+    hosted: bool,
+    completion: bool,
+) -> (
+    TempDirectory,
+    Ja1Attachment,
+    BranchId,
+    kinewright_core::HistorySnapshot,
+) {
+    use kinewright_agent::orchestration::{machine, orchestration_records::*};
+    use kinewright_project::{
+        orchestration_commit::{CommandDecision, ValidatedRunUpdate, commit_orchestration},
+        receipts::CommandId,
+    };
+    let temp = temp();
+    let path = temp.path("retained.kinewright");
+    let core = Core::spawn(doc()).unwrap();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    owner.first_save(&path, StorageLimits::default()).unwrap();
+    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let candidate_base_ref = owner.persist_durable_branch(&mut candidate).unwrap();
+    let base = owner.candidate_binding(candidate.branch_id()).unwrap();
+    let mut source = owner.fork_durable_branch("retained task").unwrap();
+    edit(source.core(), false);
+    edit(source.core(), true);
+    source.core().request(Command::Undo).unwrap();
+    let expected = source.core().export_history().unwrap();
+    let base_ref = owner.persist_durable_branch(&mut source).unwrap();
+    let source = owner.candidate_binding(source.branch_id()).unwrap();
+    let evidence = owner
+        .admit_host_grant(b"retained fixture evidence")
+        .unwrap();
+    let (issuer, grant_ref) = owner
+        .issue_metadata_authority("retained-fixture", None, b"retained fixture authority")
+        .unwrap();
+    let brief = TaskBrief {
+        plan: evidence.clone(),
+        script: evidence.clone(),
+        assignment: evidence,
+        inputs: owner.current_inputs_ref().clone(),
+        role: Role::Director,
+        provider: ProviderSelectionRecord {
+            connector: "scripted".into(),
+            model: "fixture".into(),
+            options: vec![],
+        },
+        scope: kinewright_agent::orchestration::policy::director_scope(&doc(), base.clone())
+            .unwrap(),
+    };
+    let mut envelope = OrchestrationEnvelope {
+        id: CommandId {
+            issuer,
+            sequence: 1,
+        },
+        digest: serde_json::from_value(serde_json::json!("0".repeat(64))).unwrap(),
+        project: owner.project_id().unwrap(),
+        expected_generation: owner.metadata_generation().unwrap(),
+        authority: AuthorityBinding {
+            grant_ref,
+            owner_epoch: owner.store().unwrap().owner_epoch(),
+            endpoint: None,
+            attempt: None,
+        },
+        command: OrchestrationCommand::StartRun(Box::new(StartRun { director: brief })),
+    };
+    envelope.digest = envelope.computed_digest().unwrap();
+    let initial = machine::prepare(
+        None,
+        &envelope.project,
+        envelope.expected_generation,
+        &envelope,
+        None,
+    )
+    .unwrap();
+    let mut state = initial.projection().clone();
+    let task = state.tasks[0].id.clone();
+    let finish = FinishTask {
+        task: task.clone(),
+        expected_revision: TimelineRevision(0),
+    };
+    let attempt: AttemptId = serde_json::from_value(serde_json::json!("a".repeat(32))).unwrap();
+    state.tasks[0].progress.completion = completion.then(|| {
+        Box::new(CompletionIntent {
+            id: envelope.id.clone(),
+            digest: task_command_digest(&OrchestrationCommand::FinishTask(finish.clone())).unwrap(),
+            attempt: attempt.clone(),
+            request: finish,
+        })
+    });
+    let history = TaskHistoryRecord {
+        project: envelope.project.clone(),
+        run: state.run.clone(),
+        task,
+        attempt,
+        base,
+        source: source.clone(),
+        base_ref,
+        candidate_base_ref,
+        frozen: false,
+        merge_envelope: None,
+        merge_authority: None,
+        frozen_result: None,
+    };
+    let reference = owner
+        .admit_scheduler_record(&OrchestrationRecord {
+            version: 1,
+            payload: OrchestrationPayload::TaskHistory(Box::new(history)),
+        })
+        .unwrap()
+        .reference;
+    state.tasks[0].progress.decisions.push(reference);
+    state.phase = RunPhase::Finished;
+    state.outcome = RunOutcome::Cancelled(OutcomeDetail {
+        code: "stopped_by_person".into(),
+        detail_ref: None,
+    });
+    state.effects.clear();
+    let mut segment = initial.segment().clone();
+    segment.events.last_mut().unwrap().projection = state.clone();
+    let update = ValidatedRunUpdate::new(
+        &envelope.project,
+        envelope.expected_generation,
+        &envelope,
+        state,
+        segment,
+        CommandDecision::Applied,
+    )
+    .unwrap();
+    commit_orchestration(&mut owner, update, None).unwrap();
+    // Reopen removes runtime-only registrations; the retained task records remain.
+    drop(owner);
+    let mut app = Ja1Attachment::open(&path).unwrap();
+    if hosted {
+        app.launch_host_at(
+            &host::executable(),
+            "te13-fix1-app".into(),
+            kinewright_agent::writer_host::SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+        .unwrap();
+    }
+    (temp, app, source.branch, expected)
+}
+
+#[cfg(target_os = "linux")]
+fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
+    let (_temp, mut app, branch, expected) = te13_fix1_retained_app(hosted, completion);
+    let label = format!("Save current edit, then open {}", branch.as_str());
+    let text = rendered(&app);
+    assert!(
+        text.contains("work is kept on working branch") && text.contains(&label),
+        "TE13_FIX1_STUDIO_DISCLOSURE {hosted}: {text}"
+    );
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let manual = app.owner.core().export_history().unwrap();
+    let path = app.project_path().unwrap();
+    let manual_branch = LoadedBundle::read(&path)
+        .unwrap()
+        .manual_checkpoint()
+        .unwrap()
+        .branch_id
+        .clone();
+    let action = click_control(&app, &label);
+    assert!(
+        matches!(action, Action::PreviewRecovery(_)),
+        "TE13_FIX1_STUDIO_REAL_BUTTON"
+    );
+    app.apply(action).unwrap();
+    let action = click_control(&app, "Save current work, then open recovery point");
+    app.apply(action).unwrap();
+    assert_eq!(
+        app.owner.core().export_history().unwrap(),
+        expected,
+        "TE13_FIX1_STUDIO_TASK_EXACT {hosted}"
+    );
+    assert!(
+        app.message.contains("open") || app.message.contains("Opened"),
+        "TE13_FIX1_STUDIO_CONFIRMATION {}",
+        app.message
+    );
+    assert!(
+        rendered(&app).contains("work is open on your timeline"),
+        "TE13_FIX1_STUDIO_OPEN_DISCLOSURE"
+    );
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: true,
+    }))
+    .unwrap();
+    app.apply(Action::Save).unwrap();
+    assert!(!app.read_only(), "TE13_FIX1_STUDIO_CONTINUES_EDITING");
+    assert!(app.close());
+    drop(app);
+    let bundle = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    assert!(
+        bundle.branches_probe().contains_key(&manual_branch),
+        "TE13_FIX1_STUDIO_PERSON_BRANCH"
+    );
+    let saved = bundle
+        .store()
+        .read_record::<kinewright_core::HistorySnapshot>(
+            &bundle.branches_probe()[&manual_branch].history_ref,
+        )
+        .unwrap();
+    assert_eq!(*saved, manual, "TE13_FIX1_STUDIO_PERSON_HISTORY");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix1_standalone_studio_opens_retained_task_work() {
+    for completion in [true, false] {
+        te13_fix1_studio_recovery(false, completion);
+    }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix1_host_studio_opens_retained_task_work() {
+    for completion in [true, false] {
+        te13_fix1_studio_recovery(true, completion);
+    }
+}

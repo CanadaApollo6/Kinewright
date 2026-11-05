@@ -541,7 +541,9 @@ impl TaskMcp {
         };
         let receipt = host.dispatch_orchestration(index, &request)?;
         self.remember_terminal_state(&host);
-        if let OrchestrationCommand::FinishTask(finish) = &request.envelope.command {
+        if receipt.decision == CommandDecision::Applied
+            && let OrchestrationCommand::FinishTask(finish) = &request.envelope.command
+        {
             let status = host.completion_reply_status(&state.run, finish, &receipt.envelope.id);
             return Ok(json!({"receipt":receipt,"completion_status":status}));
         }
@@ -638,6 +640,46 @@ impl HostCommandOwner {
 }
 
 impl HostCommandOwner {
+    pub(super) fn stage_completion_history(
+        &mut self,
+        update: crate::orchestration::orchestration_commit::ValidatedRunUpdate,
+    ) -> Result<crate::orchestration::orchestration_commit::ValidatedRunUpdate, HostError> {
+        if update.receipt().decision != CommandDecision::Applied {
+            return Ok(update);
+        }
+        let OrchestrationCommand::FinishTask(finish) = &update.envelope().command else {
+            return Ok(update);
+        };
+        let identity = update
+            .projection()
+            .attempts
+            .iter()
+            .find(|attempt| {
+                attempt.identity.task == finish.task
+                    && update.envelope().authority.attempt.as_ref()
+                        == Some(&attempt.identity.attempt)
+            })
+            .ok_or_else(|| refused("completion attempt missing"))?
+            .identity
+            .clone();
+        let mut state = update.projection().clone();
+        self.persist_runtime_task(&mut state, &identity, false)?;
+        let mut segment = update.segment().clone();
+        segment
+            .events
+            .last_mut()
+            .ok_or_else(|| refused("completion event missing"))?
+            .projection = state.clone();
+        crate::orchestration::orchestration_commit::ValidatedRunUpdate::new(
+            &update.envelope().project,
+            update.envelope().expected_generation,
+            update.envelope(),
+            state,
+            segment,
+            update.receipt().decision.clone(),
+        )
+        .map_err(|_| refused("invalid completion checkpoint"))
+    }
     pub(super) fn stage_control_freeze(
         &mut self,
         update: crate::orchestration::orchestration_commit::ValidatedRunUpdate,

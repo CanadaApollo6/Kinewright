@@ -61,11 +61,11 @@ impl ClaudeProtocol {
         if usage_refused {
             events.retain(|event| !matches!(event, AgentEvent::Cost { .. }));
         }
-        for event in &mut events {
-            self.usage.project(event);
-        }
         if !self.usage.has_known_tokens() {
             events.retain(|event| !matches!(event, AgentEvent::Cost { .. }));
+        }
+        for event in &mut events {
+            self.usage.project(event);
         }
         Ok(events)
     }
@@ -735,6 +735,31 @@ mod tests {
                 .last(),
             Some(AgentEvent::Done)
         ));
+    }
+
+    #[test]
+    fn te13_fix1_unknown_cost_does_not_advance_display_watermarks() {
+        let mut protocol = ClaudeProtocol::default();
+        let first = protocol.parse_line(r#"{"type":"result","uuid":"a","modelUsage":{"m":{"inputTokens":10,"outputTokens":20,"cacheCreationInputTokens":3}}}"#).unwrap();
+        assert!(
+            !first
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Cost { .. })),
+            "TE13_FIX1_UNKNOWN_COST_DROPPED"
+        );
+        let second = protocol.parse_line(r#"{"type":"result","uuid":"b","modelUsage":{"m":{"inputTokens":14,"outputTokens":50,"cacheReadInputTokens":7,"cacheCreationInputTokens":8}}}"#).unwrap();
+        let total = second
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Cost {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => Some(input_tokens + output_tokens),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert_eq!(total, 79, "TE13_FIX1_DISPLAY_WATERMARK_79");
     }
 
     #[test]

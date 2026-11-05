@@ -52,11 +52,15 @@ impl Ja1EditingSession {
         {
             return Ok(());
         }
+        let retained = self.authorize_retained_selection(&target)?;
         self.admit_selection_target(&target)?;
-        self.prepared = Some(
-            self.active_bundle()?
-                .prepare_project_selection(&self.core, target)?,
-        );
+        let mut prepared = self
+            .active_bundle()?
+            .prepare_project_selection(&self.core, target)?;
+        if retained {
+            prepared.fork_retained_target()?;
+        }
+        self.prepared = Some(prepared);
         self.selection_result = None;
         self.preliminary_save = None;
         Ok(())
@@ -492,8 +496,21 @@ impl Ja1EditingSession {
             .iter()
             .map(|r| r.byte_length)
             .sum::<u64>();
+        let mut task_disclosure = String::new();
+        for work in self
+            .retained_task_work()?
+            .iter()
+            .filter(|work| &work.source.branch == branch)
+        {
+            use std::fmt::Write as _;
+            let _ = write!(
+                task_disclosure,
+                "This branch contains retained task {} work kept for review. Removing it can make that retained version unavailable to open. ",
+                work.task.0.as_str()
+            );
+        }
         Ok(format!(
-            "Remove working branch {} at head {}: its content {} and {} Undo / {} Redo entries leave the current branch index. Current-history residency relief: {relief} bytes. Its closure contains {retained} bytes; immediate reclaimable bytes: 0, because this publication retains the previous root. Automatic recovery, independent evidence and readers may keep these bytes after later saves. {}",
+            "{task_disclosure}Remove working branch {} at head {}: its content {} and {} Undo / {} Redo entries leave the current branch index. Current-history residency relief: {relief} bytes. Its closure contains {retained} bytes; immediate reclaimable bytes: 0, because this publication retains the previous root. Automatic recovery, independent evidence and readers may keep these bytes after later saves. {}",
             branch.as_str(),
             checkpoint.head_id.as_str(),
             checkpoint.document_hash,

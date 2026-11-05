@@ -1252,6 +1252,22 @@ impl HostAttachment {
                             action = Some(Action::PreviewRecovery(point.clone().into()));
                         }
                     }
+                    for work in &self.status.retained_task_work {
+                        ui.label(&work.disclosure);
+                        if work.stopped
+                            && work.cleanup_settled
+                            && work.available
+                            && !work.open_on_timeline
+                            && ui
+                                .button(format!(
+                                    "Save current edit, then open {}",
+                                    work.source.branch.as_str()
+                                ))
+                                .clicked()
+                        {
+                            action = Some(Action::PreviewRecovery(kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(work.source.branch.clone())));
+                        }
+                    }
                     for (branch, _, blockers) in &self.status.branches {
                         ui.label(format!(
                             "Working branch {}: {}",
@@ -1259,6 +1275,11 @@ impl HostAttachment {
                             blockers.join(" ")
                         ));
                         if blockers.is_empty()
+                            && !self
+                                .status
+                                .retained_task_work
+                                .iter()
+                                .any(|work| &work.source.branch == branch)
                             && ui
                                 .button(format!("Save current edit, then open {}", branch.as_str()))
                                 .clicked()
