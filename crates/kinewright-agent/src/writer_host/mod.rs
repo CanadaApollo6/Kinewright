@@ -2479,7 +2479,10 @@ impl HostCommandOwner {
                 .map(Into::into)
                 .collect();
             status.branches = owner.list_working_branches().unwrap_or_default();
-            status.retained_task_work = owner.retained_task_work().unwrap_or_default();
+            let retained = owner.retained_task_discovery();
+            status.retained_task_work = retained.work;
+            status.retained_task_failures = retained.failures;
+            status.retained_task_branches = retained.task_branches;
             status.retirement_candidates = owner.retirement_candidates().unwrap_or_default();
             status.destinations = owner
                 .retained_destinations()

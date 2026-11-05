@@ -302,6 +302,11 @@ impl TaskMcp {
     fn call_inner(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
         let host = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
         let mut host = host.lock().map_err(|_| refused("host owner unavailable"))?;
+        // Uncertain storage cannot serve resolve_task_mcp's projection. Only
+        // the retained original finish may reach exact-envelope reconciliation.
+        if name == "finish_task" && host.hooks.pending.is_some() {
+            return self.retry_pending_finish(&mut host, arguments);
+        }
         host.prove_retention()?;
         let (index, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
         let role = state
@@ -553,6 +558,64 @@ impl TaskMcp {
             return host.frozen_mcp_result(&state.run, &task, Some(&receipt));
         }
         let _ = task;
+        Ok(json!({"receipt":receipt}))
+    }
+    /// This narrow route precedes role refresh because uncertain storage cannot
+    /// read a manifest. Dispatch still requires the retained exact command and
+    /// its original authenticated attachment; it cannot mint fresh authority.
+    pub(crate) fn retry_pending_completion(
+        &self,
+        arguments: Value,
+    ) -> Option<Result<Value, HostError>> {
+        let host = self.host.upgrade()?;
+        let mut host = host.lock().ok()?;
+        host.hooks.pending.as_ref()?;
+        Some(self.retry_pending_finish(&mut host, arguments))
+    }
+    fn retry_pending_finish(
+        &self,
+        host: &mut HostCommandOwner,
+        arguments: Value,
+    ) -> Result<Value, HostError> {
+        let retry_control: Control = serde_json::from_value(arguments)?;
+        let authority = self.endpoint.authority();
+        if retry_control.attempt != authority.attempt
+            || retry_control.owner_epoch != authority.owner_epoch
+            || retry_control.expected_head != *self.endpoint.head()
+            || !matches!(&retry_control.command, OrchestrationCommand::FinishTask(finish) if finish.task == authority.task)
+        {
+            return Err(refused("original uncertain finish changed"));
+        }
+        let index = host.resolve_attachment(Some(&self.auth.bearer()))?;
+        let mut envelope = OrchestrationEnvelope {
+            id: retry_control.id,
+            digest: serde_json::from_value(json!("0".repeat(64)))?,
+            project: authority.project.clone(),
+            expected_generation: retry_control.expected_generation,
+            authority: AuthorityBinding {
+                grant_ref: host.expected_grant(index)?,
+                owner_epoch: retry_control.owner_epoch,
+                endpoint: Some(authority.endpoint.clone()),
+                attempt: Some(authority.attempt.clone()),
+            },
+            command: retry_control.command,
+        };
+        envelope.digest = envelope
+            .computed_digest()
+            .map_err(|_| refused("invalid original finish"))?;
+        let request = super::orchestration::ScopedOrchestrationRequest {
+            run: Some(authority.run.clone()),
+            envelope,
+            consume_batch: None,
+        };
+        let receipt = host.dispatch_orchestration(index, &request)?;
+        self.remember_terminal_state(host);
+        if receipt.decision == CommandDecision::Applied
+            && let OrchestrationCommand::FinishTask(finish) = &request.envelope.command
+        {
+            let status = host.completion_reply_status(&authority.run, finish, &receipt.envelope.id);
+            return Ok(json!({"receipt":receipt,"completion_status":status}));
+        }
         Ok(json!({"receipt":receipt}))
     }
 }

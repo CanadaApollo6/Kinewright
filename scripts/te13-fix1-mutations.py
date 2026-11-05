@@ -60,15 +60,11 @@ add('accepted-intent-keeps-latest-history', O,
     'let transition = self.stage_completion_history(transition)?;',
     'let transition = transition;', RECOVERY, 'TE13_FIX1_CRASH_LATEST_HISTORY')
 add('stop-disclosure', C,
-    '''        } else {
-            self.inspect_recovery_blocks(state)?
-        };''',
-    '''        } else {
-            return Ok(None);
-        };''', RECOVERY, 'TE13_FIX1_STOP_DISCLOSURE')
+    'self.inspect_recovery_blocks(state).unwrap_or_default()',
+    'return Ok(None)', RECOVERY, 'TE13_FIX1_STOP_DISCLOSURE')
 add('published-task-kept-without-intent', W,
-    'RetainedWorkKind::Task\n                };',
-    'continue;\n                };', RECOVERY, 'TE13_FIX1_RETAINED_WORK')
+    'RetainedWorkKind::Task\n        };',
+    'return Ok(None);\n        };', RECOVERY, 'TE13_FIX1_RETAINED_WORK')
 add('recovery-activates-task', R,
     'self.core = prepared.restore.core;', 'let _ = &prepared.restore.core;',
     RECOVERY, 'TE13_FIX1_RECOVER_EXACT_TASK')
@@ -116,7 +112,7 @@ add('merge-cache-clears', C,
     '.filter(|block| current.contains(block))', '.filter(|_| true)',
     'te13_fix1_merge_receipt_clears_live_recovery_cache', 'TE13_FIX1_MERGE_CACHE_CLEARED')
 add('standalone-studio-disclosure', 'crates/kinewright-app/src/ja1_attachment.rs',
-    'self.retained_task_work = self.owner.retained_task_work().unwrap_or_default();',
+    'self.retained_task_work = retained.work;',
     'self.retained_task_work = Vec::new();',
     'te13_fix1_standalone_studio_opens_retained_task_work', 'TE13_FIX1_STUDIO_DISCLOSURE', APP)
 add('host-studio-disclosure', 'crates/kinewright-app/src/ja1_host.rs',

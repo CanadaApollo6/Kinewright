@@ -11,6 +11,14 @@ use crate::orchestration::{
 use kinewright_project::receipts::CommandId;
 use serde::{Deserialize, Serialize};
 
+/// Only the already admitted finish and attachment can resume this host-owned step.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub(super) struct PendingCompletion {
+    original: ScopedOrchestrationRequest,
+    step: ScopedOrchestrationRequest,
+    actor: super::auth::AttachmentId,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionState {
@@ -129,15 +137,26 @@ impl HostCommandOwner {
         let blocks = if state.outcome == RunOutcome::Pending {
             self.run_recovery_blocks(state)?
         } else {
-            self.inspect_recovery_blocks(state)?
+            // Disclosure failures are shown below; they must not hide a
+            // different stopped task or make the whole Run details unreadable.
+            self.inspect_recovery_blocks(state).unwrap_or_default()
         };
+        let retained = self.owner()?.retained_task_discovery();
+        if let Some(failure) = retained
+            .failures
+            .iter()
+            .find(|failure| failure.run.as_ref().is_none_or(|run| run == &state.run))
+        {
+            return Ok(Some(failure.disclosure.clone()));
+        }
         let Some(block) = blocks.first() else {
             if state.outcome == RunOutcome::Pending {
                 return Ok(None);
             }
             return Ok(self
                 .owner()?
-                .retained_task_work()?
+                .retained_task_discovery()
+                .work
                 .into_iter()
                 .filter(|work| work.run == state.run)
                 .min_by_key(|work| (work.open_on_timeline, !work.frozen))
@@ -147,13 +166,14 @@ impl HostCommandOwner {
             RecoveryBlock::Completion(task) => (task, "completion_recovery_requires_person"),
             RecoveryBlock::Merge(task) => (task, "merge_recovery_requires_person"),
         };
-        let retained = self
-            .owner()?
-            .retained_task_work()?
+        let retained = retained
+            .work
             .into_iter()
             .find(|work| work.run == state.run && &work.task == task);
         Ok(Some(if let Some(work) = retained {
             format!("{code}: {}", work.disclosure)
+        } else if state.outcome != RunOutcome::Pending {
+            return Ok(None);
         } else {
             format!(
                 "{code}: task {} has retained work. Stop and wait for cleanup before reviewing its saved task branch.",
@@ -195,8 +215,29 @@ impl HostCommandOwner {
         &self,
         request: &ScopedOrchestrationRequest,
     ) -> Result<Option<crate::orchestration::tasks::FinishDrain>, HostError> {
+        self.reopen_unapplied_finish(request)?;
         let OrchestrationCommand::FinishTask(finish) = &request.envelope.command else {
             return Ok(None);
+        };
+        let run = request.run.as_ref().ok_or_else(|| refused("run missing"))?;
+        let endpoint = self
+            .hooks
+            .runs
+            .get(run)
+            .and_then(|run| run.tasks.get(&finish.task))
+            .ok_or_else(|| refused("task actor missing"))?
+            .endpoint();
+        endpoint
+            .begin_finish()
+            .map(Some)
+            .map_err(|reason| refused(&reason))
+    }
+    pub(super) fn reopen_unapplied_finish(
+        &self,
+        request: &ScopedOrchestrationRequest,
+    ) -> Result<(), HostError> {
+        let OrchestrationCommand::FinishTask(finish) = &request.envelope.command else {
+            return Ok(());
         };
         let run = request.run.as_ref().ok_or_else(|| refused("run missing"))?;
         let endpoint = self
@@ -219,10 +260,7 @@ impl HostCommandOwner {
         {
             endpoint.reconcile_unapplied_finish();
         }
-        endpoint
-            .begin_finish()
-            .map(Some)
-            .map_err(|reason| refused(&reason))
+        Ok(())
     }
     pub(super) fn finish_revision_matches(
         &self,
@@ -338,7 +376,7 @@ impl HostCommandOwner {
         }
         let frozen = self.completion_step(
             index,
-            run,
+            request,
             &intent,
             CompletionStep::Freeze,
             OrchestrationCommand::FreezeTask(finish.task.clone()),
@@ -352,7 +390,7 @@ impl HostCommandOwner {
             .ok_or_else(|| refused("frozen result missing"))?;
         self.completion_step(
             index,
-            run,
+            request,
             &intent,
             CompletionStep::Publication,
             OrchestrationCommand::PublishResult(Box::new(PublishResult {
@@ -375,11 +413,15 @@ impl HostCommandOwner {
     fn completion_step(
         &mut self,
         index: usize,
-        run: &crate::orchestration::orchestration_records::RunId,
+        original: &ScopedOrchestrationRequest,
         intent: &CompletionIntent,
         step: CompletionStep,
         command: OrchestrationCommand,
     ) -> Result<OrchestrationReceipt, HostError> {
+        let run = original
+            .run
+            .as_ref()
+            .ok_or_else(|| refused("run missing"))?;
         let id = intent
             .step_id(step)
             .map_err(|_| refused("completion identity capacity"))?;
@@ -439,11 +481,132 @@ impl HostCommandOwner {
             consume_batch: None,
         };
         self.authorize_orchestration(index, &step)?;
-        let receipt = self.dispatch_orchestration(index, &step)?;
+        let receipt = self.dispatch_orchestration(index, &step).inspect_err(|_| {
+            if matches!(&self.hooks.pending, Some(super::orchestration::PendingPublication::Wire(request, actor))
+                if **request == step && *actor == self.attachments[index].id)
+            {
+                self.hooks.pending = Some(super::orchestration::PendingPublication::Completion(Box::new(PendingCompletion {
+                    original: original.clone(),
+                    step: step.clone(),
+                    actor: self.attachments[index].id,
+                })));
+            }
+        })?;
         if receipt.decision != CommandDecision::Applied {
             return Err(refused("completion substep refused"));
         }
         Ok(receipt)
+    }
+    /// Exact retained identity is checked before uncertain storage is read; current
+    /// authorization and the accepted intent are checked again after reconciliation.
+    pub(super) fn reconcile_completion_substep(
+        &mut self,
+        index: usize,
+        incoming: &ScopedOrchestrationRequest,
+    ) -> Result<Option<OrchestrationReceipt>, HostError> {
+        use super::orchestration::PendingPublication;
+        let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
+            return Ok(None);
+        };
+        if pending.original != *incoming || pending.actor != self.attachments[index].id {
+            return Err(refused("original uncertain finish must reconcile first"));
+        }
+        #[cfg(target_os = "linux")]
+        if self.native_recovery_pending || self.recovery_only {
+            return Err(refused("native recovery is pending"));
+        }
+        self.owner_mut()?.reconcile_metadata()?;
+        self.require_metadata_issuer(index, &incoming.envelope.id.issuer)?;
+        incoming
+            .envelope
+            .validate()
+            .map_err(|_| refused("invalid original finish"))?;
+        let run = incoming
+            .run
+            .as_ref()
+            .ok_or_else(|| refused("run missing"))?;
+        let OrchestrationCommand::FinishTask(finish) = &incoming.envelope.command else {
+            return Err(refused("not the original finish"));
+        };
+        let state = self
+            .owner()?
+            .orchestration_projection(run)?
+            .ok_or_else(|| refused("run missing"))?;
+        let intent = state
+            .tasks
+            .iter()
+            .find(|task| task.id == finish.task)
+            .and_then(|task| task.progress.completion.as_deref())
+            .ok_or_else(|| refused("completion intent missing"))?;
+        let scope = self.attachments[index]
+            .producer_scope
+            .as_ref()
+            .ok_or_else(|| refused("completion attachment changed"))?;
+        let receipt = self
+            .owner()?
+            .orchestration_replay(&incoming.envelope, incoming.consume_batch.as_ref())?
+            .filter(|receipt| receipt.decision == CommandDecision::Applied)
+            .ok_or_else(|| refused("completion intent was not accepted"))?;
+        let step = match &pending.step.envelope.command {
+            OrchestrationCommand::FreezeTask(task) if *task == finish.task => {
+                CompletionStep::Freeze
+            }
+            OrchestrationCommand::PublishResult(result) if result.task == finish.task => {
+                CompletionStep::Publication
+            }
+            _ => return Err(refused("completion substep changed")),
+        };
+        if intent.id != incoming.envelope.id
+            || intent.request != *finish
+            || incoming.envelope.authority.attempt.as_ref() != Some(&intent.attempt)
+            || pending.step.run != incoming.run
+            || pending.step.envelope.project != incoming.envelope.project
+            || pending.step.envelope.authority != incoming.envelope.authority
+            || scope.expired()
+            || scope.run != *run
+            || scope.task.as_ref() != Some(&finish.task)
+            || scope.attempt.as_ref() != Some(&intent.attempt)
+            || scope.endpoint != incoming.envelope.authority.endpoint
+            || scope.owner_epoch != self.owner()?.store()?.owner_epoch()
+            || incoming.envelope.authority.owner_epoch != scope.owner_epoch
+            || incoming.envelope.authority.grant_ref != self.expected_grant(index)?
+            || incoming.envelope.project != self.owner()?.active_manual_project()?
+            || state.outcome != RunOutcome::Pending
+            || self.recovering
+            || self.switch_frozen
+            || pending.step.envelope.id
+                != intent
+                    .step_id(step)
+                    .map_err(|_| refused("completion identity capacity"))?
+        {
+            return Err(refused("completion binding changed"));
+        }
+        let bound = self.bind_publication(&pending.step)?;
+        if let Some(stored) = self.owner()?.orchestration_replay(&bound.envelope, None)? {
+            if stored.decision != CommandDecision::Applied {
+                return Err(refused("completion substep refused"));
+            }
+            self.hooks.pending = None;
+            self.sync_runtime_grants(&state);
+        } else {
+            // Reconciliation proved this step absent. Missing work still needs
+            // today's live authorization before the original envelope is retried.
+            self.authorize_orchestration(index, incoming)?;
+            self.hooks.pending = Some(PendingPublication::Wire(
+                Box::new(pending.step.clone()),
+                pending.actor,
+            ));
+            if let Err(error) = self.dispatch_orchestration(index, &pending.step) {
+                if matches!(&self.hooks.pending, Some(PendingPublication::Wire(request, actor))
+                    if **request == pending.step && *actor == pending.actor)
+                {
+                    self.hooks.pending = Some(PendingPublication::Completion(pending));
+                }
+                return Err(error);
+            }
+        }
+        self.drive_completion(index, incoming, &receipt);
+        Ok(Some(receipt))
     }
     /// A later progress read cannot erase an acknowledged intent receipt.
     pub(super) fn completion_reply_status(

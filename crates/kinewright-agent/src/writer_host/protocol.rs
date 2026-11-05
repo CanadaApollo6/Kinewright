@@ -562,6 +562,10 @@ pub struct HostStatus {
     pub branches: Vec<(BranchId, HeadId, Vec<String>)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retained_task_work: Vec<kinewright_project::editing_session::RetainedTaskWork>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_task_failures: Vec<kinewright_project::editing_session::RetainedWorkFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_task_branches: Vec<BranchId>,
     pub retirement_candidates: Vec<BranchId>,
     pub destinations: Vec<(PathBuf, HostPublication)>,
     pub close_disclosure: String,

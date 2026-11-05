@@ -56,7 +56,7 @@ freeze = '        let _drain = self\n            .endpoint\n            .close_a
 add('task-history', T, freeze,
     '        self.core().request(kinewright_core::Command::Undo).unwrap();\n' + freeze,
     'te13_finish_preserves_exact_task_and_person_redo_histories', 'TE13_EXACT_TASK_HISTORY')
-publication = '        self.completion_step(\n            index,\n            run,\n            &intent,\n            CompletionStep::Publication,'
+publication = '        self.completion_step(\n            index,\n            request,\n            &intent,\n            CompletionStep::Publication,'
 add('manual-history', C, publication,
     '        self.owner()?.core().request(kinewright_core::Command::Undo).unwrap();\n' + publication,
     'te13_finish_preserves_exact_task_and_person_redo_histories', 'TE13_EXACT_MANUAL_REDO_HISTORY')
@@ -77,8 +77,8 @@ add('commit-scope', S, 'serde_json::json!({"revision":revision,"affected_scope":
     'te13_commit_returns_its_revision_and_affected_scope', 'TE13_COMMIT_SCOPE')
 
 add('progress-read-ack', 'crates/kinewright-agent/src/writer_host/task_mcp.rs',
-    'return Ok(json!({"receipt":receipt,"completion_status":status}));',
-    'return Ok(json!({"completion_status":status}));',
+    'let status = host.completion_reply_status(&state.run, finish, &receipt.envelope.id);\n            return Ok(json!({"receipt":receipt,"completion_status":status}));',
+    'let status = host.completion_reply_status(&state.run, finish, &receipt.envelope.id);\n            return Ok(json!({"completion_status":status}));',
     'te13_progress_read_failure_keeps_the_acknowledged_intent_outcome', 'TE13_PROGRESS_FAILURE_RETAINS_RECEIPT')
 
 add('readiness-before-intent', T, 'if !ready_for_completion(state, &request.task, true) {',

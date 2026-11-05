@@ -111,6 +111,9 @@ pub struct StudioRoot {
     pub creation_brief_ref: Option<ObjectRef>,
     pub manual_branch_id: BranchId,
     pub manual_switch_generation: u64,
+    /// Recovery forks keep their source identity after later edits and saves.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retained_task_reviews: BTreeMap<BranchId, crate::orchestration_records::BranchBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidate_branch_ids: Vec<BranchId>,
     /// The current recovery base belongs to this exact branch checkpoint.
@@ -158,6 +161,12 @@ impl StudioRoot {
         }
         if self.candidate_recovery.len() > self.candidate_branch_ids.len() + 1 {
             return Err(BundleError::Capacity("candidate recovery bindings"));
+        }
+        if self.retained_task_reviews.len() as u64 > StorageLimits::default().objects {
+            return Err(BundleError::Capacity("retained task review identities"));
+        }
+        for source in self.retained_task_reviews.values() {
+            crate::studio_records::kind(&source.checkpoint, RecordKind::BranchCheckpoint)?;
         }
         for binding in self.candidate_recovery.values() {
             crate::studio_records::kind(&binding.checkpoint, RecordKind::BranchCheckpoint)?;

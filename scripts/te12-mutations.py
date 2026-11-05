@@ -75,7 +75,7 @@ add('cross-run-receipt', 'crates/kinewright-project/src/orchestration_store.rs',
     'if false && original_run != run {',
     'te12_receipt_reconciliation_is_read_only_and_scope_bound', 'TE12_STORE_CROSS_RUN')
 DISPATCH = '''        if let Some(control) = &self.task_control {
-            let role = match control.role()'''
+            if request.name == "finish_task"'''
 add('old-dispatcher', SERVER, DISPATCH,
     '''        if request.name == "invoke_capability" && let Some(control) = &self.task_control {
             let args: InvokeCapabilityArgs = decode_args("invoke_capability",request.arguments.clone().unwrap_or_default())?;

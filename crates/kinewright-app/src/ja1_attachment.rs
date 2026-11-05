@@ -180,6 +180,8 @@ pub(crate) struct Ja1Attachment {
     points: Vec<RecoverySelection>,
     branches: Vec<(BranchId, Vec<String>)>,
     retained_task_work: Vec<kinewright_project::editing_session::RetainedTaskWork>,
+    retained_task_failures: Vec<kinewright_project::editing_session::RetainedWorkFailure>,
+    retained_task_branches: Vec<BranchId>,
     candidates: Vec<BranchId>,
     destinations: Vec<(PathBuf, PublicationState)>,
     frozen: bool,
@@ -230,6 +232,8 @@ impl Ja1Attachment {
             points: vec![],
             branches: vec![],
             retained_task_work: vec![],
+            retained_task_failures: vec![],
+            retained_task_branches: vec![],
             candidates: vec![],
             destinations: vec![],
             frozen: false,
@@ -268,7 +272,10 @@ impl Ja1Attachment {
             .into_iter()
             .map(|(id, _, blockers)| (id, blockers))
             .collect();
-        self.retained_task_work = self.owner.retained_task_work().unwrap_or_default();
+        let retained = self.owner.retained_task_discovery();
+        self.retained_task_work = retained.work;
+        self.retained_task_failures = retained.failures;
+        self.retained_task_branches = retained.task_branches;
         self.candidates = self.owner.retirement_candidates().unwrap_or_default();
         self.destinations = self.owner.retained_destinations().unwrap_or_default();
     }
@@ -1678,6 +1685,9 @@ impl Ja1Attachment {
                 {
                     action = Some(Action::PreviewRescue);
                 }
+                for failure in &self.retained_task_failures {
+                    ui.label(&failure.disclosure);
+                }
                 if !self.frozen {
                     for (index, point) in self.points.iter().enumerate() {
                         if ui
@@ -1693,6 +1703,7 @@ impl Ja1Attachment {
                             && work.cleanup_settled
                             && work.available
                             && !work.open_on_timeline
+                            && work.reviewed_on.is_none()
                             && ui
                                 .button(format!(
                                     "Save current edit, then open {}",
@@ -1712,10 +1723,11 @@ impl Ja1Attachment {
                             blockers.join(" ")
                         ));
                         if blockers.is_empty()
+                            && !self.retained_task_branches.contains(branch)
                             && !self
-                                .retained_task_work
+                                .retained_task_failures
                                 .iter()
-                                .any(|work| &work.source.branch == branch)
+                                .any(|failure| failure.branch.is_none())
                             && ui
                                 .button(format!("Save current edit, then open {}", branch.as_str()))
                                 .clicked()

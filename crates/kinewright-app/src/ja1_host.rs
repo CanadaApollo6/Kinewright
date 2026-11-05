@@ -1243,6 +1243,9 @@ impl HostAttachment {
                 if self.status.unresolved && ui.button("Save rescue copy").clicked() {
                     action = Some(Action::PreviewRescue);
                 }
+                for failure in &self.status.retained_task_failures {
+                    ui.label(&failure.disclosure);
+                }
                 if !self.status.frozen {
                     for (index, point) in self.status.recovery_points.iter().enumerate() {
                         if ui
@@ -1258,6 +1261,7 @@ impl HostAttachment {
                             && work.cleanup_settled
                             && work.available
                             && !work.open_on_timeline
+                            && work.reviewed_on.is_none()
                             && ui
                                 .button(format!(
                                     "Save current edit, then open {}",
@@ -1275,11 +1279,12 @@ impl HostAttachment {
                             blockers.join(" ")
                         ));
                         if blockers.is_empty()
+                            && !self.status.retained_task_branches.contains(branch)
                             && !self
                                 .status
-                                .retained_task_work
+                                .retained_task_failures
                                 .iter()
-                                .any(|work| &work.source.branch == branch)
+                                .any(|failure| failure.branch.is_none())
                             && ui
                                 .button(format!("Save current edit, then open {}", branch.as_str()))
                                 .clicked()

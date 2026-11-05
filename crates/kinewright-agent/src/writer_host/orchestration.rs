@@ -180,6 +180,7 @@ impl Drop for Hooks {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub(super) enum PendingPublication {
     Wire(Box<ScopedOrchestrationRequest>, super::auth::AttachmentId),
+    Completion(Box<super::task_completion::PendingCompletion>),
     Owner(Box<ValidatedRunUpdate>),
     #[cfg(target_os = "linux")]
     Cumulative(
@@ -214,7 +215,7 @@ pub(super) fn is_hook(command: &HostCommand) -> bool {
 }
 
 impl HostCommandOwner {
-    fn sync_runtime_grants(&mut self, projection: &RunProjection) {
+    pub(super) fn sync_runtime_grants(&mut self, projection: &RunProjection) {
         let epoch = self
             .owner()
             .and_then(|owner| Ok(owner.store()?.owner_epoch()))
@@ -749,6 +750,9 @@ impl HostCommandOwner {
     ) -> Result<OrchestrationReceipt, HostError> {
         // Bounded owner reads/replay finish before ordinary staging begins.
         // Long-lived snapshot readers never receive this allowance.
+        if let Some(receipt) = self.reconcile_completion_substep(index, incoming)? {
+            return Ok(receipt);
+        }
         if let Some(pending) = &self.hooks.pending {
             // An immutable attachment instance admitted this exact command before B4.
             // Scope records are unreadable while the namespace is uncertain; only that
@@ -781,6 +785,9 @@ impl HostCommandOwner {
                 }
             }
             self.hooks.pending = None;
+            if receipt.decision != orchestration_commit::CommandDecision::Applied {
+                self.reopen_unapplied_finish(request)?;
+            }
             if receipt.decision == orchestration_commit::CommandDecision::Applied
                 && let OrchestrationCommand::FinishTask(finish) = &request.envelope.command
                 && let Some(actor) = self

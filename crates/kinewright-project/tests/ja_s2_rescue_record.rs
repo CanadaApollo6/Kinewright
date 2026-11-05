@@ -1091,6 +1091,7 @@ fn w14_raw_switch_structure_and_ordinary_v3_backward_control() {
         creation_brief_ref: None,
         manual_branch_id: BranchId::fresh().unwrap(),
         manual_switch_generation: 0,
+        retained_task_reviews: std::collections::BTreeMap::new(),
         candidate_branch_ids: vec![],
         candidate_recovery: std::collections::BTreeMap::new(),
         branch_index_ref: reference(RecordKind::BranchIndex),

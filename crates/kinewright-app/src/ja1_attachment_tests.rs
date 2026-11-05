@@ -3295,6 +3295,23 @@ fn te13_fix1_retained_app(
     BranchId,
     kinewright_core::HistorySnapshot,
 ) {
+    te13_fix2_retained_app(hosted, completion, false)
+}
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "independent retained tasks exercise real standalone and hosted Studio"
+)]
+fn te13_fix2_retained_app(
+    hosted: bool,
+    completion: bool,
+    bad_history: bool,
+) -> (
+    TempDirectory,
+    Ja1Attachment,
+    BranchId,
+    kinewright_core::HistorySnapshot,
+) {
     use kinewright_agent::orchestration::{machine, orchestration_records::*};
     use kinewright_project::{
         orchestration_commit::{CommandDecision, ValidatedRunUpdate, commit_orchestration},
@@ -3315,6 +3332,14 @@ fn te13_fix1_retained_app(
     let expected = source.core().export_history().unwrap();
     let base_ref = owner.persist_durable_branch(&mut source).unwrap();
     let source = owner.candidate_binding(source.branch_id()).unwrap();
+    let bad_source = if bad_history {
+        let mut bad_source = owner.fork_durable_branch("unreadable task").unwrap();
+        edit(bad_source.core(), true);
+        owner.persist_durable_branch(&mut bad_source).unwrap();
+        Some(owner.candidate_binding(bad_source.branch_id()).unwrap())
+    } else {
+        None
+    };
     let evidence = owner
         .admit_host_grant(b"retained fixture evidence")
         .unwrap();
@@ -3392,11 +3417,31 @@ fn te13_fix1_retained_app(
     let reference = owner
         .admit_scheduler_record(&OrchestrationRecord {
             version: 1,
-            payload: OrchestrationPayload::TaskHistory(Box::new(history)),
+            payload: OrchestrationPayload::TaskHistory(Box::new(history.clone())),
         })
         .unwrap()
         .reference;
     state.tasks[0].progress.decisions.push(reference);
+    if let Some(bad_source) = bad_source {
+        let mut bad = state.tasks[0].clone();
+        bad.id = TaskId(kinewright_project::bundle_records::SessionId::fresh().unwrap());
+        bad.parent = Some(state.tasks[0].id.clone());
+        bad.brief.role = Role::Editor;
+        bad.progress = TaskProgress::default();
+        let mut mismatched = history;
+        // A real admitted record with the wrong task scope; its source remains
+        // a distinct branch so only that task's action must be refused.
+        mismatched.source = bad_source;
+        let reference = owner
+            .admit_scheduler_record(&OrchestrationRecord {
+                version: 1,
+                payload: OrchestrationPayload::TaskHistory(Box::new(mismatched)),
+            })
+            .unwrap()
+            .reference;
+        bad.progress.decisions.push(reference);
+        state.tasks.push(bad);
+    }
     state.phase = RunPhase::Finished;
     state.outcome = RunOutcome::Cancelled(OutcomeDetail {
         code: "stopped_by_person".into(),
@@ -3512,4 +3557,158 @@ fn te13_fix1_host_studio_opens_retained_task_work() {
     for completion in [true, false] {
         te13_fix1_studio_recovery(true, completion);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn te13_fix2_bad_history_studio(hosted: bool) {
+    let (_temp, mut app, branch, expected) = te13_fix2_retained_app(hosted, true, true);
+    let text = rendered(&app);
+    let label = format!("Save current edit, then open {}", branch.as_str());
+    assert!(
+        text.contains("could not be inspected"),
+        "TE13_FIX2_STUDIO_INSPECTION_FAILURE {hosted}: {text}"
+    );
+    assert!(
+        text.contains("work is kept on working branch") && text.contains(&label),
+        "TE13_FIX2_HEALTHY_TASK_VISIBLE {hosted}: {text}"
+    );
+    let failures = if let Some(host) = &app.host {
+        &host.status.retained_task_failures
+    } else {
+        &app.retained_task_failures
+    };
+    assert_eq!(failures.len(), 1, "TE13_FIX2_FAILURE_ISOLATED");
+    let failed_branch = failures[0].branch.clone().unwrap();
+    if let Some(host) = &app.host {
+        let run = failures[0].run.clone().unwrap();
+        let observed = host
+            .client
+            .request(kinewright_agent::writer_host::HostCommand::ObserveRun {
+                run,
+                after_sequence: 0,
+            })
+            .unwrap();
+        assert!(
+            observed.error.is_none() && observed.run_view.is_some(),
+            "TE13_FIX2_BAD_HISTORY_RUN_READABLE {observed:?}"
+        );
+    }
+    assert!(
+        !text.contains(&format!(
+            "Save current edit, then open {}",
+            failed_branch.as_str()
+        )),
+        "TE13_FIX2_BAD_TASK_NO_BUTTON"
+    );
+    let before = app.owner.core().export_history().unwrap();
+    assert!(
+        app.apply(Action::PreviewRecovery(RecoverySelection::WorkingBranch(
+            failed_branch.clone()
+        )))
+        .is_err(),
+        "TE13_FIX2_BAD_SELECTION_REFUSED"
+    );
+    assert!(
+        app.apply(Action::PreviewRetirement(failed_branch)).is_err(),
+        "TE13_FIX2_BAD_REMOVAL_REFUSED"
+    );
+    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    let action = click_control(&app, &label);
+    app.apply(action)
+        .unwrap_or_else(|error| panic!("TE13_FIX2_HEALTHY_TASK_RECOVERY {error}"));
+    let action = click_control(&app, "Save current work, then open recovery point");
+    app.apply(action).unwrap();
+    assert_eq!(
+        app.owner.core().export_history().unwrap(),
+        expected,
+        "TE13_FIX2_HEALTHY_TASK_RECOVERED"
+    );
+    assert!(app.close());
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix2_standalone_studio_isolates_bad_history() {
+    te13_fix2_bad_history_studio(false);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix2_host_studio_isolates_bad_history() {
+    te13_fix2_bad_history_studio(true);
+}
+
+#[cfg(target_os = "linux")]
+fn te13_fix2_reviewed_studio(hosted: bool) {
+    let (_temp, mut app, branch, _) = te13_fix1_retained_app(hosted, true);
+    let label = format!("Save current edit, then open {}", branch.as_str());
+    assert!(
+        rendered(&app).contains(&label),
+        "TE13_FIX2_UNREVIEWED_OFFER"
+    );
+    let action = click_control(&app, &label);
+    app.apply(action).unwrap();
+    let action = click_control(&app, "Save current work, then open recovery point");
+    app.apply(action).unwrap();
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    app.apply(Action::Save).unwrap();
+    let expected = app.owner.core().export_history().unwrap();
+    let path = app.project_path().unwrap();
+    let text = rendered(&app);
+    assert!(
+        text.contains("work was opened for review") && !text.contains(&label),
+        "TE13_FIX2_REVIEWED_NO_REOFFER {hosted}: {text}"
+    );
+    assert!(app.close());
+    drop(app);
+    let app = Ja1Attachment::open(&path).unwrap();
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    let text = rendered(&app);
+    assert!(
+        text.contains("work was opened for review") && !text.contains(&label),
+        "TE13_FIX2_REVIEW_LINK_REOPEN {text}"
+    );
+    drop(app);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix2_standalone_studio_keeps_review_provenance() {
+    te13_fix2_reviewed_studio(false);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix2_host_studio_keeps_review_provenance() {
+    te13_fix2_reviewed_studio(true);
+}
+
+#[cfg(target_os = "linux")]
+fn te13_fix2_removed_studio(hosted: bool) {
+    let (_temp, mut app, branch, _) = te13_fix1_retained_app(hosted, false);
+    let label = format!("Save current edit, then open {}", branch.as_str());
+    assert!(rendered(&app).contains(&label));
+    let action = click_control(
+        &app,
+        &format!("Remove this working branch {}", branch.as_str()),
+    );
+    app.apply(action).unwrap();
+    let action = click_control(&app, "Confirm working branch loss");
+    app.apply(action).unwrap();
+    let text = rendered(&app);
+    assert!(
+        !text.contains(branch.as_str()),
+        "TE13_FIX2_REMOVED_BRANCH_NO_DISCLOSURE {hosted}: {text}"
+    );
+    assert!(app.close());
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix2_standalone_studio_hides_removed_task_branch() {
+    te13_fix2_removed_studio(false);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te13_fix2_host_studio_hides_removed_task_branch() {
+    te13_fix2_removed_studio(true);
 }

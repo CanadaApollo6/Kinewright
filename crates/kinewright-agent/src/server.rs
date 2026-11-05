@@ -1491,6 +1491,16 @@ impl KinewrightMcp {
             }
         }
         if let Some(control) = &self.task_control {
+            if request.name == "finish_task"
+                && let Some(result) = control.retry_pending_completion(serde_json::Value::Object(
+                    request.arguments.clone().unwrap_or_default(),
+                ))
+            {
+                return Ok(match result {
+                    Ok(result) => success_structured("task outcome", result),
+                    Err(error) => error_text(error.to_string()),
+                });
+            }
             let role = match control.role() {
                 Ok(role) => role,
                 Err(error) => return Ok(error_text(error.to_string())),

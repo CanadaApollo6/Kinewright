@@ -1356,6 +1356,26 @@ impl BundleCommit {
             generation,
         )?;
         let store_manifest_ref = seal!(&store_manifest);
+        let mut retained_task_reviews = bundle
+            .root
+            .as_ref()
+            .map(|root| root.retained_task_reviews.clone())
+            .unwrap_or_default();
+        if let Some(selected) = selection
+            && selected.protects_branch(&selected.restore.checkpoint.branch_id)
+            && !selected.reuses_checkpoint()
+        {
+            let source = &selected.restore.checkpoint;
+            retained_task_reviews.insert(
+                selected.target_branch.clone(),
+                crate::orchestration_records::BranchBinding {
+                    branch: source.branch_id.clone(),
+                    head: source.head_id.clone(),
+                    document_hash: source.document_hash.clone(),
+                    checkpoint: bundle.checkpoint_reference(&source.branch_id)?,
+                },
+            );
+        }
         let root = StudioRoot {
             project_id: bundle.project_id.clone(),
             origin_project_ids: bundle.origin_project_ids.clone(),
@@ -1364,6 +1384,7 @@ impl BundleCommit {
             creation_brief_ref: None,
             manual_branch_id: manual_branch_id.clone(),
             manual_switch_generation: switch_generation,
+            retained_task_reviews,
             candidate_branch_ids: branches
                 .keys()
                 .filter(|id| **id != manual_branch_id)
