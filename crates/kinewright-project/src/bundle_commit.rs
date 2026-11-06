@@ -1361,6 +1361,7 @@ impl BundleCommit {
             .as_ref()
             .map(|root| root.retained_task_reviews.clone())
             .unwrap_or_default();
+        retained_task_reviews.retain(|fork, _| branches.contains_key(fork));
         if let Some(selected) = selection
             && selected.protects_branch(&selected.restore.checkpoint.branch_id)
             && !selected.reuses_checkpoint()

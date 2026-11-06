@@ -3312,6 +3312,27 @@ fn te13_fix2_retained_app(
     BranchId,
     kinewright_core::HistorySnapshot,
 ) {
+    te13_fix3_retained_app(
+        hosted,
+        completion,
+        if bad_history { "bad" } else { "plain" },
+    )
+}
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "persisted task states drive both real Studio modes"
+)]
+fn te13_fix3_retained_app(
+    hosted: bool,
+    completion: bool,
+    scenario: &str,
+) -> (
+    TempDirectory,
+    Ja1Attachment,
+    BranchId,
+    kinewright_core::HistorySnapshot,
+) {
     use kinewright_agent::orchestration::{machine, orchestration_records::*};
     use kinewright_project::{
         orchestration_commit::{CommandDecision, ValidatedRunUpdate, commit_orchestration},
@@ -3332,11 +3353,16 @@ fn te13_fix2_retained_app(
     let expected = source.core().export_history().unwrap();
     let base_ref = owner.persist_durable_branch(&mut source).unwrap();
     let source = owner.candidate_binding(source.branch_id()).unwrap();
-    let bad_source = if bad_history {
+    let mut other_base_ref = None;
+    let bad_source = if matches!(scenario, "bad" | "shared-bad" | "two") {
         let mut bad_source = owner.fork_durable_branch("unreadable task").unwrap();
         edit(bad_source.core(), true);
-        owner.persist_durable_branch(&mut bad_source).unwrap();
-        Some(owner.candidate_binding(bad_source.branch_id()).unwrap())
+        other_base_ref = Some(owner.persist_durable_branch(&mut bad_source).unwrap());
+        Some(if scenario == "shared-bad" {
+            source.clone()
+        } else {
+            owner.candidate_binding(bad_source.branch_id()).unwrap()
+        })
     } else {
         None
     };
@@ -3409,7 +3435,7 @@ fn te13_fix2_retained_app(
         source: source.clone(),
         base_ref,
         candidate_base_ref,
-        frozen: false,
+        frozen: !matches!(scenario, "plain" | "bad" | "shared-bad" | "two"),
         merge_envelope: None,
         merge_authority: None,
         frozen_result: None,
@@ -3428,10 +3454,14 @@ fn te13_fix2_retained_app(
         bad.parent = Some(state.tasks[0].id.clone());
         bad.brief.role = Role::Editor;
         bad.progress = TaskProgress::default();
-        let mut mismatched = history;
+        let mut mismatched = history.clone();
         // A real admitted record with the wrong task scope; its source remains
         // a distinct branch so only that task's action must be refused.
         mismatched.source = bad_source;
+        if scenario == "two" {
+            mismatched.task = bad.id.clone();
+            mismatched.base_ref = other_base_ref.unwrap();
+        }
         let reference = owner
             .admit_scheduler_record(&OrchestrationRecord {
                 version: 1,
@@ -3442,11 +3472,63 @@ fn te13_fix2_retained_app(
         bad.progress.decisions.push(reference);
         state.tasks.push(bad);
     }
+    if matches!(scenario, "root" | "observed" | "completed-parent" | "live") {
+        let result = TaskResult {
+            outcome: AttemptOutcome::Completed,
+            base: Some(history.base.clone()),
+            head: Some(source.clone()),
+            delta_ref: None,
+            artifacts: vec![],
+            evidence: vec![],
+            usage_ref: history.base_ref.clone(),
+            explanation: history.base_ref.clone(),
+        };
+        let result_ref = owner
+            .admit_scheduler_record(&OrchestrationRecord {
+                version: 1,
+                payload: OrchestrationPayload::Result(Box::new(result)),
+            })
+            .unwrap()
+            .reference;
+        state.results.push(result_ref.clone());
+        state.tasks[0].state = TaskState::Terminal(result_ref.clone());
+        if scenario != "root" {
+            let mut parent = state.tasks[0].clone();
+            parent.id = TaskId(kinewright_project::bundle_records::SessionId::fresh().unwrap());
+            parent.progress = TaskProgress::default();
+            parent.state = if scenario == "completed-parent" {
+                TaskState::Terminal(result_ref.clone())
+            } else {
+                TaskState::Queued
+            };
+            state.tasks[0].parent = Some(parent.id.clone());
+            state.tasks[0].brief.role = Role::Editor;
+            state.deliveries.push(DeliveryRecord {
+                id: DeliveryId(kinewright_project::bundle_records::SessionId::fresh().unwrap()),
+                task: state.tasks[0].id.clone(),
+                result: result_ref,
+                generation: 1,
+                wake: EffectId(kinewright_project::bundle_records::SessionId::fresh().unwrap()),
+                message: StableMessageId(
+                    kinewright_project::bundle_records::SessionId::fresh().unwrap(),
+                ),
+                state: DeliveryState::Observed(state.run.clone()),
+            });
+            state.tasks.insert(0, parent);
+        }
+    }
     state.phase = RunPhase::Finished;
     state.outcome = RunOutcome::Cancelled(OutcomeDetail {
         code: "stopped_by_person".into(),
         detail_ref: None,
     });
+    if scenario == "completed-parent" {
+        state.outcome = RunOutcome::Ready;
+    }
+    if scenario == "live" {
+        state.outcome = RunOutcome::Pending;
+        state.phase = RunPhase::Reviewing;
+    }
     state.effects.clear();
     let mut segment = initial.segment().clone();
     segment.events.last_mut().unwrap().projection = state.clone();
@@ -3569,7 +3651,7 @@ fn te13_fix2_bad_history_studio(hosted: bool) {
         "TE13_FIX2_STUDIO_INSPECTION_FAILURE {hosted}: {text}"
     );
     assert!(
-        text.contains("work is kept on working branch") && text.contains(&label),
+        text.contains("work is kept on working branch") && text.lines().any(|line| line == label),
         "TE13_FIX2_HEALTHY_TASK_VISIBLE {hosted}: {text}"
     );
     let failures = if let Some(host) = &app.host {
@@ -3712,3 +3794,5 @@ fn te13_fix2_standalone_studio_hides_removed_task_branch() {
 fn te13_fix2_host_studio_hides_removed_task_branch() {
     te13_fix2_removed_studio(true);
 }
+
+include!("ja1_te13_fix3_tests.rs");

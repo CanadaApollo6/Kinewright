@@ -1262,6 +1262,11 @@ impl HostAttachment {
                             && work.available
                             && !work.open_on_timeline
                             && work.reviewed_on.is_none()
+                            && !self
+                                .status
+                                .retained_task_failures
+                                .iter()
+                                .any(|failure| failure.blocks_branch(&work.source.branch))
                             && ui
                                 .button(format!(
                                     "Save current edit, then open {}",

@@ -58,6 +58,76 @@ fn refused(reason: &str) -> HostError {
     HostRefusal::new("task_scope", reason).into()
 }
 impl HostCommandOwner {
+    /// Reconciliation proves a write's fate, never grants permission to run it.
+    /// The person's attachment may abandon an absent substep before Stop.
+    pub(super) fn settle_completion_for_owner(&mut self, index: usize) -> Result<(), HostError> {
+        use super::orchestration::PendingPublication;
+        if self.attachments[index].role != super::AttachmentRole::Editor {
+            return Ok(());
+        }
+        let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
+            return Ok(());
+        };
+        self.owner_mut()?.reconcile_metadata()?;
+        let bound = self.bind_publication(&pending.step)?;
+        // A mismatch or unreadable receipt still refuses. Proven absence is
+        // sufficient for abandonment; it is not permission to execute the step.
+        self.owner()?.orchestration_replay(&bound.envelope, None)?;
+        self.retain_completion_block(&pending);
+        self.hooks.pending = None;
+        Ok(())
+    }
+    fn retain_completion_block(&mut self, pending: &PendingCompletion) {
+        if let Some(run) = pending
+            .original
+            .run
+            .as_ref()
+            .and_then(|id| self.hooks.runs.get_mut(id))
+            && let OrchestrationCommand::FinishTask(finish) = &pending.original.envelope.command
+        {
+            let block = RecoveryBlock::Completion(finish.task.clone());
+            if !run.recovery_blocks.contains(&block) {
+                run.recovery_blocks.push(block);
+            }
+        }
+    }
+    /// This exception only allows owner envelope issuance and Stop; neither
+    /// operation can continue a task or publish its result under stale authority.
+    pub(super) fn completion_owner_recovery(
+        &self,
+        index: usize,
+        command: &super::HostCommand,
+    ) -> bool {
+        use crate::orchestration::orchestration_records::RunAction;
+        if self.attachments[index].role != super::AttachmentRole::Editor {
+            return false;
+        }
+        let pending_run = match &self.hooks.pending {
+            Some(super::orchestration::PendingPublication::Completion(pending)) => {
+                pending.original.run.as_ref()
+            }
+            _ => None,
+        };
+        let blocked = |id: &crate::orchestration::orchestration_records::RunId| {
+            pending_run == Some(id)
+                || self.hooks.runs.get(id).is_some_and(|run| {
+                    run.recovery_blocks
+                        .iter()
+                        .any(|block| matches!(block, RecoveryBlock::Completion(_)))
+                })
+        };
+        match command {
+            super::HostCommand::IssueMetadataIssuer { .. } => {
+                pending_run.is_some() || self.hooks.runs.keys().any(blocked)
+            }
+            super::HostCommand::DispatchOrchestration { request } => {
+                matches!(&request.envelope.command,
+                OrchestrationCommand::ControlRun(intent) if intent.action == RunAction::Stop
+                    && request.run.as_ref() == Some(&intent.run_id) && blocked(&intent.run_id))
+            }
+            _ => false,
+        }
+    }
     pub(super) fn inspect_recovery_blocks(
         &self,
         state: &RunProjection,
@@ -149,37 +219,47 @@ impl HostCommandOwner {
         {
             return Ok(Some(failure.disclosure.clone()));
         }
-        let Some(block) = blocks.first() else {
-            if state.outcome == RunOutcome::Pending {
-                return Ok(None);
-            }
-            return Ok(self
-                .owner()?
-                .retained_task_discovery()
+        let matching = blocks.iter().find_map(|block| {
+            let task = match block {
+                RecoveryBlock::Completion(task) | RecoveryBlock::Merge(task) => task,
+            };
+            retained
                 .work
-                .into_iter()
+                .iter()
+                .find(|work| work.run == state.run && &work.task == task)
+                .map(|work| (block, work))
+        });
+        if let Some((block, work)) = matching {
+            let code = match block {
+                RecoveryBlock::Completion(_) => "completion_recovery_requires_person",
+                RecoveryBlock::Merge(_) => "merge_recovery_requires_person",
+            };
+            let instruction = if state.outcome == RunOutcome::Pending {
+                " Stop this run and wait for cleanup before reviewing its saved task branch."
+            } else {
+                ""
+            };
+            return Ok(Some(format!("{code}: {}{instruction}", work.disclosure)));
+        }
+        if state.outcome != RunOutcome::Pending {
+            return Ok(retained
+                .work
+                .iter()
                 .filter(|work| work.run == state.run)
                 .min_by_key(|work| (work.open_on_timeline, !work.frozen))
                 .map(|work| format!("retained_task_work: {}", work.disclosure)));
+        }
+        let Some(block) = blocks.first() else {
+            return Ok(None);
         };
         let (task, code) = match block {
             RecoveryBlock::Completion(task) => (task, "completion_recovery_requires_person"),
             RecoveryBlock::Merge(task) => (task, "merge_recovery_requires_person"),
         };
-        let retained = retained
-            .work
-            .into_iter()
-            .find(|work| work.run == state.run && &work.task == task);
-        Ok(Some(if let Some(work) = retained {
-            format!("{code}: {}", work.disclosure)
-        } else if state.outcome != RunOutcome::Pending {
-            return Ok(None);
-        } else {
-            format!(
-                "{code}: task {} has retained work. Stop and wait for cleanup before reviewing its saved task branch.",
-                task.0.as_str()
-            )
-        }))
+        Ok(Some(format!(
+            "{code}: task {} has retained work. Stop and wait for cleanup before reviewing its saved task branch.",
+            task.0.as_str()
+        )))
     }
     /// Reserve the fixed identities on every public Producer route, not only MCP.
     pub(super) fn authorize_completion_command(
@@ -508,6 +588,16 @@ impl HostCommandOwner {
         let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
             return Ok(None);
         };
+        if self.attachments[index].role == super::AttachmentRole::Editor
+            && matches!(&incoming.envelope.command, OrchestrationCommand::ControlRun(intent)
+                if intent.action == crate::orchestration::orchestration_records::RunAction::Stop
+                    && incoming.run == pending.original.run && incoming.run.as_ref() == Some(&intent.run_id))
+        {
+            self.owner_mut()?.reconcile_metadata()?;
+            self.authorize_orchestration(index, incoming)?;
+            self.settle_completion_for_owner(index)?;
+            return Ok(None);
+        }
         if pending.original != *incoming || pending.actor != self.attachments[index].id {
             return Err(refused("original uncertain finish must reconcile first"));
         }
@@ -516,6 +606,12 @@ impl HostCommandOwner {
             return Err(refused("native recovery is pending"));
         }
         self.owner_mut()?.reconcile_metadata()?;
+        let bound = self.bind_publication(&pending.step)?;
+        let stored = self.owner()?.orchestration_replay(&bound.envelope, None)?;
+        if stored.is_some() {
+            self.retain_completion_block(&pending);
+            self.hooks.pending = None;
+        }
         self.require_metadata_issuer(index, &incoming.envelope.id.issuer)?;
         incoming
             .envelope
@@ -581,8 +677,7 @@ impl HostCommandOwner {
         {
             return Err(refused("completion binding changed"));
         }
-        let bound = self.bind_publication(&pending.step)?;
-        if let Some(stored) = self.owner()?.orchestration_replay(&bound.envelope, None)? {
+        if let Some(stored) = stored {
             if stored.decision != CommandDecision::Applied {
                 return Err(refused("completion substep refused"));
             }

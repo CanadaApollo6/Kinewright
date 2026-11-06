@@ -59,33 +59,20 @@ add('host-status-shows-inspection-error', 'crates/kinewright-agent/src/writer_ho
     'status.retained_task_failures = retained.failures;',
     'status.retained_task_failures = Vec::new();',
     'te13_fix2_host_studio_isolates_bad_history', 'TE13_FIX2_STUDIO_INSPECTION_FAILURE', APP)
-before = '''if discovery.failures.iter().any(|failure| {
-            failure
-                .branch
-                .as_ref()
-                .is_none_or(|failed| failed == branch)
-        }) {'''
+before = "if discovery\n            .failures\n            .iter()\n            .any(|failure| failure.blocks_branch(branch))\n        {"
 add('bad-source-action-refuses', W, before, 'if false {',
     'te13_fix2_standalone_studio_isolates_bad_history', 'TE13_FIX2_BAD_SELECTION_REFUSED', APP)
 add('healthy-source-action-survives', W,
     '.is_none_or(|failed| failed == branch)', '.is_none_or(|_| true)',
-    'te13_fix2_standalone_studio_isolates_bad_history', 'TE13_FIX2_HEALTHY_TASK_RECOVERY', APP)
+    'te13_fix2_standalone_studio_isolates_bad_history', 'TE13_FIX2_HEALTHY_TASK_VISIBLE', APP)
 add('merged-work-has-no-offer', W,
     'let settled = merged', 'let settled = false',
     'te13_fix2_completed_merge_has_no_recovery_offer', 'TE13_FIX2_MERGED_NO_OFFER')
-terminal_publication = '''&& matches!(
-                    task.state,
-                    crate::orchestration_records::TaskState::Terminal(_)
-                )'''
-add('settled-publication-has-no-offer', W,
-    terminal_publication, '&& false',
-    'te13_fix2_settled_publication_has_no_recovery_offer', 'TE13_FIX2_SETTLED_PUBLICATION_NO_OFFER')
-add('separate-settled-publication-has-no-offer', W,
-    terminal_publication, '&& task.progress.completion.is_some()',
-    'te13_fix2_separate_settled_publication_has_no_recovery_offer', 'TE13_FIX2_SEPARATE_SETTLED_PUBLICATION_NO_OFFER')
+# Publication and observation never settle unmerged work. The two obsolete
+# no-offer witnesses were removed in fix 3, rather than preserving their bug.
 add('stop-disposed-delivery-stays-kept', W,
-    'crate::orchestration_records::DeliveryState::Observed(_)\n                        )',
-    'crate::orchestration_records::DeliveryState::Observed(_) | crate::orchestration_records::DeliveryState::Disposed\n                        )',
+    'let settled = merged;',
+    'let settled = merged || matches!(task.state, crate::orchestration_records::TaskState::Terminal(_)) && !incomplete;',
     'te13_fix2_stop_disposed_delivery_keeps_unreviewed_task_work', 'TE13_FIX2_DISPOSED_DELIVERY_KEPT')
 for mode, source in (('standalone', S), ('host', HOST)):
     add(f'{mode}-removed-work-has-no-offer', W,

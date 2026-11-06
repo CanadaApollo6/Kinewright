@@ -360,6 +360,7 @@ impl HostCommandOwner {
         index: usize,
         issuer: Option<&IssuerId>,
     ) -> Result<MetadataIssuer, HostError> {
+        self.settle_completion_for_owner(index)?;
         if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
         }
@@ -435,7 +436,9 @@ impl HostCommandOwner {
                     return Err(HostRefusal::new("recovery_frozen", status).into());
                 }
                 self.prove_retention()?;
-                if self.recovering || self.switch_frozen {
+                if (self.recovering || self.switch_frozen)
+                    && !self.completion_owner_recovery(index, &command)
+                {
                     return Err(HostRefusal::new(
                         "recovery_frozen",
                         "orchestration writes wait for recovery confirmation",

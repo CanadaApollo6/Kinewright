@@ -48,6 +48,13 @@ pub struct RetainedWorkFailure {
     pub branch: Option<BranchId>,
     pub disclosure: String,
 }
+impl RetainedWorkFailure {
+    /// An unbound inspection failure prevents choosing any task source.
+    #[must_use]
+    pub fn blocks_branch(&self, branch: &BranchId) -> bool {
+        self.branch.as_ref().is_none_or(|failed| failed == branch)
+    }
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedTaskDiscovery {
@@ -237,23 +244,7 @@ impl Ja1EditingSession {
         } else {
             RetainedWorkKind::Task
         };
-        let settled = merged
-            || (history.merge_envelope.is_none()
-                && matches!(
-                    task.state,
-                    crate::orchestration_records::TaskState::Terminal(_)
-                )
-                && !incomplete
-                && state
-                    .deliveries
-                    .iter()
-                    .filter(|delivery| delivery.task == task.id)
-                    .all(|delivery| {
-                        matches!(
-                            delivery.state,
-                            crate::orchestration_records::DeliveryState::Observed(_)
-                        )
-                    }));
+        let settled = merged;
         let source = history.source;
         let available = bundle
             .branches
@@ -271,7 +262,9 @@ impl Ja1EditingSession {
         let reviewed_on = bundle.root.as_ref().and_then(|root| {
             root.retained_task_reviews
                 .iter()
-                .find(|(_, original)| **original == source)
+                .find(|(branch, original)| {
+                    bundle.branches.contains_key(*branch) && **original == source
+                })
                 .map(|(branch, _)| branch.clone())
         });
         let stopped = state.outcome != RunOutcome::Pending;
@@ -296,9 +289,8 @@ impl Ja1EditingSession {
             )
         } else if !stopped || !cleanup_settled {
             format!(
-                "Task {} work is kept on working branch {}. Stop this run and wait for cleanup. Then choose Save current edit, then open {} to review it on your timeline. Your current edit is saved first.",
+                "Task {} work is kept on working branch {}. Review becomes available when the run and its cleanup finish.",
                 task.id.0.as_str(),
-                source.branch.as_str(),
                 source.branch.as_str()
             )
         } else {
@@ -336,12 +328,11 @@ impl Ja1EditingSession {
             | RecoverySelection::Checkpoint { branch, .. } => branch,
         };
         let discovery = self.retained_task_sources()?;
-        if discovery.failures.iter().any(|failure| {
-            failure
-                .branch
-                .as_ref()
-                .is_none_or(|failed| failed == branch)
-        }) {
+        if discovery
+            .failures
+            .iter()
+            .any(|failure| failure.blocks_branch(branch))
+        {
             return Err(BundleError::Identity(
                 "retained task work could not be inspected".into(),
             ));
@@ -380,7 +371,7 @@ impl Ja1EditingSession {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::{
@@ -610,5 +601,53 @@ mod tests {
             "TE13_FIX2_RECEIPT_CACHE_REFRESH"
         );
         assert_ne!(before, after);
+        let original = after[0].source.clone();
+        let missing = BranchId::fresh().unwrap();
+        owner
+            .active_bundle_mut()
+            .unwrap()
+            .root
+            .as_mut()
+            .unwrap()
+            .retained_task_reviews
+            .insert(missing, original);
+        assert!(
+            owner.retained_task_work().unwrap()[0].reviewed_on.is_none(),
+            "TE13_FIX3_STALE_FORK_IGNORED"
+        );
     }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+#[test]
+fn te13_fix3_unsupported_session_refuses_without_io() {
+    let temp = kinewright_media::test_support::TempDirectory::new("te13-unsupported");
+    let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+    let (result, trace) = crate::io_observer::observe(|| {
+        Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            crate::storage_budget::StorageLimits::default(),
+        )
+    });
+    assert!(matches!(result, Err(BundleError::DurabilityUnsupported)));
+    assert!(trace.events.is_empty());
+    assert_eq!(std::fs::read_dir(temp.root()).unwrap().count(), 0);
+}
+
+#[cfg(test)]
+#[test]
+fn te13_fix3_inspection_failure_branch_scope() {
+    let first = BranchId::fresh().unwrap();
+    let second = BranchId::fresh().unwrap();
+    let mut failure = RetainedWorkFailure {
+        run: None,
+        task: None,
+        branch: Some(first.clone()),
+        disclosure: String::new(),
+    };
+    assert!(failure.blocks_branch(&first));
+    assert!(!failure.blocks_branch(&second));
+    failure.branch = None;
+    assert!(failure.blocks_branch(&first) && failure.blocks_branch(&second));
 }

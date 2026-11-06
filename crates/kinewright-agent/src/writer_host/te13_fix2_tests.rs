@@ -395,35 +395,6 @@ fn te13_fix2_completed_merge_has_no_recovery_offer() {
 }
 
 #[test]
-fn te13_fix2_settled_publication_has_no_recovery_offer() {
-    let f = te13_fixture();
-    let (run, execution, director) = te13_director(&f);
-    let core = te13_core(&f, &run, &execution.task);
-    let reply = director.wire(
-        "finish_task",
-        te13_control(&director, &execution.task, &core),
-    );
-    assert_eq!(reply.is_error, Some(false), "{reply:?}");
-    let state = f.projection(&run);
-    assert!(matches!(state.tasks[0].state, TaskState::Terminal(_)));
-    let host = f.host.owner.upgrade().unwrap();
-    let owner = host.lock().unwrap();
-    assert!(
-        owner
-            .owner()
-            .unwrap()
-            .retained_task_work()
-            .unwrap()
-            .is_empty(),
-        "TE13_FIX2_SETTLED_PUBLICATION_NO_OFFER"
-    );
-    assert!(
-        owner.run_recovery_message(&state).unwrap().is_none(),
-        "TE13_FIX2_SETTLED_PUBLICATION_NO_RUN_MESSAGE"
-    );
-}
-
-#[test]
 fn te13_fix2_standalone_freeze_storage_refusal_can_retry() {
     let r = c5_fix10_run();
     let producer = r.f.producer_client(&r.run);
@@ -529,32 +500,4 @@ fn te13_fix2_stop_disposed_delivery_keeps_unreviewed_task_work() {
         "TE13_FIX2_DISPOSED_DELIVERY_RECOVERS"
     );
     assert_eq!(project.core().export_history().unwrap(), expected);
-}
-
-#[test]
-fn te13_fix2_separate_settled_publication_has_no_recovery_offer() {
-    let f = te13_fixture();
-    let (run, execution, director) = te13_director(&f);
-    let frozen = c5_fix10_freeze(&director, &execution.task);
-    let reply = director.wire(
-        "publish_result",
-        c5_fix10_publish(&director, &execution.task, frozen),
-    );
-    assert_eq!(reply.is_error, Some(false), "{reply:?}");
-    let state = f.projection(&run);
-    assert!(state.tasks[0].progress.completion.is_none());
-    assert!(matches!(state.tasks[0].state, TaskState::Terminal(_)));
-    assert!(state.deliveries.is_empty());
-    let host = f.host.owner.upgrade().unwrap();
-    let owner = host.lock().unwrap();
-    assert!(
-        owner
-            .owner()
-            .unwrap()
-            .retained_task_work()
-            .unwrap()
-            .is_empty(),
-        "TE13_FIX2_SEPARATE_SETTLED_PUBLICATION_NO_OFFER"
-    );
-    assert!(owner.run_recovery_message(&state).unwrap().is_none());
 }
