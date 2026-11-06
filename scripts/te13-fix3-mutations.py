@@ -21,9 +21,9 @@ BC = 'crates/kinewright-project/src/bundle_commit.rs'
 for step in ('freeze', 'publication'):
     for fate in ('committed', 'absent'):
         for authority in ('expired', 'revoked'):
-            add(f'stop-{step}-{fate}-{authority}', O,
-                '        self.settle_completion_for_owner(index)?;', '        let _ = index;',
-                f'te13_fix3_stop_{step}_{fate}_{authority}', 'TE13_FIX3_OWNER_STOP_ENVELOPE')
+            add(f'stop-{step}-{fate}-{authority}', C,
+                '            self.settle_completion_for_owner(index)?;', '            let _ = index;',
+                f'te13_fix3_stop_{step}_{fate}_{authority}', 'TE13_FIX3_OWNER_STOP')
 for fate in ('committed', 'absent'):
     add(f'preissued-stop-{fate}', C,
         'if self.attachments[index].role == super::AttachmentRole::Editor\n            && matches!(&incoming.envelope.command,',

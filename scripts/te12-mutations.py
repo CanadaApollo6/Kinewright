@@ -136,12 +136,13 @@ add('evidence-not-receipt', SERVER,
     'let has_receipt = true;',
     'te12_evidence_cannot_supply_a_receipt', 'TE12_EVIDENCE_NOT_RECEIPT')
 add('grant-publication', ORCHESTRATION,
-    'let published = owner.issue_metadata_authority(&subject, issuer, &grant);',
-    'let published = match issuer { Some(issuer) => Ok(issuer.clone()), None => owner.reuse_metadata_issuer_for(&subject) }.and_then(|issuer| Ok((issuer, owner.admit_host_grant(&grant)?)));',
+    'owner.issue_metadata_authority(&subject, issuer, &grant)',
+    'match issuer { Some(issuer) => Ok(issuer.clone()), None => owner.reuse_metadata_issuer_for(&subject) }.and_then(|issuer| Ok((issuer, owner.admit_host_grant(&grant)?)))',
     's4b_c4_fix1_foreign_missing_and_live_original_retry', 'C4_FOREIGN_COPY')
 
-add('terminal-state-retained', MCP, '        self.remember_terminal_state(&host);',
-    '        let _ = &host;',
+add('terminal-state-retained', MCP,
+    'let receipt = host.dispatch_orchestration(index, &request)?;\n        self.remember_terminal_state(&host);',
+    'let receipt = host.dispatch_orchestration(index, &request)?;\n        let _ = &host;',
     'te12_terminal_reply_keeps_receipt_and_state_without_controls', 'TE12_TERMINAL_STATE')
 
 add('lost-reply-client-digest', 'crates/kinewright-project/src/orchestration_records.rs',

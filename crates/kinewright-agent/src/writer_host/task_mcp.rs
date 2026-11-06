@@ -560,23 +560,95 @@ impl TaskMcp {
         let _ = task;
         Ok(json!({"receipt":receipt}))
     }
-    /// This narrow route precedes role refresh because uncertain storage cannot
-    /// read a manifest. Dispatch still requires the retained exact command and
-    /// its original authenticated attachment; it cannot mint fresh authority.
+    /// Before role refresh, resume an uncertain exact finish or read its stored
+    /// outcome. The slot-free route never drives completion or grants mutation.
     pub(crate) fn retry_pending_completion(
         &self,
         arguments: Value,
     ) -> Option<Result<Value, HostError>> {
         let host = self.host.upgrade()?;
         let mut host = host.lock().ok()?;
-        host.hooks.pending.as_ref()?;
-        Some(self.retry_pending_finish(&mut host, arguments))
+        if host.hooks.pending.is_some() {
+            return Some(self.retry_pending_finish(&mut host, arguments));
+        }
+        // Live calls retain normal admission, refusal accounting and completion
+        // continuation. This extra route is only a read after that authority ends.
+        if host.resolve_task_mcp(&self.auth, &self.endpoint).is_ok() {
+            return None;
+        }
+        let (index, request) = match self.original_finish_request(&host, arguments) {
+            Ok(request) => request,
+            Err(error) => return Some(Err(error)),
+        };
+        let replay = (|| {
+            let scope = host.attachments[index]
+                .producer_scope
+                .as_ref()
+                .ok_or_else(|| refused("original finish attachment changed"))?;
+            let authority = self.endpoint.authority();
+            if host.attachments[index].role != super::AttachmentRole::Producer
+                || scope.run != authority.run
+                || scope.task.as_ref() != Some(&authority.task)
+                || scope.attempt.as_ref() != Some(&authority.attempt)
+                || scope.endpoint.as_ref() != Some(&authority.endpoint)
+                || scope.owner_epoch != authority.owner_epoch
+                || scope.owner_epoch != host.owner()?.store()?.owner_epoch()
+                || authority.project != host.owner()?.active_manual_project()?
+            {
+                return Err(refused("original finish attachment changed"));
+            }
+            for pin in &host.pins {
+                if !host.attachments[index].roots.permits(&pin.anchor, false) {
+                    return Err(refused("original finish roots changed"));
+                }
+            }
+            host.require_metadata_issuer(index, &request.envelope.id.issuer)?;
+            host.owner()?
+                .orchestration_replay(&request.envelope, None)
+                .map_err(Into::into)
+        })();
+        match replay {
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+            Ok(Some(receipt)) => {
+                self.remember_terminal_state(&host);
+                let OrchestrationCommand::FinishTask(finish) = &request.envelope.command else {
+                    unreachable!()
+                };
+                let status = host.completion_reply_status(
+                    &self.endpoint.authority().run,
+                    finish,
+                    &receipt.envelope.id,
+                );
+                Some(Ok(json!({"receipt":receipt,"completion_status":status})))
+            }
+        }
     }
     fn retry_pending_finish(
         &self,
         host: &mut HostCommandOwner,
         arguments: Value,
     ) -> Result<Value, HostError> {
+        let (index, request) = self.original_finish_request(host, arguments)?;
+        let receipt = host.dispatch_orchestration(index, &request)?;
+        self.remember_terminal_state(host);
+        if receipt.decision == CommandDecision::Applied
+            && let OrchestrationCommand::FinishTask(finish) = &request.envelope.command
+        {
+            let status = host.completion_reply_status(
+                &self.endpoint.authority().run,
+                finish,
+                &receipt.envelope.id,
+            );
+            return Ok(json!({"receipt":receipt,"completion_status":status}));
+        }
+        Ok(json!({"receipt":receipt}))
+    }
+    fn original_finish_request(
+        &self,
+        host: &HostCommandOwner,
+        arguments: Value,
+    ) -> Result<(usize, super::orchestration::ScopedOrchestrationRequest), HostError> {
         let retry_control: Control = serde_json::from_value(arguments)?;
         let authority = self.endpoint.authority();
         if retry_control.attempt != authority.attempt
@@ -608,15 +680,7 @@ impl TaskMcp {
             envelope,
             consume_batch: None,
         };
-        let receipt = host.dispatch_orchestration(index, &request)?;
-        self.remember_terminal_state(host);
-        if receipt.decision == CommandDecision::Applied
-            && let OrchestrationCommand::FinishTask(finish) = &request.envelope.command
-        {
-            let status = host.completion_reply_status(&authority.run, finish, &receipt.envelope.id);
-            return Ok(json!({"receipt":receipt,"completion_status":status}));
-        }
-        Ok(json!({"receipt":receipt}))
+        Ok((index, request))
     }
 }
 impl HostCommandOwner {

@@ -1656,6 +1656,15 @@ impl HostCommandOwner {
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
+        if matches!(
+            command,
+            HostCommand::AdmitFeedbackEvidence { .. }
+                | HostCommand::AcknowledgeVoice { .. }
+                | HostCommand::StartTranscription { .. }
+                | HostCommand::ChooseTranscript { .. }
+        ) {
+            self.completion_write_available()?;
+        }
         if self.recovering
             && (!manual::connector_command(&command)
                 || matches!(
@@ -1717,9 +1726,29 @@ impl HostCommandOwner {
                         .into());
                     }
                 };
-                let result = self
-                    .owner_mut()?
-                    .metadata_command(&envelope, scope, &update)?;
+                let result = if matches!(
+                    self.hooks.pending,
+                    Some(orchestration::PendingPublication::Completion(_))
+                ) {
+                    // A lost reply can precede the finish. Read its immutable outcome
+                    // before refusing a new write; never publish around a private step.
+                    let receipt = self
+                        .owner()?
+                        .manual_transition_receipt(&envelope.receipt_envelope(&update)?)?;
+                    match receipt {
+                        ReceiptLookup::Committed(_)
+                        | ReceiptLookup::Retired(_)
+                        | ReceiptLookup::IdPayloadConflict => receipt,
+                        ReceiptLookup::Absent => {
+                            self.completion_write_available()?;
+                            return Err(BundleError::Unsettled.into());
+                        }
+                        _ => return Err(BundleError::Unsettled.into()),
+                    }
+                } else {
+                    self.owner_mut()?
+                        .metadata_command(&envelope, scope, &update)?
+                };
                 reply.metadata = Some(match result {
                     ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => receipt,
                     ReceiptLookup::IdPayloadConflict => {

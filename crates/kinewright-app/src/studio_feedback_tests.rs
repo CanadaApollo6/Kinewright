@@ -712,6 +712,7 @@ fn check_restored_draft_needs_capture(
 
 /// A port whose replies can be lost before or after the owner commits.
 struct Lossy<'a> {
+    refused: Option<String>,
     inner: &'a mut dyn FeedbackPort,
     /// Lose the request before it reaches the owner.
     before: usize,
@@ -732,6 +733,7 @@ struct Lossy<'a> {
 impl<'a> Lossy<'a> {
     fn new(inner: &'a mut dyn FeedbackPort) -> Self {
         Self {
+            refused: None,
             inner,
             before: 0,
             after: 0,
@@ -762,6 +764,9 @@ impl FeedbackPort for Lossy<'_> {
         self.inner.envelope(issuer)
     }
     fn metadata(&mut self, envelope: &MetadataEnvelope, update: &MetadataUpdate) -> Reply {
+        if let Some(why) = &self.refused {
+            return Reply::Refused(why.clone());
+        }
         self.calls += 1;
         if let Some(path) = &self.crash_at_dispatch {
             self.seen.push(std::fs::read(path).ok());
@@ -1828,3 +1833,5 @@ fn s3_stage_fix2_a_failed_last_write_keeps_the_project() {
 
 #[path = "studio_feedback_c4_tests.rs"]
 mod c4;
+
+include!("studio_te13_fix4_tests.rs");

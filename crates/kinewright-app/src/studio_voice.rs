@@ -2675,4 +2675,5 @@ mod tests {
             }
         }
     }
+    include!("studio_voice_te13_fix4_tests.rs");
 }

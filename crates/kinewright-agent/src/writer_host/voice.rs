@@ -155,6 +155,7 @@ pub(super) async fn upload_request(
             .map_err(|_| HostRefusal::new("owner_unavailable", "Voice owner unavailable"))?;
         let (_, _, roots) = owner.authorize_request(Some(&admission_bearer), &admission_request)?;
         owner.prove_retention()?;
+        owner.completion_write_available()?;
         for pin in &owner.pins {
             if !roots.permits(&pin.anchor, true) {
                 return Err(HostRefusal::roots("voice project write root").into());
@@ -376,6 +377,11 @@ impl HostCommandOwner {
         Ok(())
     }
     fn poll_voice(&mut self, note: &NoteId) -> Result<(), HostError> {
+        // Keep an in-flight transcript in memory until the exact task finish
+        // can complete; a status read must not publish around its private step.
+        if self.completion_write_available().is_err() {
+            return Ok(());
+        }
         let Some(mut job) = self.voice_jobs.remove(note) else {
             return Ok(());
         };

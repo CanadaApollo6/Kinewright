@@ -90,15 +90,11 @@ fn te13_fix3_owner_stop(
             "TE13_FIX3_OWNER_STOP_ENVELOPE {completion_step:?}/{committed}/{revoked}: {issued:?}"
         );
         assert!(
-            host.lock().unwrap().hooks.pending.is_none(),
-            "TE13_FIX3_OWNER_SETTLED"
+            host.lock().unwrap().hooks.pending.is_some(),
+            "TE13_FIX4_ISSUANCE_PRESERVES_PENDING"
         );
     }
-    // These scripted attempts have completed their actual process cleanup.
-    // No native process or execution claim exists in this fixture.
     if !preissued {
-        c5_fix10_retire(&r.f, &r.run, &r.attempt);
-        c5_fix10_retire(&r.f, &r.run, &r.parent);
         stop = Some(r.f.control(&r.f.editor, &r.run, RunAction::Stop));
     }
     let mut stop = stop.unwrap();
@@ -136,9 +132,11 @@ fn te13_fix3_owner_stop(
             owner.recovering = false;
             owner.switch_frozen = false;
         }
-        c5_fix10_retire(&r.f, &r.run, &r.attempt);
-        c5_fix10_retire(&r.f, &r.run, &r.parent);
     }
+    // No native process or execution claim exists in these scripted attempts.
+    // Record their retirement after Stop, never by abandoning at issuance.
+    c5_fix10_retire(&r.f, &r.run, &r.attempt);
+    c5_fix10_retire(&r.f, &r.run, &r.parent);
     let after = r.f.projection(&r.run);
     assert!(matches!(after.outcome, RunOutcome::Cancelled(_)));
     assert_eq!(after.cleanup, RunCleanup::Settled, "TE13_FIX3_STOP_CLEANUP");

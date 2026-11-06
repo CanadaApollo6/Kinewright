@@ -54,10 +54,50 @@ pub(super) enum RecoveryBlock {
     Completion(TaskId),
     Merge(TaskId),
 }
+impl RecoveryBlock {
+    pub(super) fn fallback_disclosure(&self) -> String {
+        let (task, code) = match self {
+            Self::Completion(task) => (task, "completion_recovery_requires_person"),
+            Self::Merge(task) => (task, "merge_recovery_requires_person"),
+        };
+        format!(
+            "{code}: task {} needs recovery. Stop this run and wait for cleanup, then check Studio recovery and rescue for available work.",
+            task.0.as_str()
+        )
+    }
+}
 fn refused(reason: &str) -> HostError {
     HostRefusal::new("task_scope", reason).into()
 }
 impl HostCommandOwner {
+    pub(super) fn completion_write_available(&self) -> Result<(), HostError> {
+        if matches!(
+            self.hooks.pending,
+            Some(super::orchestration::PendingPublication::Completion(_))
+        ) {
+            return Err(HostRefusal::new(
+                "completion_pending",
+                "Task completion is awaiting its original retry. This write has not been saved.",
+            )
+            .into());
+        }
+        Ok(())
+    }
+    /// Prove the pending substep's fate without abandoning its original retry.
+    /// Issuance prepares authority only; it cannot publish around this slot.
+    pub(super) fn prove_completion_for_owner(&mut self, index: usize) -> Result<bool, HostError> {
+        use super::orchestration::PendingPublication;
+        if self.attachments[index].role != super::AttachmentRole::Editor {
+            return Ok(false);
+        }
+        let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
+            return Ok(false);
+        };
+        self.owner_mut()?.reconcile_metadata()?;
+        let bound = self.bind_publication(&pending.step)?;
+        self.owner()?.orchestration_replay(&bound.envelope, None)?;
+        Ok(true)
+    }
     /// Reconciliation proves a write's fate, never grants permission to run it.
     /// The person's attachment may abandon an absent substep before Stop.
     pub(super) fn settle_completion_for_owner(&mut self, index: usize) -> Result<(), HostError> {
@@ -68,11 +108,9 @@ impl HostCommandOwner {
         let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
             return Ok(());
         };
-        self.owner_mut()?.reconcile_metadata()?;
-        let bound = self.bind_publication(&pending.step)?;
         // A mismatch or unreadable receipt still refuses. Proven absence is
         // sufficient for abandonment; it is not permission to execute the step.
-        self.owner()?.orchestration_replay(&bound.envelope, None)?;
+        self.prove_completion_for_owner(index)?;
         self.retain_completion_block(&pending);
         self.hooks.pending = None;
         Ok(())
@@ -109,9 +147,13 @@ impl HostCommandOwner {
             _ => None,
         };
         let blocked = |id: &crate::orchestration::orchestration_records::RunId| {
-            pending_run == Some(id)
-                || self.hooks.runs.get(id).is_some_and(|run| {
-                    run.recovery_blocks
+            self.owner()
+                .and_then(|owner| Ok(owner.orchestration_projection(id)?))
+                .ok()
+                .flatten()
+                .is_some_and(|state| {
+                    self.run_recovery_blocks(&state)
+                        .unwrap_or_default()
                         .iter()
                         .any(|block| matches!(block, RecoveryBlock::Completion(_)))
                 })
@@ -123,7 +165,8 @@ impl HostCommandOwner {
             super::HostCommand::DispatchOrchestration { request } => {
                 matches!(&request.envelope.command,
                 OrchestrationCommand::ControlRun(intent) if intent.action == RunAction::Stop
-                    && request.run.as_ref() == Some(&intent.run_id) && blocked(&intent.run_id))
+                    && request.run.as_ref() == Some(&intent.run_id)
+                    && (pending_run == Some(&intent.run_id) || blocked(&intent.run_id)))
             }
             _ => false,
         }
@@ -252,14 +295,7 @@ impl HostCommandOwner {
         let Some(block) = blocks.first() else {
             return Ok(None);
         };
-        let (task, code) = match block {
-            RecoveryBlock::Completion(task) => (task, "completion_recovery_requires_person"),
-            RecoveryBlock::Merge(task) => (task, "merge_recovery_requires_person"),
-        };
-        Ok(Some(format!(
-            "{code}: task {} has retained work. Stop and wait for cleanup before reviewing its saved task branch.",
-            task.0.as_str()
-        )))
+        Ok(Some(block.fallback_disclosure()))
     }
     /// Reserve the fixed identities on every public Producer route, not only MCP.
     pub(super) fn authorize_completion_command(
@@ -409,6 +445,13 @@ impl HostCommandOwner {
                     super::task_mcp::refusal_code(&error.to_string())
                 ),
             ));
+        } else if let (Some(run), OrchestrationCommand::FinishTask(finish)) =
+            (&request.run, &request.envelope.command)
+            && let Some(runtime) = self.hooks.runs.get_mut(run)
+        {
+            runtime
+                .recovery_blocks
+                .retain(|block| *block != RecoveryBlock::Completion(finish.task.clone()));
         }
     }
     fn completion_failure_retryable(error: &HostError) -> bool {
@@ -609,9 +652,22 @@ impl HostCommandOwner {
         let bound = self.bind_publication(&pending.step)?;
         let stored = self.owner()?.orchestration_replay(&bound.envelope, None)?;
         if stored.is_some() {
-            self.retain_completion_block(&pending);
             self.hooks.pending = None;
         }
+        let result = self.continue_completion_substep(index, incoming, &pending, stored);
+        if result.is_err() {
+            self.retain_completion_block(&pending);
+        }
+        result
+    }
+    fn continue_completion_substep(
+        &mut self,
+        index: usize,
+        incoming: &ScopedOrchestrationRequest,
+        pending: &PendingCompletion,
+        stored: Option<OrchestrationReceipt>,
+    ) -> Result<Option<OrchestrationReceipt>, HostError> {
+        use super::orchestration::PendingPublication;
         self.require_metadata_issuer(index, &incoming.envelope.id.issuer)?;
         incoming
             .envelope
@@ -695,7 +751,8 @@ impl HostCommandOwner {
                 if matches!(&self.hooks.pending, Some(PendingPublication::Wire(request, actor))
                     if **request == pending.step && *actor == pending.actor)
                 {
-                    self.hooks.pending = Some(PendingPublication::Completion(pending));
+                    self.hooks.pending =
+                        Some(PendingPublication::Completion(Box::new(pending.clone())));
                 }
                 return Err(error);
             }

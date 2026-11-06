@@ -262,6 +262,24 @@ fn te13_fix1_live_failure_blocks_and_same_finish_clears_stale_cache() {
             q.child.clone(),
         ));
     q.editor.wire("finish_task", control);
+    assert!(
+        host.lock().unwrap().hooks.runs[&q.run]
+            .recovery_blocks
+            .is_empty(),
+        "TE13_FIX4_SUCCESS_CACHE_CLEARED"
+    );
+    // Independently exercise the filtered view even though successful live
+    // continuation now removes its own cache entry immediately.
+    host.lock()
+        .unwrap()
+        .hooks
+        .runs
+        .get_mut(&q.run)
+        .unwrap()
+        .recovery_blocks
+        .push(super::super::task_completion::RecoveryBlock::Completion(
+            q.child.clone(),
+        ));
     let state = q.f.projection(&q.run);
     assert!(
         host.lock()

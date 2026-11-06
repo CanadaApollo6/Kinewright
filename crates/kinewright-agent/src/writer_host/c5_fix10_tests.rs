@@ -38,7 +38,9 @@ struct C5Fix10Run {
     core: Core,
 }
 fn c5_fix10_run() -> C5Fix10Run {
-    let mut f = Fixture::new();
+    c5_fix10_run_from(Fixture::new())
+}
+fn c5_fix10_run_from(mut f: Fixture) -> C5Fix10Run {
     let mut scoped = Document::default();
     if let kinewright_core::Operation::AddMarker { marker } = history_marker(1) {
         scoped.markers.push(marker);
