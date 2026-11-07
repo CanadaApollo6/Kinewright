@@ -326,7 +326,6 @@ pub(super) struct PreparedMediaRead {
     cursor: Option<String>,
     binding: Value,
     deadline: std::time::Instant,
-    wait: std::time::Duration,
     #[cfg(test)]
     poll_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     switch_generation: Option<u64>,
@@ -371,11 +370,10 @@ fn visible_prefix(
 const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RETRY: &str = "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned.";
 const MEDIA_PREPARING_RETRY: &str = "Media evidence preparation exceeded this wait. Retry shortly; no page is charged until a sample is returned.";
-const MEDIA_DECODE_TIMEOUT: &str =
-    "Media decode or seek exceeded the 30-second wait; not retryable. Replan without guessing.";
+const MEDIA_DECODE_TIMEOUT: &str = "Media decode or seek did not finish within the 30-second wait; not retryable. Replan without guessing.";
 enum MediaReadPhase {
     Verifying,
-    Decoding(std::time::Instant),
+    Decoding { cold: bool },
     Assembling,
 }
 struct CancelMediaRead(Arc<std::sync::atomic::AtomicBool>);
@@ -408,7 +406,6 @@ impl PreparedMediaRead {
         let worker_phase = Arc::clone(&phase);
         let _cancel_on_exit = CancelMediaRead(Arc::clone(&cancel));
         let deadline = self.deadline;
-        let wait = self.wait;
         #[cfg(test)]
         let poll_gate = self.poll_gate.clone();
         let switch_generation = self.switch_generation;
@@ -456,10 +453,8 @@ impl PreparedMediaRead {
                 let phase = phase.lock().map_err(|_| media_failed())?;
                 return Err(refused(match *phase {
                     MediaReadPhase::Verifying => MEDIA_RETRY,
-                    MediaReadPhase::Decoding(started) if now.duration_since(started) >= wait => {
-                        MEDIA_DECODE_TIMEOUT
-                    }
-                    MediaReadPhase::Decoding(_) | MediaReadPhase::Assembling => {
+                    MediaReadPhase::Decoding { cold: false } => MEDIA_DECODE_TIMEOUT,
+                    MediaReadPhase::Decoding { cold: true } | MediaReadPhase::Assembling => {
                         MEDIA_PREPARING_RETRY
                     }
                 }));
@@ -490,8 +485,9 @@ impl PreparedMediaRead {
             return Err(media_unavailable());
         }
         let source = lease.certified_source()?;
-        *phase.lock().map_err(|_| media_failed())? =
-            MediaReadPhase::Decoding(std::time::Instant::now());
+        *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Decoding {
+            cold: source.certification_was_cold(),
+        };
         let mut value = if self.audio {
             let mut decoder = source.open_audio(Arc::clone(cancel))?;
             #[cfg(test)]
@@ -1032,6 +1028,10 @@ impl HostCommandOwner {
         #[cfg(test)]
         let wait = self.hooks.context_media_wait.take().unwrap_or(wait);
         let deadline = std::time::Instant::now() + wait;
+        #[cfg(test)]
+        if let Some(delay) = self.hooks.context_media_prepare_delay.take() {
+            std::thread::sleep(delay);
+        }
         let (revision, document) = self.context_snapshot(&state.run, &task.id)?;
         if revision != read.revision {
             return Err(refused("stale evidence revision"));
@@ -1082,7 +1082,6 @@ impl HostCommandOwner {
             cursor: read.cursor.clone(),
             binding,
             deadline,
-            wait,
             #[cfg(test)]
             poll_gate: self.hooks.context_media_poll_gate.take(),
             switch_generation: self.owner()?.manual_switch_generation().ok(),

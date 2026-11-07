@@ -14,7 +14,7 @@ C='crates/kinewright-agent/src/writer_host/task_context.rs'
 H='writer_host::hooks_tests::tests::'
 def add(name,before,after,witness,marker):
  h.PAIRS.append((name,C,before,after,'kinewright-agent',H+witness,marker))
-add('phase-tail','if now.duration_since(started) >= wait','if true || now.duration_since(started) >= wait','te15_a_certification_tail_is_retryable','TE15_PHASE_TAIL_RETRY')
+add('phase-tail','MediaReadPhase::Decoding { cold: true } | MediaReadPhase::Assembling => {\n                        MEDIA_PREPARING_RETRY','MediaReadPhase::Decoding { cold: true } | MediaReadPhase::Assembling => {\n                        MEDIA_DECODE_TIMEOUT','te15_a_certification_tail_is_retryable','TE15_PHASE_TAIL_RETRY')
 add('finished-deadline','if worker.is_finished() {','if worker.is_finished() && std::time::Instant::now() < deadline {','te15_a_finished_worker_wins_over_deadline','TE15_FINISHED_AT_DEADLINE')
 add('begin-liveness','MediaReadStartError::Unavailable => media_unavailable()','MediaReadStartError::Unavailable => refused(MEDIA_RETRY)','te15_a_begin_media_read_distinguishes_liveness_from_busy','TE15_BEGIN_LIVENESS')
 add('transcript-duplicates','if value.is_object() {','if false && value.is_object() {','te15_a_transcript_duplicate_words_are_refused_on_wire','TE15_TRANSCRIPT_DUPLICATES')

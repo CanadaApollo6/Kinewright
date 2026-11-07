@@ -386,6 +386,7 @@ pub struct PreparedOwnedMedia {
 pub struct CertifiedMediaInput {
     source: CertifiedSource,
     interpretation: MediaInterpretation,
+    cold_certification: bool,
 }
 impl CertifiedMediaInput {
     pub(crate) fn playback_source(&self) -> CertifiedSource {
@@ -410,6 +411,7 @@ impl CertifiedMediaInput {
         Ok(Self {
             source,
             interpretation,
+            cold_certification: false,
         })
     }
     pub(crate) fn from_verified_source(
@@ -428,7 +430,14 @@ impl CertifiedMediaInput {
         Ok(Self {
             source,
             interpretation,
+            cold_certification: true,
         })
+    }
+    /// Whether this certificate was issued by cold verification rather than
+    /// admission-memo reuse. Clones retain the fact about that issuance.
+    #[must_use]
+    pub const fn certification_was_cold(&self) -> bool {
+        self.cold_certification
     }
     #[must_use]
     pub fn interpretation(&self) -> &MediaInterpretation {

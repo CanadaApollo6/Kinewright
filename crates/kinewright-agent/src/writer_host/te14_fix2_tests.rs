@@ -334,7 +334,6 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
     f.host.runtime.stop();
     let owner = f.host.owner.upgrade().unwrap();
     let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
-    let poll_gate = (!cold && action == 0).then(|| Arc::new((Barrier::new(2), Barrier::new(2))));
     let endpoint = {
         let mut host = owner.lock().unwrap();
         host.hooks.context_media_wait = Some(if action == 0 {
@@ -342,7 +341,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
         } else {
             Duration::from_secs(30)
         });
-        host.hooks.context_media_poll_gate = poll_gate.clone();
+        host.hooks.context_media_prepare_delay = Some(Duration::from_millis(80));
         let endpoint = host.hooks.runs[&run].tasks[&child].endpoint();
         if cold {
             let store = host.owner().unwrap().store().unwrap();
@@ -372,11 +371,6 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
     let (timely, first, busy, during) = std::thread::scope(|scope| {
         let read = scope.spawn(|| mcp.wire("read_task_evidence", request.clone()));
         gate.0.wait();
-        if let Some(poll_gate) = &poll_gate {
-            poll_gate.0.wait();
-            std::thread::sleep(Duration::from_millis(300));
-            poll_gate.1.wait();
-        }
         let control = scope.spawn(|| {
             if action == 0 {
                 return None;
@@ -440,7 +434,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
             words.contains(if cold {
                 "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned."
             } else {
-                "Media decode or seek exceeded the 30-second wait; not retryable. Replan without guessing."
+                "Media decode or seek did not finish within the 30-second wait; not retryable. Replan without guessing."
             }),
             "TE14_FIX2_MEDIA_WORDS {words}"
         );
