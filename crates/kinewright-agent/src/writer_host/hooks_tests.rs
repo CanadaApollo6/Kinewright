@@ -42,6 +42,7 @@ mod tests {
     include!("te14_fix1_tests.rs");
     include!("te14_fix2_tests.rs");
     include!("te15_a_tests.rs");
+    include!("te15_b1_tests.rs");
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_fix2_tests.rs");
@@ -97,7 +98,7 @@ mod tests {
             let issuer_auth = HostAuth::generate().unwrap();
             let host = WriterHost::start_inner(
                 HostConfig {
-                    scheduler_settings: None,
+                    scheduler_settings: Some(temp.path("scheduler")),
                     project: "hooks".into(),
                     path: Some(path),
                     roots: roots.clone(),

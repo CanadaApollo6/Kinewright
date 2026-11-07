@@ -1,5 +1,5 @@
 //! Versioned task tools use durable roles and separately refreshed live controls.
-pub(crate) mod manifest;
+pub(crate) use crate::orchestration::task_manifest as manifest;
 mod reply;
 pub(crate) mod schema;
 use super::{HostAuth, HostCommandOwner, HostError, HostRefusal};

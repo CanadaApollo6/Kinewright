@@ -18,6 +18,8 @@ pub mod mailbox;
 pub mod outbox;
 pub mod policy;
 pub mod requests;
+pub mod specialist_setting;
+pub(crate) mod task_manifest;
 #[path = "../writer_host/task_tool_names.rs"]
 pub(crate) mod task_tool_names;
 pub mod tasks;

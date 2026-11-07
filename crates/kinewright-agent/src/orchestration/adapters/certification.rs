@@ -125,15 +125,42 @@ impl ConnectorSpecification {
         self.auth_contract
     }
     pub(crate) fn session_config(&self, binding: &AttemptBinding) -> SessionConfig {
+        let selection = self.bound_selection(binding);
+        let option = |name: &str| {
+            selection
+                .options
+                .iter()
+                .find(|v| v.name == name)
+                .map(|v| v.value.clone())
+        };
+        let tools = binding
+            .task_policy
+            .as_ref()
+            .map_or(self.session.tools, |(_, role)| {
+                crate::orchestration::task_manifest::names(*role)
+            });
         SessionConfig {
-            model: Some(self.session.model.into()),
-            effort: self.session.effort.map(Into::into),
-            service_tier: self.session.service_tier.map(Into::into),
+            model: Some(selection.model),
+            effort: option(if self.provider == "codex" {
+                "model_reasoning_effort"
+            } else {
+                "effort"
+            })
+            .or_else(|| self.session.effort.map(Into::into)),
+            service_tier: option("service_tier")
+                .or_else(|| self.session.service_tier.map(Into::into)),
             max_turns: Some(self.session.max_turns),
-            tool_names: Some(self.session.tools.iter().map(|s| (*s).into()).collect()),
+            tool_names: Some(tools.iter().map(|s| (*s).into()).collect()),
             working_directory: Some(binding.working_directory.clone()),
             mcp_url: Some(binding.endpoint.clone()),
         }
+    }
+
+    fn bound_selection(&self, binding: &AttemptBinding) -> ProviderSelectionRecord {
+        binding
+            .task_policy
+            .as_ref()
+            .map_or_else(|| self.selection(), |(selection, _)| selection.clone())
     }
 
     fn registered(&self) -> bool {
@@ -160,6 +187,12 @@ impl ConnectorSpecification {
             return Err(CertificationRefusal::UnqualifiedSpecification);
         }
         binding.validate()?;
+        if let Some((selection, _)) = &binding.task_policy
+            && (selection.connector != self.provider
+                || !super::super::specialist_setting::specialist_choices().contains(selection))
+        {
+            return Err(CertificationRefusal::ModelUnavailable);
+        }
         let runtime = checks.probe(self, &binding)?;
         self.validate_runtime(&runtime)?;
         Ok(CertifiedConnectorProfile {
@@ -224,7 +257,7 @@ pub(crate) fn test_runtime() -> RuntimeQualification {
 pub fn available_connectors() -> Vec<&'static ConnectorSpecification> {
     #[cfg(target_os = "linux")]
     {
-        vec![codex_candidate()]
+        vec![codex_candidate(), claude_candidate()]
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -275,6 +308,10 @@ pub struct AttemptBinding {
     endpoint: String,
     roots: Vec<PathBuf>,
     working_directory: PathBuf,
+    task_policy: Option<(
+        ProviderSelectionRecord,
+        super::super::orchestration_records::Role,
+    )>,
 }
 impl AttemptBinding {
     #[allow(
@@ -292,9 +329,20 @@ impl AttemptBinding {
             endpoint,
             roots,
             working_directory,
+            task_policy: None,
         };
         binding.validate()?;
         Ok(binding)
+    }
+    /// Only the host may bind the durable task's person-owned selection and role.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn for_task(
+        mut self,
+        selection: ProviderSelectionRecord,
+        role: super::super::orchestration_records::Role,
+    ) -> Self {
+        self.task_policy = Some((selection, role));
+        self
     }
     fn validate(&self) -> Result<(), CertificationRefusal> {
         let url = reqwest::Url::parse(&self.endpoint)
@@ -428,7 +476,7 @@ impl CertifiedConnectorProfile {
 
     #[must_use]
     pub fn selection(&self) -> ProviderSelectionRecord {
-        self.specification.selection()
+        self.specification.bound_selection(&self.binding)
     }
     #[must_use]
     pub fn specification(&self) -> &'static ConnectorSpecification {
@@ -590,7 +638,7 @@ pub(crate) fn codex_candidate() -> &'static ConnectorSpecification {
     &CODEX_CANDIDATE
 }
 
-/// Binds an unregistered candidate for its own end-to-end tests only.
+/// Explicit candidate-binding entry point retained for containment witnesses.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 pub(crate) fn certify_candidate(
     candidate: &'static ConnectorSpecification,
@@ -603,15 +651,14 @@ pub(crate) fn certify_candidate(
     candidate.bind(binding, checks)
 }
 
-/// C6: the Claude Code candidate. It is not in [`available_connectors`]
-/// yet: it binds only in test and harness builds, for the unpaid dry launch
-/// and a lead-granted live run. Nothing advertises or registers it.
-#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+/// The hardened Claude Code connector, available on Linux. Local runtime
+/// checks still refuse unknown sign-in modes, versions and ambient authority.
+#[cfg(target_os = "linux")]
 pub(crate) fn claude_candidate() -> &'static ConnectorSpecification {
     &CLAUDE_CANDIDATE
 }
 
-#[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+#[cfg(target_os = "linux")]
 static CLAUDE_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
     provider: "claude",
     minimum_version: CliVersion(2, 1, 316),
@@ -668,8 +715,123 @@ mod tests {
             endpoint: "http://127.0.0.1:12345/mcp".into(),
             roots: vec![root.clone()],
             working_directory: root,
+            task_policy: None,
         }
     }
+    #[cfg(target_os = "linux")]
+    fn native_runtime(spec: &ConnectorSpecification) -> RuntimeQualification {
+        let mut runtime = test_runtime();
+        runtime.version = spec.minimum_version();
+        runtime.sandbox = Some(SandboxPolicy::LinuxFilesystemAndIpc);
+        let scope = &mut runtime.launch_context.credential_store;
+        scope.refresh = spec.auth_contract().refresh;
+        scope.lock_files.clear();
+        scope.temporary_file_prefixes.clear();
+        scope.credential_files = vec![
+            if spec.provider() == "codex" {
+                "auth.json"
+            } else {
+                ".credentials.json"
+            }
+            .into(),
+        ];
+        if spec.provider() == "codex" {
+            scope.single_file = Some(super::super::CredentialFile {
+                source: scope.root.join("fixture-auth"),
+                identity: [1, 2],
+            });
+        }
+        runtime.authentication.contract = spec.auth_contract();
+        runtime.authentication.context = runtime.launch_context.clone();
+        runtime.authentication.observed_store = runtime.launch_context.credential_store.clone();
+        runtime
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn te15_b1_native_profiles_pin_model_options_role_and_reject_tampering() {
+        use super::super::super::orchestration_records::Role;
+        for spec in [codex_candidate(), claude_candidate()] {
+            for role in [
+                Role::Director,
+                Role::Editor,
+                Role::Reviewer,
+                Role::Motion,
+                Role::Audio,
+                Role::Colour,
+            ] {
+                let selection = if spec.provider() == "claude" {
+                    super::super::super::specialist_setting::specialist_choices()
+                        .into_iter()
+                        .find(|s| s.model == "claude-sonnet-5-5" && s.options[0].value == "low")
+                        .unwrap()
+                } else {
+                    spec.selection()
+                };
+                let binding = binding().for_task(selection.clone(), role);
+                let runtime = native_runtime(spec);
+                let profile = spec.bind(binding.clone(), &runtime).unwrap();
+                assert_eq!(profile.selection(), selection, "TE15_SELECTION_PIN");
+                assert_eq!(
+                    profile.session_config().tool_names.as_ref().unwrap(),
+                    crate::orchestration::task_manifest::names(role),
+                    "TE15_ROLE_PIN"
+                );
+                assert_eq!(
+                    profile.session_config().effort.as_deref(),
+                    Some(selection.options[0].value.as_str())
+                );
+                profile
+                    .validate_session(profile.session_config(), binding.identity())
+                    .unwrap();
+                profile.recheck_runtime(&runtime).unwrap();
+                for changed in ["model", "effort", "tools"] {
+                    let mut config = profile.session_config().clone();
+                    match changed {
+                        "model" => config.model = Some("other".into()),
+                        "effort" => config.effort = Some("ultracode".into()),
+                        _ => config.tool_names = Some(vec!["invoke_capability".into()]),
+                    }
+                    assert_eq!(
+                        profile.validate_session(&config, binding.identity()),
+                        Err(CertificationRefusal::FixedPolicyChanged),
+                        "TE15_POLICY_TAMPER {changed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn te15_b1_unavailable_task_policy_refuses_before_probe() {
+        struct NoProbe;
+        impl ConnectorRuntimeChecks for NoProbe {
+            fn probe(
+                &self,
+                _: &ConnectorSpecification,
+                _: &AttemptBinding,
+            ) -> Result<RuntimeQualification, CertificationRefusal> {
+                panic!("TE15_UNAVAILABLE_PROBED");
+            }
+        }
+        let mut selection = codex_candidate().selection();
+        selection.model = "unavailable-model".into();
+        assert_eq!(
+            codex_candidate()
+                .bind(
+                    binding().for_task(
+                        selection,
+                        super::super::super::orchestration_records::Role::Editor
+                    ),
+                    &NoProbe
+                )
+                .err(),
+            Some(CertificationRefusal::ModelUnavailable),
+            "TE15_UNAVAILABLE_POLICY"
+        );
+    }
+
     fn runtime() -> RuntimeQualification {
         test_runtime()
     }
@@ -899,12 +1061,10 @@ mod tests {
             authentication: AuthenticationMode::Subscription,
             auth_contract: super::super::CODEX_AUTH_CONTRACT,
         };
-        for provider in ["claude", "unknown"] {
-            assert_eq!(
-                certify_connector(provider, binding(), &runtime()).err(),
-                Some(CertificationRefusal::UnknownProvider)
-            );
-        }
+        assert_eq!(
+            certify_connector("unknown", binding(), &runtime()).err(),
+            Some(CertificationRefusal::UnknownProvider)
+        );
         assert_eq!(
             certify_connector("codex", binding(), &runtime()).err(),
             Some(if cfg!(target_os = "linux") {
@@ -958,7 +1118,7 @@ mod tests {
         assert_eq!(
             registered,
             if cfg!(target_os = "linux") {
-                vec!["codex"]
+                vec!["codex", "claude"]
             } else {
                 vec![]
             }

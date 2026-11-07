@@ -67,7 +67,6 @@ pub(crate) fn environment(
 /// API key, helper, base URL, third-party provider or config folder reaches
 /// it. Tool search stays off so every tool schema the model sees is the
 /// fixed `--tools ""` plus the host's own MCP tools.
-#[cfg(any(test, feature = "test-util"))]
 pub(crate) fn claude_environment(
     scratch: &std::path::Path,
     store: &std::path::Path,
@@ -94,7 +93,6 @@ pub(crate) fn claude_environment(
 /// C6: the Claude-only system prompt. It replaces Claude Code's default
 /// coding-agent prompt, which describes tools this session does not have.
 /// The task itself is the shared native prompt, sent as the user message.
-#[cfg(any(test, feature = "test-util"))]
 const CLAUDE_SYSTEM_PROMPT: &str = "You are a Kinewright task agent working on one video project. \
 Your only tools are the kinewright MCP tools. Follow the task in the user message, \
 use the tools it names, and end with a short plain-text summary.";
@@ -262,7 +260,6 @@ pub(crate) fn sandbox(
 /// user, project and local settings; `--settings` turns hooks off and forces
 /// subscription sign-in. The MCP bearer is expanded by Claude from the
 /// environment the guardian sets; argv carries only the reference.
-#[cfg(any(test, feature = "test-util"))]
 fn claude_arguments(
     binding: &adapters::AttemptBinding,
     config: &kinewright_core::SessionConfig,
@@ -289,7 +286,6 @@ fn claude_arguments(
 
 /// The built-in plugins Claude Code 2.1.317 loads in a print-mode session,
 /// as its own `system/init` lists them.
-#[cfg(any(test, feature = "test-util"))]
 const CLAUDE_BUILTIN_PLUGINS: [&str; 3] = [
     "cc-plugin-agents-md",
     "cc-plugin-privacy",
@@ -298,7 +294,6 @@ const CLAUDE_BUILTIN_PLUGINS: [&str; 3] = [
 
 /// The argv around a given MCP configuration; [`claude_arguments`] supplies
 /// the host endpoint's.
-#[cfg(any(test, feature = "test-util"))]
 pub(crate) fn claude_argv(
     mcp: &serde_json::Value,
     config: &kinewright_core::SessionConfig,
@@ -420,7 +415,6 @@ pub(crate) fn recipe(
     if let Some(mount) = &scope.single_file {
         crate::codex_credentials::inspect(&mount.source, Some(mount.identity))?;
     }
-    #[cfg(any(test, feature = "test-util"))]
     if specification.provider() == "claude" {
         crate::claude_credentials::verify_private_store(&credentials)?;
     }
@@ -485,10 +479,7 @@ pub(crate) fn recipe(
     let dialect = StreamDialect::of(specification.provider());
     let environment = match dialect {
         StreamDialect::Codex => environment(&scratch, &credentials),
-        #[cfg(any(test, feature = "test-util"))]
         StreamDialect::Claude => claude_environment(&scratch, &credentials),
-        #[cfg(not(any(test, feature = "test-util")))]
-        StreamDialect::Claude => return Err(io::Error::other("provider recipe unavailable")),
     };
     let mut arguments = vec![];
     match specification.provider() {
@@ -596,7 +587,6 @@ pub(crate) fn recipe(
             }
             arguments.push(prompt.into());
         }
-        #[cfg(any(test, feature = "test-util"))]
         "claude" => arguments.extend(claude_arguments(binding, config, prompt)?),
         #[cfg(any(test, feature = "test-util"))]
         "scripted" => arguments.extend([
@@ -618,7 +608,6 @@ pub(crate) fn recipe(
     // C6: Claude's sign-in is a private copy inside scratch, so its person's
     // configuration folder is the root no grant may reach.
     let credential_root = match specification.provider() {
-        #[cfg(any(test, feature = "test-util"))]
         "claude" => Some(crate::claude_credentials::config_root()?),
         _ => scope
             .single_file

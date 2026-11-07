@@ -1,5 +1,5 @@
 //! Host-owned versioned manifests. Scope and caller input never change these schemas.
-use super::Role;
+use super::orchestration_records::Role;
 
 pub(crate) const VERSION: u32 = 2;
 pub(crate) const DIRECTOR: &[&str] = &[

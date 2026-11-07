@@ -9,7 +9,10 @@ use crate::director_readiness::{Readiness, readiness};
 use eframe::egui;
 use kinewright_agent::{
     orchestration::orchestration_records::ProviderSelectionRecord,
-    writer_host::{DirectorStatus, director_choices, director_status, write_director_setting},
+    writer_host::{
+        DirectorStatus, SpecialistChoice, SpecialistStatus, director_choices, director_status,
+        specialist_choices, specialist_status, write_director_setting, write_specialist_setting,
+    },
 };
 use kinewright_core::HarnessInfo;
 use std::path::{Path, PathBuf};
@@ -29,6 +32,9 @@ pub(crate) struct DirectorView {
     pub(crate) choices: Vec<ProviderSelectionRecord>,
     pub(crate) status: DirectorStatus,
     pub(crate) error: Option<String>,
+    specialist_choices: Vec<ProviderSelectionRecord>,
+    specialist_status: SpecialistStatus,
+    specialist_error: Option<String>,
     check: Option<crossbeam_channel::Receiver<(AgentHarnessChoice, Option<HarnessInfo>)>>,
 }
 impl DirectorView {
@@ -37,6 +43,9 @@ impl DirectorView {
             choices: director_choices(),
             status: director_status(folder),
             error: None,
+            specialist_choices: specialist_choices(),
+            specialist_status: specialist_status(folder),
+            specialist_error: None,
             check: None,
         }
     }
@@ -104,6 +113,8 @@ impl KinewrightApp {
             .show(ctx, |ui| {
                 ui.set_width(440.0);
                 self.show_director_settings(ui);
+                ui.add_space(space::TWO);
+                self.show_specialist_settings(ui);
                 ui.add_space(space::TWO);
                 self.show_investigator_settings(ui);
                 ui.add_space(space::TWO);
@@ -296,6 +307,93 @@ impl KinewrightApp {
         }
     }
 
+    /// One explicit preference for newly assigned specialists. Existing tasks
+    /// retain their original model; choosing this never writes the Director file.
+    pub(crate) fn choose_specialist(&mut self, choice: &SpecialistChoice) {
+        let folder = director_folder();
+        let error = write_specialist_setting(folder.as_deref(), choice).err();
+        if let Some(view) = &mut self.director_setting {
+            view.specialist_status = specialist_status(folder.as_deref());
+            view.specialist_error = error;
+        }
+    }
+
+    fn show_specialist_settings(&mut self, ui: &mut egui::Ui) {
+        let Some(view) = self.director_setting.clone() else {
+            return;
+        };
+        ui.label(theme::caps_label("SPECIALISTS", color::TEXT_MUTED));
+        let label = match &view.specialist_status {
+            SpecialistStatus::Set(SpecialistChoice::SameAsDirector) => {
+                "Same as Director".to_owned()
+            }
+            SpecialistStatus::Set(SpecialistChoice::Specific(selection)) => {
+                specialist_label(selection)
+            }
+            SpecialistStatus::NoLongerOffered(selection) => {
+                format!("Unavailable: {}", specialist_label(selection))
+            }
+            SpecialistStatus::Unreadable(_) => "Saved choice cannot be read".to_owned(),
+        };
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("specialist-choice")
+            .width(410.0)
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        view.specialist_status
+                            == SpecialistStatus::Set(SpecialistChoice::SameAsDirector),
+                        "Same as Director",
+                    )
+                    .clicked()
+                {
+                    chosen = Some(SpecialistChoice::SameAsDirector);
+                }
+                for selection in &view.specialist_choices {
+                    let choice = SpecialistChoice::Specific(selection.clone());
+                    if ui
+                        .selectable_label(
+                            view.specialist_status == SpecialistStatus::Set(choice.clone()),
+                            specialist_label(selection),
+                        )
+                        .clicked()
+                    {
+                        chosen = Some(choice);
+                    }
+                }
+            });
+        match &view.specialist_status {
+            SpecialistStatus::Set(SpecialistChoice::SameAsDirector) => {
+                let director = match &view.status {
+                    DirectorStatus::Set(selection) => specialist_label(selection),
+                    _ => "the Director chosen above".into(),
+                };
+                ui.colored_label(
+                    color::TEXT_MUTED,
+                    format!("New specialists follow {director}."),
+                );
+            }
+            SpecialistStatus::NoLongerOffered(_) => {
+                ui.colored_label(color::TEXT_MUTED, "This choice is kept. New specialists wait until you choose an available model.");
+            }
+            SpecialistStatus::Unreadable(why) => {
+                ui.colored_label(color::TEXT_MUTED, why);
+            }
+            SpecialistStatus::Set(SpecialistChoice::Specific(_)) => {}
+        }
+        ui.colored_label(
+            color::TEXT_MUTED,
+            "Tasks already started keep their model and options.",
+        );
+        if let Some(error) = &view.specialist_error {
+            ui.colored_label(color::TEXT_MUTED, error);
+        }
+        if let Some(choice) = chosen {
+            self.choose_specialist(&choice);
+        }
+    }
+
     fn show_director_readiness(&mut self, ui: &mut egui::Ui, view: &DirectorView) {
         let selection = match &view.status {
             DirectorStatus::Set(selection) | DirectorStatus::NoLongerOffered(selection) => {
@@ -318,7 +416,10 @@ impl KinewrightApp {
                             );
                     }
                     Readiness::LocalSignIn => {
-                        ui.colored_label(color::TEXT_MUTED, "Installed · local sign-in detected. Qualification is checked at launch.");
+                        ui.colored_label(
+                            color::TEXT_MUTED,
+                            "Installed · local sign-in detected. Launch checks run when needed.",
+                        );
                     }
                     Readiness::CheckAgain => {
                         ui.colored_label(color::TEXT_MUTED, "Local readiness needs checking.");
@@ -665,5 +766,63 @@ struct ReadinessCheck;
 impl Drop for ReadinessCheck {
     fn drop(&mut self) {
         READINESS_CHECKING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn specialist_label(selection: &ProviderSelectionRecord) -> String {
+    let mut label = format!("{} · {}", selection.connector, selection.model);
+    for option in &selection.options {
+        if option.name == "service_tier" {
+            label.push_str(" · Fast");
+        } else {
+            label.push_str(" · ");
+            label.push_str(&option.value);
+            label.push_str(" reasoning");
+        }
+    }
+    label
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod te15_tests {
+    use super::*;
+    use crate::app::in1_tests::{in1_harness, in1_shutdown};
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    #[test]
+    fn te15_b1_settings_show_default_and_persist_specific_without_director_change() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "te15-specialist-ui");
+        crate::ja1_attachment::SCHEDULER_SETTINGS
+            .with(|folder| *folder.borrow_mut() = Some(temp.root().into()));
+        let (mut app, _engine) = in1_harness(kinewright_core::Document::default());
+        app.refresh_director_setting();
+        assert_eq!(
+            app.director_setting.as_ref().unwrap().specialist_status,
+            SpecialistStatus::Set(SpecialistChoice::SameAsDirector)
+        );
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.show_specialist_settings(ui);
+        });
+        let shapes = format!("{:?}", output.shapes);
+        assert!(shapes.contains("Same as Director"), "TE15_VISIBLE_DEFAULT");
+        let director = director_choices()[0].clone();
+        app.choose_director(&director);
+        let before = std::fs::read(temp.path("director.json")).unwrap();
+        let specific = SpecialistChoice::Specific(
+            specialist_choices()
+                .into_iter()
+                .find(|s| s.connector == "claude")
+                .unwrap(),
+        );
+        app.choose_specialist(&specific);
+        app.refresh_director_setting();
+        assert_eq!(
+            app.director_setting.as_ref().unwrap().specialist_status,
+            SpecialistStatus::Set(specific)
+        );
+        assert_eq!(std::fs::read(temp.path("director.json")).unwrap(), before);
+        in1_shutdown(&mut app);
+        crate::ja1_attachment::SCHEDULER_SETTINGS.with(|folder| *folder.borrow_mut() = None);
     }
 }

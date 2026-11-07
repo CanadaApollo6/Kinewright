@@ -709,6 +709,9 @@ impl HostCommandOwner {
         &self,
         request: &ScopedOrchestrationRequest,
     ) -> Result<ScopedOrchestrationRequest, HostError> {
+        if let OrchestrationCommand::AssignTask(assignment) = &request.envelope.command {
+            return self.bind_specialist_assignment(request, assignment);
+        }
         let OrchestrationCommand::PublishResult(publish) = &request.envelope.command else {
             return Ok(request.clone());
         };
@@ -760,6 +763,60 @@ impl HostCommandOwner {
             .computed_digest()
             .map_err(|_| refused("invalid publication"))?;
         Ok(bound)
+    }
+    /// The model never chooses specialist billing policy. Snapshot the person's
+    /// preference on assignment; derive exact replays using the stored snapshot.
+    fn bind_specialist_assignment(
+        &self,
+        request: &ScopedOrchestrationRequest,
+        assignment: &crate::orchestration::orchestration_records::AssignTask,
+    ) -> Result<ScopedOrchestrationRequest, HostError> {
+        let Some(run) = &request.run else {
+            return Ok(request.clone());
+        };
+        let Some(state) = self.owner()?.orchestration_projection(run)? else {
+            return Ok(request.clone());
+        };
+        let bind = |selection| -> Result<ScopedOrchestrationRequest, HostError> {
+            let mut bound = request.clone();
+            let OrchestrationCommand::AssignTask(command) = &mut bound.envelope.command else {
+                return Err(refused("assignment changed"));
+            };
+            command.brief.provider = selection;
+            bound.envelope.digest = bound
+                .envelope
+                .computed_digest()
+                .map_err(|_| refused("invalid assignment"))?;
+            Ok(bound)
+        };
+        // Task ids include the entire canonical command digest (and command id).
+        // Changing Settings must not change an original immutable outcome.
+        for task in state
+            .tasks
+            .iter()
+            .filter(|task| task.parent.as_ref() == Some(&assignment.parent))
+        {
+            let original = bind(task.brief.provider.clone())?;
+            if original
+                .envelope
+                .identity::<TaskId>("task")
+                .map_err(|_| refused("invalid assignment"))?
+                == task.id
+            {
+                return Ok(original);
+            }
+        }
+        let parent = state
+            .tasks
+            .iter()
+            .find(|task| task.id == assignment.parent)
+            .ok_or_else(|| refused("parent task missing"))?;
+        let selection = super::configured_specialist(
+            self.config.scheduler_settings.as_deref(),
+            &parent.brief.provider,
+        )
+        .map_err(|why| refused(&why))?;
+        bind(selection)
     }
     pub(super) fn dispatch_orchestration(
         &mut self,

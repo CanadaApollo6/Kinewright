@@ -4,7 +4,10 @@ use super::{
 };
 use kinewright_project::{
     bundle_records::ProjectId,
-    orchestration_records::{AttemptId, OrchestrationCommand, RunId, TaskId, task_command_digest},
+    orchestration_records::{
+        AttemptId, OrchestrationCommand, RunId, TaskId, task_command_digest,
+        task_receipt_digest_matches,
+    },
     receipts::{CommandDigest, CommandId, ReceiptLookup},
 };
 use serde::{Deserialize, Serialize};
@@ -24,15 +27,13 @@ pub struct ReceiptQuery {
 }
 impl ReceiptQuery {
     fn command_digest(&self) -> Result<CommandDigest, HostError> {
-        let computed = self
-            .command
-            .as_ref()
-            .map(task_command_digest)
-            .transpose()
-            .map_err(|_| refused())?;
-        match (&self.digest, computed) {
-            (Some(expected), Some(actual)) if *expected == actual => Ok(actual),
-            (None, Some(actual)) => Ok(actual),
+        match (&self.digest, &self.command) {
+            (Some(expected), Some(command))
+                if task_receipt_digest_matches(command, expected).map_err(|_| refused())? =>
+            {
+                task_command_digest(command).map_err(|_| refused())
+            }
+            (None, Some(command)) => task_command_digest(command).map_err(|_| refused()),
             (Some(expected), None) => Ok(expected.clone()),
             _ => Err(refused()),
         }
@@ -106,7 +107,8 @@ impl HostCommandOwner {
             if run != Some(&query.run)
                 || task != Some(&query.task)
                 || envelope.project != query.project
-                || task_command_digest(&envelope.command).map_err(|_| refused())? != digest
+                || !task_receipt_digest_matches(&envelope.command, &digest)
+                    .map_err(|_| refused())?
                 || envelope.authority.attempt.as_ref() != Some(&query.attempt)
             {
                 return Err(refused());
@@ -135,7 +137,8 @@ impl HostCommandOwner {
             return Err(refused());
         }
         if let Some(receipt) = self.owner()?.orchestration_receipt(&query.run, &query.id)? {
-            if task_command_digest(&receipt.envelope.command).map_err(|_| refused())? != digest
+            if !task_receipt_digest_matches(&receipt.envelope.command, &digest)
+                .map_err(|_| refused())?
                 || receipt.envelope.project != query.project
                 || receipt.envelope.authority.attempt.as_ref() != Some(&query.attempt)
             {

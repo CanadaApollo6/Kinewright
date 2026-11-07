@@ -11,10 +11,12 @@
 )]
 #[path = "../src/orchestration/mod.rs"]
 mod orchestration;
+#[cfg(target_os = "linux")]
+use kinewright_agent::CLAUDE_ULTRACODE;
 use kinewright_agent::{
     BudgetKind, ConfirmationPolicy, McpServer, PromptPoll, ScriptedDriver, ScriptedTurn,
     SessionCounters, SessionFlow, SessionLimits, SessionObserver, SessionStop, SharedCounters,
-    pump_session,
+    claude_models, codex_models, pump_session,
 };
 use kinewright_core::{AgentDriver, AgentEvent, Core, Document, SessionConfig};
 use kinewright_media::FfmpegMediaEngine;

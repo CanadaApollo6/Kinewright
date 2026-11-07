@@ -35,7 +35,7 @@ fn s4b_registry_offers_only_connectors_with_a_real_adapter_and_launch_recipe() {
             AuthenticationMode, CliVersion, McpPolicy, SandboxPolicy,
         };
         let providers: Vec<_> = specifications.iter().map(|spec| spec.provider()).collect();
-        assert_eq!(providers, ["codex"], "ONLY_LAUNCHABLE_CONNECTORS");
+        assert_eq!(providers, ["codex", "claude"], "ONLY_LAUNCHABLE_CONNECTORS");
         for spec in &specifications {
             assert_eq!(
                 spec.required_authentication(),
@@ -43,7 +43,14 @@ fn s4b_registry_offers_only_connectors_with_a_real_adapter_and_launch_recipe() {
             );
             assert_eq!(spec.sandbox_policy(), SandboxPolicy::LinuxFilesystemAndIpc);
             assert_eq!(spec.mcp_policy(), McpPolicy::HostEndpointOnly);
-            assert_eq!(spec.minimum_version(), CliVersion(0, 166, 0));
+            assert_eq!(
+                spec.minimum_version(),
+                if spec.provider() == "claude" {
+                    CliVersion(2, 1, 316)
+                } else {
+                    CliVersion(0, 166, 0)
+                }
+            );
         }
     }
     assert_eq!(

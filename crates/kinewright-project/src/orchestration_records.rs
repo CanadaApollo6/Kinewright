@@ -842,8 +842,8 @@ pub fn validate_reference(reference: &ObjectRef) -> Result<(), Refusal> {
 }
 
 /// Client-known logical identity for receipt reconciliation. Admission controls
-/// and host grant fields are outside this digest. Only the host-owned usage
-/// reference is omitted from a publication's otherwise exact typed command.
+/// and host grant fields are outside this digest. Host-owned publication usage
+/// and assignment provider policy are omitted; all caller-owned fields remain exact.
 pub fn task_command_digest(command: &OrchestrationCommand) -> Result<CommandDigest, Refusal> {
     let mut value = serde_json::to_value(command).map_err(|_| Refusal::InvalidState)?;
     if matches!(command, OrchestrationCommand::PublishResult(_)) {
@@ -852,7 +852,35 @@ pub fn task_command_digest(command: &OrchestrationCommand) -> Result<CommandDige
             .ok_or(Refusal::InvalidState)?
             .remove("usage_ref");
     }
+    if matches!(command, OrchestrationCommand::AssignTask(_)) {
+        value["value"]["brief"]
+            .as_object_mut()
+            .ok_or(Refusal::InvalidState)?
+            .remove("provider");
+    }
+    command_value_digest(&value)
+}
+
+/// Read-only receipt lookup also accepts the exact pre-specialist assignment
+/// digest, which included provider policy. This grants no write admission.
+/// # Errors
+/// Returns an error if the command cannot fit the bounded canonical encoding.
+pub fn task_receipt_digest_matches(
+    command: &OrchestrationCommand,
+    expected: &CommandDigest,
+) -> Result<bool, Refusal> {
+    if task_command_digest(command)? == *expected {
+        return Ok(true);
+    }
+    if !matches!(command, OrchestrationCommand::AssignTask(_)) {
+        return Ok(false);
+    }
+    let original = serde_json::to_value(command).map_err(|_| Refusal::InvalidState)?;
+    Ok(command_value_digest(&original)? == *expected)
+}
+
+fn command_value_digest(value: &serde_json::Value) -> Result<CommandDigest, Refusal> {
     let mut bytes = b"kinewright.task-command.v1\0".to_vec();
-    bytes.extend(encoded(&value, CONTROL_BYTES)?);
+    bytes.extend(encoded(value, CONTROL_BYTES)?);
     Ok(CommandDigest(kinewright_media::sha256_bytes(&bytes)))
 }

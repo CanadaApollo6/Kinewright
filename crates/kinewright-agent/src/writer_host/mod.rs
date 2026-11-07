@@ -38,6 +38,10 @@ pub use crate::orchestration::director_setting::{
     DirectorSetting, DirectorStatus, configured_director, director_choices, director_status,
     scheduler_settings_directory, write_director_setting,
 };
+pub use crate::orchestration::specialist_setting::{
+    SpecialistChoice, SpecialistStatus, configured_specialist, specialist_choices,
+    specialist_status, write_specialist_setting,
+};
 mod snapshot_lease;
 #[cfg(all(test, target_os = "linux"))]
 mod snapshot_lease_tests;

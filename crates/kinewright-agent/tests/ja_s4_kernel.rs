@@ -11,6 +11,10 @@
 
 #[path = "../src/orchestration/mod.rs"]
 mod orchestration;
+#[cfg(target_os = "linux")]
+use kinewright_agent::CLAUDE_ULTRACODE;
+
+use kinewright_agent::{claude_models, codex_models};
 
 use kinewright_project::{
     bundle_records::{ObjectRef, RecordKind},

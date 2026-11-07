@@ -1,6 +1,5 @@
 //! C6: local probes for the installed Claude Code CLI, run at every native
-//! admission. Nothing here registers or advertises Claude: it is not in
-//! `available_connectors()`.
+//! admission. The same hardened recipe is used by normal runs and fixtures.
 use crate::orchestration::adapters::{
     AttemptBinding, AuthenticationMode, CLAUDE_AUTH_CONTRACT, CertificationRefusal,
     ConnectorRuntimeChecks, ConnectorSpecification, CredentialStoreScope, EffectiveAuthEvidence,

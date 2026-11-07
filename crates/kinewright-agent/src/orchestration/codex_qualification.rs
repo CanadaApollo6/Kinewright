@@ -114,3 +114,27 @@ pub(crate) fn authentication_status() -> kinewright_core::AuthenticationStatus {
     }
     AuthenticationStatus::Authenticated
 }
+
+/// Dispatch only to this build's hardened provider checks. No alternate provider.
+pub(crate) struct InstalledNativeChecks {
+    pub guardian: std::path::PathBuf,
+}
+impl ConnectorRuntimeChecks for InstalledNativeChecks {
+    fn probe(
+        &self,
+        specification: &ConnectorSpecification,
+        binding: &AttemptBinding,
+    ) -> Result<RuntimeQualification, CertificationRefusal> {
+        match specification.provider() {
+            "codex" => InstalledCodexChecks {
+                guardian: self.guardian.clone(),
+            }
+            .probe(specification, binding),
+            "claude" => crate::claude_qualification::InstalledClaudeChecks {
+                guardian: self.guardian.clone(),
+            }
+            .probe(specification, binding),
+            _ => Err(CertificationRefusal::UnknownProvider),
+        }
+    }
+}

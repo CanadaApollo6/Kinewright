@@ -62,7 +62,7 @@ impl Default for RuntimePorts {
             .with_file_name("kinewright-job-guardian");
         Self {
             profiles: None,
-            checks: Arc::new(crate::codex_qualification::InstalledCodexChecks {
+            checks: Arc::new(crate::codex_qualification::InstalledNativeChecks {
                 guardian: guardian.clone(),
             }),
             guardian,
@@ -152,6 +152,21 @@ impl StudioRuntime {
             images: Arc::default(),
         })
     }
+    #[cfg(test)]
+    pub(super) fn bind_profile_for_test(
+        &self,
+        attempt: &AdmittedAttempt,
+        endpoint: &str,
+        checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
+    ) -> io::Result<CertifiedConnectorProfile> {
+        RegisteredProfiles {
+            host: self.host.clone(),
+            checks,
+            qualification: None,
+        }
+        .bind_for_task(attempt, endpoint)
+    }
+
     /// Called only by post-discovery updates. It never blocks an HTTP request.
     fn begin_recovery(&self) -> io::Result<()> {
         let mut state = self
@@ -743,7 +758,7 @@ impl ProfileFactory for RegisteredProfiles {
             .host
             .upgrade()
             .ok_or_else(|| io::Error::other("host closed"))?;
-        let (selection, roots) = {
+        let (selection, role, roots) = {
             let owner = host
                 .lock()
                 .map_err(|_| io::Error::other("host owner unavailable"))?;
@@ -760,6 +775,7 @@ impl ProfileFactory for RegisteredProfiles {
                 .ok_or_else(|| io::Error::other("task missing"))?;
             (
                 task.brief.provider.clone(),
+                task.brief.role,
                 owner
                     .config
                     .roots
@@ -779,9 +795,7 @@ impl ProfileFactory for RegisteredProfiles {
         #[cfg(not(any(test, feature = "test-util")))]
         let candidate: Option<()> = None;
         if candidate.is_none()
-            && !crate::orchestration::adapters::available_connectors()
-                .iter()
-                .any(|spec| spec.selection() == selection)
+            && !crate::orchestration::specialist_setting::specialist_choices().contains(&selection)
         {
             return Err(io::Error::other("saved connector is not available"));
         }
@@ -796,7 +810,8 @@ impl ProfileFactory for RegisteredProfiles {
             return Err(io::Error::other("private scratch ownership"));
         }
         let binding = AttemptBinding::issue(attempt, endpoint.into(), roots, scratch)
-            .map_err(io::Error::other)?;
+            .map_err(io::Error::other)?
+            .for_task(selection.clone(), role);
         let scratch = binding.working_directory().to_path_buf();
         #[cfg(any(test, feature = "test-util"))]
         let certify = if let Some(candidate) = candidate {
