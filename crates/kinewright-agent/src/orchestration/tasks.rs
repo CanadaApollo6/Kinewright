@@ -84,6 +84,7 @@ struct Ingress {
     phase: AtomicU8,
     revoked: AtomicBool,
     paused: AtomicBool,
+    media_read_busy: AtomicBool,
     authority: RuntimeTaskAuthority,
     actor: kinewright_core::ActorIdentity,
     policy: TaskPolicy,
@@ -91,6 +92,12 @@ struct Ingress {
 
 #[derive(Clone)]
 pub struct TaskEndpoint(Arc<Ingress>);
+pub(crate) struct MediaReadPermit(TaskEndpoint);
+impl Drop for MediaReadPermit {
+    fn drop(&mut self) {
+        self.0.0.media_read_busy.store(false, Ordering::Release);
+    }
+}
 impl TaskEndpoint {
     /// Receiving port only. H3 must resolve attachment, epoch and scope before calling.
     #[allow(dead_code, reason = "H3 owns authenticated endpoint construction")]
@@ -106,6 +113,7 @@ impl TaskEndpoint {
             phase: AtomicU8::new(INGRESS_OPEN),
             revoked: AtomicBool::new(false),
             paused: AtomicBool::new(false),
+            media_read_busy: AtomicBool::new(false),
             policy,
             authority,
             actor: core.actor_identity(),
@@ -119,6 +127,24 @@ impl TaskEndpoint {
     #[must_use]
     pub fn authority(&self) -> &RuntimeTaskAuthority {
         &self.0.authority
+    }
+    pub(crate) fn begin_media_read(&self) -> Result<MediaReadPermit, String> {
+        self.check_live()?;
+        if self.0.phase.load(Ordering::Acquire) != INGRESS_OPEN {
+            return Err("task_freezing".into());
+        }
+        self.0
+            .media_read_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "media evidence read already pending".to_owned())?;
+        Ok(MediaReadPermit(self.clone()))
+    }
+    pub(crate) fn media_read_live(&self) -> bool {
+        self.check_live().is_ok() && self.0.phase.load(Ordering::Acquire) == INGRESS_OPEN
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn media_read_pending_for_fixture(&self) -> bool {
+        self.0.media_read_busy.load(Ordering::Acquire)
     }
     pub fn revoke(&self) {
         self.0.revoked.store(true, Ordering::SeqCst);

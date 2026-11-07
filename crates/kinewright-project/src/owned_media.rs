@@ -666,6 +666,10 @@ impl ProjectStore {
     ) -> Result<CertifiedMediaInput, BundleError> {
         let interpretation = entry.media_interpretation()?;
         let memo = self.media_admission_memo(entry)?;
+        #[cfg(any(test, feature = "test-util"))]
+        if memo.is_none() {
+            self.observe_cold_media_for_fixture()?;
+        }
         let source = self.certify_media_parts(
             &entry.object,
             entry.chunk_table_ref()?,

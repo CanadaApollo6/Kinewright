@@ -110,6 +110,8 @@ struct StoreInner {
     resources:
         Mutex<BTreeMap<ObjectRef, WeakCacheEntry<crate::certified_resources::ResourceBytes>>>,
     media_admissions: Mutex<BTreeMap<(ObjectRef, ObjectRef, String), MediaAdmission>>,
+    #[cfg(any(test, feature = "test-util"))]
+    cold_media_probe: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     ledger: Mutex<Ledger>,
     usage: Arc<Mutex<StorageUsage>>,
     limits: StorageLimits,
@@ -320,6 +322,40 @@ impl ProjectStore {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn hold_next_cold_media_for_fixture(
+        &self,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(), BundleError> {
+        *self
+            .inner
+            .cold_media_probe
+            .lock()
+            .map_err(|_| BundleError::Capacity("media probe poisoned"))? = Some(hook);
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn clear_media_memo_for_fixture(&self) -> Result<(), BundleError> {
+        self.inner
+            .media_admissions
+            .lock()
+            .map_err(|_| BundleError::Capacity("media memo poisoned"))?
+            .clear();
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn observe_cold_media_for_fixture(&self) -> Result<(), BundleError> {
+        let hook = self
+            .inner
+            .cold_media_probe
+            .lock()
+            .map_err(|_| BundleError::Capacity("media probe poisoned"))?
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(())
+    }
     #[cfg(any(test, feature = "test-util"))]
     pub fn retention_probe(&self) -> Result<(u64, BTreeMap<String, u64>), BundleError> {
         let ledger = self
@@ -618,6 +654,8 @@ impl ProjectStore {
                 chunk_tables: Mutex::new(BTreeMap::new()),
                 resources: Mutex::new(BTreeMap::new()),
                 media_admissions: Mutex::new(BTreeMap::new()),
+                #[cfg(any(test, feature = "test-util"))]
+                cold_media_probe: Mutex::new(None),
                 ledger: Mutex::new(Ledger {
                     authenticated_read_graph: false,
                     collection: CollectionStatus::default(),
@@ -1860,6 +1898,10 @@ impl<R: Read> Read for CountingReader<'_, R> {
     }
 }
 impl StorePin {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn retention_probe_for_fixture(&self) -> Result<(u64, BTreeMap<String, u64>), BundleError> {
+        self.read_store().retention_probe()
+    }
     pub(crate) fn contains_reference(&self, reference: &ObjectRef) -> bool {
         self.objects.contains(&reference.sha256)
     }

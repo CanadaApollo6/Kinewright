@@ -6,7 +6,7 @@ impl HostCommandOwner {
         payload: &[u8],
         live: &serde_json::Value,
     ) -> Result<Vec<u8>, HostError> {
-        let notes = self.context_notes(task)?;
+        let notes = self.prompt_notes(task)?;
         let overview = self.hooks.runs.iter().find(|(_,run)|run.tasks.contains_key(&task.id))
             .map(|(run,_)| {
                 let (revision,document)=self.context_snapshot(run,&task.id)?;

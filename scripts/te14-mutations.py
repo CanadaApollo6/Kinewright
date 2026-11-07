@@ -33,12 +33,8 @@ add('neighbouring-words', C,
     'let first = start.saturating_sub(2);\n                    let last = end.saturating_add(2).min(words.len());',
     'let first = *start;\n                    let last = *end;',
     'te14_neighbouring_words_match_the_full_transcript_decision', 'TE14_NEIGHBOUR_DECISION')
-add('unmet-note', C, '"unmet_note_ids":field("unmet_note_ids")', '"unmet_note_ids":[]',
-    'te14_summary_retains_the_unmet_note_rejection', 'TE14_UNMET_NOTE_DISCLOSED')
-add('failed-proof', C, 'if classified{field("proof_status")}else{json!("unknown")}',
-    'json!("reported_pass")', 'te14_summary_retains_the_failed_proof_rejection', 'TE14_FAILED_PROOF_DISCLOSED')
 add('legitimate-expansion', C,
-    'let context = page(&rows,&json!({"run":run,"task":task.id,"revision":revision,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(document)?),"evidence":{"kind":"timeline","clips":seeds}}),None,OVERVIEW_BYTES/2).ok();',
+    'let context = page(&rows,&json!({"run":run,"task":task.id,"source":task.brief.scope.base,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(document)?),"evidence":{"kind":"timeline","clips":seeds}}),None,OVERVIEW_BYTES/2).ok();',
     'let context = page(&rows,&json!({"task":task.id,"revision":revision,"evidence":{"kind":"timeline","clips":seeds}}),None,OVERVIEW_BYTES/2).ok();',
     'te14_scoped_context_expands_the_outside_view_dependency', 'TE14_INITIAL_CURSOR_EXPANDS')
 add('sibling-detail', C,
@@ -50,8 +46,8 @@ add('stale-revision', C, 'if revision != read.revision {\n            return Err
 add('child-source', C, 'if result.head != read.source {', 'if false && result.head != read.source {',
     'te14_child_details_bind_parent_child_run_reference_and_source', 'TE14_CHILD_STALE_SOURCE_DENIED')
 add('page-limit', C,
-    'let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES - 4096)?;\n        self.record_expansion(index, state, task, &binding)?;',
-    'let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES * 8)?;\n        self.record_expansion(index, state, task, &binding)?;',
+    'let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES - 4096)?;' + "\n" + '        self.record_expansion(\n            index,\n            state,\n            task,',
+    'let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES * 8)?;' + "\n" + '        self.record_expansion(\n            index,\n            state,\n            task,',
     'te14_page_expansion_limit_and_reconnect_are_durable', 'TE14_PAGE_LIMIT')
 add('expansion-limit', C, 'const EXPANSIONS: usize = 8;', 'const EXPANSIONS: usize = 9;',
     'te14_page_expansion_limit_and_reconnect_are_durable', 'TE14_EIGHT_EXPANSIONS')
@@ -72,14 +68,9 @@ add('durable-merge-record', M,
     'if !state.results.contains(&merge.result)\n                || merge.target != history.base',
     'if merge.target != history.base',
     'te14_merge_uses_durable_delta_and_history_after_a_small_wake', 'TE14_SUMMARY_CANNOT_AUTHORIZE_MERGE')
-add('proof-classification', C, 'if value["kind"] != "task_proof_v1"',
-    'if false && value["kind"] != "task_proof_v1"',
-    'te14_unknown_proof_expands_to_the_full_failed_proof_decision', 'TE14_CLASSIFICATION_IS_HOST_OWNED')
-add('proof-reference', C, '"proof_refs":result.artifacts', '"proof_refs":[]',
-    'te14_unknown_proof_expands_to_the_full_failed_proof_decision', 'TE14_PROOF_DETAIL_REFERENCE')
 
 # This changes a real fixed prefix byte, leaving variable task values untouched.
-harness.PAIRS.append(('golden-prefix', C, 'Context is read-only.', 'Context is writable.', A,
+harness.PAIRS.append(('golden-prefix', 'crates/kinewright-agent/src/writer_host/codex_instructions.rs', 'Context is read-only.', 'Context is writable.', A,
     'writer_host::task_context::tests::te14_role_prefix_goldens_are_fixed_ordered_bytes', 'TE14_PREFIX_BYTES_STABLE'))
 
 add('planar-audio-channels',C,'let planar = frame.format().is_planar();','let planar = false;',
@@ -87,16 +78,12 @@ add('planar-audio-channels',C,'let planar = frame.format().is_planar();','let pl
 add('plain-transcript',C,'else if let Some(text) = value.as_str() {','else if let Some(text) = value.as_str().filter(|_|false) {',
     'te14_plain_text_transcript_keeps_neighbours_and_unknown_alignment','TE14_PLAIN_TEXT_TRANSCRIPT_EXPANDS')
 add('media-owner-lock', M,
-    'drop(host);\n                            prepared.render()?',
-    'let value=prepared.render()?;\n                            drop(host); value',
+    'drop(host);\n                            prepared.render(&self.endpoint, &owner)?',
+    'let _held_host=host;\n                            prepared.render(&self.endpoint, &owner)?',
     'te14_real_owned_audio_and_frame_samples_exclude_ambient_paths', 'TE14_DECODE_RELEASES_OWNER')
-add('media-revision-recheck', C, 'if binding != rendered.binding {',
-    'if false && binding != rendered.binding {',
+add('media-revision-recheck', C, 'if revision != read.revision\n            || binding != rendered.binding',
+    'if false && revision != read.revision\n            || false && binding != rendered.binding',
     'te14_real_owned_audio_and_frame_samples_exclude_ambient_paths', 'TE14_DECODE_RECHECKS_REVISION')
-add('large-wake-omission', C,
-    'if serde_json::to_vec(&summaries)?.len() > PAGE_BYTES / 2 - 512 {',
-    'if false && serde_json::to_vec(&summaries)?.len() > PAGE_BYTES / 2 - 512 {',
-    'te14_large_wake_discloses_omission_and_full_expansion_preserves_rejection', 'TE14_LARGE_WAKE_EXPANDS')
 harness.PAIRS.extend([
  ('frame-padding',C,'output.extend_from_slice(&row[..count]);','output.extend_from_slice(&row[..stride.min(limit-output.len())]);',A,
   'writer_host::task_context::tests::te14_visible_frame_sample_skips_padding','TE14_NO_FRAME_PADDING'),

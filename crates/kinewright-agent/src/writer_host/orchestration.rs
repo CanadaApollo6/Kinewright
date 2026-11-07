@@ -155,12 +155,21 @@ pub(super) struct Hooks {
     #[cfg(test)]
     pub context_media_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     #[cfg(test)]
+    pub context_media_outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
+    #[cfg(test)]
+    pub context_reply_gate: Option<ContextReplyGate>,
+    #[cfg(test)]
     pub completion_status_read_failure: bool,
     pub runs: BTreeMap<RunId, HostRun>,
     pub pending: Option<PendingPublication>,
     pub attention: Arc<Mutex<super::attention::AttentionState>>,
     #[cfg(target_os = "linux")]
     pub native: BTreeMap<(RunId, AttemptId), super::native_invocation::RegisteredNativeAttempt>,
+}
+#[cfg(test)]
+pub(super) struct ContextReplyGate {
+    pub gate: Arc<(std::sync::Barrier, std::sync::Barrier)>,
+    pub outcome: Arc<Mutex<Option<serde_json::Value>>>,
 }
 impl Drop for Hooks {
     fn drop(&mut self) {

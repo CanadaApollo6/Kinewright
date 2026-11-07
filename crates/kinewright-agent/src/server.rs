@@ -36595,7 +36595,11 @@ fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String>
                     let schema = crate::writer_host::task_mcp::schema::context_read(name);
                     Some(Tool::new(
                         *name,
-                        "Read revision-bound host-owned context in pages up to 24 KiB. At most eight expansions per task. Capacity requires replanning. Reading never widens edit authority.",
+                        match *name {
+                            "read_task_result" => "Read a host-owned result reference once (20 KiB limit). For larger results use read_child_result with the published child and source head. Reading never widens edit authority.",
+                            "read_task_evidence" => "Read revision-bound timeline, original text, proof or owned media samples in pages up to 24 KiB. Child proof revisions must name the child's durable result head. Eight distinct pages per task; retries are free. Capacity requires replanning; reading never widens edit authority.",
+                            _ => "Read a direct child's published records, including explanation, delta, artifacts, evidence, projected usage and history, in pages up to 24 KiB. Supply its exact result reference and source head. Eight distinct pages per task; retries are free. Judge note and proof fate from the records. Reading never widens edit authority.",
+                        },
                         Arc::new(schema.as_object().unwrap().clone()),
                     ))
                 }

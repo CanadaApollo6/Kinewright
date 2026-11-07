@@ -1,8 +1,10 @@
 //! Revision-bound read context. These values describe evidence, never edit authority.
 use super::{HostCommandOwner, HostError, HostRefusal};
+#[cfg(target_os = "linux")]
+use crate::orchestration::orchestration_records::TaskResult;
 use crate::orchestration::orchestration_records::{
     AuthorityBinding, BranchBinding, OrchestrationCommand, OrchestrationEnvelope,
-    OrchestrationPayload, RunId, RunProjection, TaskId, TaskRecord, TaskResult,
+    OrchestrationPayload, RunId, RunProjection, TaskId, TaskRecord,
 };
 use kinewright_core::{ClipId, Command, Document, Event, Query, QueryResult, TimelineRevision};
 use kinewright_project::bundle_records::{ObjectRef, RecordKind};
@@ -13,11 +15,15 @@ use std::{collections::BTreeSet, sync::Arc};
 pub(super) const PAGE_BYTES: usize = 24 * 1024;
 const OVERVIEW_BYTES: usize = 8 * 1024;
 const EXPANSIONS: usize = 8;
-#[cfg(any(target_os = "linux", test))]
-const CONTRACT: &str = "Context is read-only. Omitted or unknown facts are not success. Expand dependencies and neighbouring transcript/media before deciding. Reject or replan unmet notes, conflicts, failed or unknown proofs. A page is at most 24 KiB; eight expansions per task. evidence_capacity requires replanning, never guessing. Merge only the exact durable result, never a summary.";
 fn refused(reason: &str) -> HostError {
     HostRefusal::new("task_context", reason).into()
 }
+fn legacy_limit() -> HostError {
+    refused(
+        "read_task_result exceeds its one-shot 20 KiB limit; use read_child_result for paged child records",
+    )
+}
+
 fn capacity() -> HostError {
     HostRefusal::new(
         "evidence_capacity",
@@ -32,9 +38,13 @@ pub(crate) fn application_prefix(
 ) -> Result<Vec<u8>, HostError> {
     let manifest =
         crate::server::task_manifest_identity(role).map_err(|_| refused("manifest unavailable"))?;
-    Ok(format!("{{\"instructions\":{},\"task_role\":{},\"manifest_sha256\":{},\"context_contract\":{},\"data\":",
+    Ok(format!(
+        "{{\"instructions\":{},\"task_role\":{},\"manifest_sha256\":{},\"data\":",
         serde_json::to_string(super::codex_instructions::CODEX_INSTRUCTIONS)?,
-        serde_json::to_string(&role)?, serde_json::to_string(&manifest)?, serde_json::to_string(CONTRACT)?).into_bytes())
+        serde_json::to_string(&role)?,
+        serde_json::to_string(&manifest)?
+    )
+    .into_bytes())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,7 +97,18 @@ pub(super) struct ChildRead {
     pub cursor: Option<String>,
 }
 
-fn clip_rows(document: &Document, seeds: &[ClipId]) -> Vec<Value> {
+fn check_context_cancel(cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<(), HostError> {
+    if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+        return Err(media_unavailable());
+    }
+    Ok(())
+}
+fn clip_rows(
+    document: &Document,
+    seeds: &[ClipId],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<Value>, HostError> {
+    check_context_cancel(cancel)?;
     let all = document
         .tracks
         .iter()
@@ -100,6 +121,7 @@ fn clip_rows(document: &Document, seeds: &[ClipId]) -> Vec<Value> {
     loop {
         let before = selected.len();
         for (track, clip) in &all {
+            check_context_cancel(cancel)?;
             if !selected.contains(&clip.id) {
                 continue;
             }
@@ -133,7 +155,8 @@ fn clip_rows(document: &Document, seeds: &[ClipId]) -> Vec<Value> {
         "track":t.id,"track_role":t.kind,"sync_lock":t.sync_lock,"clip":c,
         "read_only_dependency":!seeds.contains(&c.id),"asset": document.asset(c.asset).map(|a| json!({"id":a.id,"duration":a.duration,"fps":a.fps,"kind":a.kind,"fingerprint":a.source_fingerprint}))
     })));
-    rows
+    check_context_cancel(cancel)?;
+    Ok(rows)
 }
 fn page(
     rows: &[Value],
@@ -180,7 +203,7 @@ fn page(
     let mut result;
     loop {
         let next = (end < rows.len()).then(|| format!("{identity}:{end}"));
-        result = json!({"binding":binding,"items":items,"omitted":end<rows.len(),"next_cursor":next,"total_items":rows.len(),"expansion_limit":EXPANSIONS});
+        result = json!({"page_id":format!("{identity}:{offset}"),"binding":binding,"items":items,"omitted":end<rows.len(),"next_cursor":next,"total_items":rows.len(),"expansion_limit":EXPANSIONS});
         if serde_json::to_vec(&result)?.len() > limit {
             return Err(capacity());
         }
@@ -223,19 +246,27 @@ fn bytes_rows(bytes: &[u8]) -> Vec<Value> {
 }
 
 pub(super) struct PreparedMediaRead {
-    lease: kinewright_project::owned_inputs::OwnedInputLease,
+    lease: kinewright_project::owned_inputs::InputLeaseRequest,
+    alive: Arc<std::sync::atomic::AtomicBool>,
     micros: i64,
     audio: bool,
     at: i64,
     reference: ObjectRef,
-    closure: Vec<Value>,
+    document: Arc<Document>,
+    clip_id: ClipId,
+    cursor: Option<String>,
     binding: Value,
+    deadline: std::time::Instant,
+    switch_generation: Option<u64>,
     #[cfg(test)]
     gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+    #[cfg(test)]
+    outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 pub(super) struct RenderedMediaRead {
     binding: Value,
-    rows: Vec<Value>,
+    value: Value,
+    switch_generation: Option<u64>,
 }
 
 // FFmpeg's linesize includes padding. Never expose padding or inactive samples.
@@ -265,18 +296,103 @@ fn visible_prefix(
     }
     Ok(output)
 }
+// A persisted 23 MB / 60-second PCM source certified and decoded in 44–47 ms
+// in the cold-input fixture. Five seconds allows over 100x that measured cost;
+// larger or stalled sources refuse without blocking the owner.
+const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+struct CancelMediaRead(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelMediaRead {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+fn media_unavailable() -> HostError {
+    refused("media evidence read cancelled or timed out; replan without guessing")
+}
 impl PreparedMediaRead {
-    // Consumes decoder pins before the caller reacquires the host owner lock.
-    pub(super) fn render(self) -> Result<RenderedMediaRead, HostError> {
+    pub(super) fn render(
+        self,
+        endpoint: &crate::orchestration::tasks::TaskEndpoint,
+        owner: &Arc<std::sync::Mutex<HostCommandOwner>>,
+    ) -> Result<RenderedMediaRead, HostError> {
+        use std::sync::atomic::Ordering;
+        let permit = endpoint
+            .begin_media_read()
+            .map_err(|_| media_unavailable())?;
+        let alive = Arc::clone(&self.alive);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = Arc::clone(&cancel);
+        let _cancel_on_exit = CancelMediaRead(Arc::clone(&cancel));
+        let deadline = self.deadline;
+        let switch_generation = self.switch_generation;
         #[cfg(test)]
-        if let Some(gate) = &self.gate {
+        let outcome = self.outcome.clone();
+        let worker = std::thread::Builder::new()
+            .name("task-media-read".into())
+            .spawn(move || {
+                let _permit = permit;
+                let result = self.decode(&signal);
+                #[cfg(test)]
+                if let Some(outcome) = outcome {
+                    outcome.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
+                }
+                result
+            })
+            .map_err(|_| media_unavailable())?;
+        loop {
+            let mut stopped = !endpoint.media_read_live()
+                || !alive.load(Ordering::Acquire)
+                || std::time::Instant::now() >= deadline;
+            if let Ok(host) = owner.try_lock() {
+                stopped |= host.switch_frozen || host.recovering;
+                stopped |= host
+                    .owner()
+                    .ok()
+                    .and_then(|project| project.manual_switch_generation().ok())
+                    != switch_generation;
+                #[cfg(target_os = "linux")]
+                {
+                    stopped |= host.native_recovery_pending || host.recovery_only;
+                }
+            }
+            if stopped {
+                return Err(media_unavailable());
+            }
+            if worker.is_finished() {
+                return worker
+                    .join()
+                    .map_err(|_| media_unavailable())?
+                    .map_err(|_| media_unavailable());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    #[cfg(test)]
+    fn decode_gate(gate: Option<&Arc<(std::sync::Barrier, std::sync::Barrier)>>) {
+        if let Some(gate) = gate {
             gate.0.wait();
             gate.1.wait();
         }
-        let source = self.lease.certified_source()?;
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    }
+    // Cold certification may outlive a cancelled caller. The worker retains
+    // its real pins and endpoint permit until that operation exits; no second
+    // worker on the endpoint can accumulate behind it. Decode is cancellable.
+    fn decode(
+        self,
+        cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<RenderedMediaRead, HostError> {
+        use base64::Engine as _;
+        #[cfg(test)]
+        let gate = self.gate;
+        let lease = self.lease.open()?;
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(media_unavailable());
+        }
+        let source = lease.certified_source()?;
         let mut value = if self.audio {
-            let mut decoder = source.open_audio(cancel)?;
+            let mut decoder = source.open_audio(Arc::clone(cancel))?;
+            #[cfg(test)]
+            Self::decode_gate(gate.as_ref());
             decoder
                 .seek(self.micros)
                 .map_err(|_| refused("owned audio unavailable"))?;
@@ -351,9 +467,11 @@ impl PreparedMediaRead {
                     );
                 }
             }
-            json!({"kind":"owned_audio_sample","format":format!("{:?}",frame.format().packed()),"packing":"interleaved","samples":samples,"channels":channels,"rate":frame.rate(),"pts":frame.pts(),"data":data})
+            json!({"kind":"owned_audio_sample","format":format!("{:?}",frame.format().packed()),"packing":"interleaved","samples":samples,"channels":channels,"rate":frame.rate(),"pts":frame.pts(),"encoding":"base64","data_base64":base64::engine::general_purpose::STANDARD.encode(&data),"sample_bytes":data.len()})
         } else {
-            let mut decoder = source.open_video(cancel)?;
+            let mut decoder = source.open_video(Arc::clone(cancel))?;
+            #[cfg(test)]
+            Self::decode_gate(gate.as_ref());
             decoder
                 .seek(self.micros)
                 .map_err(|_| refused("owned frame unavailable"))?;
@@ -381,7 +499,7 @@ impl PreparedMediaRead {
                 frame.height() as usize,
                 2048,
             )?;
-            json!({"kind":"owned_frame_sample","format":name,"width":frame.width(),"height":frame.height(),"visible_row_bytes":row_bytes,"pts":frame.pts(),"plane":0,"omitted_planes":true,"data":data})
+            json!({"kind":"owned_frame_sample","format":name,"width":frame.width(),"height":frame.height(),"visible_row_bytes":row_bytes,"pts":frame.pts(),"plane":0,"omitted_planes":true,"encoding":"base64","data_base64":base64::engine::general_purpose::STANDARD.encode(&data),"sample_bytes":data.len()})
         };
         value["partial_coverage"] = json!(true);
         value["requested_source_frame"] = json!(self.at);
@@ -390,10 +508,22 @@ impl PreparedMediaRead {
         value["source"] = serde_json::to_value(&self.reference)?;
         // Dependencies remain independently pageable, even for a large graph.
         let mut rows = vec![value];
-        rows.extend(self.closure);
+        rows.extend(clip_rows(
+            &self.document,
+            &[self.clip_id],
+            Some(cancel.as_ref()),
+        )?);
+        let mut binding = self.binding;
+        binding["document_sha256"] = json!(kinewright_media::sha256_bytes(&serde_json::to_vec(
+            &*self.document
+        )?));
+        check_context_cancel(Some(cancel.as_ref()))?;
+        let value = page(&rows, &binding, self.cursor.as_deref(), PAGE_BYTES - 4096)?;
+        check_context_cancel(Some(cancel.as_ref()))?;
         Ok(RenderedMediaRead {
-            binding: self.binding,
-            rows,
+            binding,
+            value,
+            switch_generation: self.switch_generation,
         })
     }
 }
@@ -436,14 +566,33 @@ impl HostCommandOwner {
             Ok(json!({"note_id":revision.comment_id,"anchor":revision.anchor,"text_ref":revision.original_text_ref,"proof_ref":revision.frame_proof_ref,"transcript_ref":revision.transcript_revision,"voice":revision.voice_ref,"detail_ref":reference}))
         }).collect()
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn prompt_notes(&self, task: &TaskRecord) -> Result<Vec<Value>, HostError> {
+        let mut notes = self.context_notes(task)?;
+        for note in &mut notes {
+            let reference: ObjectRef = serde_json::from_value(note["text_ref"].clone())?;
+            note["text"] = self.prompt_note_text(&reference)?;
+        }
+        Ok(notes)
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn prompt_note_text(&self, reference: &ObjectRef) -> Result<Value, HostError> {
+        if reference.byte_length > (crate::protocol::limits::FRAME_BYTES / 2) as u64 {
+            return Err(refused("feedback prompt capacity"));
+        }
+        let bytes = self.owner()?.store()?.read_evidence(reference)?;
+        Ok(json!(
+            std::str::from_utf8(&bytes).map_err(|_| refused("feedback text is not UTF-8"))?
+        ))
+    }
     fn timeline_context_rows(
         &self,
         task: &TaskRecord,
         document: &Document,
         seeds: &[ClipId],
     ) -> Result<Vec<Value>, HostError> {
-        let mut rows = clip_rows(document, seeds);
-        rows.push(json!({"kind":"task_evidence_catalog","note_anchors":self.context_notes(task)?,"brief_refs":[task.brief.plan.clone(),task.brief.script.clone(),task.brief.assignment.clone()],"owned_inputs":task.brief.inputs,"omitted_evidence":["full transcript","full media","unobserved proof"],"read_route":"read_task_evidence"}));
+        let mut rows = clip_rows(document, seeds, None)?;
+        rows.push(json!({"kind":"task_evidence_catalog","note_count":self.context_notes(task)?.len(),"brief_refs":[task.brief.plan.clone(),task.brief.script.clone(),task.brief.assignment.clone()],"owned_inputs":task.brief.inputs,"omitted_evidence":["full transcript","full media","unobserved proof"],"read_route":"read_task_evidence"}));
         Ok(rows)
     }
     pub(super) fn context_overview(
@@ -462,11 +611,9 @@ impl HostCommandOwner {
             .filter_map(|s| s.strip_prefix("clip:")?.parse().ok().map(ClipId))
             .collect::<Vec<_>>();
         let rows = self.timeline_context_rows(task, document, &seeds)?;
-        let context = page(&rows,&json!({"run":run,"task":task.id,"revision":revision,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(document)?),"evidence":{"kind":"timeline","clips":seeds}}),None,OVERVIEW_BYTES/2).ok();
+        let context = page(&rows,&json!({"run":run,"task":task.id,"source":task.brief.scope.base,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(document)?),"evidence":{"kind":"timeline","clips":seeds}}),None,OVERVIEW_BYTES/2).ok();
         let mut overview = json!({"revision":revision,"timebase":document.fps,"duration":document.duration,
-            "tracks":document.tracks.iter().map(|t|json!({"id":t.id,"role":t.kind,"sync_lock":t.sync_lock})).collect::<Vec<_>>(),
-            "caption_boundaries":document.tracks.iter().flat_map(|t|&t.clips).filter(|c|matches!(c.content,kinewright_core::ClipContent::Title(_))).map(|c|json!({"clip":c.id,"start":c.timeline_start,"local_span":c.source_range})).collect::<Vec<_>>(),
-            "note_anchors":notes,"available_evidence":{"brief":[task.brief.plan.clone(),task.brief.script.clone(),task.brief.assignment.clone()],"owned_inputs":task.brief.inputs,"media":"owned samples via read_task_evidence; unavailable streams refuse","transcript":"only admitted references; unreported transcript is unavailable","preview_proof":"references only; unobserved proof is unknown"},
+            "note_count":notes.len(),"available_evidence":{"brief":[task.brief.plan.clone(),task.brief.script.clone(),task.brief.assignment.clone()],"owned_inputs":task.brief.inputs,"media":"owned samples via read_task_evidence; unavailable streams refuse","transcript":"only admitted references; unreported transcript is unavailable","preview_proof":"references only; unobserved proof is unknown"},
             "omitted_evidence":["full transcript","full media","full delta and history","unobserved proof"],"read_route":"read_task_evidence",
             "context":context});
         if overview["context"].is_null() || serde_json::to_vec(&overview)?.len() > OVERVIEW_BYTES {
@@ -523,8 +670,47 @@ impl HostCommandOwner {
         }
         Ok(false)
     }
+    fn proof_revision(
+        &self,
+        state: &RunProjection,
+        task: &TaskRecord,
+        reference: &ObjectRef,
+        current: TimelineRevision,
+    ) -> Result<Value, HostError> {
+        let mut sources = Vec::new();
+        for child in &state.tasks {
+            if child.parent.as_ref() != Some(&task.id) {
+                continue;
+            }
+            if let crate::orchestration::orchestration_records::TaskState::Terminal(result_ref) =
+                &child.state
+            {
+                let record = self.owner()?.store()?.read_run_record(result_ref)?;
+                if let OrchestrationPayload::Result(result) = &record.payload
+                    && (result.artifacts.contains(reference)
+                        || result.evidence.contains(reference)
+                        || result.explanation == *reference)
+                {
+                    let source = result
+                        .head
+                        .as_ref()
+                        .ok_or_else(|| refused("proof source checkpoint unavailable"))?;
+                    let value = serde_json::to_value(source)?;
+                    if !sources.contains(&value) {
+                        sources.push(value);
+                    }
+                }
+            }
+        }
+        match sources.len() {
+            0 => Ok(json!(current)),
+            1 => Ok(sources.pop().unwrap()),
+            _ => Err(refused("ambiguous proof source; use read_child_result")),
+        }
+    }
     pub(super) fn expansion_count(&self, task: &TaskRecord) -> Result<usize, HostError> {
         let mut count = 0;
+        let mut pages = BTreeSet::new();
         for reference in &task.progress.decisions {
             if reference.record_kind != RecordKind::OwnedEvidence {
                 continue;
@@ -532,7 +718,13 @@ impl HostCommandOwner {
             let bytes = self.owner()?.store()?.read_evidence(reference)?;
             let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             if value["kind"] == "task_evidence_expansion_v1" {
-                count += 1;
+                if let Some(page) = value["page_id"].as_str() {
+                    count += usize::from(pages.insert(page.to_owned()));
+                } else {
+                    // Legacy audits did not retain cursor positions. Keep
+                    // their conservative debit rather than inventing pages.
+                    count += 1;
+                }
             }
         }
         Ok(count)
@@ -543,11 +735,21 @@ impl HostCommandOwner {
         state: &RunProjection,
         task: &TaskRecord,
         binding: &Value,
+        page_id: &str,
     ) -> Result<(), HostError> {
+        for reference in &task.progress.decisions {
+            if reference.record_kind == RecordKind::OwnedEvidence {
+                let bytes = self.owner()?.store()?.read_evidence(reference)?;
+                let audit: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                if audit["kind"] == "task_evidence_expansion_v1" && audit["page_id"] == page_id {
+                    return Ok(());
+                }
+            }
+        }
         if self.expansion_count(task)? >= EXPANSIONS {
             return Err(capacity());
         }
-        let reference = self.owner_mut()?.admit_host_grant(&serde_json::to_vec(&json!({"kind":"task_evidence_expansion_v1","request_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(binding)?)}))?)?;
+        let reference = self.owner_mut()?.admit_host_grant(&serde_json::to_vec(&json!({"kind":"task_evidence_expansion_v1","page_id":page_id,"request_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&(binding,page_id))?)}))?)?;
         let issued = self.issue_metadata(index, None)?;
         let scope = self.attachments[index]
             .producer_scope
@@ -594,14 +796,11 @@ impl HostCommandOwner {
         task: &TaskRecord,
         read: &EvidenceRead,
     ) -> Result<Value, HostError> {
-        if self.expansion_count(task)? >= EXPANSIONS {
-            return Err(capacity());
-        }
         let (revision, document) = self.context_snapshot(&state.run, &task.id)?;
         if revision != read.revision {
             return Err(refused("stale evidence revision"));
         }
-        let binding = json!({"run":state.run,"task":task.id,"revision":revision,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});
+        let binding = json!({"run":state.run,"task":task.id,"source":task.brief.scope.base,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});
         let rows = match &read.evidence {
             EvidenceKind::Timeline { clips } => {
                 if clips.len() > 256
@@ -650,9 +849,8 @@ impl HostCommandOwner {
                 if matches!(
                     read.evidence,
                     EvidenceKind::Preview { .. } | EvidenceKind::Proof { .. }
-                ) && value
-                    .get("revision")
-                    .is_some_and(|stored| *stored != json!(revision))
+                ) && value.get("revision")
+                    != Some(&self.proof_revision(state, task, reference, revision)?)
                 {
                     return Err(refused("stale evidence proof revision"));
                 }
@@ -685,7 +883,7 @@ impl HostCommandOwner {
                         {
                             return Err(refused("transcript source clip unavailable"));
                         }
-                        rows.extend(clip_rows(&document, &[clip]));
+                        rows.extend(clip_rows(&document, &[clip], None)?);
                     }
                     rows
                 } else if bytes.len() <= 4096 {
@@ -698,19 +896,24 @@ impl HostCommandOwner {
             }
         };
         let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES - 4096)?;
-        self.record_expansion(index, state, task, &binding)?;
+        self.record_expansion(
+            index,
+            state,
+            task,
+            &binding,
+            value["page_id"].as_str().unwrap(),
+        )?;
         Ok(value)
     }
     pub(super) fn prepare_media_context(
         &mut self,
+        index: usize,
         state: &RunProjection,
         task: &TaskRecord,
         read: &EvidenceRead,
     ) -> Result<PreparedMediaRead, HostError> {
         use kinewright_project::owned_inputs::OwnedInputRef;
-        if self.expansion_count(task)? >= EXPANSIONS {
-            return Err(capacity());
-        }
+        let deadline = std::time::Instant::now() + MEDIA_READ_LIMIT;
         let (revision, document) = self.context_snapshot(&state.run, &task.id)?;
         if revision != read.revision {
             return Err(refused("stale evidence revision"));
@@ -739,7 +942,7 @@ impl HostCommandOwner {
             .iter()
             .find(|e| e.matches_media_asset(asset))
             .ok_or_else(|| refused("media is not owned by task inputs"))?;
-        let lease = store.lease_input(&OwnedInputRef {
+        let lease = store.input_lease_request(&OwnedInputRef {
             manifest_ref: task.brief.inputs.clone(),
             entry: entry.clone(),
         })?;
@@ -748,17 +951,24 @@ impl HostCommandOwner {
                 / i128::from(asset.fps.numerator()),
         )
         .map_err(|_| refused("media time overflow"))?;
-        let binding = json!({"run":state.run,"task":task.id,"revision":revision,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});
+        let binding = json!({"run":state.run,"task":task.id,"source":task.brief.scope.base,"evidence":read.evidence});
         Ok(PreparedMediaRead {
             lease,
+            alive: Arc::clone(&self.attachments[index].alive),
             micros,
             audio,
             at,
             reference: entry.object.clone(),
-            closure: clip_rows(&document, &[clip_id]),
+            document,
+            clip_id,
+            cursor: read.cursor.clone(),
             binding,
+            deadline,
+            switch_generation: self.owner()?.manual_switch_generation().ok(),
             #[cfg(test)]
             gate: self.hooks.context_media_gate.take(),
+            #[cfg(test)]
+            outcome: self.hooks.context_media_outcome.take(),
         })
     }
     pub(super) fn finish_media_context(
@@ -770,18 +980,21 @@ impl HostCommandOwner {
         rendered: &RenderedMediaRead,
     ) -> Result<Value, HostError> {
         let (revision, document) = self.context_snapshot(&state.run, &task.id)?;
-        let binding = json!({"run":state.run,"task":task.id,"revision":revision,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});
-        if binding != rendered.binding {
+        let binding = json!({"run":state.run,"task":task.id,"source":task.brief.scope.base,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});
+        if revision != read.revision
+            || binding != rendered.binding
+            || self.owner()?.manual_switch_generation().ok() != rendered.switch_generation
+        {
             return Err(refused("stale evidence revision after decode"));
         }
-        let value = page(
-            &rendered.rows,
+        self.record_expansion(
+            index,
+            state,
+            task,
             &binding,
-            read.cursor.as_deref(),
-            PAGE_BYTES - 4096,
+            rendered.value["page_id"].as_str().unwrap(),
         )?;
-        self.record_expansion(index, state, task, &binding)?;
-        Ok(value)
+        Ok(rendered.value.clone())
     }
     pub(super) fn read_legacy_context(
         &mut self,
@@ -790,16 +1003,21 @@ impl HostCommandOwner {
         task: &TaskRecord,
         reference: &ObjectRef,
     ) -> Result<Value, HostError> {
+        if reference.record_kind != RecordKind::RunIndex
+            && reference.byte_length > (PAGE_BYTES - 4096) as u64
+        {
+            return Err(legacy_limit());
+        }
         let value = self.read_task_reference(reference)?;
         if serde_json::to_vec(&value)?.len() > PAGE_BYTES - 4096 {
-            return Err(capacity());
+            return Err(legacy_limit());
         }
-        self.record_expansion(
-            index,
-            state,
-            task,
-            &json!({"run":state.run,"task":task.id,"reference":reference}),
-        )?;
+        let binding = json!({"run":state.run,"task":task.id,"reference":reference});
+        let page_id = format!(
+            "legacy:{}:0",
+            kinewright_media::sha256_bytes(&serde_json::to_vec(&(&binding, &value))?)
+        );
+        self.record_expansion(index, state, task, &binding, &page_id)?;
         Ok(value)
     }
     pub(super) fn read_child_context(
@@ -809,9 +1027,6 @@ impl HostCommandOwner {
         parent: &TaskRecord,
         read: &ChildRead,
     ) -> Result<Value, HostError> {
-        if self.expansion_count(parent)? >= EXPANSIONS {
-            return Err(capacity());
-        }
         let child = state
             .tasks
             .iter()
@@ -831,20 +1046,36 @@ impl HostCommandOwner {
         }
         let binding = json!({"run":state.run,"parent":parent.id,"child":child.id,"reference":read.reference,"source":read.source});
         let history = self.saved_task_history(state, &child.id)?;
-        let mut rows = vec![
-            json!({"result":result,"disclosure":self.result_disclosure(&state.run,child,result,&read.reference)?}),
-        ];
+        let header = serde_json::to_value(result)?;
+        let usage = self.read_task_reference(&result.usage_ref)?;
+        let mut rows = vec![json!({"result":header})];
+        let notes = self.expected_note_ids(child)?;
+        if !notes.is_empty() {
+            rows.push(json!({"expected_note_ids":notes,"note_fate":"unknown"}));
+        }
+
         for (kind, reference) in [
             ("explanation", Some(&result.explanation)),
             ("delta", result.delta_ref.as_ref()),
-            ("usage", Some(&result.usage_ref)),
         ] {
             if let Some(reference) = reference {
-                for chunk in bytes_rows(&serde_json::to_vec(&self.read_task_reference(reference)?)?)
-                {
+                for chunk in self.child_reference_chunks(reference)? {
                     rows.push(json!({"kind":kind,"reference":reference,"chunk":chunk}));
                 }
             }
+        }
+        for (kind, references) in [
+            ("artifact", &result.artifacts),
+            ("evidence", &result.evidence),
+        ] {
+            for reference in references {
+                for chunk in self.child_reference_chunks(reference)? {
+                    rows.push(json!({"kind":kind,"reference":reference,"chunk":chunk}));
+                }
+            }
+        }
+        for chunk in bytes_rows(&serde_json::to_vec(&usage)?) {
+            rows.push(json!({"kind":"usage","reference":result.usage_ref,"chunk":chunk}));
         }
         if let Some(history) = history {
             for chunk in bytes_rows(&serde_json::to_vec(&history)?) {
@@ -852,51 +1083,51 @@ impl HostCommandOwner {
             }
         }
         let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES - 4096)?;
-        self.record_expansion(index, state, parent, &binding)?;
+        self.record_expansion(
+            index,
+            state,
+            parent,
+            &binding,
+            value["page_id"].as_str().unwrap(),
+        )?;
         Ok(value)
     }
-    pub(super) fn result_disclosure(
+    fn child_reference_chunks(&self, reference: &ObjectRef) -> Result<Vec<Value>, HostError> {
+        if reference.record_kind == RecordKind::OwnedEvidence {
+            if reference.byte_length > (PAGE_BYTES * 8) as u64 {
+                return Err(capacity());
+            }
+            // Preserve the record the full wake shows, including whitespace,
+            // duplicate JSON keys and binary data. Parsing a child assertion
+            // here could silently discard evidence before the reader sees it.
+            let bytes = self.owner()?.store()?.read_evidence(reference)?;
+            return Ok(bytes_rows(&bytes));
+        }
+        Ok(bytes_rows(&serde_json::to_vec(
+            &self.read_task_reference(reference)?,
+        )?))
+    }
+    fn expected_note_ids(&self, task: &TaskRecord) -> Result<Vec<Value>, HostError> {
+        Ok(self
+            .context_notes(task)?
+            .into_iter()
+            .map(|note| note["note_id"].clone())
+            .collect())
+    }
+    #[cfg(target_os = "linux")]
+    fn summary_result(
         &self,
         run: &RunId,
         task: &TaskRecord,
         result: &TaskResult,
         reference: &ObjectRef,
     ) -> Result<Value, HostError> {
-        let notes = self.context_notes(task)?;
-        let bytes = self.owner()?.store()?.read_evidence(&result.explanation)?;
-        let report: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        let classified = report["kind"] == "task_result_report_v1"
-            && report["partial_coverage"].is_boolean()
-            && report["proof_status"]
-                .as_str()
-                .is_some_and(|value| matches!(value, "unknown" | "failed" | "reported_pass"))
-            && [
-                "satisfied_note_ids",
-                "unmet_note_ids",
-                "conflicts",
-                "proof_failures",
-                "changed_scope",
-            ]
-            .iter()
-            .all(|key| {
-                report[*key]
-                    .as_array()
-                    .is_some_and(|values| values.iter().all(Value::is_string))
-            });
-        let field = |key: &str| {
-            if classified {
-                report.get(key).cloned().unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            }
-        };
-        Ok(
-            json!({"outcome":result.outcome,"partial_coverage":!classified || report["partial_coverage"]!=false,"coverage_provenance":"reported; unverified facts require expansion",
-            "satisfied_note_ids":field("satisfied_note_ids"),"unmet_note_ids":field("unmet_note_ids"),"expected_note_ids":notes.iter().map(|n|n["note_id"].clone()).collect::<Vec<_>>(),
-            "conflicts":field("conflicts"),"proof_status":if classified{field("proof_status")}else{json!("unknown")},"proof_failures":field("proof_failures"),
-            "changed_scope":field("changed_scope"),"omitted_changes":true,"revision_kind":"checkpoint_head","revision":result.head.as_ref().map(|h|h.head.clone()),"base":result.base,"head":result.head,"evidence_refs":result.evidence,"proof_refs":result.artifacts,
-            "detail":{"tool":"read_child_result","run":run,"child":task.id,"reference":reference,"source":result.head},"omitted_fields":["full delta","full history","unreported coverage and proof"]}),
-        )
+        // These are only authenticated host facts. Child explanation/artifact
+        // contents remain records to inspect, never host proof or note status.
+        Ok(json!({"outcome":result.outcome,"base":result.base,
+            "expected_note_ids":self.expected_note_ids(task)?,
+            "artifact_count":result.artifacts.len(),"evidence_count":result.evidence.len(),
+            "detail":{"run":run,"child":task.id,"reference":reference,"source":result.head}}))
     }
 }
 
@@ -908,91 +1139,74 @@ impl HostCommandOwner {
         parent: &TaskId,
         references: &[&ObjectRef],
     ) -> Result<Vec<u8>, HostError> {
-        let mut summaries = Vec::new();
+        let mut results = Vec::new();
         for reference in references {
-            let child=state.tasks.iter().find(|t|t.parent.as_ref()==Some(parent) && matches!(&t.state,crate::orchestration::orchestration_records::TaskState::Terminal(r) if r==*reference)).ok_or_else(||refused("wake result is not an authenticated child"))?;
+            let child = state.tasks.iter().find(|task| task.parent.as_ref()==Some(parent)
+                && matches!(&task.state,crate::orchestration::orchestration_records::TaskState::Terminal(result) if result==*reference))
+                .ok_or_else(||refused("wake result is not an authenticated child"))?;
             let record = self.owner()?.store()?.read_run_record(reference)?;
             let OrchestrationPayload::Result(result) = &record.payload else {
                 return Err(refused("wake result record required"));
             };
-            let mut disclosure = self.result_disclosure(&state.run, child, result, reference)?;
-            disclosure["detail"]["run"] = serde_json::to_value(&state.run)?;
-            summaries.push(json!({"disclosure":disclosure}));
+            results.push(self.summary_result(&state.run, child, result, reference)?);
         }
-        let full = self
-            .result_wake_payload(references)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-        let detail_status = if full.is_some() {
-            "available"
-        } else {
-            "expansion_unavailable"
-        };
-        if full.is_none() {
-            for summary in &mut summaries {
-                summary["disclosure"]["partial_coverage"] = json!(true);
+        if let Ok(bytes) = self.result_wake_payload(references) {
+            let full: Value = serde_json::from_slice(&bytes)?;
+            let routes = results.iter().map(|result| {
+                let mut route=json!({"child":result["detail"]["child"],"reference":result["detail"]["reference"]});
+                if result["expected_note_ids"].as_array().is_some_and(|ids|!ids.is_empty()) {
+                    route["expected_note_ids"]=result["expected_note_ids"].clone();
+                }
+                route
+            }).collect::<Vec<_>>();
+            let detailed = json!({"mode":"full","full_records":full,"result_refs":routes,"omitted_details":false});
+            let bytes = serde_json::to_vec(&detailed)?;
+            if bytes.len() <= PAGE_BYTES / 2 {
+                return Ok(bytes);
             }
         }
-        let detailed = json!({"mode":"full","results":summaries,"full_records":full,"omitted_details":false,"detail_status":detail_status});
-        if !detailed["full_records"].is_null()
-            && serde_json::to_vec(&detailed)?.len() <= PAGE_BYTES / 2
-        {
-            return Ok(serde_json::to_vec(&detailed)?);
-        }
-        if serde_json::to_vec(&summaries)?.len() > PAGE_BYTES / 2 - 512 {
-            for summary in &mut summaries {
-                let disclosure = &mut summary["disclosure"];
-                let mut omitted = Vec::new();
-                let mut counts = serde_json::Map::new();
-                for field in [
-                    "satisfied_note_ids",
-                    "unmet_note_ids",
-                    "expected_note_ids",
-                    "conflicts",
-                    "proof_failures",
-                    "changed_scope",
-                    "evidence_refs",
-                    "proof_refs",
-                ] {
-                    if let Some(values) = disclosure[field].as_array() {
-                        counts.insert(field.into(), json!(values.len()));
-                        let trimmed = values
-                            .iter()
-                            .take(4)
-                            .map(|value| {
-                                if let Some(text) = value.as_str() {
-                                    json!(text.chars().take(128).collect::<String>())
-                                } else {
-                                    value.clone()
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        if trimmed != *values {
-                            omitted.push(field);
-                        }
-                        disclosure[field] = json!(trimmed);
-                    }
-                }
-                if !omitted.is_empty() {
-                    disclosure["omitted_disclosure_fields"] = json!(omitted);
-                    disclosure["disclosure_counts"] = json!(counts);
-                    disclosure["partial_coverage"] = json!(true);
-                    disclosure["decision"] = json!("expand_before_accepting");
-                }
+        let mut summary = json!({"mode":"summary","results":results,"result_count":references.len(),
+            "partial_coverage":true,"note_fate":"unknown","proof_status":"unknown",
+            "decision":"expand_before_accepting","omitted_details":true,"omitted_changes":true,
+            "detail_route":"read_child_result","source_is_result_head":true});
+        if serde_json::to_vec(&summary)?.len() > PAGE_BYTES / 2 {
+            // Keep the exact child/result/source request and counts for every
+            // admitted result before considering any whole-result omission.
+            for result in summary["results"].as_array_mut().unwrap() {
+                result["expected_note_count"] =
+                    json!(result["expected_note_ids"].as_array().map_or(0, Vec::len));
+                result.as_object_mut().unwrap().remove("expected_note_ids");
+                result.as_object_mut().unwrap().remove("base");
+                result["omitted_result_fields"] = json!(["base", "expected_note_ids"]);
             }
         }
-        let summary = serde_json::to_vec(
-            &json!({"mode":"summary","results":summaries,"omitted_details":true,"detail_status":detail_status,"detail_route":"read_child_result"}),
-        )?;
-        if summary.len() > PAGE_BYTES / 2 {
-            return Err(capacity());
+        let mut omitted = 0;
+        while serde_json::to_vec(&summary)?.len() > PAGE_BYTES / 2 {
+            let Some(_) = summary["results"].as_array_mut().unwrap().pop() else {
+                break;
+            };
+            omitted += 1;
+            summary["omitted_results"] = json!(omitted);
+            summary["enumerate_omitted"] = json!(
+                "Use task_status for terminal child references, read_task_result for their source headers, then read_child_result. Replan if page capacity prevents acceptance."
+            );
         }
-        Ok(summary)
+        // No child-sized strings enter this fixed floor. Legitimate wakes are
+        // delivered with explicit omissions instead of a capacity refusal.
+        Ok(serde_json::to_vec(&summary)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn te14_context_materialization_observes_cancellation() {
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            super::clip_rows(&kinewright_core::Document::default(), &[], Some(&cancel)).is_err(),
+            "TE14_FIX1_CONTEXT_CANCELLED"
+        );
+    }
     #[test]
     fn te14_visible_frame_sample_skips_padding() {
         let sample =

@@ -57,6 +57,17 @@ pub struct OwnedInputRef {
     pub manifest_ref: ObjectRef,
     pub entry: OwnedInputEntry,
 }
+/// A retained owner-bound request. Constructing it does not hash/probe media.
+/// Opening the actual lease may certify a cold source and belongs off host locks.
+pub struct InputLeaseRequest {
+    hold: StorePin,
+    identity: OwnedInputRef,
+}
+impl InputLeaseRequest {
+    pub fn open(self) -> Result<OwnedInputLease, BundleError> {
+        self.hold.read_store().lease_input(&self.identity)
+    }
+}
 /// Retains the actual store authority and physical charge. It grants no decoder certification.
 pub struct OwnedInputLease {
     file: File,
@@ -249,6 +260,23 @@ impl ProjectStore {
         reference: &ObjectRef,
     ) -> Result<crate::storage_budget::StorageReservation<OwnedInputManifest>, BundleError> {
         self.read_record(reference)
+    }
+    pub fn input_lease_request(
+        &self,
+        reference: &OwnedInputRef,
+    ) -> Result<InputLeaseRequest, BundleError> {
+        let manifest = self.read_input_manifest(&reference.manifest_ref)?;
+        if (manifest.project_id.clone(), manifest.session_id.clone()) != self.input_owner()
+            || !manifest.entries.contains(&reference.entry)
+        {
+            return Err(BundleError::Identity(
+                "input manifest binding mismatch".into(),
+            ));
+        }
+        Ok(InputLeaseRequest {
+            hold: self.pin(std::slice::from_ref(&reference.manifest_ref))?,
+            identity: reference.clone(),
+        })
     }
     pub fn lease_input(&self, reference: &OwnedInputRef) -> Result<OwnedInputLease, BundleError> {
         self.lease_input_for_owner(reference, &self.input_owner())

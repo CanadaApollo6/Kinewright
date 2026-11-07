@@ -191,7 +191,7 @@ fn te14_stale_revision_and_cursor_are_refused() {
 #[test]
 fn te14_page_expansion_limit_and_reconnect_are_durable() {
     let mut f = Fixture::new();
-    let reference = te14_grant(&mut f, &serde_json::json!({"text":"x".repeat(120_000)}));
+    let reference = te14_grant(&mut f, &serde_json::json!({"text":"x".repeat(180_000)}));
     f.brief.script = reference.clone();
     let (run, parent, mcp) = c4_director(&f);
     let mut cursor = None;
@@ -225,10 +225,25 @@ fn te14_page_expansion_limit_and_reconnect_are_durable() {
     let reply = te14_read(
         &reconnect,
         kinewright_core::TimelineRevision(0),
+        EvidenceKind::Reference {
+            reference: reference.clone(),
+        },
+        cursor,
+    );
+    assert_eq!(reply.is_error, Some(true), "TE14_EIGHT_EXPANSIONS");
+    let retry = te14_read(
+        &reconnect,
+        kinewright_core::TimelineRevision(0),
         EvidenceKind::Reference { reference },
         None,
     );
-    assert_eq!(reply.is_error, Some(true), "TE14_EIGHT_EXPANSIONS");
+    assert_eq!(
+        retry.is_error,
+        Some(false),
+        "TE14_FIX1_RETRY_AT_CAPACITY_FREE"
+    );
+    let first = te14_outcome(retry);
+    assert!(first["page_id"].is_string(), "TE14_RETRY_AT_CAPACITY_FREE");
     let text = serde_json::to_string(&reply.content).unwrap();
     assert!(
         text.contains("evidence_capacity") && text.contains("replan without guessing"),
@@ -261,68 +276,6 @@ fn te14_published_report(
     );
     let reference = r.f.projection(&r.run).results.last().unwrap().clone();
     (r, reference, result)
-}
-fn te14_reject(facts: &serde_json::Value) -> bool {
-    facts["unmet_note_ids"]
-        .as_array()
-        .is_some_and(|a| !a.is_empty())
-        || facts["proof_status"] == "failed"
-        || facts["conflicts"].as_array().is_some_and(|a| !a.is_empty())
-}
-fn te14_summary_decision(unmet: bool, failed: bool, marker: &str) {
-    let (r, reference, _) = te14_published_report(unmet, failed, 24_000);
-    let state = r.f.projection(&r.run);
-    let host = r.f.host.owner.upgrade().unwrap();
-    let host = host.lock().unwrap();
-    let full: serde_json::Value =
-        serde_json::from_slice(&host.result_wake_payload(&[&reference]).unwrap()).unwrap();
-    let summary: serde_json::Value = serde_json::from_slice(
-        &host
-            .context_result_wake(&state, &r.parent.task, &[&reference])
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(summary["mode"], "summary", "TE14_SUMMARY_SELECTED");
-    let facts = &summary["results"][0]["disclosure"];
-    let report: &str = full[0]["explanation"].as_str().unwrap();
-    let report: serde_json::Value = serde_json::from_str(report).unwrap();
-    assert!(te14_reject(&report), "TE14_FULL_REJECT");
-    assert_eq!(te14_reject(facts), te14_reject(&report), "{marker}");
-    for field in [
-        "outcome",
-        "partial_coverage",
-        "satisfied_note_ids",
-        "unmet_note_ids",
-        "conflicts",
-        "proof_status",
-        "proof_failures",
-        "changed_scope",
-        "omitted_changes",
-        "revision",
-        "base",
-        "head",
-        "evidence_refs",
-        "detail",
-    ] {
-        assert!(facts.get(field).is_some(), "TE14_WAKE_DISCLOSES {field}");
-    }
-    assert!(
-        facts["omitted_changes"] == true && summary["omitted_details"] == true,
-        "TE14_WAKE_OMITS_EXPLICITLY"
-    );
-    println!(
-        "TE14_WAKE_SIZE full={} summary={}",
-        serde_json::to_vec(&full).unwrap().len(),
-        serde_json::to_vec(&summary).unwrap().len()
-    );
-}
-#[test]
-fn te14_summary_retains_the_unmet_note_rejection() {
-    te14_summary_decision(true, false, "TE14_UNMET_NOTE_DISCLOSED");
-}
-#[test]
-fn te14_summary_retains_the_failed_proof_rejection() {
-    te14_summary_decision(false, true, "TE14_FAILED_PROOF_DISCLOSED");
 }
 #[test]
 fn te14_child_details_bind_parent_child_run_reference_and_source() {
@@ -615,9 +568,8 @@ fn te14_prefix_bytes_are_stable_across_distinct_tasks_of_each_role() {
         );
     }
 }
-#[test]
-fn te14_real_owned_audio_and_frame_samples_exclude_ambient_paths() {
-    use kinewright_core::{AssetId, ClipId, Operation, TimeCode, TrackId};
+fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::PathBuf) {
+    use kinewright_core::{AssetId, Operation, TimeCode, TrackId};
     let mut f = Fixture::with_media(true);
     let video = kinewright_media::test_support::GeneratedMedia::ffmpeg(
         "te14-owned-video",
@@ -757,6 +709,13 @@ fn te14_real_owned_audio_and_frame_samples_exclude_ambient_paths() {
         Some(false),
         "TE14_OWNED_MEDIA_COMMIT {committed:?}"
     );
+    (f, run, child, core, mcp, png.to_path_buf())
+}
+#[test]
+fn te14_real_owned_audio_and_frame_samples_exclude_ambient_paths() {
+    use base64::Engine as _;
+    use kinewright_core::{ClipId, TimeCode};
+    let (f, run, child, core, mcp, png) = te14_media_fixture();
     for evidence in [
         EvidenceKind::Audio {
             clip: ClipId(1),
@@ -792,16 +751,13 @@ fn te14_real_owned_audio_and_frame_samples_exclude_ambient_paths() {
             "TE14_NO_AMBIENT_MEDIA_PATH"
         );
         assert!(
-            !sample["data"].as_array().unwrap().is_empty(),
+            !sample["data_base64"].as_str().unwrap().is_empty(),
             "TE14_OWNED_SAMPLES_AVAILABLE"
         );
         if sample["kind"] == "owned_audio_sample" && sample["channels"] == 2 {
-            let bytes = sample["data"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| u8::try_from(v.as_u64().unwrap()).unwrap())
-                .collect::<Vec<_>>();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(sample["data_base64"].as_str().unwrap())
+                .unwrap();
             let mut left = 0.0f32;
             let mut right = 0.0f32;
             for pair in bytes.as_chunks::<8>().0 {
@@ -815,7 +771,10 @@ fn te14_real_owned_audio_and_frame_samples_exclude_ambient_paths() {
         }
         if sample["kind"] == "owned_frame_sample" {
             assert_eq!(
-                sample["data"].as_array().unwrap().len(),
+                base64::engine::general_purpose::STANDARD
+                    .decode(sample["data_base64"].as_str().unwrap())
+                    .unwrap()
+                    .len(),
                 16 * 16,
                 "TE14_FRAME_VISIBLE_BYTES_ONLY"
             );
@@ -896,68 +855,6 @@ fn te14_real_owned_audio_and_frame_samples_exclude_ambient_paths() {
 }
 
 #[test]
-fn te14_unknown_proof_expands_to_the_full_failed_proof_decision() {
-    let mut r = c5_fix10_run();
-    let mut result = c5_fix10_freeze(&r.director, &r.child);
-    let reference = te14_grant(
-        &mut r.f,
-        &serde_json::json!({"kind":"task_proof_v1","revision":0,"proof_status":"failed","proof_failures":["linked audio drift"]}),
-    );
-    result.artifacts.push(reference.clone());
-    r.director.accepted(
-        "publish_result",
-        OrchestrationCommand::PublishResult(Box::new(PublishResult {
-            task: r.child.clone(),
-            result,
-        })),
-    );
-    let state = r.f.projection(&r.run);
-    let result_ref = state.results.last().unwrap();
-    let host = r.f.host.owner.upgrade().unwrap();
-    let wake: serde_json::Value = serde_json::from_slice(
-        &host
-            .lock()
-            .unwrap()
-            .context_result_wake(&state, &r.parent.task, &[result_ref])
-            .unwrap(),
-    )
-    .unwrap();
-    let facts = &wake["results"][0]["disclosure"];
-    assert_eq!(
-        facts["proof_status"], "unknown",
-        "TE14_UNKNOWN_PROOF_REQUIRES_EXPANSION"
-    );
-    assert_eq!(
-        facts["proof_refs"][0],
-        serde_json::to_value(&reference).unwrap(),
-        "TE14_PROOF_DETAIL_REFERENCE"
-    );
-    let expanded = te14_outcome(te14_read(
-        &r.director,
-        kinewright_core::TimelineRevision(0),
-        EvidenceKind::Proof { reference },
-        None,
-    ));
-    assert!(
-        te14_reject(&expanded["items"][0]["data"]),
-        "TE14_EXPANDED_PROOF_REJECTION"
-    );
-    let impostor = te14_read(
-        &r.director,
-        kinewright_core::TimelineRevision(0),
-        EvidenceKind::Proof {
-            reference: r.f.brief.plan.clone(),
-        },
-        None,
-    );
-    assert_eq!(
-        impostor.is_error,
-        Some(true),
-        "TE14_CLASSIFICATION_IS_HOST_OWNED"
-    );
-}
-
-#[test]
 fn te14_large_overview_is_bounded_and_can_expand() {
     let mut doc = Document::default();
     for id in 1..120 {
@@ -975,8 +872,14 @@ fn te14_large_overview_is_bounded_and_can_expand() {
         serde_json::to_vec(&overview).unwrap().len() <= 8192,
         "TE14_OVERVIEW_BOUND"
     );
-    assert_eq!(overview["omitted"], true, "TE14_LARGE_OVERVIEW_OMISSION");
-    let expanded = mcp.wire("read_task_evidence", overview["request"].clone());
+    assert!(
+        overview["omitted"] == true || overview["context"]["omitted"] == true,
+        "TE14_LARGE_OVERVIEW_OMISSION"
+    );
+    let expanded = mcp.wire(
+        "read_task_evidence",
+        serde_json::json!({"revision":0,"evidence":{"kind":"timeline","clips":[]}}),
+    );
     assert_eq!(
         expanded.is_error,
         Some(false),
@@ -1001,71 +904,6 @@ fn te14_large_overview_is_bounded_and_can_expand() {
         "TE14_LARGE_RELATIONSHIPS_PAGEABLE"
     );
 }
-#[test]
-fn te14_large_wake_discloses_omission_and_full_expansion_preserves_rejection() {
-    let mut r = c5_fix10_run();
-    let mut result = c5_fix10_freeze(&r.director, &r.child);
-    let notes = (0..180)
-        .map(|n| format!("note-{n}-{}", "n".repeat(160)))
-        .collect::<Vec<_>>();
-    let report = serde_json::json!({"kind":"task_result_report_v1","partial_coverage":true,"satisfied_note_ids":[],"unmet_note_ids":notes,"conflicts":[],"proof_status":"failed","proof_failures":["last proof failed"],"changed_scope":[]});
-    result.explanation = te14_grant(&mut r.f, &report);
-    r.director.accepted(
-        "publish_result",
-        OrchestrationCommand::PublishResult(Box::new(PublishResult {
-            task: r.child.clone(),
-            result: result.clone(),
-        })),
-    );
-    let state = r.f.projection(&r.run);
-    let reference = state.results.last().unwrap().clone();
-    let wake = {
-        let owner = r.f.host.owner.upgrade().unwrap();
-        let host = owner.lock().unwrap();
-        host.context_result_wake(&state, &r.parent.task, &[&reference])
-            .expect("TE14_LARGE_WAKE_EXPANDS")
-    };
-    assert!(wake.len() <= 12 * 1024, "TE14_LARGE_WAKE_BOUND");
-    let wake: serde_json::Value = serde_json::from_slice(&wake).unwrap();
-    let facts = &wake["results"][0]["disclosure"];
-    assert!(
-        facts["partial_coverage"] == true
-            && facts["decision"] == "expand_before_accepting"
-            && facts["disclosure_counts"]["unmet_note_ids"] == 180,
-        "TE14_LARGE_WAKE_OMITS_EXPLICITLY"
-    );
-    let mut read = ChildRead {
-        run: r.run.clone(),
-        child: r.child.clone(),
-        reference,
-        source: result.head,
-        cursor: None,
-    };
-    let mut explanation = String::new();
-    for _ in 0..8 {
-        let page = te14_outcome(
-            r.director
-                .wire("read_child_result", serde_json::to_value(&read).unwrap()),
-        );
-        for row in page["items"].as_array().unwrap() {
-            if row["kind"] == "explanation" {
-                explanation.push_str(row["chunk"]["text"].as_str().unwrap());
-            }
-        }
-        read.cursor = page["next_cursor"].as_str().map(str::to_owned);
-        if read.cursor.is_none() {
-            break;
-        }
-    }
-    let full: serde_json::Value =
-        serde_json::from_str(&explanation).expect("TE14_LARGE_CHILD_FULL_RECORD");
-    assert_eq!(full, report, "TE14_LARGE_CHILD_EXACT_EXPANSION");
-    assert!(
-        te14_reject(&full) && te14_reject(facts),
-        "TE14_LARGE_CHILD_SAME_REJECTION"
-    );
-}
-
 #[test]
 fn te14_plain_text_transcript_keeps_neighbours_and_unknown_alignment() {
     let mut f = Fixture::new();

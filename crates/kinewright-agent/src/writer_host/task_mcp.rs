@@ -6,8 +6,8 @@ use super::{HostAuth, HostCommandOwner, HostError, HostRefusal};
 use crate::orchestration::{
     orchestration_commit::CommandDecision,
     orchestration_records::{
-        AuthorityBinding, OrchestrationCommand, OrchestrationEnvelope, Role, RunId, RunProjection,
-        TaskId,
+        AuthorityBinding, OrchestrationCommand, OrchestrationEnvelope, OrchestrationPayload, Role,
+        RunId, RunProjection, TaskId,
     },
     tasks::TaskEndpoint,
 };
@@ -349,10 +349,10 @@ impl TaskMcp {
                         super::task_context::EvidenceKind::Audio { .. }
                             | super::task_context::EvidenceKind::Frame { .. }
                     ) {
-                        let prepared = host.prepare_media_context(&state, record, &read)?;
+                        let prepared = host.prepare_media_context(index, &state, record, &read)?;
                         let rendered = {
                             drop(host);
-                            prepared.render()?
+                            prepared.render(&self.endpoint, &owner)?
                         };
                         let mut host = owner
                             .lock()
@@ -366,7 +366,15 @@ impl TaskMcp {
                             .ok_or_else(|| refused("task missing"))?;
                         host.finish_media_context(index, &state, record, &read, &rendered)
                     } else {
-                        host.read_context(index, &state, record, &read)
+                        let result = host.read_context(index, &state, record, &read);
+                        #[cfg(test)]
+                        if let Some(gate) = host.hooks.context_reply_gate.take() {
+                            *gate.outcome.lock().unwrap() = result.as_ref().ok().cloned();
+                            drop(host);
+                            gate.gate.0.wait();
+                            gate.gate.1.wait();
+                        }
+                        result
                     }
                 }
                 _ => host.read_child_context(
@@ -956,7 +964,9 @@ impl HostCommandOwner {
         reference: &kinewright_project::bundle_records::ObjectRef,
     ) -> Result<Value, HostError> {
         use kinewright_project::bundle_records::RecordKind;
-        if reference.byte_length > (super::task_context::PAGE_BYTES * 8) as u64 {
+        if reference.record_kind != RecordKind::RunIndex
+            && reference.byte_length > (super::task_context::PAGE_BYTES * 8) as u64
+        {
             return Err(HostRefusal::new(
                 "evidence_capacity",
                 "Evidence capacity exhausted; replan without guessing.",
@@ -979,7 +989,18 @@ impl HostCommandOwner {
                     reference,
                 )?,
             )?),
-            RecordKind::RunIndex => Ok(serde_json::to_value(&*store.read_run_record(reference)?)?),
+            RecordKind::RunIndex => {
+                let mut record = (*store.read_run_record(reference)?).clone();
+                if let OrchestrationPayload::Accounting(accounting) = &mut record.payload {
+                    **accounting = super::provider_usage::provider_accounting_view(accounting)?;
+                }
+                Ok(serde_json::to_value(record)?)
+            }
+            RecordKind::SpecialistBase => Ok(serde_json::to_value(
+                &*store.read_record::<kinewright_project::bundle_records::SpecialistBaseRecord>(
+                    reference,
+                )?,
+            )?),
             _ => Err(refused("unsupported task evidence record")),
         }
     }
