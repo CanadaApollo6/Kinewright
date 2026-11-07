@@ -1835,3 +1835,4 @@ fn s3_stage_fix2_a_failed_last_write_keeps_the_project() {
 mod c4;
 
 include!("studio_te13_fix4_tests.rs");
+include!("studio_te13_fix5_tests.rs");

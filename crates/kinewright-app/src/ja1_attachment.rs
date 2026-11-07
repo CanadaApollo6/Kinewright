@@ -1942,4 +1942,23 @@ impl Ja1Attachment {
         self.start_host_manual()?;
         Ok(writer)
     }
+
+    pub(crate) fn replace_fixture_editor(
+        &mut self,
+        writer: &kinewright_agent::writer_host::WriterHost,
+    ) {
+        use kinewright_agent::writer_host::{AttachmentRole, HostCommand};
+        let host = self.host.as_mut().unwrap();
+        let reply = host.client.request(HostCommand::Detach).unwrap();
+        assert!(reply.error.is_none(), "TE13_FIX5_DETACH_OLD_EDITOR");
+        let roots = host.client.bootstrap().roots;
+        host.client = writer
+            .attach(
+                "fix5-fresh-studio-editor".into(),
+                AttachmentRole::Editor,
+                roots,
+            )
+            .unwrap();
+        host.manual = None;
+    }
 }

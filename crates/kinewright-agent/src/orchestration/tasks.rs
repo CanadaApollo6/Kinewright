@@ -136,11 +136,11 @@ impl TaskEndpoint {
         self.0.actor == core.actor_identity()
     }
     pub(crate) fn check_live(&self) -> Result<(), String> {
-        if self.0.revoked.load(Ordering::SeqCst)
-            || self.0.paused.load(Ordering::SeqCst)
-            || Instant::now() >= self.0.authority.expires_at
-        {
+        if self.0.revoked.load(Ordering::SeqCst) || Instant::now() >= self.0.authority.expires_at {
             return Err("task_authority_expired".into());
+        }
+        if self.0.paused.load(Ordering::SeqCst) {
+            return Err("task_authority_paused".into());
         }
         Ok(())
     }

@@ -90,8 +90,8 @@ fn te13_fix3_owner_stop(
             "TE13_FIX3_OWNER_STOP_ENVELOPE {completion_step:?}/{committed}/{revoked}: {issued:?}"
         );
         assert!(
-            host.lock().unwrap().hooks.pending.is_some(),
-            "TE13_FIX4_ISSUANCE_PRESERVES_PENDING"
+            host.lock().unwrap().hooks.pending.is_none(),
+            "TE13_FIX5_ISSUANCE_RELEASES_BEFORE_STOP"
         );
     }
     if !preissued {

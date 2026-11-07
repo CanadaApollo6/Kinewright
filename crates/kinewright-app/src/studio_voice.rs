@@ -156,11 +156,19 @@ fn upload(
     settled: Option<HostReply>,
 ) -> Result<Receiver<UploadReply>, String> {
     let path = captured.path.clone();
+    #[cfg(all(test, target_os = "linux"))]
+    let test_gate = tests::UPLOAD_GATE.with(|gate| gate.borrow_mut().take());
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("studio-voice-upload".into())
         .spawn(move || {
             let result = (|| {
+                #[cfg(all(test, target_os = "linux"))]
+                if let Some((started, release)) = test_gate {
+                    let _ = started.send(());
+                    tests::wait_for_upload_signal(&release, Duration::from_secs(15))
+                        .map_err(|e| e.to_string())?;
+                }
                 if let Some(reply) = settled {
                     return Ok(reply);
                 }
@@ -1154,8 +1162,13 @@ impl KinewrightApp {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "studio_e2e_tests.rs"]
 mod e2e_tests;
-#[cfg(all(test, target_os = "linux"))]
+#[allow(
+    clippy::mixed_attributes_style,
+    reason = "keep the production-source scan boundary explicit and gate Linux fixtures"
+)]
+#[cfg(test)]
 mod tests {
+    #![cfg(target_os = "linux")]
     use super::*;
     use crate::{
         app::in1_tests::{in1_harness, in1_shutdown},
@@ -1166,6 +1179,17 @@ mod tests {
     use std::sync::Arc;
 
     pub(super) static VOICE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    thread_local! {
+        pub(super) static UPLOAD_GATE: std::cell::RefCell<Option<(
+            std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>
+        )>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn wait_for_upload_signal(
+        receiver: &Receiver<()>,
+        timeout: Duration,
+    ) -> Result<(), std::sync::mpsc::RecvTimeoutError> {
+        receiver.recv_timeout(timeout)
+    }
     fn hosted_case(
         run: impl FnOnce(
             &mut KinewrightApp,
@@ -2675,5 +2699,5 @@ mod tests {
             }
         }
     }
-    include!("studio_voice_te13_fix4_tests.rs");
+    include!("studio_voice_te13_fix5_tests.rs");
 }

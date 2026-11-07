@@ -24,6 +24,10 @@ pub(crate) mod spending;
 pub(crate) mod studio_runtime;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use studio_runtime::fixture::{ProtocolFixture, ProtocolFixtureMode, ProtocolObservation};
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+mod completion_fixture;
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub use completion_fixture::CompletionFixture;
 mod task_completion;
 mod task_history;
 pub use task_completion::{CompletionPhase, CompletionState, CompletionStatus};
@@ -1656,15 +1660,6 @@ impl HostCommandOwner {
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
-        if matches!(
-            command,
-            HostCommand::AdmitFeedbackEvidence { .. }
-                | HostCommand::AcknowledgeVoice { .. }
-                | HostCommand::StartTranscription { .. }
-                | HostCommand::ChooseTranscript { .. }
-        ) {
-            self.completion_write_available()?;
-        }
         if self.recovering
             && (!manual::connector_command(&command)
                 || matches!(
@@ -1726,29 +1721,9 @@ impl HostCommandOwner {
                         .into());
                     }
                 };
-                let result = if matches!(
-                    self.hooks.pending,
-                    Some(orchestration::PendingPublication::Completion(_))
-                ) {
-                    // A lost reply can precede the finish. Read its immutable outcome
-                    // before refusing a new write; never publish around a private step.
-                    let receipt = self
-                        .owner()?
-                        .manual_transition_receipt(&envelope.receipt_envelope(&update)?)?;
-                    match receipt {
-                        ReceiptLookup::Committed(_)
-                        | ReceiptLookup::Retired(_)
-                        | ReceiptLookup::IdPayloadConflict => receipt,
-                        ReceiptLookup::Absent => {
-                            self.completion_write_available()?;
-                            return Err(BundleError::Unsettled.into());
-                        }
-                        _ => return Err(BundleError::Unsettled.into()),
-                    }
-                } else {
-                    self.owner_mut()?
-                        .metadata_command(&envelope, scope, &update)?
-                };
+                let result = self
+                    .owner_mut()?
+                    .metadata_command(&envelope, scope, &update)?;
                 reply.metadata = Some(match result {
                     ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => receipt,
                     ReceiptLookup::IdPayloadConflict => {

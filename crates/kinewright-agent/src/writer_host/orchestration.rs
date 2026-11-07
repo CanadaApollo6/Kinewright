@@ -360,8 +360,8 @@ impl HostCommandOwner {
         index: usize,
         issuer: Option<&IssuerId>,
     ) -> Result<MetadataIssuer, HostError> {
-        let completion_pending = self.prove_completion_for_owner(index)?;
-        if self.hooks.pending.is_some() && !completion_pending {
+        self.prove_completion_for_owner(index)?;
+        if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
         }
         if let Some(issuer) = issuer {
@@ -379,13 +379,7 @@ impl HostCommandOwner {
         // closed ordinary admission leaves them as an unpublished description,
         // which the first validated publication commits under its own admission.
         let owner = self.owner_mut()?;
-        let published = if completion_pending {
-            // No root publication may advance the retained substep's generation.
-            // Stop will commit this prepared authority only after abandonment.
-            owner.prepare_metadata_authority(&subject, issuer, &grant)
-        } else {
-            owner.issue_metadata_authority(&subject, issuer, &grant)
-        };
+        let published = owner.issue_metadata_authority(&subject, issuer, &grant);
         let (issuer, grant_ref) = match published {
             Ok(published) => published,
             Err(BundleError::RunLimit) => {

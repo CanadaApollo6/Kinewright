@@ -21,8 +21,9 @@ BC = 'crates/kinewright-project/src/bundle_commit.rs'
 for step in ('freeze', 'publication'):
     for fate in ('committed', 'absent'):
         for authority in ('expired', 'revoked'):
-            add(f'stop-{step}-{fate}-{authority}', C,
-                '            self.settle_completion_for_owner(index)?;', '            let _ = index;',
+            add(f'stop-{step}-{fate}-{authority}', O,
+                'if request.run.as_ref() == Some(&intent.run_id) =>',
+                'if request.run.as_ref() == Some(&intent.run_id) && intent.action != RunAction::Stop =>',
                 f'te13_fix3_stop_{step}_{fate}_{authority}', 'TE13_FIX3_OWNER_STOP')
 for fate in ('committed', 'absent'):
     add(f'preissued-stop-{fate}', C,
@@ -77,7 +78,8 @@ after = before.replace('blocks.iter().find_map', 'blocks.iter().take(1).find_map
 add('host-second-task-run-message', C, before, after,
     'te13_fix3_removed_first_block_keeps_other_task_run_message', 'ASTRA_OTHER_RETAINED_TASK_RUN_MESSAGE', APP)
 add('applied-receipt-clears-before-authority', C,
-    'if stored.is_some() {', 'if false {',
+    'self.hooks.pending = None;\n        let result = self.continue_completion_substep',
+    'let result = self.continue_completion_substep',
     'te13_fix3_applied_receipt_settles_before_expired_continuation', 'TE13_FIX3_APPLIED_CLEARS_BEFORE_AUTHORITY')
 for scenario in ('observed_child_stop', 'parent_finishes_without_merging_child'):
     add('real-' + scenario, W, 'let settled = merged;', publication_settles,

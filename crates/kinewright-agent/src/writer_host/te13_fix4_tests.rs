@@ -105,134 +105,25 @@ fn te13_fix4_replay(p: &Te13Fix4Pending) {
         "TE13_FIX4_ORIGINAL_RECEIPT"
     );
 }
-fn te13_fix4_interleave(step: CompletionStep, committed: bool, other_run: bool) {
-    let p = te13_fix4_pending(step, committed, other_run);
-    let r = &p.run;
-    let host = r.f.host.owner.upgrade().unwrap();
-    let (pending, state, root) = {
-        let owner = host.lock().unwrap();
-        let state = owner
-            .owner()
-            .unwrap()
-            .orchestration_projection(&r.run)
-            .unwrap()
-            .unwrap();
-        assert!(
-            owner.run_recovery_message(&state).unwrap().is_none(),
-            "TE13_FIX4_NO_STOP_BEFORE_ISSUANCE"
-        );
-        (
-            serde_json::to_vec(&owner.hooks.pending).unwrap(),
-            state,
-            std::fs::read(r.f.temp.path("project.kinewright")).unwrap(),
-        )
-    };
-    if let Some(other) = &p.unrelated {
-        assert_ne!(other, &r.run);
-        let reply = call(
-            &r.f,
-            &r.f.editor,
-            HostCommand::ObserveRun {
-                run: other.clone(),
-                after_sequence: 0,
-            },
-            0,
-        );
-        assert!(reply.error.is_none(), "TE13_FIX4_OTHER_RUN_READ");
-    }
-    let issued = call(
-        &r.f,
-        &r.f.editor,
-        HostCommand::IssueMetadataIssuer { issuer: None },
-        0,
-    );
-    assert!(
-        issued.error.is_none(),
-        "TE13_FIX4_ISSUANCE_ALLOWED {issued:?}"
-    );
-    {
-        let owner = host.lock().unwrap();
-        assert_eq!(
-            serde_json::to_vec(&owner.hooks.pending).unwrap(),
-            pending,
-            "TE13_FIX4_UNRELATED_ISSUANCE_PRESERVES_PENDING"
-        );
-        assert_eq!(
-            owner
-                .owner()
-                .unwrap()
-                .orchestration_projection(&r.run)
-                .unwrap()
-                .unwrap(),
-            state,
-            "TE13_FIX4_ISSUANCE_PRESERVES_RUN"
-        );
-        assert_eq!(
-            std::fs::read(r.f.temp.path("project.kinewright")).unwrap(),
-            root,
-            "TE13_FIX4_ISSUANCE_NO_PUBLICATION"
-        );
-        assert!(
-            owner.hooks.runs[&r.run].recovery_blocks.is_empty(),
-            "TE13_FIX4_NO_BLOCK_AFTER_ISSUANCE"
-        );
-        assert!(
-            owner.run_recovery_message(&state).unwrap().is_none(),
-            "TE13_FIX4_NO_STOP_AFTER_ISSUANCE"
-        );
-    }
-    if let Some(other) = &p.unrelated {
-        let stop_request = r.f.control(&r.f.editor, other, RunAction::Stop);
-        let wrong_stop = te13_fix2_dispatch(r, &r.f.editor, &stop_request);
-        assert!(
-            wrong_stop.error.is_some(),
-            "TE13_FIX4_OTHER_RUN_STOP_CANNOT_ABANDON"
-        );
-        assert_eq!(
-            serde_json::to_vec(&host.lock().unwrap().hooks.pending).unwrap(),
-            pending,
-            "TE13_FIX4_OTHER_RUN_STOP_CANNOT_ABANDON"
-        );
-    }
-    te13_fix4_replay(&p);
-    te13_fix4_retired_receipt(&p);
-    let state = r.f.projection(&r.run);
-    assert_eq!(state.results.len(), 1, "TE13_FIX4_ONE_PUBLICATION");
-    assert_eq!(state.deliveries.len(), 1, "TE13_FIX4_ONE_DELIVERY");
-    let owner = host.lock().unwrap();
-    assert!(owner.hooks.pending.is_none());
-    assert!(
-        owner.hooks.runs[&r.run].recovery_blocks.is_empty(),
-        "TE13_FIX4_NO_STALE_BLOCK"
-    );
-    assert!(
-        owner.run_recovery_message(&state).unwrap().is_none(),
-        "TE13_FIX4_NO_STOP_AFTER_RETRY"
-    );
-}
-#[test]
-fn te13_fix4_issue_freeze_committed() {
-    te13_fix4_interleave(CompletionStep::Freeze, true, false);
-}
-#[test]
-fn te13_fix4_issue_freeze_absent() {
-    te13_fix4_interleave(CompletionStep::Freeze, false, false);
-}
-#[test]
-fn te13_fix4_issue_publication_committed() {
-    te13_fix4_interleave(CompletionStep::Publication, true, false);
-}
-#[test]
-fn te13_fix4_issue_publication_absent() {
-    te13_fix4_interleave(CompletionStep::Publication, false, false);
-}
-#[test]
-fn te13_fix4_issue_different_run() {
-    te13_fix4_interleave(CompletionStep::Publication, true, true);
-}
 #[test]
 fn te13_fix4_successful_continuation_closes_both_frozen_exceptions() {
     let p = te13_fix4_pending(CompletionStep::Freeze, true, false);
+    p.run
+        .f
+        .host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .hooks
+        .runs
+        .get_mut(&p.run.run)
+        .unwrap()
+        .recovery_blocks
+        .push(super::super::task_completion::RecoveryBlock::Completion(
+            p.run.child.clone(),
+        ));
     te13_fix4_replay(&p);
     let r = &p.run;
     let stop = r.f.control(&r.f.editor, &r.run, RunAction::Stop);
@@ -503,81 +394,6 @@ fn te13_fix4_committed_note_replay_reads_original_receipt_during_completion() {
     te13_fix4_replay(&p);
 }
 
-#[test]
-fn te13_fix4_notes_and_voice_refuse_without_abandoning_completion() {
-    use kinewright_project::{
-        studio_records::{FeedbackEvidenceKind, NoteId},
-        voice_ingress::VoiceUpload,
-    };
-    let p = te13_fix4_pending(CompletionStep::Publication, false, false);
-    let r = &p.run;
-    let issued = Fixture::issue(&r.f.editor);
-    let root = std::fs::read(r.f.temp.path("project.kinewright")).unwrap();
-    let note =
-        r.f.editor
-            .request(HostCommand::AdmitFeedbackEvidence {
-                kind: FeedbackEvidenceKind::Text,
-                bytes: b"Keep this note exactly".to_vec(),
-            })
-            .unwrap();
-    assert!(note.error.is_some(), "TE13_FIX4_NOTE_PENDING_REFUSAL");
-    let error = note.error.unwrap();
-    assert_eq!(
-        error.code, "completion_pending",
-        "TE13_FIX4_NOTE_PENDING_REFUSAL"
-    );
-    assert_eq!(
-        error.message,
-        "Task completion is awaiting its original retry. This write has not been saved."
-    );
-    let reference = |bytes: &[u8]| ObjectRef {
-        sha256: kinewright_media::sha256_bytes(bytes),
-        byte_length: bytes.len() as u64,
-        record_kind: kinewright_project::bundle_records::RecordKind::OwnedEvidence,
-    };
-    let audio = kinewright_media::test_support::wav_f32(&[0.25; 64], 16000, 1);
-    let log = b"{}".to_vec();
-    let upload = VoiceUpload {
-        envelope: issued.envelope,
-        root_generation: issued.root_generation,
-        note: NoteId::fresh().unwrap(),
-        duration_micros: 4000,
-        audio: reference(&audio),
-        log: reference(&log),
-    };
-    let metadata =
-        r.f.editor
-            .request(HostCommand::Metadata {
-                envelope: upload.envelope.clone(),
-                update: upload.update(),
-            })
-            .unwrap();
-    assert_eq!(
-        metadata.error.unwrap().code,
-        "completion_pending",
-        "TE13_FIX4_METADATA_PENDING_REFUSAL"
-    );
-    let voice =
-        r.f.editor
-            .acknowledge_voice(upload, std::io::Cursor::new([audio, log].concat()))
-            .unwrap();
-    let error = voice.error.unwrap();
-    assert_eq!(
-        error.code, "completion_pending",
-        "TE13_FIX4_VOICE_PENDING_REFUSAL"
-    );
-    assert_eq!(
-        error.message,
-        "Task completion is awaiting its original retry. This write has not been saved."
-    );
-    assert_eq!(
-        std::fs::read(r.f.temp.path("project.kinewright")).unwrap(),
-        root,
-        "TE13_FIX4_NOTE_VOICE_NO_PUBLICATION"
-    );
-    te13_fix4_replay(&p);
-    assert_eq!(r.f.projection(&r.run).results.len(), 1);
-}
 #[test]
 fn te13_fix4_missing_row_fallback_names_no_saved_branch() {
     let p = te13_fix4_pending(CompletionStep::Freeze, true, false);

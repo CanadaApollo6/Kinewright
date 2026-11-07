@@ -809,4 +809,6 @@ mod tests {
             "C8_COMPLETION_RETRIED"
         );
     }
+
+    include!("voice_te13_fix5_tests.rs");
 }

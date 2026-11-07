@@ -40,12 +40,18 @@ impl HostClient {
         let reply = self.request(HostCommand::VoiceReceipt {
             upload: descriptor.clone(),
         })?;
-        if let Some(error) = reply.error {
-            return Err(error.into());
+        let conflict = reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "id_payload_conflict");
+        if let Some(error) = reply.error.as_ref()
+            && !conflict
+        {
+            return Err(error.clone().into());
         }
         match reply.voice_receipt {
             Some(VoiceReceipt::Committed) => Ok(Some(reply)),
-            Some(VoiceReceipt::Absent) => {
+            _ if conflict || matches!(reply.voice_receipt, Some(VoiceReceipt::Absent)) => {
                 let reply = self.request(HostCommand::IssueMetadataIssuer {
                     issuer: Some(descriptor.envelope.id.issuer.clone()),
                 })?;
@@ -55,7 +61,8 @@ impl HostClient {
                 let grant = reply
                     .metadata_issuer
                     .ok_or_else(|| HostRefusal::new("voice_envelope", "No voice retry envelope"))?;
-                if grant.envelope.owner_epoch != descriptor.envelope.owner_epoch
+                if conflict
+                    || grant.envelope.owner_epoch != descriptor.envelope.owner_epoch
                     || grant.root_generation != descriptor.root_generation
                 {
                     descriptor.envelope = grant.envelope;
@@ -63,7 +70,7 @@ impl HostClient {
                 }
                 Ok(None)
             }
-            None => Err(HostRefusal::new(
+            _ => Err(HostRefusal::new(
                 "unsettled",
                 "Original voice receipt is not settled; capture is kept.",
             )
@@ -155,7 +162,6 @@ pub(super) async fn upload_request(
             .map_err(|_| HostRefusal::new("owner_unavailable", "Voice owner unavailable"))?;
         let (_, _, roots) = owner.authorize_request(Some(&admission_bearer), &admission_request)?;
         owner.prove_retention()?;
-        owner.completion_write_available()?;
         for pin in &owner.pins {
             if !roots.permits(&pin.anchor, true) {
                 return Err(HostRefusal::roots("voice project write root").into());
@@ -219,26 +225,40 @@ impl HostCommandOwner {
         match command {
             HostCommand::VoiceReceipt { upload } => {
                 use kinewright_project::receipts::ReceiptLookup;
-                reply.voice_receipt = Some(match self.owner()?.voice_receipt(&upload)? {
-                    ReceiptLookup::Absent => VoiceReceipt::Absent,
-                    ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_) => {
-                        let status = self.voice_status(&upload.note)?;
-                        if status.voice.audio_ref != upload.audio
-                            || status.voice.playhead_log_ref.as_ref() != Some(&upload.log)
-                        {
-                            return Err(BundleError::HistoryChanged.into());
+                let lookup = self.owner()?.voice_receipt(&upload)?;
+                let known = match &lookup {
+                    ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_) => true,
+                    ReceiptLookup::Absent | ReceiptLookup::IdPayloadConflict => {
+                        if self.owner()?.has_unresolved_publication() {
+                            return Err(BundleError::Unsettled.into());
                         }
-                        reply.voice = Some(status);
-                        VoiceReceipt::Committed
-                    }
-                    ReceiptLookup::IdPayloadConflict => {
-                        return Err(HostRefusal::new(
-                            "id_payload_conflict",
-                            "Original voice command payload changed",
-                        )
-                        .into());
+                        // The digest includes generation and the log. A changed
+                        // kept descriptor can conflict with its own saved note.
+                        self.owner()?
+                            .feedback_index()?
+                            .notes
+                            .contains_key(&upload.note)
                     }
                     _ => return Err(BundleError::Unsettled.into()),
+                };
+                reply.voice_receipt = Some(if known {
+                    let status = self.voice_status(&upload.note)?;
+                    if status.voice.audio_ref != upload.audio
+                        || status.voice.playhead_log_ref.as_ref() != Some(&upload.log)
+                        || status.voice.duration_micros != upload.duration_micros
+                    {
+                        return Err(BundleError::HistoryChanged.into());
+                    }
+                    reply.voice = Some(status);
+                    VoiceReceipt::Committed
+                } else if matches!(lookup, ReceiptLookup::IdPayloadConflict) {
+                    return Err(HostRefusal::new(
+                        "id_payload_conflict",
+                        "Original voice command payload changed",
+                    )
+                    .into());
+                } else {
+                    VoiceReceipt::Absent
                 });
             }
             HostCommand::AcknowledgeVoice { upload } => {
@@ -377,11 +397,6 @@ impl HostCommandOwner {
         Ok(())
     }
     fn poll_voice(&mut self, note: &NoteId) -> Result<(), HostError> {
-        // Keep an in-flight transcript in memory until the exact task finish
-        // can complete; a status read must not publish around its private step.
-        if self.completion_write_available().is_err() {
-            return Ok(());
-        }
         let Some(mut job) = self.voice_jobs.remove(note) else {
             return Ok(());
         };

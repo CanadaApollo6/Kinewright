@@ -70,64 +70,41 @@ fn refused(reason: &str) -> HostError {
     HostRefusal::new("task_scope", reason).into()
 }
 impl HostCommandOwner {
-    pub(super) fn completion_write_available(&self) -> Result<(), HostError> {
-        if matches!(
-            self.hooks.pending,
-            Some(super::orchestration::PendingPublication::Completion(_))
-        ) {
-            return Err(HostRefusal::new(
-                "completion_pending",
-                "Task completion is awaiting its original retry. This write has not been saved.",
-            )
-            .into());
-        }
-        Ok(())
-    }
-    /// Prove the pending substep's fate without abandoning its original retry.
-    /// Issuance prepares authority only; it cannot publish around this slot.
-    pub(super) fn prove_completion_for_owner(&mut self, index: usize) -> Result<bool, HostError> {
+    /// A proved fate releases the old envelope, not the durable finish intent.
+    pub(super) fn prove_completion_for_owner(&mut self, index: usize) -> Result<(), HostError> {
         use super::orchestration::PendingPublication;
         if self.attachments[index].role != super::AttachmentRole::Editor {
-            return Ok(false);
+            return Ok(());
         }
         let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
-            return Ok(false);
+            return Ok(());
         };
         self.owner_mut()?.reconcile_metadata()?;
         let bound = self.bind_publication(&pending.step)?;
-        self.owner()?.orchestration_replay(&bound.envelope, None)?;
-        Ok(true)
-    }
-    /// Reconciliation proves a write's fate, never grants permission to run it.
-    /// The person's attachment may abandon an absent substep before Stop.
-    pub(super) fn settle_completion_for_owner(&mut self, index: usize) -> Result<(), HostError> {
-        use super::orchestration::PendingPublication;
-        if self.attachments[index].role != super::AttachmentRole::Editor {
-            return Ok(());
-        }
-        let Some(PendingPublication::Completion(pending)) = self.hooks.pending.clone() else {
-            return Ok(());
-        };
-        // A mismatch or unreadable receipt still refuses. Proven absence is
-        // sufficient for abandonment; it is not permission to execute the step.
-        self.prove_completion_for_owner(index)?;
-        self.retain_completion_block(&pending);
+        self.proved_completion_fate(&bound)?;
         self.hooks.pending = None;
         Ok(())
     }
-    fn retain_completion_block(&mut self, pending: &PendingCompletion) {
-        if let Some(run) = pending
-            .original
-            .run
-            .as_ref()
-            .and_then(|id| self.hooks.runs.get_mut(id))
-            && let OrchestrationCommand::FinishTask(finish) = &pending.original.envelope.command
+    pub(super) fn proved_completion_fate(
+        &self,
+        step: &ScopedOrchestrationRequest,
+    ) -> Result<Option<OrchestrationReceipt>, HostError> {
+        let stored = self.owner()?.orchestration_replay(&step.envelope, None)?;
+        // Every metadata publication advances this durable cursor. No typed
+        // receipt plus a consumed ID is not proof of absence, including reopen.
+        if stored.is_none()
+            && self
+                .owner()?
+                .metadata_issuer_sequence(&step.envelope.id.issuer)?
+                > step.envelope.id.sequence
         {
-            let block = RecoveryBlock::Completion(finish.task.clone());
-            if !run.recovery_blocks.contains(&block) {
-                run.recovery_blocks.push(block);
-            }
+            return Err(HostRefusal::new(
+                "id_payload_conflict",
+                "completion ID was consumed without its original receipt",
+            )
+            .into());
         }
+        Ok(stored)
     }
     /// This exception only allows owner envelope issuance and Stop; neither
     /// operation can continue a task or publish its result under stale authority.
@@ -152,7 +129,10 @@ impl HostCommandOwner {
                 .ok()
                 .flatten()
                 .is_some_and(|state| {
-                    self.run_recovery_blocks(&state)
+                    if state.outcome != RunOutcome::Pending {
+                        return false;
+                    }
+                    self.inspect_recovery_blocks(&state)
                         .unwrap_or_default()
                         .iter()
                         .any(|block| matches!(block, RecoveryBlock::Completion(_)))
@@ -293,6 +273,17 @@ impl HostCommandOwner {
                 .map(|work| format!("retained_task_work: {}", work.disclosure)));
         }
         let Some(block) = blocks.first() else {
+            if state.tasks.iter().any(|task| {
+                task.progress.completion.as_deref().is_some_and(|intent| {
+                    intent.step_id(CompletionStep::Publication).is_ok_and(|id| {
+                        self.owner()
+                            .and_then(|owner| Ok(owner.orchestration_receipt(&state.run, &id)?))
+                            .is_ok_and(|receipt| receipt.is_none())
+                    })
+                })
+            }) {
+                return Ok(Some("Task completion is waiting for its original finish retry. No automatic retry is confirmed.".into()));
+            }
             return Ok(None);
         };
         Ok(Some(block.fallback_disclosure()))
@@ -422,29 +413,7 @@ impl HostCommandOwner {
         }
         self.hooks.completion_failure = None;
         if let Err(error) = self.drive_completion_inner(index, request) {
-            let retryable = Self::completion_failure_retryable(&error);
-            if !retryable
-                && let (Some(run), OrchestrationCommand::FinishTask(finish)) =
-                    (&request.run, &request.envelope.command)
-                && let Some(runtime) = self.hooks.runs.get_mut(run)
-            {
-                let block = RecoveryBlock::Completion(finish.task.clone());
-                if !runtime.recovery_blocks.contains(&block) {
-                    runtime.recovery_blocks.push(block);
-                }
-            }
-            self.hooks.completion_failure = Some((
-                receipt.envelope.id.clone(),
-                format!(
-                    "{}:{:?}",
-                    if retryable {
-                        "retryable_substep_refused"
-                    } else {
-                        "permanent_substep_refused"
-                    },
-                    super::task_mcp::refusal_code(&error.to_string())
-                ),
-            ));
+            self.record_completion_failure(request, &error);
         } else if let (Some(run), OrchestrationCommand::FinishTask(finish)) =
             (&request.run, &request.envelope.command)
             && let Some(runtime) = self.hooks.runs.get_mut(run)
@@ -453,6 +422,35 @@ impl HostCommandOwner {
                 .recovery_blocks
                 .retain(|block| *block != RecoveryBlock::Completion(finish.task.clone()));
         }
+    }
+    fn record_completion_failure(
+        &mut self,
+        request: &ScopedOrchestrationRequest,
+        error: &HostError,
+    ) {
+        let retryable = Self::completion_failure_retryable(error);
+        if !retryable
+            && let (Some(run), OrchestrationCommand::FinishTask(finish)) =
+                (&request.run, &request.envelope.command)
+            && let Some(runtime) = self.hooks.runs.get_mut(run)
+        {
+            let block = RecoveryBlock::Completion(finish.task.clone());
+            if !runtime.recovery_blocks.contains(&block) {
+                runtime.recovery_blocks.push(block);
+            }
+        }
+        self.hooks.completion_failure = Some((
+            request.envelope.id.clone(),
+            format!(
+                "{}:{:?}",
+                if retryable {
+                    "retryable_substep_refused"
+                } else {
+                    "permanent_substep_refused"
+                },
+                super::task_mcp::refusal_code(&error.to_string())
+            ),
+        ));
     }
     fn completion_failure_retryable(error: &HostError) -> bool {
         let refusal = error.refusal();
@@ -468,6 +466,8 @@ impl HostCommandOwner {
                 | "storage_backpressure"
                 | "contention"
                 | "cleanup_pending"
+                | "recovery_frozen"
+                | "task_authority_paused"
         )
     }
     fn drive_completion_inner(
@@ -569,6 +569,13 @@ impl HostCommandOwner {
             }
             return Ok(receipt);
         }
+        if self.owner()?.metadata_issuer_sequence(&id.issuer)? > id.sequence {
+            return Err(HostRefusal::new(
+                "id_payload_conflict",
+                "completion ID was already consumed",
+            )
+            .into());
+        }
         let endpoint = self
             .hooks
             .runs
@@ -576,9 +583,12 @@ impl HostCommandOwner {
             .and_then(|run| run.tasks.get(&intent.request.task))
             .ok_or_else(|| refused("completion task actor missing"))?
             .endpoint();
-        endpoint
-            .check_live()
-            .map_err(|_| refused("task authority expired"))?;
+        endpoint.check_live().map_err(|reason| {
+            HostError::from(HostRefusal::new(
+                &reason,
+                "task completion authority is unavailable",
+            ))
+        })?;
         if endpoint.authority().attempt != intent.attempt {
             return Err(refused("completion attempt changed"));
         }
@@ -638,7 +648,9 @@ impl HostCommandOwner {
         {
             self.owner_mut()?.reconcile_metadata()?;
             self.authorize_orchestration(index, incoming)?;
-            self.settle_completion_for_owner(index)?;
+            // Only the applied Stop decision cancels the run. A refused Stop
+            // must not turn a still-retryable finish into permanent recovery.
+            self.prove_completion_for_owner(index)?;
             return Ok(None);
         }
         if pending.original != *incoming || pending.actor != self.attachments[index].id {
@@ -650,13 +662,11 @@ impl HostCommandOwner {
         }
         self.owner_mut()?.reconcile_metadata()?;
         let bound = self.bind_publication(&pending.step)?;
-        let stored = self.owner()?.orchestration_replay(&bound.envelope, None)?;
-        if stored.is_some() {
-            self.hooks.pending = None;
-        }
+        let stored = self.proved_completion_fate(&bound)?;
+        self.hooks.pending = None;
         let result = self.continue_completion_substep(index, incoming, &pending, stored);
-        if result.is_err() {
-            self.retain_completion_block(&pending);
+        if let Err(error) = &result {
+            self.record_completion_failure(incoming, error);
         }
         result
     }
@@ -667,7 +677,6 @@ impl HostCommandOwner {
         pending: &PendingCompletion,
         stored: Option<OrchestrationReceipt>,
     ) -> Result<Option<OrchestrationReceipt>, HostError> {
-        use super::orchestration::PendingPublication;
         self.require_metadata_issuer(index, &incoming.envelope.id.issuer)?;
         incoming
             .envelope
@@ -724,8 +733,6 @@ impl HostCommandOwner {
             || incoming.envelope.authority.grant_ref != self.expected_grant(index)?
             || incoming.envelope.project != self.owner()?.active_manual_project()?
             || state.outcome != RunOutcome::Pending
-            || self.recovering
-            || self.switch_frozen
             || pending.step.envelope.id
                 != intent
                     .step_id(step)
@@ -733,29 +740,22 @@ impl HostCommandOwner {
         {
             return Err(refused("completion binding changed"));
         }
+        if self.recovering || self.switch_frozen {
+            return Err(HostRefusal::new(
+                "recovery_frozen",
+                "task completion waits for recovery confirmation",
+            )
+            .into());
+        }
         if let Some(stored) = stored {
             if stored.decision != CommandDecision::Applied {
                 return Err(refused("completion substep refused"));
             }
-            self.hooks.pending = None;
             self.sync_runtime_grants(&state);
         } else {
-            // Reconciliation proved this step absent. Missing work still needs
-            // today's live authorization before the original envelope is retried.
+            // The old envelope is absent. drive_completion authorizes and mints
+            // each missing step at the current generation under its fixed ID.
             self.authorize_orchestration(index, incoming)?;
-            self.hooks.pending = Some(PendingPublication::Wire(
-                Box::new(pending.step.clone()),
-                pending.actor,
-            ));
-            if let Err(error) = self.dispatch_orchestration(index, &pending.step) {
-                if matches!(&self.hooks.pending, Some(PendingPublication::Wire(request, actor))
-                    if **request == pending.step && *actor == pending.actor)
-                {
-                    self.hooks.pending =
-                        Some(PendingPublication::Completion(Box::new(pending.clone())));
-                }
-                return Err(error);
-            }
         }
         self.drive_completion(index, incoming, &receipt);
         Ok(Some(receipt))
@@ -879,7 +879,7 @@ impl HostCommandOwner {
             });
             let reason = if state.outcome != RunOutcome::Pending {
                 Some("run_stopped".into())
-            } else if !self.completion_authority_live(state, intent)? {
+            } else if !self.completion_authority_current(state, intent)? {
                 Some("task_authority_unavailable".into())
             } else {
                 self.hooks
@@ -892,7 +892,10 @@ impl HostCommandOwner {
                     })
             };
             (
-                if reason.is_some() {
+                if reason
+                    .as_ref()
+                    .is_some_and(|reason| !reason.starts_with("retryable_substep_refused:"))
+                {
                     CompletionState::Blocked
                 } else {
                     CompletionState::Pending
@@ -912,7 +915,7 @@ impl HostCommandOwner {
             result,
         })
     }
-    fn completion_authority_live(
+    fn completion_authority_current(
         &self,
         state: &RunProjection,
         intent: &CompletionIntent,
@@ -925,7 +928,9 @@ impl HostCommandOwner {
             .and_then(|run| run.tasks.get(&intent.request.task))
             .map(crate::orchestration::tasks::EditorTask::endpoint);
         Ok(endpoint.is_some_and(|endpoint| {
-            endpoint.check_live().is_ok()
+            endpoint
+                .check_live()
+                .map_or_else(|reason| reason == "task_authority_paused", |()| true)
                 && self.attachments.iter().any(|attachment| {
                     subject.as_deref() == Some(attachment.subject.as_str())
                         && attachment.producer_scope.as_ref().is_some_and(|scope| {
