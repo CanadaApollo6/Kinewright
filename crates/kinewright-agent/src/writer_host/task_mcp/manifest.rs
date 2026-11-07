@@ -1,8 +1,9 @@
-//! Host-owned v1 manifests. Scope and caller input never change these schemas.
+//! Host-owned versioned manifests. Scope and caller input never change these schemas.
 use super::Role;
 
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 pub(crate) const DIRECTOR: &[&str] = &[
+    "read_child_result",
     "get_timeline_state",
     "read_task_evidence",
     "read_task_result",

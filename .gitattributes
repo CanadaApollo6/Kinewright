@@ -26,3 +26,6 @@ crates/kinewright-agent/tests/fixtures/te1/** -text
 crates/kinewright-agent/tests/fixtures/te1-*.json -text
 
 crates/kinewright-agent/tests/fixtures/te12-*.json -text
+
+# TE1.4 provider byte goldens.
+crates/kinewright-agent/tests/fixtures/te14-*.json -text

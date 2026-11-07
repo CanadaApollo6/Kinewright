@@ -691,7 +691,7 @@ impl HostCommandOwner {
                 .filter(|delivery| &delivery.wake == effect)
                 .map(|delivery| &delivery.result)
                 .collect();
-            self.result_wake_payload(&references)?
+            self.context_result_wake(&state, &identity.task, &references)?
         } else {
             self.owner()?
                 .store()?
@@ -834,7 +834,9 @@ impl HostCommandOwner {
             .as_str()
             .ok_or_else(|| refused("task role"))?
             .to_owned();
-        let prefix_identity = kinewright_media::sha256_bytes(CODEX_INSTRUCTIONS.as_bytes());
+        let prefix_identity = kinewright_media::sha256_bytes(
+            &super::task_context::application_prefix(task.brief.role)?,
+        );
         measured
             .measurements
             .get_or_insert_with(Default::default)

@@ -99,8 +99,8 @@ MUTATIONS.append(('missing-role-descriptor', SERVER,
     '.ok_or_else(|| (*name).to_owned())', '.ok_or_else(|| (*name).to_owned()).or_else(|_| Ok(controls[0].clone()))',
     'server::te1_surface_tests::te12_missing_role_descriptor_is_refused_without_a_partial_manifest',
     'TE12_SCHEMA_DRIFT_REFUSED', AGENT))
-add('publication-status-scope', SERVER, 'if is_publication && !failed {',
-    'if !failed {', 'te12_evidence_cannot_supply_a_receipt', 'TE12_EVIDENCE_UNMODIFIED')
+MUTATIONS.append(('publication-status-scope', SERVER, 'if is_publication && !failed {',
+    'if !failed {', 'server::task_reply_metadata_tests::te12_typed_command_controls_reply_metadata', 'TE12_EVIDENCE_UNMODIFIED', AGENT))
 add('freeze-outcome-rewrite', RECONCILE,
     '''                return Ok(
                     serde_json::json!({"receipt":receipt,"history":history,"result":result}),
@@ -131,10 +131,9 @@ add('fix13-settled-archive', ADMISSION, 'if budget.active || (finished && archiv
 add('fix14-archival-only', ADMISSION, 'if budget.active || (finished && archival()?)', 'if budget.active || finished',
     's4b_c5_fix14_finished_phase_cycle_is_refused_and_archive_still_runs', 'C5_FIX14_PHASE_CYCLE_')
 
-add('evidence-not-receipt', SERVER,
-    'let has_receipt = crate::writer_host::task_mcp::is_capability(&request.name);',
-    'let has_receipt = true;',
-    'te12_evidence_cannot_supply_a_receipt', 'TE12_EVIDENCE_NOT_RECEIPT')
+MUTATIONS.append(('evidence-not-receipt', SERVER,
+    'let has_receipt = !matches!(self, Self::Plain);', 'let has_receipt = true;',
+    'server::task_reply_metadata_tests::te12_typed_command_controls_reply_metadata', 'TE12_TYPED_RECEIPT', AGENT))
 add('grant-publication', ORCHESTRATION,
     'owner.issue_metadata_authority(&subject, issuer, &grant)',
     'match issuer { Some(issuer) => Ok(issuer.clone()), None => owner.reuse_metadata_issuer_for(&subject) }.and_then(|issuer| Ok((issuer, owner.admit_host_grant(&grant)?)))',

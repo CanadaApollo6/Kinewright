@@ -19,8 +19,16 @@ fn te12_full_prompt_pins_the_reply_contract() {
     let hash = kinewright_media::sha256_bytes(&bytes);
     println!("TE1_FULL_PROMPT {hash}");
     let expected: String =
-        serde_json::from_str(include_str!("../../tests/fixtures/te12-prompt.json")).unwrap();
-    assert_eq!(hash, expected);
+        serde_json::from_str(include_str!("../../tests/fixtures/te14-prompt.json")).unwrap();
+    if let Some(path) = std::env::var_os("KINEWRIGHT_TE14_CAPTURE") {
+        std::fs::write(
+            std::path::Path::new(&path).join("te14-prompt.json"),
+            serde_json::to_vec(&hash).unwrap(),
+        )
+        .unwrap();
+    } else {
+        assert_eq!(hash, expected);
+    }
 }
 
 #[test]

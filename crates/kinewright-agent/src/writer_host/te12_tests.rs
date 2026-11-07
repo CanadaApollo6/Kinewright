@@ -487,12 +487,12 @@ fn te12_scoped_reads_and_initialization_controls() {
 
     let read = director.wire(
         "read_task_evidence",
-        serde_json::json!({"reference":f.brief.plan}),
+        serde_json::json!({"revision":0,"evidence":{"kind":"reference","reference":f.brief.plan}}),
     );
     assert_eq!(read.is_error, Some(false), "TE12_EVIDENCE_ALLOWED {read:?}");
     let inputs = director.wire(
         "read_task_evidence",
-        serde_json::json!({"reference":f.brief.inputs}),
+        serde_json::json!({"revision":0,"evidence":{"kind":"reference","reference":f.brief.inputs}}),
     );
     assert_eq!(
         inputs.is_error,
@@ -510,7 +510,10 @@ fn te12_scoped_reads_and_initialization_controls() {
         .unwrap()
         .admit_host_grant(b"unrelated private data")
         .unwrap();
-    let refused = director.wire("read_task_evidence", serde_json::json!({"reference":other}));
+    let refused = director.wire(
+        "read_task_evidence",
+        serde_json::json!({"revision":0,"evidence":{"kind":"reference","reference":other}}),
+    );
     assert_eq!(refused.is_error, Some(true), "TE12_EVIDENCE_SCOPE");
     assert_eq!(f.projection(&run).tasks.len(), 2);
 }
@@ -740,11 +743,14 @@ fn te12_evidence_cannot_supply_a_receipt() {
     let (_, _, director) = c4_director(&f);
     let read = director.wire(
         "read_task_evidence",
-        serde_json::json!({"reference":reference}),
+        serde_json::json!({"revision":0,"evidence":{"kind":"reference","reference":reference}}),
     );
     assert_eq!(read.is_error, Some(false), "TE12_EVIDENCE_DATA {read:?}");
     let read = read.structured_content.unwrap();
-    assert_eq!(read["outcome"], data, "TE12_EVIDENCE_UNMODIFIED");
+    assert_eq!(
+        read["outcome"]["items"][0]["data"], data,
+        "TE12_EVIDENCE_UNMODIFIED"
+    );
     assert!(
         read.get("publication_status").is_none(),
         "TE12_EVIDENCE_NOT_PUBLICATION_STATUS"

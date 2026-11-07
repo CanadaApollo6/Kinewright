@@ -23,6 +23,7 @@ fn te12_full_director_wake_moves_only_reply_metadata() {
         serde_json::from_value(serde_json::json!(format!("{:032x}", 6))).unwrap();
     task.brief.scope.base.checkpoint = evidence;
     task.brief.scope.base.document_hash = "7".repeat(64);
+    let fixture_state = f.projection(&run);
     let host = f.host.owner.upgrade().unwrap();
     let mut owner = host.lock().unwrap();
     let mut accounting = AccountingRecord::new(
@@ -151,7 +152,17 @@ fn te12_full_director_wake_moves_only_reply_metadata() {
                 payload: OrchestrationPayload::Result(Box::new(result.clone())),
             })
             .unwrap();
-        let payload = owner.result_wake_payload(&[&stored.reference]).unwrap();
+        let legacy_payload = owner.result_wake_payload(&[&stored.reference]).unwrap();
+        let mut wake_state = fixture_state.clone();
+        wake_state.run = crate::orchestration::orchestration_records::RunId(id(2));
+        let mut child = task.clone();
+        child.id = crate::orchestration::orchestration_records::TaskId(id(8));
+        child.parent = Some(task.id.clone());
+        child.state = TaskState::Terminal(stored.reference.clone());
+        wake_state.tasks = vec![task.clone(), child];
+        let payload = owner
+            .context_result_wake(&wake_state, &task.id, &[&stored.reference])
+            .unwrap();
         let prompt = owner
             .codex_prompt(&task, &payload, &te12_fixed_context())
             .unwrap();
@@ -166,39 +177,105 @@ fn te12_full_director_wake_moves_only_reply_metadata() {
             kinewright_media::sha256_bytes(&prompt)
         );
         let baseline: &[u8] = match ordinal {
-            3 => include_bytes!("../../tests/fixtures/te1-director-wake-pending.json"),
-            4 => include_bytes!("../../tests/fixtures/te1-director-wake-complete.json"),
-            _ => include_bytes!("../../tests/fixtures/te1-director-wake-unpinned.json"),
+            3 => include_bytes!("../../tests/fixtures/te12-director-wake-pending.json"),
+            4 => include_bytes!("../../tests/fixtures/te12-director-wake-complete.json"),
+            _ => include_bytes!("../../tests/fixtures/te12-director-wake-unpinned.json"),
         };
         let mut legacy: serde_json::Value = serde_json::from_slice(baseline).unwrap();
-        legacy["instructions"] =
-            serde_json::json!(super::super::codex_instructions::CODEX_INSTRUCTIONS);
         legacy["live"] = te12_fixed_context();
+        let rendered: serde_json::Value = serde_json::from_slice(&prompt).unwrap();
+        let wake: serde_json::Value =
+            serde_json::from_str(rendered["data"]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(wake["mode"], "full", "TE14_GOLDEN_FULL_WAKE");
         assert_eq!(
-            prompt,
-            serde_json::to_vec(&legacy).unwrap(),
+            serde_json::to_vec(&wake["full_records"]).unwrap(),
+            legacy_payload,
             "TE12_ONLY_REPLY_METADATA_MOVED_{name}"
         );
-        if let Some(path) = std::env::var_os("KINEWRIGHT_TE1_CAPTURE_BASE") {
-            assert!(!observed, "only the pinned base may create the oracle");
+        assert_eq!(
+            legacy_payload,
+            legacy["payload"].as_str().unwrap().as_bytes(),
+            "TE14_LEGACY_FULL_RECORD_BYTES_{name}"
+        );
+        println!(
+            "TE14_FULL_WAKE_SIZE {name} payload_before={} payload_after={} prompt_before={} prompt_after={}",
+            legacy_payload.len(),
+            payload.len(),
+            baseline.len(),
+            prompt.len()
+        );
+        if let Some(path) = std::env::var_os("KINEWRIGHT_TE14_CAPTURE") {
             std::fs::write(
-                std::path::Path::new(&path).join(format!("te1-director-wake-{name}.json")),
+                std::path::Path::new(&path).join(format!("te14-director-wake-{name}.json")),
                 &prompt,
             )
             .unwrap();
         } else {
-            let expected: &[u8] = if ordinal == 3 {
-                include_bytes!("../../tests/fixtures/te12-director-wake-pending.json")
-            } else if ordinal == 4 {
-                include_bytes!("../../tests/fixtures/te12-director-wake-complete.json")
-            } else {
-                include_bytes!("../../tests/fixtures/te12-director-wake-unpinned.json")
+            let expected: &[u8] = match ordinal {
+                3 => include_bytes!("../../tests/fixtures/te14-director-wake-pending.json"),
+                4 => include_bytes!("../../tests/fixtures/te14-director-wake-complete.json"),
+                _ => include_bytes!("../../tests/fixtures/te14-director-wake-unpinned.json"),
             };
+            assert_eq!(prompt, expected, "TE1_COMPLETE_PROVIDER_WAKE_{name}");
+        }
+        if ordinal == 5 {
+            let mut large = result.clone();
+            large.explanation = owner
+                .owner_mut()
+                .unwrap()
+                .admit_host_grant(&vec![b'x'; 24_000])
+                .unwrap();
+            let summary_ref = owner
+                .owner_mut()
+                .unwrap()
+                .admit_scheduler_record(&OrchestrationRecord {
+                    version: 1,
+                    payload: OrchestrationPayload::Result(Box::new(large)),
+                })
+                .unwrap()
+                .reference;
+            wake_state.tasks[1].state = TaskState::Terminal(summary_ref.clone());
+            let before = owner.result_wake_payload(&[&summary_ref]).unwrap();
+            let after = owner
+                .context_result_wake(&wake_state, &task.id, &[&summary_ref])
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&after).unwrap();
+            assert_eq!(parsed["mode"], "summary", "TE14_GOLDEN_SUMMARY_WAKE");
             assert_eq!(
-                std::str::from_utf8(&prompt).unwrap(),
-                std::str::from_utf8(expected).unwrap(),
-                "TE1_COMPLETE_PROVIDER_WAKE_{name}"
+                parsed["omitted_details"], true,
+                "TE14_GOLDEN_SUMMARY_OMISSION"
             );
+            let mut old_prompt = legacy.clone();
+            old_prompt["payload"] = serde_json::json!(std::str::from_utf8(&before).unwrap());
+            let old_prompt = serde_json::to_vec(&old_prompt).unwrap();
+            let new_prompt = owner
+                .codex_prompt(&task, &after, &te12_fixed_context())
+                .unwrap();
+            let sizes = serde_json::json!({"full_payload_before":legacy_payload.len(),"full_payload_after":payload.len(),"full_prompt_before":baseline.len(),"full_prompt_after":prompt.len(),"summary_payload_before":before.len(),"summary_payload_after":after.len(),"summary_prompt_before":old_prompt.len(),"summary_prompt_after":new_prompt.len()});
+            println!("TE14_WAKE_SIZES {sizes}");
+            if let Some(path) = std::env::var_os("KINEWRIGHT_TE14_CAPTURE") {
+                let path = std::path::Path::new(&path);
+                std::fs::write(path.join("te14-director-wake-summary.json"), &new_prompt).unwrap();
+                std::fs::write(
+                    path.join("te14-wake-sizes.json"),
+                    serde_json::to_vec(&sizes).unwrap(),
+                )
+                .unwrap();
+            } else {
+                assert_eq!(
+                    new_prompt,
+                    include_bytes!("../../tests/fixtures/te14-director-wake-summary.json"),
+                    "TE14_FULL_PRODUCTION_SUMMARY_GOLDEN"
+                );
+                assert_eq!(
+                    sizes,
+                    serde_json::from_slice::<serde_json::Value>(include_bytes!(
+                        "../../tests/fixtures/te14-wake-sizes.json"
+                    ))
+                    .unwrap(),
+                    "TE14_WAKE_SIZE_GOLDEN"
+                );
+            }
         }
         let original = owner
             .owner()

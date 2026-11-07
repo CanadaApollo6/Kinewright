@@ -1153,6 +1153,116 @@ fn run_server(
     });
 }
 
+/// Only the host's dispatched command kind can classify receipt/status data.
+/// Evidence pages provide an additional boundary, independent of these guards.
+#[derive(Clone, Copy)]
+enum TaskReplyKind {
+    Plain,
+    Command,
+    Publication,
+    Completion,
+}
+struct TaskReplyMetadata {
+    receipt: Option<serde_json::Value>,
+    publication_status: Option<serde_json::Value>,
+    completion_status: Option<serde_json::Value>,
+}
+impl TaskReplyKind {
+    fn for_tool(name: &str) -> Self {
+        match name {
+            "publish_result" => Self::Publication,
+            "finish_task" => Self::Completion,
+            _ if crate::writer_host::task_mcp::is_capability(name) => Self::Command,
+            _ => Self::Plain,
+        }
+    }
+    fn take_metadata(self, outcome: &mut serde_json::Value, failed: bool) -> TaskReplyMetadata {
+        let has_receipt = !matches!(self, Self::Plain);
+        let is_publication = matches!(self, Self::Publication);
+        let is_completion = matches!(self, Self::Completion);
+        let receipt = if has_receipt && !failed {
+            outcome.get("receipt").cloned()
+        } else {
+            None
+        };
+        let publication_status = if is_publication && !failed {
+            outcome
+                .as_object_mut()
+                .and_then(|value| value.remove("publication_status"))
+        } else {
+            None
+        };
+        let completion_status = if is_completion && !failed {
+            outcome
+                .as_object_mut()
+                .and_then(|value| value.remove("completion_status"))
+        } else {
+            None
+        };
+        TaskReplyMetadata {
+            receipt,
+            publication_status,
+            completion_status,
+        }
+    }
+}
+
+#[cfg(test)]
+mod task_reply_metadata_tests {
+    #[test]
+    fn te12_typed_command_controls_reply_metadata() {
+        let data = serde_json::json!({"receipt":{"decision":{"kind":"applied"}},"controls":{"owner_epoch":0},"publication_status":{"already_published":true},"completion_status":{"state":"complete"},"kept":"opaque result data"});
+        for (tool, receipt, publication, completion) in [
+            ("read_task_evidence", false, false, false),
+            ("read_task_result", false, false, false),
+            ("read_child_result", false, false, false),
+            ("get_timeline_state", false, false, false),
+            ("commit_edit_plan", false, false, false),
+            ("freeze_task", true, false, false),
+            ("publish_result", true, true, false),
+            ("finish_task", true, false, true),
+        ] {
+            for failed in [false, true] {
+                let mut outcome = data.clone();
+                let metadata =
+                    super::TaskReplyKind::for_tool(tool).take_metadata(&mut outcome, failed);
+                let mut expected = data.clone();
+                if publication && !failed {
+                    expected
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("publication_status");
+                }
+                if completion && !failed {
+                    expected
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("completion_status");
+                }
+                assert_eq!(
+                    outcome, expected,
+                    "TE12_EVIDENCE_UNMODIFIED {tool} failed={failed}"
+                );
+                assert_eq!(
+                    metadata.receipt,
+                    (receipt && !failed).then(|| data["receipt"].clone()),
+                    "TE12_TYPED_RECEIPT {tool}"
+                );
+                assert_eq!(
+                    metadata.publication_status,
+                    (publication && !failed).then(|| data["publication_status"].clone()),
+                    "TE12_TYPED_PUBLICATION {tool}"
+                );
+                assert_eq!(
+                    metadata.completion_status,
+                    (completion && !failed).then(|| data["completion_status"].clone()),
+                    "TE12_TYPED_COMPLETION {tool}"
+                );
+            }
+        }
+    }
+}
+
 fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
     fn paths_or_owned_inputs(value: &serde_json::Value) -> bool {
         match value {
@@ -1400,9 +1510,7 @@ impl KinewrightMcp {
             .and_then(|arguments| arguments.get("name"))
             .and_then(serde_json::Value::as_str);
         let tool = crate::writer_host::task_mcp::product_tool_name(&request.name, capability);
-        let has_receipt = crate::writer_host::task_mcp::is_capability(&request.name);
-        let is_publication = request.name == "publish_result";
-        let is_completion = request.name == "finish_task";
+        let reply_kind = TaskReplyKind::for_tool(&request.name);
         let reply = self.call_exposed_inner(request);
         let code = match &reply {
             Ok(result) if result.is_error == Some(true) => {
@@ -1442,25 +1550,11 @@ impl KinewrightMcp {
                 true,
             ),
         };
-        let receipt = if has_receipt && !failed {
-            outcome.get("receipt").cloned()
-        } else {
-            None
-        };
-        let publication_status = if is_publication && !failed {
-            outcome
-                .as_object_mut()
-                .and_then(|value| value.remove("publication_status"))
-        } else {
-            None
-        };
-        let completion_status = if is_completion && !failed {
-            outcome
-                .as_object_mut()
-                .and_then(|value| value.remove("completion_status"))
-        } else {
-            None
-        };
+        let TaskReplyMetadata {
+            receipt,
+            publication_status,
+            completion_status,
+        } = reply_kind.take_metadata(&mut outcome, failed);
         let mut value = control.reply(outcome, receipt);
         if let Some(status) = completion_status {
             value["completion_status"] = status;
@@ -1519,7 +1613,10 @@ impl KinewrightMcp {
             if crate::writer_host::task_mcp::is_capability(&request.name)
                 || matches!(
                     request.name.as_ref(),
-                    "read_task_result" | "read_task_evidence"
+                    "read_task_result"
+                        | "read_task_evidence"
+                        | "read_child_result"
+                        | "get_timeline_state"
                 )
             {
                 return Ok(
@@ -13895,6 +13992,16 @@ fn compact_discard_edit_plan_tool() -> Tool {
             .idempotent(true)
             .open_world(false),
     )
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn task_manifest_identity(
+    role: crate::orchestration::orchestration_records::Role,
+) -> Result<String, SchemaError> {
+    Ok(kinewright_media::sha256_bytes(
+        &serde_json::to_vec(&task_role_tools(role)?)
+            .map_err(|error| SchemaError::UnknownTool(error.to_string()))?,
+    ))
 }
 
 /// Measure the frozen surface for the Linux native task host.
@@ -36484,11 +36591,11 @@ fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String>
                 "prepare_edit_plan" => Some(task_prepare_edit_plan_tool()),
                 "commit_edit_plan" => Some(compact_commit_edit_plan_tool()),
                 "discard_edit_plan" => Some(compact_discard_edit_plan_tool()),
-                "read_task_result" | "read_task_evidence" => {
-                    let schema = crate::writer_host::task_mcp::schema::read_reference();
+                "read_task_result" | "read_task_evidence" | "read_child_result" => {
+                    let schema = crate::writer_host::task_mcp::schema::context_read(name);
                     Some(Tool::new(
                         *name,
-                        "Read one host-owned result or evidence reference authorized by this task.",
+                        "Read revision-bound host-owned context in pages up to 24 KiB. At most eight expansions per task. Capacity requires replanning. Reading never widens edit authority.",
                         Arc::new(schema.as_object().unwrap().clone()),
                     ))
                 }
@@ -36576,18 +36683,34 @@ mod te1_surface_tests {
         });
         println!("TE12_MANIFESTS {hashes:?}");
         let expected: Vec<String> =
-            serde_json::from_str(include_str!("../tests/fixtures/te12-manifests.json")).unwrap();
-        assert_eq!(
-            hashes.as_slice(),
-            expected.as_slice(),
-            "TE12_ROLE_SCHEMA_GOLDENS"
-        );
+            serde_json::from_str(include_str!("../tests/fixtures/te14-manifests.json")).unwrap();
+        if let Some(path) = std::env::var_os("KINEWRIGHT_TE14_CAPTURE") {
+            std::fs::write(
+                std::path::Path::new(&path).join("te14-manifests.json"),
+                serde_json::to_vec(&hashes).unwrap(),
+            )
+            .unwrap();
+        } else {
+            assert_eq!(
+                hashes.as_slice(),
+                expected.as_slice(),
+                "TE12_ROLE_SCHEMA_GOLDENS"
+            );
+        }
         let instructions = kinewright_media::sha256_bytes(
             crate::writer_host::codex_instructions::CODEX_INSTRUCTIONS.as_bytes(),
         );
         println!("TE12_INSTRUCTIONS {instructions}");
         let expected: String =
-            serde_json::from_str(include_str!("../tests/fixtures/te12-instructions.json")).unwrap();
-        assert_eq!(instructions, expected, "TE12_CROSS_PLATFORM_INSTRUCTIONS");
+            serde_json::from_str(include_str!("../tests/fixtures/te14-instructions.json")).unwrap();
+        if let Some(path) = std::env::var_os("KINEWRIGHT_TE14_CAPTURE") {
+            std::fs::write(
+                std::path::Path::new(&path).join("te14-instructions.json"),
+                serde_json::to_vec(&instructions).unwrap(),
+            )
+            .unwrap();
+        } else {
+            assert_eq!(instructions, expected, "TE12_CROSS_PLATFORM_INSTRUCTIONS");
+        }
     }
 }

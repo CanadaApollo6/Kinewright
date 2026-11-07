@@ -119,6 +119,7 @@ pub(crate) fn product_tool_name(name: &str, capability: Option<&str>) -> &'stati
     match name {
         "read_task_evidence" => return "read_task_evidence",
         "read_task_result" => return "read_task_result",
+        "read_child_result" => return "read_child_result",
         _ => {}
     }
     crate::runtime::COMPACT_TOOL_NAMES
@@ -167,6 +168,7 @@ pub(crate) fn refusal_code(
         "Time",
         "Replan",
         "Capacity",
+        "evidence_capacity",
         "DependencyCapacity",
         "run_limit",
     ]) {
@@ -301,8 +303,10 @@ impl TaskMcp {
         Ok(reply)
     }
     fn call_inner(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
-        let host = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
-        let mut host = host.lock().map_err(|_| refused("host owner unavailable"))?;
+        let owner = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
+        let mut host = owner
+            .lock()
+            .map_err(|_| refused("host owner unavailable"))?;
         // Uncertain storage cannot serve resolve_task_mcp's projection. Only
         // the retained original finish may reach exact-envelope reconciliation.
         if name == "finish_task" && host.hooks.pending.is_some() {
@@ -320,51 +324,82 @@ impl TaskMcp {
         if !manifest::names(role).contains(&name) {
             return Err(refused("tool hidden for durable task role"));
         }
-        if matches!(name, "read_task_result" | "read_task_evidence") {
+        if matches!(
+            name,
+            "get_timeline_state" | "read_task_evidence" | "read_child_result"
+        ) {
+            let record = state
+                .tasks
+                .iter()
+                .find(|record| record.id == task)
+                .ok_or_else(|| refused("task missing"))?;
+            return match name {
+                "get_timeline_state" => {
+                    if arguments != json!({}) {
+                        return Err(refused("overview takes no caller scope"));
+                    }
+                    let (revision, document) = host.context_snapshot(&state.run, &task)?;
+                    host.context_overview(&state.run, record, revision, &document)
+                }
+                "read_task_evidence" => {
+                    let read: super::task_context::EvidenceRead =
+                        serde_json::from_value(arguments)?;
+                    if matches!(
+                        read.evidence,
+                        super::task_context::EvidenceKind::Audio { .. }
+                            | super::task_context::EvidenceKind::Frame { .. }
+                    ) {
+                        let prepared = host.prepare_media_context(&state, record, &read)?;
+                        let rendered = {
+                            drop(host);
+                            prepared.render()?
+                        };
+                        let mut host = owner
+                            .lock()
+                            .map_err(|_| refused("host owner unavailable"))?;
+                        let (index, state, task) =
+                            host.resolve_task_mcp(&self.auth, &self.endpoint)?;
+                        let record = state
+                            .tasks
+                            .iter()
+                            .find(|record| record.id == task)
+                            .ok_or_else(|| refused("task missing"))?;
+                        host.finish_media_context(index, &state, record, &read, &rendered)
+                    } else {
+                        host.read_context(index, &state, record, &read)
+                    }
+                }
+                _ => host.read_child_context(
+                    index,
+                    &state,
+                    record,
+                    &serde_json::from_value(arguments)?,
+                ),
+            };
+        }
+        if name == "read_task_result" {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Read {
                 reference: kinewright_project::bundle_records::ObjectRef,
             }
             let read: Read = serde_json::from_value(arguments)?;
-            let record = state.tasks.iter().find(|record| record.id == task).unwrap();
-            let result_allowed = |reference: &kinewright_project::bundle_records::ObjectRef| {
-                state.deliveries.iter().any(|delivery| {
-                    &delivery.result == reference
-                        && state.tasks.iter().any(|child| {
-                            child.id == delivery.task && child.parent.as_ref() == Some(&task)
-                        })
-                }) || matches!(&record.state, crate::orchestration::orchestration_records::TaskState::Terminal(result) if result == reference)
-            };
-            let allowed = if name == "read_task_result" {
-                result_allowed(&read.reference)
-            } else {
-                [
-                    &record.brief.plan,
-                    &record.brief.script,
-                    &record.brief.inputs,
-                    &record.brief.assignment,
-                ]
-                .contains(&&read.reference)
-                    || record.brief.scope.asset_roots.contains(&read.reference)
-                    || record.brief.scope.consent_refs.contains(&read.reference)
-                    || state.results.iter().filter(|reference| result_allowed(reference)).any(|reference| {
-                        host.owner().and_then(|owner| Ok(owner.store()?.read_run_record(reference)?))
-                            .is_ok_and(|record| match &record.payload {
-                                crate::orchestration::orchestration_records::OrchestrationPayload::Result(result) => {
-                                    result.evidence.contains(&read.reference) || result.artifacts.contains(&read.reference)
-                                        || result.delta_ref.as_ref() == Some(&read.reference)
-                                        || result.usage_ref == read.reference || result.explanation == read.reference
-                                }, _ => false,
-                            })
+            let record = state
+                .tasks
+                .iter()
+                .find(|record| record.id == task)
+                .ok_or_else(|| refused("task missing"))?;
+            let allowed = state.deliveries.iter().any(|delivery| {
+                delivery.result == read.reference
+                    && state.tasks.iter().any(|child| {
+                        child.id == delivery.task && child.parent.as_ref() == Some(&task)
                     })
-            };
+            }) || matches!(&record.state,crate::orchestration::orchestration_records::TaskState::Terminal(result) if *result==read.reference);
             if !allowed {
                 return Err(refused("read reference outside task scope"));
             }
-            return host.read_task_reference(&read.reference);
-        }
-        if matches!(name, "task_status" | "wait_task") {
+            return host.read_legacy_context(index, &state, record, &read.reference);
+        } else if matches!(name, "task_status" | "wait_task") {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Observe {
@@ -916,13 +951,17 @@ impl HostCommandOwner {
 }
 
 impl HostCommandOwner {
-    fn read_task_reference(
+    pub(super) fn read_task_reference(
         &self,
         reference: &kinewright_project::bundle_records::ObjectRef,
     ) -> Result<Value, HostError> {
         use kinewright_project::bundle_records::RecordKind;
-        if reference.byte_length > (crate::protocol::limits::FRAME_BYTES / 2) as u64 {
-            return Err(refused("task evidence capacity"));
+        if reference.byte_length > (super::task_context::PAGE_BYTES * 8) as u64 {
+            return Err(HostRefusal::new(
+                "evidence_capacity",
+                "Evidence capacity exhausted; replan without guessing.",
+            )
+            .into());
         }
         let store = self.owner()?.store()?;
         match reference.record_kind {

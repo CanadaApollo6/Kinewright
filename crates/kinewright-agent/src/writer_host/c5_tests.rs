@@ -219,12 +219,12 @@ fn s4b_c5_opening_prompt_contains_bound_brief_and_notes() {
         .unwrap();
     let prompt: serde_json::Value = serde_json::from_slice(&prompt).unwrap();
     assert_eq!(
-        prompt["brief"],
+        prompt["data"]["brief"],
         serde_json::to_value(&state.tasks[0].brief).unwrap()
     );
     assert_eq!(
-        prompt["notes"][0]["text"],
-        "hook plan, script and assignment"
+        prompt["data"]["notes"][0]["text_ref"],
+        serde_json::to_value(&state.tasks[0].brief.assignment).unwrap()
     );
     assert!(prompt["instructions"].as_str().unwrap().contains("Editor"));
     assert!(

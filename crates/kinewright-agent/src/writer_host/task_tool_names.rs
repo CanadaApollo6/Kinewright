@@ -1,5 +1,6 @@
 /// Extra native-provider allowlist; the server applies the narrower durable role.
 pub(crate) const TASK_TOOL_NAMES: &[&str] = &[
+    "read_child_result",
     "get_timeline_state",
     "read_task_evidence",
     "read_task_result",

@@ -29,6 +29,7 @@ mod completion_fixture;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use completion_fixture::CompletionFixture;
 mod task_completion;
+pub(crate) mod task_context;
 mod task_history;
 pub use task_completion::{CompletionPhase, CompletionState, CompletionStatus};
 pub(crate) mod task_mcp;

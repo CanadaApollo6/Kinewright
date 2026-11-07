@@ -1,4 +1,4 @@
-//! Fixed v1 task operation schemas, independent of task scope.
+//! Fixed v2 task operation schemas, independent of task scope.
 use serde_json::{Value, json};
 fn object(properties: Value, required: &[&str]) -> Value {
     let mut schema = json!({"type":"object","required":required,"additionalProperties":false});
@@ -96,8 +96,53 @@ pub(crate) fn capability(name: &str) -> Value {
     schema
 }
 
-pub(crate) fn read_reference() -> Value {
-    let mut schema = object(json!({"reference":reference("object_ref")}), &["reference"]);
+pub(crate) fn context_read(name: &str) -> Value {
+    let cursor = json!({"type":"string","maxLength":96});
+    let mut schema = if name == "read_task_result" {
+        object(json!({"reference":reference("object_ref")}), &["reference"])
+    } else if name == "read_task_evidence" {
+        let frame = json!({"type":"integer","minimum":0});
+        let mut variants = Vec::new();
+        for kind in [
+            "timeline",
+            "reference",
+            "transcript",
+            "audio",
+            "frame",
+            "preview",
+            "proof",
+        ] {
+            let (mut properties, required) = match kind {
+                "timeline" => (
+                    json!({"clips":array(json!({"type":"integer","minimum":0}),256)}),
+                    vec!["kind"],
+                ),
+                "audio" | "frame" => (
+                    json!({"clip":{"type":"integer","minimum":0},"source_frame":frame}),
+                    vec!["kind", "clip", "source_frame"],
+                ),
+                "transcript" => (
+                    json!({"reference":reference("object_ref"),"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1}}),
+                    vec!["kind", "reference", "start", "end"],
+                ),
+                _ => (
+                    json!({"reference":reference("object_ref")}),
+                    vec!["kind", "reference"],
+                ),
+            };
+            properties["kind"] = json!({"const":kind});
+            variants.push(object(properties, &required));
+        }
+        object(
+            json!({"revision":{"type":"integer","minimum":0},"evidence":{"oneOf":variants},"cursor":cursor}),
+            &["revision", "evidence"],
+        )
+    } else {
+        object(
+            json!({"run":reference("identity"),"child":reference("identity"),"reference":reference("object_ref"),"source":{"anyOf":[reference("binding"),{"type":"null"}]},"cursor":cursor}),
+            &["run", "child", "reference", "source"],
+        )
+    };
     schema["$defs"] = definitions();
     schema
 }

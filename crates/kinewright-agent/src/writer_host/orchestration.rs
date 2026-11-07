@@ -153,6 +153,8 @@ pub(super) struct Hooks {
     #[cfg(test)]
     pub completion_before_freeze: bool,
     #[cfg(test)]
+    pub context_media_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+    #[cfg(test)]
     pub completion_status_read_failure: bool,
     pub runs: BTreeMap<RunId, HostRun>,
     pub pending: Option<PendingPublication>,
