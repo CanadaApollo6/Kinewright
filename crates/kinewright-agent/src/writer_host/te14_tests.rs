@@ -157,7 +157,14 @@ fn te14_neighbouring_words_match_the_full_transcript_decision() {
         },
         None,
     ));
-    let full_reject = full["items"][0]["data"]["words"]
+    let original = full["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["chunk"]["text"].as_str().unwrap())
+        .collect::<String>();
+    let original: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let full_reject = original["words"]
         .as_array()
         .unwrap()
         .iter()
@@ -949,11 +956,13 @@ fn te14_plain_text_transcript_keeps_neighbours_and_unknown_alignment() {
         span["items"][0]["source_alignment"], "unobserved",
         "TE14_PLAIN_TEXT_ALIGNMENT_UNKNOWN"
     );
-    let full_reject = full["items"][0]["data"]
-        .as_str()
+    let original = full["items"]
+        .as_array()
         .unwrap()
-        .split_whitespace()
-        .any(|word| word == "not");
+        .iter()
+        .map(|row| row["chunk"]["text"].as_str().unwrap())
+        .collect::<String>();
+    let full_reject = original.split_whitespace().any(|word| word == "not");
     let scoped_reject = span["items"]
         .as_array()
         .unwrap()

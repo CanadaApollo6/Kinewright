@@ -747,8 +747,19 @@ fn te12_evidence_cannot_supply_a_receipt() {
     );
     assert_eq!(read.is_error, Some(false), "TE12_EVIDENCE_DATA {read:?}");
     let read = read.structured_content.unwrap();
+    let bytes = read["outcome"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["chunk"]["text"].as_str().expect("TE12_EVIDENCE_UNMODIFIED"))
+        .collect::<String>();
     assert_eq!(
-        read["outcome"]["items"][0]["data"], data,
+        bytes.as_bytes(),
+        serde_json::to_vec(&data).unwrap(),
+        "TE12_EVIDENCE_UNMODIFIED"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&bytes).unwrap(), data,
         "TE12_EVIDENCE_UNMODIFIED"
     );
     assert!(

@@ -55,14 +55,14 @@ add('cold-switch-owner', C, 'let lease = store.input_lease_request(&OwnedInputRe
 add('decode-switch-owner', M, 'drop(host);\n                            prepared.render(&self.endpoint, &owner)?',
     'let _held_host = host;\n                            prepared.render(&self.endpoint, &owner)?',
     'te14_fix1_decode_switch', 'TE14_FIX1_MEDIA_CONTROL_NOT_BLOCKED')
-add('media-liveness', C, '!endpoint.media_read_live()\n                || !alive.load(Ordering::Acquire)',
-    'false\n                || false && !alive.load(Ordering::Acquire)',
+add('media-liveness', C, '!endpoint.media_read_live() || !alive.load(Ordering::Acquire)',
+    'false && (!endpoint.media_read_live() || !alive.load(Ordering::Acquire))',
     'te14_fix1_cold_certification_stop', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
 add('decoder-cancel', C, 'let signal = Arc::clone(&cancel);',
     'let signal = Arc::new(std::sync::atomic::AtomicBool::new(false));',
     'te14_fix1_decode_stop', 'TE14_FIX1_DECODER_REAL_CANCEL')
-add('media-deadline', C, '|| std::time::Instant::now() >= deadline;',
-    '|| false && std::time::Instant::now() >= deadline;',
+add('media-deadline', C, 'if std::time::Instant::now() >= deadline {',
+    'if false && std::time::Instant::now() >= deadline {',
     'te14_fix1_media_wall_clock_limit', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
 add('child-proof-source', C, '1 => Ok(sources.pop().unwrap()),', '1 => Ok(json!(current)),',
     'te14_fix1_child_proof_uses_durable_source_not_parent_clock', 'TE14_FIX1_CHILD_PROOF_SOURCE')
@@ -81,8 +81,8 @@ add('media-pin-release', 'crates/kinewright-project/src/owned_inputs.rs',
     'self.hold.read_store().lease_input(&self.identity)',
     'let result=self.hold.read_store().lease_input(&self.identity); std::mem::forget(self.hold); result',
     'te14_fix1_cold_certification_stop', 'TE14_FIX1_PIN_RELEASED')
-add('owned-record-bytes', C, 'return Ok(bytes_rows(&bytes));',
-    'return Ok(bytes_rows(&serde_json::to_vec(&self.read_task_reference(reference)?)?));',
+add('owned-record-bytes', C, 'return Ok(self.owner()?.store()?.read_evidence(reference)?.to_vec());',
+    'return Ok(serde_json::to_vec(&self.read_task_reference(reference)?)?);',
     'te14_fix1_child_expansion_preserves_original_owned_bytes', 'TE14_FIX1_RAW_RECORD_EXACT')
 harness.PAIRS.append(('media-context-cancel', C,
     'if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {',

@@ -24,6 +24,39 @@ fn legacy_limit() -> HostError {
     )
 }
 
+pub(super) fn record_too_large() -> HostError {
+    refused(
+        "Record exceeds the 192 KiB single-record read limit; contents unavailable on this route.",
+    )
+}
+fn unique_classified_object(bytes: &[u8]) -> Result<Value, HostError> {
+    struct UniqueObject;
+    impl<'de> serde::de::Visitor<'de> for UniqueObject {
+        type Value = Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an unambiguous classified object")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(self, mut input: M) -> Result<Value, M::Error> {
+            let mut map = serde_json::Map::new();
+            while let Some((key, value)) = input.next_entry::<String, Value>()? {
+                if map.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate top-level key"));
+                }
+            }
+            Ok(Value::Object(map))
+        }
+    }
+    use serde::de::Deserializer as _;
+    let mut input = serde_json::Deserializer::from_slice(bytes);
+    let value = (&mut input)
+        .deserialize_map(UniqueObject)
+        .map_err(|_| refused("ambiguous or invalid classified evidence object"))?;
+    input
+        .end()
+        .map_err(|_| refused("ambiguous or invalid classified evidence object"))?;
+    Ok(value)
+}
+
 fn capacity() -> HostError {
     HostRefusal::new(
         "evidence_capacity",
@@ -296,10 +329,10 @@ fn visible_prefix(
     }
     Ok(output)
 }
-// A persisted 23 MB / 60-second PCM source certified and decoded in 44–47 ms
-// in the cold-input fixture. Five seconds allows over 100x that measured cost;
-// larger or stalled sources refuse without blocking the owner.
-const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+const MEDIA_RETRY: &str = "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned.";
+const MEDIA_DECODE_TIMEOUT: &str =
+    "Media decode or seek exceeded the 30-second wait; not retryable. Replan without guessing.";
 struct CancelMediaRead(Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelMediaRead {
     fn drop(&mut self) {
@@ -307,7 +340,10 @@ impl Drop for CancelMediaRead {
     }
 }
 fn media_unavailable() -> HostError {
-    refused("media evidence read cancelled or timed out; replan without guessing")
+    refused("Media read cancelled because the task is no longer live or its source changed.")
+}
+fn media_failed() -> HostError {
+    refused("Media evidence worker could not produce the requested page.")
 }
 impl PreparedMediaRead {
     pub(super) fn render(
@@ -318,10 +354,12 @@ impl PreparedMediaRead {
         use std::sync::atomic::Ordering;
         let permit = endpoint
             .begin_media_read()
-            .map_err(|_| media_unavailable())?;
+            .map_err(|_| refused(MEDIA_RETRY))?;
         let alive = Arc::clone(&self.alive);
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = Arc::clone(&cancel);
+        let verified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_verified = Arc::clone(&verified);
         let _cancel_on_exit = CancelMediaRead(Arc::clone(&cancel));
         let deadline = self.deadline;
         let switch_generation = self.switch_generation;
@@ -331,18 +369,16 @@ impl PreparedMediaRead {
             .name("task-media-read".into())
             .spawn(move || {
                 let _permit = permit;
-                let result = self.decode(&signal);
+                let result = self.decode(&signal, &worker_verified);
                 #[cfg(test)]
                 if let Some(outcome) = outcome {
                     outcome.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
                 }
                 result
             })
-            .map_err(|_| media_unavailable())?;
+            .map_err(|_| media_failed())?;
         loop {
-            let mut stopped = !endpoint.media_read_live()
-                || !alive.load(Ordering::Acquire)
-                || std::time::Instant::now() >= deadline;
+            let mut stopped = !endpoint.media_read_live() || !alive.load(Ordering::Acquire);
             if let Ok(host) = owner.try_lock() {
                 stopped |= host.switch_frozen || host.recovering;
                 stopped |= host
@@ -358,11 +394,18 @@ impl PreparedMediaRead {
             if stopped {
                 return Err(media_unavailable());
             }
+            if std::time::Instant::now() >= deadline {
+                return Err(refused(if verified.load(Ordering::Acquire) {
+                    MEDIA_DECODE_TIMEOUT
+                } else {
+                    MEDIA_RETRY
+                }));
+            }
             if worker.is_finished() {
                 return worker
                     .join()
-                    .map_err(|_| media_unavailable())?
-                    .map_err(|_| media_unavailable());
+                    .map_err(|_| media_failed())?
+                    .map_err(|_| media_failed());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -380,6 +423,7 @@ impl PreparedMediaRead {
     fn decode(
         self,
         cancel: &Arc<std::sync::atomic::AtomicBool>,
+        verified: &std::sync::atomic::AtomicBool,
     ) -> Result<RenderedMediaRead, HostError> {
         use base64::Engine as _;
         #[cfg(test)]
@@ -389,6 +433,7 @@ impl PreparedMediaRead {
             return Err(media_unavailable());
         }
         let source = lease.certified_source()?;
+        verified.store(true, std::sync::atomic::Ordering::Release);
         let mut value = if self.audio {
             let mut decoder = source.open_audio(Arc::clone(cancel))?;
             #[cfg(test)]
@@ -827,7 +872,17 @@ impl HostCommandOwner {
                 if !self.context_reference_allowed(state, task, reference)? {
                     return Err(refused("read reference outside task scope"));
                 }
-                let value = self.read_task_reference(reference)?;
+                let bytes = self.task_reference_bytes(reference)?;
+                let value = if matches!(
+                    read.evidence,
+                    EvidenceKind::Preview { .. } | EvidenceKind::Proof { .. }
+                ) {
+                    unique_classified_object(&bytes)?
+                } else if matches!(read.evidence, EvidenceKind::Transcript { .. }) {
+                    self.read_task_reference(reference)?
+                } else {
+                    Value::Null
+                };
                 let classification = match &read.evidence {
                     EvidenceKind::Preview { .. } if value["kind"] != "task_preview_v1" => {
                         return Err(refused("reference is not a classified preview"));
@@ -854,7 +909,6 @@ impl HostCommandOwner {
                 {
                     return Err(refused("stale evidence proof revision"));
                 }
-                let bytes = serde_json::to_vec(&value)?;
                 if let EvidenceKind::Transcript { start, end, .. } = &read.evidence {
                     let words = if let Some(words) = value.get("words").and_then(Value::as_array) {
                         words.clone()
@@ -886,12 +940,8 @@ impl HostCommandOwner {
                         rows.extend(clip_rows(&document, &[clip], None)?);
                     }
                     rows
-                } else if bytes.len() <= 4096 {
-                    vec![
-                        json!({"classification":classification,"reference":reference,"data":value,"proof_verification":"unobserved"}),
-                    ]
                 } else {
-                    bytes_rows(&bytes)
+                    bytes_rows(&bytes).into_iter().map(|chunk| json!({"classification":classification,"reference":reference,"chunk":chunk,"proof_verification":"unobserved"})).collect()
                 }
             }
         };
@@ -913,7 +963,10 @@ impl HostCommandOwner {
         read: &EvidenceRead,
     ) -> Result<PreparedMediaRead, HostError> {
         use kinewright_project::owned_inputs::OwnedInputRef;
-        let deadline = std::time::Instant::now() + MEDIA_READ_LIMIT;
+        let wait = MEDIA_READ_LIMIT;
+        #[cfg(test)]
+        let wait = self.hooks.context_media_wait.take().unwrap_or(wait);
+        let deadline = std::time::Instant::now() + wait;
         let (revision, document) = self.context_snapshot(&state.run, &task.id)?;
         if revision != read.revision {
             return Err(refused("stale evidence revision"));
@@ -1054,24 +1107,20 @@ impl HostCommandOwner {
             rows.push(json!({"expected_note_ids":notes,"note_fate":"unknown"}));
         }
 
-        for (kind, reference) in [
-            ("explanation", Some(&result.explanation)),
-            ("delta", result.delta_ref.as_ref()),
-        ] {
-            if let Some(reference) = reference {
-                for chunk in self.child_reference_chunks(reference)? {
-                    rows.push(json!({"kind":kind,"reference":reference,"chunk":chunk}));
-                }
-            }
-        }
         for (kind, references) in [
             ("artifact", &result.artifacts),
             ("evidence", &result.evidence),
         ] {
             for reference in references {
-                for chunk in self.child_reference_chunks(reference)? {
-                    rows.push(json!({"kind":kind,"reference":reference,"chunk":chunk}));
-                }
+                rows.extend(self.child_record_rows(kind, reference)?);
+            }
+        }
+        for (kind, reference) in [
+            ("explanation", Some(&result.explanation)),
+            ("delta", result.delta_ref.as_ref()),
+        ] {
+            if let Some(reference) = reference {
+                rows.extend(self.child_record_rows(kind, reference)?);
             }
         }
         for chunk in bytes_rows(&serde_json::to_vec(&usage)?) {
@@ -1082,7 +1131,9 @@ impl HostCommandOwner {
                 rows.push(json!({"kind":"history","chunk":chunk}));
             }
         }
-        let value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES - 4096)?;
+        let mut value = page(&rows, &binding, read.cursor.as_deref(), PAGE_BYTES - 4096)?;
+        value["partial_coverage"] =
+            json!(value["omitted"] == true || rows.iter().any(|row| row["omitted"] == true));
         self.record_expansion(
             index,
             state,
@@ -1092,20 +1143,33 @@ impl HostCommandOwner {
         )?;
         Ok(value)
     }
+    fn child_record_rows(
+        &self,
+        kind: &str,
+        reference: &ObjectRef,
+    ) -> Result<Vec<Value>, HostError> {
+        if reference.byte_length > (PAGE_BYTES * 8) as u64 {
+            return Ok(vec![
+                json!({"kind":kind,"reference":reference,"byte_length":reference.byte_length,"omitted":true,"reason":"record_too_large","omission":"Record left out because it exceeds the 192 KiB single-record read limit.","partial_coverage":true,"acceptance":if matches!(kind,"artifact"|"evidence"){"cannot_accept_from_this_read"}else{"unverified"}}),
+            ]);
+        }
+        Ok(self
+            .child_reference_chunks(reference)?
+            .into_iter()
+            .map(|chunk| json!({"kind":kind,"reference":reference,"chunk":chunk}))
+            .collect())
+    }
     fn child_reference_chunks(&self, reference: &ObjectRef) -> Result<Vec<Value>, HostError> {
+        Ok(bytes_rows(&self.task_reference_bytes(reference)?))
+    }
+    fn task_reference_bytes(&self, reference: &ObjectRef) -> Result<Vec<u8>, HostError> {
         if reference.record_kind == RecordKind::OwnedEvidence {
             if reference.byte_length > (PAGE_BYTES * 8) as u64 {
-                return Err(capacity());
+                return Err(record_too_large());
             }
-            // Preserve the record the full wake shows, including whitespace,
-            // duplicate JSON keys and binary data. Parsing a child assertion
-            // here could silently discard evidence before the reader sees it.
-            let bytes = self.owner()?.store()?.read_evidence(reference)?;
-            return Ok(bytes_rows(&bytes));
+            return Ok(self.owner()?.store()?.read_evidence(reference)?.to_vec());
         }
-        Ok(bytes_rows(&serde_json::to_vec(
-            &self.read_task_reference(reference)?,
-        )?))
+        Ok(serde_json::to_vec(&self.read_task_reference(reference)?)?)
     }
     fn expected_note_ids(&self, task: &TaskRecord) -> Result<Vec<Value>, HostError> {
         Ok(self
@@ -1171,7 +1235,7 @@ impl HostCommandOwner {
             "detail_route":"read_child_result","source_is_result_head":true});
         if serde_json::to_vec(&summary)?.len() > PAGE_BYTES / 2 {
             // Keep the exact child/result/source request and counts for every
-            // admitted result before considering any whole-result omission.
+            // admitted result within the eight-task run bound.
             for result in summary["results"].as_array_mut().unwrap() {
                 result["expected_note_count"] =
                     json!(result["expected_note_ids"].as_array().map_or(0, Vec::len));
@@ -1180,19 +1244,9 @@ impl HostCommandOwner {
                 result["omitted_result_fields"] = json!(["base", "expected_note_ids"]);
             }
         }
-        let mut omitted = 0;
-        while serde_json::to_vec(&summary)?.len() > PAGE_BYTES / 2 {
-            let Some(_) = summary["results"].as_array_mut().unwrap().pop() else {
-                break;
-            };
-            omitted += 1;
-            summary["omitted_results"] = json!(omitted);
-            summary["enumerate_omitted"] = json!(
-                "Use task_status for terminal child references, read_task_result for their source headers, then read_child_result. Replan if page capacity prevents acceptance."
-            );
-        }
-        // No child-sized strings enter this fixed floor. Legitimate wakes are
-        // delivered with explicit omissions instead of a capacity refusal.
+        // At most seven children fit an admitted eight-task run. After the
+        // note/base trim, their fixed identities and counts fit this bound.
+        debug_assert!(serde_json::to_vec(&summary)?.len() <= PAGE_BYTES / 2);
         Ok(serde_json::to_vec(&summary)?)
     }
 }

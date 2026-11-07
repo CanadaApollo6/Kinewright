@@ -357,6 +357,9 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
             host.hooks.context_media_gate = Some(gate.clone());
             entered.store(true, Ordering::Release);
         }
+        if timeout {
+            host.hooks.context_media_wait = Some(Duration::from_millis(300));
+        }
         host.hooks.context_media_outcome = Some(outcome.clone());
         (probe, endpoint, target)
     };

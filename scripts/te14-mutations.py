@@ -93,5 +93,12 @@ harness.PAIRS.extend([
   'writer_host::task_context::tests::te14_large_rows_round_trip_and_changed_data_refuses_cursor','TE14_CURSOR_BINDS_DATA'),
 ])
 
+add('proof-classification', C, 'if value["kind"] != "task_proof_v1"',
+    'if false && value["kind"] != "task_proof_v1"',
+    'te14_fix2_classification_is_host_owned', 'TE14_CLASSIFICATION_IS_HOST_OWNED')
+add('preview-classification', C, 'EvidenceKind::Preview { .. } if value["kind"] != "task_preview_v1"',
+    'EvidenceKind::Preview { .. } if false && value["kind"] != "task_preview_v1"',
+    'te14_fix2_classification_is_host_owned', 'TE14_CLASSIFICATION_IS_HOST_OWNED')
+
 if __name__ == '__main__':
     harness.main()

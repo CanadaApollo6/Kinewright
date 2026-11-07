@@ -40,6 +40,7 @@ mod tests {
     include!("te13_fix5_tests.rs");
     include!("te14_tests.rs");
     include!("te14_fix1_tests.rs");
+    include!("te14_fix2_tests.rs");
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_fix2_tests.rs");
@@ -567,7 +568,12 @@ mod tests {
         receipt
     }
     fn reserve(f: &Fixture) -> (RunId, ExecutionIdentity, HostClient) {
-        let started = f.start();
+        reserve_from_started(f, f.start())
+    }
+    fn reserve_from_started(
+        f: &Fixture,
+        started: OrchestrationReceipt,
+    ) -> (RunId, ExecutionIdentity, HostClient) {
         let run: RunId = started.envelope.identity("run").unwrap();
         let actor = f.producer_client(&run);
         let mut projection = f.projection(&run);

@@ -967,11 +967,7 @@ impl HostCommandOwner {
         if reference.record_kind != RecordKind::RunIndex
             && reference.byte_length > (super::task_context::PAGE_BYTES * 8) as u64
         {
-            return Err(HostRefusal::new(
-                "evidence_capacity",
-                "Evidence capacity exhausted; replan without guessing.",
-            )
-            .into());
+            return Err(super::task_context::record_too_large());
         }
         let store = self.owner()?.store()?;
         match reference.record_kind {

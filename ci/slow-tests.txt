@@ -189,3 +189,5 @@ kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end crates/kinewright-a
 kinewright_agent writer_host::hooks_tests::tests::te13_finish_cannot_spend_the_terminal_reserve crates/kinewright-agent/src/writer_host/te13_tests.rs linux-only # TE1.3 ordinary intent vs terminal reserve; 67 s locally
 
 kinewright_agent writer_host::hooks_tests::tests::te14_fix1_many_results_always_deliver_a_bounded_wake crates/kinewright-agent/src/writer_host/te14_fix1_tests.rs linux-only # seven real durable child publications, over 60 s at four test threads
+
+kinewright_agent writer_host::hooks_tests::tests::te14_fix2_many_notes_reach_wake_trim crates/kinewright-agent/src/writer_host/te14_fix2_tests.rs linux-only # many-note production wake trimming
