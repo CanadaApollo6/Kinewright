@@ -102,11 +102,9 @@ add('refused-stop-keeps-finish',C,
     '            self.prove_completion_for_owner(index)?;\n            return Ok(None);',
     'te13_fix5_refused_stop_does_not_abandon_finish','TE13_FIX5_REFUSED_STOP_NO_FALSE_BLOCK')
 add('waiting-alive',C,
-    'return Ok(Some("Task completion is waiting for its original finish retry. No automatic retry is confirmed.".into()));',
-    'return Ok(None);','te13_fix5_repeated_freeze_fault','TE13_FIX5_TRUTHFUL_WAITING')
-add('waiting-gone',C,
-    'return Ok(Some("Task completion is waiting for its original finish retry. No automatic retry is confirmed.".into()));',
-    'return Ok(None);','te13_fix5_waiting_without_caller_has_truthful_words','TE13_FIX5_TRUTHFUL_WAITING')
+    'Ok(true) => waiting = true,',
+    'Ok(true) => {}',
+    'te13_fix5_repeated_freeze_fault','TE13_FIX5_TRUTHFUL_WAITING')
 for restarted in (False,True):
     add('generic-id-' + ('restart' if restarted else 'live'),C,
         'if stored.is_none()','if false',

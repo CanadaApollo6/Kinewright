@@ -180,6 +180,7 @@ pub(crate) fn refusal_code(
     } else if token(&[
         "task_scope",
         "task_authority_expired",
+        "task_authority_paused",
         "ScopeConflict",
         "root_refused",
         "identity_refused",
@@ -699,7 +700,7 @@ impl HostCommandOwner {
         }
         Err(refused("accounting missing"))
     }
-    fn resolve_task_mcp(
+    pub(super) fn resolve_task_mcp(
         &self,
         auth: &HostAuth,
         endpoint: &TaskEndpoint,
@@ -708,11 +709,12 @@ impl HostCommandOwner {
         if self.native_recovery_pending || self.recovery_only {
             return Err(HostRefusal::new("recovery_frozen", "native recovery is pending").into());
         }
-        endpoint.check_live().map_err(|_| {
-            HostError::from(HostRefusal::new(
-                "task_authority_expired",
-                "task authority expired",
-            ))
+        endpoint.check_live().map_err(|reason| {
+            HostError::from(if reason == "task_authority_paused" {
+                HostRefusal::new(&reason, "the run is paused; retry after it resumes")
+            } else {
+                HostRefusal::new(&reason, "task authority expired")
+            })
         })?;
         let index = self.resolve_attachment(Some(&auth.bearer()))?;
         let authority = endpoint.authority();

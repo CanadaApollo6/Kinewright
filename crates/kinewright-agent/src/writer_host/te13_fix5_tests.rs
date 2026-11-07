@@ -281,8 +281,42 @@ fn te13_fix5_maintenance_without_issuance() {
     te13_fix5_publisher(CompletionStep::Freeze, false, false);
 }
 
+/// The words and the completion status must agree once no retry can be accepted.
+fn te13_fix6_no_retry_possible(p: &Te13Fix4Pending) {
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let mut owner = host.lock().unwrap();
+    owner.owner_mut().unwrap().reconcile_metadata().unwrap();
+    let state = owner
+        .owner()
+        .unwrap()
+        .orchestration_projection(&p.run.run)
+        .unwrap()
+        .unwrap();
+    let words = owner.run_recovery_message(&state).unwrap().unwrap();
+    assert!(
+        words.contains("Stop this run") && !words.contains(TE13_FIX5_WAITING),
+        "TE13_FIX6_NO_RETRY_WORDS {words}"
+    );
+    let intent = state
+        .tasks
+        .iter()
+        .find_map(|task| task.progress.completion.as_deref())
+        .unwrap();
+    let status = owner.completion_status(&state, intent).unwrap();
+    assert_eq!(
+        status.state,
+        super::super::CompletionState::Blocked,
+        "TE13_FIX6_WORDS_MATCH_STATUS"
+    );
+    assert_eq!(
+        status.reason.as_deref(),
+        Some("task_authority_unavailable"),
+        "TE13_FIX6_WORDS_MATCH_STATUS"
+    );
+}
+
 #[test]
-fn te13_fix5_waiting_without_caller_has_truthful_words() {
+fn te13_fix6_dead_caller_is_blocked_not_waiting() {
     let p = te13_fix4_pending(CompletionStep::Publication, false, false);
     let host = p.run.f.host.owner.upgrade().unwrap();
     {
@@ -294,7 +328,129 @@ fn te13_fix5_waiting_without_caller_has_truthful_words() {
             .alive
             .store(false, std::sync::atomic::Ordering::Release);
     }
+    te13_fix6_no_retry_possible(&p);
+}
+
+#[test]
+fn te13_fix6_revoked_authority_is_blocked_not_waiting() {
+    let p = te13_fix4_pending(CompletionStep::Publication, false, false);
+    Fixture::issue(&p.run.f.editor);
+    {
+        let host = p.run.f.host.owner.upgrade().unwrap();
+        let owner = host.lock().unwrap();
+        owner.hooks.runs[&p.run.run]
+            .tasks
+            .values()
+            .for_each(|task| task.endpoint().revoke());
+    }
+    te13_fix6_no_retry_possible(&p);
+}
+
+#[test]
+fn te13_fix6_paused_run_still_waits_and_tells_the_caller() {
+    let p = te13_fix4_pending(CompletionStep::Publication, false, false);
+    Fixture::issue(&p.run.f.editor);
+    let pause = p
+        .run
+        .f
+        .control(&p.run.f.editor, &p.run.run, RunAction::Pause);
+    let reply = te13_fix2_dispatch(&p.run, &p.run.f.editor, &pause);
+    assert!(reply.error.is_none(), "TE13_FIX6_REAL_PAUSE {reply:?}");
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let endpoint = {
+        let owner = host.lock().unwrap();
+        owner.hooks.runs[&p.run.run]
+            .tasks
+            .values()
+            .next()
+            .unwrap()
+            .endpoint()
+    };
+    assert_eq!(
+        endpoint.check_live().unwrap_err(),
+        "task_authority_paused",
+        "TE13_FIX6_REAL_PAUSE"
+    );
+    let refusal = {
+        let owner = host.lock().unwrap();
+        owner
+            .resolve_task_mcp(&p.client.bootstrap.auth, &endpoint)
+            .map(|_| ())
+            .unwrap_err()
+    };
+    assert_eq!(
+        refusal.refusal().code,
+        "task_authority_paused",
+        "TE13_FIX6_PAUSED_IS_NOT_EXPIRED"
+    );
     te13_fix5_waiting(&p);
+}
+
+/// Stop through the durable route, with no slot and no raw block, inside a real switch.
+#[test]
+fn te13_fix6_durable_stop_inside_real_switch() {
+    use kinewright_project::bundle_switch::SwitchTarget;
+    let p = te13_fix4_pending(CompletionStep::Publication, false, false);
+    Fixture::issue(&p.run.f.editor);
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let client = "f".repeat(64);
+    let (envelope, expected) = {
+        let mut owner = host.lock().unwrap();
+        owner.acquire_manual(client.clone()).unwrap();
+        let project = owner.owner_mut().unwrap();
+        let mut branch = project.fork_durable_branch("fix6 switch target").unwrap();
+        branch
+            .core()
+            .request(kinewright_core::Command::Do(history_marker(106)))
+            .unwrap();
+        project.persist_durable_branch(&mut branch).unwrap();
+        let expected = branch.core().export_history().unwrap();
+        let id = branch.branch_id().clone();
+        project.close_durable_branch(&branch).unwrap();
+        let mut reply = HostReply::default();
+        owner
+            .prepare_switch(SwitchTarget::WorkingBranch { branch: id }, &mut reply)
+            .unwrap();
+        assert!(owner.switch_frozen, "TE13_FIX6_REAL_SWITCH_PREPARED");
+        assert!(
+            owner.hooks.pending.is_none()
+                && owner.hooks.runs[&p.run.run].recovery_blocks.is_empty(),
+            "TE13_FIX6_ROUTE_IS_DURABLE"
+        );
+        (reply.switch_envelope.unwrap(), expected)
+    };
+    Fixture::issue(&p.run.f.editor);
+    let stop = p
+        .run
+        .f
+        .control(&p.run.f.editor, &p.run.run, RunAction::Stop);
+    let reply = te13_fix2_dispatch(&p.run, &p.run.f.editor, &stop);
+    assert!(reply.error.is_none(), "TE13_FIX6_REAL_SWITCH_STOP {reply:?}");
+    assert_eq!(
+        reply.orchestration.unwrap().decision,
+        CommandDecision::Applied,
+        "TE13_FIX6_REAL_SWITCH_STOP"
+    );
+    let mut owner = host.lock().unwrap();
+    let mut reply = HostReply::default();
+    owner.publish_switch(&envelope, &mut reply).unwrap();
+    let installed = reply.switch_attachment.unwrap().identity().unwrap();
+    owner
+        .confirm_switch(client, &installed, &mut HostReply::default())
+        .unwrap();
+    assert!(!owner.switch_frozen, "TE13_FIX6_SWITCH_CONFIRMED_AFTER_STOP");
+    assert_eq!(
+        owner.core().export_history().unwrap(),
+        expected,
+        "TE13_FIX6_SWITCH_SELECTED_WORK"
+    );
+    drop(owner);
+    let state = p.run.f.projection(&p.run.run);
+    assert_eq!(
+        state.results.len(),
+        0,
+        "TE13_FIX6_STOP_PUBLISHED_NOTHING"
+    );
 }
 
 fn te13_fix5_frozen_empty(recovering: bool) {

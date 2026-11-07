@@ -227,13 +227,37 @@ impl HostCommandOwner {
         &self,
         state: &RunProjection,
     ) -> Result<Option<String>, HostError> {
-        let blocks = if state.outcome == RunOutcome::Pending {
+        let mut blocks = if state.outcome == RunOutcome::Pending {
             self.run_recovery_blocks(state)?
         } else {
             // Disclosure failures are shown below; they must not hide a
             // different stopped task or make the whole Run details unreadable.
             self.inspect_recovery_blocks(state).unwrap_or_default()
         };
+        // Words and completion status read the same authority. A finish nobody
+        // can retry any more is blocked, even though no retry ever failed.
+        let mut waiting = false;
+        if state.outcome == RunOutcome::Pending && blocks.is_empty() {
+            for task in &state.tasks {
+                let Some(intent) = task.progress.completion.as_deref() else {
+                    continue;
+                };
+                let publication_missing =
+                    intent.step_id(CompletionStep::Publication).is_ok_and(|id| {
+                        self.owner()
+                            .and_then(|owner| Ok(owner.orchestration_receipt(&state.run, &id)?))
+                            .is_ok_and(|receipt| receipt.is_none())
+                    });
+                if !publication_missing {
+                    continue;
+                }
+                match self.completion_authority_current(state, intent) {
+                    Ok(true) => waiting = true,
+                    Ok(false) => blocks.push(RecoveryBlock::Completion(task.id.clone())),
+                    Err(_) => {}
+                }
+            }
+        }
         let retained = self.owner()?.retained_task_discovery();
         if let Some(failure) = retained
             .failures
@@ -273,18 +297,9 @@ impl HostCommandOwner {
                 .map(|work| format!("retained_task_work: {}", work.disclosure)));
         }
         let Some(block) = blocks.first() else {
-            if state.tasks.iter().any(|task| {
-                task.progress.completion.as_deref().is_some_and(|intent| {
-                    intent.step_id(CompletionStep::Publication).is_ok_and(|id| {
-                        self.owner()
-                            .and_then(|owner| Ok(owner.orchestration_receipt(&state.run, &id)?))
-                            .is_ok_and(|receipt| receipt.is_none())
-                    })
-                })
-            }) {
-                return Ok(Some("Task completion is waiting for its original finish retry. No automatic retry is confirmed.".into()));
-            }
-            return Ok(None);
+            return Ok(waiting.then(|| {
+                "Task completion is waiting for its original finish retry. No automatic retry is confirmed.".into()
+            }));
         };
         Ok(Some(block.fallback_disclosure()))
     }
@@ -932,7 +947,8 @@ impl HostCommandOwner {
                 .check_live()
                 .map_or_else(|reason| reason == "task_authority_paused", |()| true)
                 && self.attachments.iter().any(|attachment| {
-                    subject.as_deref() == Some(attachment.subject.as_str())
+                    attachment.alive.load(std::sync::atomic::Ordering::Acquire)
+                        && subject.as_deref() == Some(attachment.subject.as_str())
                         && attachment.producer_scope.as_ref().is_some_and(|scope| {
                             scope.task.as_ref() == Some(&intent.request.task)
                                 && scope.run == state.run

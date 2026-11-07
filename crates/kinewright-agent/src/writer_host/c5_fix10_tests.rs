@@ -834,6 +834,7 @@ fn s4b_c5_fix10_refusal_code_table() {
         ),
         ("task_freezing", Code::TerminalReserved),
         ("task_authority_expired", Code::NotAdmitted),
+        ("task_authority_paused", Code::NotAdmitted),
         ("orchestration_refused: InvalidState", Code::InvalidState),
         ("task_scope: no task control attachment", Code::NotAdmitted),
         ("orchestration_refused: ScopeConflict", Code::NotAdmitted),
