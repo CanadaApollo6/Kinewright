@@ -41,6 +41,7 @@ mod tests {
     include!("te14_tests.rs");
     include!("te14_fix1_tests.rs");
     include!("te14_fix2_tests.rs");
+    include!("te15_a_tests.rs");
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_fix2_tests.rs");

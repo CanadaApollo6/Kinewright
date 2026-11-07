@@ -157,6 +157,8 @@ pub(super) struct Hooks {
     #[cfg(test)]
     pub context_media_wait: Option<std::time::Duration>,
     #[cfg(test)]
+    pub context_media_poll_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+    #[cfg(test)]
     pub context_media_outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
     #[cfg(test)]
     pub context_reply_gate: Option<ContextReplyGate>,

@@ -12,13 +12,16 @@ fn te14_fix2_raw_grant(f: &mut Fixture, bytes: &[u8]) -> ObjectRef {
 }
 fn te14_fix2_publish(mode: &str) -> (C5Fix10Run, ObjectRef, TaskResult) {
     let mut r = c5_fix10_run();
-    if mode == "bulk" {
+    if matches!(mode, "bulk" | "oversized") {
         for n in 0..1 {
             let revision = grant_test_revision(&r.core);
             let operation = kinewright_core::Operation::SetMarkerParam {
                 marker: kinewright_core::MarkerId(1),
                 name: "label".into(),
-                value: kinewright_core::ParamValue::Text(format!("{n}{}", "x".repeat(15_000))),
+                value: kinewright_core::ParamValue::Text(format!(
+                    "{n}{}",
+                    "x".repeat(if mode == "bulk" { 15_000 } else { 5_000 })
+                )),
             };
             let prepared=te14_outcome(r.editor.wire("prepare_edit_plan",serde_json::json!({"expected_revision":revision,"operations":[operation.clone(),operation.clone(),operation]})));
             te14_outcome(r.editor.wire(
@@ -91,8 +94,8 @@ fn te14_fix2_oversized_record_does_not_poison_child() {
         serde_json::to_value(ChildRead {
             run: r.run.clone(),
             child: r.child.clone(),
-            reference,
-            source: result.head,
+            reference: reference.clone(),
+            source: result.head.clone(),
             cursor: None,
         })
         .unwrap(),
@@ -119,7 +122,25 @@ fn te14_fix2_oversized_record_does_not_poison_child() {
         omission["acceptance"], "cannot_accept_from_this_read",
         "TE14_FIX2_OMITTED_PROOF_UNKNOWN"
     );
-    assert_eq!(page["partial_coverage"], true, "TE14_FIX2_PARTIAL_OMISSION");
+    assert_eq!(page["omitted"], true, "TE15_OMISSION_FIXTURE_SPILLS");
+    let mut last = page.clone();
+    while let Some(cursor) = last["next_cursor"].as_str() {
+        last = te14_outcome(
+            r.director.wire(
+                "read_child_result",
+                serde_json::to_value(ChildRead {
+                    run: r.run.clone(),
+                    child: r.child.clone(),
+                    reference: reference.clone(),
+                    source: result.head.clone(),
+                    cursor: Some(cursor.into()),
+                })
+                .unwrap(),
+            ),
+        );
+    }
+    assert_eq!(last["omitted"], false, "TE15_OMISSION_LAST_PAGE");
+    assert_eq!(last["partial_coverage"], true, "TE14_FIX2_PARTIAL_OMISSION");
     let legacy = r.director.wire(
         "read_task_result",
         serde_json::json!({"reference":result.artifacts[0]}),
@@ -313,6 +334,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
     f.host.runtime.stop();
     let owner = f.host.owner.upgrade().unwrap();
     let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
+    let poll_gate = (!cold && action == 0).then(|| Arc::new((Barrier::new(2), Barrier::new(2))));
     let endpoint = {
         let mut host = owner.lock().unwrap();
         host.hooks.context_media_wait = Some(if action == 0 {
@@ -320,6 +342,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
         } else {
             Duration::from_secs(30)
         });
+        host.hooks.context_media_poll_gate = poll_gate.clone();
         let endpoint = host.hooks.runs[&run].tasks[&child].endpoint();
         if cold {
             let store = host.owner().unwrap().store().unwrap();
@@ -349,6 +372,11 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
     let (timely, first, busy, during) = std::thread::scope(|scope| {
         let read = scope.spawn(|| mcp.wire("read_task_evidence", request.clone()));
         gate.0.wait();
+        if let Some(poll_gate) = &poll_gate {
+            poll_gate.0.wait();
+            std::thread::sleep(Duration::from_millis(300));
+            poll_gate.1.wait();
+        }
         let control = scope.spawn(|| {
             if action == 0 {
                 return None;

@@ -61,8 +61,8 @@ add('media-liveness', C, '!endpoint.media_read_live() || !alive.load(Ordering::A
 add('decoder-cancel', C, 'let signal = Arc::clone(&cancel);',
     'let signal = Arc::new(std::sync::atomic::AtomicBool::new(false));',
     'te14_fix1_decode_stop', 'TE14_FIX1_DECODER_REAL_CANCEL')
-add('media-deadline', C, 'if std::time::Instant::now() >= deadline {',
-    'if false && std::time::Instant::now() >= deadline {',
+add('media-deadline', C, 'if now >= deadline {',
+    'if false && now >= deadline {',
     'te14_fix1_media_wall_clock_limit', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
 add('child-proof-source', C, '1 => Ok(sources.pop().unwrap()),', '1 => Ok(json!(current)),',
     'te14_fix1_child_proof_uses_durable_source_not_parent_clock', 'TE14_FIX1_CHILD_PROOF_SOURCE')

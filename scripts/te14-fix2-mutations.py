@@ -15,10 +15,10 @@ I='crates/kinewright-agent/src/writer_host/codex_instructions.rs'
 H='writer_host::hooks_tests::tests::'
 def add(name,before,after,witness,marker,source=C):
  harness.PAIRS.append((name,source,before,after,'kinewright-agent',H+witness,marker))
-add('verification-phase','if verified.load(Ordering::Acquire) {','if !verified.load(Ordering::Acquire) {','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WORDS')
-add('decode-phase','verified.store(true, std::sync::atomic::Ordering::Release);','verified.store(false, std::sync::atomic::Ordering::Release);','te14_fix2_decode_overrun_is_not_retryable','TE14_FIX2_MEDIA_WORDS')
-add('busy-retry','.map_err(|_| refused(MEDIA_RETRY))?;','.map_err(|_| refused(MEDIA_DECODE_TIMEOUT))?;','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_BUSY_RETRY')
-add('wait-deadline','if std::time::Instant::now() >= deadline {','if false && std::time::Instant::now() >= deadline {','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WAIT_ENDS')
+add('verification-phase','MediaReadPhase::Verifying => MEDIA_RETRY,','MediaReadPhase::Verifying => MEDIA_DECODE_TIMEOUT,','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WORDS')
+add('decode-phase','if now.duration_since(started) >= wait','if false && now.duration_since(started) >= wait','te14_fix2_decode_overrun_is_not_retryable','TE14_FIX2_MEDIA_WORDS')
+add('busy-retry','MediaReadStartError::Busy => refused(MEDIA_RETRY)','MediaReadStartError::Busy => refused(MEDIA_DECODE_TIMEOUT)','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_BUSY_RETRY')
+add('wait-deadline','if now >= deadline {','if false && now >= deadline {','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WAIT_ENDS')
 for action in ('stop','pause'):
  add(action+'-wait','!endpoint.media_read_live() || !alive.load(Ordering::Acquire)','false && (!endpoint.media_read_live() || !alive.load(Ordering::Acquire))','te14_fix2_'+action+'_ends_wait','TE14_FIX2_MEDIA_WAIT_ENDS')
 s=(ROOT/C).read_text();start=s.index('pub(super) fn read_child_context');a=s.index('        for (kind, references) in [',start);b=s.index('        for (kind, reference) in [',a);end=s.index('        for chunk in bytes_rows(&serde_json::to_vec(&usage)?)',b)
@@ -29,8 +29,8 @@ add('omitted-acceptance','"cannot_accept_from_this_read"','"unverified"','te14_f
 add('omitted-partial','rows.iter().any(|row| row["omitted"] == true)','false','te14_fix2_oversized_record_does_not_poison_child','TE14_FIX2_PARTIAL_OMISSION')
 add('record-limit-words','Record exceeds the 192 KiB single-record read limit; contents unavailable on this route.','Evidence capacity exhausted; replan without guessing.','te14_fix2_oversized_record_does_not_poison_child','TE14_FIX2_RECORD_LIMIT_WORDS')
 add('reference-bytes','return Ok(self.owner()?.store()?.read_evidence(reference)?.to_vec());','return Ok(serde_json::to_vec(&self.read_task_reference(reference)?)?);','te14_fix2_all_reference_routes_preserve_bytes_or_refuse','TE14_FIX2_ORIGINAL_REFERENCE_BYTES')
-add('classified-duplicates','unique_classified_object(&bytes)?','serde_json::from_slice(&bytes)?','te14_fix2_all_reference_routes_preserve_bytes_or_refuse','TE14_FIX2_AMBIGUOUS_CLASSIFICATION')
-add('classification-fields','unique_classified_object(&bytes)?','serde_json::from_slice(&bytes)?','te14_fix2_duplicate_classification_fields_are_ambiguous','TE14_FIX2_DUPLICATE_CLASSIFICATION')
+add('classified-duplicates','                ) {\n                    unique_classified_object(&bytes)?','                ) {\n                    serde_json::from_slice(&bytes)?','te14_fix2_all_reference_routes_preserve_bytes_or_refuse','TE14_FIX2_AMBIGUOUS_CLASSIFICATION')
+add('classification-fields','                ) {\n                    unique_classified_object(&bytes)?','                ) {\n                    serde_json::from_slice(&bytes)?','te14_fix2_duplicate_classification_fields_are_ambiguous','TE14_FIX2_DUPLICATE_CLASSIFICATION')
 add('proof-classification','if value["kind"] != "task_proof_v1"','if false && value["kind"] != "task_proof_v1"','te14_fix2_classification_is_host_owned','TE14_CLASSIFICATION_IS_HOST_OWNED')
 add('preview-classification','EvidenceKind::Preview { .. } if value["kind"] != "task_preview_v1"','EvidenceKind::Preview { .. } if false && value["kind"] != "task_preview_v1"','te14_fix2_classification_is_host_owned','TE14_CLASSIFICATION_IS_HOST_OWNED')
 add('trim-note-count','json!(result["expected_note_ids"].as_array().map_or(0, Vec::len))','json!(0)','te14_fix2_many_notes_reach_wake_trim','TE14_FIX2_TRIM_NOTE_COUNT')

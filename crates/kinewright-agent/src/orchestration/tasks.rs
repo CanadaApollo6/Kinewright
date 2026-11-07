@@ -92,6 +92,11 @@ struct Ingress {
 
 #[derive(Clone)]
 pub struct TaskEndpoint(Arc<Ingress>);
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MediaReadStartError {
+    Unavailable,
+    Busy,
+}
 pub(crate) struct MediaReadPermit(TaskEndpoint);
 impl Drop for MediaReadPermit {
     fn drop(&mut self) {
@@ -128,15 +133,16 @@ impl TaskEndpoint {
     pub fn authority(&self) -> &RuntimeTaskAuthority {
         &self.0.authority
     }
-    pub(crate) fn begin_media_read(&self) -> Result<MediaReadPermit, String> {
-        self.check_live()?;
+    pub(crate) fn begin_media_read(&self) -> Result<MediaReadPermit, MediaReadStartError> {
+        self.check_live()
+            .map_err(|_| MediaReadStartError::Unavailable)?;
         if self.0.phase.load(Ordering::Acquire) != INGRESS_OPEN {
-            return Err("task_freezing".into());
+            return Err(MediaReadStartError::Unavailable);
         }
         self.0
             .media_read_busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "media evidence read already pending".to_owned())?;
+            .map_err(|_| MediaReadStartError::Busy)?;
         Ok(MediaReadPermit(self.clone()))
     }
     pub(crate) fn media_read_live(&self) -> bool {

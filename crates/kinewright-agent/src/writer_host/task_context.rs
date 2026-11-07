@@ -30,26 +30,57 @@ pub(super) fn record_too_large() -> HostError {
     )
 }
 fn unique_classified_object(bytes: &[u8]) -> Result<Value, HostError> {
-    struct UniqueObject;
-    impl<'de> serde::de::Visitor<'de> for UniqueObject {
+    struct UniqueValue(Value);
+    impl<'de> Deserialize<'de> for UniqueValue {
+        fn deserialize<D: serde::Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
+            input.deserialize_any(UniqueVisitor).map(Self)
+        }
+    }
+    struct UniqueVisitor;
+    impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
         type Value = Value;
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("an unambiguous classified object")
+            f.write_str("unambiguous JSON")
         }
         fn visit_map<M: serde::de::MapAccess<'de>>(self, mut input: M) -> Result<Value, M::Error> {
             let mut map = serde_json::Map::new();
-            while let Some((key, value)) = input.next_entry::<String, Value>()? {
-                if map.insert(key, value).is_some() {
-                    return Err(serde::de::Error::custom("duplicate top-level key"));
+            while let Some((key, value)) = input.next_entry::<String, UniqueValue>()? {
+                if map.insert(key, value.0).is_some() {
+                    return Err(serde::de::Error::custom("duplicate key"));
                 }
             }
             Ok(Value::Object(map))
+        }
+        fn visit_seq<S: serde::de::SeqAccess<'de>>(self, mut input: S) -> Result<Value, S::Error> {
+            let mut values = Vec::new();
+            while let Some(value) = input.next_element::<UniqueValue>()? {
+                values.push(value.0);
+            }
+            Ok(Value::Array(values))
+        }
+        fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Value, E> {
+            Ok(json!(value))
+        }
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Value, E> {
+            Ok(json!(value))
+        }
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Value, E> {
+            Ok(json!(value))
+        }
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Value, E> {
+            Ok(json!(value))
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Value, E> {
+            Ok(json!(value))
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+            Ok(Value::Null)
         }
     }
     use serde::de::Deserializer as _;
     let mut input = serde_json::Deserializer::from_slice(bytes);
     let value = (&mut input)
-        .deserialize_map(UniqueObject)
+        .deserialize_map(UniqueVisitor)
         .map_err(|_| refused("ambiguous or invalid classified evidence object"))?;
     input
         .end()
@@ -260,6 +291,11 @@ fn page(
     Ok(result)
 }
 fn bytes_rows(bytes: &[u8]) -> Vec<Value> {
+    if bytes.is_empty() {
+        return vec![
+            json!({"byte_offset":0,"encoding":"utf8","text":"","byte_length":0,"empty":true}),
+        ];
+    }
     if let Ok(text) = std::str::from_utf8(bytes) {
         let mut rows = Vec::new();
         let mut start = 0;
@@ -290,6 +326,9 @@ pub(super) struct PreparedMediaRead {
     cursor: Option<String>,
     binding: Value,
     deadline: std::time::Instant,
+    wait: std::time::Duration,
+    #[cfg(test)]
+    poll_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     switch_generation: Option<u64>,
     #[cfg(test)]
     gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
@@ -331,8 +370,14 @@ fn visible_prefix(
 }
 const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RETRY: &str = "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned.";
+const MEDIA_PREPARING_RETRY: &str = "Media evidence preparation exceeded this wait. Retry shortly; no page is charged until a sample is returned.";
 const MEDIA_DECODE_TIMEOUT: &str =
     "Media decode or seek exceeded the 30-second wait; not retryable. Replan without guessing.";
+enum MediaReadPhase {
+    Verifying,
+    Decoding(std::time::Instant),
+    Assembling,
+}
 struct CancelMediaRead(Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelMediaRead {
     fn drop(&mut self) {
@@ -352,16 +397,20 @@ impl PreparedMediaRead {
         owner: &Arc<std::sync::Mutex<HostCommandOwner>>,
     ) -> Result<RenderedMediaRead, HostError> {
         use std::sync::atomic::Ordering;
-        let permit = endpoint
-            .begin_media_read()
-            .map_err(|_| refused(MEDIA_RETRY))?;
+        let permit = endpoint.begin_media_read().map_err(|error| match error {
+            crate::orchestration::tasks::MediaReadStartError::Busy => refused(MEDIA_RETRY),
+            crate::orchestration::tasks::MediaReadStartError::Unavailable => media_unavailable(),
+        })?;
         let alive = Arc::clone(&self.alive);
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = Arc::clone(&cancel);
-        let verified = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_verified = Arc::clone(&verified);
+        let phase = Arc::new(std::sync::Mutex::new(MediaReadPhase::Verifying));
+        let worker_phase = Arc::clone(&phase);
         let _cancel_on_exit = CancelMediaRead(Arc::clone(&cancel));
         let deadline = self.deadline;
+        let wait = self.wait;
+        #[cfg(test)]
+        let poll_gate = self.poll_gate.clone();
         let switch_generation = self.switch_generation;
         #[cfg(test)]
         let outcome = self.outcome.clone();
@@ -369,7 +418,7 @@ impl PreparedMediaRead {
             .name("task-media-read".into())
             .spawn(move || {
                 let _permit = permit;
-                let result = self.decode(&signal, &worker_verified);
+                let result = self.decode(&signal, &worker_phase);
                 #[cfg(test)]
                 if let Some(outcome) = outcome {
                     outcome.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
@@ -377,6 +426,8 @@ impl PreparedMediaRead {
                 result
             })
             .map_err(|_| media_failed())?;
+        #[cfg(test)]
+        Self::decode_gate(poll_gate.as_ref());
         loop {
             let mut stopped = !endpoint.media_read_live() || !alive.load(Ordering::Acquire);
             if let Ok(host) = owner.try_lock() {
@@ -394,18 +445,24 @@ impl PreparedMediaRead {
             if stopped {
                 return Err(media_unavailable());
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(refused(if verified.load(Ordering::Acquire) {
-                    MEDIA_DECODE_TIMEOUT
-                } else {
-                    MEDIA_RETRY
-                }));
-            }
             if worker.is_finished() {
                 return worker
                     .join()
                     .map_err(|_| media_failed())?
                     .map_err(|_| media_failed());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                let phase = phase.lock().map_err(|_| media_failed())?;
+                return Err(refused(match *phase {
+                    MediaReadPhase::Verifying => MEDIA_RETRY,
+                    MediaReadPhase::Decoding(started) if now.duration_since(started) >= wait => {
+                        MEDIA_DECODE_TIMEOUT
+                    }
+                    MediaReadPhase::Decoding(_) | MediaReadPhase::Assembling => {
+                        MEDIA_PREPARING_RETRY
+                    }
+                }));
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -423,7 +480,7 @@ impl PreparedMediaRead {
     fn decode(
         self,
         cancel: &Arc<std::sync::atomic::AtomicBool>,
-        verified: &std::sync::atomic::AtomicBool,
+        phase: &std::sync::Mutex<MediaReadPhase>,
     ) -> Result<RenderedMediaRead, HostError> {
         use base64::Engine as _;
         #[cfg(test)]
@@ -433,7 +490,8 @@ impl PreparedMediaRead {
             return Err(media_unavailable());
         }
         let source = lease.certified_source()?;
-        verified.store(true, std::sync::atomic::Ordering::Release);
+        *phase.lock().map_err(|_| media_failed())? =
+            MediaReadPhase::Decoding(std::time::Instant::now());
         let mut value = if self.audio {
             let mut decoder = source.open_audio(Arc::clone(cancel))?;
             #[cfg(test)]
@@ -445,6 +503,7 @@ impl PreparedMediaRead {
                 .next_frame()
                 .map_err(|_| refused("owned audio unavailable"))?
                 .ok_or_else(|| refused("owned audio unavailable"))?;
+            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling;
             let channels = usize::from(frame.channels());
             let bytes = frame.format().bytes();
             let frame_bytes = channels
@@ -524,6 +583,7 @@ impl PreparedMediaRead {
                 .next_frame()
                 .map_err(|_| refused("owned frame unavailable"))?
                 .ok_or_else(|| refused("owned frame unavailable"))?;
+            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling;
             let descriptor = frame
                 .format()
                 .descriptor()
@@ -879,7 +939,12 @@ impl HostCommandOwner {
                 ) {
                     unique_classified_object(&bytes)?
                 } else if matches!(read.evidence, EvidenceKind::Transcript { .. }) {
-                    self.read_task_reference(reference)?
+                    let value = self.read_task_reference(reference)?;
+                    if value.is_object() {
+                        unique_classified_object(&bytes)?
+                    } else {
+                        value
+                    }
                 } else {
                     Value::Null
                 };
@@ -1017,6 +1082,9 @@ impl HostCommandOwner {
             cursor: read.cursor.clone(),
             binding,
             deadline,
+            wait,
+            #[cfg(test)]
+            poll_gate: self.hooks.context_media_poll_gate.take(),
             switch_generation: self.owner()?.manual_switch_generation().ok(),
             #[cfg(test)]
             gate: self.hooks.context_media_gate.take(),
