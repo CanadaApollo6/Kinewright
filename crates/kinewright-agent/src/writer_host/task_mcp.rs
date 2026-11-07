@@ -434,6 +434,17 @@ impl TaskMcp {
                 .map_err(|_| refused("history step is outside task authority"))?;
             return Ok(json!({"history":history}));
         }
+        let mut arguments = arguments;
+        if name == "assign_task" {
+            let brief = arguments
+                .pointer_mut("/command/value/brief")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| refused("assignment brief required"))?;
+            brief.insert(
+                "provider".into(),
+                serde_json::to_value(&state.tasks[0].brief.provider)?,
+            );
+        }
         let control: Control = serde_json::from_value(arguments)?;
         if control.attempt != self.endpoint.authority().attempt
             || control.owner_epoch != self.endpoint.authority().owner_epoch
@@ -501,6 +512,37 @@ impl TaskMcp {
             && !merge_replay
         {
             return Err(refused("stale control generation"));
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(
+            request.envelope.command,
+            OrchestrationCommand::AssignTask(_)
+        ) && let Some(receipt) = replay.as_ref()
+        {
+            // A broken new choice can end this turn without replacing its stored outcome.
+            let outcome = json!({"receipt":receipt});
+            drop(host);
+            let _ = super::provider_readiness::check_run(&owner, &state.run);
+            return Ok(outcome);
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(
+            request.envelope.command,
+            OrchestrationCommand::AssignTask(_)
+        ) && replay.is_none()
+        {
+            drop(host);
+            super::provider_readiness::check_run(&owner, &state.run)
+                .map_err(|why| HostRefusal::new("provider_wait", &why.to_string()))?;
+            host = owner
+                .lock()
+                .map_err(|_| refused("host owner unavailable"))?;
+            host.resolve_task_mcp(&self.auth, &self.endpoint)?;
+            if host.bind_publication(&request)? != bound {
+                let why = "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.";
+                host.wait_for_provider(&state.run, why)?;
+                return Err(HostRefusal::new("provider_wait", why).into());
+            }
         }
         if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command
             && let Some(history) = host.saved_task_history(&state, target)?

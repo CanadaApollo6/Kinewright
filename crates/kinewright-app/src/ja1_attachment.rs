@@ -16,8 +16,10 @@ use kinewright_project::{
 use std::fmt::Write as _;
 #[path = "ja1_host.rs"]
 mod host;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) use host::SCHEDULER_SETTINGS;
+#[cfg(test)]
+pub(crate) use host::test_scheduler_folder;
 #[path = "host_snapshot.rs"]
 mod host_snapshot;
 use std::{

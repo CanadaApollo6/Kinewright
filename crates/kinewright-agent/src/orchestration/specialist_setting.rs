@@ -14,6 +14,8 @@ use std::{
 
 const FILE: &str = "specialists.json";
 const MAX_BYTES: u64 = 16 << 10;
+const UNREADABLE: &str = "Your saved specialist choice cannot be read. Choose a specialist in Settings; it has not been substituted.";
+const UNAVAILABLE: &str = "Your saved specialist choice is unavailable. Choose another in Settings; it has not been substituted.";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -112,11 +114,30 @@ pub fn specialist_choices() -> Vec<ProviderSelectionRecord> {
 pub fn specialist_status(folder: Option<&Path>) -> SpecialistStatus {
     let read = || -> Result<Option<Setting>, String> {
         let folder = folder.map_or_else(scheduler_settings_directory, |p| Ok(p.to_path_buf()))?;
-        let file = match std::fs::File::open(folder.join(FILE)) {
-            Ok(file) => file,
+        let path = folder.join(FILE);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.to_string()),
+            Err(_) => return Err(UNREADABLE.into()),
         };
+        if !metadata.is_file() || metadata.len() > MAX_BYTES {
+            return Err(UNREADABLE.into());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                    .bits()
+                    .cast_signed(),
+            );
+        }
+        let file = options.open(path).map_err(|_| UNREADABLE)?;
+        if !file.metadata().map_err(|_| UNREADABLE)?.is_file() {
+            return Err(UNREADABLE.into());
+        }
         let mut bytes = Vec::new();
         file.take(MAX_BYTES + 1)
             .read_to_end(&mut bytes)
@@ -125,7 +146,10 @@ pub fn specialist_status(folder: Option<&Path>) -> SpecialistStatus {
             return Err("Specialist setting is too large.".into());
         }
         let setting: Setting = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if setting.version != 1 {
+        if setting.version != 1
+            || matches!(&setting.specialists,
+            SpecialistChoice::Specific(selection) if !super::director_setting::valid_shape(selection))
+        {
             return Err("Unknown specialist setting version.".into());
         }
         Ok(Some(setting))
@@ -139,9 +163,7 @@ pub fn specialist_status(folder: Option<&Path>) -> SpecialistStatus {
             SpecialistStatus::NoLongerOffered(selection)
         }
         Ok(Some(setting)) => SpecialistStatus::Set(setting.specialists),
-        Err(why) => {
-            SpecialistStatus::Unreadable(format!("The specialist setting cannot be read ({why})."))
-        }
+        Err(_) => SpecialistStatus::Unreadable(UNREADABLE.into()),
     }
 }
 
@@ -152,10 +174,7 @@ pub fn configured_specialist(
     match specialist_status(folder) {
         SpecialistStatus::Set(SpecialistChoice::SameAsDirector) => Ok(director.clone()),
         SpecialistStatus::Set(SpecialistChoice::Specific(selection)) => Ok(selection),
-        SpecialistStatus::NoLongerOffered(selection) => Err(format!(
-            "Your specialist choice ({} · {}) is unavailable. Choose another in Settings; it has not been substituted.",
-            selection.connector, selection.model
-        )),
+        SpecialistStatus::NoLongerOffered(_) => Err(UNAVAILABLE.into()),
         SpecialistStatus::Unreadable(why) => Err(why),
     }
 }
@@ -279,4 +298,108 @@ mod tests {
                 .all(|s| s.options.iter().all(|v| v.value != crate::CLAUDE_ULTRACODE))
         );
     }
+}
+
+#[cfg(all(test, unix))]
+mod entry_tests {
+    use super::*;
+    #[test]
+    fn te15_b1_fix_links_never_inherit_or_follow() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "te15-entry",
+        );
+        let target = temp.path("choice.json");
+        let link = temp.path(FILE);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            matches!(
+                specialist_status(Some(temp.root())),
+                SpecialistStatus::Unreadable(_)
+            ),
+            "TE15_FIX_DANGLING_INHERITED"
+        );
+        std::fs::write(
+            &target,
+            br#"{"version":1,"specialists":{"kind":"same_as_director"}}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                specialist_status(Some(temp.root())),
+                SpecialistStatus::Unreadable(_)
+            ),
+            "TE15_FIX_LINK_FOLLOWED"
+        );
+        assert!(
+            std::fs::symlink_metadata(link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn te15_b1_fix_fifo_refuses_without_blocking() {
+    use std::os::unix::fs::FileTypeExt;
+    const FOLDER: &str = "KINEWRIGHT_TE15_FIFO_FOLDER";
+    if let Some(folder) = std::env::var_os(FOLDER) {
+        assert!(
+            matches!(
+                specialist_status(Some(Path::new(&folder))),
+                SpecialistStatus::Unreadable(_)
+            ),
+            "TE15_FIX_FIFO_REFUSED"
+        );
+        return;
+    }
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "te15-fifo",
+    );
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(temp.path(FILE))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output_path = temp.path("fifo-child.log");
+    let output = std::fs::File::create(&output_path).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "orchestration::specialist_setting::te15_b1_fix_fifo_refuses_without_blocking",
+            "--nocapture",
+        ])
+        .env(FOLDER, temp.root())
+        .stdout(output.try_clone().unwrap())
+        .stderr(output)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "TE15_FIX_FIFO_BOUNDED: {}",
+        std::fs::read_to_string(output_path).unwrap()
+    );
+    assert!(
+        std::fs::symlink_metadata(temp.path(FILE))
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
 }

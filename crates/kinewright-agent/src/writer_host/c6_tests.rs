@@ -705,7 +705,7 @@ fn c6_host(
     };
     let host = WriterHost::start_inner(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path("project.kinewright")),
             roots: roots.clone(),

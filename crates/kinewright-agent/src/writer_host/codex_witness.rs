@@ -861,7 +861,7 @@ fn start_director(
     let stop_gate = Arc::new(super::qualification_gate::MergeStopGate::default());
     let host = WriterHost::start_inner(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: project.into(),
             path: Some(path.clone()),
             roots: SessionRoots {

@@ -28,6 +28,14 @@ thread_local! {
     /// The scheduler settings folder hosts launched on this test thread read.
     pub(crate) static SCHEDULER_SETTINGS: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
+    static DEFAULT_TEST_SCHEDULER: kinewright_media::test_support::TempDirectory =
+        kinewright_media::test_support::TempDirectory::new_in(&kinewright_media::test_support::workspace_target_dir(), "app-test-scheduler");
+}
+#[cfg(test)]
+pub(crate) fn test_scheduler_folder() -> PathBuf {
+    SCHEDULER_SETTINGS
+        .with(|folder| folder.borrow().clone())
+        .unwrap_or_else(|| DEFAULT_TEST_SCHEDULER.with(|folder| folder.root().into()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -292,7 +300,7 @@ impl HostAttachment {
             HostConfig {
                 // Production hosts read the person's scheduler settings folder.
                 #[cfg(test)]
-                scheduler_settings: SCHEDULER_SETTINGS.with(|folder| folder.borrow().clone()),
+                scheduler_settings: Some(test_scheduler_folder()),
                 #[cfg(not(test))]
                 scheduler_settings: None,
                 project,

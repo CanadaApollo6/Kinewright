@@ -31,19 +31,19 @@ fn refusal(refusal: crate::claude_credentials::Refusal) -> CertificationRefusal 
     }
 }
 
-impl ConnectorRuntimeChecks for InstalledClaudeChecks {
-    fn probe(
+impl InstalledClaudeChecks {
+    fn local(
         &self,
         specification: &ConnectorSpecification,
-        binding: &AttemptBinding,
-    ) -> Result<RuntimeQualification, CertificationRefusal> {
+    ) -> Result<crate::native_runtime::LocalReadiness, CertificationRefusal> {
         if !std::ptr::eq(specification, claude_candidate()) {
             return Err(CertificationRefusal::UnqualifiedSpecification);
         }
         kinewright_job_sys::require_nsdelegate()
             .and_then(|()| kinewright_job_sys::require_provider_landlock())
             .map_err(|_| CertificationRefusal::SandboxUnavailable)?;
-        let executable = executable().map_err(|_| CertificationRefusal::ExecutableIdentity)?;
+        let executable =
+            executable().map_err(|error| crate::native_runtime::executable_refusal(&error))?;
         let version = crate::version_probe::installed_version(
             &crate::version_probe::VersionProbe {
                 guardian: &self.guardian,
@@ -61,10 +61,40 @@ impl ConnectorRuntimeChecks for InstalledClaudeChecks {
         // At launch and at the launch-time recheck the person's store must
         // hold a subscription sign-in and no API mode may be configured.
         let sign_in = crate::claude_credentials::inspect(&source, None).map_err(refusal)?;
+        if version < specification.minimum_version() {
+            return Err(CertificationRefusal::UnqualifiedVersion);
+        }
+        Ok(crate::native_runtime::LocalReadiness {
+            executable,
+            source,
+            identity: sign_in.identity,
+            version,
+        })
+    }
+}
+
+impl ConnectorRuntimeChecks for InstalledClaudeChecks {
+    fn preflight(
+        &self,
+        specification: &ConnectorSpecification,
+    ) -> Result<(), CertificationRefusal> {
+        self.local(specification).map(|_| ())
+    }
+    fn probe(
+        &self,
+        specification: &ConnectorSpecification,
+        binding: &AttemptBinding,
+    ) -> Result<RuntimeQualification, CertificationRefusal> {
+        let crate::native_runtime::LocalReadiness {
+            executable,
+            source,
+            identity,
+            version,
+        } = self.local(specification)?;
         let store = crate::claude_credentials::prepare_store(
             binding.working_directory(),
             &source,
-            sign_in.identity,
+            identity,
         )
         .map_err(refusal)?;
         let context = EffectiveLaunchContext {

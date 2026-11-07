@@ -47,6 +47,25 @@ fn waiting(reason: &str) -> ReviseResult {
 }
 
 impl HostCommandOwner {
+    pub(super) fn revise_director(&self) -> Result<ProviderSelectionRecord, String> {
+        let director = configured_director(self.config.scheduler_settings.as_deref());
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        let director = if self.fixture_director {
+            crate::orchestration::director_setting::configured_fixture_director(
+                self.config.scheduler_settings.as_deref(),
+            )
+        } else {
+            director
+        };
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        let director = if let Some(candidate) = self.qualification_director {
+            Ok(candidate.selection())
+        } else {
+            director
+        };
+        director
+    }
+
     pub(super) fn revise_cut(
         &mut self,
         index: usize,
@@ -121,25 +140,15 @@ impl HostCommandOwner {
         if manual.head_id != request.expected_candidate_head {
             return Ok(ReviseResult::Conflict);
         }
-        let director = configured_director(self.config.scheduler_settings.as_deref());
-        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-        let director = if self.fixture_director {
-            crate::orchestration::director_setting::configured_fixture_director(
-                self.config.scheduler_settings.as_deref(),
-            )
-        } else {
-            director
-        };
-        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
-        let director = if let Some(candidate) = self.qualification_director {
-            Ok(candidate.selection())
-        } else {
-            director
-        };
-        let provider = match director {
+        let provider = match self.revise_director() {
             Ok(provider) => provider,
             Err(reason) => return Ok(waiting(&reason)),
         };
+        if let Err(reason) =
+            super::configured_specialist(self.config.scheduler_settings.as_deref(), &provider)
+        {
+            return Ok(waiting(&reason));
+        }
         if self.hooks.runs.len() >= RUN_SLOTS {
             return Ok(waiting(
                 "Every run slot is in use. Your notes are saved. Revise cut again when a run finishes.",

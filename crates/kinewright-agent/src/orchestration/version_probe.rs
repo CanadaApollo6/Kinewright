@@ -44,7 +44,7 @@ impl VersionForm {
     /// prerelease, a second line, extra words or any other shape is refused.
     pub(crate) fn parse(self, output: &[u8]) -> Result<CliVersion, CertificationRefusal> {
         let refused = CertificationRefusal::UnqualifiedVersion;
-        let text = std::str::from_utf8(output).map_err(|_| refused)?;
+        let text = std::str::from_utf8(output).map_err(|_| refused.clone())?;
         let line = text.strip_suffix('\n').unwrap_or(text);
         if line.contains(['\n', '\r']) {
             return Err(refused);
@@ -571,19 +571,39 @@ mod tests {
             (
                 VersionForm::Codex,
                 b"codex-cli 0.165.9-beta (upgrade to 0.200.0 recommended)\n",
-                refused,
+                refused.clone(),
             ),
-            (VersionForm::Codex, b"codex-cli 0.166.0-beta.1\n", refused),
-            (VersionForm::Codex, b"codex-cli 0.166.0\n0.200.0\n", refused),
-            (VersionForm::Codex, b"codex-cli 0.166.0\r\n", refused),
-            (VersionForm::Codex, b"codex-cli  0.166.0\n", refused),
-            (VersionForm::Codex, b"codex 0.166.0\n", refused),
-            (VersionForm::Codex, b"0.166.0\n", refused),
-            (VersionForm::Codex, b"codex-cli \xff0.166.0\n", refused),
-            (VersionForm::Codex, b"", refused),
-            (VersionForm::Claude, b"2.1.317\n", refused),
-            (VersionForm::Claude, b"2.1.317 (Claude Code)\n\n", refused),
-            (VersionForm::Claude, b"codex-cli 0.166.0\n", refused),
+            (
+                VersionForm::Codex,
+                b"codex-cli 0.166.0-beta.1\n",
+                refused.clone(),
+            ),
+            (
+                VersionForm::Codex,
+                b"codex-cli 0.166.0\n0.200.0\n",
+                refused.clone(),
+            ),
+            (
+                VersionForm::Codex,
+                b"codex-cli 0.166.0\r\n",
+                refused.clone(),
+            ),
+            (VersionForm::Codex, b"codex-cli  0.166.0\n", refused.clone()),
+            (VersionForm::Codex, b"codex 0.166.0\n", refused.clone()),
+            (VersionForm::Codex, b"0.166.0\n", refused.clone()),
+            (
+                VersionForm::Codex,
+                b"codex-cli \xff0.166.0\n",
+                refused.clone(),
+            ),
+            (VersionForm::Codex, b"", refused.clone()),
+            (VersionForm::Claude, b"2.1.317\n", refused.clone()),
+            (
+                VersionForm::Claude,
+                b"2.1.317 (Claude Code)\n\n",
+                refused.clone(),
+            ),
+            (VersionForm::Claude, b"codex-cli 0.166.0\n", refused.clone()),
         ] {
             assert_eq!(
                 form.parse(output),
@@ -653,14 +673,14 @@ mod tests {
         for (name, form, expected) in [
             ("codex-ok", VersionForm::Codex, Ok(CliVersion(0, 166, 0))),
             ("claude-ok", VersionForm::Claude, Ok(CliVersion(2, 1, 317))),
-            ("codex-banner", VersionForm::Codex, refused),
-            ("codex-beta", VersionForm::Codex, refused),
-            ("codex-lines", VersionForm::Codex, refused),
-            ("codex-bytes", VersionForm::Codex, refused),
-            ("codex-malformed", VersionForm::Codex, refused),
-            ("codex-fails", VersionForm::Codex, refused),
-            ("codex-flood", VersionForm::Codex, refused),
-            ("claude-bare", VersionForm::Claude, refused),
+            ("codex-banner", VersionForm::Codex, refused.clone()),
+            ("codex-beta", VersionForm::Codex, refused.clone()),
+            ("codex-lines", VersionForm::Codex, refused.clone()),
+            ("codex-bytes", VersionForm::Codex, refused.clone()),
+            ("codex-malformed", VersionForm::Codex, refused.clone()),
+            ("codex-fails", VersionForm::Codex, refused.clone()),
+            ("codex-flood", VersionForm::Codex, refused.clone()),
+            ("claude-bare", VersionForm::Claude, refused.clone()),
         ] {
             let (_, executable) = fixture(temp.root(), name);
             assert_eq!(

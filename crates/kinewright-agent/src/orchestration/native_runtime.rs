@@ -35,6 +35,19 @@ pub(crate) fn installed_executable(command: &str, product: &str) -> io::Result<E
     })
 }
 
+pub(crate) struct LocalReadiness {
+    pub executable: ExecutableIdentity,
+    pub source: PathBuf,
+    pub identity: [u64; 2],
+    pub version: crate::orchestration::adapters::CliVersion,
+}
+
+pub(crate) fn executable_refusal(
+    error: &io::Error,
+) -> crate::orchestration::adapters::CertificationRefusal {
+    crate::orchestration::adapters::CertificationRefusal::ExecutableResolution(error.to_string())
+}
+
 /// What one resolution reads: everything comes from the environment and the
 /// filesystem, and nothing is executed.
 struct Resolution<'a> {
@@ -472,5 +485,38 @@ mod tests {
             data: Some(several.clone()),
         });
         assert_eq!(found.unwrap(), decoy, "C6_RESOLVER_DIRECT_FIRST");
+    }
+    #[test]
+    fn te15_b1_fix_two_installs_keep_the_repair_words() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "te15-two-installs",
+        );
+        for (command, product) in [("codex", "Codex"), ("claude", "Claude Code")] {
+            for version in ["one", "two"] {
+                std::fs::create_dir_all(temp.path(&format!("installs/{command}/{version}")))
+                    .unwrap();
+            }
+            let error = resolve_without_running(&Resolution {
+                command,
+                product,
+                explicit: None,
+                path: None,
+                data: Some(temp.root().into()),
+            })
+            .unwrap_err();
+            let original = error.to_string();
+            let refusal = executable_refusal(&error);
+            let words = crate::writer_host::provider_readiness::provider_words(command, &refusal);
+            assert!(
+                words.contains(&original)
+                    && words.contains(&format!(
+                        "KINEWRIGHT_{}_EXECUTABLE",
+                        command.to_ascii_uppercase()
+                    ))
+                    && words.contains("Settings"),
+                "TE15_FIX_EXECUTABLE_REPAIR {words}"
+            );
+        }
     }
 }

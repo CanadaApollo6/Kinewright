@@ -320,6 +320,7 @@ pub enum RunWait {
     None,
     Files(WaitDetail),
     Provider(WaitDetail),
+    ProviderSettings(WaitDetail),
     Question(QuestionId),
     Children(Vec<TaskId>),
 }

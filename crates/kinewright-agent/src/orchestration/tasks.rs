@@ -826,7 +826,10 @@ pub fn refresh_wait(state: &mut super::orchestration_records::RunProjection) {
         DeliveryState, QuestionStatus, RunWait, RuntimeRequest, TaskState,
     };
     // Only the file/provider owner can settle these external facts.
-    if matches!(state.wait, RunWait::Files(_) | RunWait::Provider(_)) {
+    if matches!(
+        state.wait,
+        RunWait::Files(_) | RunWait::Provider(_) | RunWait::ProviderSettings(_)
+    ) {
         return;
     }
     if let Some(question) = state.requests.iter().find_map(|request| match request {

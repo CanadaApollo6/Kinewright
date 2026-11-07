@@ -17,7 +17,7 @@ mod tests {
         let [fixture, _] =
             kinewright_project::c0_fixtures::build_c0_fixture_pair(root.root()).unwrap();
         let host = WriterHost::start(HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(root.path("scheduler")),
             project: "c9-lease".into(),
             path: Some(fixture.path),
             roots: SessionRoots {

@@ -299,6 +299,9 @@ impl HostAttachment {
                     )?;
                 }
                 let config = HostConfig {
+                    #[cfg(test)]
+                    scheduler_settings: Some(path.with_extension("test-scheduler")),
+                    #[cfg(not(test))]
                     scheduler_settings: None,
                     project,
                     path: Some(path),

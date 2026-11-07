@@ -816,7 +816,7 @@ fn s4b_c4_host_session_drives_production_effect_pump() {
     };
     let host = WriterHost::start_inner(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path("project.kinewright")),
             roots: roots.clone(),
@@ -1072,7 +1072,7 @@ fn s4b_c4_stop_during_startup_and_full_native_queue() {
                 path: Some(temp.path("project.kinewright")),
                 roots: roots.clone(),
                 origin: HostOrigin::Headless,
-                scheduler_settings: None,
+                scheduler_settings: Some(temp.path("scheduler")),
             },
             HostAuth::generate().unwrap(),
             Some(issuer_auth.clone()),

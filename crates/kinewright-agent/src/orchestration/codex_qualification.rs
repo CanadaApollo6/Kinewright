@@ -20,23 +20,62 @@ fn digest(value: &impl serde::Serialize) -> [u8; 32] {
     let hash = kinewright_media::sha256_bytes(&serde_json::to_vec(value).expect("recipe JSON"));
     std::array::from_fn(|i| u8::from_str_radix(&hash[i * 2..i * 2 + 2], 16).expect("sha256"))
 }
-impl ConnectorRuntimeChecks for InstalledCodexChecks {
-    fn probe(
+impl InstalledCodexChecks {
+    fn local(
         &self,
         specification: &ConnectorSpecification,
-        binding: &AttemptBinding,
-    ) -> Result<RuntimeQualification, CertificationRefusal> {
+    ) -> Result<crate::native_runtime::LocalReadiness, CertificationRefusal> {
         if !std::ptr::eq(specification, codex_candidate()) {
             return Err(CertificationRefusal::UnqualifiedSpecification);
         }
         kinewright_job_sys::require_nsdelegate()
             .and_then(|()| kinewright_job_sys::require_provider_landlock())
             .map_err(|_| CertificationRefusal::SandboxUnavailable)?;
-        let executable = executable().map_err(|_| CertificationRefusal::ExecutableIdentity)?;
+        let executable =
+            executable().map_err(|error| crate::native_runtime::executable_refusal(&error))?;
         let source = crate::codex_credentials::source_path()
             .map_err(|_| CertificationRefusal::UnknownAuthentication)?;
         let identity = crate::codex_credentials::inspect(&source, None)
             .map_err(|_| CertificationRefusal::UnknownAuthentication)?;
+        let version = crate::version_probe::installed_version(
+            &crate::version_probe::VersionProbe {
+                guardian: &self.guardian,
+                form: crate::version_probe::VersionForm::Codex,
+                user_local_runtime: true,
+                credential_root: source.parent().map(std::path::Path::to_path_buf),
+            },
+            &executable,
+        )?;
+        if version < specification.minimum_version() {
+            return Err(CertificationRefusal::UnqualifiedVersion);
+        }
+        Ok(crate::native_runtime::LocalReadiness {
+            executable,
+            source,
+            identity,
+            version,
+        })
+    }
+}
+
+impl ConnectorRuntimeChecks for InstalledCodexChecks {
+    fn preflight(
+        &self,
+        specification: &ConnectorSpecification,
+    ) -> Result<(), CertificationRefusal> {
+        self.local(specification).map(|_| ())
+    }
+    fn probe(
+        &self,
+        specification: &ConnectorSpecification,
+        binding: &AttemptBinding,
+    ) -> Result<RuntimeQualification, CertificationRefusal> {
+        let crate::native_runtime::LocalReadiness {
+            executable,
+            source,
+            identity,
+            version,
+        } = self.local(specification)?;
         let home = crate::codex_credentials::prepare_home(binding.working_directory())
             .map_err(|_| CertificationRefusal::EffectiveAuthentication)?;
         let context = EffectiveLaunchContext {
@@ -54,31 +93,20 @@ impl ConnectorRuntimeChecks for InstalledCodexChecks {
                 refresh: CODEX_AUTH_CONTRACT.refresh,
             },
         };
-        let mut runtime =
-            RuntimeQualification {
-                version: crate::version_probe::installed_version(
-                    &crate::version_probe::VersionProbe {
-                        guardian: &self.guardian,
-                        form: crate::version_probe::VersionForm::Codex,
-                        user_local_runtime: true,
-                        credential_root: context.credential_store.single_file.as_ref().and_then(
-                            |file| file.source.parent().map(std::path::Path::to_path_buf),
-                        ),
-                    },
-                    &executable,
-                )?,
-                authentication: EffectiveAuthEvidence {
-                    contract: CODEX_AUTH_CONTRACT,
-                    context: context.clone(),
-                    at_launch: AuthenticationMode::Subscription,
-                    at_recheck: None,
-                    observed_store: context.credential_store.clone(),
-                },
-                launch_context: context,
-                executable,
-                sandbox: Some(SandboxPolicy::LinuxFilesystemAndIpc),
-                model_available: true,
-            };
+        let mut runtime = RuntimeQualification {
+            version,
+            authentication: EffectiveAuthEvidence {
+                contract: CODEX_AUTH_CONTRACT,
+                context: context.clone(),
+                at_launch: AuthenticationMode::Subscription,
+                at_recheck: None,
+                observed_store: context.credential_store.clone(),
+            },
+            launch_context: context,
+            executable,
+            sandbox: Some(SandboxPolicy::LinuxFilesystemAndIpc),
+            model_available: true,
+        };
         let program = crate::native_launcher::recipe(
             codex_candidate(),
             binding,
@@ -120,6 +148,23 @@ pub(crate) struct InstalledNativeChecks {
     pub guardian: std::path::PathBuf,
 }
 impl ConnectorRuntimeChecks for InstalledNativeChecks {
+    fn preflight(
+        &self,
+        specification: &ConnectorSpecification,
+    ) -> Result<(), CertificationRefusal> {
+        match specification.provider() {
+            "codex" => InstalledCodexChecks {
+                guardian: self.guardian.clone(),
+            }
+            .preflight(specification),
+            "claude" => crate::claude_qualification::InstalledClaudeChecks {
+                guardian: self.guardian.clone(),
+            }
+            .preflight(specification),
+            _ => Err(CertificationRefusal::UnknownProvider),
+        }
+    }
+
     fn probe(
         &self,
         specification: &ConnectorSpecification,

@@ -201,7 +201,7 @@ pub fn eligible(state: &RunProjection, action: &RunAction) -> bool {
         RunAction::Continue => {
             matches!(state.phase, RunPhase::Paused | RunPhase::Interrupted)
                 && state.cleanup == RunCleanup::Settled
-                && state.wait == RunWait::None
+                && matches!(state.wait, RunWait::None | RunWait::ProviderSettings(_))
         }
         RunAction::SendMessage { .. } => {
             super::requests::director(state).is_ok()
@@ -339,7 +339,12 @@ pub(crate) fn prepare_with_attention(
                     }
                     // Actual attempt retirement is never inferred from Stop.
                 }
-                RunAction::Continue => next.phase = RunPhase::Queued,
+                RunAction::Continue => {
+                    next.phase = RunPhase::Queued;
+                    if matches!(next.wait, RunWait::ProviderSettings(_)) {
+                        next.wait = RunWait::None;
+                    }
+                }
                 RunAction::SendMessage { text_ref } => {
                     let task = super::requests::director(&next)?;
                     let order = next

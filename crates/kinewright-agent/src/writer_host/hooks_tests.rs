@@ -43,6 +43,7 @@ mod tests {
     include!("te14_fix2_tests.rs");
     include!("te15_a_tests.rs");
     include!("te15_b1_tests.rs");
+    include!("te15_b1_fix1_tests.rs");
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_fix2_tests.rs");
@@ -107,6 +108,7 @@ mod tests {
                 HostAuth::generate().unwrap(),
                 Some(issuer_auth.clone()),
                 super::super::studio_runtime::RuntimePorts {
+                    checks: Arc::new(Te15Observe(std::sync::Mutex::new(None))),
                     fixture_claim: Some(temp.path("fixture-machine")),
                     ceiling: None, // Unit fixtures must never spend on an installed provider.
                     ..Default::default()

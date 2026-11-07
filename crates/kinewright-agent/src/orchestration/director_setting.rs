@@ -35,7 +35,13 @@ pub enum DirectorStatus {
 }
 
 /// Where S4 keeps per-user scheduler settings: beside Studio feedback state.
+///
+/// # Panics
+/// Unit tests panic here to catch a host that omitted its isolated settings folder.
 pub fn scheduler_settings_directory() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    panic!("TE15_FIX_TEST_DEFAULT_SETTINGS");
+    #[cfg(not(test))]
     Ok(kinewright_project::feedback_state_directory_with(
         |name| std::env::var_os(name),
         &std::env::temp_dir(),
@@ -59,7 +65,7 @@ fn folder_or_default(folder: Option<&Path>) -> Result<PathBuf, String> {
     }
 }
 
-fn valid_shape(director: &ProviderSelectionRecord) -> bool {
+pub(super) fn valid_shape(director: &ProviderSelectionRecord) -> bool {
     !director.connector.is_empty()
         && !director.model.is_empty()
         && director.connector.len() <= 128
@@ -386,4 +392,13 @@ mod tests {
             "C10_CHOOSE_AGAIN"
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn te15_b1_fix_test_hosts_cannot_read_default_folder() {
+    assert!(
+        std::panic::catch_unwind(scheduler_settings_directory).is_err(),
+        "TE15_FIX_NO_PERSONAL_FOLDER"
+    );
 }

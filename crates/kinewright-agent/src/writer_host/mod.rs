@@ -15,6 +15,8 @@ pub(crate) mod native_invocation;
 mod orchestration;
 mod owned_media;
 mod protocol;
+#[cfg(target_os = "linux")]
+pub(crate) mod provider_readiness;
 pub mod receipt_reconciliation;
 mod recovery;
 mod resolve;
@@ -707,6 +709,9 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
     let reply = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let shutting_down = matches!(request.command, HostCommand::Shutdown);
+        #[cfg(target_os = "linux")]
+        let reply = provider_readiness::execute(&state.owner, &bearer, request);
+        #[cfg(not(target_os = "linux"))]
         let reply = state.owner.lock().map_or_else(
             |_| HostReply {
                 error: Some(HostRefusal::new("retention_lost", RETENTION_LOST)),
@@ -800,21 +805,26 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
 
             let joined = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                state
-                    .owner
-                    .lock()
-                    .map(|mut owner| {
-                        let request = HostRequest {
-                            editor: None,
-                            operation: None,
-                            protocol: HOST_PROTOCOL,
-                            project: state.bootstrap.endpoint.project.clone(),
-                            roots,
-                            command,
-                        };
-                        owner.execute_bearer(Some(&bearer), request)
-                    })
-                    .map_err(|_| ())
+                let request = HostRequest {
+                    editor: None,
+                    operation: None,
+                    protocol: HOST_PROTOCOL,
+                    project: state.bootstrap.endpoint.project.clone(),
+                    roots,
+                    command,
+                };
+                #[cfg(target_os = "linux")]
+                {
+                    Ok::<_, ()>(provider_readiness::execute(&state.owner, &bearer, request))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    state
+                        .owner
+                        .lock()
+                        .map(|mut owner| owner.execute_bearer(Some(&bearer), request))
+                        .map_err(|_| ())
+                }
             })
             .await;
             let Ok(Ok(reply)) = joined else {
@@ -1185,6 +1195,9 @@ pub struct HostCommandOwner {
     #[cfg(target_os = "linux")]
     native_recovery_status: Option<String>,
     #[cfg(target_os = "linux")]
+    native_readiness_checks:
+        Option<Arc<dyn crate::orchestration::adapters::ConnectorRuntimeChecks + Send + Sync>>,
+    #[cfg(target_os = "linux")]
     #[cfg(any(test, feature = "test-util"))]
     fixture_director: bool,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
@@ -1355,6 +1368,8 @@ impl HostCommandOwner {
             runtime_owner: std::sync::Weak::new(),
             #[cfg(target_os = "linux")]
             native_recovery_status: None,
+            #[cfg(target_os = "linux")]
+            native_readiness_checks: None,
             #[cfg(target_os = "linux")]
             #[cfg(any(test, feature = "test-util"))]
             fixture_director: false,
@@ -3170,7 +3185,10 @@ mod tests {
     #[test]
     fn s3_portable_roles_revoke_and_refuse_before_manual_write_admission() {
         let configuration = || HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(std::env::temp_dir().join(format!(
+                "fixture-scheduler-{}",
+                kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
+            ))),
             project: "portable-s3-roles".into(),
             path: None,
             roots: SessionRoots::default(),
@@ -3270,7 +3288,10 @@ mod tests {
     #[test]
     fn ordinary_attachment_and_history_use_real_authenticated_loopback() {
         let host = WriterHost::start(HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(std::env::temp_dir().join(format!(
+                "fixture-scheduler-{}",
+                kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
+            ))),
             project: "unit-host".into(),
             path: None,
             roots: SessionRoots::default(),
@@ -3324,7 +3345,12 @@ mod tests {
                 snapshot.history_sha256 = "0".repeat(64);
             }
             let result = HostCommandOwner::open(HostConfig {
-                scheduler_settings: None,
+                scheduler_settings: Some(std::env::temp_dir().join(format!(
+                    "fixture-scheduler-{}",
+                    kinewright_media::sha256_bytes(
+                        HostAuth::generate().unwrap().bearer().as_bytes()
+                    )
+                ))),
                 project: "fu3-bootstrap".into(),
                 path: None,
                 roots: SessionRoots::default(),
@@ -3367,7 +3393,10 @@ mod tests {
         let mut snapshot = HostSnapshot::capture(&core).unwrap();
         snapshot.history_sha256 = "0".repeat(64);
         let mut owner = HostCommandOwner::open(HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(std::env::temp_dir().join(format!(
+                "fixture-scheduler-{}",
+                kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
+            ))),
             project: "unit-snapshot".into(),
             path: None,
             roots: SessionRoots::default(),

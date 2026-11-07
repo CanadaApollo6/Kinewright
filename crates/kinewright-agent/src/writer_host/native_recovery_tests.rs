@@ -252,7 +252,7 @@ fn real_recovery(after: bool) {
         write: vec![root.clone()],
     };
     let writer = WriterHost::start(HostConfig {
-        scheduler_settings: None,
+        scheduler_settings: Some(root.join("scheduler")),
         project: "hooks".into(),
         path: Some(root.join("project.kinewright")),
         roots,

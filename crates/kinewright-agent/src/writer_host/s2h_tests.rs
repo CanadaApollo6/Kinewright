@@ -29,7 +29,7 @@ fn fixture() -> (
         .first_save(&temp.path("a.kinewright"), StorageLimits::default())
         .unwrap();
     let mut host = HostCommandOwner::open(HostConfig {
-        scheduler_settings: None,
+        scheduler_settings: Some(temp.path("scheduler")),
         project: "s2h-review".into(),
         path: None,
         roots: SessionRoots {
@@ -753,7 +753,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
         write: vec![temp.root().into()],
     };
     let mut host = HostCommandOwner::open(HostConfig {
-        scheduler_settings: None,
+        scheduler_settings: Some(temp.path("scheduler")),
         project: "fix3-rescue-result".into(),
         path: None,
         roots: roots.clone(),
@@ -832,7 +832,7 @@ fn c7_fix1_rescue_status_names_the_rescue_copy() {
         write: vec![temp.root().into()],
     };
     let mut host = HostCommandOwner::open(HostConfig {
-        scheduler_settings: None,
+        scheduler_settings: Some(temp.path("scheduler")),
         project: "c7-fix1-rescue".into(),
         path: None,
         roots: roots.clone(),

@@ -37,11 +37,12 @@ pub(crate) trait ProfileFactory: Send + Sync {
 
 /// Driven by the existing `session::pump_session` through nonblocking Studio
 /// polling. It adds no event wait loop or serialized-host process launch.
-pub(crate) struct EffectPump {
+pub(crate) struct EffectPump<L: GuardianLauncher = NativeGuardianLauncher> {
     host: Weak<Mutex<HostCommandOwner>>,
     producer: HostAuth,
     run: RunId,
-    launcher: NativeGuardianLauncher,
+    launcher: L,
+    claim: Arc<Mutex<MachineClaim>>,
     profiles: Arc<dyn ProfileFactory>,
     ceiling: Option<NonZeroU64>,
     active: BTreeMap<crate::orchestration::orchestration_records::AttemptId, Box<dyn AgentSession>>,
@@ -62,12 +63,34 @@ impl EffectPump {
         profiles: Arc<dyn ProfileFactory>,
         ceiling: Option<NonZeroU64>,
     ) -> Self {
+        Self::with_launcher(
+            host,
+            producer,
+            run,
+            launcher.claim.clone(),
+            launcher,
+            profiles,
+            ceiling,
+        )
+    }
+}
+impl<L: GuardianLauncher> EffectPump<L> {
+    pub(crate) fn with_launcher(
+        host: &Arc<Mutex<HostCommandOwner>>,
+        producer: HostAuth,
+        run: RunId,
+        claim: Arc<Mutex<MachineClaim>>,
+        launcher: L,
+        profiles: Arc<dyn ProfileFactory>,
+        ceiling: Option<NonZeroU64>,
+    ) -> Self {
         let (sender, events) = crate::protocol::limits::event_channel();
         Self {
             host: Arc::downgrade(host),
             producer,
             run,
             launcher,
+            claim,
             profiles,
             ceiling,
             active: BTreeMap::new(),
@@ -169,6 +192,7 @@ impl EffectPump {
                 .map_err(io::Error::other)?;
         }
         let profile = self.profiles.bind(&attempt)?;
+        let provider = profile.selection().connector;
         let invocation = owner
             .lock()
             .map_err(|_| io::Error::other("host owner poisoned"))?
@@ -183,7 +207,7 @@ impl EffectPump {
             .map_err(io::Error::other)?;
         self.launcher
             .launch(attempt, invocation)
-            .map_err(|e| io::Error::other(e.0))
+            .map_err(|e| crate::writer_host::provider_readiness::provider_error(&provider, &e.0))
             .map(crate::orchestration::adapters::ContainedSession::into_session)
     }
     pub(crate) fn tick(&mut self) -> io::Result<()> {
@@ -243,9 +267,14 @@ impl EffectPump {
         {
             return Ok(());
         }
-        if !available {
+        if !ready {
             return Ok(());
         }
+        drop(host);
+        crate::writer_host::provider_readiness::check_run(&owner, &self.run)?;
+        let mut host = owner
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?;
         let Some((attempt, effect, kind)) = host
             .reserve_native_effect(&self.producer, &self.run)
             .map_err(io::Error::other)?
@@ -259,7 +288,6 @@ impl EffectPump {
             Ok(session) => session,
             Err(error) => {
                 let mut claim = self
-                    .launcher
                     .claim
                     .lock()
                     .map_err(|_| io::Error::other("machine claim poisoned"))?;
@@ -270,6 +298,9 @@ impl EffectPump {
                         "{error}; cleanup_blocked: {cleanup}"
                     )));
                 }
+                crate::writer_host::provider_readiness::wait_on_launch_error(
+                    &owner, &self.run, &error,
+                )?;
                 return Err(error);
             }
         };
@@ -282,7 +313,7 @@ impl EffectPump {
         Ok(())
     }
 }
-impl AgentSession for EffectPump {
+impl<L: GuardianLauncher> AgentSession for EffectPump<L> {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
         // The host's durable command carries the payload. This message only
         // starts its pump; subsequent steering must be persisted by H3 first.
@@ -309,7 +340,7 @@ impl AgentSession for EffectPump {
         }
     }
 }
-impl Drop for EffectPump {
+impl<L: GuardianLauncher> Drop for EffectPump<L> {
     fn drop(&mut self) {
         self.interrupt();
     }

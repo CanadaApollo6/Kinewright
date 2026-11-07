@@ -93,15 +93,29 @@ impl HostCommandOwner {
                     );
                 }
                 let stop_reason = match &state.outcome {
-                    crate::orchestration::orchestration_records::RunOutcome::Cancelled(_) => Some("Stopped".to_owned()),
-                    crate::orchestration::orchestration_records::RunOutcome::Failed(reason) => Some(reason.code.clone()),
-                    _ if accounting.clock_uncertain => Some("Clock could not be verified".to_owned()),
+                    crate::orchestration::orchestration_records::RunOutcome::Cancelled(_) => {
+                        Some("Stopped".to_owned())
+                    }
+                    crate::orchestration::orchestration_records::RunOutcome::Failed(reason) => {
+                        Some(reason.code.clone())
+                    }
+                    _ if accounting.clock_uncertain => {
+                        Some("Clock could not be verified".to_owned())
+                    }
                     _ => match &state.wait {
-                        crate::orchestration::orchestration_records::RunWait::Provider(wait) if wait.reason.record_kind == kinewright_project::bundle_records::RecordKind::OwnedEvidence => {
+                        crate::orchestration::orchestration_records::RunWait::Provider(wait)
+                        | crate::orchestration::orchestration_records::RunWait::ProviderSettings(
+                            wait,
+                        ) if wait.reason.record_kind
+                            == kinewright_project::bundle_records::RecordKind::OwnedEvidence =>
+                        {
                             let bytes = self.owner()?.store()?.read_evidence(&wait.reason)?;
                             Some(super::bounded_text(&String::from_utf8_lossy(&bytes), 1024))
                         }
-                        _ => accounting.tasks.iter().find_map(|task| task.pause.map(|reason| format!("{reason:?}"))),
+                        _ => accounting
+                            .tasks
+                            .iter()
+                            .find_map(|task| task.pause.map(|reason| format!("{reason:?}"))),
                     },
                 };
                 return Ok(Some(super::orchestration::DurableRunAccounting {

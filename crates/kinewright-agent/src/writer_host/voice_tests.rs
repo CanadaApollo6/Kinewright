@@ -47,7 +47,7 @@ mod tests {
         bundle.save(&core, &inputs).unwrap();
         drop(bundle);
         let host = WriterHost::start(HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(fixture.path),
             roots: SessionRoots {
@@ -480,7 +480,7 @@ mod tests {
             let (client, child) = HostClient::launch(
                 &executable,
                 HostConfig {
-                    scheduler_settings: None,
+                    scheduler_settings: Some(root.join("scheduler")),
                     project: "s3-capabilities".into(),
                     path: Some(root.join("c0-red.kinewright")),
                     roots: SessionRoots {
@@ -614,7 +614,7 @@ mod tests {
         eprintln!("C8_ACKNOWLEDGED_BEFORE_HOST_CRASH");
         host.crash();
         let reopened = WriterHost::start(HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(temp.path("c0-red.kinewright")),
             roots: SessionRoots {

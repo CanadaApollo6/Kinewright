@@ -22,7 +22,7 @@ N = P+'te15_b1_native_profiles_pin_model_options_role_and_reject_tampering'
 def add(name, file, before, after, witness, marker):
     h.PAIRS.append((name, file, before, after, 'kinewright-agent', witness, marker))
 add('person-choice', O, '        bind(selection)\n', '        bind(assignment.brief.provider.clone())\n', W, 'TE15_PERSON_CHOICE')
-add('immutable-replay', O, '.filter(|task| task.parent.as_ref() == Some(&assignment.parent))', '.filter(|task| false && task.parent.as_ref() == Some(&assignment.parent))', W, 'TE15_ASSIGN_REPLAY')
+add('immutable-replay', O, 'if let Some(receipt) = self\n            .owner()?\n            .orchestration_receipt(run, &request.envelope.id)?', 'if let Some(receipt) = None::<OrchestrationReceipt>', W, 'TE15_ASSIGN_REPLAY')
 add('reconcile-provider', 'crates/kinewright-project/src/orchestration_records.rs', '.remove("provider");', '.remove("unused-provider");', W, 'TE15_ASSIGN_RECONCILE')
 add('role-manifest', C, 'crate::orchestration::task_manifest::names(*role)', 'self.session.tools', N, 'TE15_ROLE_PIN')
 add('durable-role', A+'writer_host/studio_runtime.rs', '.for_task(selection.clone(), role);', '.for_task(selection.clone(), crate::orchestration::orchestration_records::Role::Director);', W, 'TE15_FACTORY_ROLE')

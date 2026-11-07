@@ -351,7 +351,7 @@ fn astra_c4_save_as_reopen_original_recovery() {
     };
     let copied = WriterHost::start_inner(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "copy".into(),
             path: Some(temp.path("copy.kinewright")),
             roots,
@@ -594,7 +594,7 @@ fn s4b_c4_fix1_foreign_missing_and_live_original_retry() {
         };
         let copy = WriterHost::start_inner(
             HostConfig {
-                scheduler_settings: None,
+                scheduler_settings: Some(temp.path("scheduler")),
                 project: "copy".into(),
                 path: Some(active_path),
                 roots,
@@ -719,7 +719,7 @@ fn s4b_c4_fix1_child_discovery_precedes_recovery_proof() {
     let launched = HostClient::launch_with_issuer(
         &wrapper,
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "child".into(),
             path: Some(temp.path("project.kinewright")),
             roots: SessionRoots {
@@ -797,7 +797,7 @@ fn s4b_c4_fix1_child_discovery_precedes_recovery_proof() {
 fn crash_host(root: &std::path::Path) -> WriterHost {
     let host = WriterHost::start_inner(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(root.join("scheduler")),
             project: "crash".into(),
             path: Some(root.join("project.kinewright")),
             roots: SessionRoots {
@@ -1136,7 +1136,7 @@ fn s4b_c4_fix1_worker_refusal_does_not_churn_on_poll() {
     drop(host);
     let host = WriterHost::start_inner(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "refusal".into(),
             path: Some(temp.path("project.kinewright")),
             roots: SessionRoots {

@@ -1,5 +1,11 @@
 struct Te15Observe(std::sync::Mutex<Option<kinewright_core::SessionConfig>>);
 impl crate::orchestration::adapters::ConnectorRuntimeChecks for Te15Observe {
+    fn preflight(
+        &self,
+        _: &crate::orchestration::adapters::ConnectorSpecification,
+    ) -> Result<(), crate::orchestration::adapters::CertificationRefusal> {
+        Ok(())
+    }
     fn probe(
         &self,
         spec: &crate::orchestration::adapters::ConnectorSpecification,

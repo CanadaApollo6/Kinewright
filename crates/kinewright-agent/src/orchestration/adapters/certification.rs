@@ -401,6 +401,10 @@ pub struct RuntimeQualification {
 
 /// Trusted local probes supplied by C2/C5. No CLI invocation or paid discovery here.
 pub trait ConnectorRuntimeChecks {
+    /// Unpaid local installation, version and subscription checks, without an attempt.
+    fn preflight(&self, _: &ConnectorSpecification) -> Result<(), CertificationRefusal> {
+        Err(CertificationRefusal::UnqualifiedSpecification)
+    }
     fn probe(
         &self,
         specification: &ConnectorSpecification,
@@ -417,7 +421,7 @@ pub enum ConnectorReadiness {
     Ready,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CertificationRefusal {
     #[error("unknown connector provider")]
     UnknownProvider,
@@ -441,6 +445,8 @@ pub enum CertificationRefusal {
     FixedPolicyChanged,
     #[error("executable identity is unavailable or changed")]
     ExecutableIdentity,
+    #[error("{0}")]
+    ExecutableResolution(String),
     #[error("the connector's sandbox is unavailable")]
     SandboxUnavailable,
     #[error("the connector's model is unavailable")]
@@ -751,7 +757,11 @@ mod tests {
     #[test]
     fn te15_b1_native_profiles_pin_model_options_role_and_reject_tampering() {
         use super::super::super::orchestration_records::Role;
-        for spec in [codex_candidate(), claude_candidate()] {
+        for (spec, priority) in [
+            (codex_candidate(), false),
+            (codex_candidate(), true),
+            (claude_candidate(), false),
+        ] {
             for role in [
                 Role::Director,
                 Role::Editor,
@@ -760,7 +770,7 @@ mod tests {
                 Role::Audio,
                 Role::Colour,
             ] {
-                let selection = if spec.provider() == "claude" {
+                let mut selection = if spec.provider() == "claude" {
                     super::super::super::specialist_setting::specialist_choices()
                         .into_iter()
                         .find(|s| s.model == "claude-sonnet-5-5" && s.options[0].value == "low")
@@ -768,6 +778,14 @@ mod tests {
                 } else {
                     spec.selection()
                 };
+                if priority {
+                    selection.options.push(
+                        super::super::super::orchestration_records::ProviderOptionRecord {
+                            name: "service_tier".into(),
+                            value: "priority".into(),
+                        },
+                    );
+                }
                 let binding = binding().for_task(selection.clone(), role);
                 let runtime = native_runtime(spec);
                 let profile = spec.bind(binding.clone(), &runtime).unwrap();
@@ -785,11 +803,17 @@ mod tests {
                     .validate_session(profile.session_config(), binding.identity())
                     .unwrap();
                 profile.recheck_runtime(&runtime).unwrap();
-                for changed in ["model", "effort", "tools"] {
+                assert_eq!(
+                    profile.session_config().service_tier.as_deref(),
+                    priority.then_some("priority"),
+                    "TE15_FIX_TIER_PIN"
+                );
+                for changed in ["model", "effort", "tier", "tools"] {
                     let mut config = profile.session_config().clone();
                     match changed {
                         "model" => config.model = Some("other".into()),
                         "effort" => config.effort = Some("ultracode".into()),
+                        "tier" => config.service_tier = Some("other".into()),
                         _ => config.tool_names = Some(vec!["invoke_capability".into()]),
                     }
                     assert_eq!(

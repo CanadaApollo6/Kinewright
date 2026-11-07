@@ -141,6 +141,7 @@ impl StudioRuntime {
                 owner.qualification_director = ports.qualification;
                 owner.qualification_stop.clone_from(&ports.stop_gate);
             }
+            owner.native_readiness_checks = Some(ports.checks.clone());
             owner.native_recovery_status = Some("cleanup pending: checking native recovery".into());
             owner.native_recovery_pending = true;
         }
@@ -334,7 +335,18 @@ impl StudioRuntime {
             candidate
         };
         if let Some((blocked_run, reason)) = &runtime.blocked {
-            if blocked_run == &run {
+            if blocked_run == &run
+                && !host.lock().is_ok_and(|owner| {
+                    owner
+                        .owner()
+                        .ok()
+                        .and_then(|session| session.orchestration_projection(&run).ok().flatten())
+                        .is_some_and(|state| {
+                            state.phase
+                                == crate::orchestration::orchestration_records::RunPhase::Queued
+                        })
+                })
+            {
                 return Err(io::Error::other(reason.clone()));
             }
             runtime.blocked = None;
@@ -797,7 +809,10 @@ impl ProfileFactory for RegisteredProfiles {
         if candidate.is_none()
             && !crate::orchestration::specialist_setting::specialist_choices().contains(&selection)
         {
-            return Err(io::Error::other("saved connector is not available"));
+            return Err(super::provider_readiness::provider_error(
+                &selection.connector,
+                &"the saved model or options are unavailable",
+            ));
         }
         let scratch = std::env::temp_dir().join(format!("k-{}", attempt.identity().nonce.as_str()));
         std::fs::create_dir(&scratch)?;
@@ -829,11 +844,17 @@ impl ProfileFactory for RegisteredProfiles {
             Ok(profile) => profile,
             Err(error) => {
                 let _ = std::fs::remove_dir(&scratch);
-                return Err(io::Error::other(error));
+                return Err(super::provider_readiness::provider_error(
+                    &selection.connector,
+                    &error,
+                ));
             }
         };
         if profile.selection() != selection {
-            return Err(io::Error::other("saved connector policy changed"));
+            return Err(super::provider_readiness::provider_error(
+                &selection.connector,
+                &"the saved connector policy changed",
+            ));
         }
         Ok(profile)
     }
@@ -846,6 +867,14 @@ impl HostCommandOwner {
         run: &RunId,
         reason: &str,
     ) -> Result<(), super::HostError> {
+        if self.spending_scope(producer, run).is_ok_and(|state| {
+            matches!(
+                state.wait,
+                crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
+            )
+        }) {
+            return Ok(());
+        }
         self.record_runtime_stop(producer, run, reason, false)
     }
     /// C5 fix 10: the native reader refused the provider's stream and killed
@@ -901,16 +930,32 @@ impl HostCommandOwner {
         reason: &str,
         pause: bool,
     ) -> Result<(), super::HostError> {
-        use crate::orchestration::orchestration_records::{
-            RunOutcome, RunPhase, RunWait, WaitDetail,
-        };
+        self.record_runtime_wait(
+            producer,
+            run,
+            reason,
+            pause,
+            crate::orchestration::orchestration_records::RunWait::Provider,
+        )
+    }
+    pub(super) fn record_runtime_wait(
+        &mut self,
+        producer: &HostAuth,
+        run: &RunId,
+        reason: &str,
+        pause: bool,
+        wait: fn(
+            crate::orchestration::orchestration_records::WaitDetail,
+        ) -> crate::orchestration::orchestration_records::RunWait,
+    ) -> Result<(), super::HostError> {
+        use crate::orchestration::orchestration_records::{RunOutcome, RunPhase, WaitDetail};
         let mut state = self.spending_scope(producer, run)?;
         if state.outcome != RunOutcome::Pending {
             return Ok(());
         }
         let reason = super::bounded_text(reason, 1024);
         let reference = self.owner_mut()?.admit_host_grant(reason.as_bytes())?;
-        state.wait = RunWait::Provider(WaitDetail {
+        state.wait = wait(WaitDetail {
             reason: reference,
             missing: vec![],
             attempt: None,

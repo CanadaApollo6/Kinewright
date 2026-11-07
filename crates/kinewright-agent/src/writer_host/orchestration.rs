@@ -708,7 +708,7 @@ impl HostCommandOwner {
     /// base, head and delta, and is rebound to the stored result, so it
     /// replays the same publication however many accounting records followed.
     pub(super) fn bind_publication(
-        &self,
+        &mut self,
         request: &ScopedOrchestrationRequest,
     ) -> Result<ScopedOrchestrationRequest, HostError> {
         if let OrchestrationCommand::AssignTask(assignment) = &request.envelope.command {
@@ -769,15 +769,15 @@ impl HostCommandOwner {
     /// The model never chooses specialist billing policy. Snapshot the person's
     /// preference on assignment; derive exact replays using the stored snapshot.
     fn bind_specialist_assignment(
-        &self,
+        &mut self,
         request: &ScopedOrchestrationRequest,
         assignment: &crate::orchestration::orchestration_records::AssignTask,
     ) -> Result<ScopedOrchestrationRequest, HostError> {
         let Some(run) = &request.run else {
-            return Ok(request.clone());
+            return Err(refused("assignment run is unavailable"));
         };
         let Some(state) = self.owner()?.orchestration_projection(run)? else {
-            return Ok(request.clone());
+            return Err(refused("assignment run is unavailable"));
         };
         let bind = |selection| -> Result<ScopedOrchestrationRequest, HostError> {
             let mut bound = request.clone();
@@ -791,22 +791,18 @@ impl HostCommandOwner {
                 .map_err(|_| refused("invalid assignment"))?;
             Ok(bound)
         };
-        // Task ids include the entire canonical command digest (and command id).
-        // Changing Settings must not change an original immutable outcome.
-        for task in state
-            .tasks
-            .iter()
-            .filter(|task| task.parent.as_ref() == Some(&assignment.parent))
+        if let Some(receipt) = self
+            .owner()?
+            .orchestration_receipt(run, &request.envelope.id)?
         {
-            let original = bind(task.brief.provider.clone())?;
-            if original
-                .envelope
-                .identity::<TaskId>("task")
-                .map_err(|_| refused("invalid assignment"))?
-                == task.id
-            {
-                return Ok(original);
+            let OrchestrationCommand::AssignTask(original) = &receipt.envelope.command else {
+                return Err(refused("original assignment changed"));
+            };
+            let bound = bind(original.brief.provider.clone())?;
+            if bound.envelope != receipt.envelope {
+                return Err(refused("original assignment changed"));
             }
+            return Ok(bound);
         }
         let parent = state
             .tasks
@@ -816,8 +812,15 @@ impl HostCommandOwner {
         let selection = super::configured_specialist(
             self.config.scheduler_settings.as_deref(),
             &parent.brief.provider,
-        )
-        .map_err(|why| refused(&why))?;
+        );
+        let selection = match selection {
+            Ok(selection) => selection,
+            Err(why) => {
+                #[cfg(target_os = "linux")]
+                self.wait_for_provider(run, &why)?;
+                return Err(HostRefusal::new("provider_wait", &why).into());
+            }
+        };
         bind(selection)
     }
     pub(super) fn dispatch_orchestration(

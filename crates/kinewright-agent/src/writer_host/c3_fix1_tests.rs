@@ -416,7 +416,7 @@ fn s4b_c3_fix1_history_atomic_crash_cuts() {
             let manual: kinewright_core::HistorySnapshot =
                 serde_json::from_value(data["manual"].clone()).unwrap();
             let writer = WriterHost::start(HostConfig {
-                scheduler_settings: None,
+                scheduler_settings: Some(root.join("scheduler")),
                 project: "hooks".into(),
                 path: Some(root.join("project.kinewright")),
                 roots: SessionRoots {

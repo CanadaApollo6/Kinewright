@@ -13,7 +13,7 @@ fn restart_plain_copy_fixture(f: Fixture, name: &str) -> Fixture {
     };
     let host = WriterHost::start_with_issuer(
         HostConfig {
-            scheduler_settings: None,
+            scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path(name)),
             roots: roots.clone(),

@@ -52,10 +52,17 @@ impl DirectorView {
 }
 
 /// The per-user scheduler folder; App tests name their own.
+#[cfg_attr(
+    test,
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "production uses None; tests must always name an isolated folder"
+    )
+)]
 fn director_folder() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        crate::ja1_attachment::SCHEDULER_SETTINGS.with(|folder| folder.borrow().clone())
+        Some(crate::ja1_attachment::test_scheduler_folder())
     }
     #[cfg(not(test))]
     {
@@ -330,9 +337,7 @@ impl KinewrightApp {
             SpecialistStatus::Set(SpecialistChoice::Specific(selection)) => {
                 specialist_label(selection)
             }
-            SpecialistStatus::NoLongerOffered(selection) => {
-                format!("Unavailable: {}", specialist_label(selection))
-            }
+            SpecialistStatus::NoLongerOffered(_) => "Unavailable saved specialist choice".into(),
             SpecialistStatus::Unreadable(_) => "Saved choice cannot be read".to_owned(),
         };
         let mut chosen = None;
@@ -365,17 +370,10 @@ impl KinewrightApp {
             });
         match &view.specialist_status {
             SpecialistStatus::Set(SpecialistChoice::SameAsDirector) => {
-                let director = match &view.status {
-                    DirectorStatus::Set(selection) => specialist_label(selection),
-                    _ => "the Director chosen above".into(),
-                };
-                ui.colored_label(
-                    color::TEXT_MUTED,
-                    format!("New specialists follow {director}."),
-                );
+                ui.colored_label(color::TEXT_MUTED, "Specialists follow the Director of their run. A run that's already open keeps its own.");
             }
             SpecialistStatus::NoLongerOffered(_) => {
-                ui.colored_label(color::TEXT_MUTED, "This choice is kept. New specialists wait until you choose an available model.");
+                ui.colored_label(color::TEXT_MUTED, "This choice is kept. Runs wait until you choose an available specialist in Settings.");
             }
             SpecialistStatus::Unreadable(why) => {
                 ui.colored_label(color::TEXT_MUTED, why);
@@ -773,7 +771,7 @@ fn specialist_label(selection: &ProviderSelectionRecord) -> String {
     let mut label = format!("{} · {}", selection.connector, selection.model);
     for option in &selection.options {
         if option.name == "service_tier" {
-            label.push_str(" · Fast");
+            label.push_str(" · Fast (increased plan usage)");
         } else {
             label.push_str(" · ");
             label.push_str(&option.value);
@@ -790,6 +788,13 @@ mod te15_tests {
     use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
     #[test]
     fn te15_b1_settings_show_default_and_persist_specific_without_director_change() {
+        let default = director_folder();
+        assert!(
+            default
+                .as_ref()
+                .is_some_and(|folder| folder.starts_with(workspace_target_dir())),
+            "TE15_FIX_APP_SETTINGS_ISOLATED"
+        );
         let temp = TempDirectory::new_in(&workspace_target_dir(), "te15-specialist-ui");
         crate::ja1_attachment::SCHEDULER_SETTINGS
             .with(|folder| *folder.borrow_mut() = Some(temp.root().into()));
@@ -806,6 +811,20 @@ mod te15_tests {
         });
         let shapes = format!("{:?}", output.shapes);
         assert!(shapes.contains("Same as Director"), "TE15_VISIBLE_DEFAULT");
+        assert!(shapes.contains("Specialists follow the Director of their run. A run that's already open keeps its own."), "TE15_FIX_RUN_WORDS");
+        let fast = specialist_choices()
+            .into_iter()
+            .find(|selection| {
+                selection
+                    .options
+                    .iter()
+                    .any(|option| option.name == "service_tier" && option.value == "priority")
+            })
+            .unwrap();
+        assert!(
+            specialist_label(&fast).contains("Fast (increased plan usage)"),
+            "TE15_FIX_FAST_WORDS"
+        );
         let director = director_choices()[0].clone();
         app.choose_director(&director);
         let before = std::fs::read(temp.path("director.json")).unwrap();
