@@ -90,10 +90,10 @@ fn te13_fix5_studio_stop(
     let mut issuer = None;
     app.with_feedback(|_, port| {
         let request = port
-            .prepare_stop(&run, &page.projection.control_revision, &mut issuer)
+            .prepare_control(&run, kinewright_project::orchestration_records::RunActionKind::Stop, &page.projection.control_revision, &mut issuer)
             .unwrap();
         assert_eq!(
-            format!("{:?}", port.send_stop(&request)),
+            format!("{:?}", port.send_control(&request)),
             "Accepted",
             "TE13_FIX5_STUDIO_STOP"
         );

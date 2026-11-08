@@ -135,7 +135,7 @@ impl HostCommandOwner {
                 .map_err(refused)?;
         Ok(Some((admitted, effect.id, kind)))
     }
-    /// Reconciliation never makes a process-bound outcome Pending again.
+    /// Only a durable not-dispatched proof makes the original effect Pending again.
     pub(crate) fn reconcile_native_effect(
         &mut self,
         producer: &HostAuth,
@@ -193,7 +193,7 @@ impl HostCommandOwner {
                 || (e.task == identity.task && e.state == EffectState::OutcomeUnknown)
         }) {
             effect.state = if effect.state == EffectState::Claimed(identity.attempt.clone()) && matches!(proof, crate::guardian::AttemptRetirementProof::NotDispatched(_)) {
-                EffectState::Settled
+                EffectState::Pending
             } else {
                 EffectState::OutcomeUnknown
             };

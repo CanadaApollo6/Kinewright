@@ -534,14 +534,11 @@ impl TaskMcp {
             drop(host);
             super::provider_readiness::check_run(&owner, &state.run).map_err(|why| {
                 let reason = if super::provider_readiness::setup_failure(&why) {
-                    super::provider_readiness::model_wait(&why)
+                    super::provider_readiness::model_wait()
                 } else {
-                    format!(
-                        "{} End your turn now. Do not retry this call.",
-                        super::provider_readiness::CHECK_RETRY
-                    )
+                    super::provider_readiness::MODEL_CHECK_WAIT
                 };
-                HostRefusal::new("provider_wait", &reason)
+                HostRefusal::new("provider_wait", reason)
             })?;
             host = owner
                 .lock()
@@ -552,7 +549,7 @@ impl TaskMcp {
                 host.wait_for_provider(&state.run, why)?;
                 return Err(HostRefusal::new(
                     "provider_wait",
-                    &super::provider_readiness::model_wait(&why),
+                    super::provider_readiness::model_wait(),
                 )
                 .into());
             }

@@ -739,7 +739,7 @@ fn te15_b1_fix2_setup_recheck_wait_and_unknown_continue_refusal() {
     assert!(result.is_ok(), "TE15_FIX2_SETUP_WAIT_PUMP_ALIVE");
     assert_eq!(
         state.effects[0].state,
-        EffectState::Settled,
+        EffectState::Pending,
         "FIX3_FINAL_RECHECK_NOT_SENT"
     );
     fix3_continue(&f, &run);
@@ -1156,7 +1156,8 @@ fn te15_b1_fix2_nonsetup_model_refusal_keeps_provider_words() {
     );
     let text = serde_json::to_string(&result).unwrap();
     assert!(
-        text.contains(super::super::provider_readiness::CHECK_RETRY)
+        text.contains("The run is waiting for the person to retry the provider check. End your turn now. Do not retry this call.")
+            && !text.contains("Continue to try again")
             && !text.contains("fix Settings")
             && !text.contains("subscription sign-in"),
         "TE15_FIX2_NONSETUP_MODEL_WORDS {text}"

@@ -1,4 +1,4 @@
-//! A Stop intent is kept before dispatch and retried with its original revision.
+//! Run controls are kept before dispatch and retried with their original revision.
 use super::{Feedback, FeedbackPort, HostFeedback, Keeping, RunId, same_identity};
 use kinewright_agent::writer_host::{HostCommand, ScopedOrchestrationRequest};
 use kinewright_project::{
@@ -12,18 +12,28 @@ use kinewright_project::{
 };
 use serde::{Deserialize, Serialize};
 
-const STOP_LIMIT: usize = 64;
+const CONTROL_LIMIT: usize = 64;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PendingStop {
+pub(crate) struct PendingControl {
     pub(crate) request: ScopedOrchestrationRequest,
 }
-impl PendingStop {
+impl PendingControl {
     pub(crate) fn run(&self) -> Option<RunId> {
         self.request
             .run
             .as_ref()
             .and_then(|run| same_identity(run).ok())
+    }
+    pub(crate) fn action(&self) -> Option<RunActionKind> {
+        match &self.request.envelope.command {
+            OrchestrationCommand::ControlRun(intent) => match intent.action {
+                RunAction::Stop => Some(RunActionKind::Stop),
+                RunAction::Continue => Some(RunActionKind::Continue),
+                _ => None,
+            },
+            _ => None,
+        }
     }
     pub(crate) fn valid(&self, project: &ProjectId) -> bool {
         let OrchestrationCommand::ControlRun(intent) = &self.request.envelope.command else {
@@ -32,14 +42,14 @@ impl PendingStop {
         self.request.envelope.project == *project
             && self.request.consume_batch.is_none()
             && self.request.run.as_ref() == Some(&intent.run_id)
-            && intent.action == RunAction::Stop
+            && self.action().is_some()
             && intent.command_id == self.request.envelope.id
             && self.request.envelope.computed_digest().ok().as_ref()
                 == Some(&self.request.envelope.digest)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StopReply {
+pub(crate) enum ControlReply {
     Accepted,
     Refused(String),
     Unknown(String),
@@ -47,22 +57,30 @@ pub(crate) enum StopReply {
 pub(super) fn prepare(
     port: &HostFeedback<'_>,
     run: &RunId,
+    action: RunActionKind,
     revision: &OpaqueRevision,
     issuer: &mut Option<IssuerId>,
 ) -> Result<ScopedOrchestrationRequest, String> {
+    let (verb, action_value) = match action {
+        RunActionKind::Stop => ("Stop", RunAction::Stop),
+        RunActionKind::Continue => ("Continue", RunAction::Continue),
+        _ => return Err("This run control is unavailable.".into()),
+    };
     let page = port.run_view(run)?;
-    if !page.allowed_actions.contains(&RunActionKind::Stop) {
-        return Err("Stop is not available from this attachment.".into());
+    if !page.allowed_actions.contains(&action) {
+        return Err(format!("{verb} is not available from this attachment."));
     }
     if &page.projection.control_revision != revision {
-        return Err("The run changed. Check its status and press Stop again.".into());
+        return Err(format!(
+            "The run changed. Check its status and press {verb} again."
+        ));
     }
     let metadata = port
         .request(HostCommand::IssueMetadataIssuer {
             issuer: issuer.clone(),
         })?
         .metadata_issuer
-        .ok_or("The host returned no Stop envelope.")?;
+        .ok_or_else(|| format!("The host returned no {verb} envelope."))?;
     *issuer = Some(metadata.envelope.id.issuer.clone());
     let mut envelope = OrchestrationEnvelope {
         id: metadata.envelope.id.clone(),
@@ -80,7 +98,7 @@ pub(super) fn prepare(
             command_id: metadata.envelope.id,
             run_id: same_identity(run)?,
             expected_control_revision: revision.clone(),
-            action: RunAction::Stop,
+            action: action_value,
         }),
     };
     envelope.digest = envelope.computed_digest().map_err(|e| format!("{e:?}"))?;
@@ -90,34 +108,40 @@ pub(super) fn prepare(
         consume_batch: None,
     })
 }
-pub(super) fn send(port: &HostFeedback<'_>, request: &ScopedOrchestrationRequest) -> StopReply {
+pub(super) fn send(port: &HostFeedback<'_>, request: &ScopedOrchestrationRequest) -> ControlReply {
+    let verb = if matches!(&request.envelope.command, OrchestrationCommand::ControlRun(intent) if intent.action == RunAction::Continue)
+    {
+        "Continue"
+    } else {
+        "Stop"
+    };
     let reply = match port.client.request(HostCommand::DispatchOrchestration {
         request: Box::new(request.clone()),
     }) {
         Ok(reply) => reply,
-        Err(error) => return StopReply::Unknown(error.to_string()),
+        Err(error) => return ControlReply::Unknown(error.to_string()),
     };
     if let Some(error) = reply.error {
         return if matches!(
             error.code.as_str(),
             "durability_unknown" | "unsettled" | "recovery_frozen"
         ) {
-            StopReply::Unknown(error.message)
+            ControlReply::Unknown(error.message)
         } else {
-            StopReply::Refused(error.message)
+            ControlReply::Refused(error.message)
         };
     }
     let Some(receipt) = reply.orchestration else {
-        return StopReply::Unknown("The host returned no Stop receipt.".into());
+        return ControlReply::Unknown(format!("The host returned no {verb} receipt."));
     };
     if receipt.envelope != request.envelope {
-        return StopReply::Unknown("The host returned a different Stop receipt.".into());
+        return ControlReply::Unknown(format!("The host returned a different {verb} receipt."));
     }
     match receipt.decision {
-        CommandDecision::Applied => StopReply::Accepted,
-        CommandDecision::Refused(_) => {
-            StopReply::Refused("The run changed. Check its status and press Stop again.".into())
-        }
+        CommandDecision::Applied => ControlReply::Accepted,
+        CommandDecision::Refused(_) => ControlReply::Refused(format!(
+            "The run changed. Check its status and press {verb} again."
+        )),
     }
 }
 impl Feedback {
@@ -125,68 +149,105 @@ impl Feedback {
         &mut self,
         port: &mut dyn FeedbackPort,
         run: &RunId,
-    ) -> Result<StopReply, String> {
-        let request = if let Some(pending) = self
-            .stops
-            .iter()
-            .find(|pending| pending.run().as_ref() == Some(run))
-        {
-            pending.request.clone()
+    ) -> Result<ControlReply, String> {
+        self.control_run(port, run, RunActionKind::Stop)
+    }
+    pub(crate) fn continue_run(
+        &mut self,
+        port: &mut dyn FeedbackPort,
+        run: &RunId,
+    ) -> Result<ControlReply, String> {
+        self.control_run(port, run, RunActionKind::Continue)
+    }
+    fn control_run(
+        &mut self,
+        port: &mut dyn FeedbackPort,
+        run: &RunId,
+        action: RunActionKind,
+    ) -> Result<ControlReply, String> {
+        let verb = if action == RunActionKind::Continue {
+            "Continue"
         } else {
-            if self.stops.len() >= STOP_LIMIT {
-                return Err("Too many Stop requests are still unconfirmed.".into());
-            }
-            let state = self
-                .rows
-                .iter()
-                .find(|row| row.run.as_ref() == Some(run))
-                .and_then(|row| row.state.as_ref())
-                .and_then(|state| state.as_ref().ok())
-                .ok_or("Check the run's status before stopping it.")?;
-            if !state.can_stop {
-                return Err("Stop is not available from this attachment.".into());
-            }
-            let request = port.prepare_stop(run, &state.control_revision, &mut self.issuer)?;
-            let pending = PendingStop {
-                request: request.clone(),
+            "Stop"
+        };
+        let request =
+            if let Some(pending) = self.controls.iter().find(|pending| {
+                pending.run().as_ref() == Some(run) && pending.action() == Some(action)
+            }) {
+                pending.request.clone()
+            } else {
+                if self.controls.len() >= CONTROL_LIMIT {
+                    return Err(format!("Too many {verb} requests are still unconfirmed."));
+                }
+                let state = self
+                    .rows
+                    .iter()
+                    .find(|row| row.run.as_ref() == Some(run))
+                    .and_then(|row| row.state.as_ref())
+                    .and_then(|state| state.as_ref().ok())
+                    .ok_or_else(|| {
+                        format!(
+                            "Check the run's status before {} it.",
+                            if action == RunActionKind::Continue {
+                                "continuing"
+                            } else {
+                                "stopping"
+                            }
+                        )
+                    })?;
+                if !(match action {
+                    RunActionKind::Continue => state.can_continue,
+                    RunActionKind::Stop => state.can_stop,
+                    _ => false,
+                }) {
+                    return Err(format!("{verb} is not available from this attachment."));
+                }
+                let request =
+                    port.prepare_control(run, action, &state.control_revision, &mut self.issuer)?;
+                let pending = PendingControl {
+                    request: request.clone(),
+                };
+                let project = self.keeping.project().ok_or("Save this project first.")?;
+                if !pending.valid(project) {
+                    return Err(super::HANDOFF_REFUSAL.into());
+                }
+                self.controls.push(pending);
+                self.changed = true;
+                if let Err(why) = self.retain_for_dispatch() {
+                    self.controls.retain(|pending| pending.request != request);
+                    return Err(format!(
+                        "{verb} was not sent: its request could not be kept ({why})."
+                    ));
+                }
+                request
             };
-            let project = self.keeping.project().ok_or("Save this project first.")?;
-            if !pending.valid(project) {
-                return Err(super::HANDOFF_REFUSAL.into());
-            }
-            self.stops.push(pending);
-            self.changed = true;
-            if let Err(why) = self.retain_for_dispatch() {
-                self.stops
-                    .retain(|pending| pending.run().as_ref() != Some(run));
-                return Err(format!(
-                    "Stop was not sent: its request could not be kept ({why})."
-                ));
-            }
-            request
-        };
         let Keeping::Kept { project, .. } = &self.keeping else {
-            return Err("The Stop request cannot be kept for this project.".into());
+            return Err(format!(
+                "The {verb} request cannot be kept for this project."
+            ));
         };
-        if !(PendingStop {
+        if !(PendingControl {
             request: request.clone(),
         })
         .valid(project)
         {
             return Err(super::HANDOFF_REFUSAL.into());
         }
-        let reply = port.send_stop(&request);
-        if !matches!(reply, StopReply::Unknown(_)) {
-            self.stops.retain(|pending| pending.request != request);
+        let reply = port.send_control(&request);
+        if !matches!(reply, ControlReply::Unknown(_)) {
+            self.controls.retain(|pending| pending.request != request);
             self.changed = true;
         }
         self.observe_runs(&*port);
         self.message = Some(match &reply {
             // The run row follows durable cleanup status on each poll.
-            StopReply::Accepted => "Stop accepted.".into(),
-            StopReply::Refused(why) => why.clone(),
-            StopReply::Unknown(why) => {
-                format!("Stop is unconfirmed ({why}). Retry Stop sends the same request.")
+            ControlReply::Accepted => format!("{verb} accepted."),
+            ControlReply::Refused(why) => why.clone(),
+            ControlReply::Unknown(why) if action == RunActionKind::Continue => {
+                format!("Continue is unconfirmed ({why}). Checking the same request again.")
+            }
+            ControlReply::Unknown(why) => {
+                format!("{verb} is unconfirmed ({why}). Retry {verb} sends the same request.")
             }
         });
         if self.changed {
@@ -194,27 +255,40 @@ impl Feedback {
         }
         Ok(reply)
     }
-    pub(crate) fn restore_stops(&mut self, project: &ProjectId, pending: Vec<PendingStop>) {
-        for pending in pending.into_iter().take(STOP_LIMIT) {
+    pub(crate) fn restore_controls(&mut self, project: &ProjectId, pending: Vec<PendingControl>) {
+        for pending in pending.into_iter().take(CONTROL_LIMIT) {
             if pending.valid(project)
                 && !self
-                    .stops
+                    .controls
                     .iter()
                     .any(|existing| existing.request == pending.request)
-                && self.stops.len() < STOP_LIMIT
+                && self.controls.len() < CONTROL_LIMIT
             {
-                self.stops.push(pending);
+                self.controls.push(pending);
             }
         }
     }
-    pub(crate) fn retry_stops(&mut self, port: &mut dyn FeedbackPort) {
+    pub(crate) fn retry_continues(&mut self, port: &mut dyn FeedbackPort) {
         let runs = self
-            .stops
+            .controls
             .iter()
-            .filter_map(PendingStop::run)
+            .filter(|pending| pending.action() == Some(RunActionKind::Continue))
+            .filter_map(PendingControl::run)
             .collect::<Vec<_>>();
         for run in runs {
-            if let Err(why) = self.stop_run(port, &run) {
+            if let Err(why) = self.continue_run(port, &run) {
+                self.message = Some(why);
+            }
+        }
+    }
+    pub(crate) fn retry_controls(&mut self, port: &mut dyn FeedbackPort) {
+        let runs = self
+            .controls
+            .iter()
+            .filter_map(|pending| Some((pending.run()?, pending.action()?)))
+            .collect::<Vec<_>>();
+        for (run, action) in runs {
+            if let Err(why) = self.control_run(port, &run, action) {
                 self.message = Some(why);
             }
         }

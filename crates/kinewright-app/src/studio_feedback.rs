@@ -496,20 +496,22 @@ pub(crate) trait FeedbackPort {
             projection: self.observe(run)?,
             accounting: None,
             runtime_status: None,
+            wait_reason: None,
             full_refresh: true,
             allowed_actions: vec![],
         })
     }
-    fn prepare_stop(
+    fn prepare_control(
         &mut self,
         _run: &RunId,
+        _action: RunActionKind,
         _revision: &OpaqueRevision,
         _issuer: &mut Option<IssuerId>,
     ) -> Result<ScopedOrchestrationRequest, String> {
         Err(NO_SCHEDULER.into())
     }
-    fn send_stop(&mut self, _request: &ScopedOrchestrationRequest) -> stop::StopReply {
-        stop::StopReply::Refused(NO_SCHEDULER.into())
+    fn send_control(&mut self, _request: &ScopedOrchestrationRequest) -> stop::ControlReply {
+        stop::ControlReply::Refused(NO_SCHEDULER.into())
     }
     /// Map one saved note onto a version or the saved current edit. Read-only
     /// and recomputed on every ask; nothing about the mapping is stored.
@@ -916,15 +918,16 @@ impl FeedbackPort for HostFeedback<'_> {
         .run_view
         .ok_or_else(|| "The host returned no run.".into())
     }
-    fn prepare_stop(
+    fn prepare_control(
         &mut self,
         run: &RunId,
+        action: RunActionKind,
         revision: &OpaqueRevision,
         issuer: &mut Option<IssuerId>,
     ) -> Result<ScopedOrchestrationRequest, String> {
-        stop::prepare(self, run, revision, issuer)
+        stop::prepare(self, run, action, revision, issuer)
     }
-    fn send_stop(&mut self, request: &ScopedOrchestrationRequest) -> stop::StopReply {
+    fn send_control(&mut self, request: &ScopedOrchestrationRequest) -> stop::ControlReply {
         stop::send(self, request)
     }
     /// The host chooses the target checkpoint; the App only names the target.
@@ -1002,7 +1005,8 @@ struct KeptRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     revise: Option<&'a ReviseRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    stops: Option<&'a [stop::PendingStop]>,
+    #[serde(rename = "stops")]
+    controls: Option<&'a [stop::PendingControl]>,
     voices: &'a BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
     active_voice: &'a Option<NoteId>,
 }
@@ -1019,7 +1023,8 @@ struct Kept {
     #[serde(default)]
     revise: Option<ReviseRequest>,
     #[serde(default)]
-    stops: Vec<stop::PendingStop>,
+    #[serde(rename = "stops")]
+    controls: Vec<stop::PendingControl>,
     #[serde(default)]
     voices: BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
     #[serde(default)]
@@ -1229,6 +1234,7 @@ pub(crate) struct RunState {
     pub(crate) cleanup: RunCleanup,
     pub(crate) control_revision: OpaqueRevision,
     pub(crate) can_stop: bool,
+    pub(crate) can_continue: bool,
     pub(crate) view: crate::studio_run_view::RunView,
 }
 impl RunState {
@@ -1241,6 +1247,7 @@ impl RunState {
             cleanup: projection.cleanup.clone(),
             control_revision: projection.control_revision.clone(),
             can_stop: page.allowed_actions.contains(&RunActionKind::Stop),
+            can_continue: page.allowed_actions.contains(&RunActionKind::Continue),
             view: crate::studio_run_view::RunView::of(page),
         }
     }
@@ -1282,7 +1289,10 @@ impl RunState {
         } else {
             ""
         };
-        format!("{phase}{wait}{cleanup}")
+        match &self.view.wait_reason {
+            Some(reason) => format!("{phase} · {reason}{cleanup}"),
+            None => format!("{phase}{wait}{cleanup}"),
+        }
     }
 }
 impl BatchRow {
@@ -1378,8 +1388,8 @@ pub(crate) struct Feedback {
     pub(crate) submission: Option<Submission>,
     /// A durable batch's Revise cut, kept until S4's reply is known.
     pub(crate) revise: Option<ReviseRequest>,
-    /// Authorized Stop requests, kept before dispatch and retried exactly.
-    pub(crate) stops: Vec<stop::PendingStop>,
+    /// Authorized run controls, kept before dispatch and retried exactly.
+    pub(crate) controls: Vec<stop::PendingControl>,
     /// Submitted batches and their linked runs.
     pub(crate) rows: Vec<BatchRow>,
     /// When linked runs were last read.
@@ -1422,7 +1432,7 @@ impl Feedback {
             .any(crate::studio_voice::KeptVoice::holds_work)
             || self.submission.is_some()
             || self.revise.is_some()
-            || !self.stops.is_empty()
+            || !self.controls.is_empty()
             || !self.detached.is_empty()
             || self.drafts.iter().any(Draft::holds_work)
     }
@@ -1448,8 +1458,16 @@ impl Feedback {
             (false, true) => format!("{notes}, and a Revise cut request is not confirmed."),
             (false, false) => format!("{notes}."),
             (true, true) => "A Revise cut request is not confirmed.".to_owned(),
-            (true, false) if !self.stops.is_empty() => {
-                "A Stop request is not confirmed.".to_owned()
+            (true, false) if !self.controls.is_empty() => {
+                if self
+                    .controls
+                    .iter()
+                    .any(|control| control.action() == Some(RunActionKind::Continue))
+                {
+                    "A Continue request is not confirmed.".to_owned()
+                } else {
+                    "A Stop request is not confirmed.".to_owned()
+                }
             }
             (true, false) => "An earlier note send is not confirmed.".to_owned(),
         };
@@ -1493,7 +1511,7 @@ impl Feedback {
             && self.selection.is_empty()
             && self.submission.is_none()
             && self.revise.is_none()
-            && self.stops.is_empty()
+            && self.controls.is_empty()
             && self.detached.is_empty()
             && self.voices.is_empty()
         {
@@ -1510,7 +1528,7 @@ impl Feedback {
                 submission: self.submission.as_ref(),
                 detached: &self.detached,
                 revise: self.revise.as_ref(),
-                stops: (!self.stops.is_empty()).then_some(self.stops.as_slice()),
+                controls: (!self.controls.is_empty()).then_some(self.controls.as_slice()),
                 voices: &self.voices,
                 active_voice: &self.active_voice,
             })
@@ -1648,7 +1666,7 @@ impl Feedback {
         // A kept Revise cut names a durable batch of the project left: its own
         // file keeps it, and that batch's Start run sends the same request.
         self.revise = None;
-        self.stops.clear();
+        self.controls.clear();
         self.drafts.retain(|draft| !draft.pending());
         self.submission = None;
         self.detached.clear();
@@ -1664,7 +1682,7 @@ impl Feedback {
     /// when it is this project's and still exactly its draft's; otherwise its
     /// draft becomes a separate unsent draft and the command settles alone.
     fn merge(&mut self, project: &ProjectId, kept: Kept) {
-        self.restore_stops(project, kept.stops);
+        self.restore_controls(project, kept.controls);
         self.voices = kept.voices;
         self.active_voice = kept
             .active_voice
@@ -1762,7 +1780,7 @@ impl Feedback {
         }
         self.resume = self.submission.is_some()
             || self.revise.is_some()
-            || !self.stops.is_empty()
+            || !self.controls.is_empty()
             || !self.detached.is_empty()
             || self.drafts.iter().any(Draft::pending);
         self.changed = true;
@@ -1795,7 +1813,7 @@ impl Feedback {
     /// Retry every restored command exactly: detached ones, saves, then the batch.
     pub(crate) fn resume(&mut self, port: &mut dyn FeedbackPort) {
         self.resume = false;
-        self.retry_stops(port);
+        self.retry_controls(port);
         self.settle_detached(port, |_| true);
         let pending = self
             .drafts
@@ -2202,6 +2220,8 @@ impl Feedback {
                 "Revise cut is sent, but its outcome is unknown ({why}). Retry sends this exact request."
             ),
         });
+        // A known Waiting reply starts no run. The submitted batch durably keeps
+        // its request for Start run; only uncertain replies occupy this slot.
         if !matches!(start, RunStart::Unknown(_)) {
             self.revise = None;
             self.changed = true;
@@ -2211,9 +2231,13 @@ impl Feedback {
     }
     /// Whether a linked run has not finished, so Notes keeps reading it.
     pub(crate) fn observing(&self) -> bool {
-        self.runtime_status
-            .as_deref()
-            .is_some_and(|status| status.starts_with("cleanup pending"))
+        self.controls
+            .iter()
+            .any(|control| control.action() == Some(RunActionKind::Continue))
+            || self
+                .runtime_status
+                .as_deref()
+                .is_some_and(|status| status.starts_with("cleanup pending"))
             || self
                 .rows
                 .iter()
@@ -2486,10 +2510,39 @@ enum NoteAction {
     Reopen(FeedbackBatchId),
     StartRun(FeedbackBatchId),
     Stop(RunId),
+    Continue(RunId),
     Submit,
     FirstSave,
     NewNote,
     Map,
+}
+
+fn run_controls(
+    ui: &mut egui::Ui,
+    run: &RunId,
+    state: Option<&RunState>,
+    pending: &[stop::PendingControl],
+) -> Option<NoteAction> {
+    let pending_stop = pending.iter().any(|control| {
+        control.run().as_ref() == Some(run) && control.action() == Some(RunActionKind::Stop)
+    });
+    let can_stop = state.is_some_and(|state| state.can_stop);
+    let mut action = None;
+    if (pending_stop || can_stop)
+        && ui
+            .small_button(if pending_stop { "Retry Stop" } else { "Stop" })
+            .clicked()
+    {
+        action = Some(NoteAction::Stop(run.clone()));
+    }
+    let can_continue = state.is_some_and(|state| state.can_continue);
+    if ui
+        .add_enabled(can_continue, egui::Button::new("Continue").small())
+        .clicked()
+    {
+        action = Some(NoteAction::Continue(run.clone()));
+    }
+    action
 }
 
 impl KinewrightApp {
@@ -2647,7 +2700,10 @@ impl KinewrightApp {
                 .observed_at
                 .is_none_or(|at| at.elapsed() >= RUN_POLL)
         {
-            let _ = self.with_feedback(|feedback, port| feedback.observe_runs(&*port));
+            let _ = self.with_feedback(|feedback, port| {
+                feedback.retry_continues(port);
+                feedback.observe_runs(&*port);
+            });
         }
         let feedback = &mut self.focused_mut().studio.feedback;
         if feedback.changed && feedback.gesture.is_none() {
@@ -3086,7 +3142,7 @@ impl KinewrightApp {
                     selection,
                     rows: batch_rows,
                     revise,
-                    stops,
+                    controls,
                     active,
                     focus,
                     changed,
@@ -3311,12 +3367,10 @@ impl KinewrightApp {
                         {
                             action = Some(NoteAction::StartRun(row.batch.clone()));
                         }
-                        if let Some(run) = &row.run {
-                            let pending_stop = stops.iter().any(|pending| pending.run().as_ref() == Some(run));
-                            let can_stop = matches!(&row.state, Some(Ok(state)) if state.can_stop);
-                            if (pending_stop || can_stop) && ui.small_button(if pending_stop { "Retry Stop" } else { "Stop" }).clicked() {
-                                action = Some(NoteAction::Stop(run.clone()));
-                            }
+                        if let Some(run) = &row.run
+                            && let Some(next) = run_controls(ui, run, row.state.as_ref().and_then(|state| state.as_ref().ok()), controls)
+                        {
+                            action = Some(next);
                         }
                         if ui.small_button("Reopen").clicked() {
                             action = Some(NoteAction::Reopen(row.batch.clone()));
@@ -3393,6 +3447,12 @@ impl KinewrightApp {
             }
             Some(NoteAction::Stop(run)) => {
                 let result = self.with_feedback(|feedback, port| feedback.stop_run(port, &run));
+                if let Err(why) = result.map_err(String::from).and_then(|result| result) {
+                    self.focused_mut().studio.feedback.message = Some(why);
+                }
+            }
+            Some(NoteAction::Continue(run)) => {
+                let result = self.with_feedback(|feedback, port| feedback.continue_run(port, &run));
                 if let Err(why) = result.map_err(String::from).and_then(|result| result) {
                     self.focused_mut().studio.feedback.message = Some(why);
                 }

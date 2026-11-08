@@ -255,7 +255,6 @@ impl<L: GuardianLauncher> EffectPump<L> {
                     && matches!(
                         entry.state,
                         crate::orchestration::orchestration_records::EffectState::Pending
-                            | crate::orchestration::orchestration_records::EffectState::Settled
                     )
             });
         crate::writer_host::provider_readiness::wait_on_launch_error(
@@ -327,8 +326,23 @@ impl<L: GuardianLauncher> EffectPump<L> {
             return Ok(());
         }
         drop(host);
-        let Ok(plan) = crate::writer_host::provider_readiness::check_run(&owner, &self.run) else {
-            return Ok(());
+        let plan = match crate::writer_host::provider_readiness::check_run(&owner, &self.run) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let mut host = owner
+                    .lock()
+                    .map_err(|_| io::Error::other("host owner poisoned"))?;
+                let state = host
+                    .spending_scope(&self.producer, &self.run)
+                    .map_err(io::Error::other)?;
+                if matches!(
+                    state.wait,
+                    crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
+                ) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
         };
         let mut host = owner
             .lock()

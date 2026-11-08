@@ -52,8 +52,8 @@ add('live-child-authority', O,
     '!matches!(projection.wait, crate::orchestration::orchestration_records::RunWait::ProviderSettings(_))',
     'true', T+'live_child_wakes_after_repair', 'TE15_FIX2_CHILD_CAN_FINISH')
 add('end-turn-words', R,
-    '{reason} The run is waiting for the person to fix Settings. End your turn now. Do not retry this call.',
-    '{reason}', T+'live_continue_sends_once', 'TE15_FIX2_END_TURN_WORDS')
+    'The run is waiting for the person to fix Settings. End your turn now. Do not retry this call.',
+    'The run is waiting for the person to fix Settings.', T+'live_continue_sends_once', 'TE15_FIX2_END_TURN_WORDS')
 add('fresh-continuation', M, 'if needs_setup_continuation(&next) {',
     'if false && needs_setup_continuation(&next) {',
     T+'live_continue_sends_once', 'TE15_FIX2_REAL_CONTINUATION')

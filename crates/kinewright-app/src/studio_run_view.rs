@@ -7,6 +7,7 @@ pub(crate) struct RunView {
     pub(crate) elapsed: String,
     pub(crate) runtime_status: Option<String>,
     pub(crate) stop_reason: Option<String>,
+    pub(crate) wait_reason: Option<String>,
     pub(crate) tasks: Vec<TaskView>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +22,7 @@ impl RunView {
         let accounting = page.accounting.as_ref();
         Self {
             runtime_status: page.runtime_status.clone(),
+            wait_reason: page.wait_reason.clone(),
             elapsed: accounting.map_or_else(
                 || "Elapsed unavailable / 6 hours".into(),
                 |record| {

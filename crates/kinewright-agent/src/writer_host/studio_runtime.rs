@@ -879,7 +879,13 @@ impl HostCommandOwner {
             matches!(
                 state.wait,
                 crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
-            )
+            ) || (matches!(
+                state.wait,
+                crate::orchestration::orchestration_records::RunWait::Provider(_)
+            ) && state.effects.iter().any(|effect| {
+                effect.state
+                    == crate::orchestration::orchestration_records::EffectState::OutcomeUnknown
+            }))
         }) {
             return Ok(());
         }

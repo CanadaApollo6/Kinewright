@@ -159,8 +159,8 @@ fn te15_b1_fix3_sandbox_resumes() {
     }
 }
 #[test]
-fn te15_b1_fix3_never_sent_gets_one_fresh_continuation() {
-    if !te15_fix_counting_child("te15_b1_fix3_never_sent_gets_one_fresh_continuation") {
+fn te15_b1_fix3_never_sent_reuses_original_effect() {
+    if !te15_fix_counting_child("te15_b1_fix3_never_sent_reuses_original_effect") {
         return;
     }
     let (f, _) = te15_fix_setup("codex");
@@ -173,12 +173,12 @@ fn te15_b1_fix3_never_sent_gets_one_fresh_continuation() {
             CertificationRefusal::UnknownAuthentication,
         )),
     );
-    pump.tick().expect("FIX3_NEVER_SENT_SETTLED");
+    pump.tick().expect("FIX3_NEVER_SENT_PENDING");
     let before = f.projection(&run);
     assert_eq!(
         before.effects[0].state,
-        EffectState::Settled,
-        "FIX3_NEVER_SENT_SETTLED"
+        EffectState::Pending,
+        "FIX3_NEVER_SENT_PENDING"
     );
     assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
     let owner = f.host.owner.upgrade().unwrap();
@@ -209,8 +209,8 @@ fn te15_b1_fix3_never_sent_gets_one_fresh_continuation() {
     drop(accounting);
     let request = fix3_continue(&f, &run);
     let state = f.projection(&run);
-    assert_eq!(state.effects.len(), 2, "FIX3_FRESH_CONTINUATION");
-    let effect = &state.effects[1];
+    assert_eq!(state.effects.len(), 1, "FIX3_ORIGINAL_EFFECT_REUSED");
+    let effect = &state.effects[0];
     let owner = f.host.owner.upgrade().unwrap();
     let bytes = owner
         .lock()
@@ -223,8 +223,8 @@ fn te15_b1_fix3_never_sent_gets_one_fresh_continuation() {
         .unwrap();
     assert_eq!(
         bytes.as_slice(),
-        b"The provider check passed. Continue this run from its retained task state.",
-        "FIX3_CONTINUATION_WORDS"
+        b"hook plan, script and assignment",
+        "FIX3_ORIGINAL_PAYLOAD"
     );
     ok(
         f.editor
@@ -300,7 +300,7 @@ fn te15_b1_fix3_claimed_and_unknown_have_distinct_words() {
             text.contains(if unknown {
                 "unknown send outcome"
             } else {
-                "The Director is still working. Continue when its turn ends."
+                "A task is still working. Continue when its turn ends."
             }),
             "FIX3_TRUE_CONTINUE_WORDS {text}"
         );
@@ -427,9 +427,42 @@ fn te15_b1_fix3_postcharge_ambiguity_is_not_resumable() {
         false,
     )
     .unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .record_runtime_refusal(&producer, &run, "raw final runtime failure")
+        .unwrap();
+    let state = f.projection(&run);
+    let RunWait::Provider(detail) = &state.wait else {
+        panic!("FIX3_POSTCHARGE_PROVIDER")
+    };
+    let reason = owner
+        .lock()
+        .unwrap()
+        .owner()
+        .unwrap()
+        .store()
+        .unwrap()
+        .read_evidence(&detail.reason)
+        .unwrap();
+    assert!(std::str::from_utf8(&reason).unwrap().ends_with(" The send outcome is unknown. Stop this run and use recovery; Continue cannot retry it."), "FIX4_FINAL_UNKNOWN_WORDS {}", String::from_utf8_lossy(&reason));
+    let page = f
+        .editor
+        .request(HostCommand::ObserveRun {
+            run: run.clone(),
+            after_sequence: 0,
+        })
+        .unwrap()
+        .run_view
+        .unwrap();
+    assert_eq!(
+        page.wait_reason.as_deref(),
+        std::str::from_utf8(&reason).ok(),
+        "FIX4_HOST_WAIT_REASON"
+    );
     assert!(
-        matches!(f.projection(&run).wait, RunWait::Provider(_)),
-        "FIX3_POSTCHARGE_PROVIDER"
+        !page.allowed_actions.contains(&RunActionKind::Continue),
+        "FIX4_HOST_UNKNOWN_DISABLED"
     );
     assert!(
         !crate::orchestration::machine::eligible(&f.projection(&run), &RunAction::Continue),
@@ -541,6 +574,13 @@ fn te15_b1_fix3_pending_child_owns_the_only_next_send() {
                 crate::native_launcher::native_identity(&identity),
             ),
         )
+        .unwrap();
+    let mut delivered = f.projection(&run);
+    delivered.effects[0].state = EffectState::Settled;
+    owner
+        .lock()
+        .unwrap()
+        .publish_native(&producer, delivered, &identity, vec![])
         .unwrap();
     owner
         .lock()

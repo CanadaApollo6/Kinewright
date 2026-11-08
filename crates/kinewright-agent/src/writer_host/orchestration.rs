@@ -49,6 +49,8 @@ pub struct RunViewPage {
     pub accounting: Option<DurableRunAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completions: Vec<super::CompletionStatus>,
     pub full_refresh: bool,
@@ -571,9 +573,9 @@ impl HostCommandOwner {
                                 .is_some_and(|effect| matches!(effect.state, crate::orchestration::orchestration_records::EffectState::Claimed(_)))
                         });
                         return Err(refused(if live {
-                            "The Director is still working. Continue when its turn ends."
+                            "A task is still working. Continue when its turn ends."
                         } else {
-                            "recovery_requires_person: the Director has an unknown send outcome; Continue cannot replay it."
+                            "recovery_requires_person: a task has an unknown send outcome; Continue cannot replay it."
                         }));
                     }
                     if intent.action == RunAction::Continue
@@ -840,7 +842,7 @@ impl HostCommandOwner {
                 self.wait_for_provider(run, &why)?;
                 #[cfg(target_os = "linux")]
                 let why = if request.envelope.authority.attempt.is_some() {
-                    super::provider_readiness::model_wait(&why)
+                    super::provider_readiness::model_wait().into()
                 } else {
                     why
                 };
@@ -1217,10 +1219,21 @@ impl HostCommandOwner {
                 machine::silently_stalled(&projection).then(|| machine::SILENT_STALL.into())
             });
         let accounting = self.durable_run_accounting(&projection)?;
+        let wait_reason = match &projection.wait {
+            crate::orchestration::orchestration_records::RunWait::Provider(detail)
+            | crate::orchestration::orchestration_records::RunWait::ProviderSettings(detail) => {
+                Some(
+                    String::from_utf8_lossy(&self.owner()?.store()?.read_evidence(&detail.reason)?)
+                        .into_owned(),
+                )
+            }
+            _ => None,
+        };
         Ok(RunViewPage {
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,
+            wait_reason,
             full_refresh: after_sequence == 0
                 || after_sequence > projection.sequence
                 || after_sequence.saturating_add(1) < projection.sequence,

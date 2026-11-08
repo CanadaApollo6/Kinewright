@@ -193,7 +193,14 @@ impl HostCommandOwner {
         let reason = if setup_failure(failure) {
             failure.to_string()
         } else {
-            CHECK_RETRY.into()
+            match command {
+                HostCommand::ReviseCut { .. } => CHECK_REVISE,
+                HostCommand::DispatchOrchestration { request } if request.run.is_none() => {
+                    CHECK_START
+                }
+                _ => CHECK_RETRY,
+            }
+            .into()
         };
         if matches!(command, HostCommand::ReviseCut { .. }) {
             return HostReply {
@@ -373,6 +380,11 @@ impl ReadinessPlan {
 }
 pub(crate) const CHECK_RETRY: &str =
     "The provider check failed before anything was sent. Continue to try again.";
+pub(crate) const CHECK_REVISE: &str =
+    "The provider check failed before anything was sent. Press Start run to try again.";
+pub(crate) const CHECK_START: &str =
+    "The provider check failed before anything was sent. Start the run again to try again.";
+pub(crate) const MODEL_CHECK_WAIT: &str = "The run is waiting for the person to retry the provider check. End your turn now. Do not retry this call.";
 
 pub(crate) fn setup_failure(error: &std::io::Error) -> bool {
     matches!(error.get_ref(), Some(cause) if cause.is::<ProviderSetupRefusal>())
@@ -394,10 +406,8 @@ pub(crate) fn certification_error(provider: &str, error: CertificationRefusal) -
         std::io::Error::other(error)
     }
 }
-pub(super) fn model_wait(reason: &impl std::fmt::Display) -> String {
-    format!(
-        "{reason} The run is waiting for the person to fix Settings. End your turn now. Do not retry this call."
-    )
+pub(super) fn model_wait() -> &'static str {
+    "The run is waiting for the person to fix Settings. End your turn now. Do not retry this call."
 }
 
 fn choice_error(reason: &str) -> std::io::Error {

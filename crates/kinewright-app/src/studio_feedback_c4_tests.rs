@@ -27,7 +27,12 @@ fn queue_message(
     let page = port.run_view(run).unwrap();
     let mut issuer = None;
     let mut request = port
-        .prepare_stop(run, &page.projection.control_revision, &mut issuer)
+        .prepare_control(
+            run,
+            RunActionKind::Stop,
+            &page.projection.control_revision,
+            &mut issuer,
+        )
         .unwrap();
     let kinewright_project::orchestration_records::OrchestrationCommand::ControlRun(intent) =
         &mut request.envelope.command
@@ -39,8 +44,8 @@ fn queue_message(
     };
     request.envelope.digest = request.envelope.computed_digest().unwrap();
     assert_eq!(
-        port.send_stop(&request),
-        stop::StopReply::Accepted,
+        port.send_control(&request),
+        stop::ControlReply::Accepted,
         "C4_QUEUED_MESSAGE_ACK"
     );
     let page = port.run_view(run).unwrap();
@@ -148,7 +153,7 @@ fn s4b_c4_notes_stop_startup_full_queue_and_execution() {
         );
         assert!(denied.is_err(), "C4_VIEWER_STOP_REFUSED");
         assert!(
-            project.feedback.stops.is_empty(),
+            project.feedback.controls.is_empty(),
             "C4_VIEWER_HAS_NO_KEPT_INTENT"
         );
         let queued = with_port(&attachment, |port| queue_message(port, &run));
@@ -184,7 +189,7 @@ fn s4b_c4_notes_stop_startup_full_queue_and_execution() {
             let refused = with_port(&attachment, |port| project.feedback.stop_run(port, &run));
             std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
             assert!(refused.is_err(), "C4_FAILED_INTENT_NEVER_DISPATCHED");
-            assert!(project.feedback.stops.is_empty());
+            assert!(project.feedback.controls.is_empty());
             assert_eq!(
                 std::fs::read(&path).unwrap(),
                 bytes,
@@ -207,10 +212,13 @@ fn s4b_c4_notes_stop_startup_full_queue_and_execution() {
             assert_eq!(lossy.seen.len(), 1, "C4_STOP_DURABLE_BEFORE_SEND");
             reply
         });
-        assert!(matches!(reply, stop::StopReply::Unknown(_)));
-        let original = project.feedback.stops[0].request.clone();
+        assert!(matches!(reply, stop::ControlReply::Unknown(_)));
+        let original = project.feedback.controls[0].request.clone();
         let kept: Kept = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(kept.stops[0].request, original, "C4_EXACT_STOP_RETRY_KEPT");
+        assert_eq!(
+            kept.controls[0].request, original,
+            "C4_EXACT_STOP_RETRY_KEPT"
+        );
         if mode == ProtocolFixtureMode::Startup {
             assert!(
                 project.feedback.rows[0].label().contains("cleanup pending"),
@@ -268,12 +276,12 @@ fn s4b_c4_notes_stop_startup_full_queue_and_execution() {
             .open(Ok(project_id), Ok(project.temp.path("state")))
             .unwrap();
         assert_eq!(
-            project.feedback.stops[0].request, original,
+            project.feedback.controls[0].request, original,
             "C4_STOP_REOPEN_SAME_ENVELOPE"
         );
         with_port(&attachment, |port| project.feedback.resume(port));
         assert!(
-            project.feedback.stops.is_empty(),
+            project.feedback.controls.is_empty(),
             "C4_STOP_ORIGINAL_RECEIPT_RECONCILED"
         );
         let page = with_port(&attachment, |port| port.run_view(&run).unwrap());
@@ -442,7 +450,7 @@ fn s4b_c4_notes_close_readiness_and_stale_stop_preserve_work() {
         after.projection, original.projection,
         "C4_CLOSING_NOTES_IS_NOT_STOP"
     );
-    assert!(app.focused().studio.feedback.stops.is_empty());
+    assert!(app.focused().studio.feedback.controls.is_empty());
     app.focused_mut().studio.tab = crate::studio::Tab::Notes;
     let context = egui::Context::default();
     crate::theme::install(&context);
@@ -474,7 +482,7 @@ fn s4b_c4_notes_close_readiness_and_stale_stop_preserve_work() {
         .unwrap();
     assert!(result.is_err(), "C4_APP_STALE_STOP_REFUSED");
     assert!(
-        app.focused().studio.feedback.stops.is_empty(),
+        app.focused().studio.feedback.controls.is_empty(),
         "C4_STALE_INTENT_NOT_KEPT"
     );
     assert_eq!(

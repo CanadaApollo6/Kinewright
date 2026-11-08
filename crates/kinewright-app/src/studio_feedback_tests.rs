@@ -821,21 +821,22 @@ impl FeedbackPort for Lossy<'_> {
     fn run_view(&self, run: &RunId) -> Result<RunViewPage, String> {
         self.inner.run_view(run)
     }
-    fn prepare_stop(
+    fn prepare_control(
         &mut self,
         run: &RunId,
+        action: RunActionKind,
         revision: &OpaqueRevision,
         issuer: &mut Option<IssuerId>,
     ) -> Result<ScopedOrchestrationRequest, String> {
-        self.inner.prepare_stop(run, revision, issuer)
+        self.inner.prepare_control(run, action, revision, issuer)
     }
-    fn send_stop(&mut self, request: &ScopedOrchestrationRequest) -> stop::StopReply {
+    fn send_control(&mut self, request: &ScopedOrchestrationRequest) -> stop::ControlReply {
         self.calls += 1;
         if let Some(path) = &self.crash_at_dispatch {
-            let bytes = std::fs::read(path).unwrap();
+            let bytes = std::fs::read(path).expect("C4_STOP_INTENT_KEPT_BEFORE_DISPATCH");
             let kept: Kept = serde_json::from_slice(&bytes).unwrap();
             assert!(
-                kept.stops
+                kept.controls
                     .iter()
                     .any(|pending| pending.request == *request && pending.valid(&kept.project)),
                 "C4_STOP_INTENT_KEPT_BEFORE_DISPATCH"
@@ -844,12 +845,12 @@ impl FeedbackPort for Lossy<'_> {
         }
         if self.before > 0 {
             self.before -= 1;
-            return stop::StopReply::Unknown("Stop request lost".into());
+            return stop::ControlReply::Unknown("Stop request lost".into());
         }
-        let reply = self.inner.send_stop(request);
+        let reply = self.inner.send_control(request);
         if self.after > 0 {
             self.after -= 1;
-            return stop::StopReply::Unknown("Stop reply lost".into());
+            return stop::ControlReply::Unknown("Stop reply lost".into());
         }
         reply
     }
@@ -1836,3 +1837,6 @@ mod c4;
 
 include!("studio_te13_fix4_tests.rs");
 include!("studio_te13_fix5_tests.rs");
+
+#[path = "studio_te15_b1_fix4_tests.rs"]
+mod te15_b1_fix4;
