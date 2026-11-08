@@ -90,7 +90,7 @@ impl RunView {
         }
     }
 }
-pub(crate) fn plain_wait_reason(reason: &str, settings: bool) -> &'static str {
+pub(crate) fn plain_wait_reason(reason: &str, settings: bool) -> &str {
     if reason.contains("The send outcome is unknown.") {
         "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."
     } else if reason.starts_with("silent_stall:") {
@@ -106,6 +106,8 @@ pub(crate) fn plain_wait_reason(reason: &str, settings: bool) -> &'static str {
         == "The writer host could not start the task yet. This start sent nothing. Continue to try again."
     {
         "The writer host could not start the task yet. This start sent nothing. Continue to try again."
+    } else if kinewright_agent::writer_host::task_preparation_words::is_recovery_reason(reason) {
+        reason
     } else if settings {
         "The provider check needs attention. Fix Director and Specialists in Settings, then press Continue."
     } else {

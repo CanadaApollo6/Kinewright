@@ -95,14 +95,23 @@ fn b201_pause(mode: &str) {
 }
 #[test]
 fn te15_b201_pause_fresh_director() {
+    if !te15_fix_counting_child("te15_b201_pause_fresh_director") {
+        return;
+    }
     b201_pause("director");
 }
 #[test]
 fn te15_b201_pause_fresh_child() {
+    if !te15_fix_counting_child("te15_b201_pause_fresh_child") {
+        return;
+    }
     b201_pause("child");
 }
 #[test]
 fn te15_b201_pause_prepared_director() {
+    if !te15_fix_counting_child("te15_b201_pause_prepared_director") {
+        return;
+    }
     b201_pause("prepared");
 }
 fn b201_page(f: &Fixture, run: &RunId) -> super::super::orchestration::RunViewPage {
@@ -156,10 +165,16 @@ fn b201_retry(code: &str) {
 }
 #[test]
 fn te15_b201_capacity_retries() {
+    if !te15_fix_counting_child("te15_b201_capacity_retries") {
+        return;
+    }
     b201_retry("capacity");
 }
 #[test]
 fn te15_b201_io_retries() {
+    if !te15_fix_counting_child("te15_b201_io_retries") {
+        return;
+    }
     b201_retry("io");
 }
 #[test]
@@ -238,7 +253,7 @@ fn te15_b201_director_words() {
     assert_eq!(
         page.wait_reason.as_deref(),
         Some(
-            "The writer host could not prepare the Director. This start sent nothing. Press Stop, then Reopen to recover any saved work before starting another run. Continue cannot repair it."
+            "The writer host could not prepare the Director. This start sent nothing. Press Stop. To review kept task edits, choose \"Save current edit, then open <branch>\", then \"Save current work, then open recovery point\". Continue cannot repair it."
         ),
         "B201_DIRECTOR_WORDS"
     );
@@ -251,6 +266,9 @@ fn te15_b201_director_words() {
 }
 #[test]
 fn te15_b201_sent_child_keeps_work() {
+    if !te15_fix_counting_child("te15_b201_sent_child_keeps_work") {
+        return;
+    }
     let (f, _) = te15_fix_setup("codex");
     let r = c5_fix10_run_from(f);
     fix4_prior_work(&r.f, &r.run);
@@ -444,6 +462,9 @@ fn te15_b201_unknown_priority_and_accounting() {
 }
 #[test]
 fn te15_b201_notification_ends_without_assignment() {
+    if !te15_fix_counting_child("te15_b201_notification_ends_without_assignment") {
+        return;
+    }
     let (f, _) = te15_fix_setup("codex");
     let (run, parent, director) = c4_director(&f);
     let child = b20_assign(&f, &run, &parent, &director, Role::Editor);
@@ -779,6 +800,9 @@ fn te15_b201_children_after_notification() {
 
 #[test]
 fn te15_b201_legacy_unprepared_is_not_proof() {
+    if !te15_fix_counting_child("te15_b201_legacy_unprepared_is_not_proof") {
+        return;
+    }
     let (f, _) = te15_fix_setup("codex");
     let run = f.start().envelope.identity("run").unwrap();
     let (mut pump, sent) = fix4_pump(&f, &run, false);
@@ -815,6 +839,13 @@ fn te15_b201_legacy_unprepared_is_not_proof() {
         sent.lock().unwrap().is_empty(),
         "B201_LEGACY_HISTORY_FAILS_CLOSED"
     );
+    let page = b201_page(&f, &run);
+    assert!(
+        matches!(page.projection.wait, RunWait::Provider(_)),
+        "B202_LEGACY_PERMANENT"
+    );
+    assert!(!page.allowed_actions.contains(&RunActionKind::Continue));
+
     assert!(
         f.projection(&run)
             .tasks

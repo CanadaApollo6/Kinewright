@@ -34,7 +34,7 @@ add('pause-no-failure-words', P, 'if state.phase != RunPhase::Paused {', 'if tru
 add('fresh-unsent-retry', O, 'if !safe {', 'if true {', 'pause_fresh_director', 'B201_PAUSE_ONE_SEND')
 add('legacy-history-proof', P, 'intent.prepared == Some(false)', 'intent.prepared != Some(true)', 'legacy_unprepared_is_not_proof', 'B201_LEGACY_HISTORY_FAILS_CLOSED')
 add('sent-child-not-cancelled', P, 'if parent.is_some() && sent {', 'if false && parent.is_some() && sent {', 'sent_child_keeps_work', 'B201_SENT_NOT_CANCELLED')
-add('director-actionable', P, 'Press Stop, then Reopen to recover any saved work before starting another run. Continue cannot repair it.', 'Stop this run and start a new one after reviewing the task.', 'director_words', 'B201_DIRECTOR_WORDS')
+add('director-actionable', W+'task_preparation_words.rs', 'The writer host could not prepare the Director.', 'The writer host failed.', 'director_words', 'B201_DIRECTOR_WORDS')
 add('notification-clears', T, '        if !delivered {', '        if true || !delivered {', 'notification_ends_without_assignment', 'B201_NOTIFICATION_CONSUMED')
 for kind in ['question', 'children']:
     add('derive-' + kind, T, '        if !delivered {', '        if true || !delivered {', kind + '_after_notification', 'B201_NEXT_WAIT')
@@ -59,6 +59,12 @@ for name, before in [
 add('restart-late-base', O, 'task_record.brief.scope.base = base;', 'let _ = base;', 'fresh_child_after_merge_restart', 'C4_MCP_ATTEMPT_HISTORY')
 r.PAIRS.append(('studio-host-reason', [('crates/kinewright-app/src/studio_feedback.rs', 'if matches!(self.wait, RunWait::Replan(_)) {', 'if false && matches!(self.wait, RunWait::Replan(_)) {')], 'kinewright-app', 'studio_feedback::ja_s3_feedback::te15_b1_fix4::te15_b201_replan_status_uses_host_reason', 'B201_UI_HOST_REASON'))
 r.PAIRS.append(('studio-host-retry', [('crates/kinewright-app/src/studio_run_view.rs', 'reason\n        == "The writer host could not start the task yet. This start sent nothing. Continue to try again."', 'reason == "mutant disabled host retry words"')], 'kinewright-app', 'studio_feedback::ja_s3_feedback::te15_b1_fix4::te15_b201_transient_status_uses_host_reason', 'B201_UI_HOST_RETRY'))
+# The legacy proof now has an explicit permanent-refusal guard as well as
+# the positive false-marker check. Bypass both to represent the original hole.
+for index, row in enumerate(r.PAIRS):
+    if row[0] == 'legacy-history-proof':
+        name, edits, package, witness, marker = row
+        r.PAIRS[index] = (name, edits + [(P, 'if intent\n                .as_ref()\n                .is_none_or(|intent| intent.prepared.is_none())\n            {', 'if false && intent.as_ref().is_none_or(|intent| intent.prepared.is_none()) {')], package, witness, marker)
 r.h.FAST_WITNESSES = {row[3] for row in r.PAIRS}
 
 if __name__ == '__main__':

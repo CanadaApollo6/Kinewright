@@ -146,20 +146,37 @@ impl HostCommandOwner {
 pub(crate) const HOST_RETRY: &str =
     "The writer host could not start the task yet. This start sent nothing. Continue to try again.";
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PreparationKind {
     History,
     Scope,
     Paused,
     Retry,
+    FrozenCheckpoint,
+    MissingHistory,
+    LegacyPreparation,
+    HistoryBase,
 }
 #[cfg(target_os = "linux")]
 impl PreparationKind {
     pub(crate) fn deterministic(self) -> bool {
         matches!(self, Self::History | Self::Scope)
     }
+    pub(crate) fn permanent(self) -> bool {
+        matches!(
+            self,
+            Self::FrozenCheckpoint
+                | Self::MissingHistory
+                | Self::LegacyPreparation
+                | Self::HistoryBase
+        )
+    }
     pub(crate) fn words(self) -> &'static str {
         match self {
+            Self::FrozenCheckpoint => super::task_preparation_words::FROZEN_RECOVERY,
+            Self::MissingHistory => super::task_preparation_words::MISSING_RECOVERY,
+            Self::LegacyPreparation => super::task_preparation_words::LEGACY_RECOVERY,
+            Self::HistoryBase => super::task_preparation_words::BASE_RECOVERY,
             Self::History => {
                 "The task could not start because its candidate changed. This start sent nothing. The Director must replan the task; Continue cannot repair it."
             }
@@ -184,6 +201,10 @@ pub(crate) fn preparation_refusal(error: HostError) -> std::io::Error {
     let kind = match &error {
         HostError::Refused(refusal) => match refusal.code.as_str() {
             "history_changed" => PreparationKind::History,
+            "task_preparation_frozen" => PreparationKind::FrozenCheckpoint,
+            "task_preparation_missing_history" => PreparationKind::MissingHistory,
+            "task_preparation_legacy" => PreparationKind::LegacyPreparation,
+            "task_preparation_history_base" => PreparationKind::HistoryBase,
             "task_scope" | "task_preparation_scope" | "task_preparation_inputs" => {
                 PreparationKind::Scope
             }
@@ -198,11 +219,35 @@ pub(crate) fn preparation_refusal(error: HostError) -> std::io::Error {
     })
 }
 #[cfg(target_os = "linux")]
-pub(crate) const SENT_TASK_RECOVERY: &str = "The writer host cannot resume this task. This start sent nothing. Press Stop, then Reopen to recover the task's saved work before starting another run. Continue cannot retry this task.";
-#[cfg(target_os = "linux")]
-pub(crate) const DIRECTOR_RECOVERY: &str = "The writer host could not prepare the Director. This start sent nothing. Press Stop, then Reopen to recover any saved work before starting another run. Continue cannot repair it.";
+pub(crate) use super::task_preparation_words::{DIRECTOR_RECOVERY, SENT_TASK_RECOVERY};
 #[cfg(target_os = "linux")]
 impl HostCommandOwner {
+    pub(super) fn preparation_block(
+        &self,
+        state: &RunProjection,
+    ) -> Result<Option<PreparationKind>, HostError> {
+        let archive = self.attempt_archive(state)?.1;
+        for attempt in state.attempts.iter().chain(&archive.attempts) {
+            let bytes = self
+                .owner()?
+                .store()?
+                .read_evidence(&attempt.recovery_ref)?;
+            if let Ok(intent) =
+                serde_json::from_slice::<super::native_invocation::NativeLaunchIntent>(&bytes)
+            {
+                if intent.identity != attempt.identity {
+                    return Err(refused());
+                }
+                if let Some(kind) = intent
+                    .permanent_preparation_failure
+                    .filter(|kind| kind.permanent())
+                {
+                    return Ok(Some(kind));
+                }
+            }
+        }
+        Ok(None)
+    }
     pub(super) fn task_has_sent(
         &self,
         state: &RunProjection,
@@ -239,12 +284,27 @@ impl HostCommandOwner {
             if !matches!(
                 entry.state,
                 crate::orchestration::orchestration_records::AttemptState::Retired(_)
-            ) || !self
-                .native_launch_intent(state, &entry.identity)?
-                .is_some_and(|intent| {
-                    intent.prepared == Some(false) && !intent.dispatched && intent.native.is_none()
-                })
+            ) {
+                return Err(HostRefusal::new(
+                    "task_preparation_busy",
+                    "previous task authority is not retired",
+                )
+                .into());
+            }
+            let intent = self.native_launch_intent(state, &entry.identity)?;
+            if intent
+                .as_ref()
+                .is_none_or(|intent| intent.prepared.is_none())
             {
+                return Err(HostRefusal::new(
+                    "task_preparation_legacy",
+                    "previous task preparation cannot be verified",
+                )
+                .into());
+            }
+            if !intent.is_some_and(|intent| {
+                intent.prepared == Some(false) && !intent.dispatched && intent.native.is_none()
+            }) {
                 return Ok(false);
             }
         }
@@ -267,6 +327,32 @@ impl HostCommandOwner {
             .ok_or_else(refused)?;
         let parent = task.parent.clone();
         let sent = self.task_has_sent(&state, &identity.task)?;
+        if kind.permanent() {
+            let mut intent = self
+                .native_launch_intent(&state, identity)?
+                .ok_or_else(refused)?;
+            intent.permanent_preparation_failure = Some(kind);
+            let reference = self
+                .owner_mut()?
+                .admit_host_grant(&serde_json::to_vec(&intent)?)?;
+            state
+                .attempts
+                .iter_mut()
+                .find(|a| a.identity == *identity)
+                .ok_or_else(refused)?
+                .recovery_ref = reference;
+            let reason = self
+                .owner_mut()?
+                .admit_host_grant(kind.words().as_bytes())?;
+            state.wait = RunWait::Provider(WaitDetail {
+                reason,
+                missing: vec![],
+                attempt: Some(identity.attempt.clone()),
+            });
+            state.phase = RunPhase::Interrupted;
+            crate::orchestration::tasks::refresh_cleanup(&mut state);
+            return self.publish_native(producer, state, identity, vec![]);
+        }
         if !kind.deterministic() {
             // A person Pause wins even if a different transient error raced it.
             if state.phase != RunPhase::Paused {
@@ -275,6 +361,12 @@ impl HostCommandOwner {
             return Ok(());
         }
         if parent.is_some() && sent {
+            if matches!(
+                state.wait,
+                RunWait::Files(_) | RunWait::Provider(_) | RunWait::ProviderSettings(_)
+            ) {
+                return Ok(());
+            }
             return self.record_runtime_wait(
                 producer,
                 &identity.run,
@@ -357,6 +449,26 @@ impl HostCommandOwner {
         }
         crate::orchestration::tasks::refresh_cleanup(&mut state);
         self.publish_native_issued(producer, state, identity, vec![reference], issued)?;
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparationCheckpoint {
+    History,
+    Publish,
+}
+#[cfg(all(test, target_os = "linux"))]
+impl HostCommandOwner {
+    pub(super) fn preparation_checkpoint(
+        &mut self,
+        point: PreparationCheckpoint,
+    ) -> Result<(), HostError> {
+        if self.preparation_fault == Some(point) {
+            self.preparation_fault = None;
+            return Err(std::io::Error::other("fixture preparation store error").into());
+        }
         Ok(())
     }
 }

@@ -395,3 +395,43 @@ fn te13_fix3_live_blocked_names_owner_stop() {
     te13_fix3_stop_studio(&mut app);
     assert!(app.close());
 }
+#[cfg(target_os = "linux")]
+fn te15_b202_recover_words(reason: &str) {
+    for hosted in [false, true] {
+        let (_temp, mut app, branch, expected) =
+            te13_fix3_retained_app(hosted, false, if hosted { "live" } else { "root" });
+        te13_fix3_stop_studio(&mut app);
+        assert_eq!(
+            crate::studio_run_view::plain_wait_reason(reason, false),
+            reason,
+            "B202_RECOVERY_STATUS_WORDS"
+        );
+        let instructions: Vec<_> = reason.split('"').collect();
+        let open = instructions[1].replace("<branch>", branch.as_str());
+        assert!(rendered(&app).contains(&open), "B202_REAL_RECOVERY_CONTROL");
+        let action = click_control(&app, &open);
+        app.apply(action).unwrap();
+        let action = click_control(&app, instructions[3]);
+        app.apply(action).unwrap();
+        assert_eq!(
+            app.owner.core().export_history().unwrap(),
+            expected,
+            "B202_INSTRUCTIONS_RECOVER_EXACT_HISTORY"
+        );
+        assert!(app.close());
+    }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te15_b202_sent_recovery_controls() {
+    te15_b202_recover_words(
+        kinewright_agent::writer_host::task_preparation_words::SENT_TASK_RECOVERY,
+    );
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te15_b202_director_recovery_controls() {
+    te15_b202_recover_words(
+        kinewright_agent::writer_host::task_preparation_words::DIRECTOR_RECOVERY,
+    );
+}

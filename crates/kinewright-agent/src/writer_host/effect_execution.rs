@@ -33,6 +33,10 @@ impl HostCommandOwner {
             return Err(refused("recovery-only owner cannot reserve sends"));
         }
         let mut state = self.spending_scope(producer, run)?;
+        if self.preparation_block(&state)?.is_some() {
+            return Ok(None);
+        }
+
         if !self.run_recovery_blocks(&state)?.is_empty() {
             return Ok(None);
         }
@@ -164,7 +168,10 @@ impl HostCommandOwner {
         {
             return Err(refused("no durable unstarted launch fence"));
         }
-        if matches!(proof, crate::guardian::AttemptRetirementProof::NotDispatched(_)) {
+        if matches!(
+            proof,
+            crate::guardian::AttemptRetirementProof::NotDispatched(_)
+        ) {
             self.record_not_dispatched_usage(producer, identity)?;
             state = self.spending_scope(producer, &identity.run)?;
         }
@@ -192,7 +199,11 @@ impl HostCommandOwner {
             e.state == EffectState::Claimed(identity.attempt.clone())
                 || (e.task == identity.task && e.state == EffectState::OutcomeUnknown)
         }) {
-            effect.state = if effect.state == EffectState::Claimed(identity.attempt.clone()) && matches!(proof, crate::guardian::AttemptRetirementProof::NotDispatched(_)) {
+            effect.state = if effect.state == EffectState::Claimed(identity.attempt.clone())
+                && matches!(
+                    proof,
+                    crate::guardian::AttemptRetirementProof::NotDispatched(_)
+                ) {
                 EffectState::Pending
             } else {
                 EffectState::OutcomeUnknown

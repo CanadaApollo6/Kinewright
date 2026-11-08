@@ -42,6 +42,8 @@ pub(crate) struct NativeLaunchIntent {
     pub dispatched: bool,
     #[serde(default)]
     pub prepared: Option<bool>,
+    #[serde(default)]
+    pub permanent_preparation_failure: Option<super::task_preparation::PreparationKind>,
     pub native: Option<RecoveryIdentity>,
 }
 impl NativeLaunchIntent {
@@ -51,6 +53,7 @@ impl NativeLaunchIntent {
             boot_id: crate::guardian::boot_id()?,
             dispatched: false,
             prepared: Some(false),
+            permanent_preparation_failure: None,
             native: None,
         })
     }

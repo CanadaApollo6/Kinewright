@@ -319,6 +319,20 @@ impl HostCommandOwner {
                 .clone();
             let previous = self.saved_task_history(state, &identity.task)?;
             let (source, base_ref, frozen) = runtime.persisted_history(self.owner_mut()?, fence)?;
+            let base = self
+                .owner()?
+                .store()?
+                .read_record::<kinewright_project::bundle_records::SpecialistBaseRecord>(
+                &base_ref,
+            )?;
+            if base.base_head != brief.scope.base.head {
+                return Err(HostRefusal::new(
+                    "task_preparation_history_base",
+                    "task history base disagrees with specialist base",
+                )
+                .into());
+            }
+
             let mut candidate = self
                 .owner()?
                 .durable_sessions()

@@ -567,6 +567,20 @@ impl HostCommandOwner {
                         .owner()?
                         .orchestration_projection(&intent.run_id)?
                         .ok_or_else(|| refused("unknown run"))?;
+                    #[cfg(target_os = "linux")]
+                    if matches!(
+                        intent.action,
+                        RunAction::Continue | RunAction::SendMessage { .. }
+                    ) && self
+                        .owner()?
+                        .orchestration_receipt(&intent.run_id, &request.envelope.id)?
+                        .is_none()
+                        && let Some(kind) = self.preparation_block(&state)?
+                    {
+                        return Err(
+                            HostRefusal::new("task_preparation_permanent", kind.words()).into()
+                        );
+                    }
                     if intent.action == RunAction::Continue
                         && !machine::provider_continuation_safe(&state)
                         && self
@@ -1581,7 +1595,11 @@ impl HostCommandOwner {
                 return Err(HostRefusal::new("history_changed", "task checkpoint changed").into());
             }
             if history.frozen && reopened.freeze(self.owner_mut()?)?.source() != &history.source {
-                return Err(refused("frozen task checkpoint changed"));
+                return Err(HostRefusal::new(
+                    "task_preparation_frozen",
+                    "frozen task checkpoint changed",
+                )
+                .into());
             }
             reopened
         } else {
@@ -1596,19 +1614,16 @@ impl HostCommandOwner {
                 #[cfg(not(target_os = "linux"))]
                 let safe = false;
                 if !safe {
-                    return Err(refused("prior task history is unavailable"));
+                    return Err(HostRefusal::new(
+                        "task_preparation_missing_history",
+                        "prior task history is unavailable",
+                    )
+                    .into());
                 }
             }
             self.restore_initial_run_candidate(&state, &task_record.brief.scope.base.branch)?;
             EditorTask::prepare(self.owner_mut()?, task_record.brief.clone(), authority)?
         };
-        let endpoint = editor_task.endpoint();
-        self.hooks
-            .runs
-            .get_mut(run)
-            .ok_or_else(|| refused("run missing"))?
-            .tasks
-            .insert(task.clone(), editor_task);
         let identity = state
             .attempts
             .iter()
@@ -1616,22 +1631,45 @@ impl HostCommandOwner {
             .ok_or_else(|| refused("reservation missing"))?
             .identity
             .clone();
-        self.persist_runtime_task(&mut state, &identity, false)?;
-        #[cfg(target_os = "linux")]
-        if let Some(mut intent) = self.native_launch_intent(&state, &identity)? {
-            intent.prepared = Some(true);
-            let reference = self
-                .owner_mut()?
-                .admit_host_grant(&serde_json::to_vec(&intent)?)?;
-            state
-                .attempts
-                .iter_mut()
-                .find(|a| a.identity == identity)
-                .ok_or_else(|| refused("reservation missing"))?
-                .recovery_ref = reference;
-            crate::orchestration::tasks::refresh_cleanup(&mut state);
+        let endpoint = editor_task.endpoint();
+        self.hooks
+            .runs
+            .get_mut(run)
+            .ok_or_else(|| refused("run missing"))?
+            .tasks
+            .insert(task.clone(), editor_task);
+        let publication = (|| {
+            self.persist_runtime_task(&mut state, &identity, false)?;
+            #[cfg(all(test, target_os = "linux"))]
+            self.preparation_checkpoint(super::task_preparation::PreparationCheckpoint::History)?;
+            #[cfg(target_os = "linux")]
+            if let Some(mut intent) = self.native_launch_intent(&state, &identity)? {
+                intent.prepared = Some(true);
+                let reference = self
+                    .owner_mut()?
+                    .admit_host_grant(&serde_json::to_vec(&intent)?)?;
+                state
+                    .attempts
+                    .iter_mut()
+                    .find(|a| a.identity == identity)
+                    .ok_or_else(|| refused("reservation missing"))?
+                    .recovery_ref = reference;
+                crate::orchestration::tasks::refresh_cleanup(&mut state);
+            }
+            #[cfg(all(test, target_os = "linux"))]
+            self.preparation_checkpoint(super::task_preparation::PreparationCheckpoint::Publish)?;
+            self.publish_native(producer, state, &identity, vec![])?;
+            Ok::<(), HostError>(())
+        })();
+        if publication.is_err() && saved.is_none() {
+            self.hooks
+                .runs
+                .get_mut(run)
+                .ok_or_else(|| refused("run missing"))?
+                .tasks
+                .remove(task);
         }
-        self.publish_native(producer, state, &identity, vec![])?;
+        publication?;
         let roots = self.attachments[index].roots.clone();
         let auth = self.issue_attachment(
             format!("task:{}", task.0.as_str()),
