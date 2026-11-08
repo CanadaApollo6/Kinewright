@@ -497,6 +497,7 @@ pub(crate) trait FeedbackPort {
             accounting: None,
             runtime_status: None,
             wait_reason: None,
+            continue_unavailable_reason: None,
             full_refresh: true,
             allowed_actions: vec![],
         })
@@ -1265,7 +1266,10 @@ impl RunState {
             (RunPhase::Interrupted, _) => "run interrupted".to_owned(),
             (RunPhase::Finished, RunOutcome::Ready) => "run finished · ready to review".to_owned(),
             (RunPhase::Finished, RunOutcome::Failed(detail)) => {
-                format!("run failed · {}", detail.code)
+                format!(
+                    "run failed · {}",
+                    crate::studio_run_view::plain_wait_reason(&detail.code, false)
+                )
             }
             (RunPhase::Finished, RunOutcome::Cancelled(_))
                 if self.cleanup != RunCleanup::Settled =>
@@ -1290,7 +1294,13 @@ impl RunState {
             ""
         };
         match &self.view.wait_reason {
-            Some(reason) => format!("{phase} · {reason}{cleanup}"),
+            Some(reason) => format!(
+                "{phase} · {}{cleanup}",
+                crate::studio_run_view::plain_wait_reason(
+                    reason,
+                    matches!(self.wait, RunWait::ProviderSettings(_))
+                )
+            ),
             None => format!("{phase}{wait}{cleanup}"),
         }
     }
@@ -2535,10 +2545,18 @@ fn run_controls(
     {
         action = Some(NoteAction::Stop(run.clone()));
     }
-    let can_continue = state.is_some_and(|state| state.can_continue);
-    if ui
-        .add_enabled(can_continue, egui::Button::new("Continue").small())
-        .clicked()
+    if let Some(state) = state
+        && matches!(state.phase, RunPhase::Paused | RunPhase::Interrupted)
+        && ui
+            .add_enabled(state.can_continue, egui::Button::new("Continue").small())
+            .on_disabled_hover_text(
+                state
+                    .view
+                    .continue_unavailable_reason
+                    .as_deref()
+                    .unwrap_or("The host has not made Continue available."),
+            )
+            .clicked()
     {
         action = Some(NoteAction::Continue(run.clone()));
     }
@@ -3358,6 +3376,7 @@ impl KinewrightApp {
                             .join("\n");
                         ui.colored_label(po0::TEXT_2, row.label())
                             .on_hover_text(revisions);
+                        ui.end_row();
                         let kept = revise
                             .as_ref()
                             .is_some_and(|request| request.batch_id == row.batch);
@@ -3386,6 +3405,8 @@ impl KinewrightApp {
                             ui.small(&state.view.elapsed);
                             if let Some(status) = &state.view.runtime_status { ui.small(status); }
                             if let Some(reason) = &state.view.stop_reason { ui.small(reason); }
+                            if let Some(reason) = &state.view.wait_reason { ui.small(reason); }
+                            if let Some(reason) = &state.view.continue_unavailable_reason { ui.small(reason); }
                         });
                     }
                 }

@@ -336,20 +336,20 @@ fn te15_a_empty_record_is_present_on_wire() {
 #[test]
 fn te15_a_fix_repeated_decode_ends_after_two_timeouts() {
     for audio in [false, true] {
-        te15_a_fix_retry_sequence(audio, true);
+        te15_a_fix_retry_sequence(audio, true, false);
     }
 }
 #[test]
 fn te15_a_fix_cold_decode_succeeds_on_warm_retry() {
     for audio in [false, true] {
-        te15_a_fix_retry_sequence(audio, false);
+        te15_a_fix_retry_sequence(audio, false, false);
     }
 }
 #[allow(
     clippy::too_many_lines,
     reason = "one repeated-read sequence covers cold work, busy wind-down, warm retry and page accounting"
 )]
-fn te15_a_fix_retry_sequence(audio: bool, terminal: bool) {
+fn te15_a_fix_retry_sequence(audio: bool, terminal: bool, assembly: bool) {
     use std::sync::{
         Arc, Barrier,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -389,11 +389,12 @@ fn te15_a_fix_retry_sequence(audio: bool, terminal: bool) {
         cursor: None,
     })
     .unwrap();
-    let prepare = |gate, outcome| {
+    let prepare = |gate: Option<Arc<(Barrier, Barrier)>>, outcome| {
         let mut host = owner.lock().unwrap();
         host.hooks.context_media_wait = Some(Duration::from_secs(1));
         host.hooks.context_media_prepare_delay = Some(Duration::from_millis(400));
-        host.hooks.context_media_gate = gate;
+        host.hooks.context_media_gate = if assembly { None } else { gate.clone() };
+        host.hooks.context_media_assembly_gate = if assembly { gate } else { None };
         host.hooks.context_media_outcome = outcome;
     };
     let drain = || {
@@ -472,10 +473,10 @@ fn te15_a_fix_retry_sequence(audio: bool, terminal: bool) {
         assert_eq!(second.is_error, Some(true));
         let words = serde_json::to_string(&second).unwrap();
         assert!(
-            words.contains("not retryable") && !words.contains("Retry shortly"),
+            words.contains("Don't retry this read") && !words.contains("Retry shortly"),
             "TE15_FIX_WARM_TERMINAL {second:?}"
         );
-        assert!(words.contains("Media decode or seek did not finish within the 30-second wait; not retryable. Replan without guessing."), "TE15_FIX_TERMINAL_WORDS {second:?}");
+        assert!(words.contains("Media decode or seek did not finish within the 30-second wait. Don't retry this read; replan without guessing."), "TE15_FIX_TERMINAL_WORDS {second:?}");
         assert_eq!(
             f.projection(&run).tasks[1].progress.decisions.len(),
             before,
@@ -498,5 +499,12 @@ fn te15_a_fix_retry_sequence(audio: bool, terminal: bool) {
             "TE15_FIX_ONE_SAMPLE_PAGE"
         );
         assert_eq!(warm_outcome.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn te15_a_followup_assembly_keeps_cold_provenance() {
+    for audio in [false, true] {
+        te15_a_fix_retry_sequence(audio, true, true);
     }
 }

@@ -111,6 +111,27 @@ fn click(ctx: &egui::Context, run: &RunId, state: &RunState, at: Pos2) -> Option
     .0
 }
 #[test]
+fn te15_b1_followup_continue_only_when_waiting() {
+    let (project, _attachment, run) = wait_fixture();
+    let original = project.feedback.rows[0]
+        .state
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    for phase in [
+        RunPhase::Queued,
+        RunPhase::Running,
+        RunPhase::Reviewing,
+        RunPhase::Finished,
+    ] {
+        let mut state = original.clone();
+        state.phase = phase;
+        let (_, output) = frame(&egui::Context::default(), &run, &state, vec![]);
+        assert!(!output.shapes.iter().any(|clipped| matches!(&clipped.shape,egui::Shape::Text(t) if t.galley.job.text=="Continue")),"FOLLOWUP_CONTINUE_ONLY_WAITING");
+    }
+}
+#[test]
 fn te15_b1_fix4_notes_continue_and_exact_reopen_replay() {
     let (mut project, attachment, run) = wait_fixture();
     let state = project.feedback.rows[0]
@@ -124,7 +145,13 @@ fn te15_b1_fix4_notes_continue_and_exact_reopen_replay() {
     assert!(state.can_continue, "FIX4_UI_ELIGIBLE");
     let reason = state.view.wait_reason.as_ref().unwrap();
     assert!(reason.contains("Settings"));
-    assert!(state.label().contains(reason), "FIX4_UI_WAIT_REASON");
+    assert!(
+        state
+            .label()
+            .contains("Fix Director and Specialists in Settings, then press Continue."),
+        "FIX4_UI_WAIT_REASON"
+    );
+    assert_eq!(state.view.wait_reason.as_ref(), Some(reason));
     if let Some(to) = std::env::var_os("KINEWRIGHT_TE15_FIX4_SHOT_PROJECT") {
         copy_tree(project.temp.root(), std::path::Path::new(&to));
     }
@@ -221,7 +248,7 @@ fn te15_b1_fix4_notes_unknown_disables_continue() {
     page.allowed_actions
         .retain(|action| *action != RunActionKind::Continue);
     page.wait_reason = Some(
-        "The send outcome is unknown. Stop this run and use recovery; Continue cannot retry it."
+        "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."
             .into(),
     );
     let state = RunState::of(&page);
@@ -430,4 +457,81 @@ fn fix4_full_notes_at_width(width: f32) {
         "FIX4_UI_REAL_ACCEPTED"
     );
     in1_shutdown(&mut app);
+}
+
+#[test]
+fn te15_b1_followup_disabled_continue_shows_host_reason() {
+    let (project, attachment, run) = wait_fixture();
+    let mut page = with_host(&attachment, |port| port.run_view(&run).unwrap());
+    page.allowed_actions
+        .retain(|action| *action != RunActionKind::Continue);
+    let why = "A task has an unknown send outcome. Continue cannot retry this send.";
+    page.continue_unavailable_reason = Some(why.into());
+    let state = RunState::of(&page);
+    let ctx = egui::Context::default();
+    ctx.all_styles_mut(|style| {
+        style.interaction.tooltip_delay = 0.0;
+        style.interaction.show_tooltips_only_when_still = false;
+    });
+    let (_, output) = frame(&ctx, &run, &state, vec![]);
+    let at = text_position(&output.shapes, "Continue");
+    frame(&ctx, &run, &state, vec![egui::Event::PointerMoved(at)]);
+    frame(&ctx, &run, &state, vec![]);
+    let (_, output) = frame(&ctx, &run, &state, vec![]);
+    assert!(output.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Text(shape) if shape.galley.job.text.contains(why))), "FOLLOWUP_DISABLED_HOST_REASON");
+    assert!(click(&ctx, &run, &state, at).is_none());
+    assert_eq!(
+        project.feedback.rows[0]
+            .state
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .phase,
+        RunPhase::Interrupted
+    );
+}
+
+#[test]
+fn te15_b1_followup_wait_row_is_plain_and_details_keep_raw() {
+    let (project, attachment, run) = wait_fixture();
+    let original = with_host(&attachment, |port| port.run_view(&run).unwrap());
+    for (raw, plain) in [
+        (
+            "silent_stall: no provider is running",
+            "The run has no scheduled work. Press Stop, then Reopen to review your notes before starting another run.",
+        ),
+        (
+            "native runtime refusal: wait write failed",
+            "The run could not continue. Check Run details for the reason.",
+        ),
+        (
+            "run_limit: private machine detail",
+            "This run reached its limit. Press Stop to finish cleanup.",
+        ),
+        (
+            "unknown_machine_reason: private detail",
+            "The run needs attention. Check Run details for the reason.",
+        ),
+    ] {
+        let mut page = original.clone();
+        let RunWait::ProviderSettings(detail) = page.projection.wait else {
+            unreachable!()
+        };
+        page.projection.wait = RunWait::Provider(detail);
+        page.wait_reason = Some(raw.into());
+        let state = RunState::of(&page);
+        assert!(state.label().contains(plain), "FOLLOWUP_PLAIN_WAIT {raw}");
+        assert!(!state.label().contains(raw));
+        assert_eq!(
+            state.view.wait_reason.as_deref(),
+            Some(raw),
+            "FOLLOWUP_RAW_DETAILS_RETAINED"
+        );
+    }
+    assert!(
+        project.feedback.rows[0]
+            .label()
+            .contains("then press Continue.")
+    );
 }

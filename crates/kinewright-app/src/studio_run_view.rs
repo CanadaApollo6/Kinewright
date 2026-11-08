@@ -8,6 +8,7 @@ pub(crate) struct RunView {
     pub(crate) runtime_status: Option<String>,
     pub(crate) stop_reason: Option<String>,
     pub(crate) wait_reason: Option<String>,
+    pub(crate) continue_unavailable_reason: Option<String>,
     pub(crate) tasks: Vec<TaskView>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +24,7 @@ impl RunView {
         Self {
             runtime_status: page.runtime_status.clone(),
             wait_reason: page.wait_reason.clone(),
+            continue_unavailable_reason: page.continue_unavailable_reason.clone(),
             elapsed: accounting.map_or_else(
                 || "Elapsed unavailable / 6 hours".into(),
                 |record| {
@@ -86,6 +88,24 @@ impl RunView {
                 })
                 .collect(),
         }
+    }
+}
+pub(crate) fn plain_wait_reason(reason: &str, settings: bool) -> &'static str {
+    if reason.contains("The send outcome is unknown.") {
+        "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."
+    } else if reason.starts_with("silent_stall:") {
+        "The run has no scheduled work. Press Stop, then Reopen to review your notes before starting another run."
+    } else if reason.starts_with("run_limit:") {
+        "This run reached its limit. Press Stop to finish cleanup."
+    } else if reason.starts_with("native runtime refusal:") {
+        "The run could not continue. Check Run details for the reason."
+    } else if reason == "The provider check failed before anything was sent. Continue to try again."
+    {
+        "The provider check failed before anything was sent. Continue to try again."
+    } else if settings {
+        "The provider check needs attention. Fix Director and Specialists in Settings, then press Continue."
+    } else {
+        "The run needs attention. Check Run details for the reason."
     }
 }
 fn duration(milliseconds: u64) -> String {

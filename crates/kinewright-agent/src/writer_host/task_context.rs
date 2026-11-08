@@ -332,6 +332,8 @@ pub(super) struct PreparedMediaRead {
     #[cfg(test)]
     gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     #[cfg(test)]
+    assembly_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+    #[cfg(test)]
     outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 pub(super) struct RenderedMediaRead {
@@ -370,11 +372,11 @@ fn visible_prefix(
 const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RETRY: &str = "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned.";
 const MEDIA_PREPARING_RETRY: &str = "Media evidence preparation exceeded this wait. Retry shortly; no page is charged until a sample is returned.";
-const MEDIA_DECODE_TIMEOUT: &str = "Media decode or seek did not finish within the 30-second wait; not retryable. Replan without guessing.";
+const MEDIA_DECODE_TIMEOUT: &str = "Media decode or seek did not finish within the 30-second wait. Don't retry this read; replan without guessing.";
 enum MediaReadPhase {
     Verifying,
     Decoding { cold: bool },
-    Assembling,
+    Assembling { cold: bool },
 }
 struct CancelMediaRead(Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelMediaRead {
@@ -453,10 +455,10 @@ impl PreparedMediaRead {
                 let phase = phase.lock().map_err(|_| media_failed())?;
                 return Err(refused(match *phase {
                     MediaReadPhase::Verifying => MEDIA_RETRY,
-                    MediaReadPhase::Decoding { cold: false } => MEDIA_DECODE_TIMEOUT,
-                    MediaReadPhase::Decoding { cold: true } | MediaReadPhase::Assembling => {
-                        MEDIA_PREPARING_RETRY
-                    }
+                    MediaReadPhase::Decoding { cold: false }
+                    | MediaReadPhase::Assembling { cold: false } => MEDIA_DECODE_TIMEOUT,
+                    MediaReadPhase::Decoding { cold: true }
+                    | MediaReadPhase::Assembling { cold: true } => MEDIA_PREPARING_RETRY,
                 }));
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -480,14 +482,15 @@ impl PreparedMediaRead {
         use base64::Engine as _;
         #[cfg(test)]
         let gate = self.gate;
+        #[cfg(test)]
+        let assembly_gate = self.assembly_gate;
         let lease = self.lease.open()?;
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             return Err(media_unavailable());
         }
         let source = lease.certified_source()?;
-        *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Decoding {
-            cold: source.certification_was_cold(),
-        };
+        let cold = source.certification_was_cold();
+        *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Decoding { cold };
         let mut value = if self.audio {
             let mut decoder = source.open_audio(Arc::clone(cancel))?;
             #[cfg(test)]
@@ -499,7 +502,9 @@ impl PreparedMediaRead {
                 .next_frame()
                 .map_err(|_| refused("owned audio unavailable"))?
                 .ok_or_else(|| refused("owned audio unavailable"))?;
-            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling;
+            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling { cold };
+            #[cfg(test)]
+            Self::decode_gate(assembly_gate.as_ref());
             let channels = usize::from(frame.channels());
             let bytes = frame.format().bytes();
             let frame_bytes = channels
@@ -579,7 +584,9 @@ impl PreparedMediaRead {
                 .next_frame()
                 .map_err(|_| refused("owned frame unavailable"))?
                 .ok_or_else(|| refused("owned frame unavailable"))?;
-            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling;
+            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling { cold };
+            #[cfg(test)]
+            Self::decode_gate(assembly_gate.as_ref());
             let descriptor = frame
                 .format()
                 .descriptor()
@@ -1087,6 +1094,8 @@ impl HostCommandOwner {
             switch_generation: self.owner()?.manual_switch_generation().ok(),
             #[cfg(test)]
             gate: self.hooks.context_media_gate.take(),
+            #[cfg(test)]
+            assembly_gate: self.hooks.context_media_assembly_gate.take(),
             #[cfg(test)]
             outcome: self.hooks.context_media_outcome.take(),
         })

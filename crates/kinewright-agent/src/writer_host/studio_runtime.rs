@@ -359,14 +359,12 @@ impl StudioRuntime {
             candidate
         };
         if let Some((blocked_run, continuation, reason)) = &runtime.blocked {
-            let current = host
-                .lock()
-                .map_err(|_| io::Error::other("host closed"))?
-                .hooks
-                .runs
-                .get(&run)
-                .and_then(|run| run.last_continue);
+            let mut owner = host.lock().map_err(|_| io::Error::other("host closed"))?;
+            let current = owner.hooks.runs.get(&run).and_then(|run| run.last_continue);
             if blocked_run == &run && continuation == &current {
+                owner
+                    .retry_pending_provider_wait(&run)
+                    .map_err(io::Error::other)?;
                 return Err(io::Error::other(reason.clone()));
             }
             runtime.blocked = None;
@@ -875,6 +873,7 @@ impl HostCommandOwner {
         run: &RunId,
         reason: &str,
     ) -> Result<(), super::HostError> {
+        self.retry_pending_provider_wait(run)?;
         if self.spending_scope(producer, run).is_ok_and(|state| {
             matches!(
                 state.wait,
@@ -882,10 +881,7 @@ impl HostCommandOwner {
             ) || (matches!(
                 state.wait,
                 crate::orchestration::orchestration_records::RunWait::Provider(_)
-            ) && state.effects.iter().any(|effect| {
-                effect.state
-                    == crate::orchestration::orchestration_records::EffectState::OutcomeUnknown
-            }))
+            ) && crate::orchestration::machine::has_unknown_send(&state))
         }) {
             return Ok(());
         }
@@ -905,7 +901,8 @@ impl HostCommandOwner {
         if matches!(
             state.wait,
             crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
-        ) {
+        ) || crate::orchestration::machine::has_unknown_send(&state)
+        {
             return Ok(());
         }
         let replan = self.native_accounting(&state)?.is_some_and(|accounting| {

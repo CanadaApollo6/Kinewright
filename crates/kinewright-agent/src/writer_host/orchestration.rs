@@ -51,6 +51,8 @@ pub struct RunViewPage {
     pub runtime_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completions: Vec<super::CompletionStatus>,
     pub full_refresh: bool,
@@ -147,6 +149,8 @@ pub(super) struct HostRun {
     pub tasks: BTreeMap<TaskId, EditorTask>,
     pub continuable: bool,
     pub last_continue: Option<u64>,
+    #[cfg(target_os = "linux")]
+    pub pending_provider_wait: Option<String>,
 }
 #[derive(Default)]
 pub(super) struct Hooks {
@@ -157,6 +161,8 @@ pub(super) struct Hooks {
     pub completion_before_freeze: bool,
     #[cfg(test)]
     pub context_media_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+    #[cfg(test)]
+    pub context_media_assembly_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     #[cfg(test)]
     pub context_media_wait: Option<std::time::Duration>,
     #[cfg(test)]
@@ -1182,7 +1188,7 @@ impl HostCommandOwner {
         let recovery_ready = !self.native_recovery_pending;
         #[cfg(not(target_os = "linux"))]
         let recovery_ready = true;
-        let allowed_actions =
+        let allowed_actions: Vec<RunActionKind> =
             if recovery_ready && self.attachments[index].role == AttachmentRole::Editor {
                 [
                     RunAction::Pause,
@@ -1229,11 +1235,35 @@ impl HostCommandOwner {
             }
             _ => None,
         };
+        let continue_unavailable_reason = (!allowed_actions.contains(&RunActionKind::Continue)
+            && matches!(projection.phase, RunPhase::Paused | RunPhase::Interrupted))
+        .then(|| {
+            if machine::has_unknown_send(&projection) {
+                "A task has an unknown send outcome. Continue cannot retry this send.".into()
+            } else if projection.effects.iter().any(|e| {
+                matches!(
+                    e.state,
+                    crate::orchestration::orchestration_records::EffectState::Claimed(_)
+                )
+            }) {
+                "A task is still working. Continue when its turn ends.".into()
+            } else if !recovery_ready
+                || projection.cleanup
+                    != crate::orchestration::orchestration_records::RunCleanup::Settled
+            {
+                "Run cleanup is still in progress. Wait for it to finish before continuing.".into()
+            } else if self.attachments[index].role != AttachmentRole::Editor {
+                "Continue is not available from this attachment.".into()
+            } else {
+                "This run cannot continue. Check Run details for the host's reason.".into()
+            }
+        });
         Ok(RunViewPage {
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,
             wait_reason,
+            continue_unavailable_reason,
             full_refresh: after_sequence == 0
                 || after_sequence > projection.sequence
                 || after_sequence.saturating_add(1) < projection.sequence,

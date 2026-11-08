@@ -215,10 +215,18 @@ pub(crate) const SETUP_CONTINUED: &[u8] =
     b"The provider check passed. Continue this run from its retained task state.";
 
 pub(crate) fn provider_continuation_safe(state: &RunProjection) -> bool {
-    super::requests::director(state).is_ok_and(|task| {
-        super::outbox::lane_head(state, &task.brief.scope.base.branch)
-            .is_none_or(|effect| effect.state == EffectState::Pending)
-    })
+    !has_unknown_send(state)
+        && super::requests::director(state).is_ok_and(|task| {
+            super::outbox::lane_head(state, &task.brief.scope.base.branch)
+                .is_none_or(|effect| effect.state == EffectState::Pending)
+        })
+}
+
+pub(crate) fn has_unknown_send(state: &RunProjection) -> bool {
+    state
+        .effects
+        .iter()
+        .any(|effect| effect.state == EffectState::OutcomeUnknown)
 }
 
 pub(crate) fn needs_setup_continuation(state: &RunProjection) -> bool {

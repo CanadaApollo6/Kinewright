@@ -41,7 +41,7 @@ for name,witness,marker in [('not-sent',T+'never_sent_reuses_original_effect','F
 add('not-sent-budget',F,'            self.record_not_dispatched_usage(producer, identity)?;', '            let _ = identity;', T+'never_sent_reuses_original_effect','FIX3_HOST_ZERO_PROOF')
 add('proof-conflict',W+'native_spending.rs','if task.usage.iter().any(|sample| {','if false && task.usage.iter().any(|sample| {',T+'not_sent_proof_refuses_observed_usage','FIX3_PROOF_CONFLICT')
 add('claimed-words',O,'return Err(refused(if live {','return Err(refused(if false && live {',T+'claimed_and_unknown_have_distinct_words','FIX3_TRUE_CONTINUE_WORDS')
-body=section(M,'    super::requests::director(state).is_ok_and(|task| {','\n}\n\npub(crate) fn needs_setup_continuation')
+body=section(M,'    !has_unknown_send(state)', '\n}\n\npub(crate) fn has_unknown_send')
 add('unknown-refusal',M,body,'    let _=state; true',T+'claimed_and_unknown_have_distinct_words','FIX3_TRUE_CONTINUE_WORDS')
 body=section(M,'        && !state.effects.iter().any(', '        && super::requests::director(state)')
 add('child-only',M,body,'',T+'pending_child_owns_the_only_next_send','FIX3_NO_EXTRA_DIRECTOR')

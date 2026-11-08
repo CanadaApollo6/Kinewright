@@ -434,7 +434,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
             words.contains(if cold {
                 "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned."
             } else {
-                "Media decode or seek did not finish within the 30-second wait; not retryable. Replan without guessing."
+                "Media decode or seek did not finish within the 30-second wait. Don't retry this read; replan without guessing."
             }),
             "TE14_FIX2_MEDIA_WORDS {words}"
         );

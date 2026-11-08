@@ -60,7 +60,7 @@ add('fresh-continuation', M, 'if needs_setup_continuation(&next) {',
 for name, witness in [('reuse-wake', 'live_child_wakes_after_repair'), ('reuse-steering', 'live_steering_reuses_its_effect')]:
     body = section(M, '    matches!(state.wait, RunWait::ProviderSettings(_))', '\n}\n\n/// C5 fix 10: the fixed reason')
     add(name, M, body, '    matches!(state.wait, RunWait::ProviderSettings(_))', T+witness, 'TE15_FIX2_PENDING_REUSED')
-body = section(M, '    super::requests::director(state).is_ok_and(|task| {', '\n}\n\npub(crate) fn needs_setup_continuation')
+body = section(M, '    !has_unknown_send(state)', '\n}\n\npub(crate) fn has_unknown_send')
 add('unknown-continue', M, body, '    let _ = state;\n    true',
     H+'te15_b1_fix3_claimed_and_unknown_have_distinct_words', 'FIX3_TRUE_CONTINUE_WORDS')
 add('final-other-provider', R, 'plan.check_except(checks.as_ref(), Some(provider))',

@@ -42,18 +42,19 @@ for name,words,marker in [('revise-words','The provider check failed before anyt
     add(name,R,words,'The provider check failed before anything was sent. Continue to try again.',T+'no_run_retry_words',marker)
 add('kept-revise',U,'        self.revise = Some(request);','        let _ = request;',UI+'waiting_revise_keeps_valid_request','FIX4_REVISE_REPAIRED','kinewright-app')
 add('waiting-revise-slot',U,'        if !matches!(start, RunStart::Unknown(_)) {','        if !matches!(start, RunStart::Unknown(_) | RunStart::Known(ReviseResult::Waiting { .. })) {',UI+'waiting_revise_keeps_valid_request','FIX4_WAITING_NOT_UNCONFIRMED','kinewright-app')
-unknown='format!("{error} The send outcome is unknown. Stop this run and use recovery; Continue cannot retry it.")'
+unknown='format!("{error} The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send.")'
 add('unknown-suffix',R,unknown,'error.to_string()',H+'te15_b1_fix3_postcharge_ambiguity_is_not_resumable','FIX4_FINAL_UNKNOWN_WORDS')
 body=section(S,'            ) || (matches!(','\n        })')
 add('unknown-final-handler',S,body,'            )',H+'te15_b1_fix3_postcharge_ambiguity_is_not_resumable','FIX4_FINAL_UNKNOWN_WORDS')
-add('claimed-child-words',O,'A task is still working. Continue when its turn ends.','The Director is still working. Continue when its turn ends.',T+'live_child_uses_neutral_words','FIX4_RIGHT_TASK_WORDS')
+add('claimed-child-words',O,'"A task is still working. Continue when its turn ends."\n                        } else','"The Director is still working. Continue when its turn ends."\n                        } else',T+'live_child_uses_neutral_words','FIX4_RIGHT_TASK_WORDS')
 add('unknown-child-words',O,'recovery_requires_person: a task has an unknown send outcome; Continue cannot replay it.','recovery_requires_person: the Director has an unknown send outcome; Continue cannot replay it.',T+'live_child_uses_neutral_words','FIX4_RIGHT_TASK_WORDS')
 add('ui-pending-control-words',U,'A Continue request is not confirmed.','A Stop request is not confirmed.',UI+'notes_continue_and_exact_reopen_replay','FIX4_UI_PENDING_CONTROL_WORDS','kinewright-app')
 body=section(U,'            Some(NoteAction::Continue(run)) => {','            Some(NoteAction::FirstSave)')
 add('ui-continue-handler',U,body,'            Some(NoteAction::Continue(_)) => {}\n',UI+'full_notes_continue_reaches_host','FIX4_UI_REAL_HANDLER','kinewright-app')
-add('ui-unknown-disabled',U,'.add_enabled(can_continue, egui::Button::new("Continue").small())','.add_enabled(true, egui::Button::new("Continue").small())',UI+'notes_unknown_disables_continue','FIX4_UI_UNKNOWN_DISABLED','kinewright-app')
+add('ui-unknown-disabled',U,'.add_enabled(state.can_continue, egui::Button::new("Continue").small())','.add_enabled(true, egui::Button::new("Continue").small())',UI+'notes_unknown_disables_continue','FIX4_UI_UNKNOWN_DISABLED','kinewright-app')
 for name,witness,marker in [('ui-settings-reason','notes_continue_and_exact_reopen_replay','FIX4_UI_WAIT_REASON'),('ui-unknown-reason','notes_unknown_disables_continue','FIX4_UI_UNKNOWN_REASON')]:
-    add(name,U,'Some(reason) => format!("{phase} · {reason}{cleanup}"),','Some(_reason) => format!("{phase}{wait}{cleanup}"),',UI+witness,marker,'kinewright-app')
+    body=section(U,'            Some(reason) => format!(', '            None => format!("{phase}{wait}{cleanup}"),')
+    add(name,U,body,'            Some(_reason) => format!("{phase}{wait}{cleanup}"),\n',UI+witness,marker,'kinewright-app')
 body=section(C,'                if let Err(why) = self.retain_for_dispatch() {','\n                request')
 add('ui-keep-before-continue',C,body,'',UI+'notes_continue_and_exact_reopen_replay','C4_STOP_INTENT_KEPT_BEFORE_DISPATCH','kinewright-app')
 body=section(C,'    pub(crate) fn retry_continues(','    pub(crate) fn retry_controls(')

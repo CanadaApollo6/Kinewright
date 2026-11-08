@@ -106,11 +106,41 @@ impl HostCommandOwner {
             .owner()?
             .orchestration_projection(run)?
             .ok_or_else(|| HostRefusal::new("provider_wait", "The run is unavailable."))?;
+        if crate::orchestration::machine::has_unknown_send(&state) {
+            if let Some(runtime) = self.hooks.runs.get_mut(run) {
+                runtime.pending_provider_wait = None;
+            }
+            return Ok(());
+        }
+        self.hooks
+            .runs
+            .get_mut(run)
+            .ok_or_else(|| HostRefusal::new("provider_wait", "The run is unavailable."))?
+            .pending_provider_wait = Some(reason.to_owned());
+        let reason = if reason == CHECK_RETRY {
+            reason.to_owned()
+        } else {
+            format!("{reason} After fixing Settings, press Continue.")
+        };
         let same = state.phase == RunPhase::Interrupted
             && matches!(&state.wait, RunWait::ProviderSettings(detail) if detail.reason.sha256 == kinewright_media::sha256_bytes(reason.as_bytes()));
         if !same {
             let producer = self.run_producer(run)?;
-            self.record_runtime_wait(&producer, run, reason, false, RunWait::ProviderSettings)?;
+            self.record_runtime_wait(&producer, run, &reason, false, RunWait::ProviderSettings)?;
+        }
+        if let Some(runtime) = self.hooks.runs.get_mut(run) {
+            runtime.pending_provider_wait = None;
+        }
+        Ok(())
+    }
+    pub(super) fn retry_pending_provider_wait(&mut self, run: &RunId) -> Result<(), HostError> {
+        if let Some(reason) = self
+            .hooks
+            .runs
+            .get(run)
+            .and_then(|run| run.pending_provider_wait.clone())
+        {
+            self.wait_for_provider(run, &reason)?;
         }
         Ok(())
     }
@@ -328,7 +358,7 @@ pub(crate) fn wait_on_launch_error(
     } else {
         let producer = owner.run_producer(run).map_err(std::io::Error::other)?;
         owner
-            .record_runtime_wait(&producer, run, &format!("{error} The send outcome is unknown. Stop this run and use recovery; Continue cannot retry it."), false, RunWait::Provider)
+            .record_runtime_wait(&producer, run, &format!("{error} The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."), false, RunWait::Provider)
             .map_err(std::io::Error::other)?;
     }
     Ok(())

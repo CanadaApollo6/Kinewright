@@ -100,6 +100,8 @@ impl HostCommandOwner {
                 tasks: BTreeMap::new(),
                 continuable: true,
                 last_continue: Some(continue_floor),
+                #[cfg(target_os = "linux")]
+                pending_provider_wait: None,
             },
         );
         Ok(())
