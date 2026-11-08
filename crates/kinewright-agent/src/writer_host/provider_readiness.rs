@@ -190,7 +190,11 @@ impl HostCommandOwner {
         }
     }
     fn readiness_reply(&mut self, command: &HostCommand, failure: &std::io::Error) -> HostReply {
-        let reason = failure.to_string();
+        let reason = if setup_failure(failure) {
+            failure.to_string()
+        } else {
+            CHECK_RETRY.into()
+        };
         if matches!(command, HostCommand::ReviseCut { .. }) {
             return HostReply {
                 status: self.status(),
@@ -307,13 +311,17 @@ pub(crate) fn wait_on_launch_error(
     host: &Arc<Mutex<HostCommandOwner>>,
     run: &RunId,
     error: &std::io::Error,
+    resumable: bool,
 ) -> std::io::Result<()> {
-    if let Some(cause) = error.get_ref()
-        && cause.is::<ProviderSetupRefusal>()
-    {
-        host.lock()
-            .map_err(|_| std::io::Error::other("host owner poisoned"))?
-            .wait_for_provider(run, &error.to_string())
+    let mut owner = host
+        .lock()
+        .map_err(|_| std::io::Error::other("host owner poisoned"))?;
+    if resumable {
+        wait_for_failure(&mut owner, run, error).map_err(std::io::Error::other)?;
+    } else {
+        let producer = owner.run_producer(run).map_err(std::io::Error::other)?;
+        owner
+            .record_runtime_wait(&producer, run, &format!("{error} The send outcome is unknown. Stop this run and use recovery; Continue cannot retry it."), false, RunWait::Provider)
             .map_err(std::io::Error::other)?;
     }
     Ok(())
@@ -363,6 +371,9 @@ impl ReadinessPlan {
         Err(std::io::Error::other(ProviderSetupRefusal(why)))
     }
 }
+pub(crate) const CHECK_RETRY: &str =
+    "The provider check failed before anything was sent. Continue to try again.";
+
 pub(crate) fn setup_failure(error: &std::io::Error) -> bool {
     matches!(error.get_ref(), Some(cause) if cause.is::<ProviderSetupRefusal>())
 }
@@ -400,7 +411,6 @@ fn wait_for_failure(
     if setup_failure(failure) {
         owner.wait_for_provider(run, &failure.to_string())
     } else {
-        let producer = owner.run_producer(run)?;
-        owner.record_runtime_refusal(&producer, run, &failure.to_string())
+        owner.wait_for_provider(run, CHECK_RETRY)
     }
 }

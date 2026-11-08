@@ -1272,7 +1272,7 @@ impl RunState {
             RunWait::None => "",
             RunWait::Files(_) => " · waiting for files",
             RunWait::Provider(_) => " · waiting for the provider",
-            RunWait::ProviderSettings(_) => " · check provider Settings",
+            RunWait::ProviderSettings(_) => " · provider check needs attention",
             RunWait::Question(_) => " · waiting for your answer",
             RunWait::Children(_) => " · waiting for its tasks",
         };

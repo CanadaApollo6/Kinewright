@@ -536,7 +536,10 @@ impl TaskMcp {
                 let reason = if super::provider_readiness::setup_failure(&why) {
                     super::provider_readiness::model_wait(&why)
                 } else {
-                    why.to_string()
+                    format!(
+                        "{} End your turn now. Do not retry this call.",
+                        super::provider_readiness::CHECK_RETRY
+                    )
                 };
                 HostRefusal::new("provider_wait", &reason)
             })?;

@@ -212,7 +212,7 @@ pub fn eligible(state: &RunProjection, action: &RunAction) -> bool {
 }
 
 pub(crate) const SETUP_CONTINUED: &[u8] =
-    b"The provider setup was fixed. Continue this run from its retained task state.";
+    b"The provider check passed. Continue this run from its retained task state.";
 
 pub(crate) fn provider_continuation_safe(state: &RunProjection) -> bool {
     super::requests::director(state).is_ok_and(|task| {
@@ -223,6 +223,10 @@ pub(crate) fn provider_continuation_safe(state: &RunProjection) -> bool {
 
 pub(crate) fn needs_setup_continuation(state: &RunProjection) -> bool {
     matches!(state.wait, RunWait::ProviderSettings(_))
+        && !state.effects.iter().any(|effect| {
+            super::outbox::lane_head(state, &effect.lane)
+                .is_some_and(|head| head.state == EffectState::Pending)
+        })
         && super::requests::director(state).is_ok_and(|task| {
             super::outbox::lane_head(state, &task.brief.scope.base.branch).is_none()
         })

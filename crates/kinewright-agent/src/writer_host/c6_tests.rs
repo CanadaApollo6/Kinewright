@@ -587,15 +587,7 @@ fn c6_reader_case(mode: &str, lines: &[String], refusal: Option<&'static str>, c
     } else {
         assert!(task.repairs.is_empty(), "C6_NO_REPAIR {mode}");
     }
-    owner
-        .reconcile_native_effect(
-            &producer,
-            &execution,
-            &crate::guardian::AttemptRetirementProof::NotDispatched(
-                crate::native_launcher::native_identity(&execution),
-            ),
-        )
-        .unwrap();
+    retire_observed_protocol_fixture(&mut owner, &producer, &execution);
     drop(owner);
     std::fs::remove_dir_all(scratch).unwrap();
     eprintln!("C6_CLAUDE_READER mode={mode} refusal={refusal:?} completed={completed}");

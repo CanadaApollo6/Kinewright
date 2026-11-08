@@ -96,11 +96,7 @@ struct State {
     recovering: bool,
     retry_at: Option<std::time::Instant>,
     recovery_worker: Option<JoinHandle<()>>,
-    blocked: Option<(
-        RunId,
-        Option<kinewright_project::receipts::CommandId>,
-        String,
-    )>,
+    blocked: Option<(RunId, Option<u64>, String)>,
     claim: Option<(RunId, Arc<Mutex<MachineClaim>>)>,
     worker: Option<Worker>,
 }
@@ -285,7 +281,7 @@ impl StudioRuntime {
                     .hooks
                     .runs
                     .get(&worker.run)
-                    .and_then(|run| run.last_continue.clone());
+                    .and_then(|run| run.last_continue);
                 runtime.blocked = Some((worker.run, continuation, reason));
             }
         }
@@ -369,7 +365,7 @@ impl StudioRuntime {
                 .hooks
                 .runs
                 .get(&run)
-                .and_then(|run| run.last_continue.clone());
+                .and_then(|run| run.last_continue);
             if blocked_run == &run && continuation == &current {
                 return Err(io::Error::other(reason.clone()));
             }
@@ -729,15 +725,6 @@ impl ProfileFactory for TaskProfiles {
         let server = {
             let mut owner = host
                 .lock()
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            owner
-                .prepare_task_endpoint(
-                    &self.producer,
-                    &identity.run,
-                    &identity.task,
-                    &identity.attempt,
-                    Duration::from_secs(3600),
-                )
                 .map_err(|error| io::Error::other(error.to_string()))?;
             owner
                 .start_task_server(&self.producer, &identity.run, &identity.task)

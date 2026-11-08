@@ -1176,8 +1176,9 @@ fn s4b_c4_fix1_worker_refusal_does_not_churn_on_poll() {
                 .unwrap()
                 .run_view
                 .is_some_and(|page| {
-                    page.runtime_status
-                        .is_some_and(|status| status.contains("native runtime refusal"))
+                    page.runtime_status.is_none()
+                        && matches!(page.projection.wait, RunWait::ProviderSettings(_))
+                        && page.allowed_actions.contains(&RunActionKind::Continue)
                 })
         },
         "C4_WORKER_REFUSAL_RECORDED",

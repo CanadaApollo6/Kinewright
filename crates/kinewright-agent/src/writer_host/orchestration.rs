@@ -144,7 +144,7 @@ pub(super) struct HostRun {
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,
     pub continuable: bool,
-    pub last_continue: Option<CommandId>,
+    pub last_continue: Option<u64>,
 }
 #[derive(Default)]
 pub(super) struct Hooks {
@@ -566,9 +566,15 @@ impl HostCommandOwner {
                             .orchestration_receipt(&intent.run_id, &request.envelope.id)?
                             .is_none()
                     {
-                        return Err(refused(
-                            "recovery_requires_person: the Director has an unknown send outcome; Continue cannot replay it.",
-                        ));
+                        let live = crate::orchestration::requests::director(&state).is_ok_and(|task| {
+                            crate::orchestration::outbox::lane_head(&state, &task.brief.scope.base.branch)
+                                .is_some_and(|effect| matches!(effect.state, crate::orchestration::orchestration_records::EffectState::Claimed(_)))
+                        });
+                        return Err(refused(if live {
+                            "The Director is still working. Continue when its turn ends."
+                        } else {
+                            "recovery_requires_person: the Director has an unknown send outcome; Continue cannot replay it."
+                        }));
                     }
                     if intent.action == RunAction::Continue
                         && !self.run_recovery_blocks(&state)?.is_empty()
@@ -1141,10 +1147,14 @@ impl HostCommandOwner {
         if receipt.decision == orchestration_commit::CommandDecision::Applied
             && matches!(&request.envelope.command, OrchestrationCommand::ControlRun(intent) if intent.action == RunAction::Continue)
             && let Some(runtime) = self.hooks.runs.get_mut(run)
+            && runtime
+                .last_continue
+                .is_none_or(|sequence| receipt.sequence > sequence)
         {
-            runtime.last_continue = Some(request.envelope.id.clone());
+            runtime.last_continue = Some(receipt.sequence);
         }
     }
+
     pub(super) fn observe_run(
         &self,
         index: usize,

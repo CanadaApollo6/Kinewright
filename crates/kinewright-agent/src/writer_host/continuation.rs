@@ -85,6 +85,10 @@ impl HostCommandOwner {
             expires_at: None,
             scope: brief.scope.clone(),
         });
+        let continue_floor = self
+            .owner()?
+            .orchestration_projection(run)?
+            .map_or(0, |state| state.sequence);
         self.hooks.runs.insert(
             run.clone(),
             HostRun {
@@ -95,7 +99,7 @@ impl HostCommandOwner {
                 inputs: HostOwnedInputClosure { context, inputs },
                 tasks: BTreeMap::new(),
                 continuable: true,
-                last_continue: None,
+                last_continue: Some(continue_floor),
             },
         );
         Ok(())

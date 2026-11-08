@@ -149,7 +149,7 @@ struct Fix2NativeProfiles {
     >,
     locations: Mutex<Vec<(ExecutionIdentity, std::path::PathBuf)>>,
     units: Mutex<Vec<NativeUnitCleanup>>,
-    refusal: Option<CertificationRefusal>,
+    refusal: Mutex<Option<CertificationRefusal>>,
 }
 impl crate::effect_pump::ProfileFactory for Fix2NativeProfiles {
     fn bind(
@@ -208,8 +208,8 @@ impl ConnectorRuntimeChecks for Fix2NativeProfiles {
         _: &ConnectorSpecification,
         binding: &crate::orchestration::adapters::AttemptBinding,
     ) -> Result<crate::orchestration::adapters::RuntimeQualification, CertificationRefusal> {
-        if let Some(refusal) = &self.refusal {
-            return Err(refusal.clone());
+        if let Some(refusal) = self.refusal.lock().unwrap().take() {
+            return Err(refusal);
         }
         Ok(self.runtimes.lock().unwrap()[&binding.identity().attempt].clone())
     }
@@ -295,7 +295,7 @@ impl Fix2NativeRun {
             runtimes: Mutex::default(),
             locations: Mutex::default(),
             units: Mutex::default(),
-            refusal,
+            refusal: Mutex::new(refusal),
         });
         let sends = Arc::new(Mutex::new(vec![]));
         let launcher = Fix2NativeLauncher {
@@ -324,7 +324,7 @@ impl Fix2NativeRun {
                 claim.clone(),
                 launcher,
                 profiles.clone(),
-                None,
+                std::num::NonZeroU64::new(8000),
             )),
             profiles,
             claim: Some(claim),
@@ -716,24 +716,55 @@ fn te15_b1_fix2_setup_recheck_wait_and_unknown_continue_refusal() {
         matches!(state.wait, RunWait::ProviderSettings(_)),
         "TE15_FIX2_SETUP_RECHECK_CLASSIFIED"
     );
+    let owner = f.host.owner.upgrade().unwrap();
+    let RunWait::ProviderSettings(wait) = &state.wait else {
+        panic!("TE15_FIX2_SETUP_RECHECK_CLASSIFIED");
+    };
+    let text = owner
+        .lock()
+        .unwrap()
+        .owner()
+        .unwrap()
+        .store()
+        .unwrap()
+        .read_evidence(&wait.reason)
+        .unwrap();
+    assert!(
+        std::str::from_utf8(text.as_slice())
+            .unwrap()
+            .contains("subscription sign-in"),
+        "TE15_FIX2_SETUP_RECHECK_CLASSIFIED"
+    );
+    drop(text);
     assert!(result.is_ok(), "TE15_FIX2_SETUP_WAIT_PUMP_ALIVE");
     assert_eq!(
         state.effects[0].state,
-        EffectState::OutcomeUnknown,
-        "TE15_FIX2_UNCERTAIN_SEND_RETAINED"
+        EffectState::Settled,
+        "FIX3_FINAL_RECHECK_NOT_SENT"
     );
-    let reply = f
-        .editor
-        .request(HostCommand::DispatchOrchestration {
-            request: Box::new(f.control(&f.editor, &run, RunAction::Continue)),
-        })
-        .unwrap();
-    assert!(
-        reply
-            .error
-            .as_ref()
-            .is_some_and(|e| e.message.contains("unknown send outcome")),
-        "TE15_FIX2_UNKNOWN_CONTINUE_REFUSED {reply:?}"
+    fix3_continue(&f, &run);
+    native.tick();
+    assert_eq!(
+        native.sends.lock().unwrap().len(),
+        1,
+        "FIX3_FINAL_RECHECK_REPAIRED"
+    );
+    native.finish_turn(&f, 1);
+    let state = f.projection(&run);
+    let owner = f.host.owner.upgrade().unwrap();
+    assert_eq!(
+        owner
+            .lock()
+            .unwrap()
+            .native_accounting(&state)
+            .unwrap()
+            .unwrap()
+            .tasks
+            .iter()
+            .map(|task| task.sends.len())
+            .sum::<usize>(),
+        2,
+        "FIX3_FINAL_RECHECK_CHARGES"
     );
 }
 #[test]
@@ -1125,13 +1156,13 @@ fn te15_b1_fix2_nonsetup_model_refusal_keeps_provider_words() {
     );
     let text = serde_json::to_string(&result).unwrap();
     assert!(
-        text.contains(&CertificationRefusal::SandboxUnavailable.to_string())
+        text.contains(super::super::provider_readiness::CHECK_RETRY)
             && !text.contains("fix Settings")
             && !text.contains("subscription sign-in"),
         "TE15_FIX2_NONSETUP_MODEL_WORDS {text}"
     );
     assert!(
-        matches!(f.projection(&run).wait, RunWait::Provider(_)),
+        matches!(f.projection(&run).wait, RunWait::ProviderSettings(_)),
         "TE15_FIX2_NONSETUP_MODEL_WAIT"
     );
     assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);

@@ -888,3 +888,56 @@ impl HostCommandOwner {
         self.publish_native(producer, state, identity, vec![])
     }
 }
+
+impl HostCommandOwner {
+    // Only the validated durable not-dispatched fence can establish this zero.
+    pub(super) fn record_not_dispatched_usage(
+        &mut self,
+        producer: &HostAuth,
+        identity: &ExecutionIdentity,
+    ) -> Result<(), HostError> {
+        let state = self.spending_scope(producer, &identity.run)?;
+        let Some(accounting) = self.native_accounting(&state)? else {
+            return Ok(());
+        };
+        let Some(task) = accounting
+            .tasks
+            .iter()
+            .find(|task| task.task == identity.task.0)
+        else {
+            return Ok(());
+        };
+        if task.usage.iter().any(|sample| {
+            sample.attempt == identity.attempt.0 && sample.event != "host.not_dispatched"
+        }) {
+            return Err(refused("unstarted attempt already has provider usage"));
+        }
+        let samples: Vec<_> = task
+            .sends
+            .iter()
+            .filter(|send| send.attempt == identity.attempt.0)
+            .map(|send| UsageSample {
+                snapshot: None,
+                attempt: send.attempt.clone(),
+                turn: send.turn,
+                event: "host.not_dispatched".into(),
+                ordinal: 1,
+                mode: UsageMode::Cumulative,
+                values: UsageValues::from_values([Some(0); 6]),
+                complete: true,
+                input_includes_cache: true,
+                output_includes_reasoning: true,
+            })
+            .collect();
+        let clock = ClockObservation {
+            unix_ms: accounting.last_unix_ms,
+            monotonic_delta_ms: 0,
+            trusted: true,
+        };
+        drop(accounting);
+        for sample in samples {
+            self.change_spending(producer, identity, SpendingChange::Usage(sample), clock)?;
+        }
+        Ok(())
+    }
+}

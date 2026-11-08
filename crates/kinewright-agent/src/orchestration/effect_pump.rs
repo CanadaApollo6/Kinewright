@@ -192,6 +192,17 @@ impl<L: GuardianLauncher> EffectPump<L> {
                 )
                 .map_err(io::Error::other)?;
         }
+        owner
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .prepare_task_endpoint(
+                &self.producer,
+                &identity.run,
+                &identity.task,
+                &identity.attempt,
+                std::time::Duration::from_secs(3600),
+            )
+            .map_err(io::Error::other)?;
         let profile = self.profiles.bind(&attempt)?;
         let provider = profile.selection().connector;
         crate::writer_host::provider_readiness::check_bound(owner, &self.run, plan, &provider)?;
@@ -210,6 +221,7 @@ impl<L: GuardianLauncher> EffectPump<L> {
             )
             .map_err(io::Error::other)?;
         drop(host);
+
         self.launcher
             .launch(attempt, invocation)
             .map_err(|e| e.0)
@@ -219,6 +231,7 @@ impl<L: GuardianLauncher> EffectPump<L> {
         &self,
         owner: &Arc<Mutex<HostCommandOwner>>,
         identity: &ExecutionIdentity,
+        effect: &crate::orchestration::orchestration_records::EffectId,
         error: io::Error,
     ) -> io::Result<()> {
         let mut claim = self
@@ -230,8 +243,25 @@ impl<L: GuardianLauncher> EffectPump<L> {
                 "{error}; cleanup_blocked: {cleanup}"
             )));
         }
-        crate::writer_host::provider_readiness::wait_on_launch_error(owner, &self.run, &error)?;
-        if crate::writer_host::provider_readiness::setup_failure(&error) {
+        let resumable = owner
+            .lock()
+            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .spending_scope(&self.producer, &self.run)
+            .map_err(io::Error::other)?
+            .effects
+            .iter()
+            .any(|entry| {
+                entry.id == *effect
+                    && matches!(
+                        entry.state,
+                        crate::orchestration::orchestration_records::EffectState::Pending
+                            | crate::orchestration::orchestration_records::EffectState::Settled
+                    )
+            });
+        crate::writer_host::provider_readiness::wait_on_launch_error(
+            owner, &self.run, &error, resumable,
+        )?;
+        if resumable {
             return Ok(());
         }
         Err(error)
@@ -297,12 +327,8 @@ impl<L: GuardianLauncher> EffectPump<L> {
             return Ok(());
         }
         drop(host);
-        let plan = match crate::writer_host::provider_readiness::check_run(&owner, &self.run) {
-            Ok(plan) => plan,
-            Err(error) if crate::writer_host::provider_readiness::setup_failure(&error) => {
-                return Ok(());
-            }
-            Err(error) => return Err(error),
+        let Ok(plan) = crate::writer_host::provider_readiness::check_run(&owner, &self.run) else {
+            return Ok(());
         };
         let mut host = owner
             .lock()
@@ -318,7 +344,7 @@ impl<L: GuardianLauncher> EffectPump<L> {
         let launched = self.launch_reserved(&owner, attempt, &effect, kind, now, &plan);
         let session = match launched {
             Ok(session) => session,
-            Err(error) => return self.reconcile_failure(&owner, &identity, error),
+            Err(error) => return self.reconcile_failure(&owner, &identity, &effect, error),
         };
         #[cfg(any(test, feature = "test-util"))]
         if let Some(observer) = &self.native_event_observer {

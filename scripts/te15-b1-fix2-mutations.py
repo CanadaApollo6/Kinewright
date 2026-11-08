@@ -45,8 +45,8 @@ def section(file, start, end):
     return text[a:text.index(end, a)]
 
 add('pump-alive', E,
-    'if crate::writer_host::provider_readiness::setup_failure(&error) {',
-    'if false && crate::writer_host::provider_readiness::setup_failure(&error) {',
+    'if resumable {',
+    'if false && resumable {',
     T+'setup_recheck_wait_and_unknown_continue_refusal', 'TE15_FIX2_SETUP_WAIT_PUMP_ALIVE')
 add('live-child-authority', O,
     '!matches!(projection.wait, crate::orchestration::orchestration_records::RunWait::ProviderSettings(_))',
@@ -58,14 +58,14 @@ add('fresh-continuation', M, 'if needs_setup_continuation(&next) {',
     'if false && needs_setup_continuation(&next) {',
     T+'live_continue_sends_once', 'TE15_FIX2_REAL_CONTINUATION')
 for name, witness in [('reuse-wake', 'live_child_wakes_after_repair'), ('reuse-steering', 'live_steering_reuses_its_effect')]:
-    add(name, M, 'super::outbox::lane_head(state, &task.brief.scope.base.branch).is_none()',
-        '{ let _ = task; true }', T+witness, 'TE15_FIX2_PENDING_REUSED')
+    body = section(M, '    matches!(state.wait, RunWait::ProviderSettings(_))', '\n}\n\n/// C5 fix 10: the fixed reason')
+    add(name, M, body, '    matches!(state.wait, RunWait::ProviderSettings(_))', T+witness, 'TE15_FIX2_PENDING_REUSED')
 body = section(M, '    super::requests::director(state).is_ok_and(|task| {', '\n}\n\npub(crate) fn needs_setup_continuation')
 add('unknown-continue', M, body, '    let _ = state;\n    true',
-    T+'setup_recheck_wait_and_unknown_continue_refusal', 'TE15_FIX2_UNKNOWN_CONTINUE_REFUSED')
+    H+'te15_b1_fix3_claimed_and_unknown_have_distinct_words', 'FIX3_TRUE_CONTINUE_WORDS')
 add('final-other-provider', R, 'plan.check_except(checks.as_ref(), Some(provider))',
     '{ let _ = (checks, provider); Ok(()) }', T+'bound_signout_does_not_charge', 'TE15_FIX2_FINAL_ZERO_SEND')
-body = section(R, '        let current = owner.readiness_for_run(run);', '\n    }\n}\npub(crate) fn setup_failure')
+body = section(R, '        let current = owner.readiness_for_run(run);', '\n    }\n}\n')
 add('final-settings', R, body, '        let _ = (owner, run); Ok(())',
     T+'bound_settings_does_not_charge', 'TE15_FIX2_FINAL_ZERO_SEND')
 add('charge-lock-compare', E, 'plan.current(&mut host, &self.run)?;',
@@ -76,9 +76,7 @@ body = section(N, '            .recheck_runtime(self.checks.as_ref())', '\n     
 add('typed-setup-launch', N, body,
     '            .recheck_runtime(self.checks.as_ref()).map_err(io::Error::other)?;',
     T+'setup_recheck_wait_and_unknown_continue_refusal', 'TE15_FIX2_SETUP_RECHECK_CLASSIFIED')
-add('generic-launch', E, '.map_err(|e| e.0)',
-    '.map_err(|e| crate::writer_host::provider_readiness::provider_error(&provider, &e.0))',
-    T+'postcommit_error_keeps_provider_recovery', 'TE15_FIX2_POSTCOMMIT_PROVIDER_WAIT')
+add('generic-launch', R, 'if resumable {', 'if true || resumable {', T+'postcommit_error_keeps_provider_recovery', 'TE15_FIX2_POSTCOMMIT_PROVIDER_WAIT')
 add('generic-model-words', W+'task_mcp.rs',
     'if super::provider_readiness::setup_failure(&why) {',
     'if true || super::provider_readiness::setup_failure(&why) {',
@@ -89,7 +87,7 @@ add('stream-wait', S, body, '        let state = self.spending_scope(producer, &
 add('queued-retry-bound', S, 'if blocked_run == &run && continuation == &current {',
     'if false && blocked_run == &run && continuation == &current {',
     T+'queued_failed_worker_needs_a_new_continue', 'TE15_FIX2_BLOCKED_QUEUED')
-add('acknowledged-continue', O, 'runtime.last_continue = Some(request.envelope.id.clone());',
+add('acknowledged-continue', O, 'runtime.last_continue = Some(receipt.sequence);',
     'let _ = runtime;', T+'queued_failed_worker_needs_a_new_continue', 'TE15_FIX2_CONTINUE_UNBLOCKED')
 add('director-link', F, 'std::fs::symlink_metadata(path)', 'std::fs::metadata(path)',
     'orchestration::director_setting::te15_b1_fix2_director_links_keep_an_unreadable_choice', 'TE15_FIX2_DIRECTOR_LINK')

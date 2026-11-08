@@ -164,6 +164,10 @@ impl HostCommandOwner {
         {
             return Err(refused("no durable unstarted launch fence"));
         }
+        if matches!(proof, crate::guardian::AttemptRetirementProof::NotDispatched(_)) {
+            self.record_not_dispatched_usage(producer, identity)?;
+            state = self.spending_scope(producer, &identity.run)?;
+        }
         self.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
@@ -188,7 +192,11 @@ impl HostCommandOwner {
             e.state == EffectState::Claimed(identity.attempt.clone())
                 || (e.task == identity.task && e.state == EffectState::OutcomeUnknown)
         }) {
-            effect.state = EffectState::OutcomeUnknown;
+            effect.state = if effect.state == EffectState::Claimed(identity.attempt.clone()) && matches!(proof, crate::guardian::AttemptRetirementProof::NotDispatched(_)) {
+                EffectState::Settled
+            } else {
+                EffectState::OutcomeUnknown
+            };
         }
         crate::orchestration::tasks::refresh_cleanup(&mut state);
         self.publish_native(producer, state, identity, vec![])

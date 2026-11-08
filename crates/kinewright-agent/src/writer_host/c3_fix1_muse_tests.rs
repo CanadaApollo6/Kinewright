@@ -291,13 +291,12 @@ fn s4b_c3_fix1_failed_tick_retires_reservation() {
         None,
     );
     for _ in 0..4 {
-        assert!(
-            pump.tick()
-                .unwrap_err()
-                .to_string()
-                .contains("injected profile refusal")
-        );
+        pump.tick().expect("C3_PRECHARGE_REFUSAL_REMAINS_RESUMABLE");
         let state = f.projection(&run);
+        assert!(
+            matches!(state.wait, RunWait::ProviderSettings(_)),
+            "C3_PRECHARGE_REFUSAL_REMAINS_RESUMABLE"
+        );
         assert!(
             state
                 .attempts

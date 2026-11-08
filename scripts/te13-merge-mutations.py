@@ -49,6 +49,8 @@ def run(name, package, witness, marker, red):
     target = ['--bin', 'kinewright-app'] if package == 'kinewright-app' else ['--lib']
     target = globals().get('TEST_TARGETS', {}).get(witness, target)
     features = {AGENT: 'eval-harness,slow-tests', 'kinewright-project': 'test-util', 'kinewright-app': 'slow-tests'}.get(package)
+    if witness in globals().get('FAST_WITNESSES', ()):
+        features = 'eval-harness' if package == AGENT else None
     args = ['test', '-p', package, *target]
     if features:
         args += ['--features', features]

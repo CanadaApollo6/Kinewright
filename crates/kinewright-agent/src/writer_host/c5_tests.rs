@@ -167,15 +167,7 @@ fn ci_protocol_case(binary: &std::path::Path, mode: &str) {
     if mode == "missing" {
         assert_eq!(accounting.tasks[0].totals.known.input, None);
     }
-    owner
-        .reconcile_native_effect(
-            &producer,
-            &execution,
-            &crate::guardian::AttemptRetirementProof::NotDispatched(
-                crate::native_launcher::native_identity(&execution),
-            ),
-        )
-        .unwrap();
+    retire_observed_protocol_fixture(&mut owner, &producer, &execution);
     drop(owner);
     eprintln!("C5_CI_PROTOCOL mode={mode} charged=1 joined=true fixture_only=true");
     assert!(
@@ -236,4 +228,42 @@ fn s4b_c5_opening_prompt_contains_bound_brief_and_notes() {
         state.attempts.is_empty(),
         "C5_PROMPT_FIXTURE_NEVER_LAUNCHES"
     );
+}
+
+// Protocol fixtures inject observations without launching a process. They cannot
+// claim the production not-dispatched proof, which excludes provider usage.
+fn retire_observed_protocol_fixture(
+    owner: &mut HostCommandOwner,
+    producer: &HostAuth,
+    identity: &ExecutionIdentity,
+) {
+    let mut state = owner.spending_scope(producer, &identity.run).unwrap();
+    state
+        .attempts
+        .iter_mut()
+        .find(|attempt| attempt.identity == *identity)
+        .unwrap()
+        .state = AttemptState::Retired(AttemptOutcome::Interrupted);
+    let task = state
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == identity.task)
+        .unwrap();
+    task.progress.capacity = DependencyReservation::Free;
+    task.progress.turn = None;
+    task.progress.turn_ended = !task.progress.expired;
+    if matches!(task.state, TaskState::Preparing | TaskState::Running(_)) {
+        task.state = TaskState::Queued;
+    }
+    for effect in state
+        .effects
+        .iter_mut()
+        .filter(|effect| effect.state == EffectState::Claimed(identity.attempt.clone()))
+    {
+        effect.state = EffectState::OutcomeUnknown;
+    }
+    crate::orchestration::tasks::refresh_cleanup(&mut state);
+    owner
+        .publish_native(producer, state, identity, vec![])
+        .unwrap();
 }
