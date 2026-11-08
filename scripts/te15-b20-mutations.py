@@ -42,7 +42,7 @@ add('host-not-provider', E,
     'e.downcast_ref::<crate::writer_host::task_preparation::PreparationRefusal>().filter(|_| false)',
     'host_failure_notifies_director_without_retrying_child', 'B20_HOST_REPLAN_WAIT')
 add('no-child-retry', P, '            effect.state = EffectState::Disposed;', '            effect.state = EffectState::Pending;', 'host_failure_notifies_director_without_retrying_child', 'B20_NO_CHILD_RETRY')
-add('director-notified', P, '                state: EffectState::Pending,', '                state: EffectState::Disposed,', 'host_failure_notifies_director_without_retrying_child', 'B20_DIRECTOR_TOLD')
+add('director-notified', P, '                state: EffectState::Pending,', '                state: EffectState::Disposed,', 'host_failure_notifies_director_without_retrying_child', 'B20_HOST_REPLAN_WAIT')
 add('history-words', P, 'The task could not start because its candidate changed. This start sent nothing. The Director must replan the task; Continue cannot repair it.', 'The provider check failed before anything was sent. Continue to try again.', 'history_refusal_has_host_words', 'B20_HISTORY_WORDS')
 # An unsafe retarget needs to bypass both stale-base and immutable merge-envelope
 # checks. Mutate the real guards together; neither production guard is changed.

@@ -17,6 +17,21 @@ fn refused() -> HostError {
     )
     .into()
 }
+pub(super) fn validate_merge_checkpoint(
+    origin: &BranchBinding,
+    base: &BranchBinding,
+    receipt: &kinewright_project::receipts::CommandReceipt,
+    checkpoint: &BranchCheckpoint,
+) -> Result<(), HostError> {
+    if receipt.target_branch != origin.branch
+        || checkpoint.branch_id != origin.branch
+        || checkpoint.head_id != receipt.head_id
+        || checkpoint.predecessor.as_ref() != Some(&base.head)
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
 impl HostCommandOwner {
     /// Descent is proved by this run's acknowledged merge receipts, never by a
     /// model-supplied head or a same-project branch name alone.
@@ -70,13 +85,7 @@ impl HostCommandOwner {
                 .owner()?
                 .store()?
                 .read_record::<BranchCheckpoint>(checkpoint_ref)?;
-            if receipt.target_branch != origin.branch
-                || checkpoint.branch_id != origin.branch
-                || checkpoint.head_id != receipt.head_id
-                || checkpoint.predecessor.as_ref() != Some(&history.base.head)
-            {
-                return Err(refused());
-            }
+            validate_merge_checkpoint(origin, &history.base, &receipt, &checkpoint)?;
             edges.push((
                 history.base.clone(),
                 BranchBinding {
@@ -134,55 +143,153 @@ impl HostCommandOwner {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct PreparationRefusal(pub &'static str);
+pub(crate) const HOST_RETRY: &str =
+    "The writer host could not start the task yet. This start sent nothing. Continue to try again.";
 #[cfg(target_os = "linux")]
-pub(crate) fn preparation_refusal(error: HostError) -> std::io::Error {
-    let words = match error {
-        HostError::Refused(refusal) if refusal.code == "history_changed" => {
-            "The task could not start because its candidate changed. This start sent nothing. The Director must replan the task; Continue cannot repair it."
-        }
-        HostError::Refused(refusal)
-            if matches!(
-                refusal.code.as_str(),
-                "task_scope" | "task_history" | "orchestration_refused" | "role_refused"
-            ) =>
-        {
-            "The task could not start because its scope is invalid. This start sent nothing. The Director must replan the task; Continue cannot repair it."
-        }
-        _ => {
-            "The writer host could not prepare the task. This start sent nothing. The Director must replan the task; Continue cannot repair it."
-        }
-    };
-    std::io::Error::other(PreparationRefusal(words))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparationKind {
+    History,
+    Scope,
+    Paused,
+    Retry,
 }
 #[cfg(target_os = "linux")]
+impl PreparationKind {
+    pub(crate) fn deterministic(self) -> bool {
+        matches!(self, Self::History | Self::Scope)
+    }
+    pub(crate) fn words(self) -> &'static str {
+        match self {
+            Self::History => {
+                "The task could not start because its candidate changed. This start sent nothing. The Director must replan the task; Continue cannot repair it."
+            }
+            Self::Scope => {
+                "The task could not start because its scope is invalid. This start sent nothing. The Director must replan the task; Continue cannot repair it."
+            }
+            Self::Paused | Self::Retry => {
+                "The writer host could not start the task yet. This start sent nothing. Continue to try again."
+            }
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub(crate) struct PreparationRefusal {
+    pub(crate) kind: PreparationKind,
+    source: HostError,
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn preparation_refusal(error: HostError) -> std::io::Error {
+    let kind = match &error {
+        HostError::Refused(refusal) => match refusal.code.as_str() {
+            "history_changed" => PreparationKind::History,
+            "task_scope" | "task_preparation_scope" | "task_preparation_inputs" => {
+                PreparationKind::Scope
+            }
+            "task_preparation_paused" => PreparationKind::Paused,
+            _ => PreparationKind::Retry,
+        },
+        _ => PreparationKind::Retry,
+    };
+    std::io::Error::other(PreparationRefusal {
+        kind,
+        source: error,
+    })
+}
+#[cfg(target_os = "linux")]
+pub(crate) const SENT_TASK_RECOVERY: &str = "The writer host cannot resume this task. This start sent nothing. Press Stop, then Reopen to recover the task's saved work before starting another run. Continue cannot retry this task.";
+#[cfg(target_os = "linux")]
+pub(crate) const DIRECTOR_RECOVERY: &str = "The writer host could not prepare the Director. This start sent nothing. Press Stop, then Reopen to recover any saved work before starting another run. Continue cannot repair it.";
+#[cfg(target_os = "linux")]
 impl HostCommandOwner {
+    pub(super) fn task_has_sent(
+        &self,
+        state: &RunProjection,
+        id: &crate::orchestration::orchestration_records::TaskId,
+    ) -> Result<bool, HostError> {
+        Ok(self.native_accounting(state)?.is_some_and(|accounting| {
+            accounting.tasks.iter().any(|task| {
+                task.task == id.0
+                    && task.sends.iter().any(|send| {
+                        !task.usage.iter().any(|sample| {
+                            sample.attempt == send.attempt
+                                && sample.turn == send.turn
+                                && sample.event == "host.not_dispatched"
+                        })
+                    })
+            })
+        }))
+    }
+    pub(super) fn unprepared_retry_safe(
+        &self,
+        state: &RunProjection,
+        id: &crate::orchestration::orchestration_records::TaskId,
+        attempt: &crate::orchestration::orchestration_records::AttemptId,
+    ) -> Result<bool, HostError> {
+        if self.task_has_sent(state, id)? {
+            return Ok(false);
+        }
+        let mut prior = state.attempts.clone();
+        prior.extend(self.attempt_archive(state)?.1.attempts);
+        for entry in prior
+            .iter()
+            .filter(|entry| &entry.identity.task == id && &entry.identity.attempt != attempt)
+        {
+            if !matches!(
+                entry.state,
+                crate::orchestration::orchestration_records::AttemptState::Retired(_)
+            ) || !self
+                .native_launch_intent(state, &entry.identity)?
+                .is_some_and(|intent| {
+                    intent.prepared == Some(false) && !intent.dispatched && intent.native.is_none()
+                })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     pub(crate) fn preparation_failed(
         &mut self,
         producer: &super::HostAuth,
         identity: &ExecutionIdentity,
-        reason: &str,
+        kind: PreparationKind,
     ) -> Result<(), HostError> {
         let mut state = self.spending_scope(producer, &identity.run)?;
         if state.outcome != RunOutcome::Pending {
             return Ok(());
         }
-        if state.effects.len() >= ITEM_LIMIT {
-            return Err(HostRefusal::new("task_preparation", "notification capacity").into());
-        }
-        let parent = state
+        let task = state
             .tasks
             .iter()
             .find(|t| t.id == identity.task)
-            .ok_or_else(refused)?
-            .parent
-            .clone();
+            .ok_or_else(refused)?;
+        let parent = task.parent.clone();
+        let sent = self.task_has_sent(&state, &identity.task)?;
+        if !kind.deterministic() {
+            // A person Pause wins even if a different transient error raced it.
+            if state.phase != RunPhase::Paused {
+                self.wait_for_provider(&identity.run, kind.words())?;
+            }
+            return Ok(());
+        }
+        if parent.is_some() && sent {
+            return self.record_runtime_wait(
+                producer,
+                &identity.run,
+                SENT_TASK_RECOVERY,
+                false,
+                RunWait::Provider,
+            );
+        }
+        if state.effects.len() >= ITEM_LIMIT {
+            return Err(HostRefusal::new("task_preparation", "notification capacity").into());
+        }
         let reason = if parent.is_none() {
-            "The writer host could not prepare the Director. This start sent nothing. Stop this run and start a new one after reviewing the task. Continue cannot repair it."
+            DIRECTOR_RECOVERY
         } else {
-            reason
+            kind.words()
         };
         let reference = self.owner_mut()?.admit_host_grant(reason.as_bytes())?;
         for effect in state
@@ -198,14 +305,21 @@ impl HostCommandOwner {
             .find(|t| t.id == identity.task)
             .ok_or_else(refused)?;
         child.state = TaskState::Cancelled;
+        child.progress.capacity =
+            crate::orchestration::orchestration_records::DependencyReservation::Free;
         child.progress.decisions.push(reference.clone());
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let issued = self.issue_metadata(index, None)?;
-        state.wait = RunWait::Replan(WaitDetail {
-            reason: reference.clone(),
-            missing: vec![],
-            attempt: Some(identity.attempt.clone()),
-        });
+        if !matches!(
+            state.wait,
+            RunWait::Files(_) | RunWait::Provider(_) | RunWait::ProviderSettings(_)
+        ) {
+            state.wait = RunWait::Replan(WaitDetail {
+                reason: reference.clone(),
+                missing: vec![],
+                attempt: Some(identity.attempt.clone()),
+            });
+        }
         if let Some(parent) = parent {
             let parent = state
                 .tasks
@@ -226,10 +340,7 @@ impl HostCommandOwner {
                 .ok_or_else(refused)?;
             state.effects.push(EffectRecord {
                 id: EffectId(serde_json::from_value(serde_json::json!(
-                    &kinewright_media::sha256_bytes(&serde_json::to_vec(&(
-                        "preparation-replan",
-                        &issued.envelope.id
-                    ))?)[..32]
+                    crate::orchestration::tasks::replan_effect_key(&identity.attempt)
                 ))?),
                 task,
                 lane,

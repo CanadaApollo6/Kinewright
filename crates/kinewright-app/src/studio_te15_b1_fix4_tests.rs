@@ -535,3 +535,47 @@ fn te15_b1_followup_wait_row_is_plain_and_details_keep_raw() {
             .contains("then press Continue.")
     );
 }
+
+#[test]
+fn te15_b201_replan_status_uses_host_reason() {
+    let (project, _attachment, _) = wait_fixture();
+    let mut state = project.feedback.rows[0]
+        .state
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    let RunWait::ProviderSettings(detail) = state.wait else {
+        unreachable!()
+    };
+    state.wait = RunWait::Replan(detail);
+    state.phase = RunPhase::Running;
+    let reason = "The task could not start because its candidate changed. This start sent nothing. The Director must replan the task; Continue cannot repair it.";
+    state.view.wait_reason = Some(reason.into());
+    assert_eq!(
+        state.label(),
+        format!("run running · {reason}"),
+        "B201_UI_HOST_REASON"
+    );
+}
+
+#[test]
+fn te15_b201_transient_status_uses_host_reason() {
+    let (project, _attachment, _) = wait_fixture();
+    let mut state = project.feedback.rows[0]
+        .state
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    let reason = "The writer host could not start the task yet. This start sent nothing. Continue to try again.";
+    assert!(matches!(state.wait, RunWait::ProviderSettings(_)));
+    state.view.wait_reason = Some(reason.into());
+    assert_eq!(
+        state.label(),
+        format!("run interrupted · {reason}"),
+        "B201_UI_HOST_RETRY"
+    );
+}

@@ -102,6 +102,10 @@ pub(crate) fn plain_wait_reason(reason: &str, settings: bool) -> &'static str {
     } else if reason == "The provider check failed before anything was sent. Continue to try again."
     {
         "The provider check failed before anything was sent. Continue to try again."
+    } else if reason
+        == "The writer host could not start the task yet. This start sent nothing. Continue to try again."
+    {
+        "The writer host could not start the task yet. This start sent nothing. Continue to try again."
     } else if settings {
         "The provider check needs attention. Fix Director and Specialists in Settings, then press Continue."
     } else {

@@ -40,6 +40,8 @@ pub(crate) struct NativeLaunchIntent {
     pub identity: ExecutionIdentity,
     pub boot_id: String,
     pub dispatched: bool,
+    #[serde(default)]
+    pub prepared: Option<bool>,
     pub native: Option<RecoveryIdentity>,
 }
 impl NativeLaunchIntent {
@@ -48,6 +50,7 @@ impl NativeLaunchIntent {
             identity: identity.clone(),
             boot_id: crate::guardian::boot_id()?,
             dispatched: false,
+            prepared: Some(false),
             native: None,
         })
     }

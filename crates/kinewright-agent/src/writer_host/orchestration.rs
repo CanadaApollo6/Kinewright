@@ -1241,7 +1241,9 @@ impl HostCommandOwner {
                     crate::orchestration::orchestration_records::RunWait::Replan(_)
                 )))
         .then(|| {
-            if matches!(
+            if machine::has_unknown_send(&projection) {
+                "A task has an unknown send outcome. Continue cannot retry this send.".into()
+            } else if matches!(
                 projection.wait,
                 crate::orchestration::orchestration_records::RunWait::Replan(_)
             ) {
@@ -1250,8 +1252,6 @@ impl HostCommandOwner {
                 } else {
                     "Continue cannot retry this task. The Director must replan it.".into()
                 }
-            } else if machine::has_unknown_send(&projection) {
-                "A task has an unknown send outcome. Continue cannot retry this send.".into()
             } else if projection.effects.iter().any(|e| {
                 matches!(
                     e.state,
@@ -1428,6 +1428,11 @@ impl HostCommandOwner {
             .owner()?
             .orchestration_projection(run)?
             .ok_or_else(|| refused("unknown run"))?;
+        if state.phase == RunPhase::Paused {
+            return Err(
+                HostRefusal::new("task_preparation_paused", "task issuance is paused").into(),
+            );
+        }
         if state.outcome != RunOutcome::Pending
             || matches!(
                 state.phase,
@@ -1514,7 +1519,11 @@ impl HostCommandOwner {
                 .find(|t| Some(&t.id) == task_record.parent.as_ref())
                 .ok_or_else(|| refused("parent missing"))?;
             if !scope_contains(&parent.brief.scope, &task_record.brief.scope) {
-                return Err(refused("unprepared task scope changed"));
+                return Err(HostRefusal::new(
+                    "task_preparation_scope",
+                    "unprepared task scope changed",
+                )
+                .into());
             }
             let checkpoint = self
                 .owner()?
@@ -1523,7 +1532,11 @@ impl HostCommandOwner {
                 &base.checkpoint,
             )?;
             if checkpoint.input_manifest_ref != task_record.brief.inputs {
-                return Err(refused("prepared input scope changed"));
+                return Err(HostRefusal::new(
+                    "task_preparation_inputs",
+                    "prepared input scope changed",
+                )
+                .into());
             }
             task_record.brief.scope.base = base;
             state
@@ -1565,7 +1578,7 @@ impl HostCommandOwner {
                 history.merge_envelope.clone(),
             )?;
             if self.owner()?.candidate_binding(&history.source.branch)? != history.source {
-                return Err(refused("task checkpoint changed"));
+                return Err(HostRefusal::new("history_changed", "task checkpoint changed").into());
             }
             if history.frozen && reopened.freeze(self.owner_mut()?)?.source() != &history.source {
                 return Err(refused("frozen task checkpoint changed"));
@@ -1578,7 +1591,13 @@ impl HostCommandOwner {
                 .any(|a| a.identity.task == *task && a.identity.attempt != *attempt)
                 || self.retired_task_authority_exists(&state, task)?
             {
-                return Err(refused("prior task history is unavailable"));
+                #[cfg(target_os = "linux")]
+                let safe = self.unprepared_retry_safe(&state, task, attempt)?;
+                #[cfg(not(target_os = "linux"))]
+                let safe = false;
+                if !safe {
+                    return Err(refused("prior task history is unavailable"));
+                }
             }
             self.restore_initial_run_candidate(&state, &task_record.brief.scope.base.branch)?;
             EditorTask::prepare(self.owner_mut()?, task_record.brief.clone(), authority)?
@@ -1598,6 +1617,20 @@ impl HostCommandOwner {
             .identity
             .clone();
         self.persist_runtime_task(&mut state, &identity, false)?;
+        #[cfg(target_os = "linux")]
+        if let Some(mut intent) = self.native_launch_intent(&state, &identity)? {
+            intent.prepared = Some(true);
+            let reference = self
+                .owner_mut()?
+                .admit_host_grant(&serde_json::to_vec(&intent)?)?;
+            state
+                .attempts
+                .iter_mut()
+                .find(|a| a.identity == identity)
+                .ok_or_else(|| refused("reservation missing"))?
+                .recovery_ref = reference;
+            crate::orchestration::tasks::refresh_cleanup(&mut state);
+        }
         self.publish_native(producer, state, &identity, vec![])?;
         let roots = self.attachments[index].roots.clone();
         let auth = self.issue_attachment(

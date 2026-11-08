@@ -768,6 +768,18 @@ pub fn apply_task_transition(
             });
             state.tasks.push(task);
             if matches!(state.wait, super::orchestration_records::RunWait::Replan(_)) {
+                if let super::orchestration_records::RunWait::Replan(detail) = &state.wait
+                    && let Some(attempt) = &detail.attempt
+                {
+                    let key = replan_effect_key(attempt);
+                    for effect in &mut state.effects {
+                        if effect.id.0.as_str() == key
+                            && effect.state == super::orchestration_records::EffectState::Pending
+                        {
+                            effect.state = super::orchestration_records::EffectState::Disposed;
+                        }
+                    }
+                }
                 state.wait = super::orchestration_records::RunWait::None;
             }
         }
@@ -824,17 +836,33 @@ fn ready_for_completion(
         && !state.requests.iter().any(|request| matches!(request, RuntimeRequest::Question(q) if &q.task == id && q.status == QuestionStatus::Pending))
 }
 
+pub(crate) fn replan_effect_key(attempt: &super::orchestration_records::AttemptId) -> String {
+    kinewright_media::sha256_bytes(format!("preparation-replan:{}", attempt.0.as_str()).as_bytes())
+        [..32]
+        .into()
+}
+
 pub fn refresh_wait(state: &mut super::orchestration_records::RunProjection) {
     use super::orchestration_records::{
         DeliveryState, QuestionStatus, RunWait, RuntimeRequest, TaskState,
     };
+    if let RunWait::Replan(detail) = &state.wait {
+        let delivered = detail.attempt.as_ref().is_some_and(|attempt| {
+            let key = replan_effect_key(attempt);
+            state.effects.iter().any(|effect| {
+                effect.id.0.as_str() == key
+                    && effect.state != super::orchestration_records::EffectState::Pending
+            })
+        });
+        if !delivered {
+            return;
+        }
+        state.wait = RunWait::None;
+    }
     // Only the file/provider owner can settle these external facts.
     if matches!(
         state.wait,
-        RunWait::Files(_)
-            | RunWait::Provider(_)
-            | RunWait::ProviderSettings(_)
-            | RunWait::Replan(_)
+        RunWait::Files(_) | RunWait::Provider(_) | RunWait::ProviderSettings(_)
     ) {
         return;
     }

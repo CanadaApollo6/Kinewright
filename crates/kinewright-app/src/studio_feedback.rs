@@ -1280,13 +1280,12 @@ impl RunState {
             (RunPhase::Finished, RunOutcome::Pending) => "run finished".to_owned(),
         };
         let wait = match &self.wait {
-            RunWait::None => "",
+            RunWait::None | RunWait::Replan(_) => "",
             RunWait::Files(_) => " · waiting for files",
             RunWait::Provider(_) => " · waiting for the provider",
             RunWait::ProviderSettings(_) => " · provider check needs attention",
             RunWait::Question(_) => " · waiting for your answer",
             RunWait::Children(_) => " · waiting for its tasks",
-            RunWait::Replan(_) => " · replanning task",
         };
         let cleanup = if self.outcome != RunOutcome::Pending && self.cleanup != RunCleanup::Settled
         {
@@ -1297,10 +1296,14 @@ impl RunState {
         match &self.view.wait_reason {
             Some(reason) => format!(
                 "{phase} · {}{cleanup}",
-                crate::studio_run_view::plain_wait_reason(
-                    reason,
-                    matches!(self.wait, RunWait::ProviderSettings(_))
-                )
+                if matches!(self.wait, RunWait::Replan(_)) {
+                    reason.as_str()
+                } else {
+                    crate::studio_run_view::plain_wait_reason(
+                        reason,
+                        matches!(self.wait, RunWait::ProviderSettings(_)),
+                    )
+                }
             ),
             None => format!("{phase}{wait}{cleanup}"),
         }

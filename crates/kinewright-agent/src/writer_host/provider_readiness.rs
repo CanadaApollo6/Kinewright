@@ -117,7 +117,7 @@ impl HostCommandOwner {
             .get_mut(run)
             .ok_or_else(|| HostRefusal::new("provider_wait", "The run is unavailable."))?
             .pending_provider_wait = Some(reason.to_owned());
-        let reason = if reason == CHECK_RETRY {
+        let reason = if reason == CHECK_RETRY || reason == super::task_preparation::HOST_RETRY {
             reason.to_owned()
         } else {
             format!("{reason} After fixing Settings, press Continue.")

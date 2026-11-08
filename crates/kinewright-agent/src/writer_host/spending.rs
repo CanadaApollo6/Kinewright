@@ -104,6 +104,7 @@ impl HostCommandOwner {
                     }
                     _ => match &state.wait {
                         crate::orchestration::orchestration_records::RunWait::Provider(wait)
+                        | crate::orchestration::orchestration_records::RunWait::Replan(wait)
                         | crate::orchestration::orchestration_records::RunWait::ProviderSettings(
                             wait,
                         ) if wait.reason.record_kind

@@ -47,6 +47,12 @@ impl HostCommandOwner {
         ),
         HostError,
     > {
+        if matches!(
+            projection.wait,
+            crate::orchestration::orchestration_records::RunWait::Replan(_)
+        ) {
+            crate::orchestration::tasks::refresh_wait(&mut projection);
+        }
         let mut envelope = OrchestrationEnvelope {
             id: issued.envelope.id,
             digest: serde_json::from_value(serde_json::json!("0".repeat(64)))?,

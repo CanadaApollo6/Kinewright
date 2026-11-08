@@ -429,6 +429,13 @@ fn b20_host_failure(widened: bool) {
         matches!(f.projection(&run).wait, RunWait::None),
         "B20_DIRECTOR_REPLANS"
     );
+    assert!(
+        !f.projection(&run)
+            .effects
+            .iter()
+            .any(|e| e.id == wake.id && e.state == EffectState::Pending),
+        "B201_ASSIGN_CONSUMES_NOTIFICATION"
+    );
 }
 fn c4_reserve_root_for_b20(f: &Fixture, run: &RunId) -> (ExecutionIdentity, Core, C4Mcp) {
     let root = f.projection(run).tasks[0].id.clone();
@@ -473,7 +480,13 @@ fn te15_b20_recorded_base_and_assignment_replay_survive_reopen() {
         .base
         .clone();
     assert_ne!(recorded, f.brief.scope.base, "B20_LATE_RECORDED");
+    let count = f.projection(&run).tasks.len();
     let replay = director.wire("assign_task", control);
+    assert_eq!(
+        f.projection(&run).tasks.len(),
+        count,
+        "B20_REPLAY_TASK_COUNT"
+    );
     assert_eq!(replay.is_error, Some(false));
     assert_eq!(
         original.structured_content.unwrap()["outcome"],
@@ -505,7 +518,13 @@ fn te15_b20_history_refusal_has_host_words() {
         kinewright_project::bundle::BundleError::HistoryChanged,
     ));
     assert_eq!(
-        error.to_string(),
+        error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<super::super::task_preparation::PreparationRefusal>()
+            .unwrap()
+            .kind
+            .words(),
         "The task could not start because its candidate changed. This start sent nothing. The Director must replan the task; Continue cannot repair it.",
         "B20_HISTORY_WORDS"
     );
@@ -560,7 +579,18 @@ fn te15_b20_host_refusal_preserves_person_pause() {
     // Exercise the publication after a person Pause between preparation and
     // failure reconciliation. No launch or provider charge exists.
     let producer = f.producer(&run);
-    f.host.owner.upgrade().unwrap().lock().unwrap().preparation_failed(&producer, &attempt, "The task could not start because its scope is invalid. This start sent nothing. The Director must replan the task; Continue cannot repair it.").unwrap();
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .preparation_failed(
+            &producer,
+            &attempt,
+            super::super::task_preparation::PreparationKind::Scope,
+        )
+        .unwrap();
     let state = f.projection(&run);
     assert_eq!(state.phase, RunPhase::Paused, "B20_PERSON_PAUSE_RETAINED");
     assert!(

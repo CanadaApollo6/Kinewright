@@ -53,7 +53,12 @@ pub(crate) struct EffectPump<L: GuardianLauncher = NativeGuardianLauncher> {
     #[cfg(any(test, feature = "test-util"))]
     native_event_observer:
         Option<Arc<dyn Fn(crossbeam_channel::Receiver<AgentEvent>) + Send + Sync>>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) before_preparation: Option<PreparationHook>,
 }
+#[cfg(any(test, feature = "test-util"))]
+type PreparationHook =
+    Arc<dyn Fn(&ExecutionIdentity) -> Result<(), crate::writer_host::HostError> + Send + Sync>;
 impl EffectPump {
     pub(crate) fn new(
         host: &Arc<Mutex<HostCommandOwner>>,
@@ -100,6 +105,8 @@ impl<L: GuardianLauncher> EffectPump<L> {
             opened: false,
             #[cfg(any(test, feature = "test-util"))]
             native_event_observer: None,
+            #[cfg(any(test, feature = "test-util"))]
+            before_preparation: None,
         }
     }
     #[cfg(any(test, feature = "test-util"))]
@@ -176,6 +183,10 @@ impl<L: GuardianLauncher> EffectPump<L> {
         plan: &crate::writer_host::provider_readiness::ReadinessPlan,
     ) -> io::Result<Box<dyn AgentSession>> {
         let identity = attempt.identity();
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(before) = &self.before_preparation {
+            before(identity).map_err(crate::writer_host::task_preparation::preparation_refusal)?;
+        }
         if let Some(limit) = self.ceiling {
             owner
                 .lock()
@@ -261,12 +272,12 @@ impl<L: GuardianLauncher> EffectPump<L> {
             e.downcast_ref::<crate::writer_host::task_preparation::PreparationRefusal>()
         }) {
             if !resumable {
-                return Err(io::Error::other(failure.0));
+                return Err(io::Error::other(failure.kind.words()));
             }
             owner
                 .lock()
                 .map_err(|_| io::Error::other("host owner poisoned"))?
-                .preparation_failed(&self.producer, identity, failure.0)
+                .preparation_failed(&self.producer, identity, failure.kind)
                 .map_err(io::Error::other)?;
             return Ok(());
         }
