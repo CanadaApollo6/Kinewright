@@ -641,6 +641,10 @@ pub struct DeliveryRecord {
 #[serde(deny_unknown_fields)]
 pub struct RunProjection {
     pub run: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_consent: Option<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edit_approvals: Vec<ObjectRef>,
     pub sequence: u64,
     pub control_revision: OpaqueRevision,
     pub phase: RunPhase,

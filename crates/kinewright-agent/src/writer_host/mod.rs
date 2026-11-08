@@ -3465,3 +3465,5 @@ mod qualification_gate;
 
 /// Recovery instructions shared by the host and Studio.
 pub mod task_preparation_words;
+
+pub use task_mcp::consent::EditApproval;

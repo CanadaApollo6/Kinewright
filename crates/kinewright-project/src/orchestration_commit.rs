@@ -326,6 +326,8 @@ fn request_refs(request: &RuntimeRequest, refs: &mut Vec<ObjectRef>) {
 
 fn projection_refs(state: &RunProjection, refs: &mut Vec<ObjectRef>) -> Result<(), Refusal> {
     validate_projection(state)?;
+    refs.extend(state.edit_consent.clone());
+    refs.extend(state.edit_approvals.clone());
     for task in &state.tasks {
         brief_refs(&task.brief, refs)?;
         refs.extend(task.progress.feedback.clone());
@@ -470,6 +472,14 @@ fn same_cleanup_set(
     reason = "one complete projection invariant check"
 )]
 pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
+    if state
+        .edit_consent
+        .iter()
+        .chain(&state.edit_approvals)
+        .any(|r| r.record_kind != RecordKind::OwnedEvidence)
+    {
+        return Err(Refusal::InvalidState);
+    }
     if state.tasks.len() > TASK_LIMIT
         || state.attempts.len() > ATTEMPT_LIMIT
         || [
@@ -478,6 +488,7 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
             state.requests.len(),
             state.results.len(),
             state.usage.len(),
+            state.edit_approvals.len(),
         ]
         .into_iter()
         .any(|n| n > ITEM_LIMIT)

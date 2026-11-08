@@ -51,6 +51,7 @@ mod tests {
     include!("te15_b20_tests.rs");
     include!("te15_b20_fix1_tests.rs");
     include!("te15_b20_fix2_tests.rs");
+    include!("te15_b21_tests.rs");
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_fix2_tests.rs");
@@ -75,6 +76,16 @@ mod tests {
             Self::with_document_at(media, document, "project.kinewright")
         }
         fn with_document_at(media: bool, document: Document, name: &str) -> Self {
+            Self::with_inputs(media, document, name, |bundle| {
+                bundle.empty_inputs().unwrap().reference.clone()
+            })
+        }
+        fn with_inputs(
+            media: bool,
+            document: Document,
+            name: &str,
+            inputs: impl FnOnce(&mut ProjectBundle) -> kinewright_project::bundle_records::ObjectRef,
+        ) -> Self {
             let temp = kinewright_media::test_support::TempDirectory::new_in(
                 &kinewright_media::test_support::workspace_target_dir(),
                 "s3-hooks",
@@ -84,7 +95,7 @@ mod tests {
             let core = Core::spawn(document).unwrap();
             let mut bundle =
                 ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-            let mut inputs = bundle.empty_inputs().unwrap().reference.clone();
+            let mut inputs = inputs(&mut bundle);
             bundle.save(&core, &inputs).unwrap();
             drop(bundle);
             if media {

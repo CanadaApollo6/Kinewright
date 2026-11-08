@@ -44,6 +44,8 @@ pub struct MetadataIssuer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunViewPage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edit_approvals: Vec<super::EditApproval>,
     pub projection: RunProjection,
     #[serde(default)]
     pub accounting: Option<DurableRunAccounting>,
@@ -1285,6 +1287,7 @@ impl HostCommandOwner {
             }
         });
         Ok(RunViewPage {
+            edit_approvals: self.edit_approval_details(&projection)?,
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,

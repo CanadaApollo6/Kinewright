@@ -83,6 +83,8 @@ fn projection(envelope: &OrchestrationEnvelope) -> RunProjection {
     };
     let task: TaskId = envelope.identity("task").unwrap();
     RunProjection {
+        edit_consent: None,
+        edit_approvals: Vec::new(),
         run: envelope.identity("run").unwrap(),
         sequence: 1,
         control_revision: id(14),

@@ -8,6 +8,14 @@ impl C4Mcp {
         Self::for_host(&f.host, run, task)
     }
     fn for_host(host: &WriterHost, run: &RunId, task: &TaskId) -> Self {
+        let host = host.owner.upgrade().unwrap();
+        let mut owner = host.lock().unwrap();
+        let producer = owner.run_producer(run).unwrap();
+        let server = owner.start_task_server(&producer, run, task).unwrap();
+        drop(owner);
+        Self::from_server(server)
+    }
+    fn from_server(server: crate::McpServer) -> Self {
         use rmcp::{
             ServiceExt,
             transport::{
@@ -15,11 +23,6 @@ impl C4Mcp {
                 streamable_http_client::StreamableHttpClientTransportConfig,
             },
         };
-        let host = host.owner.upgrade().unwrap();
-        let mut owner = host.lock().unwrap();
-        let producer = owner.run_producer(run).unwrap();
-        let server = owner.start_task_server(&producer, run, task).unwrap();
-        drop(owner);
         let bootstrap = mcp_credentials(server.endpoint()).unwrap();
         let config = StreamableHttpClientTransportConfig::with_uri(server.endpoint().to_owned())
             .custom_headers(

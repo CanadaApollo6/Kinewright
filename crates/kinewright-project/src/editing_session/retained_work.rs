@@ -524,6 +524,8 @@ mod tests {
             .unwrap()
             .reference;
         let state = RunProjection {
+            edit_consent: None,
+            edit_approvals: Vec::new(),
             run: run.clone(),
             sequence: 1,
             control_revision: id(5),

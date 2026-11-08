@@ -180,7 +180,8 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
         })),
     );
     let task = f.projection(&run).tasks[1].id.clone();
-    let (execution, _actor, _endpoint, _core) = c4_reserve_task(&f, &run, &task);
+    let (execution, actor, endpoint, _core) = c4_reserve_task(&f, &run, &task);
+    history_turn(&f, &execution, &actor, &endpoint, 1, true);
     let producer = f.producer_client(&run);
     let (server, core) = {
         let owner = f.host.owner.upgrade().unwrap();
@@ -261,7 +262,7 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
             .find(|record| record.id == task)
             .unwrap()
             .state,
-        TaskState::Preparing
+        TaskState::Running(execution.attempt.clone())
     );
     assert_eq!(state.phase, RunPhase::Running);
     assert_eq!(state.outcome, RunOutcome::Pending);

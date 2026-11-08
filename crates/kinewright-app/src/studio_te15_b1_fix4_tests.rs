@@ -579,3 +579,21 @@ fn te15_b201_transient_status_uses_host_reason() {
         "B201_UI_HOST_RETRY"
     );
 }
+
+#[test]
+fn te15_b21_run_details_lists_the_approved_private_batch() {
+    let (_project, attachment, run) = wait_fixture();
+    let mut page = with_host(&attachment, |port| port.run_view(&run).unwrap());
+    page.edit_approvals
+        .push(kinewright_agent::writer_host::EditApproval {
+            task: page.projection.tasks[0].id.clone(),
+            description: "Plan removes 2 clips and 0 tracks - approve?".into(),
+            digest: "a".repeat(64),
+        });
+    let state = RunState::of(&page);
+    assert_eq!(
+        state.view.edit_approvals,
+        ["Approved private-branch edit: Plan removes 2 clips and 0 tracks"],
+        "B21_PLAIN_APPROVAL_DETAILS"
+    );
+}

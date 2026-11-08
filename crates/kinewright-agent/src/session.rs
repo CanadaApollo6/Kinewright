@@ -1045,7 +1045,62 @@ mod tests {
         assert_eq!(stop, SessionStop::Completed, "the session ran to the end");
         assert_eq!(spent.turns, 1);
         assert!(spent.tool_calls >= 1, "{spent:?}");
-        assert_eq!(raised.join().unwrap(), Ok(()));
+        assert_eq!(raised.join().unwrap(), Ok(()), "B21_LEGACY_EVAL_APPROVES");
+        server.shutdown();
+    }
+
+    #[test]
+    fn te15_b21_legacy_studio_confirmation_still_rejects_and_stops() {
+        struct Owner;
+        impl SessionObserver for Owner {
+            fn on_event(&mut self, _: &AgentEvent) -> SessionFlow {
+                SessionFlow::Continue
+            }
+            fn on_tick(&mut self, _: &SessionCounters) -> SessionFlow {
+                SessionFlow::Continue
+            }
+            fn prepare_studio_stop(
+                &mut self,
+                _: &SessionStop,
+                binding: Option<&kinewright_core::RuntimeRequestBinding>,
+            ) -> Result<(), String> {
+                assert!(binding.is_none());
+                Ok(())
+            }
+        }
+        let server = live_server();
+        let broker = ConfirmationBroker::with_timeout(Duration::from_secs(5));
+        let raised = raise_confirmation(&broker);
+        let mut session = session_for(
+            &server,
+            vec![one_call_turn().with_pause(Duration::from_millis(400))],
+        );
+        let events = session.events();
+        let (stop, _) = pump_session(
+            session.as_mut(),
+            &events,
+            &mut std::iter::once("fixture".to_owned()),
+            Some(&broker),
+            ConfirmationPolicy::Studio,
+            &SessionLimits {
+                max_turns: 4,
+                max_wall_time: Duration::from_secs(20),
+                max_tokens: None,
+            },
+            &Arc::new(SharedCounters::default()),
+            &Arc::new(AtomicBool::new(false)),
+            &mut Owner,
+        );
+        assert_eq!(
+            stop,
+            SessionStop::PolicyViolation,
+            "B21_LEGACY_STUDIO_STOPS"
+        );
+        assert_eq!(
+            raised.join().unwrap(),
+            Err(INVESTIGATOR_CONFIRMATION_REFUSAL.to_owned()),
+            "B21_LEGACY_STUDIO_REFUSES"
+        );
         server.shutdown();
     }
 

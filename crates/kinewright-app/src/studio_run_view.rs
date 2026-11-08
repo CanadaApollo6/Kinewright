@@ -4,6 +4,7 @@ use kinewright_project::orchestration_accounting::UsageTotals;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunView {
+    pub(crate) edit_approvals: Vec<String>,
     pub(crate) elapsed: String,
     pub(crate) runtime_status: Option<String>,
     pub(crate) stop_reason: Option<String>,
@@ -22,6 +23,18 @@ impl RunView {
     pub(crate) fn of(page: &RunViewPage) -> Self {
         let accounting = page.accounting.as_ref();
         Self {
+            edit_approvals: page
+                .edit_approvals
+                .iter()
+                .map(|a| {
+                    format!(
+                        "Approved private-branch edit: {}",
+                        a.description
+                            .strip_suffix(" - approve?")
+                            .unwrap_or(&a.description)
+                    )
+                })
+                .collect(),
             runtime_status: page.runtime_status.clone(),
             wait_reason: page.wait_reason.clone(),
             continue_unavailable_reason: page.continue_unavailable_reason.clone(),

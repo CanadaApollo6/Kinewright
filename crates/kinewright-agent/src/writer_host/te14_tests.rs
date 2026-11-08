@@ -700,7 +700,8 @@ fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::Path
         })),
     );
     let child = f.projection(&run).tasks[1].id.clone();
-    let (_, _, _, core) = c4_reserve_task(&f, &run, &child);
+    let (execution, actor, endpoint, core) = c4_reserve_task(&f, &run, &child);
+    history_turn(&f, &execution, &actor, &endpoint, 1, true);
     let mcp = C4Mcp::new(&f, &run, &child);
     let revision = grant_test_revision(&core);
     let prepared = te14_outcome(mcp.wire(

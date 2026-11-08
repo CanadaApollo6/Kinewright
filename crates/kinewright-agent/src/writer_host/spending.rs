@@ -22,6 +22,7 @@ impl HostCommandOwner {
             return Ok(update);
         }
         let mut state = update.projection().clone();
+        self.seed_edit_consent(&mut state)?;
         // The first native attempt can follow a host restart. Retain the
         // candidate's original merge base before any task actor exists.
         for task in &mut state.tasks {

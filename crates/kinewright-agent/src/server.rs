@@ -297,6 +297,7 @@ pub(crate) const REFRAME_SUBJECT_PROVENANCE_PREFIX: &str = "__kinewright_reframe
 const REFRAME_SUBJECT_PROVENANCE_HEADER_BYTES: usize = 18;
 const REFRAME_SUBJECT_PROVENANCE_SAMPLE_BYTES: usize = 16;
 
+mod task_confirmation;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationRequest {
     pub id: u64,
@@ -315,13 +316,22 @@ pub struct ConfirmationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ConfirmationDecision {
+pub(crate) enum ConfirmationDecision {
     Approved,
     Rejected(String),
 }
 
+#[cfg(test)]
+type TaskConfirmationHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+#[cfg(test)]
+type TaskBindingHook = Arc<Mutex<Option<Arc<dyn Fn(&mut serde_json::Value) + Send + Sync>>>>;
 #[derive(Clone)]
 pub struct ConfirmationBroker {
+    task_pending: Arc<Mutex<HashMap<u64, String>>>,
+    #[cfg(test)]
+    pub(crate) task_hook: TaskConfirmationHook,
+    #[cfg(test)]
+    pub(crate) task_binding_hook: TaskBindingHook,
     requests_tx: crossbeam_channel::Sender<ConfirmationRequest>,
     requests_rx: crossbeam_channel::Receiver<ConfirmationRequest>,
     pending: Arc<Mutex<HashMap<u64, crossbeam_channel::Sender<ConfirmationDecision>>>>,
@@ -360,6 +370,11 @@ impl ConfirmationBroker {
     fn build(timeout: Duration, incident: Option<IncidentId>) -> Self {
         let (requests_tx, requests_rx) = crossbeam_channel::unbounded();
         Self {
+            task_pending: Arc::default(),
+            #[cfg(test)]
+            task_hook: Arc::default(),
+            #[cfg(test)]
+            task_binding_hook: Arc::default(),
             requests_tx,
             requests_rx,
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -400,6 +415,11 @@ impl ConfirmationBroker {
     }
 
     pub fn reject_all(&self, reason: impl Into<String>) {
+        let mut bound = self
+            .task_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        bound.clear();
         let reason = reason.into();
         let pending = self
             .pending
@@ -417,6 +437,13 @@ impl ConfirmationBroker {
     }
 
     fn resolve(&self, id: u64, decision: ConfirmationDecision) -> bool {
+        let bound = self
+            .task_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if bound.contains_key(&id) {
+            return false;
+        }
         let sender = self
             .pending
             .lock()
@@ -2771,6 +2798,10 @@ impl KinewrightMcp {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep one revision-gated edit transaction together"
+    )]
     fn apply_edit_plan(
         &self,
         expected_revision: TimelineRevision,
@@ -2804,8 +2835,12 @@ impl KinewrightMcp {
                 "AddLutAsset cannot be submitted through apply_edit_plan; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
             ));
         }
-        if let Some(description) = plan_confirmation_description(&before, operations)
-            && let Err(reason) = self.confirmations.confirm("apply_edit_plan", description)
+        let confirmation = plan_confirmation_description(&before, operations);
+        if self.task_control.is_none()
+            && let Some(description) = confirmation.as_ref()
+            && let Err(reason) = self
+                .confirmations
+                .confirm("apply_edit_plan", description.clone())
         {
             return Ok(error_text(format!(
                 "refused destructive tool apply_edit_plan: {reason}"
@@ -2823,13 +2858,28 @@ impl KinewrightMcp {
         {
             return Ok(error_text(error));
         }
-        let event = self
-            .core
-            .request(Command::DoBatchIfRevision {
+        let apply = || {
+            self.core.request(Command::DoBatchIfRevision {
                 expected: expected_revision,
                 operations: operations.to_vec(),
             })
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        };
+        let event = if let Some(control) = &self.task_control {
+            match control.apply_with_edit_consent(
+                &self.confirmations,
+                &self.core,
+                expected_revision,
+                &before,
+                operations,
+                confirmation.as_deref(),
+            ) {
+                Ok(result) => result,
+                Err(error) => return Ok(error_text(error.to_string())),
+            }
+        } else {
+            apply()
+        }
+        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(match event {
             Event::DocumentChanged { doc, revision, .. } => {
                 if self.publish_to_playback {
@@ -9188,6 +9238,19 @@ impl KinewrightMcp {
     ) -> Result<PreparedEditPlan, String> {
         if let Some(endpoint) = &self.task_endpoint {
             endpoint.validate_batch(document, &operations)?;
+        }
+        if let Some(control) = &self.task_control {
+            control
+                .validate_edit_consent(
+                    &self.core,
+                    revision,
+                    document,
+                    &operations,
+                    plan_confirmation_description(document, &operations)
+                        .as_deref()
+                        .unwrap_or("Reversible private-branch edit"),
+                )
+                .map_err(|e| e.to_string())?;
         }
         self.ensure_verified_patched_sources(document, &operations)?;
         self.prepared_plans

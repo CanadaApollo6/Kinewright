@@ -1,5 +1,7 @@
 //! Versioned task tools use durable roles and separately refreshed live controls.
 pub(crate) use crate::orchestration::task_manifest as manifest;
+#[path = "task_consent.rs"]
+pub(crate) mod consent;
 mod reply;
 pub(crate) mod schema;
 use super::{HostAuth, HostCommandOwner, HostError, HostRefusal};

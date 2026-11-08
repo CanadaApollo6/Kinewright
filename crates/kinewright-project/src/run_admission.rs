@@ -734,6 +734,8 @@ mod tests {
             record_kind: RecordKind::OwnedEvidence,
         };
         let state = RunProjection {
+            edit_consent: None,
+            edit_approvals: Vec::new(),
             run: id(),
             sequence: 0,
             control_revision: id(),

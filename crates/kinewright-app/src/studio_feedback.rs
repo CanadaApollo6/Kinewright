@@ -492,6 +492,7 @@ pub(crate) trait FeedbackPort {
     }
     fn run_view(&self, run: &RunId) -> Result<RunViewPage, String> {
         Ok(RunViewPage {
+            edit_approvals: vec![],
             completions: vec![],
             projection: self.observe(run)?,
             accounting: None,
@@ -3406,6 +3407,7 @@ impl KinewrightApp {
                                 ui.small(&task.usage);
                                 if let Some(completion) = &task.completion { ui.small(completion); }
                             }
+                            for approval in &state.view.edit_approvals { ui.small(approval); }
                             ui.small(&state.view.elapsed);
                             if let Some(status) = &state.view.runtime_status { ui.small(status); }
                             if let Some(reason) = &state.view.stop_reason { ui.small(reason); }
