@@ -532,8 +532,14 @@ impl TaskMcp {
         ) && replay.is_none()
         {
             drop(host);
-            super::provider_readiness::check_run(&owner, &state.run)
-                .map_err(|why| HostRefusal::new("provider_wait", &why.to_string()))?;
+            super::provider_readiness::check_run(&owner, &state.run).map_err(|why| {
+                let reason = if super::provider_readiness::setup_failure(&why) {
+                    super::provider_readiness::model_wait(&why)
+                } else {
+                    why.to_string()
+                };
+                HostRefusal::new("provider_wait", &reason)
+            })?;
             host = owner
                 .lock()
                 .map_err(|_| refused("host owner unavailable"))?;
@@ -541,7 +547,11 @@ impl TaskMcp {
             if host.bind_publication(&request)? != bound {
                 let why = "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.";
                 host.wait_for_provider(&state.run, why)?;
-                return Err(HostRefusal::new("provider_wait", why).into());
+                return Err(HostRefusal::new(
+                    "provider_wait",
+                    &super::provider_readiness::model_wait(&why),
+                )
+                .into());
             }
         }
         if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command

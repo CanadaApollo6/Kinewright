@@ -21,9 +21,9 @@ P = 'orchestration::specialist_setting::'
 T = H+'te15_b1_fix_'
 def add(name, file, before, after, witness, marker, package='kinewright-agent'):
     h.PAIRS.append((name, file, before, after, package, witness, marker))
-add('codex-mixed-preflight', A+'orchestration/effect_pump.rs',
-    'crate::writer_host::provider_readiness::check_run(&owner, &self.run)?;',
-    'let _ = &self.run;', T+'codex_waits_for_claude_before_send', 'TE15_FIX_ZERO_SEND_provider')
+add('codex-mixed-preflight', R,
+    'self.check_except(checks, None)', 'Ok(())',
+    T+'codex_waits_for_claude_before_send', 'TE15_FIX_PREFLIGHT_BEFORE_RESERVATION')
 add('claude-mixed-preflight', R,
     'checks\n                .preflight(spec)',
     'checks\n                .preflight(spec).or_else(|error| if spec.provider() == "codex" { Ok(()) } else { Err(error) })',
@@ -33,10 +33,14 @@ add('malformed-preflight', S, 'SpecialistStatus::Unreadable(why) => Err(why),',
 add('retired-preflight', S, 'SpecialistStatus::NoLongerOffered(_) => Err(UNAVAILABLE.into()),',
     'SpecialistStatus::NoLongerOffered(_) => Ok(director.clone()),', T+'retired_waits_before_send', 'TE15_FIX_ZERO_SEND_retired')
 add('replay-preflight', W+'task_mcp.rs', 'let _ = super::provider_readiness::check_run(&owner, &state.run);', 'let _ = &state.run;', T+'replay_keeps_outcome_but_waits_on_broken_choice', 'TE15_FIX_REPLAY_SETUP_WAIT')
-add('midrun-preflight', W+'task_mcp.rs',
-    'super::provider_readiness::check_run(&owner, &state.run)\n                .map_err(|why| HostRefusal::new("provider_wait", &why.to_string()))?;',
-    'let _ = &state.run;', T+'midrun_assignment_waits_without_another_send', 'TE15_FIX_MIDRUN_WAIT')
-add('active-director-close', R, 'native.control.close();', 'let _ = &native.control;', T+'bad_setting_closes_the_live_director', 'TE15_FIX_ACTIVE_DIRECTOR_CLOSED')
+midrun=(ROOT/(W+'task_mcp.rs')).read_text()
+a=midrun.index('            super::provider_readiness::check_run(&owner, &state.run).map_err')
+b=midrun.index('            host = owner',a)
+add('midrun-preflight', W+'task_mcp.rs', midrun[a:b], '            let _ = &state.run;\n', T+'midrun_assignment_waits_without_another_send', 'TE15_FIX_MIDRUN_WAIT')
+add('active-turn-preserved', R, '        if !same {',
+    '        for native in self.hooks.native.values().filter(|n| n.identity.run == *run) { native.control.close(); }\n        if !same {',
+    T+'bad_setting_keeps_the_live_director', 'TE15_FIX2_LIVE_TURN_PRESERVED')
+h.EQUIPPED_WITNESSES={T+'bad_setting_keeps_the_live_director'}
 add('continue-settings-wait', A+'orchestration/machine.rs',
     'matches!(state.wait, RunWait::None | RunWait::ProviderSettings(_))',
     'state.wait == RunWait::None', T+'continue_and_steering_recheck_choices', 'TE15_FIX_CONTINUE_REPAIRED')
@@ -56,15 +60,16 @@ replay='''if let Some(receipt) = self
             .orchestration_receipt(run, &request.envelope.id)?'''
 add('refused-replay', O, replay, 'if let Some(receipt) = None::<OrchestrationReceipt>',
     T+'refused_assignment_replays_after_settings_change', 'TE15_FIX_REFUSED_REPLAY')
-add('dangling-choice', S, 'std::fs::symlink_metadata(&path)', 'std::fs::metadata(&path)',
+F=A+'orchestration/setting_file.rs'
+add('dangling-choice', F, 'std::fs::symlink_metadata(path)', 'std::fs::metadata(path)',
     P+'entry_tests::te15_b1_fix_links_never_inherit_or_follow', 'TE15_FIX_DANGLING_INHERITED')
 # Remove the actual shape/no-follow/nonblocking open guard. The parent witness
 # kills and reaps its FIFO reader if the old blocking open is restored.
-source=(ROOT/S).read_text()
-a=source.index('        let path = folder.join(FILE);')
-b=source.index('        let mut bytes = Vec::new();', a)
-add('fifo-choice', S, source[a:b],
-    '        let file = std::fs::File::open(folder.join(FILE)).map_err(|_| UNREADABLE)?;\n',
+source=(ROOT/F).read_text()
+a=source.index('    let metadata = match')
+b=source.index('    let mut bytes = Vec::new();',a)
+add('fifo-choice', F, source[a:b],
+    '    let file = std::fs::File::open(path).map_err(|_| ())?;\n',
     P+'te15_b1_fix_fifo_refuses_without_blocking', 'TE15_FIX_FIFO_BOUNDED')
 add('test-settings-isolation', A+'orchestration/director_setting.rs',
     'panic!("TE15_FIX_TEST_DEFAULT_SETTINGS");', 'return Ok(PathBuf::new());',

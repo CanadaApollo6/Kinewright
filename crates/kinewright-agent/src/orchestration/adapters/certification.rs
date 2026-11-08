@@ -705,6 +705,8 @@ static CODEX_CANDIDATE: ConnectorSpecification = ConnectorSpecification {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    include!("../../../tests/fixtures/te15_catalog.rs");
 
     fn binding() -> AttemptBinding {
         let root = std::env::current_dir().unwrap();
@@ -757,6 +759,11 @@ mod tests {
     #[test]
     fn te15_b1_native_profiles_pin_model_options_role_and_reject_tampering() {
         use super::super::super::orchestration_records::Role;
+        if !te15_catalog_child(
+            "orchestration::adapters::certification::tests::te15_b1_native_profiles_pin_model_options_role_and_reject_tampering",
+        ) {
+            return;
+        }
         for (spec, priority) in [
             (codex_candidate(), false),
             (codex_candidate(), true),
@@ -788,7 +795,9 @@ mod tests {
                 }
                 let binding = binding().for_task(selection.clone(), role);
                 let runtime = native_runtime(spec);
-                let profile = spec.bind(binding.clone(), &runtime).unwrap();
+                let profile = spec
+                    .bind(binding.clone(), &runtime)
+                    .expect("TE15_FIX2_PRIORITY_CATALOG");
                 assert_eq!(profile.selection(), selection, "TE15_SELECTION_PIN");
                 assert_eq!(
                     profile.session_config().tool_names.as_ref().unwrap(),

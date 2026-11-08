@@ -47,12 +47,18 @@ PAIRS = [
 
 def run(name, package, witness, marker, red):
     target = ['--bin', 'kinewright-app'] if package == 'kinewright-app' else ['--lib']
+    target = globals().get('TEST_TARGETS', {}).get(witness, target)
     features = {AGENT: 'eval-harness,slow-tests', 'kinewright-project': 'test-util', 'kinewright-app': 'slow-tests'}.get(package)
     args = ['test', '-p', package, *target]
     if features:
         args += ['--features', features]
     args += [witness, '--', '--exact', '--nocapture']
-    command = 'source scripts/setup-ffmpeg.sh && flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo ' + shlex.join(args)
+    if witness in globals().get('EQUIPPED_WITNESSES', ()):
+        args += ['--include-ignored']
+    runner = ''
+    if witness in globals().get('EMPTY_CATALOG_WITNESSES', ()):
+        runner = ' CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=' + shlex.quote('nice -n 19 python3 -I ' + str(ROOT / 'scripts/te15-b1-empty-catalog.py'))
+    command = 'source scripts/setup-ffmpeg.sh && flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4' + runner + ' nice -n 10 cargo ' + shlex.join(args)
     with (OUT / f'{name}.log').open('w') as log:
         result = subprocess.run(['bash', '-c', command], cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=False)
     text = (OUT / f'{name}.log').read_text(errors='replace')

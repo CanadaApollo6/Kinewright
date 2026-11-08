@@ -784,10 +784,16 @@ fn specialist_label(selection: &ProviderSelectionRecord) -> String {
 #[cfg(all(test, target_os = "linux"))]
 mod te15_tests {
     use super::*;
+    include!("../../kinewright-agent/tests/fixtures/te15_catalog.rs");
     use crate::app::in1_tests::{in1_harness, in1_shutdown};
     use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
     #[test]
     fn te15_b1_settings_show_default_and_persist_specific_without_director_change() {
+        if !te15_catalog_child(
+            "settings_ui::te15_tests::te15_b1_settings_show_default_and_persist_specific_without_director_change",
+        ) {
+            return;
+        }
         let default = director_folder();
         assert!(
             default
@@ -820,7 +826,7 @@ mod te15_tests {
                     .iter()
                     .any(|option| option.name == "service_tier" && option.value == "priority")
             })
-            .unwrap();
+            .expect("TE15_FIX2_APP_PRIORITY_CATALOG");
         assert!(
             specialist_label(&fast).contains("Fast (increased plan usage)"),
             "TE15_FIX_FAST_WORDS"

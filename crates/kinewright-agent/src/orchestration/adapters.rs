@@ -20,7 +20,7 @@ mod invocation;
 pub use invocation::*;
 
 #[derive(Debug)]
-pub struct LaunchError(pub String);
+pub struct LaunchError(pub std::io::Error);
 
 pub struct ContainedSession {
     session: Box<dyn AgentSession>,
@@ -90,6 +90,6 @@ impl<L: GuardianLauncher> AgentDriver for ContainedDriver<L> {
         self.launcher
             .launch(attempt, invocation)
             .map(|contained| contained.session)
-            .map_err(|error| AgentError::Unavailable(error.0))
+            .map_err(|error| AgentError::Unavailable(error.0.to_string()))
     }
 }

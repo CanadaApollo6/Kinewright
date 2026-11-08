@@ -95,6 +95,7 @@ impl HostCommandOwner {
                 inputs: HostOwnedInputClosure { context, inputs },
                 tasks: BTreeMap::new(),
                 continuable: true,
+                last_continue: None,
             },
         );
         Ok(())

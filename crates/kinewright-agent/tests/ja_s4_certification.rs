@@ -110,9 +110,10 @@ fn s4b_unavailable_saved_choice_is_kept_and_never_substituted() {
         "UNAVAILABLE_SHOWS_AS_UNAVAILABLE"
     );
     let why = configured_director(Some(temp.root())).unwrap_err();
-    assert!(
-        why.contains("claude") && why.contains("no longer available"),
-        "PLAIN_REASON_NAMES_THE_SAVED_CHOICE {why}"
+    assert_eq!(
+        why,
+        "Your saved Director choice is no longer available. Choose another Director in Settings; your notes are saved and the choice has not been substituted.",
+        "TE15_FIX2_UNAVAILABLE_DIRECTOR_FIXED_WORDS"
     );
     assert!(
         write_director_setting(Some(temp.root()), &unavailable).is_err(),

@@ -96,7 +96,11 @@ struct State {
     recovering: bool,
     retry_at: Option<std::time::Instant>,
     recovery_worker: Option<JoinHandle<()>>,
-    blocked: Option<(RunId, String)>,
+    blocked: Option<(
+        RunId,
+        Option<kinewright_project::receipts::CommandId>,
+        String,
+    )>,
     claim: Option<(RunId, Arc<Mutex<MachineClaim>>)>,
     worker: Option<Worker>,
 }
@@ -226,6 +230,24 @@ impl StudioRuntime {
         state.recovering = true;
         Ok(())
     }
+    #[cfg(test)]
+    pub(super) fn failed_worker_fixture(&self, run: &RunId) {
+        let mut state = self.state.lock().unwrap();
+        state.recovered = true;
+        state.recovering = false;
+        state.stopping = false;
+        state.worker = Some(Worker {
+            run: run.clone(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            thread: std::thread::spawn(|| Some("fixture worker failed".into())),
+        });
+        while !state.worker.as_ref().unwrap().thread.is_finished() {
+            std::thread::yield_now();
+        }
+        if let Some(host) = self.host.upgrade() {
+            host.lock().unwrap().native_recovery_pending = false;
+        }
+    }
     pub(super) fn drive(&self) -> io::Result<()> {
         self.begin_recovery()?;
         let host = self
@@ -252,16 +274,22 @@ impl StudioRuntime {
             return Ok(());
         }
         if let Some(worker) = runtime.worker.take() {
-            match worker.thread.join() {
-                Ok(Some(reason)) => {
-                    runtime.blocked = Some((worker.run, reason));
-                }
-                Err(_) => {
-                    runtime.blocked = Some((worker.run, "native runtime worker failed".into()));
-                }
-                Ok(None) => {}
+            let failure = match worker.thread.join() {
+                Ok(failure) => failure,
+                Err(_) => Some("native runtime worker failed".into()),
+            };
+            if let Some(reason) = failure {
+                let continuation = host
+                    .lock()
+                    .map_err(|_| io::Error::other("host closed"))?
+                    .hooks
+                    .runs
+                    .get(&worker.run)
+                    .and_then(|run| run.last_continue.clone());
+                runtime.blocked = Some((worker.run, continuation, reason));
             }
         }
+
         if let Some((run, claim)) = runtime.claim.take() {
             let terminal = host
                 .lock()
@@ -334,19 +362,15 @@ impl StudioRuntime {
             };
             candidate
         };
-        if let Some((blocked_run, reason)) = &runtime.blocked {
-            if blocked_run == &run
-                && !host.lock().is_ok_and(|owner| {
-                    owner
-                        .owner()
-                        .ok()
-                        .and_then(|session| session.orchestration_projection(&run).ok().flatten())
-                        .is_some_and(|state| {
-                            state.phase
-                                == crate::orchestration::orchestration_records::RunPhase::Queued
-                        })
-                })
-            {
+        if let Some((blocked_run, continuation, reason)) = &runtime.blocked {
+            let current = host
+                .lock()
+                .map_err(|_| io::Error::other("host closed"))?
+                .hooks
+                .runs
+                .get(&run)
+                .and_then(|run| run.last_continue.clone());
+            if blocked_run == &run && continuation == &current {
                 return Err(io::Error::other(reason.clone()));
             }
             runtime.blocked = None;
@@ -844,17 +868,14 @@ impl ProfileFactory for RegisteredProfiles {
             Ok(profile) => profile,
             Err(error) => {
                 let _ = std::fs::remove_dir(&scratch);
-                return Err(super::provider_readiness::provider_error(
+                return Err(super::provider_readiness::certification_error(
                     &selection.connector,
-                    &error,
+                    error,
                 ));
             }
         };
         if profile.selection() != selection {
-            return Err(super::provider_readiness::provider_error(
-                &selection.connector,
-                &"the saved connector policy changed",
-            ));
+            return Err(io::Error::other("saved connector policy changed"));
         }
         Ok(profile)
     }
@@ -888,6 +909,12 @@ impl HostCommandOwner {
         reason: &str,
     ) -> Result<(), super::HostError> {
         let state = self.spending_scope(producer, &identity.run)?;
+        if matches!(
+            state.wait,
+            crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
+        ) {
+            return Ok(());
+        }
         let replan = self.native_accounting(&state)?.is_some_and(|accounting| {
             accounting.tasks.iter().any(|task| {
                 task.task == identity.task.0

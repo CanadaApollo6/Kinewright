@@ -13,7 +13,7 @@ use crate::orchestration::{
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct ReadinessPlan {
+pub(crate) struct ReadinessPlan {
     selections: Vec<ProviderSelectionRecord>,
 }
 pub(crate) fn provider_words(provider: &str, why: &impl std::fmt::Display) -> String {
@@ -33,14 +33,23 @@ pub(crate) fn provider_error(provider: &str, why: &impl std::fmt::Display) -> st
     std::io::Error::other(ProviderSetupRefusal(provider_words(provider, why)))
 }
 impl ReadinessPlan {
-    pub(super) fn check(&self, checks: &dyn ConnectorRuntimeChecks) -> Result<(), String> {
+    pub(super) fn check(&self, checks: &dyn ConnectorRuntimeChecks) -> std::io::Result<()> {
+        self.check_except(checks, None)
+    }
+    fn check_except(
+        &self,
+        checks: &dyn ConnectorRuntimeChecks,
+        bound: Option<&str>,
+    ) -> std::io::Result<()> {
         let mut providers = std::collections::BTreeSet::new();
         for selection in &self.selections {
             #[cfg(any(test, feature = "test-util"))]
             if matches!(selection.connector.as_str(), "scripted" | "scripted-claude") {
                 continue;
             }
-            if !providers.insert(&selection.connector) {
+            if bound == Some(selection.connector.as_str())
+                || !providers.insert(&selection.connector)
+            {
                 continue;
             }
             let spec = available_connectors()
@@ -55,11 +64,11 @@ impl ReadinessPlan {
                     .find(|s| s.provider() == selection.connector)
             });
             let spec = spec.ok_or_else(|| {
-                provider_words(&selection.connector, &CertificationRefusal::UnknownProvider)
+                certification_error(&selection.connector, CertificationRefusal::UnknownProvider)
             })?;
             checks
                 .preflight(spec)
-                .map_err(|why| provider_words(&selection.connector, &why))?;
+                .map_err(|why| certification_error(&selection.connector, why))?;
         }
         Ok(())
     }
@@ -99,14 +108,6 @@ impl HostCommandOwner {
             .ok_or_else(|| HostRefusal::new("provider_wait", "The run is unavailable."))?;
         let same = state.phase == RunPhase::Interrupted
             && matches!(&state.wait, RunWait::ProviderSettings(detail) if detail.reason.sha256 == kinewright_media::sha256_bytes(reason.as_bytes()));
-        for native in self
-            .hooks
-            .native
-            .values()
-            .filter(|native| native.identity.run == *run)
-        {
-            native.control.close();
-        }
         if !same {
             let producer = self.run_producer(run)?;
             self.record_runtime_wait(&producer, run, reason, false, RunWait::ProviderSettings)?;
@@ -188,19 +189,20 @@ impl HostCommandOwner {
             _ => Ok(None),
         }
     }
-    fn readiness_reply(&mut self, command: &HostCommand, reason: &str) -> HostReply {
+    fn readiness_reply(&mut self, command: &HostCommand, failure: &std::io::Error) -> HostReply {
+        let reason = failure.to_string();
         if matches!(command, HostCommand::ReviseCut { .. }) {
             return HostReply {
                 status: self.status(),
                 revise_result: Some(kinewright_project::studio_records::ReviseResult::Waiting {
-                    reason: reason.into(),
+                    reason: reason.clone(),
                 }),
                 ..HostReply::default()
             };
         }
         if let HostCommand::DispatchOrchestration { request } = command
             && let Some(run) = &request.run
-            && let Err(error) = self.wait_for_provider(run, reason)
+            && let Err(error) = wait_for_failure(self, run, failure)
         {
             return HostReply {
                 status: self.status(),
@@ -210,7 +212,7 @@ impl HostCommandOwner {
         }
         HostReply {
             status: self.status(),
-            error: Some(HostRefusal::new("provider_wait", reason)),
+            error: Some(HostRefusal::new("provider_wait", &reason)),
             ..HostReply::default()
         }
     }
@@ -238,12 +240,13 @@ pub(super) fn execute(
         Ok(Some(plan)) => checks
             .as_ref()
             .ok_or_else(|| {
-                "Provider checks are unavailable. Review Director and Specialists in Settings."
-                    .into()
+                std::io::Error::other(
+                    "Provider checks are unavailable. Review Director and Specialists in Settings.",
+                )
             })
             .and_then(|checks| plan.check(checks.as_ref())),
         Ok(None) => Ok(()),
-        Err(why) => Err(why.clone()),
+        Err(why) => Err(choice_error(why)),
     };
     let Ok(mut owner) = host.lock() else {
         return HostReply {
@@ -255,7 +258,7 @@ pub(super) fn execute(
         return owner.execute_bearer(Some(bearer), request);
     }
     if owner.command_readiness(bearer, &request) != plan {
-        return owner.readiness_reply(&request.command, "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.");
+        return owner.readiness_reply(&request.command, &choice_error("Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again."));
     }
     if let Err(why) = checked {
         return owner.readiness_reply(&request.command, &why);
@@ -263,7 +266,10 @@ pub(super) fn execute(
     owner.execute_bearer(Some(bearer), request)
 }
 /// Every effect, including a restored or queued one, rechecks before reservation.
-pub(crate) fn check_run(host: &Arc<Mutex<HostCommandOwner>>, run: &RunId) -> std::io::Result<()> {
+pub(crate) fn check_run(
+    host: &Arc<Mutex<HostCommandOwner>>,
+    run: &RunId,
+) -> std::io::Result<ReadinessPlan> {
     let (plan, checks) = {
         let owner = host
             .lock()
@@ -273,11 +279,10 @@ pub(crate) fn check_run(host: &Arc<Mutex<HostCommandOwner>>, run: &RunId) -> std
             owner.native_readiness_checks.clone(),
         )
     };
-    let result = plan.as_ref().map_err(Clone::clone).and_then(|plan| {
+    let result = plan.as_ref().map_err(|why| choice_error(why)).and_then(|plan| {
         checks
             .ok_or_else(|| {
-                "Provider checks are unavailable. Review Director and Specialists in Settings."
-                    .into()
+                std::io::Error::other("Provider checks are unavailable. Review Director and Specialists in Settings.")
             })
             .and_then(|checks| plan.check(checks.as_ref()))
     });
@@ -287,15 +292,15 @@ pub(crate) fn check_run(host: &Arc<Mutex<HostCommandOwner>>, run: &RunId) -> std
     let result = if owner.readiness_for_run(run) == plan {
         result
     } else {
-        Err("Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.".into())
+        Err(choice_error(
+            "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.",
+        ))
     };
     if let Err(why) = result {
-        owner
-            .wait_for_provider(run, &why)
-            .map_err(std::io::Error::other)?;
-        return Err(std::io::Error::other(why));
+        wait_for_failure(&mut owner, run, &why).map_err(std::io::Error::other)?;
+        return Err(why);
     }
-    Ok(())
+    plan.map_err(std::io::Error::other)
 }
 
 pub(crate) fn wait_on_launch_error(
@@ -312,4 +317,90 @@ pub(crate) fn wait_on_launch_error(
             .map_err(std::io::Error::other)?;
     }
     Ok(())
+}
+
+/// Bind already probed the launching provider. Recheck every other provider,
+/// then compare this plan under the SAME owner lock that charges the invocation.
+pub(crate) fn check_bound(
+    host: &Arc<Mutex<HostCommandOwner>>,
+    run: &RunId,
+    plan: &ReadinessPlan,
+    provider: &str,
+) -> std::io::Result<()> {
+    let checks = {
+        let mut owner = host
+            .lock()
+            .map_err(|_| std::io::Error::other("host closed"))?;
+        plan.current(&mut owner, run)?;
+        owner.native_readiness_checks.clone()
+    };
+    let result = checks
+        .ok_or_else(|| {
+            std::io::Error::other(
+                "Provider checks are unavailable. Review Director and Specialists in Settings.",
+            )
+        })
+        .and_then(|checks| plan.check_except(checks.as_ref(), Some(provider)));
+    if let Err(why) = result {
+        let mut owner = host
+            .lock()
+            .map_err(|_| std::io::Error::other("host closed"))?;
+        wait_for_failure(&mut owner, run, &why).map_err(std::io::Error::other)?;
+        return Err(why);
+    }
+    Ok(())
+}
+impl ReadinessPlan {
+    pub(crate) fn current(&self, owner: &mut HostCommandOwner, run: &RunId) -> std::io::Result<()> {
+        let current = owner.readiness_for_run(run);
+        if current.as_ref() == Ok(self) {
+            return Ok(());
+        }
+        let why = current.err().unwrap_or_else(|| "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.".into());
+        owner
+            .wait_for_provider(run, &why)
+            .map_err(std::io::Error::other)?;
+        Err(std::io::Error::other(ProviderSetupRefusal(why)))
+    }
+}
+pub(crate) fn setup_failure(error: &std::io::Error) -> bool {
+    matches!(error.get_ref(), Some(cause) if cause.is::<ProviderSetupRefusal>())
+}
+pub(crate) fn certification_error(provider: &str, error: CertificationRefusal) -> std::io::Error {
+    if matches!(
+        error,
+        CertificationRefusal::UnknownProvider
+            | CertificationRefusal::UnqualifiedVersion
+            | CertificationRefusal::ApiAuthentication
+            | CertificationRefusal::UnknownAuthentication
+            | CertificationRefusal::EffectiveAuthentication
+            | CertificationRefusal::ExecutableIdentity
+            | CertificationRefusal::ExecutableResolution(_)
+            | CertificationRefusal::ModelUnavailable
+    ) {
+        provider_error(provider, &error)
+    } else {
+        std::io::Error::other(error)
+    }
+}
+pub(super) fn model_wait(reason: &impl std::fmt::Display) -> String {
+    format!(
+        "{reason} The run is waiting for the person to fix Settings. End your turn now. Do not retry this call."
+    )
+}
+
+fn choice_error(reason: &str) -> std::io::Error {
+    std::io::Error::other(ProviderSetupRefusal(reason.into()))
+}
+fn wait_for_failure(
+    owner: &mut HostCommandOwner,
+    run: &RunId,
+    failure: &std::io::Error,
+) -> Result<(), HostError> {
+    if setup_failure(failure) {
+        owner.wait_for_provider(run, &failure.to_string())
+    } else {
+        let producer = owner.run_producer(run)?;
+        owner.record_runtime_refusal(&producer, run, &failure.to_string())
+    }
 }

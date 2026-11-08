@@ -417,7 +417,9 @@ fn check_guardian_injection(attempt: orchestration::AdmittedAttempt) {
                 .verify_payload(invocation.invocation().manifest(), b"fixture prompt")
                 .unwrap();
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(LaunchError("fixture containment refused".into()))
+            Err(LaunchError(std::io::Error::other(
+                "fixture containment refused",
+            )))
         }
     }
     let profile = CertifiedConnectorProfile::fixture(&attempt);

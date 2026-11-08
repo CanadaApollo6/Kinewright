@@ -173,6 +173,7 @@ impl<L: GuardianLauncher> EffectPump<L> {
         effect: &crate::orchestration::orchestration_records::EffectId,
         kind: crate::orchestration::adapters::SendKind,
         now: u64,
+        plan: &crate::writer_host::provider_readiness::ReadinessPlan,
     ) -> io::Result<Box<dyn AgentSession>> {
         let identity = attempt.identity();
         if let Some(limit) = self.ceiling {
@@ -193,9 +194,12 @@ impl<L: GuardianLauncher> EffectPump<L> {
         }
         let profile = self.profiles.bind(&attempt)?;
         let provider = profile.selection().connector;
-        let invocation = owner
+        crate::writer_host::provider_readiness::check_bound(owner, &self.run, plan, &provider)?;
+        let mut host = owner
             .lock()
-            .map_err(|_| io::Error::other("host owner poisoned"))?
+            .map_err(|_| io::Error::other("host owner poisoned"))?;
+        plan.current(&mut host, &self.run)?;
+        let invocation = host
             .charge_native_invocation(
                 &self.producer,
                 &attempt,
@@ -205,10 +209,32 @@ impl<L: GuardianLauncher> EffectPump<L> {
                 crate::writer_host::spending::unix_ms().map_err(io::Error::other)?,
             )
             .map_err(io::Error::other)?;
+        drop(host);
         self.launcher
             .launch(attempt, invocation)
-            .map_err(|e| crate::writer_host::provider_readiness::provider_error(&provider, &e.0))
+            .map_err(|e| e.0)
             .map(crate::orchestration::adapters::ContainedSession::into_session)
+    }
+    fn reconcile_failure(
+        &self,
+        owner: &Arc<Mutex<HostCommandOwner>>,
+        identity: &ExecutionIdentity,
+        error: io::Error,
+    ) -> io::Result<()> {
+        let mut claim = self
+            .claim
+            .lock()
+            .map_err(|_| io::Error::other("machine claim poisoned"))?;
+        if let Err(cleanup) = reconcile_attempt(owner, &mut claim, &self.producer, identity) {
+            return Err(io::Error::other(format!(
+                "{error}; cleanup_blocked: {cleanup}"
+            )));
+        }
+        crate::writer_host::provider_readiness::wait_on_launch_error(owner, &self.run, &error)?;
+        if crate::writer_host::provider_readiness::setup_failure(&error) {
+            return Ok(());
+        }
+        Err(error)
     }
     pub(crate) fn tick(&mut self) -> io::Result<()> {
         self.drain_events()?;
@@ -271,7 +297,13 @@ impl<L: GuardianLauncher> EffectPump<L> {
             return Ok(());
         }
         drop(host);
-        crate::writer_host::provider_readiness::check_run(&owner, &self.run)?;
+        let plan = match crate::writer_host::provider_readiness::check_run(&owner, &self.run) {
+            Ok(plan) => plan,
+            Err(error) if crate::writer_host::provider_readiness::setup_failure(&error) => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let mut host = owner
             .lock()
             .map_err(|_| io::Error::other("host owner poisoned"))?;
@@ -283,26 +315,10 @@ impl<L: GuardianLauncher> EffectPump<L> {
         };
         let identity = attempt.identity().clone();
         drop(host);
-        let launched = self.launch_reserved(&owner, attempt, &effect, kind, now);
+        let launched = self.launch_reserved(&owner, attempt, &effect, kind, now, &plan);
         let session = match launched {
             Ok(session) => session,
-            Err(error) => {
-                let mut claim = self
-                    .claim
-                    .lock()
-                    .map_err(|_| io::Error::other("machine claim poisoned"))?;
-                if let Err(cleanup) =
-                    reconcile_attempt(&owner, &mut claim, &self.producer, &identity)
-                {
-                    return Err(io::Error::other(format!(
-                        "{error}; cleanup_blocked: {cleanup}"
-                    )));
-                }
-                crate::writer_host::provider_readiness::wait_on_launch_error(
-                    &owner, &self.run, &error,
-                )?;
-                return Err(error);
-            }
+            Err(error) => return self.reconcile_failure(&owner, &identity, error),
         };
         #[cfg(any(test, feature = "test-util"))]
         if let Some(observer) = &self.native_event_observer {

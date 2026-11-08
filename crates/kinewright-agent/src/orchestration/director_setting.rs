@@ -11,7 +11,9 @@ use std::{
 };
 
 const DIRECTOR_FILE: &str = "director.json";
-const DIRECTOR_FILE_BYTES: u64 = 16 << 10;
+#[cfg(test)]
+const DIRECTOR_FILE_BYTES: u64 = super::setting_file::MAX_BYTES;
+const UNREADABLE: &str = "Your saved Director choice cannot be read. Choose a Director in Settings; your notes are saved and the choice has not been substituted.";
 const NO_DIRECTOR: &str = "No Director provider is set up on this computer. Your notes are saved. Revise cut again after one is set up.";
 
 /// The person's Director choice, in per-user scheduler settings.
@@ -82,45 +84,15 @@ fn director_status_in(
     folder: Option<&Path>,
     choices: &[ProviderSelectionRecord],
 ) -> DirectorStatus {
-    let folder = match folder_or_default(folder) {
-        Ok(folder) => folder,
-        Err(why) => return DirectorStatus::Unreadable(why),
+    let Ok(folder) = folder_or_default(folder) else {
+        return DirectorStatus::Unreadable(UNREADABLE.into());
     };
     let path = folder.join(DIRECTOR_FILE);
-    let bytes = match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > DIRECTOR_FILE_BYTES => {
-            return DirectorStatus::Unreadable("The Director setting is too large to read.".into());
-        }
-        Ok(_) => match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return DirectorStatus::Unreadable(format!(
-                    "The Director setting cannot be read ({error})."
-                ));
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return DirectorStatus::Missing;
-        }
-        Err(error) => {
-            return DirectorStatus::Unreadable(format!(
-                "The Director setting cannot be read ({error})."
-            ));
-        }
+    let setting = match super::setting_file::read::<DirectorSetting>(&path) {
+        Ok(Some(setting)) if setting.version == 1 && valid_shape(&setting.director) => setting,
+        Ok(None) => return DirectorStatus::Missing,
+        _ => return DirectorStatus::Unreadable(UNREADABLE.into()),
     };
-    let setting: DirectorSetting = match serde_json::from_slice(&bytes) {
-        Ok(setting) => setting,
-        Err(error) => {
-            return DirectorStatus::Unreadable(format!(
-                "The Director setting cannot be read ({error})."
-            ));
-        }
-    };
-    if setting.version != 1 || !valid_shape(&setting.director) {
-        return DirectorStatus::Unreadable(
-            "The Director setting has an unknown version or shape.".into(),
-        );
-    }
     if choices.contains(&setting.director) {
         DirectorStatus::Set(setting.director)
     } else {
@@ -136,18 +108,10 @@ fn configured_director_in(
     folder: Option<&Path>,
     choices: &[ProviderSelectionRecord],
 ) -> Result<ProviderSelectionRecord, String> {
-    if folder.is_none()
-        && let Err(why) = scheduler_settings_directory()
-    {
-        return Err(format!("{NO_DIRECTOR} ({why})"));
-    }
     match director_status_in(folder, choices) {
         DirectorStatus::Set(director) => Ok(director),
         DirectorStatus::Missing => Err(NO_DIRECTOR.into()),
-        DirectorStatus::NoLongerOffered(director) => Err(format!(
-            "The Director you chose ({} · {}) is no longer available on this computer. Your notes are saved. Choose another Director in Settings, then Revise cut again.",
-            director.connector, director.model
-        )),
+        DirectorStatus::NoLongerOffered(_) => Err("Your saved Director choice is no longer available. Choose another Director in Settings; your notes are saved and the choice has not been substituted.".into()),
         DirectorStatus::Unreadable(why) => Err(why),
     }
 }
@@ -400,5 +364,103 @@ fn te15_b1_fix_test_hosts_cannot_read_default_folder() {
     assert!(
         std::panic::catch_unwind(scheduler_settings_directory).is_err(),
         "TE15_FIX_NO_PERSONAL_FOLDER"
+    );
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn te15_b1_fix2_director_links_keep_an_unreadable_choice() {
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "te15-director-link",
+    );
+    let entry = temp.path(DIRECTOR_FILE);
+    let target = temp.path("target.json");
+    std::os::unix::fs::symlink(&target, &entry).unwrap();
+    for intact in [false, true] {
+        if intact {
+            std::fs::write(
+                &target,
+                serde_json::to_vec(&DirectorSetting {
+                    version: 1,
+                    director: director_choices()[0].clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            director_status(Some(temp.root())),
+            DirectorStatus::Unreadable(UNREADABLE.into()),
+            "TE15_FIX2_DIRECTOR_LINK"
+        );
+        assert_eq!(
+            configured_director(Some(temp.root())).unwrap_err(),
+            UNREADABLE,
+            "TE15_FIX2_DIRECTOR_WORDS"
+        );
+        assert!(
+            std::fs::symlink_metadata(&entry)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn te15_b1_fix2_director_fifo_is_bounded() {
+    const CHILD: &str = "KINEWRIGHT_TE15_DIRECTOR_FIFO";
+    if let Some(folder) = std::env::var_os(CHILD) {
+        assert!(
+            matches!(
+                director_status(Some(Path::new(&folder))),
+                DirectorStatus::Unreadable(_)
+            ),
+            "TE15_FIX2_DIRECTOR_FIFO_REFUSED"
+        );
+        return;
+    }
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "te15-director-fifo",
+    );
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(temp.path(DIRECTOR_FILE))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output_path = temp.path("child.log");
+    let output = std::fs::File::create(&output_path).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "orchestration::director_setting::te15_b1_fix2_director_fifo_is_bounded",
+            "--nocapture",
+        ])
+        .env(CHILD, temp.root())
+        .stdout(output.try_clone().unwrap())
+        .stderr(output)
+        .spawn()
+        .unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let result = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= end {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        result.is_some_and(|s| s.success()),
+        "TE15_FIX2_DIRECTOR_FIFO_BOUNDED: {}",
+        std::fs::read_to_string(output_path).unwrap()
     );
 }

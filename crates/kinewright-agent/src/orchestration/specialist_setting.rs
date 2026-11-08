@@ -7,13 +7,11 @@ use super::{
     orchestration_records::{ProviderOptionRecord, ProviderSelectionRecord},
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    io::{Read, Write},
-    path::Path,
-};
+use std::{io::Write, path::Path};
 
 const FILE: &str = "specialists.json";
-const MAX_BYTES: u64 = 16 << 10;
+#[cfg(test)]
+const MAX_BYTES: u64 = super::setting_file::MAX_BYTES;
 const UNREADABLE: &str = "Your saved specialist choice cannot be read. Choose a specialist in Settings; it has not been substituted.";
 const UNAVAILABLE: &str = "Your saved specialist choice is unavailable. Choose another in Settings; it has not been substituted.";
 
@@ -114,38 +112,11 @@ pub fn specialist_choices() -> Vec<ProviderSelectionRecord> {
 pub fn specialist_status(folder: Option<&Path>) -> SpecialistStatus {
     let read = || -> Result<Option<Setting>, String> {
         let folder = folder.map_or_else(scheduler_settings_directory, |p| Ok(p.to_path_buf()))?;
-        let path = folder.join(FILE);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(UNREADABLE.into()),
+        let Some(setting) =
+            super::setting_file::read::<Setting>(&folder.join(FILE)).map_err(|()| UNREADABLE)?
+        else {
+            return Ok(None);
         };
-        if !metadata.is_file() || metadata.len() > MAX_BYTES {
-            return Err(UNREADABLE.into());
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
-                    .bits()
-                    .cast_signed(),
-            );
-        }
-        let file = options.open(path).map_err(|_| UNREADABLE)?;
-        if !file.metadata().map_err(|_| UNREADABLE)?.is_file() {
-            return Err(UNREADABLE.into());
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > MAX_BYTES {
-            return Err("Specialist setting is too large.".into());
-        }
-        let setting: Setting = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if setting.version != 1
             || matches!(&setting.specialists,
             SpecialistChoice::Specific(selection) if !super::director_setting::valid_shape(selection))

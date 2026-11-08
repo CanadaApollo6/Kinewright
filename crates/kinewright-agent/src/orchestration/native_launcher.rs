@@ -915,7 +915,7 @@ impl adapters::GuardianLauncher for NativeGuardianLauncher {
         invocation: AuthorizedInvocation,
     ) -> Result<adapters::ContainedSession, adapters::LaunchError> {
         self.launch_native(&attempt, &invocation)
-            .map_err(|error| adapters::LaunchError(error.to_string()))
+            .map_err(adapters::LaunchError)
     }
 }
 impl NativeGuardianLauncher {
@@ -942,7 +942,12 @@ impl NativeGuardianLauncher {
         invocation
             .profile()
             .recheck_runtime(self.checks.as_ref())
-            .map_err(io::Error::other)?;
+            .map_err(|error| {
+                crate::writer_host::provider_readiness::certification_error(
+                    invocation.profile().specification().provider(),
+                    error,
+                )
+            })?;
         let immutable = invocation.invocation();
         let manifest: Manifest = serde_json::from_slice(immutable.manifest_bytes())?;
         if manifest.identity != *attempt.identity()

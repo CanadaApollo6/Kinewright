@@ -144,6 +144,7 @@ pub(super) struct HostRun {
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,
     pub continuable: bool,
+    pub last_continue: Option<CommandId>,
 }
 #[derive(Default)]
 pub(super) struct Hooks {
@@ -300,7 +301,9 @@ impl HostCommandOwner {
                     endpoint.revoke();
                 }
                 endpoint.set_paused(
-                    matches!(projection.phase, RunPhase::Paused | RunPhase::Interrupted)
+                    (projection.phase == RunPhase::Paused
+                        || (projection.phase == RunPhase::Interrupted
+                            && !matches!(projection.wait, crate::orchestration::orchestration_records::RunWait::ProviderSettings(_))))
                         || matches!(projection.cleanup, RunCleanup::Blocked(_, _)),
                 );
             }
@@ -556,6 +559,17 @@ impl HostCommandOwner {
                         .owner()?
                         .orchestration_projection(&intent.run_id)?
                         .ok_or_else(|| refused("unknown run"))?;
+                    if intent.action == RunAction::Continue
+                        && !machine::provider_continuation_safe(&state)
+                        && self
+                            .owner()?
+                            .orchestration_receipt(&intent.run_id, &request.envelope.id)?
+                            .is_none()
+                    {
+                        return Err(refused(
+                            "recovery_requires_person: the Director has an unknown send outcome; Continue cannot replay it.",
+                        ));
+                    }
                     if intent.action == RunAction::Continue
                         && !self.run_recovery_blocks(&state)?.is_empty()
                     {
@@ -818,6 +832,12 @@ impl HostCommandOwner {
             Err(why) => {
                 #[cfg(target_os = "linux")]
                 self.wait_for_provider(run, &why)?;
+                #[cfg(target_os = "linux")]
+                let why = if request.envelope.authority.attempt.is_some() {
+                    super::provider_readiness::model_wait(&why)
+                } else {
+                    why
+                };
                 return Err(HostRefusal::new("provider_wait", &why).into());
             }
         };
@@ -878,6 +898,7 @@ impl HostCommandOwner {
             {
                 actor.endpoint().seal_accepted_finish();
             }
+            self.acknowledge_continue(&run, request, &receipt);
             self.drive_completion(index, request, &receipt);
             return Ok(receipt);
         }
@@ -1028,6 +1049,18 @@ impl HostCommandOwner {
             )
             .map_err(scheduler_error)?
         } else {
+            let setup_resume = if matches!(&request.envelope.command, OrchestrationCommand::ControlRun(intent) if intent.action == RunAction::Continue)
+                && previous
+                    .as_ref()
+                    .is_some_and(machine::needs_setup_continuation)
+            {
+                Some(
+                    self.owner_mut()?
+                        .admit_host_grant(machine::SETUP_CONTINUED)?,
+                )
+            } else {
+                None
+            };
             machine::prepare_with_attention(
                 previous.as_ref(),
                 &self.owner()?.active_manual_project()?,
@@ -1035,6 +1068,7 @@ impl HostCommandOwner {
                 &request.envelope,
                 previous_segment,
                 attention.as_ref().map(|(proof, _)| proof),
+                setup_resume,
             )
             .map_err(scheduler_error)?
         };
@@ -1074,6 +1108,7 @@ impl HostCommandOwner {
                 if let Some(run) = self.hooks.runs.get_mut(&run_id) {
                     run.continuable = continuable;
                 }
+                self.acknowledge_continue(&run_id, request, &receipt);
                 self.drive_completion(index, request, &receipt);
                 Ok(receipt)
             }
@@ -1095,6 +1130,19 @@ impl HostCommandOwner {
                 }
                 Err(error.into())
             }
+        }
+    }
+    fn acknowledge_continue(
+        &mut self,
+        run: &RunId,
+        request: &ScopedOrchestrationRequest,
+        receipt: &OrchestrationReceipt,
+    ) {
+        if receipt.decision == orchestration_commit::CommandDecision::Applied
+            && matches!(&request.envelope.command, OrchestrationCommand::ControlRun(intent) if intent.action == RunAction::Continue)
+            && let Some(runtime) = self.hooks.runs.get_mut(run)
+        {
+            runtime.last_continue = Some(request.envelope.id.clone());
         }
     }
     pub(super) fn observe_run(

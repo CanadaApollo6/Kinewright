@@ -202,12 +202,30 @@ pub fn eligible(state: &RunProjection, action: &RunAction) -> bool {
             matches!(state.phase, RunPhase::Paused | RunPhase::Interrupted)
                 && state.cleanup == RunCleanup::Settled
                 && matches!(state.wait, RunWait::None | RunWait::ProviderSettings(_))
+                && provider_continuation_safe(state)
         }
         RunAction::SendMessage { .. } => {
             super::requests::director(state).is_ok()
                 && state.effects.len() < super::orchestration_records::ITEM_LIMIT
         }
     }
+}
+
+pub(crate) const SETUP_CONTINUED: &[u8] =
+    b"The provider setup was fixed. Continue this run from its retained task state.";
+
+pub(crate) fn provider_continuation_safe(state: &RunProjection) -> bool {
+    super::requests::director(state).is_ok_and(|task| {
+        super::outbox::lane_head(state, &task.brief.scope.base.branch)
+            .is_none_or(|effect| effect.state == EffectState::Pending)
+    })
+}
+
+pub(crate) fn needs_setup_continuation(state: &RunProjection) -> bool {
+    matches!(state.wait, RunWait::ProviderSettings(_))
+        && super::requests::director(state).is_ok_and(|task| {
+            super::outbox::lane_head(state, &task.brief.scope.base.branch).is_none()
+        })
 }
 
 /// C5 fix 10: the fixed reason and status of a silently stalled run.
@@ -247,7 +265,15 @@ pub fn prepare(
     envelope: &OrchestrationEnvelope,
     previous_segment: Option<super::bundle_records::ObjectRef>,
 ) -> Result<ValidatedRunUpdate, Refusal> {
-    prepare_with_attention(state, project, generation, envelope, previous_segment, None)
+    prepare_with_attention(
+        state,
+        project,
+        generation,
+        envelope,
+        previous_segment,
+        None,
+        None,
+    )
 }
 #[allow(clippy::too_many_lines, reason = "single envelope-to-cut transition")]
 pub(crate) fn prepare_with_attention(
@@ -257,6 +283,7 @@ pub(crate) fn prepare_with_attention(
     envelope: &OrchestrationEnvelope,
     previous_segment: Option<super::bundle_records::ObjectRef>,
     attention: Option<&super::requests::LiveAttentionAdmission>,
+    setup_resume: Option<super::bundle_records::ObjectRef>,
 ) -> Result<ValidatedRunUpdate, Refusal> {
     envelope.validate()?;
     if let Some(state) = state {
@@ -342,6 +369,30 @@ pub(crate) fn prepare_with_attention(
                 RunAction::Continue => {
                     next.phase = RunPhase::Queued;
                     if matches!(next.wait, RunWait::ProviderSettings(_)) {
+                        if needs_setup_continuation(&next) {
+                            let task = super::requests::director(&next)?;
+                            let order = next
+                                .effects
+                                .iter()
+                                .filter(|effect| effect.lane == task.brief.scope.base.branch)
+                                .map(|effect| effect.order)
+                                .max()
+                                .unwrap_or(0)
+                                .checked_add(1)
+                                .ok_or(Refusal::Capacity)?;
+                            if next.effects.len() >= super::orchestration_records::ITEM_LIMIT {
+                                return Err(Refusal::Capacity);
+                            }
+                            next.effects.push(EffectRecord {
+                                id: envelope.identity("effect.setup-continued")?,
+                                task: task.id.clone(),
+                                lane: task.brief.scope.base.branch.clone(),
+                                order,
+                                safety: EffectSafety::ProcessBound,
+                                state: EffectState::Pending,
+                                payload: setup_resume.ok_or(Refusal::InvalidState)?,
+                            });
+                        }
                         next.wait = RunWait::None;
                     }
                 }

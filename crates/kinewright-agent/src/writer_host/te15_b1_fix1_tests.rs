@@ -68,67 +68,78 @@ impl ConnectorRuntimeChecks for Te15ProfileChecks {
         spec: &ConnectorSpecification,
         binding: &crate::orchestration::adapters::AttemptBinding,
     ) -> Result<crate::orchestration::adapters::RuntimeQualification, CertificationRefusal> {
-        use crate::orchestration::adapters::*;
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let auth = binding.working_directory().with_extension("fixture-auth");
-        std::fs::create_dir(&auth).unwrap();
-        std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let source = auth.join("auth.json");
-        std::fs::write(&source, br#"{"auth_mode":"chatgpt"}"#).unwrap();
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let metadata = std::fs::metadata(&source).unwrap();
-        let mut runtime = crate::orchestration::adapters::test_runtime();
-        runtime.version = spec.minimum_version();
-        runtime.sandbox = Some(SandboxPolicy::LinuxFilesystemAndIpc);
-        let executable = std::fs::metadata("/usr/bin/true").unwrap();
-        runtime.executable = ExecutableIdentity {
-            path: "/usr/bin/true".into(),
-            file_identity: [executable.dev(), executable.ino()],
-        };
-        runtime.launch_context.executable = runtime.executable.clone();
-        let scope = &mut runtime.launch_context.credential_store;
-        if spec.provider() == "codex" {
-            scope.root =
-                crate::codex_credentials::prepare_home(binding.working_directory()).unwrap();
-            scope.single_file = Some(CredentialFile {
-                source,
-                identity: [metadata.dev(), metadata.ino()],
-            });
-            scope.credential_files = vec!["auth.json".into()];
-        } else {
-            assert_eq!(spec.provider(), "claude");
-            scope.root = binding.working_directory().join("claude-config");
-            std::fs::create_dir(&scope.root).unwrap();
-            std::fs::set_permissions(&scope.root, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let private = scope.root.join(".credentials.json");
-            // Synthetic subscription evidence, never an installed provider's sign-in.
-            std::fs::write(&private, br#"{"claudeAiOauth":{"accessToken":"fixture-only-token","expiresAt":9000000000000,"scopes":["user:inference"],"subscriptionType":"max"}}"#).unwrap();
-            std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
-            scope.single_file = None;
-            scope.credential_files = vec![".credentials.json".into()];
-        }
-        scope.lock_files.clear();
-        scope.temporary_file_prefixes.clear();
-        scope.refresh = spec.auth_contract().refresh;
-        runtime.authentication.contract = spec.auth_contract();
-        runtime.authentication.context = runtime.launch_context.clone();
-        runtime.authentication.observed_store = runtime.launch_context.credential_store.clone();
-        let program = crate::native_launcher::recipe(
+        Ok(te15_profile_runtime(
             spec,
             binding,
-            &runtime,
-            &spec.session_config(binding),
-            "fake prompt",
-        )
-        .unwrap();
-        runtime.launch_context.environment_digest = native_digest(&program.environment);
-        let mut arguments = program.arguments;
-        arguments.pop();
-        runtime.launch_context.settings_digest = native_digest(&arguments);
-        runtime.authentication.context = runtime.launch_context.clone();
-        Ok(runtime)
+            std::path::Path::new("/usr/bin/true"),
+        ))
     }
 }
+fn te15_profile_runtime(
+    spec: &ConnectorSpecification,
+    binding: &crate::orchestration::adapters::AttemptBinding,
+    image: &std::path::Path,
+) -> crate::orchestration::adapters::RuntimeQualification {
+    use crate::orchestration::adapters::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let auth = binding.working_directory().with_extension("fixture-auth");
+    std::fs::create_dir(&auth).unwrap();
+    std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = auth.join("auth.json");
+    std::fs::write(&source, br#"{"auth_mode":"chatgpt"}"#).unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let metadata = std::fs::metadata(&source).unwrap();
+    let mut runtime = crate::orchestration::adapters::test_runtime();
+    runtime.version = spec.minimum_version();
+    runtime.sandbox = Some(SandboxPolicy::LinuxFilesystemAndIpc);
+    let executable = std::fs::metadata(image).unwrap();
+    runtime.executable = ExecutableIdentity {
+        path: image.into(),
+        file_identity: [executable.dev(), executable.ino()],
+    };
+    runtime.launch_context.executable = runtime.executable.clone();
+    let scope = &mut runtime.launch_context.credential_store;
+    if spec.provider() == "codex" {
+        scope.root = crate::codex_credentials::prepare_home(binding.working_directory()).unwrap();
+        scope.single_file = Some(CredentialFile {
+            source,
+            identity: [metadata.dev(), metadata.ino()],
+        });
+        scope.credential_files = vec!["auth.json".into()];
+    } else {
+        assert_eq!(spec.provider(), "claude");
+        scope.root = binding.working_directory().join("claude-config");
+        std::fs::create_dir(&scope.root).unwrap();
+        std::fs::set_permissions(&scope.root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let private = scope.root.join(".credentials.json");
+        // Synthetic subscription evidence, never an installed provider's sign-in.
+        std::fs::write(&private, br#"{"claudeAiOauth":{"accessToken":"fixture-only-token","expiresAt":9000000000000,"scopes":["user:inference"],"subscriptionType":"max"}}"#).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
+        scope.single_file = None;
+        scope.credential_files = vec![".credentials.json".into()];
+    }
+    scope.lock_files.clear();
+    scope.temporary_file_prefixes.clear();
+    scope.refresh = spec.auth_contract().refresh;
+    runtime.authentication.contract = spec.auth_contract();
+    runtime.authentication.context = runtime.launch_context.clone();
+    runtime.authentication.observed_store = runtime.launch_context.credential_store.clone();
+    let program = crate::native_launcher::recipe(
+        spec,
+        binding,
+        &runtime,
+        &spec.session_config(binding),
+        "fake prompt",
+    )
+    .unwrap();
+    runtime.launch_context.environment_digest = native_digest(&program.environment);
+    let mut arguments = program.arguments;
+    arguments.pop();
+    runtime.launch_context.settings_digest = native_digest(&arguments);
+    runtime.authentication.context = runtime.launch_context.clone();
+    runtime
+}
+
 impl crate::effect_pump::ProfileFactory for Te15Profiles {
     fn bind(
         &self,
@@ -269,6 +280,7 @@ fn te15_fix_counting_child(name: &str) -> bool {
             "--exact",
             &format!("writer_host::hooks_tests::tests::{name}"),
             "--nocapture",
+            "--include-ignored",
         ])
         .env(CHILD, name)
         .env("HOME", temp.root())
@@ -293,11 +305,20 @@ fn te15_fix_counting_child(name: &str) -> bool {
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    let output = std::fs::read_to_string(output_path).unwrap();
     assert!(
-        status.is_some_and(|s| s.success()),
-        "TE15_FIX_COUNTING_CHILD {name}: {}",
-        std::fs::read_to_string(output_path).unwrap()
+        status.is_some_and(|s| s.success())
+            && output
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "TE15_FIX_COUNTING_CHILD {name}: {output}"
     );
+    for line in output
+        .lines()
+        .filter(|line| line.starts_with("TE15_FIX2_PROBE_COUNTS"))
+    {
+        println!("{line}");
+    }
     false
 }
 fn te15_fix_preflight_case(provider: &str, failure: &str) {
@@ -328,7 +349,7 @@ fn te15_fix_preflight_case(provider: &str, failure: &str) {
         );
         assert!(checks.checked.lock().unwrap().iter().any(|p| p == other));
     } else {
-        assert!(result.is_err(), "TE15_FIX_ZERO_SEND_{failure}");
+        assert!(result.is_ok(), "TE15_FIX_ZERO_SEND_{failure}");
         assert_eq!(
             count.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -740,7 +761,8 @@ fn te15_b1_fix_assignment_without_a_run_refuses_at_binding() {
 }
 
 #[test]
-fn te15_b1_fix_bad_setting_closes_the_live_director() {
+#[ignore = "on-demand: equipped Linux guardian qualification"]
+fn te15_b1_fix_bad_setting_keeps_the_live_director() {
     let f = Fixture::new();
     let live = LiveNative::start(&f);
     let mut brief = f.brief.clone();
@@ -767,7 +789,7 @@ fn te15_b1_fix_bad_setting_closes_the_live_director() {
     let closed = live.control.closed();
     live.finish();
     assert!(result.is_err());
-    assert!(closed, "TE15_FIX_ACTIVE_DIRECTOR_CLOSED");
+    assert!(!closed, "TE15_FIX2_LIVE_TURN_PRESERVED");
 }
 #[test]
 fn te15_b1_fix_reopen_continue_checks_the_new_setting() {
@@ -902,14 +924,10 @@ fn te15_b1_fix_replay_keeps_outcome_but_waits_on_broken_choice() {
         "TE15_FIX_REPLAY_SETUP_WAIT"
     );
     assert_eq!(state.phase, RunPhase::Interrupted);
-    assert!(
-        replay
-            .structured_content
-            .as_ref()
-            .unwrap()
-            .get("controls")
-            .is_none(),
-        "TE15_FIX_REPLAY_NO_CONTROLS"
+    assert_eq!(
+        replay.structured_content.as_ref().unwrap()["controls"]["attempt"],
+        serde_json::to_value(&identity.attempt).unwrap(),
+        "TE15_FIX2_REPLAY_TURN_CONTROLS"
     );
 }
 

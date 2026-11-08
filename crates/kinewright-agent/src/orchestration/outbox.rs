@@ -27,15 +27,18 @@ pub fn next_effect<'a>(state: &'a RunProjection, lane: &BranchId) -> Option<&'a 
     {
         return None;
     }
-    let first = state
+    lane_head(state, lane).filter(|first| first.state == EffectState::Pending)
+}
+
+pub(crate) fn lane_head<'a>(state: &'a RunProjection, lane: &BranchId) -> Option<&'a EffectRecord> {
+    state
         .effects
         .iter()
         .filter(|effect| {
             &effect.lane == lane
                 && !matches!(effect.state, EffectState::Settled | EffectState::Disposed)
         })
-        .min_by_key(|effect| effect.order)?;
-    (first.state == EffectState::Pending).then_some(first)
+        .min_by_key(|effect| effect.order)
 }
 
 /// Return a proposal only. Persist it through H1 before doing external work.

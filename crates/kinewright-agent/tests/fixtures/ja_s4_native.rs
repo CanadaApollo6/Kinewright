@@ -34,7 +34,22 @@ fn publish(root: &Path, role: &str) {
     fs::rename(path.with_extension("partial"), path).unwrap();
 }
 fn main() {
-    let args: Vec<_> = env::args_os().collect();
+    let mut args: Vec<_> = env::args_os().collect();
+    // The same pinned synthetic child can exercise the actual vendor recipes.
+    if args.get(1).is_some_and(|arg| arg == "exec" || arg == "-p") {
+        let role = if args[1] == "exec" {
+            "s4b-codex"
+        } else {
+            "s4b-claude"
+        };
+        let prompt = args.last().unwrap().clone();
+        args = vec![
+            args[0].clone(),
+            env::var_os("HOME").unwrap(),
+            role.into(),
+            prompt,
+        ];
+    }
     let root = Path::new(&args[1]);
     let role = args[2].to_str().unwrap();
     #[cfg(target_os = "linux")]
@@ -307,6 +322,11 @@ fn main() {
             }
             loop {
                 thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if fs::read(root.join("event-mode")).is_ok_and(|mode| mode == b"hold-turn") {
+            while !root.join("final-release").exists() {
+                thread::sleep(Duration::from_millis(1));
             }
         }
         writeln!(std::io::stdout(), "{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"fixture response\"}}}}").unwrap();
@@ -730,6 +750,11 @@ fn claude(root: &Path, prompt: &str) {
             thread::sleep(Duration::from_millis(5));
         }
         return;
+    }
+    if mode == "hold-turn" {
+        while !root.join("final-release").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
     let mut out = std::io::stdout().lock();
     let tools = [
