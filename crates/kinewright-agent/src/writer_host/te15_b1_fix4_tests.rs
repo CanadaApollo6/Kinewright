@@ -200,6 +200,10 @@ fn fix4_assignment(f: &Fixture, run: &RunId, own: bool) {
         .unwrap()
         .publish_orchestration_transition(&producer.bootstrap.auth, &update, None)
         .unwrap();
+    if own {
+        let child = f.projection(run).tasks.last().unwrap().id.clone();
+        b20_prepare_legacy_lane(f, run, &child);
+    }
 }
 fn fix4_retry_work(kind: crate::orchestration::adapters::SendKind, own: bool) {
     use crate::orchestration::adapters::SendKind;

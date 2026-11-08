@@ -668,7 +668,7 @@ impl HostCommandOwner {
                 && state.tasks.iter().any(|child| {
                     &child.id == id
                         && child.parent.as_ref() == Some(&task.id)
-                        && scope_contains(&scope.scope, &child.brief.scope)
+                        && self.prepared_child_scope(&state, &scope.scope, &child.brief.scope)
                 })
         };
         let allowed = match &request.envelope.command {
@@ -1227,18 +1227,30 @@ impl HostCommandOwner {
         let accounting = self.durable_run_accounting(&projection)?;
         let wait_reason = match &projection.wait {
             crate::orchestration::orchestration_records::RunWait::Provider(detail)
-            | crate::orchestration::orchestration_records::RunWait::ProviderSettings(detail) => {
-                Some(
-                    String::from_utf8_lossy(&self.owner()?.store()?.read_evidence(&detail.reason)?)
-                        .into_owned(),
-                )
-            }
+            | crate::orchestration::orchestration_records::RunWait::ProviderSettings(detail)
+            | crate::orchestration::orchestration_records::RunWait::Replan(detail) => Some(
+                String::from_utf8_lossy(&self.owner()?.store()?.read_evidence(&detail.reason)?)
+                    .into_owned(),
+            ),
             _ => None,
         };
         let continue_unavailable_reason = (!allowed_actions.contains(&RunActionKind::Continue)
-            && matches!(projection.phase, RunPhase::Paused | RunPhase::Interrupted))
+            && (matches!(projection.phase, RunPhase::Paused | RunPhase::Interrupted)
+                || matches!(
+                    projection.wait,
+                    crate::orchestration::orchestration_records::RunWait::Replan(_)
+                )))
         .then(|| {
-            if machine::has_unknown_send(&projection) {
+            if matches!(
+                projection.wait,
+                crate::orchestration::orchestration_records::RunWait::Replan(_)
+            ) {
+                if projection.phase == RunPhase::Interrupted {
+                    "Continue cannot repair this task. Stop this run and start a new one.".into()
+                } else {
+                    "Continue cannot retry this task. The Director must replan it.".into()
+                }
+            } else if machine::has_unknown_send(&projection) {
                 "A task has an unknown send outcome. Continue cannot retry this send.".into()
             } else if projection.effects.iter().any(|e| {
                 matches!(
@@ -1412,7 +1424,7 @@ impl HostCommandOwner {
                 "task issuance requires the independent run Producer",
             ));
         }
-        let state = self
+        let mut state = self
             .owner()?
             .orchestration_projection(run)?
             .ok_or_else(|| refused("unknown run"))?;
@@ -1425,11 +1437,12 @@ impl HostCommandOwner {
         {
             return Err(refused("task issuance is paused or at capacity"));
         }
-        let task_record = state
+        let mut task_record = state
             .tasks
             .iter()
             .find(|record| &record.id == task)
-            .ok_or_else(|| refused("unknown task"))?;
+            .ok_or_else(|| refused("unknown task"))?
+            .clone();
         let epoch = self.owner()?.store()?.owner_epoch();
         if !(RuntimeGrantBinding {
             run: run.clone(),
@@ -1485,6 +1498,41 @@ impl HostCommandOwner {
             owner_epoch: epoch,
             expires_at: Instant::now() + ttl,
         };
+        let saved = self.saved_task_history(&state, task)?;
+        if saved.is_none()
+            && !self
+                .hooks
+                .runs
+                .get(run)
+                .is_some_and(|r| r.tasks.contains_key(task))
+            && task_record.parent.is_some()
+        {
+            let base = self.preparation_base(&state)?;
+            let parent = state
+                .tasks
+                .iter()
+                .find(|t| Some(&t.id) == task_record.parent.as_ref())
+                .ok_or_else(|| refused("parent missing"))?;
+            if !scope_contains(&parent.brief.scope, &task_record.brief.scope) {
+                return Err(refused("unprepared task scope changed"));
+            }
+            let checkpoint = self
+                .owner()?
+                .store()?
+                .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                &base.checkpoint,
+            )?;
+            if checkpoint.input_manifest_ref != task_record.brief.inputs {
+                return Err(refused("prepared input scope changed"));
+            }
+            task_record.brief.scope.base = base;
+            state
+                .tasks
+                .iter_mut()
+                .find(|t| &t.id == task)
+                .ok_or_else(|| refused("task missing"))?
+                .brief = task_record.brief.clone();
+        }
         let scope = ProducerScope {
             run: run.clone(),
             task: Some(task.clone()),
@@ -1494,7 +1542,6 @@ impl HostCommandOwner {
             expires_at: Some(authority.expires_at),
             scope: task_record.brief.scope.clone(),
         };
-        let saved = self.saved_task_history(&state, task)?;
         let previous = self
             .hooks
             .runs
@@ -1550,7 +1597,6 @@ impl HostCommandOwner {
             .ok_or_else(|| refused("reservation missing"))?
             .identity
             .clone();
-        let mut state = state;
         self.persist_runtime_task(&mut state, &identity, false)?;
         self.publish_native(producer, state, &identity, vec![])?;
         let roots = self.attachments[index].roots.clone();
@@ -1648,7 +1694,7 @@ impl HostCommandOwner {
     }
 }
 
-fn scope_contains(parent: &TaskScope, child: &TaskScope) -> bool {
+pub(super) fn scope_contains(parent: &TaskScope, child: &TaskScope) -> bool {
     child.base == parent.base
         && child.operations.is_subset(&parent.operations)
         && child.objects.is_subset(&parent.objects)

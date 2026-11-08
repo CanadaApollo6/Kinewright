@@ -34,6 +34,7 @@ mod provider_usage;
 mod task_completion;
 pub(crate) mod task_context;
 mod task_history;
+pub(crate) mod task_preparation;
 pub use task_completion::{CompletionPhase, CompletionState, CompletionStatus};
 pub(crate) mod task_mcp;
 pub use crate::orchestration::director_setting::{

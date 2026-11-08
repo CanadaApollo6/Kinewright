@@ -201,7 +201,10 @@ pub fn eligible(state: &RunProjection, action: &RunAction) -> bool {
         RunAction::Continue => {
             matches!(state.phase, RunPhase::Paused | RunPhase::Interrupted)
                 && state.cleanup == RunCleanup::Settled
-                && matches!(state.wait, RunWait::None | RunWait::ProviderSettings(_))
+                && matches!(
+                    state.wait,
+                    RunWait::None | RunWait::ProviderSettings(_) | RunWait::Replan(_)
+                )
                 && provider_continuation_safe(state)
         }
         RunAction::SendMessage { .. } => {

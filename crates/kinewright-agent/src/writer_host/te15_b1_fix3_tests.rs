@@ -561,6 +561,8 @@ fn te15_b1_fix3_pending_child_owns_the_only_next_send() {
         .unwrap();
     let state = f.projection(&run);
     let child = state.tasks[1].id.clone();
+    b20_prepare_legacy_lane(&f, &run, &child);
+    let state = f.projection(&run);
     let original = state.effects.last().unwrap().id.clone();
     let producer = f.producer(&run);
     let identity = state.attempts[0].identity.clone();

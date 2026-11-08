@@ -202,7 +202,7 @@ impl<L: GuardianLauncher> EffectPump<L> {
                 &identity.attempt,
                 std::time::Duration::from_secs(3600),
             )
-            .map_err(io::Error::other)?;
+            .map_err(crate::writer_host::task_preparation::preparation_refusal)?;
         let profile = self.profiles.bind(&attempt)?;
         let provider = profile.selection().connector;
         crate::writer_host::provider_readiness::check_bound(owner, &self.run, plan, &provider)?;
@@ -257,6 +257,19 @@ impl<L: GuardianLauncher> EffectPump<L> {
                         crate::orchestration::orchestration_records::EffectState::Pending
                     )
             });
+        if let Some(failure) = error.get_ref().and_then(|e| {
+            e.downcast_ref::<crate::writer_host::task_preparation::PreparationRefusal>()
+        }) {
+            if !resumable {
+                return Err(io::Error::other(failure.0));
+            }
+            owner
+                .lock()
+                .map_err(|_| io::Error::other("host owner poisoned"))?
+                .preparation_failed(&self.producer, identity, failure.0)
+                .map_err(io::Error::other)?;
+            return Ok(());
+        }
         crate::writer_host::provider_readiness::wait_on_launch_error(
             owner, &self.run, &error, resumable,
         )?;

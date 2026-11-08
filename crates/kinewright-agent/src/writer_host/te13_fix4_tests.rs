@@ -6,9 +6,21 @@ struct Te13Fix4Pending {
     unrelated: Option<RunId>,
 }
 fn te13_fix4_pending(step: CompletionStep, committed: bool, other_run: bool) -> Te13Fix4Pending {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     let unrelated = if other_run {
+        // Independent runs own independent candidates, even when the earlier
+        // run has already stopped. Preserve the Stop-isolation scenario.
+        let original = f.brief.scope.base.clone();
+        f.brief.scope.base = {
+            let host = f.host.owner.upgrade().unwrap();
+            let mut host = host.lock().unwrap();
+            let owner = host.owner_mut().unwrap();
+            let mut candidate = owner.fork_durable_branch("unrelated run").unwrap();
+            owner.persist_durable_branch(&mut candidate).unwrap();
+            owner.candidate_binding(candidate.branch_id()).unwrap()
+        };
         let prior = RunId(f.start().envelope.identity("run").unwrap());
+        f.brief.scope.base = original;
         let stop_request = f.control(&f.editor, &prior, RunAction::Stop);
         let reply = call(
             &f,

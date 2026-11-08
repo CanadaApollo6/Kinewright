@@ -767,6 +767,9 @@ pub fn apply_task_transition(
                 payload: task.brief.assignment.clone(),
             });
             state.tasks.push(task);
+            if matches!(state.wait, super::orchestration_records::RunWait::Replan(_)) {
+                state.wait = super::orchestration_records::RunWait::None;
+            }
         }
         TaskTransition::Freeze(id) => {
             let task = state
@@ -828,7 +831,10 @@ pub fn refresh_wait(state: &mut super::orchestration_records::RunProjection) {
     // Only the file/provider owner can settle these external facts.
     if matches!(
         state.wait,
-        RunWait::Files(_) | RunWait::Provider(_) | RunWait::ProviderSettings(_)
+        RunWait::Files(_)
+            | RunWait::Provider(_)
+            | RunWait::ProviderSettings(_)
+            | RunWait::Replan(_)
     ) {
         return;
     }

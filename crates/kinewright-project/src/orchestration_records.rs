@@ -321,6 +321,7 @@ pub enum RunWait {
     Files(WaitDetail),
     Provider(WaitDetail),
     ProviderSettings(WaitDetail),
+    Replan(WaitDetail),
     Question(QuestionId),
     Children(Vec<TaskId>),
 }

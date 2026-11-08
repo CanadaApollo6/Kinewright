@@ -1286,6 +1286,7 @@ impl RunState {
             RunWait::ProviderSettings(_) => " · provider check needs attention",
             RunWait::Question(_) => " · waiting for your answer",
             RunWait::Children(_) => " · waiting for its tasks",
+            RunWait::Replan(_) => " · replanning task",
         };
         let cleanup = if self.outcome != RunOutcome::Pending && self.cleanup != RunCleanup::Settled
         {

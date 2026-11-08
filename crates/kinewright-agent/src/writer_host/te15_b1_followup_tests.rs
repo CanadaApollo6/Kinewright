@@ -16,6 +16,14 @@ fn te15_b1_followup_unknown_wait_survives_assign_and_stream() {
     let producer = f.producer(&run);
     let mut state = f.projection(&run);
     let child = state.tasks[1].id.clone();
+    assert_eq!(sent.lock().unwrap().len(), 1, "FOLLOWUP_UNKNOWN_HAS_A_SEND");
+    assert!(
+        state
+            .effects
+            .iter()
+            .any(|e| e.task == child && matches!(e.state, EffectState::Claimed(_))),
+        "FOLLOWUP_UNKNOWN_HAS_A_CLAIM"
+    );
     let identity = state
         .attempts
         .iter()

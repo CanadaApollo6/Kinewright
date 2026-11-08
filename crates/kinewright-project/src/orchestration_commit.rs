@@ -361,7 +361,10 @@ fn projection_refs(state: &RunProjection, refs: &mut Vec<ObjectRef>) -> Result<(
         _ => {}
     }
     match &state.wait {
-        RunWait::Files(detail) | RunWait::Provider(detail) | RunWait::ProviderSettings(detail) => {
+        RunWait::Files(detail)
+        | RunWait::Provider(detail)
+        | RunWait::ProviderSettings(detail)
+        | RunWait::Replan(detail) => {
             refs.push(detail.reason.clone());
             refs.extend(detail.missing.clone());
         }
