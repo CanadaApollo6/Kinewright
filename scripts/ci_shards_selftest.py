@@ -60,6 +60,29 @@ class Sharding(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unlisted test binary"):
             cs.plan(data, "fast", 2)
 
+    def test_measured_long_tests_get_dedicated_shards(self):
+        data = listing()
+        data["rust-suites"]["kinewright_media"]["testcases"]["c"] = {"ignored": False}
+        measured = {("kinewright_media", "a"): 434, ("kinewright_media", "b"): 346,
+                    ("kinewright_media", "c"): 200}
+        with mock.patch.object(cs, "weights", return_value=(measured, {})):
+            result = cs.plan(data, "fast", 5)
+        self.assertEqual([u["tests"] for u in result["shards"][1]], [["a"]])
+        self.assertEqual([u["tests"] for u in result["shards"][2]], [["b"]])
+        self.assertEqual(result["estimated_seconds"][1:3], [434, 346])
+        for count in (1, 2, 3):
+            with mock.patch.object(cs, "weights", return_value=(measured, {})):
+                small = cs.plan(data, "fast", count)
+            expected = [(s["label"], p) for s in small["suites"] for p in s["tests"]]
+            rows = [(small["suites"][u["suite"]]["label"], p, "ok")
+                    for shard in small["shards"] for u in shard for p in u["tests"]]
+            st.verify_exact_rows(expected, rows)
+
+    def test_prediction_keeps_exclusive_batches_and_parallel_tail(self):
+        units = [{"isolated": False, "estimate": 50},
+                 *[{"isolated": True, "estimate": x} for x in (120, 100, 90, 80, 70)]]
+        self.assertEqual(cs.predicted_seconds(units), 200)
+
     def test_slow_inventory_requires_every_manifest_test_enabled(self):
         entries = [("mcp_server", "mcp1", "source", "any")]
         with mock.patch.object(st, "read_manifest", return_value=entries):

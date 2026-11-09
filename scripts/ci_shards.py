@@ -66,12 +66,27 @@ def weights():
         if match:
             b, p, *_ = line.split()
             result[b, p] = int(match.group(1 if st.host_os() == "linux" else 2))
-    return result
+    measured = load(st.ROOT / "ci" / "test-timings.json")
+    os_name = st.host_os()
+    for binary, tests in measured["unit_seconds"][os_name].items():
+        result.update({(binary, name): seconds for name, seconds in tests.items()})
+    return result, measured["slow_batch_seconds"][os_name]
+
+
+def predicted_seconds(units):
+    """Match the runner's exclusive batches followed by four isolated processes."""
+    exclusive = sum(u["estimate"] for u in units if not u["isolated"])
+    lanes = [0.0] * 4
+    for unit in units:
+        if unit["isolated"]:
+            lane = min(range(4), key=lambda i: lanes[i])
+            lanes[lane] += unit["estimate"]
+    return exclusive + max(lanes)
 
 
 def plan(listing, tier, count):
     suites = inventory(listing, tier)
-    estimates = weights()
+    estimates, slow_batches = weights()
     units = []
     for suite_index, suite in enumerate(suites):
         split = suite["label"] in ("kinewright_media", "kinewright_agent")
@@ -83,17 +98,28 @@ def plan(listing, tier, count):
             if not split:
                 cost = {"kinewright_app": 342 if tier == "fast" else 28, "mcp_server": 182,
                         "ja_s1_storage": 188, "kinewright_project": 86}.get(suite["label"], max(1, len(names) * 0.02))
-            units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast", "isolated": split, "estimate": cost / 4 if split else cost})
+                if len(names) == 1:
+                    cost = estimates.get((suite["label"], names[0]), cost)
+                if tier == "slow":
+                    cost = slow_batches.get(suite["label"], cost)
+            units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast", "isolated": split, "estimate": cost})
     shards = [[] for _ in range(count)]
-    loads = [0] * count
-    # Keep the app's existing scheduling and order on a runner of its own.
-    for unit in sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"])):
+    ordered = sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"]))
+    # Long tests get a runner alone, without waiting behind other test processes.
+    long_tests = [u for u in ordered if u["isolated"] and u["estimate"] > 240][:max(0, count - 2)]
+    for slot, unit in enumerate(long_tests, 1):
+        shards[slot].append(unit)
+    available = list(range(1 + len(long_tests), count)) if count > 1 else [0]
+    for unit in ordered:
+        if unit in long_tests:
+            continue
         if suites[unit["suite"]]["label"] == "kinewright_app":
             slot = 0
         else:
-            slot = min(range(1, count), key=lambda i: (loads[i], i)) if count > 1 else 0
+            slot = min(available, key=lambda i: (predicted_seconds([*shards[i], unit]),
+                                                 sum(u["estimate"] for u in shards[i]), i))
         shards[slot].append(unit)
-        loads[slot] += unit["estimate"]
+    loads = [round(predicted_seconds(shard), 3) for shard in shards]
     return {"os": st.host_os(), "tier": tier, "suites": suites, "shards": shards, "estimated_seconds": loads}
 
 

@@ -577,6 +577,26 @@ class ManifestLint(unittest.TestCase):
 
 
 class CompiledInventory(unittest.TestCase):
+    def test_compile_fail_doctest_annotation_is_not_part_of_the_compiled_name(self):
+        for source in ("crates/core/src/lib.rs", r"crates\core\src\lib.rs"):
+            name = source + " - owner::Profile (line 27)"
+            text = build_log([("doc-tests:core", name + " - compile fail", "ok")])
+            st.verify_exact_rows([("doc-tests:core", name)], st.parse(text))
+
+    def test_compile_fail_annotation_does_not_hide_a_different_doctest_or_failure(self):
+        name = "crates/core/src/lib.rs - owner::Profile (line 27)"
+        for suffix, outcome in ((" - compile fail", "FAILED"), (" - compile fails", "ok")):
+            with self.assertRaises(st.UnparsableLog):
+                st.verify_exact_rows([("doc-tests:core", name)], st.parse(build_log([
+                    ("doc-tests:core", name + suffix, outcome)
+                ])))
+        with self.assertRaises(st.UnparsableLog):
+            st.verify_exact_rows([("doc-tests:core", name.replace("27", "28"))], st.parse(build_log([
+                ("doc-tests:core", name + " - compile fail", "ok")
+            ])))
+        text = build_log([("core", "item - compile fail", "ok")])
+        self.assertEqual(st.parse(text), [("core", "item - compile fail", "ok")])
+
     def test_should_panic_annotation_is_not_part_of_the_compiled_name(self):
         log = build_log([("witness", "x - should panic", "ok")])
         self.assertEqual(st.parse(log), [("witness", "x", "ok")])

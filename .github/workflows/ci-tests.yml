@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: ${{ inputs.os }} ${{ inputs.tier }} archive and doctests
+    name: Build test archive
     runs-on: ${{ inputs.os }}
     timeout-minutes: 20
     steps:
@@ -66,7 +66,8 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: metadata-${{ inputs.os }}-${{ inputs.tier }}
           path: |
@@ -76,7 +77,7 @@ jobs:
           retention-days: 7
 
   predecessor:
-    name: ${{ inputs.os }} sealed predecessor controls
+    name: Sealed predecessor controls (fast tier only)
     if: inputs.tier == 'fast'
     runs-on: ${{ inputs.os }}
     timeout-minutes: 20
@@ -108,7 +109,6 @@ jobs:
           retention-days: 3
 
   test:
-    name: ${{ inputs.os }} ${{ inputs.tier }} shard ${{ matrix.shard }}
     needs: [build, predecessor]
     if: >-
       !cancelled() && needs.build.result == 'success' &&
@@ -180,7 +180,7 @@ jobs:
           retention-days: 7
 
   coverage:
-    name: ${{ inputs.os }} ${{ inputs.tier }} exact coverage
+    name: Exact test coverage
     needs: [build, predecessor, test]
     if: always()
     runs-on: ubuntu-24.04

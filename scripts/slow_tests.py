@@ -457,7 +457,10 @@ def parse(log: str) -> list[tuple[str, str, str]]:
         if test:
             if section is None:
                 fail(number, f"test result outside any `Running`/`Doc-tests` section: {line.strip()}")
-            section["rows"].append((section["binary"], test.group(1).removesuffix(" - should panic"), test.group(2).strip()))
+            name = test.group(1).removesuffix(" - should panic")
+            if section["binary"].startswith("doc-tests:"):
+                name = name.removesuffix(" - compile fail")
+            section["rows"].append((section["binary"], name, test.group(2).strip()))
             continue
         summary = SUMMARY.match(line)
         if summary:
