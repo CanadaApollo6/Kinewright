@@ -63,6 +63,8 @@ mod harness;
 pub mod ja_harness;
 mod local_editing;
 mod models;
+#[cfg(feature = "te1-eval")]
+pub mod te1_eval;
 pub use local_editing::LocalEditingSession;
 mod motion;
 mod muse;

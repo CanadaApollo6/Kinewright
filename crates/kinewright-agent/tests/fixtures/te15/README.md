@@ -1,0 +1,34 @@
+The frozen TE1 still image is presented as a 100-frame lossless video so that
+Studio can admit its real duration through the owned-media store. The original
+TE1 corpus and hashes remain unchanged. The eval oracle changes only the source
+locator and the measured fingerprint; timing, colour, raster and all edits stay
+exact. Both arms import these identical bytes.
+
+Generated with the provisioned FFmpeg:
+
+```sh
+ffmpeg -v error -loop 1 -framerate 25 -i ../te1/talking-head.ppm \
+  -frames:v 100 -an -c:v ffv1 -level 3 -pix_fmt bgra -map_metadata -1 \
+  -fflags +bitexact -flags:v +bitexact talking-head-owned.mkv
+```
+
+The measurement pin records the file hash. This fixture is unpaid and contains
+no provider output, authentication or grant.
+
+The original WAV is carried unchanged as PCM beside a black 16x16, 25-fps
+FFV1 stream in `talking-head-audio-owned.mkv`. Audio-only admission otherwise
+uses 30 fps, which would change the corpus's source-frame trim contract. The
+carrier is on the Audio track and contributes no visible layer. Its admitted
+kind/raster/colour are explicit fixture metadata; duration and frame rate stay
+100 frames at 25 fps. Checks compare the final render and PCM against the
+original Image/WAV oracle, not against a newly regenerated picture or sound.
+
+```sh
+ffmpeg -v error -f lavfi -i color=c=black:s=16x16:r=25:d=4 \
+  -i ../te1/talking-head.wav -frames:v 100 -map 0:v -map 1:a \
+  -c:v ffv1 -level 3 -c:a pcm_s16le -map_metadata -1 \
+  -fflags +bitexact -flags:v +bitexact talking-head-audio-owned.mkv
+```
+
+BGRA keeps the source RGB bytes lossless and is accepted by the production
+owned-frame evidence reader. No production pixel-format guard changes.

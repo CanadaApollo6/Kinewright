@@ -29,3 +29,16 @@ crates/kinewright-agent/tests/fixtures/te12-*.json -text
 
 # TE1.4 provider byte goldens.
 crates/kinewright-agent/tests/fixtures/te14-*.json -text
+crates/kinewright-agent/tests/fixtures/te15-*.json -text
+crates/kinewright-agent/tests/fixtures/te15/** -text
+
+# Measurement source hashes preserve Git bytes on Windows.
+crates/kinewright-agent/src/te1_eval.rs -text
+crates/kinewright-agent/src/te1_eval/*.rs -text
+crates/kinewright-agent/src/writer_host/te1_eval.rs -text
+crates/kinewright-agent/src/writer_host/te1_eval_surface.rs -text
+crates/kinewright-agent/src/writer_host/studio_runtime.rs -text
+crates/kinewright-agent/src/writer_host/mod.rs -text
+crates/kinewright-agent/src/writer_host/task_mcp.rs -text
+crates/kinewright-agent/src/server.rs -text
+crates/kinewright-agent/src/orchestration/native_launcher.rs -text

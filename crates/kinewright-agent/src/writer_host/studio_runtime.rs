@@ -37,6 +37,8 @@ pub(super) struct RuntimeWitness {
 }
 pub(super) struct RuntimePorts {
     pub profiles: Option<Arc<dyn ProfileFactory>>,
+    #[cfg(feature = "te1-eval")]
+    pub evaluation: Option<Arc<super::te1_eval::ScriptedLauncher>>,
     pub checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
     pub guardian: PathBuf,
     pub ceiling: Option<std::num::NonZeroU64>,
@@ -62,6 +64,8 @@ impl Default for RuntimePorts {
             .with_file_name("kinewright-job-guardian");
         Self {
             profiles: None,
+            #[cfg(feature = "te1-eval")]
+            evaluation: None,
             checks: Arc::new(crate::codex_qualification::InstalledNativeChecks {
                 guardian: guardian.clone(),
             }),
@@ -452,6 +456,23 @@ impl StudioRuntime {
         let refusal_producer = producer.clone();
         let refusal_run = run.clone();
         let worker_run = run.clone();
+        #[cfg(feature = "te1-eval")]
+        let mut session = {
+            let claim = launcher.claim.clone();
+            EffectPump::with_launcher(
+                &host,
+                producer,
+                run,
+                claim,
+                EvaluationLauncher {
+                    native: launcher,
+                    scripted: self.ports.evaluation.clone(),
+                },
+                profiles,
+                self.ports.ceiling,
+            )
+        };
+        #[cfg(not(feature = "te1-eval"))]
         let mut session =
             EffectPump::new(&host, producer, run, launcher, profiles, self.ports.ceiling);
         #[cfg(any(test, feature = "test-util"))]
@@ -996,5 +1017,27 @@ impl HostCommandOwner {
                 owner_instance: run.0.clone(),
             });
         self.publish_native(producer, state, &identity, vec![])
+    }
+}
+
+#[cfg(feature = "te1-eval")]
+struct EvaluationLauncher {
+    native: NativeGuardianLauncher,
+    scripted: Option<Arc<super::te1_eval::ScriptedLauncher>>,
+}
+#[cfg(feature = "te1-eval")]
+impl crate::orchestration::adapters::GuardianLauncher for EvaluationLauncher {
+    fn launch(
+        &self,
+        attempt: AdmittedAttempt,
+        invocation: crate::orchestration::adapters::AuthorizedInvocation,
+    ) -> Result<
+        crate::orchestration::adapters::ContainedSession,
+        crate::orchestration::adapters::LaunchError,
+    > {
+        match &self.scripted {
+            Some(scripted) => scripted.launch(attempt, invocation),
+            None => self.native.launch(attempt, invocation),
+        }
     }
 }

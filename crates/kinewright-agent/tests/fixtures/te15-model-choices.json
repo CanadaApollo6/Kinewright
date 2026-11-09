@@ -1,0 +1,66 @@
+{
+  "codex": {
+    "director": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "editor": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "reviewer": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "motion": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "audio": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "colour": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    }
+  },
+  "claude": {
+    "director": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "editor": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "reviewer": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "motion": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "audio": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    },
+    "colour": {
+      "status": "OPEN: lead and Riel choose before any paid run",
+      "model": null,
+      "options": null
+    }
+  }
+}

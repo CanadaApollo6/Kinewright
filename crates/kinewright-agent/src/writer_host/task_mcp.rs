@@ -1063,3 +1063,33 @@ impl HostCommandOwner {
         }
     }
 }
+
+#[cfg(all(feature = "te1-eval", target_os = "linux"))]
+impl TaskMcp {
+    /// Called after the production handler has released its endpoint permit.
+    pub(crate) fn eval_observe(
+        &self,
+        name: &str,
+        args: Value,
+        result: &rmcp::model::CallToolResult,
+    ) -> std::io::Result<()> {
+        let Some(host) = self.host.upgrade() else {
+            return Ok(());
+        };
+        let observer = host
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .evaluation_observer
+            .clone();
+        if let Some(observer) = observer {
+            observer.call(
+                self.endpoint.authority().task.0.as_str(),
+                self.endpoint.authority().attempt.0.as_str(),
+                name,
+                args,
+                result,
+            )?;
+        }
+        Ok(())
+    }
+}

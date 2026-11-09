@@ -12481,6 +12481,8 @@ impl ServerHandler for KinewrightMcp {
             .protocol_version()
             .as_ref()
             .is_none_or(|v| v.as_str() < rmcp::model::ProtocolVersion::V_2026_07_28.as_str());
+        #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+        let evaluation_request = request.clone();
         let size_control = self.task_control.clone();
         let size_metrics = Arc::clone(&self.result_sizes);
         let capability = request
@@ -12541,12 +12543,28 @@ impl ServerHandler for KinewrightMcp {
             let native_recorded = size_control
                 .as_ref()
                 .is_none_or(|control| control.record_size(size_tool, bytes));
-            let mut metrics = size_metrics
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            metrics.record(size_tool, bytes);
-            metrics.incomplete |= !native_recorded;
-            drop(metrics);
+            {
+                let mut metrics = size_metrics
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                metrics.record(size_tool, bytes);
+                metrics.incomplete |= !native_recorded;
+            }
+            #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+            if let (Some(control), Ok(result)) = (&size_control, &reply) {
+                let control = control.clone();
+                let result = result.clone();
+                tokio::task::spawn_blocking(move || {
+                    control.eval_observe(
+                        &evaluation_request.name,
+                        serde_json::Value::Object(evaluation_request.arguments.unwrap_or_default()),
+                        &result,
+                    )
+                })
+                .await
+                .map_err(|_| McpError::internal_error("eval observation worker failed", None))?
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            }
             reply.map(Into::into)
         }
     }
@@ -14069,7 +14087,7 @@ fn compact_discard_edit_plan_tool() -> Tool {
     )
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "te1-eval"))]
 pub(crate) fn task_manifest_identity(
     role: crate::orchestration::orchestration_records::Role,
 ) -> Result<String, SchemaError> {
@@ -36636,7 +36654,7 @@ fn task_control_tools() -> Vec<Tool> {
 }
 
 /// Fixed v1 schemas shared across every task with the same durable role.
-fn task_role_tools(
+pub(crate) fn task_role_tools(
     role: crate::orchestration::orchestration_records::Role,
 ) -> Result<Vec<Tool>, SchemaError> {
     use crate::orchestration::orchestration_records::Role;

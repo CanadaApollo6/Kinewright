@@ -96,7 +96,7 @@ fn capacity() -> HostError {
     .into()
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "te1-eval"))]
 pub(crate) fn application_prefix(
     role: crate::orchestration::orchestration_records::Role,
 ) -> Result<Vec<u8>, HostError> {

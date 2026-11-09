@@ -161,6 +161,8 @@ impl ProtocolFixture {
         let queues = self.0.clone();
         RuntimePorts {
             profiles: Some(Arc::new(Factory(self.0.clone()))),
+            #[cfg(feature = "te1-eval")]
+            evaluation: None,
             checks: Arc::new(Factory(self.0.clone())),
             guardian: target_dir().join("kinewright-job-guardian"),
             ceiling: None,

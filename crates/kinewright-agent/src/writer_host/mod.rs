@@ -1195,6 +1195,8 @@ pub struct HostCommandOwner {
     #[cfg(all(test, target_os = "linux"))]
     preparation_fault: Option<task_preparation::PreparationCheckpoint>,
     runtime_owner: std::sync::Weak<Mutex<HostCommandOwner>>,
+    #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+    evaluation_observer: Option<Arc<crate::te1_eval::observe::Observations>>,
     #[cfg(target_os = "linux")]
     native_recovery_status: Option<String>,
     #[cfg(target_os = "linux")]
@@ -1369,6 +1371,8 @@ impl HostCommandOwner {
         }
         let mut host = Self {
             runtime_owner: std::sync::Weak::new(),
+            #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+            evaluation_observer: None,
             #[cfg(target_os = "linux")]
             native_recovery_status: None,
             #[cfg(target_os = "linux")]
@@ -3462,6 +3466,12 @@ pub use codex_witness::{
 
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 mod qualification_gate;
+
+#[cfg(all(feature = "te1-eval", target_os = "linux"))]
+pub(crate) mod te1_eval;
+
+#[cfg(feature = "te1-eval")]
+pub(crate) mod te1_eval_surface;
 
 /// Recovery instructions shared by the host and Studio.
 pub mod task_preparation_words;
