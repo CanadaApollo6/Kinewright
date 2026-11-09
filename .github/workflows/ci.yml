@@ -1,8 +1,8 @@
 name: CI
 
-# Two test tiers, both on Linux and Windows (ci/slow-tests.txt lists the slow tier):
+# Both tiers preserve ci/slow-tests.txt and ci/ignored-tests.txt on each OS.
 #   fast  every push and pull request that changes more than documentation:
-#         cargo test --workspace with the slow tests skipped, clippy and fmt.
+#         archived libtest partitions with slow tests skipped, clippy and fmt.
 #   slow  the tests that each take a minute or more (end-to-end scenarios, loudness
 #         measurement, wire-limit probes): a push to main, a manual run, or a push
 #         whose head commit message contains `[slow-tier]`.
@@ -23,6 +23,11 @@ on:
       - 'LICENSE*'
       - '.gitignore'
   workflow_dispatch:
+
+# A new branch push replaces its previous run. main runs have unique groups.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.run_id || 'branch' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   pf1-wrapper:
@@ -46,378 +51,124 @@ jobs:
       - name: PF1 wrapper witnesses (synthetic child, no GPU or FFmpeg)
         run: python3 scripts/pf1/test_lane.py
 
-  windows:
-    name: Windows workspace
-    timeout-minutes: 60
-    runs-on: windows-latest
-
+  lint:
+    name: Formatting and CI accounting witnesses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Locate pinned FFmpeg archive cache
-        id: ffmpeg
-        shell: bash
-        run: |
-          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
-          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pinned FFmpeg archive
-        uses: actions/cache@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: ${{ runner.temp }}/ffmpeg-archives
-          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable-x86_64-pc-windows-msvc
-          components: rustfmt, clippy
-
-      # Default key includes rustc (host/release/hash) and a hash of every
-      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Python
-        uses: actions/setup-python@v5
+          components: rustfmt
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - run: cargo fmt --check
+      - run: python scripts/pf1/test_validate.py
+      - run: python scripts/slow_tests.py lint
+      - run: python scripts/slow_tests_selftest.py
+      - run: python scripts/ci_shards_selftest.py
 
-      - name: PF1 portable pins witnesses
-        run: python scripts/pf1/test_validate.py
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Prepare sealed JA S1 predecessor controls
+  checks:
+    name: ${{ matrix.os }} clippy and shipping builds
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os == 'Linux' && 'linux' || 'windows' }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: ./.github/actions/ci-native
+      - if: runner.os == 'Linux'
         shell: bash
-        run: bash scripts/ja-s1-predecessor-controls.sh
-
-      - name: Provision FFmpeg, test (fast tier), and lint
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          cargo clippy --workspace --all-targets -- -D warnings || exit 1
+      - if: runner.os == 'Windows'
         shell: pwsh
         env:
           PYTHONUTF8: '1'
         run: |
-          # pwsh does not stop on a native command's non-zero exit, so without
-          # these checks the step's status is the last command's and a failing
-          # `cargo test` is reported as success.
           $ErrorActionPreference = 'Stop'
           & .\scripts\setup-ffmpeg.ps1
-          if ($LASTEXITCODE -ne 0) { throw "setup-ffmpeg.ps1 exited $LASTEXITCODE" }
-          $buildTimes = @()
-          $clock = [System.Diagnostics.Stopwatch]::StartNew()
-          cargo build --workspace
-          if ($LASTEXITCODE -ne 0) { throw "cargo build --workspace exited $LASTEXITCODE" }
-          $clock.Stop()
-          $buildTimes += @{ command = 'cargo build --workspace'; seconds = $clock.Elapsed.TotalSeconds }
-          $clock.Restart()
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg setup failed' }
+          python scripts/pf1/test_validate.py
+          if ($LASTEXITCODE -ne 0) { throw 'PF1 pins witnesses failed' }
           cargo build -p kinewright-agent --no-default-features --lib
-          if ($LASTEXITCODE -ne 0) { throw "cargo build agent shipping library exited $LASTEXITCODE" }
-          $clock.Stop()
-          $buildTimes += @{ command = 'cargo build -p kinewright-agent --no-default-features --lib'; seconds = $clock.Elapsed.TotalSeconds }
-          $clock.Restart()
+          if ($LASTEXITCODE -ne 0) { throw 'shipping library build failed' }
           cargo build -p kinewright-app --no-default-features --bin kinewright-app
-          if ($LASTEXITCODE -ne 0) { throw "cargo build app shipping binary exited $LASTEXITCODE" }
-          $clock.Stop()
-          $buildTimes += @{ command = 'cargo build -p kinewright-app --no-default-features --bin kinewright-app'; seconds = $clock.Elapsed.TotalSeconds }
-          $clock.Restart()
+          if ($LASTEXITCODE -ne 0) { throw 'shipping app build failed' }
           cargo build -p kinewright-agent --no-default-features --bin kinewright
-          if ($LASTEXITCODE -ne 0) { throw "cargo build shipping writer host exited $LASTEXITCODE" }
-          $clock.Stop()
-          $buildTimes += @{ command = 'cargo build -p kinewright-agent --no-default-features --bin kinewright'; seconds = $clock.Elapsed.TotalSeconds }
-          $rustVersion = rustc -Vv
-          if ($LASTEXITCODE -ne 0) { throw "rustc -Vv exited $LASTEXITCODE" }
-          $totalSeconds = ($buildTimes | Measure-Object -Property seconds -Sum).Sum
-          @{
-            head_sha = '${{ github.sha }}'
-            ci_url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-            runner_os = $env:RUNNER_OS
-            runner_image = $env:ImageOS
-            runner_image_version = $env:ImageVersion
-            toolchain = ($rustVersion -join "`n")
-            cache_state = 'Swatinem/rust-cache@v2; see Cache Rust step for restore hit/miss'
-            commands = $buildTimes
-            extra_build_minutes = $totalSeconds / 60
-            c8_host_build_minutes = $buildTimes[-1].seconds / 60
-            timeout_minutes = 60
-          } | ConvertTo-Json -Depth 4 | Tee-Object -FilePath "$env:RUNNER_TEMP/ja1-c1-windows-build-times.json"
-          "JA-1 C1/C8 added builds: $($totalSeconds / 60) minutes; C8 host link: $($buildTimes[-1].seconds / 60) minutes" >> $env:GITHUB_STEP_SUMMARY
-          # slow_tests.py runs `cargo test --workspace` (the slow tests are
-          # ignored without their feature) and fails unless the tests it
-          # skipped are exactly ci/slow-tests.txt plus the ignores that
-          # ci/ignored-tests.txt lists for this OS, each observed as ignored.
-          python scripts/slow_tests.py fast
-          if ($LASTEXITCODE -ne 0) { throw "slow_tests.py fast (cargo test --workspace) exited $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw 'shipping host build failed' }
           cargo clippy --workspace --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { throw "cargo clippy --workspace --all-targets exited $LASTEXITCODE" }
-
-      - name: Retain JA-1 Windows build timings
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ja1-c1-windows-build-times-${{ github.sha }}
-          path: ${{ runner.temp }}/ja1-c1-windows-build-times.json
-          if-no-files-found: warn
-
-  windows-slow:
-    name: Windows slow tier
-    runs-on: windows-latest
-    timeout-minutes: 45
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-       (github.ref == 'refs/heads/main' ||
-        contains(github.event.head_commit.message, '[slow-tier]')))
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Locate pinned FFmpeg archive cache
-        id: ffmpeg
-        shell: bash
-        run: |
-          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
-          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pinned FFmpeg archive
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/ffmpeg-archives
-          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable-x86_64-pc-windows-msvc
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Provision FFmpeg and run the slow tier
-        shell: pwsh
-        env:
-          PYTHONUTF8: '1'
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & .\scripts\setup-ffmpeg.ps1
-          # Runs exactly the tests in ci/slow-tests.txt with every crate's
-          # `slow-tests` feature on, and fails unless all of them ran and passed.
-          python scripts/slow_tests.py slow
-          if ($LASTEXITCODE -ne 0) { throw "slow_tests.py slow exited $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw 'clippy failed' }
 
   linux:
-    name: Linux workspace
-    timeout-minutes: 90
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Locate pinned FFmpeg archive cache
-        id: ffmpeg
-        shell: bash
-        run: |
-          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
-          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pinned FFmpeg archive
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/ffmpeg-archives
-          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # Default key includes rustc (host/release/hash) and a hash of every
-      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      # The Azure Ubuntu mirror has stalled for 30+ minutes on the large debs
-      # (cmake, libclang, mesa), twice on 2026-10-22, which ran the job into
-      # its timeout. Keep the downloaded archives between runs so a warm run
-      # fetches only the package indexes. The key carries the runner image
-      # version (a runner environment variable, which the `env` expression
-      # context does not see), so the cache follows the image's packages.
-      - name: Read the runner image version
-        id: image
-        run: echo "key=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
-
-      - name: Restore apt archives
-        id: apt-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/apt-archives
-          key: apt-${{ steps.image.outputs.key }}-${{ hashFiles('scripts/install-linux-deps.sh') }}
-          restore-keys: apt-
-
-      - name: Install native build dependencies
-        run: |
-          set -euo pipefail
-          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' |
-            sudo tee /etc/apt/apt.conf.d/99kinewright-keep-debs >/dev/null
-          mkdir -p ~/apt-archives
-          if compgen -G ~/apt-archives/'*.deb' >/dev/null; then
-            sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/
-          fi
-          ./scripts/install-linux-deps.sh
-          # Drop archives the mirror no longer serves, so a cache restored
-          # from an older image does not grow without bound. A caching miss
-          # must not fail the job.
-          sudo apt-get autoclean -qq
-          if compgen -G /var/cache/apt/archives/'*.deb' >/dev/null; then
-            cp /var/cache/apt/archives/*.deb ~/apt-archives/
-          fi
-          echo "apt archives cached: $(find ~/apt-archives -name "*.deb" | wc -l) debs, $(du -sh ~/apt-archives | cut -f1)"
-
-      # Saved here rather than in a post step: a slow download is exactly the
-      # run most likely to time out later, and a post step saves only when
-      # the whole job succeeds.
-      - name: Save apt archives
-        if: steps.apt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/apt-archives
-          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
-
-      - name: PF1 portable pins witnesses
-        run: python scripts/pf1/test_validate.py
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Check the slow-test manifest and ignored-test allowlist format against the source, and the parser
-        run: |
-          python3 scripts/slow_tests.py lint
-          python3 scripts/slow_tests_selftest.py
-
-      - name: Prepare sealed JA S1 predecessor controls
-        shell: bash
-        run: bash scripts/ja-s1-predecessor-controls.sh
-
-      - name: Provision FFmpeg, build, test (fast tier), and lint
-        run: |
-          # `set -e` alone is not enough: sourcing a script that manipulates
-          # shell options can switch it back off, which is how a failing
-          # `cargo test --workspace` reported success here for months. Each
-          # command carries its own check, so the step's status cannot become
-          # the last command's.
-          set -euo pipefail
-          source ./scripts/setup-ffmpeg.sh
-          set -euo pipefail
-          cargo build --workspace || exit 1
-          readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
-          # slow_tests.py runs `cargo test --workspace` (the slow tests are
-          # ignored without their feature) and fails unless the tests it
-          # skipped are exactly ci/slow-tests.txt plus the ignores that
-          # ci/ignored-tests.txt lists for this OS, each observed as ignored.
-          python3 scripts/slow_tests.py fast || exit 1
-          cargo clippy --workspace --all-targets -- -D warnings || exit 1
-
+    name: Linux fast
+    uses: ./.github/workflows/ci-tests.yml
+    with:
+      os: ubuntu-24.04
+      tier: fast
+      shards: '[0,1,2,3,4,5,6,7,8,9,10,11]'
+  windows:
+    name: Windows fast
+    uses: ./.github/workflows/ci-tests.yml
+    with:
+      os: windows-latest
+      tier: fast
+      shards: '[0,1,2,3,4,5,6,7,8,9,10,11]'
   linux-slow:
-    name: Linux slow tier
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    name: Linux slow
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' &&
        (github.ref == 'refs/heads/main' ||
         contains(github.event.head_commit.message, '[slow-tier]')))
+    uses: ./.github/workflows/ci-tests.yml
+    with:
+      os: ubuntu-24.04
+      tier: slow
+      shards: '[0,1,2,3,4,5,6,7]'
+  windows-slow:
+    name: Windows slow
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' ||
+        contains(github.event.head_commit.message, '[slow-tier]')))
+    uses: ./.github/workflows/ci-tests.yml
+    with:
+      os: windows-latest
+      tier: slow
+      shards: '[0,1,2,3,4,5,6,7]'
 
+  result:
+    name: CI result
+    if: always()
+    needs: [pf1-wrapper, lint, checks, linux, windows, linux-slow, windows-slow]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+      SLOW_EXPECTED: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[slow-tier]'))) }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Locate pinned FFmpeg archive cache
-        id: ffmpeg
-        shell: bash
+      - name: Require every scheduled job
         run: |
-          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
-          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pinned FFmpeg archive
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/ffmpeg-archives
-          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
-
-      - name: Equip guardian user session
-        run: |
-          sudo loginctl enable-linger "$(id -un)" || true
-          sudo systemctl start "user@$(id -u).service" || true
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      # The Azure Ubuntu mirror has stalled for 30+ minutes on the large debs
-      # (cmake, libclang, mesa), twice on 2026-10-22, which ran the job into
-      # its timeout. Keep the downloaded archives between runs so a warm run
-      # fetches only the package indexes. The key carries the runner image
-      # version (a runner environment variable, which the `env` expression
-      # context does not see), so the cache follows the image's packages.
-      - name: Read the runner image version
-        id: image
-        run: echo "key=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
-
-      - name: Restore apt archives
-        id: apt-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/apt-archives
-          key: apt-${{ steps.image.outputs.key }}-${{ hashFiles('scripts/install-linux-deps.sh') }}
-          restore-keys: apt-
-
-      - name: Install native build dependencies
-        run: |
-          set -euo pipefail
-          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' |
-            sudo tee /etc/apt/apt.conf.d/99kinewright-keep-debs >/dev/null
-          mkdir -p ~/apt-archives
-          if compgen -G ~/apt-archives/'*.deb' >/dev/null; then
-            sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/
-          fi
-          ./scripts/install-linux-deps.sh
-          # Drop archives the mirror no longer serves, so a cache restored
-          # from an older image does not grow without bound. A caching miss
-          # must not fail the job.
-          sudo apt-get autoclean -qq
-          if compgen -G /var/cache/apt/archives/'*.deb' >/dev/null; then
-            cp /var/cache/apt/archives/*.deb ~/apt-archives/
-          fi
-          echo "apt archives cached: $(find ~/apt-archives -name "*.deb" | wc -l) debs, $(du -sh ~/apt-archives | cut -f1)"
-
-      # Saved here rather than in a post step: a slow download is exactly the
-      # run most likely to time out later, and a post step saves only when
-      # the whole job succeeds.
-      - name: Save apt archives
-        if: steps.apt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/apt-archives
-          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
-
-      - name: Provision FFmpeg and run the slow tier
-        run: |
-          set -euo pipefail
-          source ./scripts/setup-ffmpeg.sh
-          set -euo pipefail
-          # Runs exactly the tests in ci/slow-tests.txt with every crate's
-          # `slow-tests` feature on, and fails unless all of them ran and passed.
-          python3 scripts/slow_tests.py slow || exit 1
+          python - <<'PYTHON'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          for job, value in results.items():
+              expected = 'skipped' if job.endswith('-slow') and os.environ['SLOW_EXPECTED'] != 'true' else 'success'
+              assert value['result'] == expected, (job, value['result'], expected)
+          PYTHON

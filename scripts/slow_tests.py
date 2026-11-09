@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -406,6 +407,16 @@ class UnparsableLog(Exception):
     pass
 
 
+def verify_exact_rows(expected, rows) -> None:
+    """A compiled inventory and the partitioned libtest results must be a bijection."""
+    wanted = Counter(tuple(key) for key in expected)
+    observed = Counter((b, p) for b, p, _ in rows)
+    if any(count != 1 for count in wanted.values()) or wanted != observed:
+        raise UnparsableLog(f"compiled inventory differs: missing {wanted - observed}; extra {observed - wanted}")
+    if any(o != "ok" and not o.startswith("ignored") for _, _, o in rows):
+        raise UnparsableLog("a listed test failed or has an unknown outcome")
+
+
 def parse(log: str) -> list[tuple[str, str, str]]:
     """(binary, test path, outcome) for every `test x ... y` line, after stripping ANSI.
 
@@ -446,7 +457,7 @@ def parse(log: str) -> list[tuple[str, str, str]]:
         if test:
             if section is None:
                 fail(number, f"test result outside any `Running`/`Doc-tests` section: {line.strip()}")
-            section["rows"].append((section["binary"], test.group(1), test.group(2).strip()))
+            section["rows"].append((section["binary"], test.group(1).removesuffix(" - should panic"), test.group(2).strip()))
             continue
         summary = SUMMARY.match(line)
         if summary:
@@ -543,12 +554,12 @@ def unparsable(error: UnparsableLog) -> int:
     return 1
 
 
-def verify_slow(log: str) -> int:
+def verify_slow(log: str, os_name: str | None = None) -> int:
     try:
         rows = parse(log)
     except UnparsableLog as error:
         return unparsable(error)
-    expected = {(b, p) for b, p, _, scope in read_manifest() if not scope.endswith("-only") or scope == host_os() + "-only"}
+    expected = {(b, p) for b, p, _, scope in read_manifest() if not scope.endswith("-only") or scope == (os_name or host_os()) + "-only"}
     skips = re.findall(r"C2_NATIVE_NOT_RUN test=(s4_\w+) reason=([^\r\n]+)", log)
     skipped = {("ja_s4_guardian", name) for name, _ in skips}
     outcomes = {}

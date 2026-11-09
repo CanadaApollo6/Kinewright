@@ -1,0 +1,60 @@
+name: Native CI dependencies
+description: Restore pinned FFmpeg and cached Linux native dependencies.
+runs:
+  using: composite
+  steps:
+    - name: Locate pinned FFmpeg archive cache
+      id: ffmpeg
+      shell: bash
+      run: |
+        echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
+        python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ runner.temp }}/ffmpeg-archives
+        key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
+    - if: runner.os == 'Linux'
+      name: Read the runner image version
+      id: image
+      shell: bash
+      run: echo "key=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+    - if: runner.os == 'Linux'
+      name: Restore apt archives
+      id: apt-cache
+      uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+      with:
+        path: ~/apt-archives
+        key: apt-${{ steps.image.outputs.key }}-${{ hashFiles('scripts/install-linux-deps.sh') }}
+        restore-keys: apt-
+
+    - if: runner.os == 'Linux'
+      name: Install native build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' |
+          sudo tee /etc/apt/apt.conf.d/99kinewright-keep-debs >/dev/null
+        mkdir -p ~/apt-archives
+        if compgen -G ~/apt-archives/'*.deb' >/dev/null; then
+          sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/
+        fi
+        ./scripts/install-linux-deps.sh
+        # Drop archives the mirror no longer serves, so a cache restored
+        # from an older image does not grow without bound. A caching miss
+        # must not fail the job.
+        sudo apt-get autoclean -qq
+        if compgen -G /var/cache/apt/archives/'*.deb' >/dev/null; then
+          cp /var/cache/apt/archives/*.deb ~/apt-archives/
+        fi
+        echo "apt archives cached: $(find ~/apt-archives -name "*.deb" | wc -l) debs, $(du -sh ~/apt-archives | cut -f1)"
+
+      # Saved here rather than in a post step: a slow download is exactly the
+      # run most likely to time out later, and a post step saves only when
+      # the whole job succeeds.
+    - name: Save apt archives
+      if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.apt-cache.outputs.cache-primary-key }}

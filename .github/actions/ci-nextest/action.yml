@@ -1,0 +1,7 @@
+name: Pinned nextest
+description: Install the same hash-verified nextest on build and test runners.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python scripts/ci_nextest_install.py

@@ -1,0 +1,219 @@
+name: Archived test tier
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+      tier:
+        type: string
+        required: true
+      shards:
+        type: string
+        required: true
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_TERM_COLOR: never
+  RUST_TEST_THREADS: '4'
+
+jobs:
+  build:
+    name: ${{ inputs.os }} ${{ inputs.tier }} archive and doctests
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os == 'Linux' && 'linux' || 'windows' }}${{ inputs.tier == 'slow' && '-slow' || '' }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: ./.github/actions/ci-native
+      - uses: ./.github/actions/ci-nextest
+      - name: Count shards
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: echo "SHARD_COUNT=$(python -c 'import json,os; print(len(json.loads(os.environ["SHARDS"])))')" >> "$GITHUB_ENV"
+      - if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TIER: ${{ inputs.tier }}
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          python scripts/ci_archive.py build --tier "$TIER" --count "$SHARD_COUNT" || exit 1
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TIER: ${{ inputs.tier }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\setup-ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg setup failed' }
+          python scripts/ci_archive.py build --tier $env:TIER --count $env:SHARD_COUNT
+          if ($LASTEXITCODE -ne 0) { throw 'archive or doctests failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tests-${{ inputs.os }}-${{ inputs.tier }}
+          path: |
+            ci-artifacts/tests.tar.zst
+            ci-artifacts/tests.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: metadata-${{ inputs.os }}-${{ inputs.tier }}
+          path: |
+            ci-artifacts/*.json
+            ci-artifacts/*.log
+          if-no-files-found: error
+          retention-days: 7
+
+  predecessor:
+    name: ${{ inputs.os }} sealed predecessor controls
+    if: inputs.tier == 'fast'
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore predecessor source identity before its cache
+        shell: bash
+        run: |
+          git fetch --no-tags origin 076a96c922b2f05984df4bb839ad7cf0900e6183
+          git worktree add --detach target/ja-s1-predecessor/source 076a96c922b2f05984df4bb839ad7cf0900e6183
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-predecessor-${{ runner.os }}
+          workspaces: target/ja-s1-predecessor/source -> ../build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: ./.github/actions/ci-native
+      - shell: bash
+        run: bash scripts/ja-s1-predecessor-controls.sh
+      - run: python scripts/ci_archive.py pack-predecessor
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: predecessor-${{ inputs.os }}
+          path: predecessor.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
+  test:
+    name: ${{ inputs.os }} ${{ inputs.tier }} shard ${{ matrix.shard }}
+    needs: [build, predecessor]
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.predecessor.result == 'success' || (inputs.tier == 'slow' && needs.predecessor.result == 'skipped'))
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: ./.github/actions/ci-native
+      - uses: ./.github/actions/ci-nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tests-${{ inputs.os }}-${{ inputs.tier }}
+          path: ci-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: metadata-${{ inputs.os }}-${{ inputs.tier }}
+          path: ci-artifacts
+      - if: inputs.tier == 'fast'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: predecessor-${{ inputs.os }}
+      - if: inputs.tier == 'fast'
+        run: python scripts/ci_archive.py restore-predecessor
+      - name: Equip guardian user session
+        if: runner.os == 'Linux' && inputs.tier == 'slow'
+        shell: bash
+        run: |
+          sudo loginctl enable-linger "$(id -un)" || true
+          sudo systemctl start "user@$(id -u).service" || true
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - if: runner.os == 'Linux'
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          python scripts/ci_archive.py extract || exit 1
+          python scripts/ci_shards.py run --plan ci-artifacts/ci-plan.json --index "$SHARD" || exit 1
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\setup-ffmpeg.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg setup failed' }
+          python scripts/ci_archive.py extract
+          if ($LASTEXITCODE -ne 0) { throw 'archive extraction failed' }
+          python scripts/ci_shards.py run --plan ci-artifacts/ci-plan.json --index $env:SHARD
+          if ($LASTEXITCODE -ne 0) { throw 'test shard failed' }
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-${{ inputs.os }}-${{ inputs.tier }}-${{ matrix.shard }}
+          path: ci-results/
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage:
+    name: ${{ inputs.os }} ${{ inputs.tier }} exact coverage
+    needs: [build, predecessor, test]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      BUILD_RESULT: ${{ needs.build.result }}
+      TEST_RESULT: ${{ needs.test.result }}
+      PREDECESSOR_RESULT: ${{ needs.predecessor.result }}
+      TIER: ${{ inputs.tier }}
+    steps:
+      - name: Require all processes to finish successfully
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$TEST_RESULT" = success
+          if [ "$TIER" = fast ]; then test "$PREDECESSOR_RESULT" = success; fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: metadata-${{ inputs.os }}-${{ inputs.tier }}
+          path: ci-artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: results-${{ inputs.os }}-${{ inputs.tier }}-*
+          path: ci-results
+          merge-multiple: true
+      - name: Prove compiled test coverage and tier accounting
+        shell: bash
+        run: |
+          if [ "$TIER" = fast ]; then
+            python scripts/ci_shards.py verify --plan ci-artifacts/ci-plan.json --doc-log ci-artifacts/docs.log --doc-list ci-artifacts/doc-list.json | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python scripts/ci_shards.py verify --plan ci-artifacts/ci-plan.json | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

@@ -576,6 +576,23 @@ class ManifestLint(unittest.TestCase):
                 return check(st.lint)
 
 
+class CompiledInventory(unittest.TestCase):
+    def test_should_panic_annotation_is_not_part_of_the_compiled_name(self):
+        log = build_log([("witness", "x - should panic", "ok")])
+        self.assertEqual(st.parse(log), [("witness", "x", "ok")])
+
+    def test_complete_shards_must_match_each_compiled_test_exactly_once(self):
+        expected = [("one", "same"), ("two", "same")]
+        rows = [("one", "same", "ok"), ("two", "same", "ignored, hardware")]
+        st.verify_exact_rows(expected, rows)
+        for bad in (rows[:-1], rows + rows[:1], [("wrong", p, o) for _, p, o in rows],
+                    [(b, p, "FAILED") for b, p, _ in rows], []):
+            with self.assertRaises(st.UnparsableLog):
+                st.verify_exact_rows(expected, bad)
+        with self.assertRaises(st.UnparsableLog):
+            st.verify_exact_rows(expected * 2, rows * 2)
+
+
 class RunCargoTests(unittest.TestCase):
     def test_slow_runner_selects_the_whole_manifest_with_features_on_both_oses(self):
         for platform in ("linux", "win32"):
