@@ -52,7 +52,8 @@ def stop(child):
 
 def run(label,witness,marker,red):
     global active
-    cmd=['bash','-c','source scripts/setup-ffmpeg.sh && exec flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 nice -n 19 cargo test -p kinewright-agent --features te1-eval --test te1_measurement "$1" -- --exact --nocapture','b2a',witness]
+    target='--lib' if witness.startswith('te1_eval::') else '--test te1_measurement'
+    cmd=['bash','-c','source scripts/setup-ffmpeg.sh && exec flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 nice -n 19 cargo test -p kinewright-agent --features te1-eval '+target+' "$1" -- --exact --nocapture','b2a',witness]
     with (OUT/f'{label}.log').open('w') as log:
         active=subprocess.Popen(cmd,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         (OUT/'active-pid.json').write_text(json.dumps({'pid':active.pid,'label':label})+'\n')
@@ -85,11 +86,14 @@ def main():
     originals={relative:(ROOT/relative).read_bytes() for _,relative,*_ in pairs}
     for name,relative,before,after,witness,marker in pairs:
         path=ROOT/relative;original=originals[relative];mutant=original
-        replacements=before if isinstance(before,list) else [(before,after)]
-        for before,after in replacements:
-            before=before.encode();after=after.encode()
-            assert mutant.count(before)==1,name+': anchor drifted'
-            mutant=mutant.replace(before,after)
+        if callable(before):
+            mutant=before(original)
+        else:
+            replacements=before if isinstance(before,list) else [(before,after)]
+            for before,after in replacements:
+                before=before.encode();after=after.encode()
+                assert mutant.count(before)==1,name+': anchor drifted'
+                mutant=mutant.replace(before,after)
         row={'name':name,'source':relative,'witness':witness,'original_sha256':hashlib.sha256(original).hexdigest(),'mutant_sha256':hashlib.sha256(mutant).hexdigest()}
         try:
             path.write_bytes(mutant)

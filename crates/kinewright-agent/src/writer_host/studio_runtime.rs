@@ -39,6 +39,8 @@ pub(super) struct RuntimePorts {
     pub profiles: Option<Arc<dyn ProfileFactory>>,
     #[cfg(feature = "te1-eval")]
     pub evaluation: Option<Arc<super::te1_eval::ScriptedLauncher>>,
+    #[cfg(feature = "te1-eval")]
+    pub evaluation_counts: Option<Arc<Mutex<crate::te1_eval::Trace>>>,
     pub checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
     pub guardian: PathBuf,
     pub ceiling: Option<std::num::NonZeroU64>,
@@ -66,6 +68,8 @@ impl Default for RuntimePorts {
             profiles: None,
             #[cfg(feature = "te1-eval")]
             evaluation: None,
+            #[cfg(feature = "te1-eval")]
+            evaluation_counts: None,
             checks: Arc::new(crate::codex_qualification::InstalledNativeChecks {
                 guardian: guardian.clone(),
             }),
@@ -467,6 +471,7 @@ impl StudioRuntime {
                 EvaluationLauncher {
                     native: launcher,
                     scripted: self.ports.evaluation.clone(),
+                    counts: self.ports.evaluation_counts.clone(),
                 },
                 profiles,
                 self.ports.ceiling,
@@ -1024,6 +1029,7 @@ impl HostCommandOwner {
 struct EvaluationLauncher {
     native: NativeGuardianLauncher,
     scripted: Option<Arc<super::te1_eval::ScriptedLauncher>>,
+    counts: Option<Arc<Mutex<crate::te1_eval::Trace>>>,
 }
 #[cfg(feature = "te1-eval")]
 impl crate::orchestration::adapters::GuardianLauncher for EvaluationLauncher {
@@ -1035,6 +1041,15 @@ impl crate::orchestration::adapters::GuardianLauncher for EvaluationLauncher {
         crate::orchestration::adapters::ContainedSession,
         crate::orchestration::adapters::LaunchError,
     > {
+        if let Some(counts) = &self.counts {
+            crate::te1_eval::record_launch(
+                &mut *counts.lock().map_err(|e| {
+                    crate::orchestration::adapters::LaunchError(io::Error::other(e.to_string()))
+                })?,
+                self.scripted.is_some(),
+            )
+            .map_err(crate::orchestration::adapters::LaunchError)?;
+        }
         match &self.scripted {
             Some(scripted) => scripted.launch(attempt, invocation),
             None => self.native.launch(attempt, invocation),

@@ -33,11 +33,17 @@ impl Row {
             sum.checked_add(task.totals.token_lower_bound)
                 .ok_or_else(|| error("inclusive token overflow"))
         })?;
-        let usage_complete = !accounting.tasks.is_empty()
-            && accounting
-                .tasks
-                .iter()
-                .all(|task| task.totals.tokens_complete);
+        accounting.validate().map_err(|e| error(format!("{e:?}")))?;
+        let mut usage_complete = accounting.tasks.iter().any(|task| !task.sends.is_empty());
+        for task in &accounting.tasks {
+            let reports = task.stream_reports().map_err(|e| error(format!("{e:?}")))?;
+            usage_complete &= !task.measurements.as_ref().is_some_and(|m| m.incomplete)
+                && task.sends.iter().all(|send| {
+                    reports.iter().any(|report| {
+                        report.reported_complete && report.attempts.contains(&send.attempt)
+                    })
+                });
+        }
         Ok(Self {
             provider: provider.into(),
             case,

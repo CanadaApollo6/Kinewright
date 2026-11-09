@@ -57,6 +57,7 @@ export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
 if [[ "${OS:-}" == Windows_NT ]]; then
     executable=kinewright-ja-baseline.exe
     # The provisioner imports MSVC/FFmpeg into this PowerShell process. Every native exit is checked.
+    export JA_S1_FFMPEG_SETUP="$(cygpath -w "$repo/scripts/setup-ffmpeg.ps1")"
     export JA_S1_PREDECESSOR_TREE="$(cygpath -w "$source_tree")"
     export JA_S1_PREDECESSOR_TARGET="$(cygpath -w "$scratch/build")"
     export JA_S1_PREDECESSOR_SEALED="$(cygpath -w "$sealed")"
@@ -65,7 +66,7 @@ if [[ "${OS:-}" == Windows_NT ]]; then
     cat > "$scratch/build-windows.ps1" <<'PS'
 $ErrorActionPreference='Stop'
 Set-Location -LiteralPath $env:JA_S1_PREDECESSOR_TREE
-& .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
+& $env:JA_S1_FFMPEG_SETUP -SkipBuildCachePrune
 $env:CARGO_TARGET_DIR=$env:JA_S1_PREDECESSOR_TARGET
 cargo build -p kinewright-agent --features eval-harness --bin kinewright-ja-baseline
 if ($LASTEXITCODE -ne 0) { throw "predecessor build exited $LASTEXITCODE" }
@@ -87,7 +88,7 @@ PS
     cat > "$scratch/run-windows.ps1" <<'PS'
 $ErrorActionPreference='Stop'
 Set-Location -LiteralPath $env:JA_S1_PREDECESSOR_TREE
-& .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
+& $env:JA_S1_FFMPEG_SETUP -SkipBuildCachePrune
 $control=Join-Path $env:JA_S1_PREDECESSOR_SEALED 'max2-control.exe'
 & $control --exact pinned_max2_format_controls
 if ($LASTEXITCODE -ne 0) { throw "max-2 observer exited $LASTEXITCODE" }
@@ -114,7 +115,7 @@ else
             mkdir -p third_party
             ln -s "$repo/third_party/ffmpeg" third_party/ffmpeg
         fi
-        source scripts/setup-ffmpeg.sh
+        source "$repo/scripts/setup-ffmpeg.sh"
         export TMPDIR="$scratch/tmp" CARGO_TARGET_DIR="$scratch/build"
         mkdir -p "$TMPDIR"
         nice -n 10 cargo build -p kinewright-agent --features eval-harness --bin kinewright-ja-baseline

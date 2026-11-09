@@ -42,7 +42,10 @@ impl Observations {
         if contexts.len() >= 32 {
             return Err(error("eval attempt capacity"));
         }
-        contexts.insert(key, context);
+        if contexts.insert(key, context).is_some() {
+            return Err(error("duplicate eval attempt binding"));
+        }
+        self.trace.lock().map_err(error)?.bound_attempts += 1;
         Ok(())
     }
     pub fn call(
@@ -67,6 +70,7 @@ impl Observations {
             .unwrap_or(serde_json::to_value(result)?);
         let call = Call {
             task: json!(task),
+            attempt: json!(attempt),
             tool: name.into(),
             arguments: args,
             reply,

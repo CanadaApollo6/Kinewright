@@ -14,7 +14,6 @@ script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 third_party="$repo_root/third_party"
 ffmpeg_root="$third_party/ffmpeg"
-archive="$third_party/ffmpeg.tar.xz"
 sourced=0
 if [[ "${BASH_SOURCE[0]:-}" != "$0" ]]; then
     sourced=1
@@ -37,6 +36,7 @@ set -euo pipefail
 
 FFMPEG_URL='https://github.com/mifi/ffmpeg-builds/releases/download/8.0-1/ffmpeg-n8.0-latest-linux64-gpl-shared-8.0.tar.xz'
 FFMPEG_SHA256='c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1'
+archive="${KINEWRIGHT_FFMPEG_ARCHIVE_CACHE:-$third_party/ffmpeg-archives}/$FFMPEG_SHA256.tar.xz"
 
 fail() {
     echo "$*" >&2
@@ -72,35 +72,13 @@ if [[ -f "$marker" ]]; then
 fi
 
 if [[ "$installed_hash" != "$FFMPEG_SHA256" ]]; then
+    python3 "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
     rm -rf "$ffmpeg_root"
-    rm -f "$archive"
-    echo 'Downloading pinned FFmpeg 8.0 Linux x64 shared GPL build...'
-    python3 - "$FFMPEG_URL" "$archive" <<'PY'
-import sys
-import urllib.request
-
-request = urllib.request.Request(sys.argv[1], headers={"User-Agent": "Kinewright-Linux"})
-with urllib.request.urlopen(request, timeout=120) as source, open(sys.argv[2], "wb") as target:
-    while chunk := source.read(1024 * 1024):
-        target.write(chunk)
-PY
-    actual_hash="$(python3 - "$archive" <<'PY'
-import hashlib, sys
-hasher = hashlib.sha256()
-with open(sys.argv[1], "rb") as archive:
-    while chunk := archive.read(1024 * 1024):
-        hasher.update(chunk)
-print(hasher.hexdigest())
-PY
-)"
-    if [[ "$actual_hash" != "$FFMPEG_SHA256" ]]; then
-        fail "FFmpeg archive SHA-256 mismatch. Expected $FFMPEG_SHA256, got $actual_hash."
-        return 1 2>/dev/null || exit 1
-    fi
     mkdir -p "$ffmpeg_root"
     tar -xJf "$archive" -C "$ffmpeg_root" --strip-components=1
     printf '%s' "$FFMPEG_SHA256" > "$marker"
-    rm -f "$archive"
+elif [[ -f "$archive" ]]; then
+    python3 "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
 fi
 
 pkg_config_path="$ffmpeg_root/lib/pkgconfig"

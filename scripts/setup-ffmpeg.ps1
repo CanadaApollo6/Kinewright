@@ -19,13 +19,14 @@ $thirdParty = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'third_party'))
 $ffmpegRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg'))
 $pkgconfRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'pkgconf'))
 $libclangRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'libclang'))
-$archive = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg.zip'))
+$archiveCache = if ($env:KINEWRIGHT_FFMPEG_ARCHIVE_CACHE) { $env:KINEWRIGHT_FFMPEG_ARCHIVE_CACHE } else { Join-Path $thirdParty 'ffmpeg-archives' }
+$archive = [System.IO.Path]::GetFullPath((Join-Path $archiveCache "$FfmpegSha256.zip"))
 
 if (-not $SkipBuildCachePrune) {
     & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaximumGiB $BuildCacheLimitGiB
 }
 
-foreach ($path in @($ffmpegRoot, $pkgconfRoot, $libclangRoot, $archive)) {
+foreach ($path in @($ffmpegRoot, $pkgconfRoot, $libclangRoot)) {
     if (-not $path.StartsWith($thirdParty, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside $thirdParty`: $path"
     }
@@ -92,24 +93,8 @@ if ($installedHash -ne $FfmpegSha256) {
     if (Test-Path -LiteralPath $ffmpegRoot) {
         Remove-Item -LiteralPath $ffmpegRoot -Recurse -Force
     }
-    if (Test-Path -LiteralPath $archive) {
-        Remove-Item -LiteralPath $archive -Force
-    }
-
-    Write-Host 'Downloading pinned FFmpeg 8.0.1 MSVC shared GPL build...'
-    $download = @'
-import sys
-import urllib.request
-
-request = urllib.request.Request(sys.argv[1], headers={'User-Agent': 'Kinewright-M0'})
-with urllib.request.urlopen(request, timeout=60) as source, open(sys.argv[2], 'wb') as target:
-    while chunk := source.read(1024 * 1024):
-        target.write(chunk)
-'@
-    & $python.Source -c $download $FfmpegUrl $archive
-    if ($LASTEXITCODE -ne 0) {
-        throw 'FFmpeg download failed.'
-    }
+    & $python.Source (Join-Path $PSScriptRoot 'ffmpeg_archive.py') $FfmpegUrl $archive $FfmpegSha256
+    if ($LASTEXITCODE -ne 0) { throw 'FFmpeg archive fetch or verification failed.' }
 
     $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -ne $FfmpegSha256) {
@@ -119,7 +104,9 @@ with urllib.request.urlopen(request, timeout=60) as source, open(sys.argv[2], 'w
     New-Item -ItemType Directory -Path $ffmpegRoot -Force | Out-Null
     Expand-Archive -LiteralPath $archive -DestinationPath $ffmpegRoot -Force
     Set-Content -LiteralPath $marker -Value $FfmpegSha256 -NoNewline
-    Remove-Item -LiteralPath $archive -Force
+} elseif (Test-Path -LiteralPath $archive) {
+    & $python.Source (Join-Path $PSScriptRoot 'ffmpeg_archive.py') $FfmpegUrl $archive $FfmpegSha256
+    if ($LASTEXITCODE -ne 0) { throw 'Cached FFmpeg archive verification failed.' }
 }
 
 $pkgConfig = Join-Path $pkgconfRoot 'pkgconf\.bin\pkgconf.exe'

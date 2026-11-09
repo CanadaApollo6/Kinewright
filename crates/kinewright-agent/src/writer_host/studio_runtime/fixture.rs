@@ -163,6 +163,8 @@ impl ProtocolFixture {
             profiles: Some(Arc::new(Factory(self.0.clone()))),
             #[cfg(feature = "te1-eval")]
             evaluation: None,
+            #[cfg(feature = "te1-eval")]
+            evaluation_counts: None,
             checks: Arc::new(Factory(self.0.clone())),
             guardian: target_dir().join("kinewright-job-guardian"),
             ceiling: None,

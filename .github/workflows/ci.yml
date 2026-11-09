@@ -55,6 +55,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Locate pinned FFmpeg archive cache
+        id: ffmpeg
+        shell: bash
+        run: |
+          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
+          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned FFmpeg archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-archives
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -161,6 +174,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Locate pinned FFmpeg archive cache
+        id: ffmpeg
+        shell: bash
+        run: |
+          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
+          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned FFmpeg archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-archives
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -194,6 +220,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Locate pinned FFmpeg archive cache
+        id: ffmpeg
+        shell: bash
+        run: |
+          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
+          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned FFmpeg archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-archives
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -299,6 +338,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Locate pinned FFmpeg archive cache
+        id: ffmpeg
+        shell: bash
+        run: |
+          echo "KINEWRIGHT_FFMPEG_ARCHIVE_CACHE=$RUNNER_TEMP/ffmpeg-archives" >> "$GITHUB_ENV"
+          python scripts/ffmpeg_archive.py --cache-key "$RUNNER_OS" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned FFmpeg archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-archives
+          key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
 
       - name: Equip guardian user session
         run: |

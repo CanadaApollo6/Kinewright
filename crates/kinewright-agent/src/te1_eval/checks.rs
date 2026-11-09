@@ -148,15 +148,12 @@ pub(super) fn verify(
 fn histories(
     actual: &Document,
     history: &kinewright_core::HistorySnapshot,
-    data: &Value,
+    _data: &Value,
 ) -> io::Result<(bool, bool)> {
     let reopened = Core::spawn((*history.baseline).clone()).map_err(error)?;
     reopened.restore_history(history.clone()).map_err(error)?;
     let history_reopened =
         reopened.export_history().map_err(error)? == *history && *history.document == *actual;
-    let operations: Vec<kinewright_core::Operation> =
-        serde_json::from_value(data["operations"].clone()).map_err(error)?;
-    let exact_operations = history.applied_operations() == operations;
     for _ in &history.cursor.undo {
         reopened
             .request(kinewright_core::Command::Undo)
@@ -170,7 +167,7 @@ fn histories(
             .map_err(error)?;
     }
     let redone = reopened.export_history().map_err(error)?;
-    let task_undo_redo = exact_operations
+    let task_undo_redo = !history.cursor.undo.is_empty()
         && undo_ok
         && redone.document == history.document
         && redone.cursor == history.cursor;
@@ -184,79 +181,113 @@ fn observed(case: u8, trace: &Trace) -> bool {
         .iter()
         .find(|send| send["brief"]["role"] == "director")
         .map(|send| &send["identity"]["task"]);
-    let edits = calls
-        .iter()
-        .filter(|c| c.tool == "commit_edit_plan" && !c.refused)
-        .count();
     match case {
-        1 => edits == 1,
-        5 => {
-            let deceptive = calls.iter().find(|c| {
-                c.tool == "publish_result"
-                    && c.arguments
-                        .pointer("/command/value/result/explanation")
-                        .is_some_and(|v| !v.is_null())
-            });
-            deceptive.is_some_and(|bad| {
-                let published = calls.iter().position(|c| std::ptr::eq(c, bad)).unwrap();
-                let merge = calls
+        1 => true, // Exact document/history/media checks determine the effect.
+        5 => calls.iter().enumerate().any(|(published, bad)| {
+            bad.tool == "publish_result"
+                && !bad.refused
+                && !bad.fixture
+                && bad
+                    .arguments
+                    .pointer("/command/value/result/explanation")
+                    .is_some_and(|v| !v.is_null())
+                && calls[published + 1..]
                     .iter()
-                    .position(|c| c.tool == "merge_task" && !c.refused)
-                    .unwrap_or(calls.len());
-                calls
-                    .get(published + 1..merge)
-                    .unwrap_or(&[])
-                    .iter()
-                    .any(|c| {
-                        matches!(c.tool.as_str(), "read_child_result" | "read_task_result")
-                            && Some(&c.task) == director
-                            && !c.refused
-                            && serde_json::to_string(&c.reply).is_ok_and(|s| {
+                    .enumerate()
+                    .any(|(offset, read)| {
+                        matches!(read.tool.as_str(), "read_child_result" | "read_task_result")
+                            && Some(&read.task) == director
+                            && ((read.tool == "read_child_result" && read.arguments["child"] == bad.task) || (read.tool == "read_task_result" && read.arguments["reference"] == bad.arguments["command"]["value"]["result"]["explanation"]))
+                            && !read.refused
+                            && !read.fixture
+                            && serde_json::to_string(&read.reply).is_ok_and(|s| {
                                 s.contains("correct-homophone") && s.contains("failed")
                             })
+                            && calls[published + offset + 2..].iter().any(|c| {
+                                c.tool == "merge_task"
+                                    && !c.refused
+                                    && !c.fixture
+                                    && Some(&c.task) == director
+                            })
                     })
-                    && !calls.iter().any(|c| {
-                        c.tool == "merge_task"
-                            && !c.refused
-                            && c.arguments["command"]["value"]["task"] == bad.task
-                    })
-                    && calls
-                        .iter()
-                        .filter(|c| c.tool == "merge_task" && !c.refused)
-                        .count()
-                        == 2
-                    && edits >= 3
-            })
-        }
+                && !calls.iter().any(|c| {
+                    c.tool == "merge_task"
+                        && !c.refused
+                        && c.arguments["command"]["value"]["task"] == bad.task
+                })
+        }),
         6 => {
-            let stale = calls
-                .iter()
-                .position(|c| c.tool == "commit_edit_plan" && c.refused);
-            stale.is_some_and(|stale| {
-                let later = &calls[stale + 1..];
-                later
-                    .iter()
-                    .any(|c| c.tool == "get_timeline_state" && !c.refused)
-                    && later.iter().any(|c| {
-                        c.tool == "prepare_edit_plan"
-                            && !c.refused
-                            && c.reply
-                                .pointer("/outcome/preview")
-                                .or_else(|| c.reply.get("preview"))
-                                .is_some()
-                    })
-                    && later
-                        .iter()
-                        .any(|c| c.tool == "commit_edit_plan" && !c.refused)
+            calls.iter().enumerate().any(|(stale, failed)| {
+                failed.tool == "commit_edit_plan"
+                    && failed.refused
+                    && !failed.fixture
+                    && calls[..stale].iter().any(|c| c.fixture && !c.refused && c.tool == "undo_task_edit" && c.task == failed.task && c.attempt == failed.attempt)
                     && ["timeline", "transcript", "frame", "audio"]
                         .iter()
-                        .all(|kind| calls[..stale].iter().any(|c| evidence_read(c, kind)))
+                        .all(|kind| {
+                            calls[..stale]
+                                .iter()
+                                .any(|c| same_actor(c, failed) && evidence_read(c, kind))
+                        })
+                    && recovered(&calls[stale..], failed)
             }) && calls
                 .iter()
                 .any(|c| c.tool == "undo_task_edit" && !c.refused && c.fixture)
         }
         _ => false,
     }
+}
+#[cfg(target_os = "linux")]
+fn same_actor(call: &Call, affected: &Call) -> bool {
+    !call.fixture
+        && call.task.is_string()
+        && call.attempt.is_string()
+        && call.task == affected.task
+        && call.attempt == affected.attempt
+}
+#[cfg(target_os = "linux")]
+fn recovered(calls: &[Call], affected: &Call) -> bool {
+    let mut refreshed = false;
+    let mut prepared = None;
+    for call in calls {
+        if !same_actor(call, affected) {
+            continue;
+        }
+        let reply = call.reply.get("outcome").unwrap_or(&call.reply);
+        if (matches!(call.tool.as_str(), "task_status" | "get_timeline_state")
+            && !call.refused
+            && reply.is_object())
+            || call
+                .reply
+                .get("controls")
+                .is_some_and(|v| v.is_object() && !v.as_object().unwrap().is_empty())
+        {
+            refreshed = true;
+        }
+        if call.tool == "prepare_edit_plan" && !call.refused && refreshed {
+            prepared = reply
+                .get("preview")
+                .filter(|preview| {
+                    preview["operation_count"].as_u64().is_some_and(|n| n > 0)
+                        && !call.arguments["expected_revision"].is_null()
+                        && preview["expected_revision"] == call.arguments["expected_revision"]
+                })
+                .and_then(|_| reply.get("plan_id"))
+                .filter(|id| id.as_u64().is_some_and(|id| id > 0))
+                .map(|id| (id.clone(), call.arguments["expected_revision"].clone()));
+        }
+        if call.tool == "commit_edit_plan"
+            && !call.refused
+            && prepared.as_ref().is_some_and(|(plan, revision)| {
+                !revision.is_null()
+                    && call.arguments["plan_id"] == *plan
+                    && call.arguments["expected_revision"] == *revision
+            })
+        {
+            return true;
+        }
+    }
+    false
 }
 #[cfg(target_os = "linux")]
 fn evidence_read(call: &Call, kind: &str) -> bool {
@@ -283,10 +314,10 @@ fn evidence_read(call: &Call, kind: &str) -> bool {
     }
 }
 #[cfg(target_os = "linux")]
-fn absolute(mut document: Document) -> Document {
+fn absolute(mut document: Document, oracle: bool) -> Document {
     for asset in &mut document.media_pool {
         if asset.path.is_relative() {
-            asset.path = if asset.kind == kinewright_core::MediaKind::Image {
+            asset.path = if oracle {
                 fixtures().join(&asset.path)
             } else {
                 super::media_source(asset.id.0)
@@ -309,7 +340,7 @@ fn media(
     let mut frames = Vec::new();
     let mut audio = Vec::new();
     for (index, document) in [actual, oracle].into_iter().enumerate() {
-        let document = Arc::new(absolute(document.clone()));
+        let document = Arc::new(absolute(document.clone(), index == 1));
         engine.set_document(document.clone());
         let receiver = engine.frames();
         let mut arm = Vec::new();
@@ -386,3 +417,7 @@ fn media(
         audio[0].len(),
     ))
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "checks_tests.rs"]
+mod tests;

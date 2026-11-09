@@ -158,6 +158,11 @@ impl ScriptedLauncher {
             trace.sends.push(json!({"identity":context.identity,"brief":context.brief,"accepted_candidate":candidate_base}));
             trace.recipe_argument_counts.push(program.arguments.len());
             trace.recipe_bytes.push(serde_json::to_vec(&program)?.len());
+            let size = crate::te1_eval::recipe::measure(
+                &serde_json::to_value(&program)?,
+                &json!({"identity":context.identity,"brief":context.brief,"fixtures":context.fixtures,"endpoint":context.endpoint}),
+            );
+            trace.recipe_sizes.push(size);
         }
         let trace = self.trace.clone();
         let script = self.script.clone();
@@ -551,6 +556,7 @@ impl Studio {
             studio_runtime::RuntimePorts {
                 checks: Arc::new(SyntheticChecks::default()),
                 evaluation: Some(launcher.clone()),
+                evaluation_counts: Some(trace.clone()),
                 fixture_claim: Some(root.join("machine")),
                 fixture_autostart: true,
                 ..Default::default()

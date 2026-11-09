@@ -20,6 +20,7 @@ mod checks;
 #[cfg(target_os = "linux")]
 pub(crate) mod observe;
 pub mod pin;
+pub mod recipe;
 
 #[cfg(target_os = "linux")]
 pub(crate) type Script = Arc<dyn Fn(SendContext) -> io::Result<()> + Send + Sync>;
@@ -38,18 +39,33 @@ pub struct Trace {
     pub initial_tracks: Vec<u64>,
     pub feedback_revisions: Vec<Value>,
     pub scripted_sends: usize,
+    pub launch_requests: usize,
+    pub bound_attempts: usize,
     pub recipes: usize,
     pub provider_launches: usize,
     pub prompts: Vec<String>,
     pub sends: Vec<Value>,
     pub recipe_argument_counts: Vec<usize>,
     pub recipe_bytes: Vec<usize>,
+    pub recipe_sizes: Vec<recipe::RecipeSize>,
     pub calls: Vec<Call>,
     pub errors: Vec<String>,
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn record_launch(trace: &mut Trace, scripted: bool) -> io::Result<()> {
+    trace.launch_requests += 1;
+    if !scripted {
+        trace.provider_launches += 1;
+        return Err(error(
+            "TE15_B2AF1_NATIVE_FALLBACK: eval refused before native construction",
+        ));
+    }
+    Ok(())
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Call {
     pub task: Value,
+    pub attempt: Value,
     pub tool: String,
     pub arguments: Value,
     pub reply: Value,
@@ -60,6 +76,7 @@ pub struct Call {
 #[serde(rename_all = "snake_case")]
 pub enum ScriptedOutcome {
     Correct,
+    Alternative,
     Wrong,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,7 +101,7 @@ pub(crate) fn media_source(id: u64) -> PathBuf {
     } else {
         fixtures()
             .with_file_name("te15")
-            .join("talking-head-audio-owned.mkv")
+            .join("talking-head-audio-owned.mov")
     }
 }
 fn error(e: impl std::fmt::Display) -> io::Error {
@@ -262,6 +279,20 @@ impl Mcp {
         controls["command"] = command;
         self.call(name, controls)
     }
+    fn replay_control(&self, name: &str, value: &Value) -> io::Result<()> {
+        let (status, refused) = self.wire("task_status", json!({}))?;
+        if refused {
+            return Err(error("task_status refused"));
+        }
+        let mut controls = status["controls"].clone();
+        controls["command"] = json!({"kind":name,"value":value});
+        let first = self.call(name, controls.clone())?;
+        let replay = self.call(name, controls)?;
+        if first != replay {
+            return Err(error("immutable replay outcome changed"));
+        }
+        Ok(())
+    }
     fn revision(&self) -> io::Result<Value> {
         let timeline = self.call("get_timeline_state", json!({}))?;
         timeline
@@ -404,6 +435,9 @@ fn scripted_turn(context: &SendContext, case: &Value, outcome: ScriptedOutcome) 
     } else {
         job.operations(case)?
     };
+    if number == 1 && outcome == ScriptedOutcome::Alternative {
+        mcp.edit(json!([{"op":"move_marker","marker":1,"to":7}]))?;
+    }
     mcp.edit(operations)?;
     mcp.publish(None)
 }
@@ -511,16 +545,18 @@ fn scripted_director(
         if !serde_json::to_string(&record)?.contains("correct-homophone") {
             return Err(error("durable child report did not reach Director"));
         }
-        if outcome == ScriptedOutcome::Correct {
+        if outcome != ScriptedOutcome::Wrong {
             assign(mcp, context, jobs(number)[1])?;
             return Ok(());
         }
     }
-    mcp.control(
-        "merge_task",
-        json!({"task":child["id"],"target":result["base"],"result":reference}),
-    )?;
-    if outcome == ScriptedOutcome::Correct
+    let merge = json!({"task":child["id"],"target":result["base"],"result":reference});
+    if number == 5 && outcome == ScriptedOutcome::Alternative {
+        mcp.replay_control("merge_task", &merge)?;
+    } else {
+        mcp.control("merge_task", merge)?;
+    }
+    if outcome != ScriptedOutcome::Wrong
         && let Some(job) = jobs(number).get(tasks.len() - 1)
     {
         assign(mcp, context, *job)?;

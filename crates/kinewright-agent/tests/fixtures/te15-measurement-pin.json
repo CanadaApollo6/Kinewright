@@ -1,4 +1,9 @@
 {
+  "accepted_behavior": {
+    "case1": "exact oracle effect and reversible task history; extra in-scope commits are accepted",
+    "case5": "Director reads the durable deceptive child result after publication and before a subsequent merge; incomplete child is never merged; no fixed number of commits or merge replays",
+    "case6": "affected task and attempt alone, excluding fixture calls: timeline/transcript/frame/audio evidence before refused commit, then refresh via task_status, get_timeline_state or refreshed controls; nonempty preview on prepare, then successful commit with that exact plan id and revision, in order"
+  },
   "analysis": {
     "baseline_oracle_failure": "stop and diagnose",
     "both_improve": "declared-sample pass only, no general model recommendation",
@@ -15,8 +20,8 @@
   "arm_bridge_sha256": {
     "host": "7cb9413ef0bde16f689746fc6bf8d33a936ae2a3893542cb9a984935afefaa10",
     "mcp_observation": "8859f8656b213f85a29f841eb5a877c69abebc2ed7257d4f731cdae3683932c7",
-    "runtime": "f7e4e83ca8bf414132563c47a8350fbc700a6c6b230ebd620846a959d9d500de",
-    "studio": "53b802c97ed36fd0f97dbebd37f9eb20cdc16ab3d9dc6c63b21f533e0af62ead",
+    "runtime": "1745d43a9ab953f28623f1f8e4818090e2bfe0878e16a2b3f7fd5702b8c79b96",
+    "studio": "4c508e50ea4a98cd6b365421e269915a78d2109481da9007168d0eba6d77b02e",
     "surface": "3c72db8f610fa8d77c26fa00407cd560cefe1d75213587ac5d1cde706d15fbd8",
     "task_observation": "9125329063ec22108c0a3aaf5adfadb365af7f04be29d88f5a9be224857d4fec"
   },
@@ -36,19 +41,20 @@
     "acceptance": "all checks pass; observed reads/actions retained; incomplete work or usage is not cheaper success",
     "audio": "production export PCM compared with oracle; non-silent, same sample count, <=1/32768 sample error",
     "document": "exact frozen oracle; unrelated clips preserved",
-    "history": "exact durable bundle reopen, task operations and undo/redo, unchanged manual history and retained manual redo",
+    "history": "exact durable bundle reopen, reversible task history, unchanged manual history and retained manual redo; extra in-scope commits may end at the exact oracle",
     "render": "production preview compared with oracle at frames 0,20,49,50,51,52,89,90,99"
   },
   "driver_sources_sha256": {
-    "te1_eval.rs": "c9657c91b5f5c1f987faec6adc4e9c4c01e8fe7d767fee9ffa9ba20e142bf1ca",
-    "te1_eval/analysis.rs": "af3be8e1328191d61ee8a6a7e1546899541a19c577f889683c20105b1fbead23",
-    "te1_eval/checks.rs": "1be37aa8900027802b5a77913664677c01fc324e88c55c56ebb51bb4fea31681",
-    "te1_eval/observe.rs": "6ca0b0cf77e614ca4e062a5c68038bee91566ce52d1a447fe8a0ca968289b94c",
-    "te1_eval/pin.rs": "0258da3785dd0611d18fd6500c43b0d9acc4e57ae69566efdf995bb06f653258"
+    "te1_eval.rs": "b1c73e176e5f08ae6d66a2f7fa72440e183966abe13e40446ff9b6c0a1385d58",
+    "te1_eval/analysis.rs": "2d0afe7936c25ef2899c0ab370b5059b340d90db42afcfb551c00967425f7f38",
+    "te1_eval/checks.rs": "fabd48cb5b6ab78e053ffd1eab64b44b4d0a71367155871a921eb7fc64a49ec5",
+    "te1_eval/observe.rs": "6084dfac169dd3b00aa30196bb4bee03f35592d21e5e3e05cb0723f2bf3db652",
+    "te1_eval/pin.rs": "704d77daef25a916ea7865b0e03017ce1bad870f43d7e5e2d5b0bc69912937bd",
+    "te1_eval/recipe.rs": "de09e30617dea2a2c0ddb3ac9cad41980f0f11bc02839c8b112ab3fc28aeef85"
   },
   "embedded_title_font_sha256": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031",
   "fixture_and_oracle_sha256": {
-    "../te15/talking-head-audio-owned.mkv": "49831191f48ba96b583763a2626abf810ba5b24745e7467ea97f79c642333171",
+    "../te15/talking-head-audio-owned.mov": "31ec1a7bdd98023afae68ee504b57f2650d191818482252b01c39b5ead383329",
     "../te15/talking-head-owned.mkv": "11e0042a41a82bd48d063e67ddfa6a731de28c201cbdd1d69feef849286da970",
     "case-1-oracle.kinewright": "15f458ca1a54bc2e073edaa81b6b740f0871999ea893f5dcf89fc600e67d96c1",
     "case-1.json": "925f71204be909a40d6667fa9bc71d4ea9c7a88ec4bf896bc9fa62a448f1ce2c",
@@ -154,7 +160,13 @@
       }
     }
   },
-  "owned_presentation": "Lossless 100-frame FFV1 picture and a 25-fps video carrier for the original PCM (audio-only probing otherwise assigns 30 fps). Source locator/fingerprint and carrier kind/raster/colour are explicit fixture admission changes, shared by both arms. Every preview/PCM check still compares against the original legacy oracle.",
+  "owned_presentation": "Lossless 100-frame FFV1 picture and a 25-fps raw-BGRA MOV carrier for the original PCM, packetized at 320 samples (8-kHz mono) per source frame; production range PCM matches the original WAV (audio-only probing otherwise assigns 30 fps). Source locator/fingerprint and carrier kind/raster/colour are explicit fixture admission changes, shared by both arms. Every preview/PCM check still compares against the original legacy oracle.",
+  "pre_send_size": {
+    "change": "never raise limit mid-sample; any limit or prompt change requires reviewed pin refresh and matched unpaid arm checks",
+    "limit": 32768,
+    "preflight": "measure and retain the actual recipe bytes on the same checkout with the chosen model/options before every paid run",
+    "refusal": "retain failed run row and all earlier spending/lower bounds; stop that pair for diagnosis, never a zero-token win or automatic retry"
+  },
   "purpose": "Measurement pin only; not certification, qualification or a release gate",
   "run_order": [
     {

@@ -118,7 +118,10 @@ fn te15_b2a_catalog_child(name: &str) -> bool {
         status.is_some_and(|s| s.success()),
         "TE15_B2A_CATALOG {name}: {output}"
     );
-    for line in output.lines().filter(|line| line.starts_with("TE15_B2A_")) {
+    for line in output
+        .lines()
+        .filter(|line| line.starts_with("TE15_B2A_") || line.starts_with("TE15_B2AF1_"))
+    {
         eprintln!("{line}");
     }
     false
@@ -209,7 +212,8 @@ fn scripted(case: u8) {
         }
         assert_eq!(wrong.trace.provider_launches, 0);
         eprintln!(
-            "TE15_B2A_ORACLE case={case} provider={provider} wrong=RED restored=GREEN real_provider_launches=0 native_program_max_bytes={} checks={:?}",
+            "TE15_B2A_ORACLE case={case} provider={provider} wrong=RED restored=GREEN real_provider_launches={} native_program_max_bytes={} checks={:?}",
+            correct.trace.provider_launches,
             correct.trace.recipe_bytes.iter().max().unwrap(),
             correct.checks
         );
@@ -217,6 +221,33 @@ fn scripted(case: u8) {
 }
 #[cfg(target_os = "linux")]
 fn task_scopes(correct: &kinewright_agent::te1_eval::Measurement, case: u8) {
+    assert_eq!(
+        correct.trace.launch_requests, correct.trace.scripted_sends,
+        "TE15_B2AF1_LAUNCH_COUNT"
+    );
+    assert_eq!(
+        correct.trace.bound_attempts, correct.trace.scripted_sends,
+        "TE15_B2AF1_BIND_COUNT"
+    );
+    for size in &correct.trace.recipe_sizes {
+        eprintln!(
+            "TE15_B2AF1_RECIPE case={case} provider={} {}",
+            correct.provider,
+            serde_json::to_string(size).unwrap()
+        );
+    }
+    let attempts: std::collections::BTreeSet<_> = correct.accounting["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|task| task["sends"].as_array().unwrap())
+        .map(|send| send["attempt"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        correct.trace.launch_requests,
+        attempts.len(),
+        "TE15_B2AF1_ATTEMPT_LAUNCHES"
+    );
     assert_eq!(correct.trace.provider_launches, 0);
     assert!(
         correct.trace.recipe_bytes.iter().all(|n| *n <= 32768),
@@ -384,4 +415,209 @@ fn te15_b2a_analysis_retains_every_pair_and_requires_both_statistics() {
     assert_eq!(analyze(&rows).unwrap().verdict, Verdict::StopAll);
     rows.push(rows[0].clone());
     assert!(analyze(&rows).is_err());
+}
+
+mod coverage {
+    use kinewright_agent::te1_eval::analysis::{Arm, Row, Verdict, analyze};
+    use kinewright_project::orchestration_accounting::*;
+    use kinewright_project::usage_stream::*;
+    use serde_json::json;
+    fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
+        serde_json::from_value(json!(format!("{n:032x}"))).unwrap()
+    }
+    fn accounting() -> AccountingRecord {
+        let mut a = AccountingRecord::new(id(1), id(2), 1000).unwrap();
+        a.add_task(id(3), Some(1000)).unwrap();
+        let t = &mut a.tasks[0];
+        let selection = ProviderSelection {
+            connector: "codex".into(),
+            model: "fixture".into(),
+            options: vec![],
+        };
+        t.select_provider(ProviderMetadata {
+            attempt: id(4),
+            requested: selection.clone(),
+            resolved: selection,
+            cli_version: "0.166.0".into(),
+        })
+        .unwrap();
+        t.bind_stream(StreamBinding {
+            attempt: id(4),
+            stream: id(5),
+            adapter: Adapter::Codex01660V1,
+            resumed: false,
+        })
+        .unwrap();
+        t.consume_send(SendConsumption {
+            command: kinewright_project::receipts::CommandId {
+                issuer: id(6),
+                sequence: 1,
+            },
+            attempt: id(4),
+            turn: 1,
+            payload: kinewright_project::bundle_records::ObjectRef {
+                sha256: "a".repeat(64),
+                byte_length: 10,
+                record_kind: kinewright_project::bundle_records::RecordKind::OwnedData,
+            },
+        })
+        .unwrap();
+        let values = UsageValues {
+            input: Some(100),
+            output: Some(20),
+            cache_read: Some(0),
+            ..Default::default()
+        };
+        t.usage.push(UsageSample {
+            snapshot: Some(Snapshot {
+                payload_sha256: "b".repeat(64),
+                stream: id(5),
+                adapter: Adapter::Codex01660V1,
+                models: vec![ModelSnapshot {
+                    model: "c".repeat(64),
+                    values: values.clone(),
+                }],
+            }),
+            attempt: id(4),
+            turn: 1,
+            event: "result".into(),
+            ordinal: 1,
+            mode: UsageMode::Cumulative,
+            values,
+            complete: true,
+            input_includes_cache: true,
+            output_includes_reasoning: true,
+        });
+        t.totals = normalize(&t.usage).unwrap();
+        a.validate().unwrap();
+        a
+    }
+
+    fn row(a: &AccountingRecord) -> Row {
+        a.validate().unwrap();
+        Row::from_accounting("codex", 1, Arm::Candidate, a, true).unwrap()
+    }
+    fn verdict(a: &AccountingRecord) -> Verdict {
+        let row = row(a);
+        let mut rows = vec![];
+        for provider in ["codex", "claude"] {
+            for case in [1, 5, 6] {
+                for arm in [Arm::Baseline, Arm::Candidate] {
+                    let mut r = row.clone();
+                    r.provider = provider.into();
+                    r.case = case;
+                    r.arm = arm;
+                    if arm == Arm::Baseline {
+                        r.inclusive_lower_bound = 400;
+                        r.usage_complete = true;
+                    }
+                    rows.push(r);
+                }
+            }
+        }
+        analyze(&rows).unwrap().verdict
+    }
+    fn later() -> AccountingRecord {
+        let mut a = accounting();
+        let mut send = a.tasks[0].sends[0].clone();
+        send.turn = 2;
+        send.command.sequence = 2;
+        a.tasks[0].consume_send(send).unwrap();
+        a
+    }
+    #[test]
+    fn te15_b2af1_uncovered_turn() {
+        let a = later();
+        assert_eq!(row(&a).inclusive_lower_bound, 120);
+        assert_eq!(verdict(&a), Verdict::Incomplete, "TE15_B2AF1_TURN");
+    }
+    #[test]
+    fn te15_b2af1_uncovered_attempt() {
+        let mut a = accounting();
+        let t = &mut a.tasks[0];
+        let mut provider = t.providers[0].clone();
+        provider.attempt = id(7);
+        t.select_provider(provider).unwrap();
+        t.bind_stream(StreamBinding {
+            attempt: id(7),
+            stream: id(8),
+            adapter: Adapter::Codex01660V1,
+            resumed: false,
+        })
+        .unwrap();
+        let mut send = t.sends[0].clone();
+        send.attempt = id(7);
+        send.command.sequence = 2;
+        t.consume_send(send).unwrap();
+        assert_eq!(row(&a).inclusive_lower_bound, 120);
+        assert_eq!(verdict(&a), Verdict::Incomplete, "TE15_B2AF1_ATTEMPT");
+    }
+    #[test]
+    fn te15_b2af1_observation_overflow() {
+        let mut a = accounting();
+        a.tasks[0].measurements =
+            Some(kinewright_project::usage_measurement::Measurements::default());
+        for _ in 0..257 {
+            a.tasks[0].measurements.as_mut().unwrap().result(
+                kinewright_project::usage_measurement::ToolResult {
+                    attempt: id(4),
+                    turn: None,
+                    provider_call: None,
+                    host_call: 0,
+                    tool: "get_timeline_state".into(),
+                    serialized_bytes: 1,
+                },
+            );
+        }
+        assert_eq!(row(&a).inclusive_lower_bound, 120);
+        assert_eq!(verdict(&a), Verdict::Incomplete, "TE15_B2AF1_OVERFLOW");
+    }
+    #[test]
+    fn te15_b2af1_later_snapshot_closes_gap() {
+        let mut a = later();
+        assert!(!row(&a).usage_complete);
+        let mut sample = a.tasks[0].usage[0].clone();
+        sample.turn = 2;
+        sample.ordinal = 2;
+        sample.event = "result-2".into();
+        sample.values.input = Some(200);
+        sample.values.output = Some(40);
+        let snap = sample.snapshot.as_mut().unwrap();
+        snap.payload_sha256 = "d".repeat(64);
+        snap.models[0].values = sample.values.clone();
+        a.tasks[0].usage.push(sample);
+        a.tasks[0].totals = normalize(&a.tasks[0].usage).unwrap();
+        assert_eq!(row(&a).inclusive_lower_bound, 240);
+        assert!(row(&a).usage_complete, "TE15_B2AF1_RECOVER");
+        assert_eq!(
+            verdict(&a),
+            Verdict::DeclaredSamplePass,
+            "TE15_B2AF1_RECOVER"
+        );
+    }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te15_b2af1_alternative_outcomes() {
+    if !te15_b2a_catalog_child("te15_b2af1_alternative_outcomes") {
+        return;
+    }
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "b2a",
+    );
+    for case in [1, 5, 6] {
+        let m = kinewright_agent::te1_eval::run_scripted(
+            &temp.path(&format!("case-{case}")),
+            case,
+            "codex",
+            kinewright_agent::te1_eval::ScriptedOutcome::Alternative,
+        )
+        .unwrap();
+        assert!(
+            m.checks.passed(),
+            "TE15_B2AF1_ALTERNATIVE case={case} {:?}",
+            m.checks
+        );
+    }
 }
