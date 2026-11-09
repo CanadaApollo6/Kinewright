@@ -492,9 +492,9 @@ fn te14_fixed_prefix_is_identical_through_both_protocols() {
         )
         .unwrap();
         assert_eq!(
-            program.arguments.last().unwrap().as_bytes(),
-            invocation.invocation().bytes(),
-            "TE14_PROTOCOL_FINAL_ARGUMENT"
+            program.input.as_ref().unwrap().sha256,
+            kinewright_media::sha256_bytes(invocation.invocation().bytes()),
+            "TE14_PROTOCOL_INPUT_BINDING"
         );
         let prefix = super::super::task_context::application_prefix(Role::Director).unwrap();
         assert!(

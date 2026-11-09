@@ -165,6 +165,19 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
         None if matches!(program.sandbox, ProviderSandbox::ContainmentOnly) => None,
         None => return Err(io::Error::other("qualified image missing")),
     };
+    let input = program
+        .input
+        .as_ref()
+        .map(|binding| {
+            crate::job_guardian::input::open(
+                binding
+                    .source
+                    .as_deref()
+                    .ok_or_else(|| io::Error::other("native input source missing"))?,
+                binding,
+            )
+        })
+        .transpose()?;
     let cgroup = Cgroup::open(&leaf)?;
     cgroup.enter()?;
     drop(cgroup);
@@ -176,7 +189,7 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
         }
         let Some(pid) = kinewright_job_sys::fork_payload_init()? else {
             drop(read);
-            let result = init(program, image, std::fs::File::from(write));
+            let result = init(program, image, input, std::fs::File::from(write));
             std::process::exit(result.unwrap_or(1));
         };
         drop(write);
@@ -234,6 +247,7 @@ fn write_ready(writer: &mut impl Write, result: &impl serde::Serialize) -> io::R
 fn init(
     program: Program,
     image: Option<std::fs::File>,
+    input: Option<std::fs::File>,
     mut ready: std::fs::File,
 ) -> io::Result<i32> {
     use std::os::unix::net::UnixStream;
@@ -324,7 +338,7 @@ fn init(
         .as_ref()
         .map(|pipes| pipes[3].try_clone())
         .transpose()?;
-    let result = launch(program, image, pipes);
+    let result = launch(program, image, pipes, input);
     if let Some(mut status) = status {
         let _ = status.write_all(super::protocol::guardian_status_record(&result).as_bytes());
     }
@@ -361,6 +375,7 @@ fn launch(
     program: Program,
     image: Option<std::fs::File>,
     pipes: Option<Vec<std::os::unix::net::UnixStream>>,
+    input: Option<std::fs::File>,
 ) -> io::Result<i32> {
     use std::os::fd::OwnedFd;
     if let ProviderSandbox::LinuxAllowlist {
@@ -435,6 +450,9 @@ fn launch(
             }
             command.env("KINEWRIGHT_HOST_MCP_TOKEN", token);
         }
+    }
+    if let Some(input) = input {
+        command.stdin(Stdio::from(input));
     }
     // Init still holds the transient MCP bearer and its inherited state. The
     // provider shares its UID and Landlock domain, so init's /proc entries

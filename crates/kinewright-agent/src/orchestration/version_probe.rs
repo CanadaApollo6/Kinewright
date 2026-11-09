@@ -455,6 +455,7 @@ fn program(
         .map(|(key, value)| (key.to_owned(), value.to_owned())),
     );
     let program = Program {
+        input: None,
         image: Some(ExecutableImage {
             digest,
             source: Some(crate::executable_images::source(image)),

@@ -17,7 +17,7 @@ OBS='crates/kinewright-agent/src/te1_eval/observe.rs'
 PIN='crates/kinewright-agent/tests/fixtures/te15-measurement-pin.json'
 PAIRS=[]
 for case in (1,5,6):
-    PAIRS.append((f'oracle-{case}',TEST,'ScriptedOutcome::Correct,','ScriptedOutcome::Wrong,',f'te15_b2a_case{case}_scripted_studio_end_to_end','TE15_B2A_ORACLE_PASS'))
+    PAIRS.append((f'oracle-{case}',TEST,'\n            ScriptedOutcome::Correct,','\n            ScriptedOutcome::Wrong,',f'te15_b2a_case{case}_scripted_studio_end_to_end','TE15_B2A_ORACLE_PASS'))
 PAIRS += [
     ('durable-child',DRIVER,'return mcp.publish(Some(&context.fixtures["child_report"]));','return mcp.publish(None);','te15_b2a_case5_scripted_studio_end_to_end','durable child report did not reach Director'),
     ('conflict-schedule',OBS,'if self.case == 6','if self.case == 0','te15_b2a_case6_scripted_studio_end_to_end','case 6 stale plan was accepted'),
@@ -52,8 +52,8 @@ def stop(child):
 
 def run(label,witness,marker,red):
     global active
-    target='--lib' if witness.startswith('te1_eval::') else '--test te1_measurement'
-    cmd=['bash','-c','source scripts/setup-ffmpeg.sh && exec flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 nice -n 19 cargo test -p kinewright-agent --features te1-eval '+target+' "$1" -- --exact --nocapture','b2a',witness]
+    target='--lib' if witness.startswith(('te1_eval::','writer_host::','job_guardian::')) else '--test te1_measurement'
+    cmd=['bash','-c','source scripts/setup-ffmpeg.sh && exec flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 nice -n 19 cargo test -p kinewright-agent --features te1-eval '+target+' "$1" -- --exact --include-ignored --nocapture','b2a',witness]
     with (OUT/f'{label}.log').open('w') as log:
         active=subprocess.Popen(cmd,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         (OUT/'active-pid.json').write_text(json.dumps({'pid':active.pid,'label':label})+'\n')

@@ -42,3 +42,7 @@ crates/kinewright-agent/src/writer_host/mod.rs -text
 crates/kinewright-agent/src/writer_host/task_mcp.rs -text
 crates/kinewright-agent/src/server.rs -text
 crates/kinewright-agent/src/orchestration/native_launcher.rs -text
+crates/kinewright-agent/src/job_guardian/input.rs -text
+crates/kinewright-agent/src/job_guardian/protocol.rs -text
+crates/kinewright-agent/src/job_guardian/linux.rs -text
+crates/kinewright-agent/src/orchestration/provider_pipes.rs -text

@@ -134,8 +134,7 @@ impl ConnectorRuntimeChecks for InstalledClaudeChecks {
             "probe recipe",
         )
         .map_err(|_| CertificationRefusal::EffectiveAuthentication)?;
-        let mut arguments = program.arguments;
-        arguments.pop();
+        let arguments = program.arguments;
         runtime.launch_context.environment_digest = digest(&program.environment);
         runtime.launch_context.settings_digest = digest(&arguments);
         runtime.authentication.context = runtime.launch_context.clone();

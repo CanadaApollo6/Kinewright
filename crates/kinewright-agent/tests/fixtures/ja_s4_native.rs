@@ -42,7 +42,7 @@ fn main() {
         } else {
             "s4b-claude"
         };
-        let prompt = args.last().unwrap().clone();
+        let prompt = std::ffi::OsString::from("-");
         args = vec![
             args[0].clone(),
             env::var_os("HOME").unwrap(),
@@ -171,7 +171,30 @@ fn main() {
             eprintln!("Error: Codex executable path is not configured");
             std::process::exit(1);
         }
-        let prompt = args[3].to_str().unwrap();
+        let mut input = String::new();
+        let prompt = if args[3] == "-" {
+            std::io::stdin().read_to_string(&mut input).unwrap();
+            fs::write(root.join("stdin-input.partial"), input.as_bytes()).unwrap();
+            fs::rename(root.join("stdin-input.partial"), root.join("stdin-input")).unwrap();
+            #[cfg(target_os = "linux")]
+            {
+                unsafe extern "C" {
+                    fn fcntl(fd: i32, command: i32, ...) -> i32;
+                }
+                // SAFETY: Linux F_GETFL (3) reads flags of our own open stdin.
+                let flags = unsafe { fcntl(0, 3) };
+                assert!(flags >= 0, "B2B0_CHILD_FLAGS");
+                assert_eq!(flags & 3, 0, "B2B0_CHILD_READONLY");
+                if let Ok(mut writable) = fs::OpenOptions::new().write(true).open("/proc/self/fd/0")
+                {
+                    assert!(writable.write_all(b"changed").is_err(), "B2B0_CHILD_SEALED");
+                    assert!(writable.set_len(0).is_err(), "B2B0_CHILD_NO_TRUNCATE");
+                }
+            }
+            input.as_str()
+        } else {
+            args[3].to_str().unwrap()
+        };
         let mut executions = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -350,7 +373,31 @@ fn main() {
         return;
     }
     if role == "s4b-claude" {
-        claude(root, args[3].to_str().unwrap());
+        let mut input = String::new();
+        let prompt = if args[3] == "-" {
+            std::io::stdin().read_to_string(&mut input).unwrap();
+            fs::write(root.join("stdin-input.partial"), input.as_bytes()).unwrap();
+            fs::rename(root.join("stdin-input.partial"), root.join("stdin-input")).unwrap();
+            #[cfg(target_os = "linux")]
+            {
+                unsafe extern "C" {
+                    fn fcntl(fd: i32, command: i32, ...) -> i32;
+                }
+                // SAFETY: Linux F_GETFL (3) reads flags of our own open stdin.
+                let flags = unsafe { fcntl(0, 3) };
+                assert!(flags >= 0, "B2B0_CHILD_FLAGS");
+                assert_eq!(flags & 3, 0, "B2B0_CHILD_READONLY");
+                if let Ok(mut writable) = fs::OpenOptions::new().write(true).open("/proc/self/fd/0")
+                {
+                    assert!(writable.write_all(b"changed").is_err(), "B2B0_CHILD_SEALED");
+                    assert!(writable.set_len(0).is_err(), "B2B0_CHILD_NO_TRUNCATE");
+                }
+            }
+            input.as_str()
+        } else {
+            args[3].to_str().unwrap()
+        };
+        claude(root, prompt);
         return;
     }
     if role == "s4b-pipes" {

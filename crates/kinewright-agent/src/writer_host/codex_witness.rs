@@ -126,6 +126,7 @@ fn local_probe(arguments: Vec<String>) -> (String, String) {
         .chain(crate::native_runtime::runtime_tree(&executable).unwrap())
         .collect();
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: executable.path.clone(),

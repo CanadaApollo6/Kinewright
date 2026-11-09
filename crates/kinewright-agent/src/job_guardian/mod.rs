@@ -5,6 +5,8 @@
 #[cfg(target_os = "linux")]
 pub(crate) mod credentials;
 #[cfg(target_os = "linux")]
+pub(crate) mod input;
+#[cfg(target_os = "linux")]
 mod linux;
 pub mod protocol;
 mod service;

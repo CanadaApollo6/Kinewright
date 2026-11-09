@@ -164,6 +164,7 @@ fn s4b_c3_fix1_prepare_failure_retires_unbound_only_under_proof() {
             .into();
         id.attempt = id.nonce.clone();
         let program = crate::job_guardian::protocol::Program {
+            input: None,
             image: None,
             credential_root: None,
             executable: "/usr/bin/true".into(),

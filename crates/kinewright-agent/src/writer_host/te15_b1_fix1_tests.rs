@@ -133,8 +133,7 @@ fn te15_profile_runtime(
     )
     .unwrap();
     runtime.launch_context.environment_digest = native_digest(&program.environment);
-    let mut arguments = program.arguments;
-    arguments.pop();
+    let arguments = program.arguments;
     runtime.launch_context.settings_digest = native_digest(&arguments);
     runtime.authentication.context = runtime.launch_context.clone();
     runtime

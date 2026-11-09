@@ -80,7 +80,11 @@ fn te15_b2a_catalog_child(name: &str) -> bool {
         assert!(codex.starts_with(kinewright_media::test_support::workspace_target_dir()));
         assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
         std::fs::create_dir(home.join(".claude")).unwrap();
-        std::fs::write(codex.join("models_cache.json"),br#"{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}],"service_tiers":[{"id":"priority","name":"Fast"}]}]}"#).unwrap();
+        std::fs::write(codex.join("models_cache.json"),br#"{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"},{"effort":"medium"}],"service_tiers":[{"id":"priority","name":"Fast"}]}]}"#).unwrap();
+        if name == "te15_b2b0_home_capacity" {
+            let public = include_bytes!("fixtures/te15-b2b0-models.json");
+            std::fs::write(codex.join("models_cache.json"), public).unwrap();
+        }
         return true;
     }
     let temp = kinewright_media::test_support::TempDirectory::new_in(
@@ -90,13 +94,19 @@ fn te15_b2a_catalog_child(name: &str) -> bool {
     for dir in ["home", "codex"] {
         std::fs::create_dir(temp.path(dir)).unwrap();
     }
+    let mut home = temp.path("home");
+    if name == "te15_b2b0_home_capacity" {
+        home = home.join("h".repeat(255 - home.as_os_str().len() - 1));
+        assert_eq!(home.as_os_str().len(), 255);
+        std::fs::create_dir(&home).unwrap();
+    }
     let log = std::fs::File::create(temp.path("child.log")).unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])
         .env(CHILD, name)
-        .env("HOME", temp.path("home"))
+        .env("HOME", &home)
         .env("CODEX_HOME", temp.path("codex"))
-        .env("CLAUDE_CONFIG_DIR", temp.path("home/.claude"))
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
@@ -125,6 +135,45 @@ fn te15_b2a_catalog_child(name: &str) -> bool {
         eprintln!("{line}");
     }
     false
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn te15_b2b0_home_capacity() {
+    if !te15_b2a_catalog_child("te15_b2b0_home_capacity") {
+        return;
+    }
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "b2b0-capacity",
+    );
+    for provider in ["codex", "claude"] {
+        let result = kinewright_agent::te1_eval::run_scripted(
+            &temp.path(provider),
+            5,
+            provider,
+            kinewright_agent::te1_eval::ScriptedOutcome::Correct,
+        )
+        .unwrap();
+        assert!(!result.trace.capacity_sizes.is_empty());
+        let mut maximum = 0;
+        for row in &result.trace.capacity_sizes {
+            assert_eq!(row["home_bytes"], 255, "B2B0_LONG_HOME");
+            let bytes = row["program_bytes"]
+                .as_u64()
+                .unwrap()
+                .max(row["all_home_paths_255_bytes"].as_u64().unwrap());
+            maximum = maximum.max(bytes);
+            assert!(bytes <= 16384, "B2B0_HALF_LIMIT {row}");
+        }
+        assert_eq!(result.trace.input_hashes.len(), result.trace.prompts.len());
+        for row in &result.trace.input_hashes {
+            assert_eq!(row["before"], row["after"], "B2B0_ROLE_HASH {row}");
+        }
+        eprintln!(
+            "TE15_B2A_B2B0_HOME provider={provider} home=255 maximum={maximum} roles=6 model_options={}",
+            result.trace.capacity_sizes[0]["selection"]
+        );
+    }
 }
 #[cfg(target_os = "linux")]
 fn scripted(case: u8) {
@@ -220,7 +269,33 @@ fn scripted(case: u8) {
     }
 }
 #[cfg(target_os = "linux")]
+fn stdin_shape(correct: &kinewright_agent::te1_eval::Measurement, case: u8) {
+    let provider = correct.provider.as_str();
+    for args in &correct.trace.recipe_argv {
+        if provider == "codex" {
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("-"),
+                "B2B0_CODEX_STDIN_MODE"
+            );
+        } else {
+            assert!(!args.iter().any(|a| a == "--"), "B2B0_CLAUDE_STDIN_MODE");
+        }
+    }
+    assert_eq!(
+        correct.trace.input_hashes.len(),
+        correct.trace.prompts.len()
+    );
+    for row in &correct.trace.input_hashes {
+        assert_eq!(
+            row["before"], row["after"],
+            "B2B0_CASE_HASH {case} {provider}"
+        );
+    }
+}
+#[cfg(target_os = "linux")]
 fn task_scopes(correct: &kinewright_agent::te1_eval::Measurement, case: u8) {
+    stdin_shape(correct, case);
     assert_eq!(
         correct.trace.launch_requests, correct.trace.scripted_sends,
         "TE15_B2AF1_LAUNCH_COUNT"

@@ -125,10 +125,10 @@ impl ProviderPipes {
     pub fn guardian_channel(&self) -> io::Result<GuardianChannel> {
         self.credentials.try_clone().map(GuardianChannel)
     }
-    /// C5 fix 7: ends the provider's stdin at once and keeps only what the
-    /// host reads. Codex `exec` reads a non-TTY stdin to EOF before its turn,
-    /// so a held stdin is a provider that never starts. The returned set has
-    /// no stdin, so no later closure can hold it open again.
+    /// End the streaming stdin socket and keep only the read channels.
+    /// Native prompts use a separate sealed file as provider stdin. Legacy
+    /// socket fixtures still need EOF here, before COMMIT, so no closure can
+    /// accidentally retain a writer and hold their first turn open.
     #[must_use]
     pub fn into_reader(self) -> ProviderReader {
         // Shutdown reaches the peer even if a descriptor copy survives.

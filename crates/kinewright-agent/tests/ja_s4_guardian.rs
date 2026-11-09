@@ -119,6 +119,7 @@ fn host_ipc_case(restricted: bool) {
         kinewright_agent::provider_pipes::ProviderPipeListeners::bind(&root.join("pipes")).unwrap()
     });
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: binary.clone(),
@@ -279,6 +280,7 @@ fn identity() -> AttemptIdentity {
 }
 fn program(root: &Path) -> Program {
     Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: fixture().into(),
@@ -711,6 +713,7 @@ fn s4_native_host_fixture() {
         MachineClaim::acquire_fixture(&root.join("machine"), &id.project, &id.run).unwrap();
     let mut owner = Owner::new(&root);
     let program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: std::env::var_os("KINEWRIGHT_S4_NATIVE").unwrap().into(),
@@ -2709,6 +2712,7 @@ fn s4b_c2_provider_pipes_and_final_environment() {
     let mut owner = Owner::new(&root);
     let metadata = fs::metadata(fixture()).unwrap();
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: fixture().into(),
@@ -2944,6 +2948,7 @@ fn s4b_c5_single_file_credentials() {
     let executable = fixture();
     let metadata = fs::metadata(executable).unwrap();
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: executable.into(),
@@ -3045,6 +3050,7 @@ fn s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier() {
     let pipes = ProviderPipeListeners::bind(&root.join("pipes")).unwrap();
     let metadata = fs::metadata(&executable).unwrap();
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: executable.clone(),
@@ -3127,6 +3133,7 @@ fn s4b_c5_fix4_provider_cannot_read_namespace_init() {
     let pipes = ProviderPipeListeners::bind(&root.join("pipes")).unwrap();
     let metadata = fs::metadata(&executable).unwrap();
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: executable.clone(),
@@ -3251,6 +3258,7 @@ fn s4b_c5_fix1_unpaid_sealed_codex_version() {
         .to_vec();
     runtime.push(executable.parent().unwrap().into());
     let mut program = Program {
+        input: None,
         executable,
         arguments: vec!["--version".into()],
         image: None,

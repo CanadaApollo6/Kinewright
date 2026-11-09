@@ -11,6 +11,8 @@ pub const CLEANUP: Duration = Duration::from_secs(2);
 pub const WIRE_CAP: usize = 64 * 1024;
 pub const RECOVERY_CAP: usize = 1024;
 pub const VERSION: u32 = 1;
+pub const INPUT_BYTES: usize = 256 * 1024;
+pub const INPUT_TOO_LONG: &str = "This feedback is too long to send in one run. Shorten or split the notes, then start the run again.";
 
 /// Namespace init's own exit record. Init writes it on the private credential
 /// socket, which the provider never holds, so provider output cannot forge it.
@@ -76,6 +78,8 @@ impl AttemptIdentity {
 #[serde(deny_unknown_fields)]
 pub struct Program {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<InputBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ExecutableImage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_root: Option<PathBuf>,
@@ -85,6 +89,45 @@ pub struct Program {
     pub working_directory: PathBuf,
     pub sandbox: ProviderSandbox,
     pub pipe_directory: Option<PathBuf>,
+}
+
+/// Exact immutable stdin, independently bounded from launch metadata.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InputBinding {
+    pub sha256: String,
+    pub byte_length: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PathBuf>,
+}
+impl InputBinding {
+    #[cfg(target_os = "linux")]
+    #[allow(
+        dead_code,
+        reason = "the standalone guardian receives bindings constructed by the host"
+    )]
+    pub(crate) fn new(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() > INPUT_BYTES {
+            return Err(io::Error::other(INPUT_TOO_LONG));
+        }
+        Ok(Self {
+            sha256: kinewright_hash::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            source: None,
+        })
+    }
+    pub(crate) fn validate(&self) -> io::Result<()> {
+        if self.byte_length > INPUT_BYTES as u64 {
+            return Err(io::Error::other(INPUT_TOO_LONG));
+        }
+        if self.sha256.len() != 64
+            || !self.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || self.source.as_ref().is_some_and(|p| !p.is_absolute())
+        {
+            return Err(io::Error::other("invalid native input binding"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,6 +224,13 @@ impl Program {
     /// # Errors
     /// Refuses relative executables, excessive arguments, or protocol overflow.
     pub fn validate(&self) -> io::Result<()> {
+        if let Some(input) = &self.input {
+            input.validate()?;
+            #[cfg(not(target_os = "linux"))]
+            return Err(io::Error::other(
+                "native stdin transport is not qualified on this platform",
+            ));
+        }
         if !self.executable.is_absolute()
             || !self.working_directory.is_absolute()
             || self.image.as_ref().is_some_and(|i| {

@@ -500,6 +500,7 @@ fn run_probe<T: serde::de::DeserializeOwned + serde::Serialize>(
         pipes
     };
     let mut program = Program {
+        input: None,
         image: None,
         credential_root: None,
         executable: probe,

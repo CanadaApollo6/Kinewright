@@ -401,7 +401,7 @@ fn s4b_c6_claude_argv_and_environment_are_isolated() {
         "invoke_capability".into(),
     ]);
     let mcp = serde_json::json!({"mcpServers":{"kinewright":{"type":"http","url":"http://127.0.0.1:1/mcp"}}});
-    let argv = claude_argv(&mcp, &config, "the task").unwrap();
+    let argv = claude_argv(&mcp, &config).unwrap();
     let after = |flag: &str| {
         argv.iter()
             .position(|arg| arg == flag)
@@ -438,13 +438,14 @@ fn s4b_c6_claude_argv_and_environment_are_isolated() {
         }),
         "BUILTIN_PLUGINS_OFF"
     );
-    assert_eq!(
-        argv[argv.len() - 2..],
-        ["--".to_owned(), "the task".to_owned()]
+    assert!(
+        !argv.iter().any(|arg| arg == "--" || arg == "the task"),
+        "C6_STDIN_NO_POSITIONAL_PROMPT"
     );
+    assert_eq!(after("--input-format"), "text");
     config.tool_names = None;
     assert!(
-        claude_argv(&mcp, &config, "x").is_err(),
+        claude_argv(&mcp, &config).is_err(),
         "NO_TOOL_LIST_NO_LAUNCH"
     );
     let scratch = std::path::Path::new("/s");
@@ -777,10 +778,14 @@ fn s4b_c6_claude_fixture_turn_under_guardian() {
     assert_eq!(report["token"], true, "C6_MCP_BEARER_FROM_GUARDIAN");
     let record = spending_record(&f, &run);
     let task = &record.tasks[0];
-    assert_eq!(
-        task.totals.known.input, None,
-        "C6_USAGE_UNKNOWN_UNDER_GUARDIAN"
-    );
+    // The fixture reports 1+1 in modelUsage and omits both cache categories.
+    // TE1 retains those known counters without claiming complete coverage.
+    assert_eq!(task.totals.known.input, Some(1), "C6_GUARDIAN_INPUT");
+    assert_eq!(task.totals.known.output, Some(1), "C6_GUARDIAN_OUTPUT");
+    assert_eq!(task.totals.known.cache_read, None, "C6_UNKNOWN_CACHE_READ");
+    assert_eq!(task.totals.known.cache_write, None, "C6_UNKNOWN_CACHE_WRITE");
+    assert_eq!(task.totals.token_lower_bound, 2, "C6_GUARDIAN_LOWER_BOUND");
+    assert!(!task.totals.tokens_complete, "C6_PARTIAL_USAGE_INCOMPLETE");
     assert!(task.repairs.is_empty());
     c5_fix3_stop(&f, &run, &fixture);
     eprintln!("C6_CLAUDE_FIXTURE_TURN env={report}");

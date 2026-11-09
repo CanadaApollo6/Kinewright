@@ -742,8 +742,12 @@ impl HostCommandOwner {
             return Err(refused("task prompt endpoint missing"));
         };
         let payload = self.codex_prompt(task, &payload, &live)?;
-        if payload.len() > crate::protocol::limits::FRAME_BYTES / 2 {
-            return Err(refused("native prompt capacity"));
+        if payload.len() > crate::job_guardian::protocol::INPUT_BYTES {
+            return Err(HostRefusal::new(
+                "feedback_too_long",
+                crate::job_guardian::protocol::INPUT_TOO_LONG,
+            )
+            .into());
         }
         let prompt = std::str::from_utf8(&payload).map_err(refused)?;
         let program = native_launcher::program(&profile, prompt).map_err(refused)?;
@@ -938,8 +942,15 @@ impl HostCommandOwner {
         identity: &ExecutionIdentity,
         text: &str,
     ) -> Result<(), HostError> {
-        if text.is_empty() || text.len() > crate::protocol::limits::FRAME_BYTES / 2 {
+        if text.is_empty() {
             return Err(refused("native steering capacity"));
+        }
+        if text.len() > crate::job_guardian::protocol::INPUT_BYTES {
+            return Err(HostRefusal::new(
+                "feedback_too_long",
+                crate::job_guardian::protocol::INPUT_TOO_LONG,
+            )
+            .into());
         }
         let mut state = self.native_projection(producer, identity)?;
         if state.effects.len() >= ITEM_LIMIT {

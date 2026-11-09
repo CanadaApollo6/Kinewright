@@ -353,7 +353,20 @@ pub(crate) fn wait_on_launch_error(
     let mut owner = host
         .lock()
         .map_err(|_| std::io::Error::other("host owner poisoned"))?;
-    if resumable {
+    if resumable
+        && matches!(error.get_ref().and_then(|cause| cause.downcast_ref::<HostError>()), Some(HostError::Refused(detail)) if detail.code == "feedback_too_long")
+    {
+        let producer = owner.run_producer(run).map_err(std::io::Error::other)?;
+        owner
+            .record_runtime_wait(
+                &producer,
+                run,
+                crate::job_guardian::protocol::INPUT_TOO_LONG,
+                false,
+                RunWait::Provider,
+            )
+            .map_err(std::io::Error::other)?;
+    } else if resumable {
         wait_for_failure(&mut owner, run, error).map_err(std::io::Error::other)?;
     } else {
         let producer = owner.run_producer(run).map_err(std::io::Error::other)?;

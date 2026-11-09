@@ -252,8 +252,8 @@ pub(crate) fn sandbox(
     })
 }
 
-/// C6: Claude Code's fixed argv. The prompt is last, after `--`, so the
-/// variadic flags cannot swallow it and `context_matches` can drop it.
+/// Claude Code's fixed argv. The user prompt is exclusively file-backed stdin;
+/// every argv entry is an immutable launch setting included in certification.
 /// `--tools ""` removes every built-in tool schema; `--allowedTools` only
 /// grants permission to the host's MCP tools and filters no schema.
 /// `--strict-mcp-config` loads only the host endpoint; `--restricted` skips
@@ -263,7 +263,6 @@ pub(crate) fn sandbox(
 fn claude_arguments(
     binding: &adapters::AttemptBinding,
     config: &kinewright_core::SessionConfig,
-    prompt: &str,
 ) -> io::Result<Vec<String>> {
     let bootstrap = crate::writer_host::mcp_credentials(binding.endpoint())
         .ok_or_else(|| io::Error::other("private host MCP credentials unavailable"))?;
@@ -281,7 +280,7 @@ fn claude_arguments(
             }
         }
     });
-    claude_argv(&mcp, config, prompt)
+    claude_argv(&mcp, config)
 }
 
 /// The built-in plugins Claude Code 2.1.317 loads in a print-mode session,
@@ -297,7 +296,6 @@ const CLAUDE_BUILTIN_PLUGINS: [&str; 3] = [
 pub(crate) fn claude_argv(
     mcp: &serde_json::Value,
     config: &kinewright_core::SessionConfig,
-    prompt: &str,
 ) -> io::Result<Vec<String>> {
     let allowed = config
         .tool_names
@@ -357,7 +355,6 @@ pub(crate) fn claude_argv(
     if let Some(effort) = &config.effort {
         arguments.extend(["--effort".into(), effort.clone()]);
     }
-    arguments.extend(["--".into(), prompt.into()]);
     Ok(arguments)
 }
 
@@ -585,20 +582,20 @@ pub(crate) fn recipe(
             } else {
                 return Err(io::Error::other("private host MCP credentials unavailable"));
             }
-            arguments.push(prompt.into());
+            arguments.push("-".into());
         }
-        "claude" => arguments.extend(claude_arguments(binding, config, prompt)?),
+        "claude" => arguments.extend(claude_arguments(binding, config)?),
         #[cfg(any(test, feature = "test-util"))]
         "scripted" => arguments.extend([
             scratch.to_string_lossy().into_owned(),
             "s4b-codex".into(),
-            prompt.into(),
+            "-".into(),
         ]),
         #[cfg(any(test, feature = "test-util"))]
         "scripted-claude" => arguments.extend([
             scratch.to_string_lossy().into_owned(),
             "s4b-claude".into(),
-            prompt.into(),
+            "-".into(),
         ]),
         _ => return Err(io::Error::other("provider recipe unavailable")),
     }
@@ -615,6 +612,9 @@ pub(crate) fn recipe(
             .and_then(|mount| mount.source.parent().map(std::path::Path::to_path_buf)),
     };
     let result = Program {
+        input: Some(crate::job_guardian::protocol::InputBinding::new(
+            prompt.as_bytes(),
+        )?),
         image: Some(crate::job_guardian::protocol::ExecutableImage {
             digest,
             source: None,
@@ -711,10 +711,9 @@ pub(crate) fn context_matches(
             })
     }
     let context = &profile.runtime().launch_context;
-    let mut options = program.arguments.clone();
-    options.pop();
+    let options = &program.arguments;
     if hex(&context.environment_digest) != digest(&serde_json::to_vec(&program.environment)?)
-        || hex(&context.settings_digest) != digest(&serde_json::to_vec(&options)?)
+        || hex(&context.settings_digest) != digest(&serde_json::to_vec(options)?)
     {
         return Err(io::Error::other(
             "provider effective launch context changed",
@@ -1018,6 +1017,12 @@ impl NativeGuardianLauncher {
             .ok_or_else(|| io::Error::other("qualified image missing"))?;
         let sealed = self.images.get(&actual.executable, &image.digest)?;
         image.source = Some(crate::executable_images::source(&sealed));
+        let input_binding = actual
+            .input
+            .as_mut()
+            .ok_or_else(|| io::Error::other("native input binding missing"))?;
+        let input = crate::job_guardian::input::seal(immutable.bytes(), input_binding)?;
+        input_binding.source = Some(crate::job_guardian::input::source(&input));
         let profile = CertifiedProfile::linux_allowlist();
         let mut claim_guard = self
             .claim
@@ -1038,6 +1043,7 @@ impl NativeGuardianLauncher {
             &profile,
         )?;
         drop(claim_guard);
+        drop(input); // Namespace init owns its verified read-only copy now.
         let control = Arc::new(Mutex::new(native));
         let mut startup = StartupCleanup {
             owner: self.owner.clone(),
@@ -1071,8 +1077,8 @@ impl NativeGuardianLauncher {
                 .unwrap_or_default()
                 .as_bytes(),
         )?;
-        // C5 fix 7: the provider's stdin ends here, before COMMIT. Only the
-        // streams the host reads cross into the reader thread.
+        // The unused socket reaches EOF before COMMIT. The provider receives
+        // the verified sealed file instead, with no writer to hold EOF open.
         let pipes = pipes.into_reader();
         #[cfg(test)]
         if self.lose_commit_ack {
@@ -1328,8 +1334,13 @@ struct RestrictedSession {
 }
 impl AgentSession for RestrictedSession {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
-        if text.is_empty() || text.len() > crate::protocol::limits::FRAME_BYTES / 2 {
+        if text.is_empty() {
             return Err(AgentError::Protocol("provider prompt capacity".into()));
+        }
+        if text.len() > crate::job_guardian::protocol::INPUT_BYTES {
+            return Err(AgentError::Protocol(
+                crate::job_guardian::protocol::INPUT_TOO_LONG.into(),
+            ));
         }
         if let Some(first) = self.first.take() {
             return if first == text {

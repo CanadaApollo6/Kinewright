@@ -9,9 +9,10 @@ use crate::orchestration::{
     AdmittedAttempt,
     adapters::{
         AttemptBinding, AuthenticationMode, AuthorizedInvocation, CertificationRefusal,
-        ConnectorRuntimeChecks, ConnectorSpecification, ContainedSession, CredentialFile,
-        CredentialStoreScope, EffectiveAuthEvidence, EffectiveLaunchContext, ExecutableIdentity,
-        GuardianLauncher, LaunchError, RuntimeQualification, SandboxPolicy, available_connectors,
+        CertifiedConnectorProfile, ConnectorRuntimeChecks, ConnectorSpecification,
+        ContainedSession, CredentialFile, CredentialStoreScope, EffectiveAuthEvidence,
+        EffectiveLaunchContext, ExecutableIdentity, GuardianLauncher, LaunchError,
+        RuntimeQualification, SandboxPolicy, available_connectors,
     },
     orchestration_records::{
         AttemptOutcome, AttemptState, DependencyReservation, EffectState, ExecutionIdentity,
@@ -103,6 +104,18 @@ impl ScriptedLauncher {
             profile,
             std::str::from_utf8(invocation.invocation().bytes()).map_err(io_error)?,
         )?;
+        let binding = program
+            .input
+            .as_ref()
+            .ok_or_else(|| io_error("eval input binding missing"))?;
+        let mut input = crate::job_guardian::input::seal(invocation.invocation().bytes(), binding)?;
+        let mut received = String::new();
+        std::io::Read::read_to_string(&mut input, &mut received)?;
+        if received.as_bytes() != invocation.invocation().bytes() {
+            return Err(io_error("eval stdin bytes changed"));
+        }
+        let input_digest = kinewright_media::sha256_bytes(received.as_bytes());
+        drop(input);
         let mut locked = host.lock().map_err(io_error)?;
         let producer = locked.run_producer(&identity.run).map_err(io_error)?;
         let mut state = locked
@@ -143,8 +156,7 @@ impl ScriptedLauncher {
             endpoint: profile.binding().endpoint().into(),
             identity: serde_json::to_value(&identity).map_err(io_error)?,
             brief: serde_json::to_value(&brief).map_err(io_error)?,
-            prompt: String::from_utf8(invocation.invocation().bytes().to_vec())
-                .map_err(io_error)?,
+            prompt: received,
             fixtures: self.fixtures.lock().map_err(io_error)?.clone(),
             child_index,
         };
@@ -154,8 +166,10 @@ impl ScriptedLauncher {
             let mut trace = self.trace.lock().map_err(io_error)?;
             trace.scripted_sends += 1;
             trace.recipes += 1;
+            trace.input_hashes.push(serde_json::json!({"before":binding.sha256,"after":input_digest,"bytes":binding.byte_length,"role":brief.role}));
             trace.prompts.push(context.prompt.clone());
             trace.sends.push(json!({"identity":context.identity,"brief":context.brief,"accepted_candidate":candidate_base}));
+            trace.recipe_argv.push(program.arguments.clone());
             trace.recipe_argument_counts.push(program.arguments.len());
             trace.recipe_bytes.push(serde_json::to_vec(&program)?.len());
             let size = crate::te1_eval::recipe::measure(
@@ -163,6 +177,9 @@ impl ScriptedLauncher {
                 &json!({"identity":context.identity,"brief":context.brief,"fixtures":context.fixtures,"endpoint":context.endpoint}),
             );
             trace.recipe_sizes.push(size);
+            trace
+                .capacity_sizes
+                .extend(capacity_recipes(profile, &context.prompt)?);
         }
         let trace = self.trace.clone();
         let script = self.script.clone();
@@ -230,6 +247,69 @@ impl HostCommandOwner {
         }
         self.publish_native(producer, state, identity, vec![])
     }
+}
+
+// Conservative metadata capacity only: build each served role's real recipe
+// with the longest offered model/options, then also expand every host-home
+// prefix to a 255-byte home. The expanded paths are not executed or opened.
+fn capacity_recipes(profile: &CertifiedConnectorProfile, prompt: &str) -> io::Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    let selection = crate::orchestration::specialist_setting::specialist_choices()
+        .into_iter()
+        .filter(|s| s.connector == profile.selection().connector)
+        .max_by_key(|s| serde_json::to_vec(s).unwrap().len())
+        .ok_or_else(|| io_error("capacity model/options unavailable"))?;
+    for role in [
+        crate::orchestration::orchestration_records::Role::Director,
+        crate::orchestration::orchestration_records::Role::Editor,
+        crate::orchestration::orchestration_records::Role::Reviewer,
+        crate::orchestration::orchestration_records::Role::Motion,
+        crate::orchestration::orchestration_records::Role::Audio,
+        crate::orchestration::orchestration_records::Role::Colour,
+    ] {
+        let mut config = profile.session_config().clone();
+        config.model = Some(selection.model.clone());
+        for option in &selection.options {
+            match option.name.as_str() {
+                "model_reasoning_effort" | "effort" => config.effort = Some(option.value.clone()),
+                "service_tier" => config.service_tier = Some(option.value.clone()),
+                _ => return Err(io_error("capacity option unsupported")),
+            }
+        }
+        config.tool_names = Some(
+            crate::orchestration::task_manifest::names(role)
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+        );
+        let recipe = crate::native_launcher::recipe(
+            profile.specification(),
+            profile.binding(),
+            profile.runtime(),
+            &config,
+            prompt,
+        )?;
+        let text = serde_json::to_string(&recipe)?;
+        let path = profile.binding().working_directory().to_string_lossy();
+        let expanded = path
+            .strip_prefix("/home/")
+            .and_then(|p| p.split('/').next())
+            .map_or(text.len(), |user| {
+                text.replace(
+                    &format!("/home/{user}/"),
+                    &format!("/home/{}/", "h".repeat(249)),
+                )
+                .len()
+            });
+        rows.push(json!({"role":role,"selection":selection,"home_bytes":std::env::var("HOME").map_err(io_error)?.len(),"program_bytes":text.len(),"all_home_paths_255_bytes":expanded}));
+    }
+    if profile.specification().provider() == "codex" {
+        crate::native_runtime::write_model_catalog(
+            profile.binding().working_directory(),
+            profile.session_config().model.as_deref(),
+        )?;
+    }
+    Ok(rows)
 }
 
 /// Synthetic qualification reads only files created beneath this run's temp
@@ -352,8 +432,7 @@ fn synthetic_runtime(
         "synthetic prompt",
     )?;
     result.launch_context.environment_digest = digest(&program.environment)?;
-    let mut args = program.arguments;
-    args.pop();
+    let args = program.arguments;
     result.launch_context.settings_digest = digest(&args)?;
     result.authentication.context = result.launch_context.clone();
     Ok(result)

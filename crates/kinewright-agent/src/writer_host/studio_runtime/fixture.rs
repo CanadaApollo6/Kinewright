@@ -330,8 +330,7 @@ impl ProfileFactory for Factory {
         let profile =
             certify_connector(self.0.connector, binding.clone(), self).map_err(io::Error::other)?;
         let program = crate::native_launcher::program(&profile, "placeholder")?;
-        let mut options = program.arguments;
-        options.pop();
+        let options = program.arguments;
         let mut checks = self
             .0
             .checks

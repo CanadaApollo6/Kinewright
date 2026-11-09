@@ -135,8 +135,7 @@ fn native_profile_for(
     let profile = certify_connector(provider, binding.clone(), &checks).unwrap();
     let program = crate::native_launcher::program(&profile, "placeholder").unwrap();
     checks.0.launch_context.environment_digest = native_digest(&program.environment);
-    let mut arguments = program.arguments;
-    arguments.pop();
+    let arguments = program.arguments;
     checks.0.launch_context.settings_digest = native_digest(&arguments);
     checks.0.authentication.context = checks.0.launch_context.clone();
     let profile = certify_connector(provider, binding, &checks).unwrap();
