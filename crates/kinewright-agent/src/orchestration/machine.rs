@@ -328,6 +328,7 @@ pub(crate) fn prepare_with_attention(
         RunProjection {
             edit_consent: None,
             edit_approvals: Vec::new(),
+            edit_applications: vec![],
             run: envelope.identity("run")?,
             sequence: 0,
             control_revision: revision.clone(),

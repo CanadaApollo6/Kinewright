@@ -587,13 +587,50 @@ fn te15_b21_run_details_lists_the_approved_private_batch() {
     page.edit_approvals
         .push(kinewright_agent::writer_host::EditApproval {
             task: page.projection.tasks[0].id.clone(),
-            description: "Plan removes 2 clips and 0 tracks - approve?".into(),
+            removed_clips: 2,
+            removed_tracks: 0,
+            applied: true,
+            issue: None,
             digest: "a".repeat(64),
         });
     let state = RunState::of(&page);
     assert_eq!(
         state.view.edit_approvals,
-        ["Approved private-branch edit: Plan removes 2 clips and 0 tracks"],
+        ["Removed 2 clips in the draft version. Your project is unchanged until you choose it."],
         "B21_PLAIN_APPROVAL_DETAILS"
     );
+}
+
+#[test]
+fn te15_b21f_details_distinguish_unapplied_integrity_and_summary() {
+    let (_project, attachment, run) = wait_fixture();
+    let mut page = with_host(&attachment, |port| port.run_view(&run).unwrap());
+    let row = kinewright_agent::writer_host::EditApproval {
+        task: page.projection.tasks[0].id.clone(),
+        removed_clips: 2,
+        removed_tracks: 0,
+        applied: true,
+        issue: None,
+        digest: "a".repeat(64),
+    };
+    page.edit_approvals = vec![row.clone(); 6];
+    let mut pending = row.clone();
+    pending.applied = false;
+    page.edit_approvals.push(pending);
+    let mut bad = row;
+    bad.issue = Some("bad".into());
+    bad.applied = false;
+    page.edit_approvals.push(bad);
+    let view = RunState::of(&page).view;
+    assert_eq!(view.edit_approvals.len(), 3, "FOL_COLLAPSED_DETAILS");
+    assert!(view.edit_approvals[0].contains("6 edits removed 12 clips"));
+    assert!(
+        view.edit_approvals[1].contains("changes are not confirmed"),
+        "FOL_UNAPPLIED_WORDS"
+    );
+    assert!(
+        view.edit_approvals[2].contains("could not be verified"),
+        "FOL_INTEGRITY_WORDS"
+    );
+    assert!(view.edit_approvals.iter().all(|s| !s.contains("approve?")));
 }

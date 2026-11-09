@@ -611,7 +611,7 @@ impl McpServer {
             Arc::clone(&incidents),
         );
         handler.host_scoped = true;
-        handler.task_control = control;
+        handler.task_control = control.map(|c| c.with_confirmations(confirmations.clone()));
         if let Some(endpoint) = task {
             handler = handler.with_task_endpoint(endpoint);
         }
@@ -2814,7 +2814,11 @@ impl KinewrightMcp {
         if let Some(endpoint) = &self.task_endpoint
             && let Err(error) = endpoint.validate_batch(&before, operations)
         {
-            return Ok(error_text(error));
+            return Ok(error_text(if self.task_control.is_some() {
+                format!("consent_policy: {error}")
+            } else {
+                error
+            }));
         }
         if let Err(error) = self.ensure_verified_patched_sources(&before, operations) {
             return Ok(error_text(error));
@@ -9237,7 +9241,15 @@ impl KinewrightMcp {
         operations: Vec<Operation>,
     ) -> Result<PreparedEditPlan, String> {
         if let Some(endpoint) = &self.task_endpoint {
-            endpoint.validate_batch(document, &operations)?;
+            endpoint
+                .validate_batch(document, &operations)
+                .map_err(|e| {
+                    if self.task_control.is_some() {
+                        format!("consent_policy: {e}")
+                    } else {
+                        e
+                    }
+                })?;
         }
         if let Some(control) = &self.task_control {
             control

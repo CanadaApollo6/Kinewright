@@ -526,6 +526,7 @@ mod tests {
         let state = RunProjection {
             edit_consent: None,
             edit_approvals: Vec::new(),
+            edit_applications: vec![],
             run: run.clone(),
             sequence: 1,
             control_revision: id(5),

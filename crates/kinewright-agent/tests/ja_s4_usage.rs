@@ -544,6 +544,7 @@ fn update(envelope: &OrchestrationEnvelope, accounting_ref: ObjectRef) -> Valida
     let projection = RunProjection {
         edit_consent: None,
         edit_approvals: Vec::new(),
+        edit_applications: vec![],
         run: id(2),
         sequence: 1,
         control_revision: id(6),

@@ -82,6 +82,7 @@ pub(crate) fn is_capability(name: &str) -> bool {
 #[derive(Clone)]
 pub(crate) struct TaskMcp {
     host: Weak<Mutex<HostCommandOwner>>,
+    confirmations: Option<crate::ConfirmationBroker>,
     auth: HostAuth,
     endpoint: TaskEndpoint,
     issuer: Arc<Mutex<Option<IssuerId>>>,
@@ -205,6 +206,10 @@ pub(crate) fn refusal_code(
 }
 
 impl TaskMcp {
+    pub(crate) fn with_confirmations(mut self, broker: crate::ConfirmationBroker) -> Self {
+        self.confirmations = Some(broker);
+        self
+    }
     pub(crate) fn record_size(&self, tool: &'static str, bytes: Option<u64>) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -279,6 +284,7 @@ impl TaskMcp {
     ) -> Self {
         Self {
             host,
+            confirmations: None,
             auth,
             endpoint,
             issuer: Arc::default(),
@@ -429,11 +435,13 @@ impl TaskMcp {
                 expected_revision: kinewright_core::TimelineRevision,
             }
             let step: Step = serde_json::from_value(arguments)?;
-            let core = host.hooks.runs[&state.run].tasks[&task].core();
-            let history = self
-                .endpoint
-                .history_step(core, step.expected_revision, name == "redo_task_edit")
-                .map_err(|_| refused("history step is outside task authority"))?;
+            let core = host.hooks.runs[&state.run].tasks[&task].core().clone();
+            drop(host);
+            let history = self.history_with_edit_consent(
+                &core,
+                step.expected_revision,
+                name == "redo_task_edit",
+            )?;
             return Ok(json!({"history":history}));
         }
         let mut arguments = arguments;

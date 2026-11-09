@@ -328,6 +328,7 @@ fn projection_refs(state: &RunProjection, refs: &mut Vec<ObjectRef>) -> Result<(
     validate_projection(state)?;
     refs.extend(state.edit_consent.clone());
     refs.extend(state.edit_approvals.clone());
+    refs.extend(state.edit_applications.clone());
     for task in &state.tasks {
         brief_refs(&task.brief, refs)?;
         refs.extend(task.progress.feedback.clone());
@@ -476,6 +477,7 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
         .edit_consent
         .iter()
         .chain(&state.edit_approvals)
+        .chain(&state.edit_applications)
         .any(|r| r.record_kind != RecordKind::OwnedEvidence)
     {
         return Err(Refusal::InvalidState);
@@ -489,6 +491,7 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
             state.results.len(),
             state.usage.len(),
             state.edit_approvals.len(),
+            state.edit_applications.len(),
         ]
         .into_iter()
         .any(|n| n > ITEM_LIMIT)
@@ -731,6 +734,25 @@ fn retired_attempt_refs(
         refs.push(attempt.recovery_ref.clone());
     }
     if projects.len() > 1 {
+        return Err(Refusal::ScopeConflict);
+    }
+    Ok(())
+}
+
+/// Consent is fixed at admission; audit entries can only be appended.
+pub fn validate_projection_successor(
+    before: &RunProjection,
+    after: &RunProjection,
+) -> Result<(), Refusal> {
+    validate_projection(after)?;
+    if after.edit_consent != before.edit_consent {
+        return Err(Refusal::ScopeConflict);
+    }
+    if !after.edit_approvals.starts_with(&before.edit_approvals)
+        || !after
+            .edit_applications
+            .starts_with(&before.edit_applications)
+    {
         return Err(Refusal::ScopeConflict);
     }
     Ok(())

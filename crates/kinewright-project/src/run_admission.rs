@@ -736,6 +736,7 @@ mod tests {
         let state = RunProjection {
             edit_consent: None,
             edit_approvals: Vec::new(),
+            edit_applications: vec![],
             run: id(),
             sequence: 0,
             control_revision: id(),

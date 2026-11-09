@@ -238,13 +238,20 @@ impl TaskEndpoint {
             .lock()
             .map_err(|_| "task_ingress_poisoned".into())
     }
-    pub(crate) fn history_step(
+    pub(crate) fn preview_history_step(
         &self,
         core: &Core,
         expected: kinewright_core::TimelineRevision,
         redo: bool,
-    ) -> Result<kinewright_core::HistorySnapshot, String> {
-        let _gate = self.admit()?;
+    ) -> Result<
+        (
+            kinewright_core::HistorySnapshot,
+            kinewright_core::HistorySnapshot,
+            Vec<Operation>,
+        ),
+        String,
+    > {
+        self.check_live()?;
         if !self.matches_core(core) {
             return Err("task actor changed".into());
         }
@@ -277,6 +284,7 @@ impl TaskEndpoint {
             },
             &boundary.operations,
         )?;
+        let operations = boundary.operations.clone();
         let private = Core::spawn((*history.baseline).clone()).map_err(|e| e.to_string())?;
         private
             .restore_history(history.clone())
@@ -292,6 +300,16 @@ impl TaskEndpoint {
         self.0
             .policy
             .validate_history_change(&history.document, &after.document)?;
+        Ok((history, after, operations))
+    }
+    pub(crate) fn history_step(
+        &self,
+        core: &Core,
+        expected: kinewright_core::TimelineRevision,
+        redo: bool,
+    ) -> Result<kinewright_core::HistorySnapshot, String> {
+        let _gate = self.admit()?;
+        let (_, after, _) = self.preview_history_step(core, expected, redo)?;
         core.request(if redo {
             kinewright_core::Command::Redo
         } else {

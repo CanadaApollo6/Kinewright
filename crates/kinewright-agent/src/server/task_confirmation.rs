@@ -5,6 +5,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Debug)]
+pub(crate) enum TaskRequestError {
+    Capacity,
+    Unavailable(String),
+}
+impl TaskRequestError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Capacity => "consent_broker_capacity",
+            Self::Unavailable(_) => "consent_broker",
+        }
+    }
+}
+impl std::fmt::Display for TaskRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capacity => f.write_str("confirmation capacity"),
+            Self::Unavailable(reason) => f.write_str(reason),
+        }
+    }
+}
 pub(crate) struct TaskConfirmation {
     broker: ConfirmationBroker,
     id: u64,
@@ -61,7 +82,7 @@ impl ConfirmationBroker {
         &self,
         binding: &serde_json::Value,
         description: String,
-    ) -> Result<TaskConfirmation, String> {
+    ) -> Result<TaskConfirmation, TaskRequestError> {
         #[cfg(test)]
         let binding = {
             let mut value = binding.clone();
@@ -71,7 +92,8 @@ impl ConfirmationBroker {
             value
         };
         let digest = kinewright_media::sha256_bytes(
-            &serde_json::to_vec(&binding).map_err(|e| e.to_string())?,
+            &serde_json::to_vec(&binding)
+                .map_err(|e| TaskRequestError::Unavailable(e.to_string()))?,
         );
         let id = self
             .next_id
@@ -80,13 +102,13 @@ impl ConfirmationBroker {
         let mut bound = self
             .task_pending
             .lock()
-            .map_err(|_| "confirmation broker stopped")?;
+            .map_err(|_| TaskRequestError::Unavailable("confirmation broker stopped".into()))?;
         let mut pending = self
             .pending
             .lock()
-            .map_err(|_| "confirmation broker stopped")?;
+            .map_err(|_| TaskRequestError::Unavailable("confirmation broker stopped".into()))?;
         if pending.len() >= kinewright_project::orchestration_records::ITEM_LIMIT {
-            return Err("confirmation capacity".into());
+            return Err(TaskRequestError::Capacity);
         }
         bound.insert(id, digest.clone());
         pending.insert(id, sender);

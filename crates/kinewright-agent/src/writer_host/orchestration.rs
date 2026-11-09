@@ -154,8 +154,15 @@ pub(super) struct HostRun {
     #[cfg(target_os = "linux")]
     pub pending_provider_wait: Option<String>,
 }
+#[cfg(test)]
+pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
+    // A fixture can present an old/corrupt grant at the read boundary without rewriting a fixed grant.
+    #[cfg(all(test, target_os = "linux"))]
+    pub consent_fixture: Option<super::task_mcp::consent::ConsentFixture>,
+    #[cfg(test)]
+    pub consent_apply_hook: Option<ConsentApplyHook>,
     pub completion_failure: Option<(CommandId, String)>,
     #[cfg(test)]
     pub completion_cut: Option<crate::orchestration::orchestration_records::CompletionStep>,
@@ -1287,7 +1294,7 @@ impl HostCommandOwner {
             }
         });
         Ok(RunViewPage {
-            edit_approvals: self.edit_approval_details(&projection)?,
+            edit_approvals: self.edit_approval_details(&projection),
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,

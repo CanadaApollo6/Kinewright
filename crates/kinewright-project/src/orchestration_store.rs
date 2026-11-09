@@ -143,6 +143,18 @@ impl ProjectBundle {
         {
             return Err(invalid("successor isolation"));
         }
+        if let Some(previous) = previous {
+            let reference = index
+                .cumulative
+                .get(&transition.projection().run)
+                .unwrap_or(&previous.snapshot);
+            let record = self.store.read_record::<OrchestrationRecord>(reference)?;
+            let OrchestrationPayload::Snapshot(before) = &record.payload else {
+                return Err(invalid("previous snapshot kind"));
+            };
+            super::validate_projection_successor(before, transition.projection())
+                .map_err(invalid)?;
+        }
         Ok(())
     }
     pub(crate) fn stage_orchestration_update(

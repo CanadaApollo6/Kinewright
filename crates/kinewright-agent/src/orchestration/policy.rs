@@ -30,7 +30,7 @@ pub struct TaskPolicy {
 
 macro_rules! operation_names {
     ($($variant:ident => $name:literal),+ $(,)?) => {
-        const OPERATION_NAMES: &[&str] = &[$($name),+];
+        pub(crate) const OPERATION_NAMES: &[&str] = &[$($name),+];
 
         /// Return the compact schema name, exhaustively covering Core operations.
         #[must_use]

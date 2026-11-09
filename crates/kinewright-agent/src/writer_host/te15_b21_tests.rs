@@ -26,6 +26,9 @@ mod tests {
         b21_start_role(Role::Editor)
     }
     fn b21_start_role(role: Role) -> B21 {
+        b21_start_options(role, false)
+    }
+    fn b21_start_options(role: Role, legacy: bool) -> B21 {
         let mut document = Document::default();
         kinewright_core::apply_batch(
             &mut document,
@@ -119,6 +122,25 @@ mod tests {
             .lock()
             .unwrap()
             .native_readiness_checks = Some(Arc::new(Te15Readiness::default()));
+        // Explicitly reserve the identities used by follow-up creation witnesses.
+        f.brief.scope.objects.insert("clip:4".into());
+        f.brief.scope.objects.insert("track:88".into());
+        f.brief.scope.tracks.insert("track:88".into());
+        f.brief
+            .scope
+            .bus_sidechain_closure
+            .insert("track:88".into());
+        if legacy {
+            f.host
+                .owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .hooks
+                .consent_fixture =
+                Some(crate::writer_host::task_mcp::consent::ConsentFixture::Missing);
+        }
         let (run, parent, director) = c4_director(&f);
         let child = b20_assign(&f, &run, &parent, &director, role);
         b20_retire(&f, &run, &parent);
@@ -270,15 +292,29 @@ mod tests {
         assert_eq!(page.edit_approvals.len(), 1, "B21_VISIBLE_APPROVAL");
         assert_eq!(page.edit_approvals[0].task, b.child);
         assert_eq!(
-            page.edit_approvals[0].description,
-            "Plan removes 2 clips and 0 tracks - approve?"
+            (
+                page.edit_approvals[0].removed_clips,
+                page.edit_approvals[0].removed_tracks,
+                page.edit_approvals[0].applied
+            ),
+            (2, 0, true)
         );
         assert!(b.mcp.server.confirmations().pending_requests().is_empty());
     }
     fn b21_replace_state(b: &B21, change: impl FnOnce(&mut RunProjection)) {
         let mut state = b.f.projection(&b.run);
         change(&mut state);
-        publish_projection(&b.f, &b.f.producer_client(&b.run), &b.run, state, None);
+        b.f.host
+            .owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .hooks
+            .consent_fixture = Some(match state.edit_consent {
+            Some(r) => crate::writer_host::task_mcp::consent::ConsentFixture::Record(r),
+            None => crate::writer_host::task_mcp::consent::ConsentFixture::Missing,
+        });
     }
     fn b21_assert_refused_unchanged(
         b: &B21,
@@ -311,7 +347,7 @@ mod tests {
         assert!(
             serde_json::to_string(&reply)
                 .unwrap()
-                .contains("consent_required"),
+                .contains("consent_missing"),
             "B21_MISSING_GRANT_WORDS"
         );
         let reply = b21_commit(&b, &prepared);
@@ -446,7 +482,7 @@ mod tests {
         assert!(
             serde_json::to_string(&reply)
                 .unwrap()
-                .contains("consent_required"),
+                .contains("consent_missing"),
             "B21_ARGUMENT_IS_NOT_CONSENT"
         );
     }
@@ -571,8 +607,11 @@ mod tests {
                     .admit_host_grant(&serde_json::to_vec(&record).unwrap())
                     .unwrap(),
             );
+            host.hooks.consent_fixture = Some(match state.edit_consent {
+                Some(r) => crate::writer_host::task_mcp::consent::ConsentFixture::Record(r),
+                None => crate::writer_host::task_mcp::consent::ConsentFixture::Missing,
+            });
             drop(host);
-            publish_projection(&b.f, &b.f.producer_client(&b.run), &b.run, state, None);
             let reply = b21_prepare(&b);
             b21_assert_refused_unchanged(&b, &reply, &before);
         }
@@ -725,5 +764,8 @@ mod tests {
             "B21_AUDIT_CAPACITY_NO_EDIT"
         );
         assert_eq!(b.f.projection(&b.run).edit_approvals.len(), ITEM_LIMIT);
+    }
+    mod consent_followups {
+        include!("te15_b21_followup_tests.rs");
     }
 }

@@ -85,6 +85,7 @@ fn projection(envelope: &OrchestrationEnvelope) -> RunProjection {
     RunProjection {
         edit_consent: None,
         edit_approvals: Vec::new(),
+        edit_applications: vec![],
         run: envelope.identity("run").unwrap(),
         sequence: 1,
         control_revision: id(14),

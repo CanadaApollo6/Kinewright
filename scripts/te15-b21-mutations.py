@@ -32,7 +32,7 @@ prepare_guard='''                .map_err(|e| e.to_string())?;
         self.ensure_verified_patched_sources(document, &operations)?;'''
 for name,witness in [('missing-grant','missing_grant_refuses_at_prepare_and_commit'),('argument-not-grant','prompt_or_argument_cannot_supply_a_grant')]:
     add(name,[(S,prepare_guard,prepare_guard.replace('.map_err(|e| e.to_string())?;', '.unwrap_or(());'))],H+witness,'B21_REFUSED')
-for field,guard in [('project','consent.project != binding.project'),('run','consent.run != state.run'),('candidate','consent.candidate != state.tasks[0].brief.scope.base.branch\n            || consent.candidate != task.brief.scope.base.branch'),('tracks','!task.brief.scope.tracks.is_subset(&consent.tracks)'),('classes','!operations\n                .iter()\n                .all(|op| class(op).is_some_and(|c| consent.classes.contains(c)))')]:
+for field,guard in [('project','consent.project != binding.project'),('run','consent.run != state.run'),('candidate','consent.candidate != state.tasks[0].brief.scope.base.branch\n            || consent.candidate != task.brief.scope.base.branch'),('tracks','!task.brief.scope.tracks.is_subset(&consent.tracks)'),('classes','!edit\n            .classes(before)?\n            .iter()\n            .all(|c| consent.classes.contains(*c))')]:
     add('grant-'+field,[(C,guard,'false')],H+'grant_cannot_cover_foreign_run_tracks_or_missing_classes','B21_REFUSED')
 for field in ['run','task','attempt','turn','batch_digest']:
     add('exact-'+field,[(C,'if request.digest != digest(&current)? {','if false {')],H+'wrong_'+field+'_refuses','B21_REFUSED')
@@ -66,8 +66,8 @@ add('trim-and-track-classes',[(C,'"trim_clip" => Some("trim"),','"trim_clip" => 
 add('legacy-investigator',[(A+'session.rs','broker.reject(request.id, INVESTIGATOR_CONFIRMATION_REFUSAL);','broker.approve(request.id);')],'session::tests::in2_a_confirmation_inside_a_session_ends_it_with_a_policy_violation',"the request is rejected with the contract's literal reason")
 add('legacy-studio',[(A+'session.rs','broker.reject(request.id, INVESTIGATOR_CONFIRMATION_REFUSAL);','broker.approve(request.id);')],'session::tests::te15_b21_legacy_studio_confirmation_still_rejects_and_stops','B21_LEGACY_STUDIO_REFUSES')
 add('legacy-eval',[(A+'session.rs','if !broker.approve(request.id) {','if !broker.reject(request.id, "refused") {')],'session::tests::in2_the_pump_under_approve_all_approves_and_continues','B21_LEGACY_EVAL_APPROVES')
-add('visible-approval',[(A+'writer_host/orchestration.rs','edit_approvals: self.edit_approval_details(&projection)?,','edit_approvals: vec![],')],H+'pause_cut_is_approved_by_recorded_consent','B21_VISIBLE_APPROVAL')
-add('ui-approval',[( 'crates/kinewright-app/src/studio_run_view.rs','edit_approvals: page\n                .edit_approvals','edit_approvals: Vec::<kinewright_agent::writer_host::EditApproval>::new()')], 'studio_feedback::ja_s3_feedback::te15_b1_fix4::te15_b21_run_details_lists_the_approved_private_batch','B21_PLAIN_APPROVAL_DETAILS','kinewright-app')
+add('visible-approval',[(A+'writer_host/orchestration.rs','edit_approvals: self.edit_approval_details(&projection),','edit_approvals: vec![],')],H+'pause_cut_is_approved_by_recorded_consent','B21_VISIBLE_APPROVAL')
+add('ui-approval',[( 'crates/kinewright-app/src/studio_run_view.rs','edit_approvals: edit_lines(&page.edit_approvals),','edit_approvals: vec![],')], 'studio_feedback::ja_s3_feedback::te15_b1_fix4::te15_b21_run_details_lists_the_approved_private_batch','B21_PLAIN_APPROVAL_DETAILS','kinewright-app')
 # Retained guards adjacent to the real task-server and commit path.
 def load(name, filename):
     spec=importlib.util.spec_from_file_location(name,ROOT/'scripts'/filename)

@@ -645,6 +645,8 @@ pub struct RunProjection {
     pub edit_consent: Option<ObjectRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edit_approvals: Vec<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edit_applications: Vec<ObjectRef>,
     pub sequence: u64,
     pub control_revision: OpaqueRevision,
     pub phase: RunPhase,

@@ -23,18 +23,7 @@ impl RunView {
     pub(crate) fn of(page: &RunViewPage) -> Self {
         let accounting = page.accounting.as_ref();
         Self {
-            edit_approvals: page
-                .edit_approvals
-                .iter()
-                .map(|a| {
-                    format!(
-                        "Approved private-branch edit: {}",
-                        a.description
-                            .strip_suffix(" - approve?")
-                            .unwrap_or(&a.description)
-                    )
-                })
-                .collect(),
+            edit_approvals: edit_lines(&page.edit_approvals),
             runtime_status: page.runtime_status.clone(),
             wait_reason: page.wait_reason.clone(),
             continue_unavailable_reason: page.continue_unavailable_reason.clone(),
@@ -179,6 +168,59 @@ fn usage(totals: Option<&UsageTotals>) -> String {
         .collect::<Vec<_>>()
         .join(" · ")
 }
+fn removal_words(clips: usize, tracks: usize) -> String {
+    let mut parts = Vec::new();
+    if clips > 0 {
+        parts.push(format!(
+            "{clips} {}",
+            if clips == 1 { "clip" } else { "clips" }
+        ));
+    }
+    if tracks > 0 {
+        parts.push(format!(
+            "{tracks} {}",
+            if tracks == 1 { "track" } else { "tracks" }
+        ));
+    }
+    parts.join(" and ")
+}
+fn edit_lines(rows: &[kinewright_agent::writer_host::EditApproval]) -> Vec<String> {
+    let applied = rows
+        .iter()
+        .filter(|r| r.applied && r.issue.is_none())
+        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    if applied.len() > 5 {
+        lines.push(format!("{} edits removed {} in the draft version. Your project is unchanged until you choose it.",applied.len(),removal_words(applied.iter().map(|r|r.removed_clips).sum(),applied.iter().map(|r|r.removed_tracks).sum())));
+    } else {
+        for r in applied {
+            lines.push(format!(
+                "Removed {} in the draft version. Your project is unchanged until you choose it.",
+                removal_words(r.removed_clips, r.removed_tracks)
+            ));
+        }
+    }
+    let pending = rows
+        .iter()
+        .filter(|r| !r.applied && r.issue.is_none())
+        .count();
+    if pending > 0 {
+        lines.push(format!(
+            "{pending} {} approved, but {} changes are not confirmed.",
+            if pending == 1 {
+                "edit was"
+            } else {
+                "edits were"
+            },
+            if pending == 1 { "its" } else { "their" }
+        ));
+    }
+    if rows.iter().any(|r| r.issue.is_some()) {
+        lines.push("Some edit records could not be verified.".into());
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
