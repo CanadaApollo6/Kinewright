@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shards as cs
+import ci_archive as ca
 import slow_tests as st
 
 
@@ -50,6 +51,34 @@ class Sharding(unittest.TestCase):
                 self.assertEqual(len(batch[0]["tests"]), 2)
             self.assertEqual(data, cs.plan(listing(), "fast", count))
 
+    def test_control_family_and_compiler_probe_are_exclusive_without_dropping_names(self):
+        data = listing()
+        names = [cs.CONTROL_PREFIX + "cold_certification_switch", cs.CONTROL_PREFIX + "decode_stop", cs.COMPILER_PROBE]
+        data["rust-suites"]["kinewright_agent"] = {"binary-path": "/target/debug/deps/kinewright_agent-0123456789abcdef",
+                                                   "cwd": "/repo", "testcases": {n: {"ignored": False} for n in names}}
+        data["rust-suites"]["kinewright_media"]["testcases"][cs.DISPLAY_PARITY] = {"ignored": False}
+        neighbor = "display::tests::i5_exact_self_check_requires_gpu"
+        data["rust-suites"]["kinewright_media"]["testcases"][neighbor] = {"ignored": False}
+        result = cs.plan(data, "fast", 8)
+        flat = [u for shard in result["shards"] for u in shard]
+        controls = [u for u in flat if names[0] in u["tests"]]
+        self.assertEqual(len(controls), 1)
+        self.assertEqual(set(controls[0]["tests"]), set(names[:2]))
+        self.assertFalse(controls[0]["isolated"])
+        self.assertEqual(controls[0]["threads"], 1)
+        for name in (names[0], cs.COMPILER_PROBE, cs.DISPLAY_PARITY):
+            shard = next(shard for shard in result["shards"] if any(name in u["tests"] for u in shard))
+            self.assertEqual(len(shard), 1)
+        display = next(u for u in flat if cs.DISPLAY_PARITY in u["tests"])
+        self.assertEqual(display["timeout_seconds"], 1800)
+        self.assertEqual(set(display["tests"]), {cs.DISPLAY_PARITY, neighbor})
+        self.assertFalse(display["isolated"])
+        self.assertEqual(display["threads"], 1)
+        self.assertTrue(next(u for u in flat if cs.COMPILER_PROBE in u["tests"])["compiler_inputs"])
+        expected = [(s["label"], p) for s in result["suites"] for p in s["tests"]]
+        rows = [(result["suites"][u["suite"]]["label"], p, "ok") for u in flat for p in u["tests"]]
+        st.verify_exact_rows(expected, rows)
+
     def test_inventory_rejects_a_dropped_suite_or_an_unlisted_binary(self):
         data = listing()
         data["test-count"] = 8
@@ -82,6 +111,21 @@ class Sharding(unittest.TestCase):
         units = [{"isolated": False, "estimate": 50},
                  *[{"isolated": True, "estimate": x} for x in (120, 100, 90, 80, 70)]]
         self.assertEqual(cs.predicted_seconds(units), 200)
+
+    def test_workflow_matrix_and_conditional_compiler_download(self):
+        with tempfile.TemporaryDirectory(prefix="kinewright-ci-matrix-") as directory:
+            path = Path(directory) / "plan.json"
+            cs.save(path, {"shards": [[{"timeout_seconds": 1800}], [{"compiler_inputs": True}], []]})
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["ci_shards.py", "matrix", "--plan", str(path)]), contextlib.redirect_stdout(output):
+                cs.main()
+            matrix = json.loads(output.getvalue().removeprefix("matrix="))
+            self.assertEqual(matrix, {"include": [{"shard": 0, "timeout": 35}, {"shard": 1, "timeout": 15}, {"shard": 2, "timeout": 15}]})
+            for index, wanted in ((0, "false"), (1, "true"), (2, "false")):
+                output = io.StringIO()
+                with mock.patch.object(sys, "argv", ["ci_shards.py", "requirements", "--plan", str(path), "--index", str(index)]), contextlib.redirect_stdout(output):
+                    cs.main()
+                self.assertEqual(output.getvalue().strip(), "compiler_inputs=" + wanted)
 
     def test_slow_inventory_requires_every_manifest_test_enabled(self):
         entries = [("mcp_server", "mcp1", "source", "any")]
@@ -229,6 +273,42 @@ class Sharding(unittest.TestCase):
             result = cs.load(root / "shard-0.json")
             self.assertFalse(result["completed"])
             self.assertEqual(result["runs"][0]["code"], 124)
+
+
+class ArchiveEnvironment(unittest.TestCase):
+    def test_compiler_inputs_survive_restore_and_target_tmp_exists(self):
+        with tempfile.TemporaryDirectory(prefix="kinewright-ci-archive-") as directory:
+            root = Path(directory)
+            debug = root / "target" / "debug"
+            fingerprint = debug / ".fingerprint" / "agent-123" / "test-lib-agent.json"
+            fingerprint.parent.mkdir(parents=True)
+            fingerprint.write_bytes(b'{"deps":[[1,"project",false,2]]}')
+            library = debug / "deps" / "libproject-123.rlib"
+            library.parent.mkdir()
+            library.write_bytes(b"compiled-library")
+            (library.parent / "test-binary").write_bytes(b"do not duplicate nextest binaries")
+            artifact = root / "artifacts"
+            artifact.mkdir()
+            with mock.patch.object(ca, "ROOT", root):
+                ca.pack_compiler_inputs(artifact)
+                import shutil
+                shutil.rmtree(root / "target")
+                ca.restore_test_environment(artifact, [{"compiler_inputs": True}])
+            self.assertEqual(fingerprint.read_bytes(), b'{"deps":[[1,"project",false,2]]}')
+            self.assertEqual(library.read_bytes(), b"compiled-library")
+            self.assertFalse((library.parent / "test-binary").exists())
+            self.assertTrue((root / "target" / "tmp").is_dir())
+            checksum = artifact / "compiler-inputs.tar.sha256"
+            checksum.write_text("wrong")
+            with mock.patch.object(ca, "ROOT", root), self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                ca.restore_test_environment(artifact, [{"compiler_inputs": True}])
+
+    def test_normal_shard_needs_no_compiler_artifact(self):
+        with tempfile.TemporaryDirectory(prefix="kinewright-ci-archive-") as directory:
+            root = Path(directory)
+            with mock.patch.object(ca, "ROOT", root):
+                ca.restore_test_environment(root / "absent-artifact", [])
+            self.assertTrue((root / "target" / "tmp").is_dir())
 
 
 if __name__ == "__main__":

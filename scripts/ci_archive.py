@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import ci_shards
 import slow_tests as st
 
 ROOT = Path(__file__).resolve().parent.parent
+CARGO_CONFIG = ["--config", str(ROOT / ".cargo" / "ci-test.toml")]
 
 
 def run(args, output=None):
@@ -31,23 +33,27 @@ def build(tier, count):
     directory.mkdir(exist_ok=True)
     archive = directory / "tests.tar.zst"
     features = ["--features", st.feature_list(st.read_manifest())] if tier == "slow" else []
-    run(["cargo", "nextest", "archive", "--locked", "--workspace", *features,
+    run(["cargo", "nextest", "archive", *CARGO_CONFIG, "--timings", "--locked", "--workspace", *features,
          "--archive-file", str(archive)])
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     (directory / "tests.sha256").write_text(digest + "\n")
-    listing = subprocess.check_output(["cargo", "nextest", "list", "--locked", "--workspace",
+    listing = subprocess.check_output(["cargo", "nextest", "list", *CARGO_CONFIG, "--locked", "--workspace",
                                        *features, "--message-format", "json"], cwd=ROOT, text=True)
     compiled = json.loads(listing)
     ci_shards.save(directory / "compiled-list.json", compiled)
     data = ci_shards.plan(compiled, tier, count)
     ci_shards.save(directory / "ci-plan.json", data)
     print(f"compiled inventory: {sum(len(s['tests']) for s in data['suites'])}; estimated shard seconds {data['estimated_seconds']}")
+    for timing in (ROOT / "target" / "cargo-timings").glob("*.html"):
+        shutil.copyfile(timing, directory / timing.name)
+    if tier == "fast" and st.host_os() == "linux":
+        pack_compiler_inputs(directory)
     if tier == "fast":
-        run(["cargo", "test", "--locked", "--workspace", "--doc", "--", "--list"], directory / "doc-list.log")
+        run(["cargo", "test", *CARGO_CONFIG, "--locked", "--workspace", "--doc", "--", "--list"], directory / "doc-list.log")
         docs = ci_shards.doc_inventory((directory / "doc-list.log").read_text(encoding="utf-8"))
         ci_shards.save(directory / "doc-list.json", docs)
-        run(["cargo", "test", "--locked", "--workspace", "--doc"], directory / "docs.log")
+        run(["cargo", "test", *CARGO_CONFIG, "--locked", "--workspace", "--doc"], directory / "docs.log")
         st.verify_exact_rows(docs, st.parse((directory / "docs.log").read_text(encoding="utf-8")))
         if st.host_os() == "linux":
             dynamic = subprocess.check_output(["readelf", "-d", "target/debug/kinewright-eval"], text=True)
@@ -56,7 +62,34 @@ def build(tier, count):
             print(dynamic)
 
 
-def extract():
+def pack_compiler_inputs(directory):
+    archive = directory / "compiler-inputs.tar.gz"
+    debug = ROOT / "target" / "debug"
+    fingerprints = debug / ".fingerprint"
+    libraries = sorted(p for p in (debug / "deps").iterdir() if p.suffix in (".rlib", ".rmeta", ".so", ".dll", ".lib", ".a"))
+    if not fingerprints.is_dir() or not libraries:
+        raise ValueError("compiler fixture inputs were not built")
+    with tarfile.open(archive, "w:gz", compresslevel=1) as output:
+        for path in [fingerprints, *libraries]:
+            output.add(path, arcname=path.relative_to(ROOT))
+    with archive.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    archive.with_suffix(".sha256").write_text(digest + "\n")
+
+
+def restore_test_environment(directory, units):
+    (ROOT / "target" / "tmp").mkdir(parents=True, exist_ok=True)
+    if any(u.get("compiler_inputs", False) for u in units):
+        archive = directory / "compiler-inputs.tar.gz"
+        with archive.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        if digest != archive.with_suffix(".sha256").read_text().strip():
+            raise ValueError("compiler inputs SHA-256 mismatch")
+        with tarfile.open(archive) as source:
+            source.extractall(ROOT, filter="data")
+
+
+def extract(index=None):
     directory = ROOT / "ci-artifacts"
     archive = directory / "tests.tar.zst"
     with archive.open("rb") as source:
@@ -71,6 +104,8 @@ def extract():
     actual = ci_shards.inventory(ci_shards.load(directory / "extracted-list.json"), data["tier"])
     if actual != data["suites"]:
         raise ValueError("extracted test paths or inventory differ from builder")
+    units = data["shards"][index] if index is not None else [u for shard in data["shards"] for u in shard]
+    restore_test_environment(directory, units)
 
 
 def predecessor(pack):
@@ -94,11 +129,12 @@ if __name__ == "__main__":
     parser.add_argument("command", choices=["build", "extract", "pack-predecessor", "restore-predecessor"])
     parser.add_argument("--tier", choices=["fast", "slow"])
     parser.add_argument("--count", type=int)
+    parser.add_argument("--index", type=int)
     args = parser.parse_args()
     os.environ["CARGO_TERM_COLOR"] = "never"
     if args.command == "build":
         build(args.tier, args.count)
     elif args.command == "extract":
-        extract()
+        extract(args.index)
     else:
         predecessor(args.command == "pack-predecessor")

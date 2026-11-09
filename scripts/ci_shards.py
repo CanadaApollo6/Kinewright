@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import slow_tests as st
 
 
+DISPLAY_PARITY = "display::tests::i5_production_workloads_match_ten_frames_exactly"
+COMPILER_PROBE = "writer_host::hooks_tests::tests::s4b_c5_fix2_public_writes_cannot_spend_terminal_reserve"
+CONTROL_PREFIX = "writer_host::hooks_tests::tests::te14_fix1_"
+
+
 def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -59,7 +64,7 @@ def inventory(listing, tier, os_name=None):
     return suites
 
 
-def weights():
+def weights(tier="slow"):
     result = {}
     for line in st.MANIFEST.read_text(encoding="utf-8").splitlines():
         match = re.search(r"#\s*(\d+)/(\d+)", line)
@@ -68,9 +73,9 @@ def weights():
             result[b, p] = int(match.group(1 if st.host_os() == "linux" else 2))
     measured = load(st.ROOT / "ci" / "test-timings.json")
     os_name = st.host_os()
-    for binary, tests in measured["unit_seconds"][os_name].items():
+    for binary, tests in measured["unit_seconds"][os_name][tier].items():
         result.update({(binary, name): seconds for name, seconds in tests.items()})
-    return result, measured["slow_batch_seconds"][os_name]
+    return result, measured["batch_seconds"][os_name][tier]
 
 
 def predicted_seconds(units):
@@ -86,27 +91,48 @@ def predicted_seconds(units):
 
 def plan(listing, tier, count):
     suites = inventory(listing, tier)
-    estimates, slow_batches = weights()
+    estimates, measured_batches = weights(tier)
     units = []
     for suite_index, suite in enumerate(suites):
         split = suite["label"] in ("kinewright_media", "kinewright_agent")
-        groups = [[p] for p in suite["tests"] if p not in suite["ignored"]] if split else [suite["tests"]]
-        if split and suite["ignored"]:
-            groups.append(suite["ignored"])
+        controls = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_agent" and p.startswith(CONTROL_PREFIX)]
+        display_names = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_media" and p.startswith("display::tests::")]
+        rest = [p for p in suite["tests"] if p not in controls and p not in display_names]
+        groups = [[p] for p in rest if p not in suite["ignored"]] if split else [rest]
+        if split and any(p in suite["ignored"] for p in rest):
+            groups.append([p for p in rest if p in suite["ignored"]])
+        if controls:
+            groups.append(controls)
+        if display_names:
+            groups.append(display_names)
         for names in groups:
+            if not names:
+                continue
+            control_batch = names == controls
+            display_batch = names == display_names
+            isolated = split and not control_batch and not display_batch
             cost = sum(estimates.get((suite["label"], p), 60 if p.startswith("pf1_s2c_witness::") else 2) for p in names if p not in suite["ignored"])
             if not split:
                 cost = {"kinewright_app": 342 if tier == "fast" else 28, "mcp_server": 182,
                         "ja_s1_storage": 188, "kinewright_project": 86}.get(suite["label"], max(1, len(names) * 0.02))
                 if len(names) == 1:
                     cost = estimates.get((suite["label"], names[0]), cost)
-                if tier == "slow":
-                    cost = slow_batches.get(suite["label"], cost)
-            units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast", "isolated": split, "estimate": cost})
+                cost = measured_batches.get(suite["label"], cost)
+            display = suite["label"] == "kinewright_media" and DISPLAY_PARITY in names
+            compiler = suite["label"] == "kinewright_agent" and COMPILER_PROBE in names
+            if display:
+                # The old green run exceeded ten minutes. A timeout is a lower
+                # bound, never a successful timing sample for partition weights.
+                cost = 1200
+            units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast",
+                          "isolated": isolated, "estimate": cost, "compiler_inputs": compiler,
+                          "dedicated": display or control_batch or compiler,
+                          "threads": 1 if control_batch else (1 if suite["label"] == "kinewright_media" else 4),
+                          "timeout_seconds": 1800 if display else 600})
     shards = [[] for _ in range(count)]
     ordered = sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"]))
     # Long tests get a runner alone, without waiting behind other test processes.
-    long_tests = [u for u in ordered if u["isolated"] and u["estimate"] > 240][:max(0, count - 2)]
+    long_tests = [u for u in ordered if (u.get("dedicated", False) or (u["isolated"] and u["estimate"] > 240))][:max(0, count - 2)]
     for slot, unit in enumerate(long_tests, 1):
         shards[slot].append(unit)
     available = list(range(1 + len(long_tests), count)) if count > 1 else [0]
@@ -134,7 +160,7 @@ def execute_unit(data, unit, number, index, directory):
         args += ["--exact", *unit["tests"]]
     if data["tier"] == "slow":
         args += ["--show-output"]
-    threads = "1" if suite["label"] == "kinewright_media" else "4"
+    threads = str(unit.get("threads", 1 if suite["label"] == "kinewright_media" else 4))
     args += ["--test-threads", threads]
     log_name = f"shard-{index}-{number}.log"
     log_path = directory / log_name
@@ -146,7 +172,7 @@ def execute_unit(data, unit, number, index, directory):
         log.flush()
         try:
             process = subprocess.run(args, cwd=suite["cwd"], env=env, stdout=log,
-                                     stderr=subprocess.STDOUT, timeout=600)
+                                     stderr=subprocess.STDOUT, timeout=unit.get("timeout_seconds", 600))
             code = process.returncode
         except subprocess.TimeoutExpired:
             code = 124
@@ -267,7 +293,7 @@ def doc_inventory(log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["plan", "run", "verify", "doc-list"])
+    parser.add_argument("command", choices=["plan", "run", "verify", "doc-list", "requirements", "matrix"])
     parser.add_argument("--plan", default="ci-plan.json")
     parser.add_argument("--listing")
     parser.add_argument("--tier", choices=["fast", "slow"])
@@ -283,6 +309,13 @@ def main():
         data = plan(load(args.listing), args.tier, args.count)
         save(args.plan, data)
         print(f"{sum(len(s['tests']) for s in data['suites'])} compiled tests; estimated shard seconds {data['estimated_seconds']}")
+    elif args.command == "requirements":
+        units = load(args.plan)["shards"][args.index]
+        print("compiler_inputs=" + str(any(u.get("compiler_inputs", False) for u in units)).lower())
+    elif args.command == "matrix":
+        matrix = {"include": [{"shard": i, "timeout": max(15, 5 + max((u.get("timeout_seconds", 600) for u in units), default=600) // 60)}
+                              for i, units in enumerate(load(args.plan)["shards"])]}
+        print("matrix=" + json.dumps(matrix, separators=(",", ":")))
     elif args.command == "run":
         run_shard(args.plan, args.index, args.output)
     elif args.command == "doc-list":
