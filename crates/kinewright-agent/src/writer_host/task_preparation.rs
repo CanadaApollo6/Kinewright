@@ -344,12 +344,22 @@ impl HostCommandOwner {
             let reason = self
                 .owner_mut()?
                 .admit_host_grant(kind.words().as_bytes())?;
-            state.wait = RunWait::Provider(WaitDetail {
-                reason,
-                missing: vec![],
-                attempt: Some(identity.attempt.clone()),
-            });
-            state.phase = RunPhase::Interrupted;
+            if state.phase != RunPhase::Paused
+                && !matches!(
+                    state.wait,
+                    RunWait::Files(_)
+                        | RunWait::Provider(_)
+                        | RunWait::ProviderSettings(_)
+                        | RunWait::Replan(_)
+                )
+            {
+                state.wait = RunWait::Provider(WaitDetail {
+                    reason,
+                    missing: vec![],
+                    attempt: Some(identity.attempt.clone()),
+                });
+                state.phase = RunPhase::Interrupted;
+            }
             crate::orchestration::tasks::refresh_cleanup(&mut state);
             return self.publish_native(producer, state, identity, vec![]);
         }
@@ -470,5 +480,47 @@ impl HostCommandOwner {
             return Err(std::io::Error::other("fixture preparation store error").into());
         }
         Ok(())
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetainedFork {
+    pub kind: String,
+    pub task: crate::orchestration::orchestration_records::TaskId,
+    pub base: BranchBinding,
+    pub branch: kinewright_project::bundle_records::BranchId,
+}
+impl HostCommandOwner {
+    pub(super) fn retained_preparation_fork(
+        &self,
+        state: &RunProjection,
+        task: &crate::orchestration::orchestration_records::TaskId,
+    ) -> Result<Option<kinewright_project::bundle_records::BranchId>, HostError> {
+        let record = state
+            .tasks
+            .iter()
+            .find(|t| t.id == *task)
+            .ok_or_else(refused)?;
+        let mut result = None;
+        for reference in &record.progress.decisions {
+            if reference.record_kind
+                != kinewright_project::bundle_records::RecordKind::OwnedEvidence
+            {
+                continue;
+            }
+            let bytes = self.owner()?.store()?.read_evidence(reference)?;
+            if let Ok(intent) = serde_json::from_slice::<RetainedFork>(&bytes) {
+                if intent.kind != "studio_task_fork_v1"
+                    || intent.task != *task
+                    || intent.base != record.brief.scope.base
+                    || result.as_ref().is_some_and(|r| r != &intent.branch)
+                {
+                    return Err(refused());
+                }
+                result = Some(intent.branch);
+            }
+        }
+        Ok(result)
     }
 }

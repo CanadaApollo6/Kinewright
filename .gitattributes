@@ -46,3 +46,6 @@ crates/kinewright-agent/src/job_guardian/input.rs -text
 crates/kinewright-agent/src/job_guardian/protocol.rs -text
 crates/kinewright-agent/src/job_guardian/linux.rs -text
 crates/kinewright-agent/src/orchestration/provider_pipes.rs -text
+
+# Authenticated negative recovery graphs; preserve compressed fixture bytes.
+crates/kinewright-project/tests/fixtures/te15-b2b/** -text

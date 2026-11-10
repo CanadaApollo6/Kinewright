@@ -47,6 +47,10 @@ impl HostCommandOwner {
         ),
         HostError,
     > {
+        if let Err(error) = self.append_pending_edit_applications(&mut projection) {
+            self.message = format!("Edit audit publication is still pending: {error}");
+            eprintln!("{}", self.message);
+        }
         if matches!(
             projection.wait,
             crate::orchestration::orchestration_records::RunWait::Replan(_)

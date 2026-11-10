@@ -1443,6 +1443,9 @@ pub(super) fn validate_studio_records(
         let mut seen_commands = BTreeSet::new();
         for (id, cuts) in &index.orchestration {
             let mut previous = None;
+            let mut previous_snapshot: Option<
+                StorageReservation<crate::orchestration_records::OrchestrationRecord>,
+            > = None;
             for cut in cuts {
                 if cut.receipt.envelope.project != root.project_id
                     && !root
@@ -1460,6 +1463,23 @@ pub(super) fn validate_studio_records(
                     &cut.segment
                 );
                 let update = cut.validate_cut(id, &snapshot, &segment, previous)?;
+                if let Some(previous) = previous_snapshot.as_ref() {
+                    let crate::orchestration_records::OrchestrationPayload::Snapshot(before) =
+                        &previous.payload
+                    else {
+                        return Err(BundleError::HistoryChanged);
+                    };
+                    crate::orchestration_commit::validate_projection_successor(
+                        before,
+                        update.projection(),
+                    )
+                    .map_err(|_| {
+                        BundleError::Corrupt(
+                            "stored run consent or append-only audit changed".into(),
+                        )
+                    })?;
+                }
+                previous_snapshot = Some(snapshot);
                 let command = cut.metadata_envelope.receipt_envelope(
                     &crate::studio_records::MetadataUpdate {
                         expected_root_generation: update.envelope().expected_generation,

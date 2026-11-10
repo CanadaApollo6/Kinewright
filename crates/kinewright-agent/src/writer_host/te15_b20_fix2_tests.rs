@@ -37,8 +37,25 @@ fn b202_fault(point: super::super::task_preparation::PreparationCheckpoint) {
     }
     assert!(state.effects.iter().any(|e| e == &original));
     assert!(sent.lock().unwrap().is_empty());
+    let fork = owner
+        .lock()
+        .unwrap()
+        .retained_preparation_fork(&state, &child)
+        .unwrap()
+        .expect("B2B_FORK_RETAINED_BEFORE_HISTORY");
     fix3_continue(&f, &run);
     pump.tick().unwrap();
+    let current = f.projection(&run);
+    let history = owner
+        .lock()
+        .unwrap()
+        .saved_task_history(&current, &child)
+        .unwrap()
+        .expect("B2B_FORK_REUSED_AFTER_PUBLICATION_FAILURE: retry history must exist");
+    assert_eq!(
+        history.source.branch, fork,
+        "B2B_FORK_REUSED_AFTER_PUBLICATION_FAILURE"
+    );
     let state = f.projection(&run);
     assert_ne!(
         state.tasks.iter().find(|t| t.id == child).unwrap().state,
@@ -101,7 +118,12 @@ fn b202_permanent(code: &str) {
         Err(std::io::Error::other("fixture store failure").into())
     }));
     pump.tick().unwrap();
-    let before = f.projection(&run);
+    let mut before = f.projection(&run);
+    // This witness installs the permanent reason with no prior wait. The B2b
+    // precedence witness separately preserves the fixture's transient wait.
+    before.wait = RunWait::None;
+    before.phase = RunPhase::Running;
+    publish_projection(&f, &f.producer_client(&run), &run, before.clone(), None);
     let child = before.tasks[0].id.clone();
     let attempt = before.attempts[0].identity.clone();
     let error =

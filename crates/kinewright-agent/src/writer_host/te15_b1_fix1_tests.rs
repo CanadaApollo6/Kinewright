@@ -292,7 +292,15 @@ fn te15_fix_counting_child(name: &str) -> bool {
         command.env_remove(name);
     }
     let mut child = command.spawn().unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    // The media oracle keeps B2a's bound. The foreign-grant matrix runs five
+    // independent fixtures, each with the ordinary counting-witness budget.
+    // This changes no scripted-case, provider, token or admission limit.
+    let seconds = match name {
+        "te15_b2b_merge_replay_same_final_document" => 900,
+        "tests::te15_b21_grant_cannot_cover_foreign_run_tracks_or_missing_classes" => 5 * 45,
+        _ => 45,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break Some(status);

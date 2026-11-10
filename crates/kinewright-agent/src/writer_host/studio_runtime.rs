@@ -8,7 +8,7 @@ use crate::{
     orchestration::{
         AdmittedAttempt,
         adapters::{CertifiedConnectorProfile, ConnectorRuntimeChecks},
-        orchestration_records::RunId,
+        orchestration_records::{RunId, RunProjection, RunWait},
     },
 };
 use kinewright_core::{AgentEvent, AgentSession};
@@ -41,6 +41,8 @@ pub(super) struct RuntimePorts {
     pub evaluation: Option<Arc<super::te1_eval::ScriptedLauncher>>,
     #[cfg(feature = "te1-eval")]
     pub evaluation_counts: Option<Arc<Mutex<crate::te1_eval::Trace>>>,
+    #[cfg(feature = "te1-eval")]
+    pub evaluation_native: Option<Arc<super::te1_eval::NativeEvaluation>>,
     pub checks: Arc<dyn ConnectorRuntimeChecks + Send + Sync>,
     pub guardian: PathBuf,
     pub ceiling: Option<std::num::NonZeroU64>,
@@ -70,6 +72,8 @@ impl Default for RuntimePorts {
             evaluation: None,
             #[cfg(feature = "te1-eval")]
             evaluation_counts: None,
+            #[cfg(feature = "te1-eval")]
+            evaluation_native: None,
             checks: Arc::new(crate::codex_qualification::InstalledNativeChecks {
                 guardian: guardian.clone(),
             }),
@@ -471,6 +475,7 @@ impl StudioRuntime {
                 EvaluationLauncher {
                     native: launcher,
                     scripted: self.ports.evaluation.clone(),
+                    granted: self.ports.evaluation_native.clone(),
                     counts: self.ports.evaluation_counts.clone(),
                 },
                 profiles,
@@ -899,19 +904,46 @@ impl HostCommandOwner {
         run: &RunId,
         reason: &str,
     ) -> Result<(), super::HostError> {
+        let state = self.spending_scope(producer, run)?;
+        if self.surface_unknown_send(producer, &state)? {
+            return Ok(());
+        }
+        if matches!(
+            state.wait,
+            RunWait::Files(_) | RunWait::Replan(_) | RunWait::Provider(_)
+        ) {
+            return Ok(());
+        }
         self.retry_pending_provider_wait(run)?;
-        if self.spending_scope(producer, run).is_ok_and(|state| {
-            matches!(
-                state.wait,
-                crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
-            ) || (matches!(
-                state.wait,
-                crate::orchestration::orchestration_records::RunWait::Provider(_)
-            ) && crate::orchestration::machine::has_unknown_send(&state))
-        }) {
+        if matches!(
+            self.spending_scope(producer, run)?.wait,
+            RunWait::ProviderSettings(_)
+        ) {
             return Ok(());
         }
         self.record_runtime_stop(producer, run, reason, false)
+    }
+    fn surface_unknown_send(
+        &mut self,
+        producer: &HostAuth,
+        state: &RunProjection,
+    ) -> Result<bool, super::HostError> {
+        const WORDS: &str = "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send.";
+        if !crate::orchestration::machine::has_unknown_send(state) {
+            return Ok(false);
+        }
+        if let RunWait::Provider(detail) = &state.wait
+            && self
+                .owner()?
+                .store()?
+                .read_evidence(&detail.reason)?
+                .as_slice()
+                == WORDS.as_bytes()
+        {
+            return Ok(true);
+        }
+        self.record_runtime_stop(producer, &state.run, WORDS, false)?;
+        Ok(true)
     }
     /// C5 fix 10: the native reader refused the provider's stream and killed
     /// it. A task the accounting paused for a repeated failure pauses the run
@@ -924,11 +956,13 @@ impl HostCommandOwner {
         reason: &str,
     ) -> Result<(), super::HostError> {
         let state = self.spending_scope(producer, &identity.run)?;
+        if self.surface_unknown_send(producer, &state)? {
+            return Ok(());
+        }
         if matches!(
             state.wait,
-            crate::orchestration::orchestration_records::RunWait::ProviderSettings(_)
-        ) || crate::orchestration::machine::has_unknown_send(&state)
-        {
+            RunWait::Files(_) | RunWait::Replan(_) | RunWait::ProviderSettings(_)
+        ) {
             return Ok(());
         }
         let replan = self.native_accounting(&state)?.is_some_and(|accounting| {
@@ -1027,6 +1061,7 @@ impl HostCommandOwner {
 
 #[cfg(feature = "te1-eval")]
 struct EvaluationLauncher {
+    granted: Option<Arc<super::te1_eval::NativeEvaluation>>,
     native: NativeGuardianLauncher,
     scripted: Option<Arc<super::te1_eval::ScriptedLauncher>>,
     counts: Option<Arc<Mutex<crate::te1_eval::Trace>>>,
@@ -1041,6 +1076,12 @@ impl crate::orchestration::adapters::GuardianLauncher for EvaluationLauncher {
         crate::orchestration::adapters::ContainedSession,
         crate::orchestration::adapters::LaunchError,
     > {
+        if let Some(granted) = &self.granted {
+            granted
+                .before_launch(&invocation)
+                .map_err(crate::orchestration::adapters::LaunchError)?;
+            return self.native.launch(attempt, invocation);
+        }
         if let Some(counts) = &self.counts {
             crate::te1_eval::record_launch(
                 &mut *counts.lock().map_err(|e| {

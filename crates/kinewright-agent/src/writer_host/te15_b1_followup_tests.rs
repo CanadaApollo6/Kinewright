@@ -85,11 +85,28 @@ fn te15_b1_followup_unknown_wait_survives_assign_and_stream() {
         .unwrap()
         .record_stream_refusal(&producer, &director, "later stream refusal")
         .unwrap();
+    // The first runtime handler normalizes the earlier detailed launch error.
+    // Subsequent handlers retain that immutable reason without another write.
+    let canonical = f.projection(&run).wait;
     assert_eq!(
-        f.projection(&run).wait,
-        original,
+        b201_page(&f, &run).wait_reason.as_deref(),
+        Some(
+            "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."
+        ),
         "FOLLOWUP_UNKNOWN_STREAM_WAIT"
     );
+    let sequence = f.projection(&run).sequence;
+    owner
+        .lock()
+        .unwrap()
+        .record_stream_refusal(&producer, &director, "repeated stream refusal")
+        .unwrap();
+    assert_eq!(
+        f.projection(&run).wait,
+        canonical,
+        "FOLLOWUP_UNKNOWN_STREAM_WAIT"
+    );
+    assert_eq!(f.projection(&run).sequence, sequence);
     let mut ended = f.projection(&run);
     for effect in ended.effects.iter_mut().filter(|e| e.task == director.task) {
         effect.state = EffectState::Settled;

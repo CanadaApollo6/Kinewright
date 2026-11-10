@@ -95,6 +95,8 @@ impl RunView {
 pub(crate) fn plain_wait_reason(reason: &str, settings: bool) -> &str {
     if reason.contains("The send outcome is unknown.") {
         "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."
+    } else if reason == kinewright_agent::job_guardian::protocol::INPUT_TOO_LONG {
+        reason
     } else if reason.starts_with("silent_stall:") {
         "The run has no scheduled work. Press Stop, then Reopen to review your notes before starting another run."
     } else if reason.starts_with("run_limit:") {

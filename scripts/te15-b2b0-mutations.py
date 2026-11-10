@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """B2b-0 sealed stdin and launch-shape negative mutations."""
-import importlib.util, subprocess
+import importlib.util, subprocess, os
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('b2b0_pairs',ROOT/'scripts/te15-b2a-mutations.py')
 engine=importlib.util.module_from_spec(spec);spec.loader.exec_module(engine)
-engine.OUT=ROOT/'target/te1-5/b2b-0/new-pairs'
+engine.OUT=Path(os.environ.get('KINEWRIGHT_TE15_B2B0_OUT',ROOT/'target/te1-5/b2b-0/new-pairs'))
 INPUT='crates/kinewright-agent/src/job_guardian/input.rs'
 PROTO='crates/kinewright-agent/src/job_guardian/protocol.rs'
 LAUNCH='crates/kinewright-agent/src/orchestration/native_launcher.rs'
@@ -25,7 +25,7 @@ engine.PAIRS=[
  ('codex-mode',LAUNCH,'arguments.push("-".into());','arguments.push("fixed positional prompt".into());','te15_b2a_case1_scripted_studio_end_to_end','B2B0_CODEX_STDIN_MODE'),
  ('claude-mode',LAUNCH,'    Ok(arguments)','    arguments.extend(["--".into(), "changed prompt".into()]); Ok(arguments)','writer_host::hooks_tests::tests::s4b_c6_claude_argv_and_environment_are_isolated','C6_STDIN_NO_POSITIONAL_PROMPT'),
  ('capacity-words','crates/kinewright-agent/src/writer_host/provider_readiness.rs','detail.code == \"feedback_too_long\"','detail.code == \"mutant_not_capacity\"','writer_host::hooks_tests::tests::te15_b2b0_oversize_pump_never_launches_or_retries','B2B0_PUMP_TRUE_WORDS'),
- ('guardian-input',GUARD,'        command.stdin(Stdio::from(input));','        drop(input);',LIVE,'B2B0_CHILD_EXACT_BYTES'),
+ ('guardian-input',GUARD,'    command.stdin(stdin.unwrap_or_else(Stdio::null));','    drop(stdin);',LIVE,'B2B0_CHILD_EXACT_BYTES'),
 ]
 original_run=engine.run
 def run(label,witness,marker,red):

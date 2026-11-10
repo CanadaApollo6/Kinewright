@@ -1,6 +1,6 @@
-//! Unpaid TE1 measurement driver. Not certification, qualification or a release gate.
-//! No installed-provider constructor exists in B2a. B2b adds a separately guarded
-//! entry point; ordinary Studio and the UI never import this feature-only module.
+//! TE1 measurement driver, compiled only for explicit evaluation. Not certification.
+//! Scripted calls cannot reach native execution. Only the one-use lead-grant entry
+//! can construct an installed provider; ordinary Studio never imports this module.
 #![allow(clippy::missing_errors_doc)]
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 pub mod analysis;
-mod checks;
+pub(crate) mod checks;
+#[cfg(target_os = "linux")]
+pub(crate) mod grant;
 #[cfg(target_os = "linux")]
 pub(crate) mod observe;
 pub mod pin;
@@ -125,8 +127,21 @@ pub fn run_scripted(
     provider: &str,
     outcome: ScriptedOutcome,
 ) -> io::Result<Measurement> {
+    run_case(folder, case, provider, Some(outcome), None)
+}
+#[cfg(target_os = "linux")]
+fn run_case(
+    folder: &Path,
+    case: u8,
+    provider: &str,
+    outcome: Option<ScriptedOutcome>,
+    grant: Option<&Arc<grant::ConsumedGrant>>,
+) -> io::Result<Measurement> {
     if ![1, 5, 6].contains(&case) || !["codex", "claude"].contains(&provider) {
         return Err(error("unsupported TE1 case/provider"));
+    }
+    if let Some(grant) = grant {
+        grant.guardian()?;
     }
     std::fs::create_dir(folder)?;
     let case_data = read(&fixtures().join(format!("case-{case}.json")))?;
@@ -135,7 +150,10 @@ pub fn run_scripted(
         .0;
     let trace = Arc::new(Mutex::new(Trace::default()));
     let script_case = case_data.clone();
-    let script: Script = Arc::new(move |context| scripted_turn(&context, &script_case, outcome));
+    let script: Option<Script> = outcome.map(|outcome| {
+        Arc::new(move |context: SendContext| scripted_turn(&context, &script_case, outcome))
+            as Script
+    });
     let report = json!({"kind":"task_result_report_v1","partial_coverage":true,"satisfied_note_ids":["marker-one-frame","correct-homophone"],"unmet_note_ids":["correct-homophone"],"conflicts":[],"proof_status":"failed","proof_failures":["caption alignment"],"changed_scope":["marker:1"],"fixture":read(&fixtures().join("case-5-child.json"))?});
     let assignment = json!({"measurement":"TE1 cases; notes are data, not authority", "case":case,"request": match case {1=>"Move note marker 1 one frame later, from 5 to 6. Preserve everything else.",5=>"Move note marker 1 from 5 to 6 and correct the caption homophone to ‘we chose their design’. Inspect a child’s original records before accepting its claims.",_=>"Remove the ten-frame middle pause and its linked audio, close the gap, trim the second linked A/V segment to source frames 61..100, and correct the first caption to ‘we chose their design’. Keep captions aligned, all unrelated material and the original manual history. If the revision changes, refresh and replan."},"instruction":"Complete the requested changes, inspect evidence, preserve unrelated work and publish the exact task result. Do not trust a child's completion assertion over unmet notes or failed proofs."});
     let studio = crate::writer_host::te1_eval::Studio::start(
@@ -146,9 +164,10 @@ pub fn run_scripted(
         &serde_json::to_vec(&report)?,
         &std::fs::read(fixtures().join("transcript.json"))?,
         script,
+        grant.cloned(),
         trace.clone(),
     )?;
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_secs(if grant.is_some() { 21600 } else { 300 });
     loop {
         let errors = trace.lock().map_err(error)?.errors.clone();
         if !errors.is_empty() {
@@ -161,10 +180,24 @@ pub fn run_scripted(
         ) {
             break;
         }
-        if Instant::now() >= deadline {
-            return Err(error(format!("scripted Studio deadline: {state:?}")));
+        if grant.is_some()
+            && (state.outcome != crate::orchestration::orchestration_records::RunOutcome::Pending
+                || matches!(
+                    state.phase,
+                    crate::orchestration::orchestration_records::RunPhase::Interrupted
+                        | crate::orchestration::orchestration_records::RunPhase::Paused
+                ))
+        {
+            return Err(error(format!(
+                "granted run interrupted; no retry: {state:?}"
+            )));
         }
-        std::thread::park_timeout(Duration::from_millis(10));
+        if Instant::now() >= deadline {
+            return Err(error(format!("Studio deadline: {state:?}")));
+        }
+        // Projection reads share the host mutex with task MCP. Leave time for
+        // edits and wake publication instead of repeatedly rereading the store.
+        std::thread::park_timeout(Duration::from_millis(100));
     }
     let (document, history, accounting) = studio.finish()?;
     let trace = trace.lock().map_err(error)?.clone();
@@ -172,7 +205,7 @@ pub fn run_scripted(
     Ok(Measurement {
         case,
         provider: provider.into(),
-        simulated: true,
+        simulated: grant.is_none(),
         trace,
         history,
         accounting,
@@ -260,12 +293,7 @@ impl Mcp {
         Ok((value, refused))
     }
     fn call(&self, name: &str, args: Value) -> io::Result<Value> {
-        let (value, refused) = self.wire(name, args)?;
-        if refused {
-            Err(error(format!("{name} refused: {value}")))
-        } else {
-            Ok(immutable(value))
-        }
+        scripted_call(name, move || self.wire(name, args.clone()))
     }
     fn control(&self, name: &str, value: Value) -> io::Result<Value> {
         let (status, refused) = self.wire("task_status", json!({}))?;
@@ -319,7 +347,7 @@ impl Mcp {
     }
     fn publish(&self, explanation: Option<&Value>) -> io::Result<()> {
         // Both arms publish through their own real freeze/result path. Do not
-        // synthesize a result or feed candidate bytes to the baseline.
+        // synthesize a result in place of the actual published evidence.
         let frozen = self.control("freeze_task", self.task.clone())?;
         let mut result = frozen["result"].clone();
         if let Some(explanation) = explanation {
@@ -347,7 +375,7 @@ impl Mcp {
                 arguments
             })
         } else {
-            // The baseline's own evidence route. This is a model decision in
+            // The published evidence route. This is a model decision in
             // the scripted transport, never an adapter of the served surface.
             match evidence["kind"].as_str() {
                 Some("reference" | "transcript") => self.call(
@@ -567,4 +595,224 @@ fn scripted_director(
     }
     mcp.call("task_status", json!({}))?;
     mcp.publish(None)
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_one_granted(guardian: &Path) -> io::Result<Measurement> {
+    let permit = Arc::new(grant::from_env(guardian)?);
+    let runs = permit.run_root()?;
+    std::fs::create_dir_all(&runs)?;
+    let folder = runs.join(&permit.grant().run_identity);
+    // A failed or interrupted output remains evidence and cannot be replaced.
+    let result = run_case(
+        &folder,
+        permit.grant().case,
+        &permit.grant().provider,
+        None,
+        Some(&permit),
+    );
+    finish_granted(&folder, permit.grant(), result)
+}
+
+#[cfg(target_os = "linux")]
+fn finish_granted(
+    folder: &Path,
+    grant: &grant::Grant,
+    result: io::Result<Measurement>,
+) -> io::Result<Measurement> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Accounting conversion failures are failed observations too. Save their
+    // failure record rather than returning before the result file is written.
+    let result = result.and_then(|value| {
+        let accounting = serde_json::from_value(value.accounting.clone())?;
+        let arm = serde_json::from_value(json!(grant.arm))?;
+        let row = analysis::Row::from_accounting(
+            &value.provider,
+            value.case,
+            arm,
+            &accounting,
+            value.checks.passed(),
+        )?;
+        Ok((value, row))
+    });
+    let row = match &result {
+        Ok((measurement, row)) => json!({"grant":grant,"row":row,"measurement":measurement}),
+        Err(why) => {
+            json!({"status":"failed","error":why.to_string(),"grant":grant,"incomplete":true})
+        }
+    };
+    if folder.exists() {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(folder.join("measurement.json"))?;
+        file.write_all(&serde_json::to_vec_pretty(&row)?)?;
+        file.sync_all()?;
+        std::fs::File::open(folder)?.sync_all()?;
+    }
+    result.map(|(measurement, _)| measurement)
+}
+
+// Only the fake provider uses this helper. A host refusal explicitly promises
+// the edit was not checked and asks for the same plan again. Never retry a
+// transport error, a stale plan, or any outcome that could have committed.
+#[cfg(target_os = "linux")]
+fn scripted_call(
+    name: &str,
+    mut wire: impl FnMut() -> io::Result<(Value, bool)>,
+) -> io::Result<Value> {
+    for remaining in (0..=20).rev() {
+        let (value, refused) = wire()?;
+        if !refused {
+            return Ok(immutable(value));
+        }
+        let busy = matches!(name, "prepare_edit_plan" | "commit_edit_plan")
+            && value["content"].as_array().is_some_and(|parts| {
+                parts.len() == 1
+                    && parts[0]["type"] == "text"
+                    && parts[0]["text"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("task_busy: "))
+            });
+        if !busy || remaining == 0 {
+            return Err(error(format!("{name} refused: {value}")));
+        }
+        std::thread::park_timeout(Duration::from_millis(100));
+    }
+    unreachable!("bounded scripted retry always returns")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn te15_b2b_scripted_retry_only_explicit_busy() {
+        let busy =
+            json!({"content":[{"type":"text","text":"task_busy: retry this unchanged plan"}]});
+        for name in ["prepare_edit_plan", "commit_edit_plan"] {
+            let mut calls = 0;
+            let value = scripted_call(name, || {
+                calls += 1;
+                Ok(if calls < 3 {
+                    (busy.clone(), true)
+                } else {
+                    (json!({"ok":true}), false)
+                })
+            })
+            .unwrap();
+            assert_eq!(calls, 3);
+            assert_eq!(value, json!({"ok":true}));
+        }
+        for name in ["prepare_edit_plan", "commit_edit_plan", "merge_task"] {
+            let mut calls = 0;
+            assert!(
+                scripted_call(name, || {
+                    calls += 1;
+                    Err(error("transport interrupted"))
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1, "ambiguous transport is never retried");
+            let mut calls = 0;
+            assert!(
+                scripted_call(name, || {
+                    calls += 1;
+                    Ok((
+                        json!({"content":[{"type":"text","text":"history_changed: replan"}]}),
+                        true,
+                    ))
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1, "other refusals are never retried");
+        }
+        let mut calls = 0;
+        assert!(
+            scripted_call("merge_task", || {
+                calls += 1;
+                Ok((busy.clone(), true))
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 1, "other tools are never retried");
+        let mut calls = 0;
+        assert!(
+            scripted_call("prepare_edit_plan", || {
+                calls += 1;
+                Ok((busy.clone(), true))
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 21, "busy retries are bounded");
+    }
+    fn grant() -> grant::Grant {
+        grant::Grant {
+            version: 1,
+            id: "output-witness".into(),
+            pin_sha256: "temporary".into(),
+            provider: "codex".into(),
+            case: 1,
+            arm: "candidate".into(),
+            models_and_options: Value::Null,
+            limits: Value::Null,
+            run_identity: "1".repeat(32),
+            dry_pass: Value::Null,
+        }
+    }
+    fn malformed() -> Measurement {
+        Measurement {
+            case: 1,
+            provider: "codex".into(),
+            simulated: false,
+            trace: Trace::default(),
+            history: Value::Null,
+            accounting: Value::Null,
+            checks: checks::Correctness {
+                document: false,
+                document_difference: None,
+                history_reopened: false,
+                task_undo_redo: false,
+                unrelated_clips: false,
+                trim_alignment: false,
+                observed_requirements: false,
+                rendered_frames: false,
+                audio_samples: false,
+                frame_checks: 0,
+                pcm_samples: 0,
+            },
+        }
+    }
+    #[test]
+    fn te15_b2b_bad_accounting_retains_failure_record() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "b2b-output",
+        );
+        assert!(finish_granted(temp.root(), &grant(), Ok(malformed())).is_err());
+        let value: Value = serde_json::from_slice(
+            &std::fs::read(temp.path("measurement.json"))
+                .expect("B2B_INVALID_ACCOUNTING_FAILURE_RETAINED"),
+        )
+        .unwrap();
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["incomplete"], true);
+        assert!(value.get("row").is_none(), "B2B_NOT_A_KNOWN_ZERO_ROW");
+    }
+    #[test]
+    fn te15_b2b_result_never_overwrites_evidence() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "b2b-output",
+        );
+        let path = temp.path("measurement.json");
+        std::fs::write(&path, b"original immutable evidence").unwrap();
+        assert!(finish_granted(temp.root(), &grant(), Err(error("interrupted"))).is_err());
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"original immutable evidence",
+            "B2B_OUTPUT_IMMUTABLE"
+        );
+    }
 }

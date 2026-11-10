@@ -112,13 +112,22 @@ impl ProjectBundle {
         self.store.read_record(&self.checkpoint(id)?.lineage_ref)
     }
     pub fn fork_branch(&mut self, source: &BranchId) -> Result<BranchId, BundleError> {
+        self.fork_branch_as(source, BranchId::fresh()?)
+    }
+    pub(crate) fn fork_branch_as(
+        &mut self,
+        source: &BranchId,
+        id: BranchId,
+    ) -> Result<BranchId, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
         let inputs = self.checkpoint(source)?.input_manifest_ref.clone();
         let source_history = self.branch_history(source)?;
         let original = self.branch_lineage(source)?;
-        let id = BranchId::fresh()?;
+        if self.branches.contains_key(&id) {
+            return Err(BundleError::HistoryChanged);
+        }
         let seed = LineageRecord {
             branch_origin: id.clone(),
             baseline: original.current.clone(),

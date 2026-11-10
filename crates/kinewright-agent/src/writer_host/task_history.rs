@@ -372,6 +372,17 @@ impl HostCommandOwner {
             } else {
                 None
             };
+            #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+            let frozen_result = frozen_result.map(|mut result| {
+                if let Some(reference) = self
+                    .evaluation_observer
+                    .as_ref()
+                    .and_then(|observer| observer.native_child_report(state, &identity.task))
+                {
+                    result.explanation = reference;
+                }
+                result
+            });
             let history = TaskHistoryRecord {
                 project: identity.project.clone(),
                 run: state.run.clone(),

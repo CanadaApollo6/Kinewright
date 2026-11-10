@@ -366,6 +366,25 @@ pub(crate) fn wait_on_launch_error(
                 RunWait::Provider,
             )
             .map_err(std::io::Error::other)?;
+    } else if resumable
+        && matches!(
+            error
+                .get_ref()
+                .and_then(|cause| cause
+                    .downcast_ref::<crate::orchestration::adapters::InvocationRefusal>()),
+            Some(crate::orchestration::adapters::InvocationRefusal::PayloadChanged)
+        )
+    {
+        let producer = owner.run_producer(run).map_err(std::io::Error::other)?;
+        owner
+            .record_runtime_wait(
+                &producer,
+                run,
+                super::task_preparation_words::UPGRADE_RECOVERY,
+                false,
+                RunWait::Provider,
+            )
+            .map_err(std::io::Error::other)?;
     } else if resumable {
         wait_for_failure(&mut owner, run, error).map_err(std::io::Error::other)?;
     } else {

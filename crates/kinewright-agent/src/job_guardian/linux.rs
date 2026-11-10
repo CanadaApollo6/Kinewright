@@ -414,7 +414,6 @@ fn launch(
         .env_clear()
         .envs(program.environment)
         .current_dir(program.working_directory)
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if matches!(program.sandbox, ProviderSandbox::ContainmentOnly) {
@@ -423,12 +422,14 @@ fn launch(
             format!("/run/user/{}", rustix::process::getuid().as_raw()),
         );
     }
+    let mut stdin = input.map(Stdio::from);
     if let Some(pipes) = pipes {
         let mut pipes = pipes.into_iter();
+        let socket = pipes.next().expect("stdin pipe");
+        if stdin.is_none() {
+            stdin = Some(Stdio::from(OwnedFd::from(socket)));
+        }
         command
-            .stdin(Stdio::from(OwnedFd::from(
-                pipes.next().expect("stdin pipe"),
-            )))
             .stdout(Stdio::from(OwnedFd::from(
                 pipes.next().expect("stdout pipe"),
             )))
@@ -451,9 +452,7 @@ fn launch(
             command.env("KINEWRIGHT_HOST_MCP_TOKEN", token);
         }
     }
-    if let Some(input) = input {
-        command.stdin(Stdio::from(input));
-    }
+    command.stdin(stdin.unwrap_or_else(Stdio::null));
     // Init still holds the transient MCP bearer and its inherited state. The
     // provider shares its UID and Landlock domain, so init's /proc entries
     // must not depend on Yama or on init keeping capabilities.

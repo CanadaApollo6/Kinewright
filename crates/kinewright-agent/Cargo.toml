@@ -28,7 +28,7 @@ eval-harness = [
     "kinewright-project/test-util",
 ]
 test-util = []
-# Unpaid TE1 measurement driver. Never linked into the Studio application.
+# Explicit TE1 measurement driver, including the lead-grant entry. Never linked into Studio.
 te1-eval = ["eval-harness"]
 # Slow tier (docs/BUILDING.md, ci/slow-tests.txt): tests marked with
 # `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this

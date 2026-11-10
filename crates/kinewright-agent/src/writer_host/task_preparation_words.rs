@@ -28,6 +28,7 @@ pub const BASE_RECOVERY: &str = recovery!(
     "The task's saved history has conflicting bases.",
     "Continue cannot repair this task."
 );
+pub const UPGRADE_RECOVERY: &str = "This run was admitted with a different application version or launch recipe. Press Stop, then Reopen to keep and review your notes, and start a new run. Continue cannot retry this send.";
 #[must_use]
 pub fn is_recovery_reason(reason: &str) -> bool {
     [
@@ -37,6 +38,7 @@ pub fn is_recovery_reason(reason: &str) -> bool {
         MISSING_RECOVERY,
         LEGACY_RECOVERY,
         BASE_RECOVERY,
+        UPGRADE_RECOVERY,
     ]
     .contains(&reason)
 }

@@ -20,8 +20,7 @@ test -n "$url" && test -n "$sha"
 cache="$HOME/.cache/kinewright-winxbuild"
 if [ "$(cat "$cache/ffmpeg/.archive-sha256" 2>/dev/null)" != "$sha" ]; then
     mkdir -p "$cache/dl"
-    curl -sSL --max-time 300 -o "$cache/dl/ffmpeg.zip" "$url"
-    echo "$sha  $cache/dl/ffmpeg.zip" | sha256sum -c -
+    python3 scripts/ffmpeg_archive.py "$url" "$cache/dl/ffmpeg.zip" "$sha"
     rm -rf "$cache/ffmpeg"
     mkdir -p "$cache/ffmpeg"
     unzip -q "$cache/dl/ffmpeg.zip" -d "$cache/ffmpeg"
@@ -37,7 +36,7 @@ chmod +x "$TMPDIR/bin/rc.exe"
 export PATH="$TMPDIR/bin:$PATH"
 test "$(free -g | awk '/^Mem:/{print $7}')" -ge 6
 run() {
-    flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 \
+    flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 19 \
         cargo xwin clippy "$@" --target x86_64-pc-windows-msvc --target-dir target/win-xwin -- -D warnings
 }
 run --workspace --all-targets

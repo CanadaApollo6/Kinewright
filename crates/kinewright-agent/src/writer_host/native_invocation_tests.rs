@@ -258,11 +258,10 @@ fn s4b_c2_durable_charge_guardian_session_and_queued_steering() {
         !scratch.join("executions").exists(),
         "S4B_C2_NO_EXECUTION_BEFORE_COMMIT"
     );
+    let opening = String::from_utf8(invocation.invocation().bytes().to_vec()).unwrap();
     let (session, claim) = native_start(&f, admitted, invocation, checks, false);
     let mut session = session.unwrap();
-    session
-        .send_user_message("hook plan, script and assignment".into())
-        .unwrap();
+    session.send_user_message(opening).unwrap();
     wait_native(&scratch.join("execution-ready"));
     session.send_user_message("queued steering".into()).unwrap();
     assert_eq!(
@@ -466,10 +465,12 @@ fn s4b_c2_full_event_queue_cancels_and_proves_cleanup() {
     let _unit_cleanup = NativeUnitCleanup::new(&identity);
     let admitted = native_admitted(&f, &identity);
     let (profile, checks, scratch) = native_profile(&f, &admitted);
+    std::fs::write(scratch.join("event-mode"), b"block").unwrap();
     let invocation = native_charge(&f, &admitted, profile);
+    let opening = String::from_utf8(invocation.invocation().bytes().to_vec()).unwrap();
     let (result, claim) = native_start(&f, admitted, invocation, checks, false);
     let mut session = result.unwrap();
-    session.send_user_message("block".into()).unwrap();
+    session.send_user_message(opening).unwrap();
     wait_native(&scratch.join("execution-ready"));
     let events = session.events();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -510,10 +511,12 @@ fn s4b_c2_overflow_cleans_before_reusing_the_slot() {
     let _unit_cleanup = NativeUnitCleanup::new(&identity);
     let admitted = native_admitted(&f, &identity);
     let (profile, checks, scratch) = native_profile(&f, &admitted);
+    std::fs::write(scratch.join("event-mode"), b"overflow").unwrap();
     let invocation = native_charge(&f, &admitted, profile);
+    let opening = String::from_utf8(invocation.invocation().bytes().to_vec()).unwrap();
     let (result, claim) = native_start(&f, admitted, invocation, checks, false);
     let mut session = result.unwrap();
-    session.send_user_message("overflow".into()).unwrap();
+    session.send_user_message(opening).unwrap();
     wait_native(&scratch.join("execution-ready"));
     let deadline = Instant::now() + Duration::from_secs(5);
     while claim.lock().unwrap().retained_attempts() != 0 {

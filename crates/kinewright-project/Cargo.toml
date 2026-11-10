@@ -37,6 +37,7 @@ rustix.workspace = true
 winapi-util = "=0.1.11"
 
 [dev-dependencies]
+flate2.workspace = true
 dhat = "=0.3.3"
 # The sidecar round-trip tests persist through `TempDirectory`.
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }

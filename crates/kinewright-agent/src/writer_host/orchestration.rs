@@ -158,6 +158,7 @@ pub(super) struct HostRun {
 pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
+    pub pending_edit_applications: Vec<(RunId, Vec<u8>)>,
     // A fixture can present an old/corrupt grant at the read boundary without rewriting a fixed grant.
     #[cfg(all(test, target_os = "linux"))]
     pub consent_fixture: Option<super::task_mcp::consent::ConsentFixture>,
@@ -1211,6 +1212,12 @@ impl HostCommandOwner {
         let recovery_ready = !self.native_recovery_pending;
         #[cfg(not(target_os = "linux"))]
         let recovery_ready = true;
+        #[cfg(target_os = "linux")]
+        let preparation_ready = self
+            .preparation_block(&projection)
+            .is_ok_and(|kind| kind.is_none());
+        #[cfg(not(target_os = "linux"))]
+        let preparation_ready = true;
         let allowed_actions: Vec<RunActionKind> =
             if recovery_ready && self.attachments[index].role == AttachmentRole::Editor {
                 [
@@ -1224,10 +1231,11 @@ impl HostCommandOwner {
                 .into_iter()
                 .filter(|action| {
                     machine::eligible(&projection, action)
-                        && (!matches!(action, RunAction::Continue)
-                            || self
-                                .run_recovery_blocks(&projection)
-                                .is_ok_and(|blocks| blocks.is_empty()))
+                        && (!matches!(action, RunAction::Continue | RunAction::SendMessage { .. })
+                            || preparation_ready
+                                && self
+                                    .run_recovery_blocks(&projection)
+                                    .is_ok_and(|blocks| blocks.is_empty()))
                 })
                 .map(|action| match action {
                     RunAction::Pause => RunActionKind::Pause,
@@ -1528,7 +1536,13 @@ impl HostCommandOwner {
             expires_at: Instant::now() + ttl,
         };
         let saved = self.saved_task_history(&state, task)?;
+        let retained_fork = if saved.is_none() {
+            self.retained_preparation_fork(&state, task)?
+        } else {
+            None
+        };
         if saved.is_none()
+            && retained_fork.is_none()
             && !self
                 .hooks
                 .runs
@@ -1592,6 +1606,24 @@ impl HostCommandOwner {
             {
                 return Err(refused("previous task authority is not retired"));
             }
+            let base = self
+                .owner()?
+                .store()?
+                .read_record::<kinewright_project::bundle_records::SpecialistBaseRecord>(
+                &history.base_ref,
+            )?;
+            if history.base != task_record.brief.scope.base
+                || base.target_branch != history.base.branch
+                || base.base_head != history.base.head
+                || base.base_document_hash != history.base.document_hash
+                || base.frozen_checkpoint_ref != history.base.checkpoint
+            {
+                return Err(HostRefusal::new(
+                    "task_preparation_history_base",
+                    "saved task history disagrees with its retained base",
+                )
+                .into());
+            }
             self.restore_task_candidate(history)?;
             let mut reopened = EditorTask::reopen(
                 self.owner_mut()?,
@@ -1602,7 +1634,15 @@ impl HostCommandOwner {
                 history.merge_envelope.clone(),
             )?;
             if self.owner()?.candidate_binding(&history.source.branch)? != history.source {
-                return Err(HostRefusal::new("history_changed", "task checkpoint changed").into());
+                return Err(HostRefusal::new(
+                    if history.frozen {
+                        "task_preparation_frozen"
+                    } else {
+                        "history_changed"
+                    },
+                    "task checkpoint changed",
+                )
+                .into());
             }
             if history.frozen && reopened.freeze(self.owner_mut()?)?.source() != &history.source {
                 return Err(HostRefusal::new(
@@ -1632,7 +1672,46 @@ impl HostCommandOwner {
                 }
             }
             self.restore_initial_run_candidate(&state, &task_record.brief.scope.base.branch)?;
-            EditorTask::prepare(self.owner_mut()?, task_record.brief.clone(), authority)?
+            let branch = if let Some(branch) = retained_fork {
+                branch
+            } else {
+                let branch = kinewright_project::bundle_records::BranchId::fresh()?;
+                let reference = self.owner_mut()?.admit_host_grant(&serde_json::to_vec(
+                    &super::task_preparation::RetainedFork {
+                        kind: "studio_task_fork_v1".into(),
+                        task: task.clone(),
+                        base: task_record.brief.scope.base.clone(),
+                        branch: branch.clone(),
+                    },
+                )?)?;
+                state
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.id == *task)
+                    .ok_or_else(|| refused("task missing"))?
+                    .progress
+                    .decisions
+                    .push(reference);
+                let identity = state
+                    .attempts
+                    .iter()
+                    .find(|a| a.identity.task == *task && a.identity.attempt == *attempt)
+                    .ok_or_else(|| refused("attempt missing"))?
+                    .identity
+                    .clone();
+                self.publish_native(producer, state, &identity, vec![])?;
+                state = self
+                    .owner()?
+                    .orchestration_projection(run)?
+                    .ok_or_else(|| refused("run missing"))?;
+                branch
+            };
+            EditorTask::prepare_retained(
+                self.owner_mut()?,
+                task_record.brief.clone(),
+                authority,
+                branch,
+            )?
         };
         let identity = state
             .attempts

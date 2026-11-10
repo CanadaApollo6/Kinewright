@@ -103,6 +103,15 @@ impl Drop for MediaReadPermit {
         self.0.0.media_read_busy.store(false, Ordering::Release);
     }
 }
+pub(crate) fn is_liveness_refusal(reason: &str) -> bool {
+    matches!(
+        reason,
+        "task_authority_expired"
+            | "task_authority_paused"
+            | "task_freezing"
+            | "task_ingress_poisoned"
+    )
+}
 impl TaskEndpoint {
     /// Receiving port only. H3 must resolve attachment, epoch and scope before calling.
     #[allow(dead_code, reason = "H3 owns authenticated endpoint construction")]
@@ -365,9 +374,31 @@ impl EditorTask {
         brief: TaskBrief,
         authority: RuntimeTaskAuthority,
     ) -> Result<Self, BundleError> {
+        Self::prepare_inner(owner, brief, authority, None)
+    }
+    pub(crate) fn prepare_retained(
+        owner: &mut Ja1EditingSession,
+        brief: TaskBrief,
+        authority: RuntimeTaskAuthority,
+        branch: super::bundle_records::BranchId,
+    ) -> Result<Self, BundleError> {
+        Self::prepare_inner(owner, brief, authority, Some(branch))
+    }
+    fn prepare_inner(
+        owner: &mut Ja1EditingSession,
+        brief: TaskBrief,
+        authority: RuntimeTaskAuthority,
+        branch: Option<super::bundle_records::BranchId>,
+    ) -> Result<Self, BundleError> {
         validate_owner_authority(owner, &authority)?;
-        let registration =
-            owner.fork_registered_from_candidate(&brief.scope.base, "Studio task")?;
+        let registration = match branch {
+            Some(branch) => owner.fork_registered_from_candidate_retained(
+                &brief.scope.base,
+                "Studio task",
+                branch,
+            )?,
+            None => owner.fork_registered_from_candidate(&brief.scope.base, "Studio task")?,
+        };
         let endpoint = TaskEndpoint::from_authorized_owner(
             TaskPolicy {
                 role: brief.role,

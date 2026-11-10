@@ -190,6 +190,85 @@ impl Ja1EditingSession {
         base: &BranchBinding,
         name: &str,
     ) -> Result<DurableBranchSessionGuard, BundleError> {
+        self.fork_registered_from_candidate_inner(base, name, None)
+    }
+    pub fn fork_registered_from_candidate_retained(
+        &mut self,
+        base: &BranchBinding,
+        name: &str,
+        branch: BranchId,
+    ) -> Result<DurableBranchSessionGuard, BundleError> {
+        self.fork_registered_from_candidate_inner(base, name, Some(branch))
+    }
+    fn retained_registered_fork(
+        &mut self,
+        base: &BranchBinding,
+        name: &str,
+        branch: &BranchId,
+    ) -> Result<Option<DurableBranchSessionGuard>, BundleError> {
+        if let Some(registered) = self
+            .durable_sessions()
+            .into_iter()
+            .find(|(_, g)| g.branch_id() == branch)
+            .map(|(_, g)| g)
+        {
+            if registered.base().target_branch != base.branch
+                || registered.base().base_head != base.head
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            return Ok(Some(registered));
+        }
+        if self.active_bundle()?.branches.contains_key(branch) {
+            let bundle = self.active_bundle_mut()?;
+            let checkpoint = bundle
+                .store()
+                .read_record::<crate::bundle_records::BranchCheckpoint>(&base.checkpoint)?;
+            let history = bundle.branch_history(branch)?;
+            let retained = bundle.checkpoint(branch)?;
+            let lineage = bundle.branch_lineage(branch)?;
+            let origin = bundle
+                .store()
+                .read_record::<crate::bundle_records::LineageRecord>(&checkpoint.lineage_ref)?;
+            if !history.cursor.undo.is_empty()
+                || !history.cursor.redo.is_empty()
+                || retained.document_hash != base.document_hash
+                || retained.input_manifest_ref != checkpoint.input_manifest_ref
+                || lineage.branch_origin != *branch
+                || lineage.baseline != origin.current
+                || lineage.current != origin.current
+                || !lineage.undo.is_empty()
+                || !lineage.redo.is_empty()
+                || lineage.split_ancestry != origin.split_ancestry
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            let specialist = SpecialistBaseRecord {
+                target_branch: base.branch.clone(),
+                base_head: base.head.clone(),
+                base_document_hash: base.document_hash.clone(),
+                original_baseline_ref: checkpoint.document_ref.clone(),
+                frozen_checkpoint_ref: base.checkpoint.clone(),
+                full_applied_delta: vec![],
+            };
+            let reference = bundle.stage_specialist_base(&specialist)?;
+            return self
+                .reopen_durable_branch(branch.clone(), &reference, name)
+                .map(Some);
+        }
+        Ok(None)
+    }
+    fn fork_registered_from_candidate_inner(
+        &mut self,
+        base: &BranchBinding,
+        name: &str,
+        branch: Option<BranchId>,
+    ) -> Result<DurableBranchSessionGuard, BundleError> {
+        if let Some(branch) = branch.as_ref()
+            && let Some(guard) = self.retained_registered_fork(base, name, branch)?
+        {
+            return Ok(guard);
+        }
         self.candidate_core(base)?;
         let charge = self.registration_capacity(name)?;
         let bundle = self.active_bundle_mut()?;
@@ -225,7 +304,10 @@ impl Ja1EditingSession {
                 .reserve_retained_capture(&encoded)?
                 .hold(frozen),
         );
-        let branch = bundle.fork_branch(&base.branch)?;
+        let branch = match branch {
+            Some(branch) => bundle.fork_branch_as(&base.branch, branch)?,
+            None => bundle.fork_branch(&base.branch)?,
+        };
         bundle.attach_core(&core)?;
         let guard = DurableBranchSessionGuard {
             branch,

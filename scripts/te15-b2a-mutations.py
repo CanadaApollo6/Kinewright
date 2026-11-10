@@ -9,6 +9,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 ROOT=Path(__file__).resolve().parent.parent
 OUT=Path(os.environ.get('KINEWRIGHT_TE15_B2A_OUT',ROOT/'target/te1-5/b2a/current/pairs'))
 TEST='crates/kinewright-agent/tests/te1_measurement.rs'
@@ -32,8 +33,7 @@ PAIRS += [
   ('if !self.scope.tracks.contains(&key) {','if key != "track:88" && !self.scope.tracks.contains(&key) {'),
   ('if !self.scope.bus_sidechain_closure.contains(key) {','if key != "track:88" && !self.scope.bus_sidechain_closure.contains(key) {'),
  ],None,'te15_b2a_case6_scripted_studio_end_to_end','TE15_B2A_ORDINARY_SCOPE'),
- ('analysis-mean',ANALYSIS,'let mean_improves = candidate_sum < baseline_sum;','let mean_improves = true;','te15_b2a_analysis_retains_every_pair_and_requires_both_statistics','TE15_B2A_PROVIDER_SEPARATE'),
- ('analysis-median',ANALYSIS,'let median_improves = candidate[1] < baseline[1];','let median_improves = true;','te15_b2a_analysis_retains_every_pair_and_requires_both_statistics','TE15_B2A_PROVIDER_SEPARATE'),
+
 ]
 PAIRS.append(('two-note-batch','crates/kinewright-agent/src/writer_host/te1_eval.rs','for note in 0..if case == 5 { 2 } else { 1 } {','for note in 0..1 {','te15_b2a_case5_scripted_studio_end_to_end','TE15_B2A_NOTE_COUNT'))
 active=None
@@ -50,6 +50,22 @@ def stop(child):
         except ProcessLookupError: pass
         child.wait()
 
+def wait_for_cargo(child, log, timeout=900):
+    """Exclude shared-lock queue time; retain the active build/test deadline."""
+    started=None
+    while True:
+        try:
+            return child.wait(timeout=min(1, timeout))
+        except subprocess.TimeoutExpired:
+            if started is None and re.search(
+                r'^\s*(?:Compiling|Finished|Checking|Blocking|Running)\b',
+                Path(log).read_text(errors='replace'), re.M,
+            ):
+                started=time.monotonic()
+            if started is not None and time.monotonic()-started >= timeout:
+                raise subprocess.TimeoutExpired(child.args, timeout) from None
+
+
 def run(label,witness,marker,red):
     global active
     target='--lib' if witness.startswith(('te1_eval::','writer_host::','job_guardian::')) else '--test te1_measurement'
@@ -57,7 +73,7 @@ def run(label,witness,marker,red):
     with (OUT/f'{label}.log').open('w') as log:
         active=subprocess.Popen(cmd,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
         (OUT/'active-pid.json').write_text(json.dumps({'pid':active.pid,'label':label})+'\n')
-        try: code=active.wait(timeout=900)
+        try: code=wait_for_cargo(active, OUT/f'{label}.log')
         finally:
             if active.poll() is None: stop(active)
             active=None

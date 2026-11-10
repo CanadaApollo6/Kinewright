@@ -393,6 +393,200 @@ mod tests {
         assert!(refused, "FOL_FIXED_STORE grant={grant}");
         assert_eq!(b.f.projection(&b.run), before, "FOL_FIXED_STATE_UNCHANGED");
     }
+    fn fixed_applications() {
+        let b = b21_start();
+        let p = b21_prepare(&b);
+        assert_eq!(b21_commit(&b, &p).is_error, Some(false));
+        let before = b.f.projection(&b.run);
+        let mut bad = before.clone();
+        bad.edit_applications.clear();
+        let actor = b.f.producer_client(&b.run);
+        let request = b.f.request(
+            &actor,
+            Some(b.run.clone()),
+            OrchestrationCommand::RecordContext {
+                task: bad.tasks[0].id.clone(),
+                feedback: vec![],
+                decisions: vec![],
+            },
+        );
+        bad.sequence += 1;
+        bad.control_revision = request.envelope.identity("control-revision").unwrap();
+        let owner = b.f.host.owner.upgrade().unwrap();
+        let mut host = owner.lock().unwrap();
+        let segment = EventSegment {
+            run: b.run.clone(),
+            first_sequence: bad.sequence,
+            previous: Some(
+                host.owner()
+                    .unwrap()
+                    .orchestration_cut(&b.run)
+                    .unwrap()
+                    .unwrap()
+                    .segment,
+            ),
+            events: vec![OrchestrationEvent {
+                command: request.envelope.id.clone(),
+                sequence: bad.sequence,
+                projection: bad.clone(),
+            }],
+        };
+        let update = ValidatedRunUpdate::new(
+            &request.envelope.project,
+            request.envelope.expected_generation,
+            &request.envelope,
+            bad,
+            segment,
+            CommandDecision::Applied,
+        )
+        .unwrap();
+        let refused = host
+            .publish_orchestration_transition(&actor.bootstrap.auth, &update, None)
+            .is_err();
+        drop(host);
+        assert!(refused, "B2B_APPLICATIONS_APPEND_ONLY");
+        assert_eq!(b.f.projection(&b.run), before, "FOL_FIXED_STATE_UNCHANGED");
+    }
+    #[test]
+    fn te15_b2b_applications_are_append_only() {
+        if child("te15_b2b_applications_are_append_only") {
+            fixed_applications();
+        }
+    }
+    #[test]
+    fn te15_b2b_net_zero_removal() {
+        if !child("te15_b2b_net_zero_removal") {
+            return;
+        }
+        let b = b21_start();
+        let before = b.core.export_history().unwrap();
+        edit(
+            &b,
+            &serde_json::json!([{"op":"split_clip","clip":3,"at":25},{"op":"delete_clip","clip":4},{"op":"trim_clip","clip":3,"new_source":{"start":0,"end":10}}]),
+        );
+        assert_eq!(b.core.export_history().unwrap().document, before.document);
+        assert!(
+            b.f.projection(&b.run).edit_approvals.is_empty(),
+            "B2B_NO_ZERO_APPROVAL"
+        );
+        assert!(
+            b201_page(&b.f, &b.run).edit_approvals.is_empty(),
+            "B2B_NO_BLANK_REMOVAL_ROW"
+        );
+    }
+    #[test]
+    fn te15_b2b_liveness_prepare_and_commit() {
+        if !child("te15_b2b_liveness_prepare_and_commit") {
+            return;
+        }
+        for commit in [false, true] {
+            let b = b21_start();
+            let before = b.core.export_history().unwrap();
+            let prepared = b21_prepare(&b);
+            let owner = b.f.host.owner.upgrade().unwrap();
+            owner.lock().unwrap().hooks.runs[&b.run].tasks[&b.child]
+                .endpoint()
+                .set_paused(true);
+            let r = if commit {
+                b21_commit(&b, &prepared)
+            } else {
+                b21_prepare(&b)
+            };
+            assert_eq!(r.is_error, Some(true));
+            assert!(
+                text(&r).contains("consent_liveness"),
+                "B2B_LIVENESS_CODE commit={commit} {r:?}"
+            );
+            assert_eq!(b.core.export_history().unwrap(), before);
+        }
+    }
+    #[test]
+    fn te15_b2b_applied_marker_retries() {
+        use std::os::unix::fs::PermissionsExt;
+        if !child("te15_b2b_applied_marker_retries") {
+            return;
+        }
+        let b = b21_start();
+        let prepared = b21_prepare(&b);
+        let owner = b.f.host.owner.upgrade().unwrap();
+        let objects = owner
+            .lock()
+            .unwrap()
+            .owner()
+            .unwrap()
+            .store()
+            .unwrap()
+            .resolved_root()
+            .unwrap()
+            .with_extension("kinewright-assets")
+            .join("studio/objects");
+        let permissions = std::fs::metadata(&objects).unwrap().permissions();
+        let held = objects.clone();
+        owner.lock().unwrap().hooks.consent_apply_hook = Some(Arc::new(move |_| {
+            std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }));
+        let result = b21_commit(&b, &prepared);
+        std::fs::set_permissions(&objects, permissions).unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(false),
+            "B2B_SUCCESS_SURVIVES_AUDIT_FAILURE {result:?}"
+        );
+        assert_eq!(
+            b.core.export_history().unwrap().document.tracks[0]
+                .clips
+                .len(),
+            1
+        );
+        assert!(b.f.projection(&b.run).edit_applications.is_empty());
+        assert_eq!(
+            owner.lock().unwrap().hooks.pending_edit_applications.len(),
+            1,
+            "B2B_PENDING_MARKER_RETAINED"
+        );
+        assert!(
+            owner.lock().unwrap().message.contains("audit"),
+            "B2B_PENDING_MARKER_LOGGED"
+        );
+        let producer = b.f.producer(&b.run);
+        let state = b.f.projection(&b.run);
+        let identity = state
+            .attempts
+            .iter()
+            .find(|a| a.identity.task == b.child)
+            .unwrap()
+            .identity
+            .clone();
+        owner
+            .lock()
+            .unwrap()
+            .publish_native(&producer, state, &identity, vec![])
+            .unwrap();
+        let state = b.f.projection(&b.run);
+        assert_eq!(
+            state.edit_applications.len(),
+            1,
+            "B2B_MARKER_NEXT_PUBLICATION"
+        );
+        owner
+            .lock()
+            .unwrap()
+            .publish_native(&producer, state, &identity, vec![])
+            .unwrap();
+        assert_eq!(
+            b.f.projection(&b.run).edit_applications.len(),
+            1,
+            "B2B_MARKER_EXACTLY_ONCE"
+        );
+        assert!(
+            owner
+                .lock()
+                .unwrap()
+                .hooks
+                .pending_edit_applications
+                .is_empty()
+        );
+    }
     #[test]
     fn te15_b21f_grant_is_fixed() {
         if child("te15_b21f_grant_is_fixed") {

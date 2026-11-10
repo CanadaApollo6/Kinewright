@@ -445,7 +445,11 @@ fn te15_b1_fix3_postcharge_ambiguity_is_not_resumable() {
         .unwrap()
         .read_evidence(&detail.reason)
         .unwrap();
-    assert!(std::str::from_utf8(&reason).unwrap().ends_with(" The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send."), "FIX4_FINAL_UNKNOWN_WORDS {}", String::from_utf8_lossy(&reason));
+    assert_eq!(
+        std::str::from_utf8(&reason).unwrap(),
+        "The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send.",
+        "FIX4_FINAL_UNKNOWN_WORDS"
+    );
     let page = f
         .editor
         .request(HostCommand::ObserveRun {

@@ -14,6 +14,7 @@ pub(crate) struct Observations {
     pub trace: Arc<Mutex<Trace>>,
     contexts: Mutex<BTreeMap<(String, String), SendContext>>,
     case: u8,
+    native_report: Mutex<Option<Value>>,
     conflict: AtomicBool,
     injecting: AtomicBool,
 }
@@ -23,9 +24,36 @@ impl Observations {
             trace,
             case,
             contexts: Mutex::default(),
+            native_report: Mutex::default(),
             conflict: AtomicBool::new(false),
             injecting: AtomicBool::new(false),
         }
+    }
+    pub fn set_native_report(
+        &self,
+        reference: kinewright_project::bundle_records::ObjectRef,
+    ) -> io::Result<()> {
+        *self.native_report.lock().map_err(error)? = Some(serde_json::to_value(reference)?);
+        Ok(())
+    }
+    pub fn native_child_report(
+        &self,
+        state: &crate::orchestration::orchestration_records::RunProjection,
+        task: &crate::orchestration::orchestration_records::TaskId,
+    ) -> Option<kinewright_project::bundle_records::ObjectRef> {
+        if self.case != 5
+            || state
+                .tasks
+                .get(1)
+                .is_none_or(|child| child.id != *task || child.parent.is_none())
+        {
+            return None;
+        }
+        self.native_report
+            .lock()
+            .ok()?
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
     pub fn bind(&self, context: SendContext) -> io::Result<()> {
         let key = (
@@ -80,6 +108,15 @@ impl Observations {
         {
             let mut trace = self.trace.lock().map_err(error)?;
             if trace.calls.len() >= 256 || serde_json::to_vec(&call)?.len() > 256 * 1024 {
+                if !trace
+                    .errors
+                    .iter()
+                    .any(|e| e == "eval trace capacity; observations incomplete")
+                {
+                    trace
+                        .errors
+                        .push("eval trace capacity; observations incomplete".into());
+                }
                 return Err(error("eval trace capacity"));
             }
             trace.calls.push(call);

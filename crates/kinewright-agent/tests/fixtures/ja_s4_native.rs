@@ -333,10 +333,16 @@ fn main() {
                 thread::sleep(Duration::from_millis(1));
             }
         }
-        if prompt == "overflow" || prompt == "block" || fixture_full {
+        let mode = fs::read_to_string(root.join("event-mode")).unwrap_or_default();
+        if prompt == "overflow"
+            || prompt == "block"
+            || fixture_full
+            || mode == "block"
+            || mode == "overflow"
+        {
             for _ in 0..if fixture_full {
                 30 // The bounded channel reserves its last two slots for Error/Done.
-            } else if prompt == "block" {
+            } else if prompt == "block" || mode == "block" {
                 30
             } else {
                 40

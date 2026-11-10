@@ -1,4 +1,4 @@
-//! The arm-specific, feature-only Studio bridge. No installed-provider entry point.
+//! The arm-specific Studio bridge. Native execution requires a consumed lead grant.
 #![allow(clippy::missing_errors_doc)]
 use super::{
     Arc, AttachmentRole, Core, Document, Duration, HostAuth, HostClient, HostCommand,
@@ -463,7 +463,8 @@ impl Studio {
         assignment: &[u8],
         report: &[u8],
         transcript: &[u8],
-        script: Script,
+        script: Option<Script>,
+        grant: Option<Arc<crate::te1_eval::grant::ConsumedGrant>>,
         trace: Arc<Mutex<Trace>>,
     ) -> io::Result<Self> {
         let case = serde_json::from_slice::<Value>(assignment)?["case"]
@@ -601,7 +602,10 @@ impl Studio {
         let settings = root.join("scheduler");
         crate::orchestration::director_setting::write_director_setting(
             Some(&settings),
-            &spec.selection(),
+            &grant.as_ref().map_or_else(
+                || Ok(spec.selection()),
+                |g| g.selection("director").map_err(io_error),
+            )?,
         )
         .map_err(io_error)?;
         let case = serde_json::from_slice::<Value>(assignment)?["case"]
@@ -612,13 +616,56 @@ impl Studio {
             case,
             trace.clone(),
         ));
-        let launcher = Arc::new(ScriptedLauncher {
-            host: OnceLock::new(),
-            script,
-            trace: trace.clone(),
-            fixtures: Mutex::new(Value::Null),
-            observer: observer.clone(),
+        let launcher = script.map(|script| {
+            Arc::new(ScriptedLauncher {
+                host: OnceLock::new(),
+                script,
+                trace: trace.clone(),
+                fixtures: Mutex::new(Value::Null),
+                observer: observer.clone(),
+            })
         });
+        let native = grant.map(|permit| {
+            Arc::new(NativeEvaluation {
+                host: OnceLock::new(),
+                permit,
+                run_binding: Mutex::new(None),
+                root: root.to_path_buf(),
+                trace: trace.clone(),
+                fixtures: Mutex::new(Value::Null),
+                observer: observer.clone(),
+            })
+        });
+        let ports = if let Some(native) = &native {
+            let selected = native.permit.selection("editor")?;
+            crate::orchestration::specialist_setting::write_specialist_setting(
+                Some(&settings),
+                &crate::orchestration::specialist_setting::SpecialistChoice::Specific(selected),
+            )
+            .map_err(io_error)?;
+            let guardian = native.permit.guardian()?.to_path_buf();
+            studio_runtime::RuntimePorts {
+                guardian: guardian.clone(),
+                checks: Arc::new(crate::codex_qualification::InstalledNativeChecks { guardian }),
+                evaluation_native: Some(native.clone()),
+                ceiling: std::num::NonZeroU64::new(
+                    native.permit.grant().limits["tokens_per_task"]
+                        .as_u64()
+                        .ok_or_else(|| io_error("token limit missing"))?,
+                ),
+                fixture_autostart: true,
+                ..Default::default()
+            }
+        } else {
+            studio_runtime::RuntimePorts {
+                checks: Arc::new(SyntheticChecks::default()),
+                evaluation: launcher.clone(),
+                evaluation_counts: Some(trace.clone()),
+                fixture_claim: Some(root.join("machine")),
+                fixture_autostart: true,
+                ..Default::default()
+            }
+        };
         let host = WriterHost::start_inner(
             HostConfig {
                 project: "TE1 unpaid measurement".into(),
@@ -632,20 +679,21 @@ impl Studio {
             },
             HostAuth::generate().map_err(io_error)?,
             None,
-            studio_runtime::RuntimePorts {
-                checks: Arc::new(SyntheticChecks::default()),
-                evaluation: Some(launcher.clone()),
-                evaluation_counts: Some(trace.clone()),
-                fixture_claim: Some(root.join("machine")),
-                fixture_autostart: true,
-                ..Default::default()
-            },
+            ports,
         )
         .map_err(io_error)?;
-        launcher
-            .host
-            .set(host.owner.clone())
-            .map_err(|_| io_error("eval owner already set"))?;
+        if let Some(launcher) = &launcher {
+            launcher
+                .host
+                .set(host.owner.clone())
+                .map_err(|_| io_error("eval owner already set"))?;
+        }
+        if let Some(native) = &native {
+            native
+                .host
+                .set(host.owner.clone())
+                .map_err(|_| io_error("eval owner already set"))?;
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
             host.runtime.update();
@@ -670,7 +718,7 @@ impl Studio {
             .ok_or_else(|| io_error("eval owner gone"))?;
         let mut locked = owner.lock().map_err(io_error)?;
         locked.fixture_director = false;
-        locked.evaluation_observer = Some(observer);
+        locked.evaluation_observer = Some(observer.clone());
         let explanation = locked
             .owner_mut()
             .map_err(io_error)?
@@ -681,8 +729,14 @@ impl Studio {
             .map_err(io_error)?
             .admit_host_grant(transcript)
             .map_err(io_error)?;
-        *launcher.fixtures.lock().map_err(io_error)? =
-            json!({"child_report":explanation,"transcript":transcript.clone()});
+        let fixture_refs = json!({"child_report":explanation,"transcript":transcript.clone()});
+        if let Some(launcher) = &launcher {
+            *launcher.fixtures.lock().map_err(io_error)? = fixture_refs.clone();
+        }
+        if let Some(native) = &native {
+            *native.fixtures.lock().map_err(io_error)? = fixture_refs;
+            observer.set_native_report(explanation.clone())?;
+        }
         // Studio's ordinary submitted-feedback / ReviseCut path, not a task
         // fixture projection. These are durable objects in this run's bundle.
         let (checkpoint_ref, checkpoint) = locked
@@ -825,6 +879,9 @@ impl Studio {
         })
     }
     pub fn projection(&self) -> io::Result<RunProjection> {
+        // Headless observation must advance the same worker-completion and
+        // queued-wake lifecycle that ordinary host requests drive.
+        self.host.runtime.update();
         let owner = self
             .host
             .owner
@@ -987,4 +1044,106 @@ fn metadata(
     )?
     .metadata
     .ok_or_else(|| io_error("metadata receipt missing"))
+}
+
+/// Exists only after a durable lead-grant receipt; normal Studio cannot create it.
+pub(super) struct NativeEvaluation {
+    host: OnceLock<Weak<Mutex<HostCommandOwner>>>,
+    permit: Arc<crate::te1_eval::grant::ConsumedGrant>,
+    run_binding: Mutex<Option<RunId>>,
+    root: PathBuf,
+    trace: Arc<Mutex<Trace>>,
+    fixtures: Mutex<Value>,
+    observer: Arc<crate::te1_eval::observe::Observations>,
+}
+impl NativeEvaluation {
+    pub(super) fn before_launch(&self, invocation: &AuthorizedInvocation) -> io::Result<()> {
+        let identity = invocation.profile().binding().identity();
+        {
+            use std::io::Write;
+            let mut bound = self.run_binding.lock().map_err(io_error)?;
+            match bound.as_ref() {
+                Some(run) if run != &identity.run => {
+                    return Err(io_error("grant already bound to another Studio run"));
+                }
+                Some(_) => {}
+                None => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(self.root.join("run-binding.json"))?;
+                    file.write_all(&serde_json::to_vec(
+                        &json!({"grant":self.permit.grant(),"studio_run":identity.run}),
+                    )?)?;
+                    file.sync_all()?;
+                    std::fs::File::open(&self.root)?.sync_all()?;
+                    *bound = Some(identity.run.clone());
+                }
+            }
+        }
+        let host = self
+            .host
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| io_error("eval host missing"))?;
+        let locked = host.lock().map_err(io_error)?;
+        let state = locked
+            .owner()
+            .map_err(io_error)?
+            .orchestration_projection(&identity.run)
+            .map_err(io_error)?
+            .ok_or_else(|| io_error("eval run missing"))?;
+        let task = state
+            .tasks
+            .iter()
+            .find(|t| t.id == identity.task)
+            .ok_or_else(|| io_error("eval task missing"))?;
+        let role = serde_json::to_value(task.brief.role)?;
+        if self.permit.grant().dry_pass["cli_sha256"]
+            != kinewright_media::sha256_file(&invocation.profile().runtime().executable.path)
+                .map_err(io_error)?
+        {
+            return Err(io_error("provider image changed since the dry pass"));
+        }
+        if task.brief.provider
+            != self
+                .permit
+                .selection(role.as_str().ok_or_else(|| io_error("role missing"))?)?
+        {
+            return Err(io_error("paid role differs from grant"));
+        }
+        let prompt = std::str::from_utf8(invocation.invocation().bytes())
+            .map_err(io_error)?
+            .to_owned();
+        let program = crate::native_launcher::program(invocation.profile(), &prompt)?;
+        let context = SendContext {
+            endpoint: invocation.profile().binding().endpoint().into(),
+            identity: serde_json::to_value(identity)?,
+            brief: serde_json::to_value(&task.brief)?,
+            prompt: prompt.clone(),
+            fixtures: self.fixtures.lock().map_err(io_error)?.clone(),
+            child_index: state
+                .tasks
+                .iter()
+                .position(|t| t.id == identity.task)
+                .unwrap(),
+        };
+        self.observer.bind(context)?;
+        let mut trace = self.trace.lock().map_err(io_error)?;
+        trace.launch_requests += 1;
+        trace.provider_launches += 1;
+        trace.recipes += 1;
+        trace.prompts.push(prompt.clone());
+        trace.recipe_argv.push(program.arguments.clone());
+        trace.recipe_argument_counts.push(program.arguments.len());
+        trace.recipe_bytes.push(serde_json::to_vec(&program)?.len());
+        trace.recipe_sizes.push(crate::te1_eval::recipe::measure(&serde_json::to_value(&program)?,&json!({"identity":identity,"brief":task.brief,"fixtures":self.fixtures.lock().map_err(io_error)?.clone(),"endpoint":invocation.profile().binding().endpoint()})));
+        let binding = program
+            .input
+            .as_ref()
+            .ok_or_else(|| io_error("input missing"))?;
+        trace.input_hashes.push(json!({"before":binding.sha256,"after":kinewright_media::sha256_bytes(prompt.as_bytes()),"bytes":binding.byte_length,"role":task.brief.role}));
+        trace.sends.push(json!({"identity":identity,"brief":task.brief,"accepted_candidate":locked.owner().map_err(io_error)?.candidate_binding(&task.brief.scope.base.branch).map_err(io_error)?}));
+        Ok(())
+    }
 }

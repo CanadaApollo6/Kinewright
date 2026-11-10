@@ -634,3 +634,28 @@ fn te15_b21f_details_distinguish_unapplied_integrity_and_summary() {
     );
     assert!(view.edit_approvals.iter().all(|s| !s.contains("approve?")));
 }
+
+#[test]
+fn te15_b2b_feedback_capacity_label() {
+    let (_project, attachment, run) = wait_fixture();
+    let mut page = with_host(&attachment, |port| port.run_view(&run).unwrap());
+    let words = kinewright_agent::job_guardian::protocol::INPUT_TOO_LONG;
+    page.wait_reason = Some(words.into());
+    assert!(
+        RunState::of(&page).label().contains(words),
+        "B2B_CAPACITY_LABEL"
+    );
+    page.wait_reason = Some(format!("{words} The send outcome is unknown."));
+    let label = RunState::of(&page).label();
+    assert!(
+        label.contains("send outcome is unknown") && !label.contains(words),
+        "B2B_UNKNOWN_LABEL_PRIORITY"
+    );
+    page.wait_reason =
+        Some(kinewright_agent::writer_host::task_preparation_words::UPGRADE_RECOVERY.into());
+    let label = RunState::of(&page).label();
+    assert!(
+        label.contains("Press Stop") && label.contains("start a new run"),
+        "B2B_UPGRADE_STOP_WORDS"
+    );
+}

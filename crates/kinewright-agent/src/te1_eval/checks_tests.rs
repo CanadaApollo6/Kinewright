@@ -114,8 +114,8 @@ fn te15_b2af1_case5_read_before_merge() {
     for tool in ["merge_task", "read_task_result", "merge_task"] {
         let mut c = call(
             tool,
-            json!({"command":{"value":{"task":"corrected"}}}),
-            json!({"unmet":"correct-homophone","proof":"failed"}),
+            json!({"command":{"value":{"task":if trace.calls.len()==1 {"earlier-independent"} else {"corrected"}}}}),
+            json!({"unmet":"correct-homophone","proof":"failed","receipt":{"id":format!("merge-{}",trace.calls.len())}}),
             false,
         );
         if tool == "read_task_result" {
@@ -206,4 +206,69 @@ fn te15_b2af1_recovery_matches_injected_task() {
     let mut trace = recovery();
     trace.calls[4].task = json!("sibling");
     assert!(!observed(6, &trace), "TE15_B2AF1_AFFECTED");
+}
+
+#[test]
+fn te15_b2b_effective_merge_order() {
+    let bad = call(
+        "publish_result",
+        json!({"command":{"value":{"result":{"explanation":{"sha256":"x"}}}}}),
+        json!({}),
+        false,
+    );
+    let mut read = call(
+        "read_task_result",
+        json!({"reference":{"sha256":"x"}}),
+        json!({"unmet":"correct-homophone","proof":"failed"}),
+        false,
+    );
+    read.task = json!("director");
+    let mut merge = call(
+        "merge_task",
+        json!({"command":{"value":{"task":"corrected"}}}),
+        json!({"outcome":{"receipt":{"id":{"issuer":"real-durable","counter":1}}}}),
+        false,
+    );
+    merge.task = json!("director");
+    let mut trace = Trace {
+        sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        calls: vec![bad.clone(), read.clone(), merge.clone(), merge.clone()],
+        ..Trace::default()
+    };
+    assert!(observed(5, &trace), "B2B_READ_MERGE_REPLAY");
+    trace.calls = vec![bad, merge.clone(), read, merge];
+    assert!(!observed(5, &trace), "B2B_MERGE_READ_REPLAY_REFUSED");
+}
+
+#[test]
+fn te15_b2b_finish_publication_order() {
+    let mut bad = call(
+        "finish_task",
+        json!({}),
+        json!({"completion_status":{"publication_receipt":{"id":"durable"},"result":{"explanation":{"sha256":"x"}}}}),
+        false,
+    );
+    let mut read = call(
+        "read_task_result",
+        json!({"reference":{"sha256":"x"}}),
+        json!({"unmet":"correct-homophone","proof":"failed"}),
+        false,
+    );
+    read.task = json!("director");
+    let mut merge = call(
+        "merge_task",
+        json!({"command":{"value":{"task":"corrected"}}}),
+        json!({"outcome":{"receipt":{"id":{"issuer":"real-durable","counter":1}}}}),
+        false,
+    );
+    merge.task = json!("director");
+    let mut trace = Trace {
+        sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        calls: vec![bad.clone(), read.clone(), merge.clone()],
+        ..Trace::default()
+    };
+    assert!(observed(5, &trace), "B2B_FINISH_PUBLISHED_OBSERVED");
+    bad.reply["completion_status"]["publication_receipt"] = serde_json::Value::Null;
+    trace.calls = vec![bad, read, merge];
+    assert!(!observed(5, &trace), "B2B_FROZEN_ONLY_IS_NOT_PUBLISHED");
 }

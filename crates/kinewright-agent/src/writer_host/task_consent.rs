@@ -88,7 +88,13 @@ fn scope(reason: impl std::fmt::Display) -> HostError {
     problem("consent_scope", format!("{reason}. Tell the Director."))
 }
 fn policy(reason: impl Into<String>) -> HostError {
-    problem("consent_policy", reason)
+    let reason = reason.into();
+    let code = if crate::orchestration::tasks::is_liveness_refusal(&reason) {
+        "consent_liveness"
+    } else {
+        "consent_policy"
+    };
+    problem(code, reason)
 }
 fn lock_host(
     owner: &std::sync::Mutex<HostCommandOwner>,
@@ -433,6 +439,9 @@ impl TaskMcp {
         edit: &ConsentEdit<'_>,
         description: &str,
     ) -> Result<(BatchBinding, RunProjection), HostError> {
+        self.endpoint
+            .check_live()
+            .map_err(|reason| problem("consent_liveness", reason))?;
         let (_, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
         consent_reference(host, &state)?;
         let record = state
@@ -653,12 +662,12 @@ impl TaskMcp {
         revision: TimelineRevision,
         before: &Document,
         edit: &ConsentEdit<'_>,
-        description: Option<&str>,
+        _description: Option<&str>,
     ) -> Result<EditOutcome, HostError> {
         let counts = removed(before, &edit.after(before)?);
         let actual_description = (counts.0 > 0 || counts.1 > 0)
             .then(|| format!("Remove {} clips and {} tracks", counts.0, counts.1));
-        let description = actual_description.as_deref().or(description);
+        let description = actual_description.as_deref();
         let owner = self.consent_host()?;
         if description.is_none() {
             let host = lock_host(&owner)?;
@@ -714,16 +723,24 @@ impl TaskMcp {
             .identity
             .clone();
         host.publish_native(&producer, state.clone(), &execution, vec![])?;
-        self.endpoint.check_live().map_err(authority)?;
+        self.endpoint
+            .check_live()
+            .map_err(|reason| problem("consent_liveness", reason))?;
         answer.approve().map_err(|e| problem("consent_broker", e))?;
         #[cfg(test)]
         if let Some(hook) = host.hooks.consent_apply_hook.take() {
             hook(core);
         }
+        if host.hooks.pending_edit_applications.len() >= ITEM_LIMIT {
+            return Err(problem(
+                "consent_capacity",
+                "The host must save the pending edit audit before another edit.",
+            ));
+        }
         let outcome = edit.apply(&self.endpoint, core, revision)?;
         if outcome.applied() {
             // The original successful Core outcome survives an audit-publication failure.
-            let _ = (|| -> Result<(), HostError> {
+            if let Err(error) = (|| -> Result<(), HostError> {
                 let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = core
                     .request(Command::Query(Query::Snapshot))
                     .map_err(|e| authority(e.to_string()))?
@@ -735,19 +752,66 @@ impl TaskMcp {
                     approval: reference,
                     revision,
                 };
+                host.hooks
+                    .pending_edit_applications
+                    .push((state.run.clone(), serde_json::to_vec(&marker)?));
                 state = host
                     .owner()?
                     .orchestration_projection(&state.run)?
                     .ok_or_else(|| authority("Run unavailable"))?;
-                state.edit_applications.push(
-                    host.owner_mut()?
-                        .admit_host_grant(&serde_json::to_vec(&marker)?)?,
-                );
                 host.publish_native(&producer, state, &execution, vec![])?;
                 Ok(())
-            })();
+            })() {
+                host.message = format!("Edit applied; its audit is pending publication: {error}");
+                eprintln!("{}", host.message);
+            }
         }
         Ok(outcome)
+    }
+}
+
+impl HostCommandOwner {
+    pub(crate) fn append_pending_edit_applications(
+        &mut self,
+        state: &mut RunProjection,
+    ) -> Result<(), HostError> {
+        if !self
+            .hooks
+            .pending_edit_applications
+            .iter()
+            .any(|(run, _)| run == &state.run)
+        {
+            return Ok(());
+        }
+        let current = self.owner()?.orchestration_projection(&state.run)?;
+        self.hooks
+            .pending_edit_applications
+            .retain(|(run, marker)| {
+                if run != &state.run {
+                    return true;
+                }
+                let bytes = marker;
+                !current.as_ref().is_some_and(|saved| {
+                    saved
+                        .edit_applications
+                        .iter()
+                        .any(|r| r.sha256 == kinewright_media::sha256_bytes(bytes))
+                })
+            });
+        let pending = self
+            .hooks
+            .pending_edit_applications
+            .iter()
+            .filter(|(run, _)| run == &state.run)
+            .map(|(_, m)| m.clone())
+            .collect::<Vec<_>>();
+        for bytes in pending {
+            let reference = self.owner_mut()?.admit_host_grant(&bytes)?;
+            if !state.edit_applications.contains(&reference) {
+                state.edit_applications.push(reference);
+            }
+        }
+        Ok(())
     }
 }
 

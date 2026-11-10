@@ -5,8 +5,7 @@ use std::io;
 pub(crate) fn arm() -> &'static str {
     "candidate"
 }
-/// B3's only surface-specific expressions are the two calls below: observe
-/// that arm's actually served definitions and its actual provider prefixes.
+/// Observe the candidate's actually served definitions and provider prefixes.
 pub(crate) fn roles() -> io::Result<Value> {
     let mut surfaces = serde_json::Map::new();
     for role in [

@@ -150,6 +150,18 @@ fn resolve_worker_threads(worker_threads: Option<usize>) -> usize {
     worker_threads.unwrap_or(DEFAULT_WORKER_THREADS)
 }
 
+fn task_edit_error(name: &str, error: &str) -> String {
+    if matches!(
+        name,
+        "prepare_edit_plan" | "commit_edit_plan" | "undo_task_edit" | "redo_task_edit"
+    ) && crate::orchestration::tasks::is_liveness_refusal(error.split(':').next().unwrap_or(""))
+    {
+        format!("consent_liveness: {error}")
+    } else {
+        error.into()
+    }
+}
+
 /// Build one server's Tokio runtime with its resolved worker count.
 ///
 /// Split out of `run_server` so the default/override contract is pinned
@@ -1624,7 +1636,12 @@ impl KinewrightMcp {
             }
             let role = match control.role() {
                 Ok(role) => role,
-                Err(error) => return Ok(error_text(error.to_string())),
+                Err(error) => {
+                    return Ok(error_text(task_edit_error(
+                        &request.name,
+                        &error.to_string(),
+                    )));
+                }
             };
             if request
                 .arguments
@@ -1663,7 +1680,13 @@ impl KinewrightMcp {
             }
             match endpoint.admit() {
                 Ok(guard) => Some(guard),
-                Err(error) => return Ok(error_text(error)),
+                Err(error) => {
+                    return Ok(error_text(if self.task_control.is_some() {
+                        task_edit_error(&request.name, &error)
+                    } else {
+                        error
+                    }));
+                }
             }
         } else {
             None
@@ -2815,7 +2838,14 @@ impl KinewrightMcp {
             && let Err(error) = endpoint.validate_batch(&before, operations)
         {
             return Ok(error_text(if self.task_control.is_some() {
-                format!("consent_policy: {error}")
+                format!(
+                    "{}: {error}",
+                    if crate::orchestration::tasks::is_liveness_refusal(&error) {
+                        "consent_liveness"
+                    } else {
+                        "consent_policy"
+                    }
+                )
             } else {
                 error
             }));
@@ -9245,7 +9275,14 @@ impl KinewrightMcp {
                 .validate_batch(document, &operations)
                 .map_err(|e| {
                     if self.task_control.is_some() {
-                        format!("consent_policy: {e}")
+                        format!(
+                            "{}: {e}",
+                            if crate::orchestration::tasks::is_liveness_refusal(&e) {
+                                "consent_liveness"
+                            } else {
+                                "consent_policy"
+                            }
+                        )
                     } else {
                         e
                     }

@@ -408,88 +408,58 @@ fn te15_b2a_case6_scripted_studio_end_to_end() {
 }
 
 #[test]
-fn te15_b2a_analysis_retains_every_pair_and_requires_both_statistics() {
+fn te15_b2b_analysis_retains_six_candidate_rows() {
     use kinewright_agent::te1_eval::analysis::{Arm, Row, Verdict, analyze};
     let mut rows = Vec::new();
-    for provider in ["codex", "claude"] {
-        for case in [1, 5, 6] {
-            for arm in [Arm::Baseline, Arm::Candidate] {
-                rows.push(Row {
-                    provider: provider.into(),
-                    case,
-                    arm,
-                    inclusive_lower_bound: if arm == Arm::Baseline { 100 } else { 90 },
-                    usage_complete: true,
-                    correct: true,
-                    shared_safety: true,
-                });
-            }
+    for (provider, totals) in [("codex", [100, 300, 200]), ("claude", [900, 600, 300])] {
+        for (case, tokens) in [1, 5, 6].into_iter().zip(totals) {
+            rows.push(Row {
+                provider: provider.into(),
+                case,
+                arm: Arm::Candidate,
+                inclusive_lower_bound: tokens,
+                usage_complete: true,
+                correct: true,
+                shared_safety: true,
+            });
         }
     }
-    for index in [7, 9, 11] {
-        rows[index].inclusive_lower_bound = 100;
-    }
-    let split = analyze(&rows).unwrap();
-    assert_eq!(split.providers[0].verdict, Verdict::DeclaredSamplePass);
+    let complete = analyze(&rows).unwrap();
     assert_eq!(
-        split.providers[1].verdict,
-        Verdict::Fail,
-        "TE15_B2A_PROVIDER_SEPARATE"
+        complete.verdict,
+        Verdict::DeclaredSamplePass,
+        "B2B_SIX_CANDIDATES_ONLY"
     );
-    for index in [7, 9, 11] {
-        rows[index].inclusive_lower_bound = 90;
-    }
-    let pass = analyze(&rows).unwrap();
-    assert_eq!(pass.verdict, Verdict::DeclaredSamplePass);
-    assert_eq!(pass.rows.len(), 12);
-    assert!(
-        pass.providers
-            .iter()
-            .all(|p| p.mean_improves && p.median_improves)
+    assert_eq!(complete.rows.len(), 6, "B2B_SIX_CANDIDATES_ONLY");
+    assert_eq!(complete.providers[0].candidate_sum, 600);
+    assert_eq!(complete.providers[0].candidate_median, 200);
+    assert_eq!(complete.providers[0].mean_denominator, 3);
+    assert_eq!(complete.providers[1].candidate_sum, 1800);
+    assert_eq!(complete.providers[1].candidate_median, 600);
+    rows.reverse();
+    assert_eq!(
+        serde_json::to_value(analyze(&rows).unwrap().rows).unwrap(),
+        serde_json::to_value(&rows).unwrap(),
+        "all supplied rows and ordering retained"
     );
-    for (index, tokens) in [1, 3, 5].into_iter().zip([110, 110, 1]) {
-        rows[index].inclusive_lower_bound = tokens;
-    }
-    let mixed = analyze(&rows).unwrap();
-    assert_eq!(mixed.verdict, Verdict::MixedInconclusive);
-    assert!(mixed.providers[0].mean_improves);
-    assert!(
-        !mixed.providers[0].median_improves,
-        "TE15_B2A_MEDIAN_REQUIRED"
-    );
-    for (index, tokens) in [1, 3, 5].into_iter().zip([90, 90, 200]) {
-        rows[index].inclusive_lower_bound = tokens;
-    }
-    let mixed = analyze(&rows).unwrap();
-    assert!(!mixed.providers[0].mean_improves, "TE15_B2A_MEAN_REQUIRED");
-    assert!(mixed.providers[0].median_improves);
-    // Neither provider passes both aggregates, but a single improved aggregate
-    // remains mixed, rather than being reported as a complete token-bar failure.
-    for index in [7, 9, 11] {
-        rows[index].inclusive_lower_bound = 100;
-    }
-    assert_eq!(analyze(&rows).unwrap().verdict, Verdict::MixedInconclusive);
-    for index in [1, 3, 5] {
-        rows[index].inclusive_lower_bound = 100;
-    }
-    assert_eq!(analyze(&rows).unwrap().verdict, Verdict::Fail);
-    rows[7].usage_complete = false;
-    rows[7].inclusive_lower_bound = 118;
+    assert_eq!(analyze(&rows[..5]).unwrap().verdict, Verdict::Incomplete);
+    rows[0].usage_complete = false;
+    rows[0].inclusive_lower_bound = 118;
     let incomplete = analyze(&rows).unwrap();
     assert_eq!(incomplete.verdict, Verdict::Incomplete);
-    assert_eq!(incomplete.rows[7].inclusive_lower_bound, 118);
-    assert_eq!(analyze(&rows[..11]).unwrap().verdict, Verdict::Incomplete);
-    rows[7].correct = false;
-    assert_eq!(analyze(&rows).unwrap().verdict, Verdict::StopProvider);
+    assert_eq!(incomplete.rows[0].inclusive_lower_bound, 118);
     rows[0].correct = false;
-    assert_eq!(
-        analyze(&rows).unwrap().verdict,
-        Verdict::BaselineOracleFailure
-    );
+    assert_eq!(analyze(&rows).unwrap().verdict, Verdict::StopProvider);
     rows[0].shared_safety = false;
     assert_eq!(analyze(&rows).unwrap().verdict, Verdict::StopAll);
     rows.push(rows[0].clone());
     assert!(analyze(&rows).is_err());
+    for arm in ["baseline", "other", "Candidate", ""] {
+        assert!(
+            serde_json::from_value::<Arm>(serde_json::json!(arm)).is_err(),
+            "B2B_ONLY_CANDIDATE_ROW {arm}"
+        );
+    }
 }
 
 mod coverage {
@@ -577,17 +547,10 @@ mod coverage {
         let mut rows = vec![];
         for provider in ["codex", "claude"] {
             for case in [1, 5, 6] {
-                for arm in [Arm::Baseline, Arm::Candidate] {
-                    let mut r = row.clone();
-                    r.provider = provider.into();
-                    r.case = case;
-                    r.arm = arm;
-                    if arm == Arm::Baseline {
-                        r.inclusive_lower_bound = 400;
-                        r.usage_complete = true;
-                    }
-                    rows.push(r);
-                }
+                let mut r = row.clone();
+                r.provider = provider.into();
+                r.case = case;
+                rows.push(r);
             }
         }
         analyze(&rows).unwrap().verdict
