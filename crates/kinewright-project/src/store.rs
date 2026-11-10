@@ -1471,6 +1471,15 @@ impl ProjectStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn reserve_decoder_for_fixture(
+        &self,
+        bytes: u64,
+    ) -> Result<kinewright_media::owned_io::LifetimeGuard, String> {
+        self.decoder_reserver()(bytes)
+    }
+
     pub(crate) fn media_admission_verified(
         &self,
         entry: &crate::owned_inputs::OwnedInputEntry,
@@ -1537,6 +1546,25 @@ impl ProjectStore {
                 _charge: self.reserve_copy_read(0, charge, 0, false, true)?,
             },
         );
+        Ok(())
+    }
+
+    pub(crate) fn forget_media_admission(
+        &self,
+        entry: &crate::owned_inputs::OwnedInputEntry,
+    ) -> Result<(), BundleError> {
+        self.inner
+            .media_admissions
+            .lock()
+            .map_err(|_| BundleError::Capacity("media admission memo poisoned"))?
+            .remove(&(
+                entry.object.clone(),
+                entry.chunk_table_ref()?.clone(),
+                entry
+                    .profile
+                    .clone()
+                    .ok_or_else(|| BundleError::Corrupt("missing media interpretation".into()))?,
+            ));
         Ok(())
     }
 

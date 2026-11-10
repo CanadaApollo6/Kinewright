@@ -407,7 +407,17 @@ impl TaskMcp {
                         let prepared = host.prepare_media_context(index, &state, record, &read)?;
                         let rendered = {
                             drop(host);
-                            prepared.render(&self.endpoint, &owner)?
+                            match prepared.render(&self.endpoint, &owner) {
+                                Ok(rendered) => rendered,
+                                Err(error) => {
+                                    if prepared.failed()?
+                                        && let Ok(mut host) = self.lock_owner(&owner)
+                                    {
+                                        prepared.discard_failed(&mut host, &state.run, &task)?;
+                                    }
+                                    return Err(error);
+                                }
+                            }
                         };
                         let mut host = self.lock_owner(&owner)?;
                         let (index, state, task) =

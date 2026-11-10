@@ -294,3 +294,9 @@ All build, test and gate processes started for this follow-up have exited.
 No extra mutation pair, live provider, dry launch or paid run is part of this
 follow-up. The maximal fixture remains excluded as directed. The Windows F2
 metadata limitation and the non-media paths in the inventory are left unchanged.
+
+Follow-up on `3e79b967`: unusable admission memos are evicted and fully recertified off the owner lock; unchanged bytes receive a fresh stamp-bound memo, while damaged bytes fail before StartRun.
+Media recertification uses the existing background job and cancellation signal, so timeout retries reuse completed work and Stop cancels pending verification.
+Failed reads are delivered once then evicted; cached successes recheck their actual source's original stamp before publication, using existing failure words and no source hashing under the owner lock.
+Narrow verification passed: Project owned_media 12, media owned_io/memo 41, te1_media_only 5, te1_safety 8, media wait/Stop/pause 6, te15_a 9, and four adjacent tamper tests (85 total; logs under `target/te1-recert/`).
+fmt, workspace Clippy, Windows Clippy and slow-test lint passed; no whole-crate suites or mutation pairs ran, `scripts/__pycache__/` was removed, and owner-lock deadlines remain deferred.

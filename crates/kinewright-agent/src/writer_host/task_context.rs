@@ -322,6 +322,7 @@ pub(super) struct PreparedMediaRead {
 }
 struct MediaReadInput {
     source: kinewright_project::owned_inputs::CertifiedMediaInput,
+    refresh: kinewright_project::owned_inputs::InputLeaseRequest,
     micros: i64,
     audio: bool,
     at: i64,
@@ -339,6 +340,7 @@ struct MediaReadInput {
     outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 pub(super) struct RenderedMediaRead {
+    source: kinewright_project::owned_inputs::CertifiedMediaInput,
     binding: Value,
     value: Value,
     switch_generation: Option<u64>,
@@ -354,6 +356,7 @@ enum MediaReadState {
     Queued(Box<MediaReadInput>),
     Running,
     Ready(Result<Arc<RenderedMediaRead>, HostRefusal>),
+    Failed,
 }
 
 // FFmpeg's linesize includes padding. Never expose padding or inactive samples.
@@ -393,7 +396,7 @@ fn media_failed() -> HostError {
 }
 impl PreparedMediaRead {
     pub(super) fn render(
-        self,
+        &self,
         endpoint: &crate::orchestration::tasks::TaskEndpoint,
         owner: &Arc<std::sync::Mutex<HostCommandOwner>>,
     ) -> Result<Arc<RenderedMediaRead>, HostError> {
@@ -408,16 +411,48 @@ impl PreparedMediaRead {
                     .store(true, std::sync::atomic::Ordering::Release);
                 return Err(media_unavailable());
             }
-            if let MediaReadState::Ready(result) =
-                &*self.work.state.lock().map_err(|_| media_failed())?
             {
-                return result.clone().map_err(HostError::from);
+                let mut state = self.work.state.lock().map_err(|_| media_failed())?;
+                match &*state {
+                    MediaReadState::Ready(result) => {
+                        let result = result.clone();
+                        if result.is_err() {
+                            *state = MediaReadState::Failed;
+                        }
+                        return result.map_err(HostError::from);
+                    }
+                    MediaReadState::Failed => return Err(media_failed()),
+                    MediaReadState::Queued(_) | MediaReadState::Running => {}
+                }
             }
             if !started || std::time::Instant::now() >= self.deadline {
                 return Err(refused(MEDIA_RETRY));
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+    pub(super) fn discard_failed(
+        &self,
+        host: &mut HostCommandOwner,
+        run: &RunId,
+        task: &TaskId,
+    ) -> Result<(), HostError> {
+        if self.failed()?
+            && let Some(run) = host.hooks.runs.get_mut(run)
+            && run
+                .media_reads
+                .get(task)
+                .is_some_and(|work| Arc::ptr_eq(work, &self.work))
+        {
+            run.media_reads.remove(task);
+        }
+        Ok(())
+    }
+    pub(super) fn failed(&self) -> Result<bool, HostError> {
+        Ok(matches!(
+            *self.work.state.lock().map_err(|_| media_failed())?,
+            MediaReadState::Failed
+        ))
     }
 }
 impl MediaReadWork {
@@ -449,7 +484,7 @@ impl MediaReadWork {
     fn pending(&self) -> Result<bool, HostError> {
         Ok(!matches!(
             *self.state.lock().map_err(|_| media_failed())?,
-            MediaReadState::Ready(_)
+            MediaReadState::Ready(_) | MediaReadState::Failed
         ))
     }
     fn start(
@@ -542,7 +577,11 @@ impl MediaReadInput {
         #[cfg(test)]
         let assembly_gate = self.assembly_gate;
         check_context_cancel(Some(cancel.as_ref()))?;
-        let source = self.source;
+        let source = if self.source.verify_unchanged().is_ok() {
+            self.source
+        } else {
+            self.refresh.certified_media_source(Arc::clone(cancel))?
+        };
         source.verify_unchanged()?;
         let mut value = if self.audio {
             let mut decoder = source.open_audio(Arc::clone(cancel))?;
@@ -680,6 +719,7 @@ impl MediaReadInput {
         let value = page(&rows, &binding, self.cursor.as_deref(), PAGE_BYTES - 4096)?;
         check_context_cancel(Some(cancel.as_ref()))?;
         Ok(RenderedMediaRead {
+            source,
             binding,
             value,
             switch_generation: self.switch_generation,
@@ -1118,14 +1158,14 @@ impl HostCommandOwner {
             .find(|e| e.matches_media_asset(asset))
             .ok_or_else(|| refused("media is not owned by task inputs"))?;
         let run = self.hooks.runs.get(&state.run).ok_or_else(media_failed)?;
-        let source = run
+        let lease = run
             .inputs
             .context
             .certified_input_leases
             .iter()
             .find(|lease| lease.identity().entry == *entry)
-            .ok_or_else(media_failed)?
-            .certified_source()?;
+            .ok_or_else(media_failed)?;
+        let source = lease.certified_source()?;
         let endpoint = run.tasks.get(&task.id).ok_or_else(media_failed)?.endpoint();
         let switch_generation = self.owner()?.manual_switch_generation().ok();
         let micros = i64::try_from(
@@ -1136,7 +1176,12 @@ impl HostCommandOwner {
         let binding = json!({"run":state.run,"task":task.id,"source":task.brief.scope.base,"evidence":read.evidence});
         let key = json!({"endpoint":endpoint.authority().endpoint,"revision":read.revision,"cursor":read.cursor,"binding":binding,"switch_generation":switch_generation});
         if let Some(work) = run.media_reads.get(&task.id) {
-            if work.key == key && !work.cancel.load(std::sync::atomic::Ordering::Acquire) {
+            let failed = matches!(
+                *work.state.lock().map_err(|_| media_failed())?,
+                MediaReadState::Failed
+            );
+            if work.key == key && !failed && !work.cancel.load(std::sync::atomic::Ordering::Acquire)
+            {
                 return Ok(PreparedMediaRead {
                     work: Arc::clone(work),
                     deadline,
@@ -1150,6 +1195,7 @@ impl HostCommandOwner {
         }
         let input = MediaReadInput {
             source,
+            refresh: lease.media_recertification_request()?,
             micros,
             audio,
             at,
@@ -1201,6 +1247,20 @@ impl HostCommandOwner {
             || self.owner()?.manual_switch_generation().ok() != rendered.switch_generation
         {
             return Err(refused("stale evidence revision after decode"));
+        }
+        if rendered.source.verify_unchanged().is_err() {
+            if let Some(run) = self.hooks.runs.get_mut(&state.run)
+                && let Some(work) = run.media_reads.get(&task.id)
+            {
+                let cached = matches!(
+                    &*work.state.lock().map_err(|_| media_failed())?,
+                    MediaReadState::Ready(Ok(cached)) if std::ptr::eq(cached.as_ref(), rendered)
+                );
+                if cached {
+                    run.media_reads.remove(&task.id);
+                }
+            }
+            return Err(media_failed());
         }
         self.record_expansion(
             index,

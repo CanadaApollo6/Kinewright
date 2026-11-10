@@ -64,6 +64,15 @@ pub struct InputLeaseRequest {
     identity: OwnedInputRef,
 }
 impl InputLeaseRequest {
+    /// Refresh an already admitted media binding outside the owner's mutex.
+    pub fn certified_media_source(
+        self,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<CertifiedMediaInput, BundleError> {
+        self.hold
+            .read_store()
+            .certify_media_input_with_cancel(&self.identity, cancel)
+    }
     pub fn open(self) -> Result<OwnedInputLease, BundleError> {
         self.hold.read_store().lease_input(&self.identity)
     }
@@ -183,6 +192,16 @@ impl OwnedInputLease {
         self.source
             .clone()
             .ok_or_else(|| BundleError::Unsupported("input is not certified media".into()))
+    }
+    /// Retain the exact previously authorized binding for off-lock recertification.
+    pub fn media_recertification_request(&self) -> Result<InputLeaseRequest, BundleError> {
+        Ok(InputLeaseRequest {
+            hold: self
+                .pin
+                .read_store()
+                .pin(std::slice::from_ref(&self.identity.manifest_ref))?,
+            identity: self.identity.clone(),
+        })
     }
     fn verified_cursor(
         &mut self,
