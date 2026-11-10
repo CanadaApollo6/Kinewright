@@ -191,3 +191,4 @@ kinewright_agent writer_host::hooks_tests::tests::te13_finish_cannot_spend_the_t
 kinewright_agent writer_host::hooks_tests::tests::te14_fix1_many_results_always_deliver_a_bounded_wake crates/kinewright-agent/src/writer_host/te14_fix1_tests.rs linux-only # seven real durable child publications, over 60 s at four test threads
 
 kinewright_agent writer_host::hooks_tests::tests::te14_fix2_many_notes_reach_wake_trim crates/kinewright-agent/src/writer_host/te14_fix2_tests.rs linux-only # many-note production wake trimming
+kinewright_agent writer_host::hooks_tests::tests::te1_media_only_claude_wait_reuses_read_and_stop_prevents_publication crates/kinewright-agent/src/writer_host/te1_media_only_tests.rs linux-only # real 30-second media wait and cached HTTP retry under 45 seconds

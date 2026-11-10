@@ -39,7 +39,7 @@ impl FileIdentity {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct FileStamp {
     length: u64,
     modified: std::time::SystemTime,
@@ -64,6 +64,7 @@ impl FileStamp {
 #[derive(Clone)]
 pub struct SourceAdmissionMemo {
     native: FileIdentity,
+    certified_stamp: FileStamp,
     identity: CertifiedIdentity,
     chunks_digest: [u8; 32],
     selected: Option<SelectedStreams>,
@@ -99,6 +100,7 @@ impl CertifiedSource {
         })?;
         Ok(SourceAdmissionMemo {
             native,
+            certified_stamp: self.0.certified_stamp,
             identity: self.identity(),
             chunks_digest: chunks_digest(&self.0.chunks),
             selected: self.1,
@@ -132,6 +134,11 @@ impl SourceAdmissionMemo {
             lifetime,
             reserve_cursor,
         )?;
+        if source.0.certified_stamp != self.certified_stamp {
+            return Err(OwnedIoError::InvalidCertificate(
+                "admission memo source changed since verification".into(),
+            ));
+        }
         let _ = source.0.verified_identity.set(self.native);
         source.1 = self.selected;
         Ok(source)

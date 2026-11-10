@@ -149,6 +149,7 @@ pub(super) struct HostRun {
     pub producer: HostAuth,
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,
+    pub media_reads: BTreeMap<TaskId, Arc<super::task_context::MediaReadWork>>,
     pub continuable: bool,
     pub last_continue: Option<u64>,
     #[cfg(target_os = "linux")]

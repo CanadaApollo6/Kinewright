@@ -328,6 +328,7 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
     let owner = f.host.owner.upgrade().unwrap();
     let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
     let entered = Arc::new(AtomicBool::new(false));
+    let unexpected_cold = Arc::new(AtomicBool::new(false));
     let outcome = Arc::new(AtomicU8::new(0));
     let (probe, endpoint, target) = {
         let mut host = owner.lock().unwrap();
@@ -344,19 +345,15 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
         let probe = store.pin(&[]).unwrap();
         if cold {
             store.clear_media_memo_for_fixture().unwrap();
-            let gate = gate.clone();
-            let entered = entered.clone();
+            let unexpected_cold = unexpected_cold.clone();
             store
                 .hold_next_cold_media_for_fixture(Arc::new(move || {
-                    entered.store(true, Ordering::Release);
-                    gate.0.wait();
-                    gate.1.wait();
+                    unexpected_cold.store(true, Ordering::Release);
                 }))
                 .unwrap();
-        } else {
-            host.hooks.context_media_gate = Some(gate.clone());
-            entered.store(true, Ordering::Release);
         }
+        host.hooks.context_media_gate = Some(gate.clone());
+        entered.store(true, Ordering::Release);
         if timeout {
             host.hooks.context_media_wait = Some(Duration::from_millis(300));
         }
@@ -394,6 +391,10 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
             }
         }
         gate.0.wait();
+        assert!(
+            !unexpected_cold.load(Ordering::Acquire),
+            "TE14_FIX1_READ_REUSES_CERTIFICATE"
+        );
         let control = scope.spawn(|| {
             if timeout {
                 return None;
@@ -500,18 +501,23 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
     }
     assert_eq!(
         outcome.load(Ordering::Acquire),
-        2,
-        "TE14_FIX1_DECODER_REAL_CANCEL"
+        if timeout { 1 } else { 2 },
+        "TE14_FIX1_DECODER_CONTINUES_OR_CANCELS"
     );
     assert!(
         !endpoint.media_read_pending_for_fixture(),
         "TE14_FIX1_WORKER_RELEASED"
     );
     assert!(
-        held_pins.iter().any(|(key, held)| *held
-            >= after_pins.get(key).copied().unwrap_or(0) + if cold { 2 } else { 1 }),
-        "TE14_FIX1_PIN_RELEASED"
+        held_pins
+            .iter()
+            .all(|(key, held)| *held >= after_pins.get(key).copied().unwrap_or(0)),
+        "TE14_FIX1_RETAINED_SOURCE_PINS_DO_NOT_GROW"
     );
+    // Switching can certify its newly installed inputs after the read was cancelled.
+    if !switch {
+        assert!(!unexpected_cold.load(Ordering::Acquire));
+    }
     assert_eq!(
         f.projection(&run).tasks[1].progress.decisions.len(),
         before,
@@ -523,11 +529,11 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
     );
 }
 #[test]
-fn te14_fix1_cold_certification_stop() {
+fn te14_fix1_retained_certificate_stop_after_memo_eviction() {
     te14_fix1_media_control(true, false, false);
 }
 #[test]
-fn te14_fix1_cold_certification_switch() {
+fn te14_fix1_retained_certificate_switch_after_memo_eviction() {
     te14_fix1_media_control(true, true, false);
 }
 #[test]

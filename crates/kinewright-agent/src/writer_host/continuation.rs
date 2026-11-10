@@ -88,6 +88,7 @@ impl HostCommandOwner {
                 producer,
                 inputs: HostOwnedInputClosure { context, inputs },
                 tasks: BTreeMap::new(),
+                media_reads: BTreeMap::new(),
                 continuable: true,
                 last_continue: Some(continue_floor),
                 #[cfg(target_os = "linux")]
