@@ -114,7 +114,7 @@ mutations = [
      "direct_input: complete.then_some(direct).flatten(),", "direct_input: direct,",
      ["--test", "te1_usage"], "te1_review_stream_report_does_not_present_incomplete_direct_input_as_known"),
     ("native-observer-loss", "crates/kinewright-agent/src/writer_host/task_mcp.rs",
-     "measurements.incomplete |= !attached;", "measurements.incomplete |= !attached && false;",
+     "measurements.incomplete |= incomplete;", "measurements.incomplete |= incomplete && false;",
      ["--lib"], "writer_host::hooks_tests::tests::te1_review_native_size_observer_survives_missing_host_and_poison"),
     ("native-size-loss", "crates/kinewright-agent/src/server.rs",
      "metrics.incomplete |= !native_recorded;", "metrics.incomplete |= !native_recorded && false;",
@@ -176,7 +176,7 @@ mutations = [
      "self.samples.pop();", "let _ = self.samples.last();",
      ["--lib"], "usage_observer::tests::te1_refused_regression_does_not_poison_later_valid_observations"),
     ("corpus-manual-fork", "crates/kinewright-project/src/editing_session/durable.rs",
-     '        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;', '        let core = self.core.clone();\n        let bundle = self.active_bundle_mut()?;',
+     '        let core = Core::spawn(std::sync::Arc::clone(&live.document))\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;', '        let core = self.core.clone();\n        let bundle = self.active_bundle_mut()?;',
      ["--test", "te1_corpus"], "te1_case1_task_fork_preserves_its_source_manual_history_and_redo"),
 ]
 proof = []
