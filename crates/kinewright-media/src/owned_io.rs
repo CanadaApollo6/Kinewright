@@ -1702,12 +1702,18 @@ mod bridge {
         )))
         .unwrap();
         // SAFETY: as in `Avio::open`: the buffer and context are null-checked,
-        // `cursor` stays allocated until `avio` drops, and the reads run
-        // synchronously on this thread while no Rust borrow of the cursor is live.
+        // and on either failure the buffer and `cursor` are freed before the
+        // panic (as `Avio::open`'s failure paths do), so neither leaks;
+        // otherwise `avio` owns both from here and frees them when it drops.
+        // The reads run synchronously on this thread while no Rust borrow of
+        // the cursor is live.
         unsafe {
             let buffer = ffi::av_malloc(AVIO_BUFFER_BYTES).cast::<u8>();
-            assert!(!buffer.is_null());
-            let context = NonNull::new(ffi::avio_alloc_context(
+            if buffer.is_null() {
+                free_cursor(cursor);
+                panic!("AVIO buffer allocation");
+            }
+            let context = ffi::avio_alloc_context(
                 buffer,
                 c_int::try_from(AVIO_BUFFER_BYTES).unwrap(),
                 0,
@@ -1715,8 +1721,12 @@ mod bridge {
                 Some(read),
                 None,
                 Some(seek),
-            ))
-            .unwrap();
+            );
+            let Some(context) = NonNull::new(context) else {
+                ffi::av_free(buffer.cast());
+                free_cursor(cursor);
+                panic!("AVIO context allocation");
+            };
             let mut avio = Avio { context, cursor };
             let mut bytes = [0; 32];
             busy.store(true, Ordering::Release);

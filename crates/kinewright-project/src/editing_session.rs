@@ -633,16 +633,25 @@ impl Ja1EditingSession {
         kind: HostActivationKind,
         prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
     ) -> Result<Core, BundleError> {
-        self.activate_host_cut_prepared(cut, history, publisher_digest, kind, prepare, None)
+        self.activate_host_cut_prepared(
+            cut,
+            std::borrow::Cow::Owned(history),
+            publisher_digest,
+            kind,
+            prepare,
+            None,
+        )
     }
     #[allow(
         clippy::too_many_arguments,
         reason = "the original exact-cut handoff also consumes optional prepublication GUI resources"
     )]
+    /// `history` is borrowed when `prepared` already restored it (only its
+    /// digest is checked here), and is restored by value otherwise.
     fn activate_host_cut_prepared(
         &mut self,
         cut: &kinewright_core::AcceptedCut,
-        history: kinewright_core::HistorySnapshot,
+        history: std::borrow::Cow<'_, kinewright_core::HistorySnapshot>,
         publisher_digest: &str,
         kind: HostActivationKind,
         prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
@@ -657,7 +666,7 @@ impl Ja1EditingSession {
             return Err(BundleError::Capacity("retained GUI rescue actors"));
         }
         let bytes =
-            serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            serde_json::to_vec(&*history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         if kinewright_media::sha256_bytes(&bytes) != publisher_digest {
             self.host_lost()?;
             return Err(BundleError::Identity(
@@ -671,7 +680,7 @@ impl Ja1EditingSession {
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let attachment = ProjectAttachment::new(&core).map_err(crate::bundle::history_error)?;
             attachment
-                .restore_history(history)
+                .restore_history(history.into_owned())
                 .map_err(crate::bundle::history_error)?;
             let fresh_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
             (core, attachment, fresh_cut)

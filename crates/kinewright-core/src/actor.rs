@@ -935,21 +935,37 @@ impl CoreState {
     /// `self.history() == *other`, compared field by field without building
     /// the snapshot (which would copy every batch and every entry's
     /// operations).
+    ///
+    /// The snapshot types are destructured without `..`, so a field added to
+    /// `HistorySnapshot`, `HistoryCursor` or `GestureBoundary` is a compile
+    /// error here rather than a field `history() ==` compares and this skips.
     fn history_matches(&self, other: &HistorySnapshot) -> bool {
         fn entries_match(entries: &[HistoryEntry], boundaries: &[GestureBoundary]) -> bool {
             entries.len() == boundaries.len()
                 && entries.iter().zip(boundaries).all(|(entry, boundary)| {
-                    entry.document == boundary.document
-                        && entry.operations == boundary.operations
-                        && entry.coalesce_key == boundary.coalesce_key
+                    let GestureBoundary {
+                        document,
+                        operations,
+                        coalesce_key,
+                    } = boundary;
+                    entry.document == *document
+                        && entry.operations == *operations
+                        && entry.coalesce_key == *coalesce_key
                 })
         }
-        self.floor_offset == other.floor_offset
-            && self.baseline == other.baseline
-            && self.document == other.document
-            && self.batches == other.batches
-            && entries_match(&self.undo, &other.cursor.undo)
-            && entries_match(&self.redo, &other.cursor.redo)
+        let HistorySnapshot {
+            floor_offset,
+            baseline,
+            document,
+            batches,
+            cursor: HistoryCursor { undo, redo },
+        } = other;
+        self.floor_offset == *floor_offset
+            && self.baseline == *baseline
+            && self.document == *document
+            && self.batches == *batches
+            && entries_match(&self.undo, undo)
+            && entries_match(&self.redo, redo)
     }
 
     fn restore(snapshot: &HistorySnapshot) -> Result<Self, HistoryError> {

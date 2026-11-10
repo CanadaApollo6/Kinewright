@@ -1342,7 +1342,7 @@ impl World {
             // Independent D14 oracle: the dispatched decoder's promised times,
             // actual exact decoded coverage, explicit demand and other owners.
             // It does not read the scheduler's continuation provenance.
-            let before = self.readers.required.clone();
+            let before = self.readers.required.frames();
             let explicit = &self.required_by_post;
             // A retiring reader's output is discarded (H-6), so that flight
             // cannot supply a keeper. Its decoded frames stay protected (F3).
@@ -1362,7 +1362,8 @@ impl World {
             if version != self.readers.version && !retiring {
                 let expected: HashSet<_> = before.difference(&removable).copied().collect();
                 assert_eq!(
-                    self.readers.required, expected,
+                    self.readers.required.frames(),
+                    expected,
                     "D14 independent exact handoff oracle"
                 );
             }
@@ -1449,9 +1450,9 @@ impl World {
     fn snapshot(&self) -> String {
         let r = &self.readers;
         let mut out = String::new();
-        let mut required: Vec<_> = r.required.iter().copied().collect();
+        let mut required: Vec<_> = r.required.frames().into_iter().collect();
         required.sort_unstable();
-        let mut reserved: Vec<_> = r.reserved.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut reserved: Vec<_> = r.reserved.iter().map(|(k, at, v)| ((*k, at), *v)).collect();
         reserved.sort_unstable();
         let _ = writeln!(
             out,
@@ -1510,7 +1511,9 @@ impl World {
                 // For a live reader it ends when a plan requires the time
                 // again (Amendment R66, F13), once that plan's admission
                 // reserves it (K-2: until then the time is missing).
-                if !readers.required.contains(&frame) || slot.state == ReaderState::Retiring {
+                if !readers.required.contains(&frame.0, frame.1)
+                    || slot.state == ReaderState::Retiring
+                {
                     agent.unowed.insert(at);
                     continue;
                 }
@@ -1521,7 +1524,7 @@ impl World {
                 let charged = slot.retained.contains(&at)
                     && readers
                         .reserved
-                        .get(&frame)
+                        .get(&frame.0, frame.1)
                         .is_some_and(|bytes| *bytes >= raw.max(F));
                 let outside = |(low, bound): (i64, i64)| !(low..=bound).contains(&at);
                 let discarded = !slot.retained.contains(&at)
@@ -1534,7 +1537,7 @@ impl World {
                     agent.id,
                     agent.key,
                     slot.retained.contains(&at),
-                    readers.reserved.get(&frame),
+                    readers.reserved.get(&frame.0, frame.1),
                     slot.discard,
                     agent.doing
                 );
@@ -1593,12 +1596,12 @@ impl World {
             windows, held,
             "the windows held, the scheduler's and the model's"
         );
-        for ((key, at), bytes) in &readers.reserved {
-            let charge = self.charge(*key, *at);
+        for (key, at, bytes) in readers.reserved.iter() {
+            let charge = self.charge(*key, at);
             if *bytes == charge {
                 continue;
             }
-            let kept = self.keeps(*key, *at);
+            let kept = self.keeps(*key, at);
             let most = if kept {
                 charge.max(self.kept_size(*key))
             } else {
@@ -1616,7 +1619,7 @@ impl World {
             let room = readers.budget.saturating_sub(self.detached_charges());
             // Amendment R66 (item 4): H by the model's charges.
             let h: usize = (readers.required.iter())
-                .map(|(key, at)| self.charge(*key, *at))
+                .map(|(key, at, ())| self.charge(*key, at))
                 .sum();
             assert_eq!(
                 readers.required_bytes, h,
@@ -1638,9 +1641,9 @@ impl World {
             }
         }
         // I5: every required frame is resolved, in flight or planned.
-        for (key, at) in &readers.required {
+        for (key, at) in &readers.required.frames() {
             let resolved = (readers.rings.get(key)).is_some_and(|ring| ring.contains_key(at))
-                || readers.failures.contains_key(&(*key, *at));
+                || readers.failures.contains(key, *at);
             let planned = (readers.slots.iter()).any(|slot| {
                 slot.key == *key
                     && (slot.plan.required.contains(at)
@@ -2121,7 +2124,7 @@ fn a_carried_reservation_below_its_charge_is_made_again_at_it() {
         ],
     );
     assert_eq!(
-        world.readers.reserved.get(&(0, 0)),
+        world.readers.reserved.get(&0, 0),
         Some(&(2 * F)),
         "0 at max(f, d):\n{}",
         world.snapshot()
@@ -2496,7 +2499,7 @@ fn a_continued_window_fits_beside_a_kept_time_at_its_kept_charge() {
     );
     let required = &world.readers.required;
     assert!(
-        !required.contains(&(1, 7)) && required.contains(&(1, 8)),
+        !required.contains(&1, 7) && required.contains(&1, 8),
         "the continuation is cut to 8–18:\n{}",
         world.snapshot()
     );
@@ -2710,7 +2713,7 @@ fn s3b_d14_independent_model_checks_superseded_optional_handoff() {
         "the supersession path actually ran"
     );
     assert_eq!(
-        world.readers.required,
+        world.readers.required.frames(),
         HashSet::from([(0, 8)]),
         "explicit target only; fixed() also checked exact charges and settled progress"
     );
@@ -2754,7 +2757,7 @@ fn s3b_d14_model_retiring_decode_is_not_an_available_keeper() {
     );
     assert_eq!(world.reach.stale_refills, 1, "the superseded refill ran");
     assert_eq!(
-        world.readers.required,
+        world.readers.required.frames(),
         HashSet::from([(0, 36), (0, 37), (0, 38)]),
         "only exact available continuation and the explicit target stay"
     );

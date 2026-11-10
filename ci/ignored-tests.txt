@@ -55,6 +55,7 @@ kinewright_eval tests::v5_music_fixture_builds_with_real_media_and_pinned_beats 
 
 # kinewright_media
 kinewright_media audio::tests::h4_ten_minute_stereo_mix_cost crates/kinewright-media/src/audio.rs any on-demand  # on-demand measurement
+kinewright_media sched::tests::h3_multi_source_scheduler_pass_cost crates/kinewright-media/src/sched.rs any on-demand  # on-demand measurement
 kinewright_media pf1_harness::s4_prepare_inputs crates/kinewright-media/src/pf1_s4_inputs.rs any on-demand  # preparation only, before frozen pins and lanes
 kinewright_media cc1_fixtures::cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware crates/kinewright-media/src/cc1_fixtures.rs any hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
 kinewright_media cc3_fixtures::cc3_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc3_fixtures.rs any hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
@@ -83,6 +84,7 @@ kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_
 # kinewright_project
 kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # Historical direct filesystem injection bypasses authority; C7 real GUI writer witness covers production exclusion
 kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs any on-demand  # manual pre-land check: scripts/mo2-old-reader-check.sh
+ownership_w2_measure w2_long_session_save_cost crates/kinewright-project/tests/ownership_w2_measure.rs linux on-demand  # on-demand measurement
 
 # new_harness_e2e
 new_harness_e2e copilot_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs any on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1

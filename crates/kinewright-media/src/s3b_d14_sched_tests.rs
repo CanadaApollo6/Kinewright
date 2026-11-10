@@ -29,17 +29,13 @@ fn s3b_d14_only_unavailable_optional_continuation_is_removed() {
         // Only 6 and 10 onward actually kept; 4/5/7 were optional promises.
         let kept: BTreeSet<i64> = std::iter::once(6).chain(10..19).collect();
         readers.refilled_exact(id, (refill.0, refill.1), Some(6), &kept);
-        let required: BTreeSet<i64> = readers
-            .required
-            .iter()
-            .filter_map(|(key, at)| (*key == 0).then_some(*at))
-            .collect();
+        let required: BTreeSet<i64> = readers.required.times(&0).collect();
         let expected: BTreeSet<i64> = [Some(6), Some(8), extra].into_iter().flatten().collect();
         assert_eq!(
             required, expected,
             "sparse exact coverage; every explicit target preserved"
         );
-        assert!(readers.required.contains(&(1, 0)), "other source untouched");
+        assert!(readers.required.contains(&1, 0), "other source untouched");
         assert_eq!(readers.windows, original_window, "held window untouched");
         assert_eq!(readers.ring_times(&0), original_ring, "no ring eviction");
         deliver_ok(&mut readers, id, 0, refill);
@@ -78,7 +74,7 @@ fn s3b_d14_a_second_keeper_preserves_the_optional_time() {
         post_paused(&mut readers, &[(0, 8, 0)], HashMap::new());
         if ring_keeper {
             // An already delivered keeper: its reservation becomes the ring's charge.
-            let bytes = readers.reserved.remove(&(0, 5)).expect("promised time");
+            let bytes = readers.reserved.remove(&0, 5).expect("promised time");
             readers.release(bytes - F);
             readers.rings.entry(0).or_default().insert(
                 5,
@@ -104,15 +100,15 @@ fn s3b_d14_a_second_keeper_preserves_the_optional_time() {
         let ring = readers.ring_times(&0);
         readers.refilled_exact(id, (19, version), Some(10), &(10..19).collect());
         assert!(
-            readers.required.contains(&(0, 5)),
+            readers.required.contains(&0, 5),
             "another live keeper protects the optional time; ring={ring_keeper}"
         );
         assert!(
-            !readers.required.contains(&(0, 4)),
+            !readers.required.contains(&0, 4),
             "unavailable optional neighbour removed"
         );
-        assert!(!readers.required.contains(&(0, 6)));
-        assert!(readers.required.contains(&(0, 8)), "explicit target stays");
+        assert!(!readers.required.contains(&0, 6));
+        assert!(readers.required.contains(&0, 8), "explicit target stays");
         assert_eq!(readers.ring_times(&0), ring, "ring contents preserved");
     }
 }
@@ -144,7 +140,7 @@ fn s3b_d14_a_current_refill_keeps_coverage_the_ring_holds() {
         }
     };
     assert_eq!(readers.windows.get(&0), Some(&(4, 19)));
-    let ring_ten = readers.required.contains(&(0, 10));
+    let ring_ten = readers.required.contains(&0, 10);
     // The decode produced 10..=18 (its GOP starts at 10); the ring keeps 10.
     readers.refilled_exact(id, (19, version), Some(10), &(11..19).collect());
     assert_eq!(
@@ -152,6 +148,6 @@ fn s3b_d14_a_current_refill_keeps_coverage_the_ring_holds() {
         Some(&(10, 19)),
         "a current window starts at the first produced frame"
     );
-    assert_eq!(readers.required.contains(&(0, 10)), ring_ten, "10 stays");
+    assert_eq!(readers.required.contains(&0, 10), ring_ten, "10 stays");
     assert!(readers.rings[&0].contains_key(&10), "10 stays the ring's");
 }
