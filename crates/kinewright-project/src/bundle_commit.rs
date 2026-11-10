@@ -222,7 +222,7 @@ impl BundleCommit {
         let after = if envelope.command.is_none() && envelope.transition.is_none() {
             before.clone()
         } else {
-            let candidate = Core::spawn((*before.baseline).clone())
+            let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let attachment = bundle.attach_core(&candidate)?;
             attachment
@@ -814,7 +814,7 @@ impl BundleCommit {
                     &serialized,
                     bundle.store.limits(),
                 )?)?;
-            let core = Core::spawn((*checked.baseline).clone())
+            let core = Core::spawn(std::sync::Arc::clone(&checked.baseline))
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             bundle
                 .attach_core(&core)?

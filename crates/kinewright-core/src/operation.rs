@@ -563,11 +563,17 @@ pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), B
     apply_batch_inner(doc, operations, false).map(|_| ())
 }
 
-pub(crate) fn apply_batch_observed(
-    doc: &mut Document,
+/// [`apply_batch`] with identity capture, applied **in place** to a scratch
+/// document the caller owns (the actor's copy of its live document).
+///
+/// There is no second copy: on `Err`, `candidate` is garbage and the caller
+/// must drop it. The checks, their order and the errors are exactly those of
+/// [`apply_batch`].
+pub(crate) fn apply_batch_observed_in_place(
+    candidate: &mut Document,
     operations: &[Operation],
 ) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
-    apply_batch_inner(doc, operations, true)
+    apply_batch_unpublished(candidate, operations, true)
 }
 
 fn apply_batch_inner(
@@ -578,8 +584,24 @@ fn apply_batch_inner(
     if operations.is_empty() {
         return Err(BatchError::Empty);
     }
+    // The atomic copy: a failed batch leaves the caller's document untouched.
     let mut candidate = doc.clone();
-    validate_document(&candidate).map_err(|error| BatchError::OperationFailed {
+    let effects = apply_batch_unpublished(&mut candidate, operations, capture_identities)?;
+    *doc = candidate;
+    Ok(effects)
+}
+
+/// Validate and apply `operations` to an unpublished `candidate`. On `Err`
+/// the candidate may be partly edited; every caller discards it.
+fn apply_batch_unpublished(
+    candidate: &mut Document,
+    operations: &[Operation],
+    capture_identities: bool,
+) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
+    if operations.is_empty() {
+        return Err(BatchError::Empty);
+    }
+    validate_document(candidate).map_err(|error| BatchError::OperationFailed {
         op_number: 1,
         error,
     })?;
@@ -589,7 +611,7 @@ fn apply_batch_inner(
         Vec::new()
     };
     for (index, operation) in operations.iter().enumerate() {
-        let before = capture_identities.then(|| clip_identities(&candidate));
+        let before = capture_identities.then(|| clip_identities(candidate));
         let split_parent =
             if let (true, Operation::SplitClip { clip, .. }) = (capture_identities, operation) {
                 candidate.clip(*clip).cloned()
@@ -599,20 +621,19 @@ fn apply_batch_inner(
         // The batch already owns an unpublished candidate. Reuse it instead
         // of cloning the entire document inside Operation::apply for each
         // step. Validate every intermediate result so a later operation can
-        // never repair an invalid earlier step. Failure drops the candidate
-        // and leaves the caller's document untouched.
-        let result = apply_unchecked(operation, &mut candidate)
+        // never repair an invalid earlier step. On failure the caller drops
+        // the candidate, so its own document stays untouched.
+        let result = apply_unchecked(operation, candidate)
             .and_then(|()| candidate.recompute_duration())
-            .and_then(|()| validate_document(&candidate));
+            .and_then(|()| validate_document(candidate));
         result.map_err(|error| BatchError::OperationFailed {
             op_number: index + 1,
             error,
         })?;
         if let Some(before) = before {
-            effects.push(identity_effect(&before, &candidate, split_parent));
+            effects.push(identity_effect(&before, candidate, split_parent));
         }
     }
-    *doc = candidate;
     Ok(effects)
 }
 

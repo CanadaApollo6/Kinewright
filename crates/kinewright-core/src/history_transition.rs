@@ -170,8 +170,8 @@ impl HistoryTransition {
         if before != *reconciled {
             return Err(HistoryError::Corrupt);
         }
-        let candidate =
-            Core::spawn((*before.baseline).clone()).map_err(|_| HistoryError::Corrupt)?;
+        let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
+            .map_err(|_| HistoryError::Corrupt)?;
         candidate
             .history_save_owner(&RecoveryReplayProof)?
             .restore_history(&RecoveryReplayProof, before.clone())?;

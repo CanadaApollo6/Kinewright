@@ -227,7 +227,7 @@ mod tests {
         let stale = owner.capture(&Proof).unwrap();
         core.request(edit(1)).unwrap();
         let cut = owner.freeze(&Proof).unwrap();
-        let shadow = Core::spawn((*cut.history().document).clone()).unwrap();
+        let shadow = Core::spawn(std::sync::Arc::clone(&cut.history().document)).unwrap();
         shadow.request(edit(2)).unwrap();
         let after = shadow.export_history().unwrap();
         assert!(

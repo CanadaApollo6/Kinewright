@@ -2040,7 +2040,7 @@ pub(crate) mod feedback_capture {
         }
         fn advance_voice_head(owner: &mut ProjectBundle) {
             let history = owner.branch_history(owner.manual_branch_id()).unwrap();
-            let core = kinewright_core::Core::spawn((*history.document).clone()).unwrap();
+            let core = kinewright_core::Core::spawn(Arc::clone(&history.document)).unwrap();
             core.restore_history((*history).clone()).unwrap();
             move_for_asr(owner, &core, 1);
         }

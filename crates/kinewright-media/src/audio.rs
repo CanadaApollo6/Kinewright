@@ -6316,6 +6316,65 @@ mod tests {
         )
     }
 
+    /// On-demand measurement for the ownership fixes (H4): the export mix of a
+    /// 10-minute stereo document with two audio tracks. Prints one `H4_MIX`
+    /// line with the wall time of one whole `mix_audio` pass.
+    #[test]
+    #[ignore = "on-demand measurement"]
+    fn h4_ten_minute_stereo_mix_cost() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let frames = 30 * 600;
+        let source = GeneratedMedia::ffmpeg(
+            "h4-measure-stereo",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=600",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_f32le",
+            ],
+            "wav",
+        );
+        let asset = |id| MediaAsset {
+            duration: TimeCode(frames),
+            ..audio_asset(id, source.path(), "h4-stereo", fps)
+        };
+        let track = |id| Track {
+            id: TrackId(id),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![audio_clip(id, id, 0..frames, 0)],
+        };
+        let document = Document {
+            investigator: None,
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+            tracks: vec![track(1), track(2)],
+            media_pool: vec![asset(1), asset(2)],
+            markers: Vec::new(),
+            fps,
+            resolution: (64, 64),
+            duration: TimeCode(frames),
+        };
+        let settings = parity_settings(fps);
+        let warm = crate::export::mix_audio(&document, &settings).unwrap();
+        let started = std::time::Instant::now();
+        let mixed = crate::export::mix_audio(&document, &settings).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(mixed.len(), warm.len());
+        println!(
+            "H4_MIX tracks=2 seconds=600 samples={} mix_ms={:.1}",
+            mixed.len(),
+            elapsed.as_secs_f64() * 1e3,
+        );
+    }
+
     fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {
         Document {
             investigator: None,
