@@ -311,7 +311,23 @@ impl super::HostCommandOwner {
         auth: &HostAuth,
         request: super::HostRequest,
     ) -> super::HostReply {
-        self.execute_bearer(Some(&auth.bearer()), request)
+        let bearer = auth.bearer();
+        let inputs = self.command_run_inputs(&bearer, &request).and_then(|inputs| {
+            if inputs.is_some() && self.runtime_owner.upgrade().is_some() {
+                return Err(HostRefusal::new("shared_owner_required", "Run preparation requires the shared-owner entry point; no execution was started.").into());
+            }
+            inputs.map(super::run_inputs::PreparedRunInputs::open).transpose()
+        });
+        super::run_inputs::execute_prepared(self, &bearer, request, inputs)
+    }
+
+    /// Shared-owner ingress releases the mutex while certifying run inputs.
+    pub fn execute_attached_shared(
+        owner: &std::sync::Arc<std::sync::Mutex<Self>>,
+        auth: &HostAuth,
+        request: super::HostRequest,
+    ) -> super::HostReply {
+        super::run_inputs::execute(owner, &auth.bearer(), request)
     }
 
     pub(super) fn authorize_request(

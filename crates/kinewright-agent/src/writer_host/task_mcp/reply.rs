@@ -4,7 +4,7 @@ impl TaskMcp {
     /// Neither a cached manifest nor a caller's role can outlive this binding.
     pub(crate) fn role(&self) -> Result<Role, HostError> {
         let host = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
-        let host = host.lock().map_err(|_| refused("host unavailable"))?;
+        let host = self.lock_owner(&host)?;
         let (_, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
         Ok(state
             .tasks
@@ -50,7 +50,7 @@ impl TaskMcp {
             reply["state"] = state.clone();
         }
         if let Some(host) = self.host.upgrade()
-            && let Ok(mut host) = host.lock()
+            && let Ok(mut host) = self.lock_reply_owner(&host)
             && let Ok(mut issuer) = self.issuer.lock()
         {
             let context = host.task_reply_context(&self.auth, &self.endpoint, &mut issuer);

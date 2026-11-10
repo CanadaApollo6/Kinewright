@@ -252,6 +252,7 @@ struct Source {
     read_authority: Option<ReadAuthority>,
     file: File,
     verified_identity: OnceLock<memo::FileIdentity>,
+    certified_stamp: memo::FileStamp,
     failure: Mutex<Option<OwnedIoError>>,
     identity: CertifiedIdentity,
     chunks: Arc<[[u8; 32]]>,
@@ -367,6 +368,7 @@ impl CertifiedSource {
         Ok(Self(
             Arc::new(Source {
                 read_authority: None,
+                certified_stamp: memo::FileStamp::of_file(&file)?,
                 file,
                 verified_identity: OnceLock::new(),
                 failure: Mutex::new(None),

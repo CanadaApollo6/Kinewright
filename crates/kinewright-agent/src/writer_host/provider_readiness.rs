@@ -289,6 +289,11 @@ pub(super) fn execute(
         Ok(None) => Ok(()),
         Err(why) => Err(choice_error(why)),
     };
+    let inputs = if checked.is_ok() {
+        super::run_inputs::prepare(host, bearer, &request)
+    } else {
+        Ok(None)
+    };
     let Ok(mut owner) = host.lock() else {
         return HostReply {
             error: Some(HostRefusal::new("retention_lost", super::RETENTION_LOST)),
@@ -304,7 +309,7 @@ pub(super) fn execute(
     if let Err(why) = checked {
         return owner.readiness_reply(&request.command, &why);
     }
-    owner.execute_bearer(Some(bearer), request)
+    super::run_inputs::execute_prepared(&mut owner, bearer, request, inputs)
 }
 /// Every effect, including a restored or queued one, rechecks before reservation.
 pub(crate) fn check_run(

@@ -158,6 +158,7 @@ pub(super) struct HostRun {
 pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
+    pub prepared_run_inputs: Option<super::HostOwnedInputClosure>,
     // A fixture can present an old/corrupt grant at the read boundary without rewriting a fixed grant.
     #[cfg(all(test, target_os = "linux"))]
     pub consent_fixture: Option<super::task_mcp::consent::ConsentFixture>,

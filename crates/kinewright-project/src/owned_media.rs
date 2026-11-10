@@ -447,6 +447,9 @@ impl CertifiedMediaInput {
     pub fn identity(&self) -> kinewright_media::owned_io::CertifiedIdentity {
         self.source.identity()
     }
+    pub fn verify_unchanged(&self) -> Result<(), BundleError> {
+        self.source.verify_unchanged().map_err(io_error)
+    }
     pub fn cursor(
         &self,
         cancel: Arc<AtomicBool>,

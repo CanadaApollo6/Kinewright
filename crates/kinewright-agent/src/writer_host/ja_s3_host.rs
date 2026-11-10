@@ -176,12 +176,11 @@ fn request(client: &HostClient, command: HostCommand) -> HostRequest {
 }
 
 fn direct(host: &WriterHost, client: &HostClient, command: HostCommand) -> HostReply {
-    host.owner
-        .upgrade()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .execute_attached(&client.bootstrap.auth, request(client, command))
+    HostCommandOwner::execute_attached_shared(
+        &host.owner.upgrade().unwrap(),
+        &client.bootstrap.auth,
+        request(client, command),
+    )
 }
 
 #[expect(
@@ -744,13 +743,11 @@ fn s3_attachment_scope_cap_and_wire_spoofing() {
     let mut wrong_project = request(&viewer, HostCommand::Status);
     wrong_project.project = "another-project".into();
     let before = state(&host);
-    let reply = host
-        .owner
-        .upgrade()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .execute_attached(&viewer.bootstrap.auth, wrong_project);
+    let reply = HostCommandOwner::execute_attached_shared(
+        &host.owner.upgrade().unwrap(),
+        &viewer.bootstrap.auth,
+        wrong_project,
+    );
     assert!(reply.error.is_some(), "C1_PROJECT_BINDING");
     assert_eq!(state(&host), before, "C1_PROJECT_BINDING");
     accepted(viewer.request(HostCommand::Detach).unwrap());
@@ -909,12 +906,11 @@ fn foreground_request(
         )
         .unwrap()
     } else {
-        host.owner
-            .upgrade()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .execute_attached(&client.bootstrap.auth, request)
+        HostCommandOwner::execute_attached_shared(
+            &host.owner.upgrade().unwrap(),
+            &client.bootstrap.auth,
+            request,
+        )
     }
 }
 
@@ -1157,14 +1153,11 @@ fn discard_foreground_reply(
         assert!(response.status().is_success());
         drop(response);
     } else {
-        drop(
-            host.owner
-                .upgrade()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .execute_attached(&client.bootstrap.auth, request),
-        );
+        drop(HostCommandOwner::execute_attached_shared(
+            &host.owner.upgrade().unwrap(),
+            &client.bootstrap.auth,
+            request,
+        ));
     }
     let owner = host.owner.upgrade().unwrap();
     let owner = owner.lock().unwrap();

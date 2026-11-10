@@ -762,10 +762,11 @@ fn te14_fix2_real_scale_measurements() {
             .unwrap()
             .clear_media_memo_for_fixture()
             .unwrap();
+        drop(host);
         let now = Instant::now();
-        host.restore_native_run(&run).unwrap();
+        super::super::run_inputs::restore(&owner, &run).unwrap();
         println!(
-            "TE14_FIX2_SCALE phase=cold_restore_owner_locked bytes={bytes} seconds={:.6}",
+            "TE14_FIX2_SCALE phase=cold_restore bytes={bytes} seconds={:.6}",
             now.elapsed().as_secs_f64()
         );
     }

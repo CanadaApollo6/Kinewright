@@ -71,6 +71,7 @@ impl InputLeaseRequest {
 /// Retains the actual store authority and physical charge. It grants no decoder certification.
 pub struct OwnedInputLease {
     file: File,
+    certified_metadata: std::fs::Metadata,
     pin: StorePin,
     identity: OwnedInputRef,
     owner_epoch: u64,
@@ -128,15 +129,40 @@ impl OwnedInputLease {
         identity: OwnedInputRef,
         owner_epoch: u64,
         source: Option<CertifiedMediaInput>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, BundleError> {
+        let certified_metadata = file.metadata()?;
+        Ok(Self {
             file,
+            certified_metadata,
             pin,
             identity,
             owner_epoch,
             source,
             cursor: None,
+        })
+    }
+    pub(crate) fn verify_certification_current(&self) -> Result<(), BundleError> {
+        self.pin.read_store().check_read_authority()?;
+        if let Some(source) = &self.source {
+            return source.verify_unchanged();
         }
+        let current = self.file.metadata()?;
+        let certified = &self.certified_metadata;
+        let changed =
+            current.len() != certified.len() || current.modified()? != certified.modified()?;
+        #[cfg(unix)]
+        let changed = {
+            use std::os::unix::fs::MetadataExt as _;
+            changed
+                || (current.ctime(), current.ctime_nsec())
+                    != (certified.ctime(), certified.ctime_nsec())
+        };
+        if changed {
+            return Err(BundleError::Corrupt(
+                "input changed since certification".into(),
+            ));
+        }
+        Ok(())
     }
     pub fn certify_decoder_open(&self) -> Result<DecoderOpenReceipt, BundleError> {
         self.certified_source()?;
@@ -308,12 +334,6 @@ impl ProjectStore {
         } else {
             self.open_verified(&reference.entry.object)?
         };
-        Ok(OwnedInputLease::new(
-            file,
-            pin,
-            reference.clone(),
-            self.owner_epoch(),
-            source,
-        ))
+        OwnedInputLease::new(file, pin, reference.clone(), self.owner_epoch(), source)
     }
 }

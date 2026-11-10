@@ -42,6 +42,7 @@ mod tests {
     include!("te14_fix1_tests.rs");
     include!("te14_fix2_tests.rs");
     include!("te15_a_tests.rs");
+    include!("te1_safety_tests.rs");
     include!("te15_b2b0_tests.rs");
     include!("te15_b1_tests.rs");
     include!("te15_b1_fix1_tests.rs");
@@ -316,13 +317,11 @@ mod tests {
                     roots: actor.bootstrap.roots.clone(),
                     command,
                 };
-                f.host
-                    .owner
-                    .upgrade()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .execute_attached(&actor.bootstrap.auth, request)
+                HostCommandOwner::execute_attached_shared(
+                    &f.host.owner.upgrade().unwrap(),
+                    &actor.bootstrap.auth,
+                    request,
+                )
             }
             1 => actor.request(command).unwrap(),
             _ => {

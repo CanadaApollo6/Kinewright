@@ -90,13 +90,22 @@ fn scope(reason: impl std::fmt::Display) -> HostError {
 fn policy(reason: impl Into<String>) -> HostError {
     problem("consent_policy", reason)
 }
-fn lock_host(
-    owner: &std::sync::Mutex<HostCommandOwner>,
-) -> Result<std::sync::MutexGuard<'_, HostCommandOwner>, HostError> {
+fn lock_host<'a>(
+    owner: &'a std::sync::Mutex<HostCommandOwner>,
+    endpoint: &crate::orchestration::tasks::TaskEndpoint,
+) -> Result<std::sync::MutexGuard<'a, HostCommandOwner>, HostError> {
     let started = std::time::Instant::now();
     loop {
+        endpoint
+            .check_live()
+            .map_err(|why| super::task_authority_error(&why))?;
         match owner.try_lock() {
-            Ok(host) => return Ok(host),
+            Ok(host) => {
+                endpoint
+                    .check_live()
+                    .map_err(|why| super::task_authority_error(&why))?;
+                return Ok(host);
+            }
             Err(std::sync::TryLockError::Poisoned(_)) => {
                 return Err(authority("The host is unavailable. Tell the Director."));
             }
@@ -486,7 +495,7 @@ impl TaskMcp {
         description: &str,
     ) -> Result<(), HostError> {
         let owner = self.consent_host()?;
-        let host = lock_host(&owner)?;
+        let host = lock_host(&owner, &self.endpoint)?;
         let (binding, state) = self.batch_binding(
             &host,
             revision,
@@ -613,7 +622,7 @@ impl TaskMcp {
     ) -> Result<HistorySnapshot, HostError> {
         {
             let owner = self.consent_host()?;
-            let host = lock_host(&owner)?;
+            let host = lock_host(&owner, &self.endpoint)?;
             self.batch_binding(&host, revision, &ConsentEdit::Batch(&[]), "History step")?;
         }
         let (before, after, operations) = self
@@ -661,7 +670,7 @@ impl TaskMcp {
         let description = actual_description.as_deref().or(description);
         let owner = self.consent_host()?;
         if description.is_none() {
-            let host = lock_host(&owner)?;
+            let host = lock_host(&owner, &self.endpoint)?;
             let (binding, state) =
                 self.batch_binding(&host, revision, edit, "Reversible private-branch edit")?;
             self.validate_consent(&host, &state, &binding, core, before, edit)?;
@@ -669,14 +678,14 @@ impl TaskMcp {
         }
         let description = description.ok_or_else(refused)?;
         let binding = {
-            let host = lock_host(&owner)?;
+            let host = lock_host(&owner, &self.endpoint)?;
             self.batch_binding(&host, revision, edit, description)?.0
         };
         let request_digest = digest(&binding)?;
         let request = broker
             .request_task(&serde_json::to_value(&binding)?, description.into())
             .map_err(|e| problem(e.code(), e.to_string()))?;
-        let mut host = lock_host(&owner)?;
+        let mut host = lock_host(&owner, &self.endpoint)?;
         let (current, mut state) =
             self.batch_binding(&host, revision, edit, &request.description)?;
         if request.digest != digest(&current)? {

@@ -21,6 +21,7 @@ pub mod receipt_reconciliation;
 mod recovery;
 mod resolve;
 mod revise;
+pub(crate) mod run_inputs;
 pub(crate) mod spending;
 #[cfg(target_os = "linux")]
 pub(crate) mod studio_runtime;
@@ -713,13 +714,7 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         #[cfg(target_os = "linux")]
         let reply = provider_readiness::execute(&state.owner, &bearer, request);
         #[cfg(not(target_os = "linux"))]
-        let reply = state.owner.lock().map_or_else(
-            |_| HostReply {
-                error: Some(HostRefusal::new("retention_lost", RETENTION_LOST)),
-                ..HostReply::default()
-            },
-            |mut owner| owner.execute_bearer(Some(&bearer), request),
-        );
+        let reply = run_inputs::execute(&state.owner, &bearer, request);
         #[cfg(target_os = "linux")]
         state.runtime.update();
         if shutting_down && reply.error.is_none() {
@@ -820,11 +815,7 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    state
-                        .owner
-                        .lock()
-                        .map(|mut owner| owner.execute_bearer(Some(&bearer), request))
-                        .map_err(|_| ())
+                    Ok::<_, ()>(run_inputs::execute(&state.owner, &bearer, request))
                 }
             })
             .await;

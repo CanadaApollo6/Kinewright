@@ -39,6 +39,26 @@ impl FileIdentity {
     }
 }
 
+#[derive(PartialEq, Eq)]
+pub(super) struct FileStamp {
+    length: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+impl FileStamp {
+    pub(super) fn of_file(file: &File) -> Result<Self, OwnedIoError> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = file.metadata().map_err(unavailable)?;
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified().map_err(unavailable)?,
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
 /// Opaque evidence of an earlier complete verification, with no descriptor or pin.
 /// Only a successfully verified source can issue this memo.
 #[derive(Clone)]
@@ -64,6 +84,14 @@ pub(super) fn mark_verified(source: &CertifiedSource) -> Result<(), OwnedIoError
 }
 
 impl CertifiedSource {
+    pub fn verify_unchanged(&self) -> Result<(), OwnedIoError> {
+        if FileStamp::of_file(&self.0.file)? != self.0.certified_stamp {
+            return Err(OwnedIoError::Damaged(
+                "source changed since certification".into(),
+            ));
+        }
+        Ok(())
+    }
     /// Retain complete verification without retaining this source's leases or caches.
     pub fn admission_memo(&self) -> Result<SourceAdmissionMemo, OwnedIoError> {
         let native = self.0.verified_identity.get().copied().ok_or_else(|| {
