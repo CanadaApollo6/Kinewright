@@ -192,3 +192,5 @@ kinewright_agent writer_host::hooks_tests::tests::te14_fix1_many_results_always_
 
 kinewright_agent writer_host::hooks_tests::tests::te14_fix2_many_notes_reach_wake_trim crates/kinewright-agent/src/writer_host/te14_fix2_tests.rs linux-only # many-note production wake trimming
 kinewright_agent writer_host::hooks_tests::tests::te1_media_only_claude_wait_reuses_read_and_stop_prevents_publication crates/kinewright-agent/src/writer_host/te1_media_only_tests.rs linux-only # real 30-second media wait and cached HTTP retry under 45 seconds
+
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_small_run_keeps_approvals_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux-only # Scaled maximal dispatch, approvals, Stop and reopen

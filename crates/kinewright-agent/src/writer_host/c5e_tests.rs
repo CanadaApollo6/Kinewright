@@ -124,28 +124,280 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
     assert!(result.is_ok(), "C5E_SEND_PUBLICATION {turn}: {result:?}");
 }
 
+#[derive(Clone, Copy)]
+enum C5eSize {
+    Maximal,
+    Small,
+}
+impl C5eSize {
+    fn clocks(self) -> u64 {
+        match self {
+            Self::Maximal => 720,
+            Self::Small => 3,
+        }
+    }
+    fn tasks(self) -> usize {
+        match self {
+            Self::Maximal => 8,
+            Self::Small => 2,
+        }
+    }
+    fn rounds(self) -> usize {
+        match self {
+            Self::Maximal => 3,
+            Self::Small => 2,
+        }
+    }
+    fn approvals(self) -> usize {
+        match self {
+            Self::Maximal => 256,
+            Self::Small => 4,
+        }
+    }
+    fn sends(self, task: usize) -> usize {
+        match self {
+            Self::Small => 4,
+            Self::Maximal if task == 7 => 80,
+            Self::Maximal if task == 6 => 6,
+            Self::Maximal => 7,
+        }
+    }
+}
+#[derive(Default, Debug)]
+struct C5eStorage {
+    objects: u64,
+    physical_bytes: u64,
+    metadata_bytes: u64,
+}
+fn c5e_storage(f: &Fixture, maximum: &mut C5eStorage) {
+    let host = f.host.owner.upgrade().unwrap();
+    let owner = host.lock().unwrap();
+    let store = owner.owner().unwrap().store().unwrap();
+    let usage = store.usage().unwrap();
+    let limits = store.limits();
+    maximum.objects = maximum.objects.max(usage.objects);
+    maximum.physical_bytes = maximum.physical_bytes.max(usage.peak_physical_bytes);
+    maximum.metadata_bytes = maximum.metadata_bytes.max(usage.metadata_bytes);
+    assert!(
+        maximum.objects <= limits.objects,
+        "C5E_OBJECT_BOUND {maximum:?} limit={}",
+        limits.objects
+    );
+    assert!(
+        maximum.metadata_bytes <= limits.metadata_bytes,
+        "C5E_METADATA_BOUND {maximum:?} limit={}",
+        limits.metadata_bytes
+    );
+    assert!(
+        maximum.physical_bytes
+            <= limits.owned_bytes + limits.copy_overlap_bytes + 2 * limits.metadata_bytes,
+        "C5E_PHYSICAL_BOUND {maximum:?}"
+    );
+    assert!(
+        !usage.damaged_accounting,
+        "C5E_STORAGE_ACCOUNTING {usage:?}"
+    );
+}
+fn c5e_approval_edits(
+    f: &Fixture,
+    execution: &ExecutionIdentity,
+    core: &Core,
+    count: usize,
+    depth: &mut u64,
+    storage: &mut C5eStorage,
+) {
+    let mcp = C4Mcp::new(f, &execution.run, &execution.task);
+    for clip in 1..=count {
+        let before_document = core.export_history().unwrap().document;
+        let revision = grant_test_revision(core);
+        let prepared = mcp.raw(
+            "prepare_edit_plan",
+            serde_json::json!({
+            "expected_revision":revision,"operations":[{"op":"delete_clip","clip":1}]}),
+        );
+        assert_eq!(
+            prepared.is_error,
+            Some(false),
+            "C5E_APPROVAL_PREPARE {clip} {prepared:?}"
+        );
+        let before = {
+            let host = f.host.owner.upgrade().unwrap();
+            let owner = host.lock().unwrap();
+            owner
+                .owner()
+                .unwrap()
+                .orchestration_cut(&execution.run)
+                .unwrap()
+                .unwrap()
+                .segment
+        };
+        let committed = mcp.raw("commit_edit_plan", serde_json::json!({
+            "expected_revision":revision,"plan_id":prepared.structured_content.unwrap()["plan_id"]}));
+        assert_eq!(
+            committed.is_error,
+            Some(false),
+            "C5E_APPROVAL_COMMIT {clip} {committed:?}"
+        );
+        let host = f.host.owner.upgrade().unwrap();
+        let owner = host.lock().unwrap();
+        let project = owner.owner().unwrap();
+        let cut = project.orchestration_cut(&execution.run).unwrap().unwrap();
+        let final_record = project
+            .store()
+            .unwrap()
+            .read_record::<OrchestrationRecord>(&cut.segment)
+            .unwrap();
+        let OrchestrationPayload::EventSegment(applied) = &final_record.payload else {
+            panic!("C5E_APPLICATION_H1")
+        };
+        let approval_ref = applied.previous.as_ref().unwrap();
+        let approval_record = project
+            .store()
+            .unwrap()
+            .read_record::<OrchestrationRecord>(approval_ref)
+            .unwrap();
+        let OrchestrationPayload::EventSegment(approved) = &approval_record.payload else {
+            panic!("C5E_APPROVAL_H1")
+        };
+        assert_eq!(
+            approved.previous.as_ref(),
+            Some(&before),
+            "C5E_TWO_H1_PUBLICATIONS {clip}"
+        );
+        let approved_state = &approved.events.last().unwrap().projection;
+        let applied_state = &applied.events.last().unwrap().projection;
+        assert_eq!(
+            approved_state.edit_approvals.len(),
+            clip,
+            "C5E_APPROVAL_PUBLISHED {clip}"
+        );
+        assert_eq!(
+            approved_state.edit_applications.len(),
+            clip - 1,
+            "C5E_APPROVAL_BEFORE_APPLY {clip}"
+        );
+        assert_eq!(applied_state.edit_approvals, approved_state.edit_approvals);
+        assert_eq!(
+            applied_state.edit_applications.len(),
+            clip,
+            "C5E_APPLICATION_PUBLISHED {clip}"
+        );
+        let marker: serde_json::Value = serde_json::from_slice(
+            &project
+                .store()
+                .unwrap()
+                .read_evidence(applied_state.edit_applications.last().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["kind"], "studio_edit_applied_v1");
+        assert_eq!(
+            marker["approval"],
+            serde_json::to_value(approved_state.edit_approvals.last().unwrap()).unwrap()
+        );
+        drop(owner);
+        assert_eq!(
+            core.export_history().unwrap().document.tracks[0]
+                .clips
+                .len(),
+            3,
+            "C5E_DESTRUCTIVE_EDIT_APPLIED {clip}"
+        );
+        // Restore the same owned clip between deletions. This reaches the full
+        // approval cap without requiring more than the admitted object scope.
+        let undone = mcp.invoke(
+            "undo_task_edit",
+            serde_json::json!({"expected_revision":grant_test_revision(core)}),
+        );
+        assert_eq!(
+            undone.is_error,
+            Some(false),
+            "C5E_APPROVAL_UNDO {clip} {undone:?}"
+        );
+        assert_eq!(
+            core.export_history().unwrap().document,
+            before_document,
+            "C5E_APPROVAL_UNDO_EXACT {clip}"
+        );
+        c5e_depth(f, depth);
+        c5e_storage(f, storage);
+        if clip % 32 == 0 {
+            eprintln!("C5E_APPROVALS {clip} {storage:?} max_depth={depth}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "on-demand: maximal six-hour durable run"]
+fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
+    c5e_run(C5eSize::Maximal);
+}
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s4b_c5e_small_run_keeps_approvals_stop_and_recovery_bounded() {
+    c5e_run(C5eSize::Small);
+}
 #[allow(
     clippy::too_many_lines,
-    reason = "one maximal run retains its exact histories through Stop and reopen"
+    reason = "one scaled durable run retains the same bounds and histories through Stop and reopen"
 )]
-fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
+fn c5e_run(size: C5eSize) {
     use super::super::native_invocation::SpendingChange;
     use kinewright_project::{
         orchestration_accounting::{RUN_MILLIS, UsageMode, UsageSample, UsageValues},
         run_admission,
     };
-    let mut f = Fixture::new();
-    f.host.runtime.stop();
-    let mut scoped = Document::default();
-    for id in [1, 2] {
-        if let kinewright_core::Operation::AddMarker { marker } = history_marker(id) {
-            scoped.markers.push(marker);
-        }
+    let mut document = Document::default();
+    kinewright_core::apply_batch(
+        &mut document,
+        &[kinewright_core::Operation::AddTrack {
+            track: kinewright_core::Track {
+                id: kinewright_core::TrackId(81),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: false,
+                clips: vec![],
+            },
+        }],
+    )
+    .unwrap();
+    for clip in 0..4 {
+        kinewright_core::apply_batch(
+            &mut document,
+            &[kinewright_core::Operation::AddSolidClip {
+                track: kinewright_core::TrackId(81),
+                timeline_start: kinewright_core::TimeCode(i64::from(clip) * 10),
+                duration: kinewright_core::TimeCode(10),
+                color: kinewright_core::SolidColor::default(),
+            }],
+        )
+        .unwrap();
     }
+    let mut f = Fixture::with_inputs(false, document, "project.kinewright", |bundle| {
+        bundle.empty_inputs().unwrap().reference.clone()
+    });
+    f.host.runtime.stop();
+    let scope_document = f
+        .host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .core()
+        .export_history()
+        .unwrap()
+        .document;
     f.brief.scope =
-        crate::orchestration::policy::director_scope(&scoped, f.brief.scope.base.clone()).unwrap();
+        crate::orchestration::policy::director_scope(&scope_document, f.brief.scope.base.clone())
+            .unwrap();
+    // Reserve the two marker identities used by the existing redo witness.
+    f.brief
+        .scope
+        .objects
+        .extend(["marker:1".into(), "marker:2".into()]);
     let manual = {
         let host = f.host.owner.upgrade().unwrap();
         let mut owner = host.lock().unwrap();
@@ -191,8 +443,9 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     let director = C4Mcp::new(&f, &run, &parent.task);
     let now = native_now(&f, &run);
     let mut maximum = 0;
+    let mut storage = C5eStorage::default();
     let sequence = f.projection(&run).sequence;
-    for tick in 1..720 {
+    for tick in 1..size.clocks() {
         assert!(
             spending_change(
                 &f,
@@ -213,6 +466,7 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
         if tick % 120 == 0 {
             eprintln!("C5_FIX1_CLOCK {tick}");
             c5e_depth(&f, &mut maximum);
+            c5e_storage(&f, &mut storage);
         }
     }
     let claim_root = f.temp.path("c5-fix1-machine");
@@ -227,8 +481,8 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     let mut last = parent.clone();
     // Seven serial specialists fit the three simultaneous dependency slots.
     // One task reaches its 80-send ceiling; the run reaches its shared 128-send ceiling.
-    for task_index in 0..8 {
-        let task = if task_index == 7 {
+    for task_index in 0..size.tasks() {
+        let task = if task_index == size.tasks() - 1 {
             parent.task.clone()
         } else {
             let mut brief = f.brief.clone();
@@ -250,16 +504,12 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
             );
             f.projection(&run).tasks.last().unwrap().id.clone()
         };
-        let sends: usize = if task_index == 7 {
-            80
-        } else if task_index == 6 {
-            6
-        } else {
-            7
-        };
+        let sends = size.sends(task_index);
         let mut history = None;
-        for round in 0..3 {
-            let (execution, client, endpoint, core) = if task_index == 7 && round == 0 {
+        for round in 0..size.rounds() {
+            let (execution, client, endpoint, core) = if task_index == size.tasks() - 1
+                && round == 0
+            {
                 let (client, endpoint) = task_actor(&f, &run, &parent, &f.producer_client(&run));
                 let core = f.host.owner.upgrade().unwrap().lock().unwrap().hooks.runs[&run].tasks
                     [&task]
@@ -269,9 +519,21 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
             } else {
                 c4_reserve_task(&f, &run, &task)
             };
+            // Reserve the real launcher's private transport fence, as in
+            // s4b_c3_fix1_unbound_crash_child. Recovery must not claim a known
+            // not-dispatched zero after this scripted attempt reports usage.
+            claim.reserve(&unbound_identity(&execution)).unwrap();
             if round == 0 {
                 history_turn(&f, &execution, &client, &endpoint, 1, true);
                 history = Some(if task_index == 0 {
+                    c5e_approval_edits(
+                        &f,
+                        &execution,
+                        &core,
+                        size.approvals(),
+                        &mut maximum,
+                        &mut storage,
+                    );
                     c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
                 } else {
                     core.export_history().unwrap()
@@ -289,7 +551,7 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                     &f,
                     &execution,
                     SpendingChange::Ceiling(2_000_000),
-                    now + 719 * 30_000,
+                    now + (size.clocks() - 1) * 30_000,
                     0,
                     true,
                 )
@@ -301,7 +563,7 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                     "C5_FIX1_ATTEMPT_HISTORY"
                 );
             }
-            let count = sends / 3 + usize::from(round < sends % 3);
+            let count = sends / size.rounds() + usize::from(round < sends % size.rounds());
             for turn in 1..=count as u64 {
                 c5e_send(&f, &execution, turn);
                 for (event, ordinal, input, output, complete) in [
@@ -316,7 +578,7 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                         &f,
                         &execution,
                         SpendingChange::Usage(sample),
-                        now + 719 * 30_000,
+                        now + (size.clocks() - 1) * 30_000,
                         0,
                         true,
                     )
@@ -325,7 +587,7 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
             }
             all_attempts.push(execution.clone());
             last = execution.clone();
-            if task_index != 7 || round != 2 {
+            if task_index != size.tasks() - 1 || round != size.rounds() - 1 {
                 crate::effect_pump::reconcile_attempt(
                     &f.host.owner.upgrade().unwrap(),
                     &mut claim,
@@ -335,20 +597,34 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                 .unwrap();
             }
             c5e_depth(&f, &mut maximum);
+            c5e_storage(&f, &mut storage);
         }
         histories.push((task, history.unwrap(), sends));
         eprintln!("C5_FIX1_MAX_TASK {task_index} sends={sends}");
     }
-    assert_eq!(histories.len(), run_admission::TASKS);
-    assert_eq!(all_attempts.len(), run_admission::ATTEMPTS);
-    assert_eq!(
-        spending_record(&f, &run)
-            .tasks
-            .iter()
-            .map(|t| t.sends.len())
-            .sum::<usize>(),
-        run_admission::SENDS
-    );
+    if matches!(size, C5eSize::Maximal) {
+        assert_eq!(histories.len(), run_admission::TASKS);
+        assert_eq!(all_attempts.len(), run_admission::ATTEMPTS);
+        assert_eq!(
+            spending_record(&f, &run)
+                .tasks
+                .iter()
+                .map(|t| t.sends.len())
+                .sum::<usize>(),
+            run_admission::SENDS
+        );
+    } else {
+        assert_eq!(histories.len(), size.tasks());
+        assert_eq!(all_attempts.len(), size.tasks() * size.rounds());
+        assert_eq!(
+            spending_record(&f, &run)
+                .tasks
+                .iter()
+                .map(|t| t.sends.len())
+                .sum::<usize>(),
+            (0..size.tasks()).map(|i| size.sends(i)).sum::<usize>()
+        );
+    }
     drop(director);
     assert!(
         spending_change(
@@ -363,8 +639,24 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     );
     assert_eq!(spending_record(&f, &run).elapsed_ms, RUN_MILLIS);
     let full = spending_record(&f, &run);
-    assert!(
-        matches!(
+    if matches!(size, C5eSize::Maximal) {
+        assert!(
+            matches!(
+                f.host
+                    .owner
+                    .upgrade()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .owner()
+                    .unwrap()
+                    .check_run_send_budget(&full),
+                Err(kinewright_project::bundle::BundleError::RunLimit)
+            ),
+            "C5_FIX1_MAX_SEND_ADMISSION_CLOSED"
+        );
+    } else {
+        assert!(
             f.host
                 .owner
                 .upgrade()
@@ -373,11 +665,11 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
                 .unwrap()
                 .owner()
                 .unwrap()
-                .check_run_send_budget(&full),
-            Err(kinewright_project::bundle::BundleError::RunLimit)
-        ),
-        "C5_FIX1_MAX_SEND_ADMISSION_CLOSED"
-    );
+                .check_run_send_budget(&full)
+                .is_ok(),
+            "C5E_SMALL_BELOW_SEND_CEILING"
+        );
+    }
     let stop = f.control(&f.editor, &run, RunAction::Stop);
     ok(
         f.editor
@@ -387,6 +679,22 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
             .unwrap(),
         "C5_FIX1_MAX_STOP",
     );
+    // Stop closes H1 authority. Complete this scripted transport's unbound
+    // cleanup through the launcher's acknowledgment port, then replay recovery.
+    // The recovery-only unbound path itself requires a still-Reserved attempt.
+    {
+        use crate::native_launcher::InvocationOwner;
+        let proof = crate::guardian::RecoveryObserver::unbound_cleanup(
+            &mut claim,
+            &unbound_identity(&last),
+        )
+        .unwrap();
+        let host = f.host.owner.upgrade().unwrap();
+        let port =
+            super::super::native_invocation::HostInvocationOwner::new(&host, run_auth.clone());
+        port.unbound_completed(&last, &proof).unwrap();
+        claim.retire_unbound(&proof).unwrap();
+    }
     crate::effect_pump::reconcile_attempt(
         &f.host.owner.upgrade().unwrap(),
         &mut claim,
@@ -405,15 +713,45 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
         let store = owner.owner().unwrap().store().unwrap();
         eprintln!("C5_FIX1_MAX_USAGE {:?}", store.usage().unwrap());
     }
+    c5e_depth(&f, &mut maximum);
+    c5e_storage(&f, &mut storage);
     claim.finish().unwrap();
     let record = spending_record(&f, &run);
     let state = f.projection(&run);
+    assert_eq!(
+        state.edit_approvals.len(),
+        size.approvals(),
+        "C5E_STOP_APPROVALS"
+    );
+    assert_eq!(
+        state.edit_applications.len(),
+        size.approvals(),
+        "C5E_STOP_APPLICATIONS"
+    );
+    assert_eq!(
+        state.edit_approvals.iter().collect::<BTreeSet<_>>().len(),
+        size.approvals(),
+        "C5E_DISTINCT_APPROVALS"
+    );
+    assert_eq!(
+        state
+            .edit_applications
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        size.approvals(),
+        "C5E_DISTINCT_APPLICATIONS"
+    );
     assert_eq!(state.cleanup, RunCleanup::Settled);
     assert!(state.attempts.is_empty());
     for (task, history, sends) in &histories {
         let t = record.tasks.iter().find(|t| t.task == task.0).unwrap();
         assert_eq!(t.sends.len(), *sends);
-        assert_eq!(t.providers.len(), 3);
+        if matches!(size, C5eSize::Maximal) {
+            assert_eq!(t.providers.len(), 3);
+        } else {
+            assert_eq!(t.providers.len(), size.rounds());
+        }
         assert_eq!(t.usage.len(), sends * 2);
         assert_eq!(t.totals.token_lower_bound, *sends as u64 * 7);
         assert_eq!(c5e_history(&f, &run, task), *history);
@@ -457,8 +795,34 @@ fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
         "C5_FIX1_MAX_REOPEN_MANUAL"
     );
     c5e_depth(&f, &mut maximum);
+    c5e_storage(&f, &mut storage);
+    let host = f.host.owner.upgrade().unwrap();
+    let owner = host.lock().unwrap();
+    let approvals = owner.edit_approval_details(&state);
+    assert_eq!(
+        approvals.len(),
+        size.approvals(),
+        "C5E_REOPEN_APPROVAL_COUNT"
+    );
+    assert!(
+        approvals.iter().all(|row| row.applied
+            && row.removed_clips == 1
+            && row.removed_tracks == 0
+            && row.issue.is_none()),
+        "C5E_REOPEN_APPLICATION_MARKERS {approvals:?}"
+    );
+    drop(owner);
     eprintln!(
-        "C5_FIX1_MAXIMAL clocks=720 tasks=8 sends=128 attempts=24 max_depth={maximum} stop=true cleanup=true reopen_exact=true"
+        "C5E_RETAINED_MAXIMA {storage:?} max_depth={maximum} approvals={} h1_edit_publications={}",
+        size.approvals(),
+        size.approvals() * 2
+    );
+    eprintln!(
+        "C5_FIX1_MAXIMAL clocks={} tasks={} sends={} attempts={} max_depth={maximum} stop=true cleanup=true reopen_exact=true",
+        size.clocks(),
+        size.tasks(),
+        (0..size.tasks()).map(|i| size.sends(i)).sum::<usize>(),
+        all_attempts.len()
     );
 }
 
