@@ -1245,4 +1245,21 @@ mod tests {
         assert!(can_overwrite_save(3));
         assert!(!can_overwrite_save(4));
     }
+
+    /// An unknown field on a clip refuses before projection, and the refused file keeps its bytes.
+    #[test]
+    fn unknown_blend_field_is_refused_and_the_file_is_untouched() {
+        let (_, blended, _) = mo2_feature_documents()
+            .into_iter()
+            .find(|(name, ..)| *name == "blend")
+            .unwrap();
+        let saved = serialize_project_document(&blended).unwrap();
+        assert!(saved.contains("\"blend_mode\": \"screen\""));
+        let bytes = saved.replace("\"blend_mode\": \"screen\"", "\"future_blend\": \"screen\"");
+        let directory = TempDirectory::new("unknown-blend-field");
+        let path = directory.path("edit.kinewright");
+        fs::write(&path, &bytes).unwrap();
+        assert!(load_document(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
+    }
 }
