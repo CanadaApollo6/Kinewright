@@ -114,3 +114,6 @@ mod candidate_recovery;
 mod orchestration_cumulative;
 
 pub mod run_admission;
+
+#[cfg(test)]
+mod person_admission_tests;

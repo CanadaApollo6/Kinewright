@@ -496,7 +496,7 @@ impl ProjectBundle {
         let result = if let Some(cut) = cut {
             self.save_frozen(core, inputs, cut)
         } else {
-            self.save(core, inputs)
+            self.save_current(core, inputs)
         };
         if let Err(error) = result {
             if !self.unsettled {
@@ -615,7 +615,7 @@ impl ProjectBundle {
                 BundleError::Corrupt("issuer disappeared during owner operation".into())
             })?
             .reconciled_high_water = through;
-        if let Err(error) = self.save(core, inputs) {
+        if let Err(error) = self.save_current(core, inputs) {
             if !self.unsettled {
                 self.issuers.insert(id.clone(), old);
             }
@@ -670,7 +670,7 @@ impl ProjectBundle {
         {
             self.issuers.remove(id);
         }
-        if let Err(error) = self.save(core, inputs) {
+        if let Err(error) = self.save_current(core, inputs) {
             if !self.unsettled {
                 self.receipts = prior;
                 self.issuers.insert(id.clone(), old);

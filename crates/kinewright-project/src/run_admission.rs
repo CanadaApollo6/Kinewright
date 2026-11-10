@@ -142,6 +142,14 @@ impl ProjectStore {
             .as_ref()
             .is_some_and(|token| token.matches_store(self))
     }
+    pub(crate) fn is_person_publication(&self) -> bool {
+        self.person_publication
+            .as_ref()
+            .is_some_and(|token| token.matches_store(self))
+    }
+    pub(crate) fn is_project_publication(&self) -> bool {
+        self.is_terminal_publication() || self.is_person_publication()
+    }
     /// Return an owned H1 record; headroom cannot escape as a retained reservation.
     pub fn read_run_record(
         &self,
@@ -154,14 +162,17 @@ impl ProjectStore {
         ))
     }
     pub(crate) fn admission_limits(&self) -> StorageLimits {
-        if self.run_budget_active() && !self.is_terminal_publication() {
+        if self.run_budget_active() && !self.is_project_publication() {
             ordinary(self.limits())
         } else {
             self.limits().clone()
         }
     }
     pub(crate) fn run_error(&self, error: BundleError) -> BundleError {
-        if self.run_budget_active() && matches!(error, BundleError::Capacity(_)) {
+        if self.run_budget_active()
+            && !self.is_person_publication()
+            && matches!(error, BundleError::Capacity(_))
+        {
             self.note_run_limit();
             BundleError::RunLimit
         } else {
@@ -169,7 +180,7 @@ impl ProjectStore {
         }
     }
     pub(crate) fn admit_run_write(&self) -> Result<(), BundleError> {
-        if self.run_budget_active() && !self.is_terminal_publication() && self.has_run_limit() {
+        if self.run_budget_active() && !self.is_project_publication() && self.has_run_limit() {
             return Err(BundleError::RunLimit);
         }
         Ok(())
@@ -201,6 +212,21 @@ impl Drop for PublicationBundle<'_> {
     }
 }
 impl crate::bundle::ProjectBundle {
+    /// Manual publishers keep project admission for their complete transaction,
+    /// including reconciliation. The ordinary run store is restored on exit.
+    pub(crate) fn with_person_publication<T>(
+        &mut self,
+        publish: impl FnOnce(&mut Self) -> Result<T, BundleError>,
+    ) -> Result<T, BundleError> {
+        let _reading = reading(&self.store);
+        let writer = self.store.person_publication_store();
+        let ordinary = std::mem::replace(&mut self.store, writer);
+        let mut publication = PublicationBundle {
+            bundle: self,
+            ordinary: Some(ordinary),
+        };
+        publish(&mut publication)
+    }
     pub(crate) fn with_publication_admission<T>(
         &mut self,
         admission: Option<TerminalAdmission>,
