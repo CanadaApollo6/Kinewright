@@ -2567,6 +2567,57 @@ impl ProjectStore {
         &mut self,
         record: &T,
     ) -> Result<SealedObject, BundleError> {
+        Ok(self.admit_record_offering(record, None)?.0)
+    }
+    /// Decode `bytes` as a history record, as the commit check does, and keep the support
+    /// fields that decode observed together with the bytes it observed them in.
+    pub(crate) fn check_history_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<
+        (
+            StorageReservation<kinewright_core::HistorySnapshot>,
+            CheckedHistoryBytes,
+        ),
+        BundleError,
+    > {
+        let mut fields = BTreeSet::new();
+        let checked = crate::bundle_recovery::decode::<kinewright_core::HistorySnapshot>(
+            &bytes,
+            &self.inner.usage,
+            RecordKind::History,
+            &mut fields,
+            self.limits(),
+        )?;
+        // The decode charged exactly `preflight_record(&bytes, self.limits())`.
+        let charge = checked.decoded_charge();
+        Ok((
+            checked,
+            CheckedHistoryBytes {
+                bytes,
+                charge,
+                fields,
+            },
+        ))
+    }
+    /// [`Self::admit_record`] for a history the commit check decoded from `checked`'s bytes.
+    /// When the bytes it seals are exactly the checked bytes, it takes the check's
+    /// preflight charge in place of preflighting them again, and it returns the check's
+    /// support fields bound to the sealed object; [`Self::support_fields`] then uses them
+    /// in place of decoding that object again. Otherwise it preflights the bytes, returns no
+    /// fields, and the support read decodes the object as before.
+    pub(crate) fn admit_checked_history(
+        &mut self,
+        record: &kinewright_core::HistorySnapshot,
+        checked: Option<CheckedHistoryBytes>,
+    ) -> Result<(SealedObject, Option<SealedSupport>), BundleError> {
+        self.admit_record_offering(record, checked)
+    }
+    fn admit_record_offering<T: BundleRecord>(
+        &mut self,
+        record: &T,
+        checked: Option<CheckedHistoryBytes>,
+    ) -> Result<(SealedObject, Option<SealedSupport>), BundleError> {
         self.admit_run_write()?;
         record
             .validate(&self.admission_limits())
@@ -2598,9 +2649,16 @@ impl ProjectStore {
         if bytes.len() != capacity {
             return Err(BundleError::Corrupt("unstable record serialization".into()));
         }
+        let checked = checked.and_then(|checked| checked.matching(&bytes));
         let preflight = self.reserve(0, self.limits().decoded_record_bytes, 0, false)?;
-        let decoded =
-            preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?;
+        let decoded = match &checked {
+            // These are the checked bytes, which the check's decode preflighted under these
+            // same (fixed) limits; preflighting them again would repeat that pass exactly.
+            Some(checked) => checked.charge,
+            None => {
+                preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?
+            }
+        };
         drop(preflight);
         if self.run_budget_active()
             && !self.is_terminal_publication()
@@ -2646,7 +2704,14 @@ impl ProjectStore {
             .lock()
             .map_err(|_| BundleError::Capacity("memo poisoned"))?
             .remember(&sealed.reference, record, decoded, None, self.limits());
-        Ok(sealed)
+        let support = checked
+            .and_then(|checked| checked.fields_for(&sealed.reference, self.limits()))
+            .map(|fields| SealedSupport {
+                reference: sealed.reference.clone(),
+                decoded,
+                fields,
+            });
+        Ok((sealed, support))
     }
     pub fn read_record<T: BundleRecord>(
         &self,
@@ -2717,6 +2782,47 @@ impl ProjectStore {
         self.check_read_authority()?;
         Ok(decoded_reservation.hold(value))
     }
+}
+/// A history's encoded bytes with the preflight charge and the support fields one decode
+/// of exactly these bytes observed. Only [`ProjectStore::check_history_bytes`] makes one,
+/// so the charge and fields cannot belong to any other bytes, and sealing uses them only
+/// for bytes equal to these.
+pub(crate) struct CheckedHistoryBytes {
+    bytes: Vec<u8>,
+    charge: u64,
+    fields: BTreeSet<String>,
+}
+impl CheckedHistoryBytes {
+    /// The checked bytes, for the path without reuse.
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    /// `self`, when `sealed` is exactly the checked bytes.
+    fn matching(self, sealed: &[u8]) -> Option<Self> {
+        #[cfg(any(test, feature = "test-util"))]
+        if crate::io_observer::save_reuse_disabled() {
+            return None;
+        }
+        (self.bytes == sealed).then_some(self)
+    }
+    /// The fields of matched bytes sealed as `reference`.
+    ///
+    /// A history over the support-read size cap is left to `support_fields`, which
+    /// refuses it there, as it always has.
+    fn fields_for(self, reference: &ObjectRef, limits: &StorageLimits) -> Option<BTreeSet<String>> {
+        (reference.record_kind == RecordKind::History
+            && reference.byte_length <= limits.control_bytes)
+            .then_some(self.fields)
+    }
+}
+/// The support fields of one sealed history object and the decoded charge of its bytes,
+/// taken from the commit check's decode of exactly those bytes. Only
+/// [`ProjectStore::admit_checked_history`] makes one.
+pub(crate) struct SealedSupport {
+    reference: ObjectRef,
+    decoded: u64,
+    fields: BTreeSet<String>,
 }
 pub(crate) struct BoundedCounter {
     pub(crate) bytes: u64,
@@ -2825,6 +2931,8 @@ pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u
     if bytes.len() as u64 > limits.decoded_record_bytes {
         return Err(BundleError::Capacity("encoded record cap"));
     }
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::note_preflight();
     // serde_json's unescape scratch may grow geometrically; reserve it before typed parsing.
     let scratch = (bytes.len() as u64)
         .checked_mul(2)
@@ -3355,9 +3463,16 @@ impl ProjectStore {
             );
         Ok(())
     }
+    /// The support fields of every record in the closure of `roots`. `sealed` is the
+    /// support of the history this publication just sealed, if
+    /// [`Self::admit_checked_history`] bound one: where the read would decode that object,
+    /// it verifies the object as before and records the given fields and charge, the
+    /// result that decode would produce, instead of reading and decoding the bytes again.
+    /// Every other object is read as before.
     pub(crate) fn support_fields(
         &self,
         roots: &[ObjectRef],
+        mut sealed: Option<SealedSupport>,
     ) -> Result<BTreeSet<String>, BundleError> {
         let mut fields = BTreeSet::new();
         for reference in self.closure(roots)? {
@@ -3403,36 +3518,43 @@ impl ProjectStore {
             }
             let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
             let mut file = self.open_verified(&reference)?;
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(
-                    usize::try_from(reference.byte_length)
-                        .map_err(|_| BundleError::Capacity("record address space"))?,
-                )
-                .map_err(|_| BundleError::Capacity("support bytes allocation"))?;
-            (&mut file)
-                .take(reference.byte_length + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 != reference.byte_length {
-                return Err(BundleError::Corrupt("support bytes changed".into()));
-            }
-            if reference.record_kind == RecordKind::RootCheckpoint {
-                let admission = crate::bundle::BundleWriteAdmission::from_bytes(None, bytes)?;
-                admission.require_supported()?;
-                object_fields.extend(admission.data.inventory.required_fields.iter().cloned());
+            if let Some(own) = sealed.take_if(|own| own.reference == reference) {
+                // The bytes `open_verified` just checked are the bytes the commit check
+                // decoded: `admit_checked_history` bound the fields to them.
+                self.memoize_support_decode(&reference, own.decoded, own.fields.clone())?;
+                object_fields = own.fields;
             } else {
-                let raw = crate::bundle_recovery::decode::<serde_json::Value>(
-                    &bytes,
-                    &self.inner.usage,
-                    reference.record_kind,
-                    &mut object_fields,
-                    self.limits(),
-                )?;
-                self.memoize_support_decode(
-                    &reference,
-                    raw.decoded_charge(),
-                    object_fields.clone(),
-                )?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(
+                        usize::try_from(reference.byte_length)
+                            .map_err(|_| BundleError::Capacity("record address space"))?,
+                    )
+                    .map_err(|_| BundleError::Capacity("support bytes allocation"))?;
+                (&mut file)
+                    .take(reference.byte_length + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() as u64 != reference.byte_length {
+                    return Err(BundleError::Corrupt("support bytes changed".into()));
+                }
+                if reference.record_kind == RecordKind::RootCheckpoint {
+                    let admission = crate::bundle::BundleWriteAdmission::from_bytes(None, bytes)?;
+                    admission.require_supported()?;
+                    object_fields.extend(admission.data.inventory.required_fields.iter().cloned());
+                } else {
+                    let raw = crate::bundle_recovery::decode::<serde_json::Value>(
+                        &bytes,
+                        &self.inner.usage,
+                        reference.record_kind,
+                        &mut object_fields,
+                        self.limits(),
+                    )?;
+                    self.memoize_support_decode(
+                        &reference,
+                        raw.decoded_charge(),
+                        object_fields.clone(),
+                    )?;
+                }
             }
             let cache_charge = object_fields.iter().try_fold(128_u64, |total, field| {
                 total
@@ -4243,6 +4365,9 @@ impl ProjectStore {
         result.map(|_| ())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod support_reuse_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod c0_fix1_tests {
