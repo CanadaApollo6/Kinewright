@@ -120,14 +120,14 @@ jobs:
     with:
       os: ubuntu-24.04
       tier: fast
-      shards: '[0,1,2,3,4,5,6,7,8,9,10,11]'
+      shards: '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]'
   windows:
     name: Windows fast
     uses: ./.github/workflows/ci-tests.yml
     with:
       os: windows-latest
       tier: fast
-      shards: '[0,1,2,3,4,5,6,7]'
+      shards: '[0,1,2,3,4,5,6,7,8,9,10,11,12,13]'
   linux-slow:
     name: Linux slow
     if: >-

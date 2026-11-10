@@ -320,8 +320,7 @@ fn g6_broken_table_falls_back_and_completion_releases_scratch() {
     assert_eq!(gpu.ledger().live_bytes(), 0);
 }
 
-#[test]
-fn i5_production_workloads_match_ten_frames_exactly() {
+fn i5_production_workload_matches_ten_frames_exactly(name: &str) {
     use crate::{
         engine::monitor_max_width,
         perf_fixtures::Workload,
@@ -337,9 +336,14 @@ fn i5_production_workloads_match_ten_frames_exactly() {
         "runtime GPU route required"
     );
     let mut pool = pool.expect("GPU route was asserted before accessing the pool");
-    let workloads = crate::pf1_harness::play_workloads();
+    let workloads = crate::pf1_harness::play_workload_names();
     assert_eq!(workloads.len(), 6, "I5 requires every original W workload");
-    for (name, Workload(document, _media)) in workloads {
+    assert!(
+        workloads.contains(&name),
+        "I5 requires the original workload"
+    );
+    {
+        let Workload(document, _media) = crate::pf1_harness::play_workload(name);
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
@@ -389,6 +393,36 @@ fn i5_production_workloads_match_ten_frames_exactly() {
     }
     drop(pool);
     assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+#[test]
+fn i5_production_workload_typical_1080p_matches_ten_frames_exactly() {
+    i5_production_workload_matches_ten_frames_exactly("typical_1080p");
+}
+
+#[test]
+fn i5_production_workload_blend_heavy_1080p_matches_ten_frames_exactly() {
+    i5_production_workload_matches_ten_frames_exactly("blend_heavy_1080p");
+}
+
+#[test]
+fn i5_production_workload_explainer_16x9_matches_ten_frames_exactly() {
+    i5_production_workload_matches_ten_frames_exactly("explainer_16x9");
+}
+
+#[test]
+fn i5_production_workload_reel_9x16_matches_ten_frames_exactly() {
+    i5_production_workload_matches_ten_frames_exactly("reel_9x16");
+}
+
+#[test]
+fn i5_production_workload_feed_4x5_matches_ten_frames_exactly() {
+    i5_production_workload_matches_ten_frames_exactly("feed_4x5");
+}
+
+#[test]
+fn i5_production_workload_talk_recut_matches_ten_frames_exactly() {
+    i5_production_workload_matches_ten_frames_exactly("talk_recut");
 }
 
 #[test]

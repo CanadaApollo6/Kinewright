@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import slow_tests as st
 
 
-DISPLAY_PARITY = "display::tests::i5_production_workloads_match_ten_frames_exactly"
+DISPLAY_PARITY_PREFIX = "display::tests::i5_production_workload_"
 COMPILER_PROBE = "writer_host::hooks_tests::tests::s4b_c5_fix2_public_writes_cannot_spend_terminal_reserve"
 CONTROL_PREFIX = "writer_host::hooks_tests::tests::te14_fix1_"
 
@@ -71,11 +72,17 @@ def weights(tier="slow"):
         if match:
             b, p, *_ = line.split()
             result[b, p] = int(match.group(1 if st.host_os() == "linux" else 2))
-    measured = load(st.ROOT / "ci" / "test-timings.json")
+    try:
+        measured = load(st.ROOT / "ci" / "test-timings.json")
+    except (OSError, ValueError):
+        measured = {}
     os_name = st.host_os()
-    for binary, tests in measured["unit_seconds"][os_name][tier].items():
-        result.update({(binary, name): seconds for name, seconds in tests.items()})
-    return result, measured["batch_seconds"][os_name][tier]
+    for binary, tests in measured.get("unit_seconds", {}).get(os_name, {}).get(tier, {}).items():
+        result.update({(binary, name): seconds for name, seconds in tests.items()
+                       if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds >= 0})
+    batches = measured.get("batch_seconds", {}).get(os_name, {}).get(tier, {})
+    return result, {binary: seconds for binary, seconds in batches.items()
+                    if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds >= 0}
 
 
 def predicted_seconds(units):
@@ -96,7 +103,7 @@ def plan(listing, tier, count):
     for suite_index, suite in enumerate(suites):
         split = suite["label"] in ("kinewright_media", "kinewright_agent")
         controls = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_agent" and p.startswith(CONTROL_PREFIX)]
-        display_names = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_media" and p.startswith("display::tests::")]
+        display_names = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_media" and p.startswith("display::tests::") and not p.startswith(DISPLAY_PARITY_PREFIX)]
         rest = [p for p in suite["tests"] if p not in controls and p not in display_names]
         groups = [[p] for p in rest if p not in suite["ignored"]] if split else [rest]
         if split and any(p in suite["ignored"] for p in rest):
@@ -118,17 +125,19 @@ def plan(listing, tier, count):
                 if len(names) == 1:
                     cost = estimates.get((suite["label"], names[0]), cost)
                 cost = measured_batches.get(suite["label"], cost)
-            display = suite["label"] == "kinewright_media" and DISPLAY_PARITY in names
+            display = suite["label"] == "kinewright_media" and any(p.startswith(DISPLAY_PARITY_PREFIX) for p in names)
+            if control_batch:
+                cost = measured_batches.get("kinewright_agent::te14_fix1", cost)
+            if display_batch:
+                cost = measured_batches.get("kinewright_media::display", 30)
             compiler = suite["label"] == "kinewright_agent" and COMPILER_PROBE in names
             if display:
-                # The old green run exceeded ten minutes. A timeout is a lower
-                # bound, never a successful timing sample for partition weights.
-                cost = 1200
+                cost = estimates.get((suite["label"], names[0]), 150 if st.host_os() == "windows" else 80)
             units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast",
                           "isolated": isolated, "estimate": cost, "compiler_inputs": compiler,
-                          "dedicated": display or control_batch or compiler,
+                          "dedicated": display or control_batch or compiler or (not isolated and cost > 120 and suite["label"] != "kinewright_app"),
                           "threads": 1 if control_batch else (1 if suite["label"] == "kinewright_media" else 4),
-                          "timeout_seconds": 1800 if display else 600})
+                          "timeout_seconds": 600})
     shards = [[] for _ in range(count)]
     ordered = sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"]))
     # Long tests get a runner alone, without waiting behind other test processes.

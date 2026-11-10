@@ -339,19 +339,36 @@ fn frame_ms(document: &Document) -> f64 {
     1e3 * f64::from(document.fps.denominator()) / f64::from(document.fps.numerator())
 }
 
+const PLAY_BUILDERS: [Builder; 6] = [
+    ("typical_1080p", typical_60s),
+    ("blend_heavy_1080p", || perf_fixtures::blend_heavy(1_800)),
+    ("explainer_16x9", perf_fixtures::explainer_16x9),
+    ("reel_9x16", || perf_fixtures::social((1080, 1920))),
+    ("feed_4x5", || perf_fixtures::social((1080, 1350))),
+    ("talk_recut", perf_fixtures::talk_recut),
+];
+
+pub(crate) fn play_workload_names() -> Vec<&'static str> {
+    PLAY_BUILDERS
+        .into_iter()
+        .filter(|(key, _)| wanted(key))
+        .map(|(key, _)| key)
+        .collect()
+}
+
+pub(crate) fn play_workload(key: &str) -> Workload {
+    let (_, make) = PLAY_BUILDERS
+        .into_iter()
+        .find(|(name, _)| *name == key)
+        .expect("known play workload");
+    s4_input(key).unwrap_or_else(make)
+}
+
 /// Q-2 P-play's workloads: W-1 plus MO2's two, unchanged builders at 60 s.
 pub(crate) fn play_workloads() -> Vec<(&'static str, Workload)> {
-    let all: [Builder; 6] = [
-        ("typical_1080p", typical_60s),
-        ("blend_heavy_1080p", || perf_fixtures::blend_heavy(1_800)),
-        ("explainer_16x9", perf_fixtures::explainer_16x9),
-        ("reel_9x16", || perf_fixtures::social((1080, 1920))),
-        ("feed_4x5", || perf_fixtures::social((1080, 1350))),
-        ("talk_recut", perf_fixtures::talk_recut),
-    ];
-    let wanted = all.into_iter().filter(|(key, _)| wanted(key));
-    wanted
-        .map(|(key, make)| (key, s4_input(key).unwrap_or_else(make)))
+    play_workload_names()
+        .into_iter()
+        .map(|key| (key, play_workload(key)))
         .collect()
 }
 

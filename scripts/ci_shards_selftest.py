@@ -56,22 +56,24 @@ class Sharding(unittest.TestCase):
         names = [cs.CONTROL_PREFIX + "cold_certification_switch", cs.CONTROL_PREFIX + "decode_stop", cs.COMPILER_PROBE]
         data["rust-suites"]["kinewright_agent"] = {"binary-path": "/target/debug/deps/kinewright_agent-0123456789abcdef",
                                                    "cwd": "/repo", "testcases": {n: {"ignored": False} for n in names}}
-        data["rust-suites"]["kinewright_media"]["testcases"][cs.DISPLAY_PARITY] = {"ignored": False}
+        display_names = [cs.DISPLAY_PARITY_PREFIX + name + "_matches_ten_frames_exactly"
+                         for name in ("typical_1080p", "blend_heavy_1080p", "explainer_16x9", "reel_9x16", "feed_4x5", "talk_recut")]
+        data["rust-suites"]["kinewright_media"]["testcases"].update({name: {"ignored": False} for name in display_names})
         neighbor = "display::tests::i5_exact_self_check_requires_gpu"
         data["rust-suites"]["kinewright_media"]["testcases"][neighbor] = {"ignored": False}
-        result = cs.plan(data, "fast", 8)
+        result = cs.plan(data, "fast", 14)
         flat = [u for shard in result["shards"] for u in shard]
         controls = [u for u in flat if names[0] in u["tests"]]
         self.assertEqual(len(controls), 1)
         self.assertEqual(set(controls[0]["tests"]), set(names[:2]))
         self.assertFalse(controls[0]["isolated"])
         self.assertEqual(controls[0]["threads"], 1)
-        for name in (names[0], cs.COMPILER_PROBE, cs.DISPLAY_PARITY):
+        for name in (names[0], cs.COMPILER_PROBE, *display_names):
             shard = next(shard for shard in result["shards"] if any(name in u["tests"] for u in shard))
             self.assertEqual(len(shard), 1)
-        display = next(u for u in flat if cs.DISPLAY_PARITY in u["tests"])
-        self.assertEqual(display["timeout_seconds"], 1800)
-        self.assertEqual(set(display["tests"]), {cs.DISPLAY_PARITY, neighbor})
+        display = next(u for u in flat if neighbor in u["tests"])
+        self.assertEqual(display["timeout_seconds"], 600)
+        self.assertEqual(display["tests"], [neighbor])
         self.assertFalse(display["isolated"])
         self.assertEqual(display["threads"], 1)
         self.assertTrue(next(u for u in flat if cs.COMPILER_PROBE in u["tests"])["compiler_inputs"])
@@ -154,11 +156,12 @@ class Sharding(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cs.doc_inventory(text)
 
-    def prepare(self, root):
-        data = cs.plan(listing(), "fast", 12)
+    def prepare(self, root, compiled=None):
+        compiled = listing() if compiled is None else compiled
+        data = cs.plan(compiled, "fast", 12)
         plan_path = root / "plan.json"
         cs.save(plan_path, data)
-        cs.save(root / "compiled-list.json", listing())
+        cs.save(root / "compiled-list.json", compiled)
         digest = hashlib.sha256(plan_path.read_bytes()).hexdigest()
         for index, units in enumerate(data["shards"]):
             runs = []
@@ -181,6 +184,38 @@ class Sharding(unittest.TestCase):
              mock.patch.object(st, "allowlist_for", return_value={("kinewright_media", "skip")}), \
              contextlib.redirect_stdout(io.StringIO()):
             cs.verify(paths[0], root, paths[1], paths[2])
+
+    def test_new_te1_test_without_a_timing_is_scheduled_and_required_by_coverage(self):
+        name = "writer_host::hooks_tests::tests::te1_new_regression_without_timing"
+        for hints in ({}, {"unit_seconds": {"linux": {"fast": {"removed_binary": {"removed_test": 999}}}}},
+                      FileNotFoundError("timing seed absent")):
+            with self.subTest(hints=hints), tempfile.TemporaryDirectory(prefix="kinewright-ci-new-test-") as directory:
+                root = Path(directory)
+                compiled = listing()
+                compiled["rust-suites"]["kinewright_agent"] = {
+                    "binary-path": "/target/debug/deps/kinewright_agent-0123456789abcdef",
+                    "cwd": "/repo", "testcases": {name: {"ignored": False}}}
+                original_load = cs.load
+
+                def optional_hints(path):
+                    if Path(path).name == "test-timings.json":
+                        if isinstance(hints, Exception):
+                            raise hints
+                        return hints
+                    return original_load(path)
+
+                with mock.patch.object(cs, "load", side_effect=optional_hints):
+                    paths = self.prepare(root, compiled)
+                    data = cs.load(paths[0])
+                    matches = [(i, n, u) for i, shard in enumerate(data["shards"])
+                               for n, u in enumerate(shard) if name in u["tests"]]
+                    self.assertEqual(len(matches), 1)
+                    self.assertEqual(matches[0][2]["estimate"], 2)
+                    self.check(root, paths)
+                    index, number, _ = matches[0]
+                    (root / f"shard-{index}-{number}.log").write_text(log("kinewright_agent", []))
+                    with self.assertRaises((ValueError, st.UnparsableLog)):
+                        self.check(root, paths)
 
     def test_aggregate_accepts_explicitly_empty_shards(self):
         with tempfile.TemporaryDirectory(prefix="kinewright-ci-selftest-") as directory:
@@ -302,6 +337,19 @@ class ArchiveEnvironment(unittest.TestCase):
             checksum.write_text("wrong")
             with mock.patch.object(ca, "ROOT", root), self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                 ca.restore_test_environment(artifact, [{"compiler_inputs": True}])
+
+    def test_locked_fetch_uses_network_only_when_dependency_cache_is_incomplete(self):
+        for code in (0, 101):
+            with self.subTest(code=code), \
+                 mock.patch.object(subprocess, "check_output", return_value="host: x86_64-pc-windows-msvc\n"), \
+                 mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], code)) as check, \
+                 mock.patch.object(ca, "run") as online, contextlib.redirect_stdout(io.StringIO()):
+                ca.fetch_locked()
+            self.assertEqual(check.call_args.args[0], ["cargo", "fetch", "--locked", "--target", "x86_64-pc-windows-msvc", "--offline"])
+            if code:
+                online.assert_called_once_with(["cargo", "fetch", "--locked", "--target", "x86_64-pc-windows-msvc"])
+            else:
+                online.assert_not_called()
 
     def test_normal_shard_needs_no_compiler_artifact(self):
         with tempfile.TemporaryDirectory(prefix="kinewright-ci-archive-") as directory:

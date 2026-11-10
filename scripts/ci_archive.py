@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shards
@@ -20,12 +21,26 @@ CARGO_CONFIG = ["--config", str(ROOT / ".cargo" / "ci-test.toml")]
 
 def run(args, output=None):
     print("+ " + " ".join(map(str, args)), flush=True)
+    started = time.monotonic()
     if output:
         with Path(output).open("w", encoding="utf-8") as log:
             subprocess.run(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
                            check=True, encoding="utf-8")
     else:
         subprocess.run(args, cwd=ROOT, check=True)
+    print(f"command wall seconds: {time.monotonic() - started:.3f}", flush=True)
+
+
+def fetch_locked():
+    host = next(line.removeprefix("host: ") for line in
+                subprocess.check_output(["rustc", "-vV"], text=True).splitlines() if line.startswith("host: "))
+    args = ["cargo", "fetch", "--locked", "--target", host]
+    cached = subprocess.run([*args, "--offline"], cwd=ROOT, capture_output=True, text=True)
+    if cached.returncode:
+        print("Dependency cache incomplete; fetch the locked host dependencies online.", flush=True)
+        run(args)
+    else:
+        print("Locked host dependencies are cached; build without an index refresh.", flush=True)
 
 
 def build(tier, count):
@@ -33,12 +48,13 @@ def build(tier, count):
     directory.mkdir(exist_ok=True)
     archive = directory / "tests.tar.zst"
     features = ["--features", st.feature_list(st.read_manifest())] if tier == "slow" else []
-    run(["cargo", "nextest", "archive", *CARGO_CONFIG, "--timings", "--locked", "--workspace", *features,
+    fetch_locked()
+    run(["cargo", "nextest", "archive", *CARGO_CONFIG, "--timings", "--frozen", "--workspace", *features,
          "--archive-file", str(archive)])
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     (directory / "tests.sha256").write_text(digest + "\n")
-    listing = subprocess.check_output(["cargo", "nextest", "list", *CARGO_CONFIG, "--locked", "--workspace",
+    listing = subprocess.check_output(["cargo", "nextest", "list", *CARGO_CONFIG, "--frozen", "--workspace",
                                        *features, "--message-format", "json"], cwd=ROOT, text=True)
     compiled = json.loads(listing)
     ci_shards.save(directory / "compiled-list.json", compiled)
@@ -50,10 +66,10 @@ def build(tier, count):
     if tier == "fast" and st.host_os() == "linux":
         pack_compiler_inputs(directory)
     if tier == "fast":
-        run(["cargo", "test", *CARGO_CONFIG, "--locked", "--workspace", "--doc", "--", "--list"], directory / "doc-list.log")
+        run(["cargo", "test", *CARGO_CONFIG, "--frozen", "--workspace", "--doc", "--", "--list"], directory / "doc-list.log")
         docs = ci_shards.doc_inventory((directory / "doc-list.log").read_text(encoding="utf-8"))
         ci_shards.save(directory / "doc-list.json", docs)
-        run(["cargo", "test", *CARGO_CONFIG, "--locked", "--workspace", "--doc"], directory / "docs.log")
+        run(["cargo", "test", *CARGO_CONFIG, "--frozen", "--workspace", "--doc"], directory / "docs.log")
         st.verify_exact_rows(docs, st.parse((directory / "docs.log").read_text(encoding="utf-8")))
         if st.host_os() == "linux":
             dynamic = subprocess.check_output(["readelf", "-d", "target/debug/kinewright-eval"], text=True)
