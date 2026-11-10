@@ -517,7 +517,9 @@ fn c5e_run(size: C5eSize) {
                     .clone();
                 (parent.clone(), client, endpoint, core)
             } else {
-                c4_reserve_task(&f, &run, &task)
+                // Match EffectPump::launch's native lease. C4's short default
+                // is not long enough for the maximal approval workload.
+                c4_reserve_task_with_ttl(&f, &run, &task, Duration::from_secs(3600))
             };
             // Reserve the real launcher's private transport fence, as in
             // s4b_c3_fix1_unbound_crash_child. Recovery must not claim a known

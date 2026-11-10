@@ -407,6 +407,19 @@ fn c4_reserve_task(
     crate::orchestration::tasks::TaskEndpoint,
     Core,
 ) {
+    c4_reserve_task_with_ttl(f, run, task, Duration::from_secs(300))
+}
+fn c4_reserve_task_with_ttl(
+    f: &Fixture,
+    run: &RunId,
+    task: &TaskId,
+    ttl: Duration,
+) -> (
+    ExecutionIdentity,
+    HostClient,
+    crate::orchestration::tasks::TaskEndpoint,
+    Core,
+) {
     let producer = f.producer_client(run);
     let host = f.host.owner.upgrade().unwrap();
     let mut state = f.projection(run);
@@ -440,13 +453,7 @@ fn c4_reserve_task(
     let (auth, endpoint) = host
         .lock()
         .unwrap()
-        .prepare_task_endpoint(
-            &producer.bootstrap.auth,
-            run,
-            task,
-            &execution.attempt,
-            Duration::from_secs(300),
-        )
+        .prepare_task_endpoint(&producer.bootstrap.auth, run, task, &execution.attempt, ttl)
         .unwrap_or_else(|error| panic!("C4_MCP_ATTEMPT_HISTORY: {error}"));
     let client = HostClient::connect(f.host.endpoint.clone(), auth, f.host.roots.clone()).unwrap();
     let core = host.lock().unwrap().hooks.runs[run].tasks[task]
