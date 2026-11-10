@@ -177,6 +177,20 @@ fn run(walk: Walk, raw: &Value, name: &str, schema: &Value) -> Result<BTreeSet<S
     Ok(fields)
 }
 
+/// One walk of `raw` against `schema` (resolving references in `root`) from a given field
+/// set; returns the outcome and the set as the walk left it, also after an `Err`.
+fn run_keeping(
+    walk: Walk,
+    raw: &Value,
+    name: &str,
+    schema: &Value,
+    root: &Value,
+    mut fields: BTreeSet<String>,
+) -> (Result<(), String>, BTreeSet<String>) {
+    let outcome = walk(raw, schema, root, name, 0, &mut fields);
+    (outcome, fields)
+}
+
 /// Old and new on one input; panics with the input's label on any difference.
 fn same(raw: &Value, name: &str, schema: &Value, label: &str) -> bool {
     let reference = run(walk_serialized_support_reference, raw, name, schema);
@@ -719,12 +733,22 @@ fn failed_alternative_leaks_no_fields() {
                         "type": "object",
                         "properties": { "a": {}, "b": { "type": "string" } }
                     },
-                    // Nested: records x.a, x.b via an inner anyOf that succeeds, then
-                    // fails on a required key.
+                    // Nested: the first `allOf` member records x.a and x.b, and x.b's inner
+                    // `anyOf` succeeds and records x.b.d; then the second member fails on a
+                    // missing key, so the whole outer alternative fails.
                     {
-                        "type": "object",
-                        "required": ["c"],
-                        "properties": { "a": {}, "b": { "anyOf": [ { "type": "number" } ] } }
+                        "allOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "a": {},
+                                    "b": { "anyOf": [
+                                        { "type": "object", "properties": { "d": {} } }
+                                    ] }
+                                }
+                            },
+                            { "required": ["c"] }
+                        ]
                     },
                     // Succeeds through additionalProperties: only x.* is recorded.
                     { "type": "object", "additionalProperties": {} }
@@ -732,7 +756,27 @@ fn failed_alternative_leaks_no_fields() {
             }
         }
     });
-    let value = json!({ "before": 1, "x": { "a": 1, "b": 5 } });
+    let value = json!({ "before": 1, "x": { "a": 1, "b": { "d": 1 } } });
+    // The nested alternative really runs its inner `anyOf` before failing: walked on its
+    // own, both walks fail on the missing key and leave the same partial fields, x.b.d
+    // among them.
+    let nested = &schema["properties"]["x"]["anyOf"][1];
+    let partial: BTreeSet<String> = ["v.x.a", "v.x.b", "v.x.b.d"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for walk in [
+        walk_serialized_support_reference as Walk,
+        walk_serialized_support,
+    ] {
+        assert_eq!(
+            run_keeping(walk, &value["x"], "v.x", nested, &schema, BTreeSet::new()),
+            (
+                Err("missing required field at v.x".to_owned()),
+                partial.clone()
+            )
+        );
+    }
     let expected: BTreeSet<String> = ["v.before", "v.x", "v.x.*"]
         .into_iter()
         .map(str::to_owned)
@@ -771,16 +815,111 @@ fn failed_alternative_leaks_no_fields() {
     );
 }
 
+fn set(fields: &[&str]) -> BTreeSet<String> {
+    fields.iter().copied().map(str::to_owned).collect()
+}
+
+/// A failed alternative reached through a local `$ref`, and one inside `prefixItems`,
+/// contributes none of its fields; the alternative after it wins. Old and new agree, and
+/// both equal the expected set.
+#[test]
+fn failed_alternative_through_ref_and_prefix_items_leaks_no_fields() {
+    let schema = json!({
+        "definitions": {
+            "strict": { "type": "object", "properties": { "a": {}, "b": { "type": "string" } } },
+            "loose": { "type": "object", "properties": { "a": {} }, "additionalProperties": {} }
+        },
+        "type": "object",
+        "properties": {
+            "r": { "anyOf": [
+                { "$ref": "#/definitions/strict" },
+                { "$ref": "#/definitions/loose" }
+            ] },
+            "t": { "anyOf": [
+                { "type": "array", "prefixItems": [ { "$ref": "#/definitions/strict" } ] },
+                { "type": "array", "prefixItems": [ { "$ref": "#/definitions/loose" } ] }
+            ] }
+        }
+    });
+    let value = json!({ "r": { "a": 1, "b": 2 }, "t": [ { "a": 1, "b": 2 } ] });
+    let expected = set(&["v.r", "v.r.a", "v.r.*", "v.t", "v.t[].a", "v.t[].*"]);
+    assert_eq!(
+        run(walk_serialized_support_reference, &value, "v", &schema),
+        Ok(expected.clone())
+    );
+    assert_eq!(
+        run(walk_serialized_support, &value, "v", &schema),
+        Ok(expected)
+    );
+}
+
+/// After an `Err`, both walks leave the same fields in the caller's set: the fields an
+/// `allOf` member recorded before a later member failed (no alternative involved), and the
+/// incoming and sibling fields when every alternative of a child fails.
+#[test]
+fn partial_fields_after_an_error_are_identical() {
+    let all_of = json!({
+        "type": "object",
+        "properties": {
+            "x": { "allOf": [
+                { "type": "object", "properties": { "a": {} } },
+                { "required": ["c"] }
+            ] }
+        }
+    });
+    let failing_alternatives = json!({
+        "type": "object",
+        "properties": {
+            "before": {},
+            "x": { "anyOf": [
+                { "type": "object", "properties": { "a": {}, "b": { "type": "string" } } },
+                { "type": "string" }
+            ] }
+        }
+    });
+    let cases = [
+        (
+            &all_of,
+            json!({ "x": { "a": 1 } }),
+            set(&["pre"]),
+            "missing required field at v.x",
+            set(&["pre", "v.x", "v.x.a"]),
+        ),
+        (
+            &failing_alternatives,
+            json!({ "before": 1, "x": { "a": 1, "b": 2 } }),
+            // v.x.a is also recorded by the failed alternative: it stays, as it came in.
+            set(&["pre", "v.x.a"]),
+            "unsupported variant at v.x",
+            set(&["pre", "v.x.a", "v.before", "v.x"]),
+        ),
+    ];
+    for (schema, value, incoming, error, left) in cases {
+        for walk in [
+            walk_serialized_support_reference as Walk,
+            walk_serialized_support,
+        ] {
+            assert_eq!(
+                run_keeping(walk, &value, "v", schema, schema, incoming.clone()),
+                (Err(error.to_owned()), left.clone())
+            );
+        }
+    }
+}
+
 // ---- seeded synthetic schemas ----------------------------------------------------------
 
 const KEYS: [&str; 4] = ["a", "b", "c", "d"];
 
 /// A random schema whose `anyOf` alternatives overlap: several alternatives accept the
 /// same keys, so one can record fields, fail deeper down, and leave the next to succeed.
-/// That is the case the product change touches, and the compiled schemas never reach it.
+/// That is the case the product change touches; no compiled-schema input in the default
+/// corpus reaches a later winner after such a failure. Besides objects, arrays and
+/// alternatives it makes `allOf` lists, `prefixItems` tuples and local `$ref`s to the two
+/// definitions `random_definitions` puts at the root.
 fn random_schema(random: &mut XorShift, depth: u32) -> Value {
     let leaf = depth >= 3;
-    match random.below(if leaf { 4 } else { 8 }) {
+    match random.below(if leaf { 4 } else { 10 }) {
         0 => {
             let kind = ["string", "number", "boolean", "null", "object", "array"][random.below(6)];
             json!({ "type": kind })
@@ -821,8 +960,30 @@ fn random_schema(random: &mut XorShift, depth: u32) -> Value {
                 .collect();
             json!({ key: alternatives })
         }
-        _ => json!({ "type": "array", "items": random_schema(random, depth + 1) }),
+        7 => {
+            let mut schema = json!({ "type": "array", "items": random_schema(random, depth + 1) });
+            if random.below(2) == 0 {
+                let tuple: Vec<Value> = (0..=random.below(2))
+                    .map(|_| random_schema(random, depth + 1))
+                    .collect();
+                schema["prefixItems"] = Value::Array(tuple);
+            }
+            schema
+        }
+        8 => {
+            let members: Vec<Value> = (0..2 + random.below(2))
+                .map(|_| random_schema(random, depth + 1))
+                .collect();
+            json!({ "allOf": members })
+        }
+        _ => json!({ "$ref": format!("#/definitions/d{}", random.below(2)) }),
     }
+}
+
+/// The definitions a generated `$ref` points to. They may refer to each other, so a cycle
+/// ends at the depth limit, with the same error in both walks.
+fn random_definitions(random: &mut XorShift) -> Value {
+    json!({ "d0": random_schema(random, 2), "d1": random_schema(random, 2) })
 }
 
 fn random_value(random: &mut XorShift, depth: u32) -> Value {
@@ -869,6 +1030,7 @@ fn product_walk_matches_reference_walk_on_seeded_synthetic_schemas() {
             .map(|_| random_schema(&mut random, 1))
             .collect();
         schema["properties"]["x"]["anyOf"] = Value::Array(alternatives.clone());
+        schema["definitions"] = random_definitions(&mut random);
         let value = json!({ "x": random_value(&mut random, 1) });
         if same(&value, "v", &schema, &format!("synthetic case {case}")) {
             accepted += 1;
