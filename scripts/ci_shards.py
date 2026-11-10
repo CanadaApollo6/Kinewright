@@ -23,6 +23,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import slow_tests as st
+import ci_display_inputs
 
 
 DISPLAY_PARITY_PREFIX = "display::tests::i5_production_workload_"
@@ -117,7 +118,7 @@ def plan(listing, tier, count):
                 continue
             control_batch = names == controls
             display_batch = names == display_names
-            isolated = split and not control_batch and not display_batch
+            isolated = split and not control_batch and not display_batch and not any(p.startswith(DISPLAY_PARITY_PREFIX) for p in names)
             cost = sum(estimates.get((suite["label"], p), 60 if p.startswith("pf1_s2c_witness::") else 2) for p in names if p not in suite["ignored"])
             if not split:
                 cost = {"kinewright_app": 342 if tier == "fast" else 28, "mcp_server": 182,
@@ -134,17 +135,19 @@ def plan(listing, tier, count):
             if display:
                 cost = estimates.get((suite["label"], names[0]), 150 if st.host_os() == "windows" else 80)
             units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast",
-                          "isolated": isolated, "estimate": cost, "compiler_inputs": compiler,
+                          "isolated": isolated, "estimate": cost, "compiler_inputs": compiler, "display": display,
                           "dedicated": display or control_batch or compiler or (not isolated and cost > 120 and suite["label"] != "kinewright_app"),
                           "threads": 1 if control_batch else (1 if suite["label"] == "kinewright_media" else 4),
-                          "timeout_seconds": 600})
+                          "timeout_seconds": 1800 if display else 600})
     shards = [[] for _ in range(count)]
     ordered = sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"]))
-    # Long tests get a runner alone, without waiting behind other test processes.
+    # Display workloads get separate runners and finish before the parallel tail.
+    # Control/compiler fixtures and other long units retain exclusive runners.
     long_tests = [u for u in ordered if (u.get("dedicated", False) or (u["isolated"] and u["estimate"] > 240))][:max(0, count - 2)]
     for slot, unit in enumerate(long_tests, 1):
         shards[slot].append(unit)
-    available = list(range(1 + len(long_tests), count)) if count > 1 else [0]
+    available = ([i for i, shard in enumerate(shards) if any(u.get("display", False) for u in shard)] +
+                 list(range(1 + len(long_tests), count))) if count > 1 else [0]
     for unit in ordered:
         if unit in long_tests:
             continue
@@ -167,7 +170,7 @@ def execute_unit(data, unit, number, index, directory):
     args = [str(binary), "--color", "never"]
     if not unit["full"]:
         args += ["--exact", *unit["tests"]]
-    if data["tier"] == "slow":
+    if data["tier"] == "slow" or unit.get("display", False):
         args += ["--show-output"]
     threads = str(unit.get("threads", 1 if suite["label"] == "kinewright_media" else 4))
     args += ["--test-threads", threads]
@@ -176,6 +179,7 @@ def execute_unit(data, unit, number, index, directory):
     started = time.monotonic()
     env = {**os.environ, "CARGO_MANIFEST_DIR": suite["cwd"],
            "CARGO_TERM_COLOR": "never", "RUST_TEST_THREADS": threads}
+    env.update(ci_display_inputs.environment(unit))
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"Running tests/{suite['label']}.rs ({binary})\n")
         log.flush()
@@ -321,6 +325,14 @@ def main():
     elif args.command == "requirements":
         units = load(args.plan)["shards"][args.index]
         print("compiler_inputs=" + str(any(u.get("compiler_inputs", False) for u in units)).lower())
+        workloads = [ci_display_inputs.workload(u) for u in units if u.get("display", False)]
+        if len(workloads) > 1:
+            raise ValueError("display workloads must use separate runners")
+        print("display_workload=" + (workloads[0] if workloads else ""))
+        if workloads:
+            identity = (str(st.ROOT) + subprocess.check_output(["rustc", "-vV"], text=True) +
+                        os.environ.get("RUSTFLAGS", "") + os.environ.get("CARGO_ENCODED_RUSTFLAGS", ""))
+            print("display_cache_id=" + hashlib.sha256(identity.encode()).hexdigest()[:20])
     elif args.command == "matrix":
         matrix = {"include": [{"shard": i, "timeout": max(15, 5 + max((u.get("timeout_seconds", 600) for u in units), default=600) // 60)}
                               for i, units in enumerate(load(args.plan)["shards"])]}

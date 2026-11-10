@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shards as cs
 import ci_archive as ca
+import ci_display_inputs as di
 import slow_tests as st
 
 
@@ -68,9 +69,13 @@ class Sharding(unittest.TestCase):
         self.assertEqual(set(controls[0]["tests"]), set(names[:2]))
         self.assertFalse(controls[0]["isolated"])
         self.assertEqual(controls[0]["threads"], 1)
-        for name in (names[0], cs.COMPILER_PROBE, *display_names):
+        for name in (names[0], cs.COMPILER_PROBE):
             shard = next(shard for shard in result["shards"] if any(name in u["tests"] for u in shard))
             self.assertEqual(len(shard), 1)
+        display_shards = [i for i, shard in enumerate(result["shards"])
+                          for u in shard if any(name in u["tests"] for name in display_names)]
+        self.assertEqual(len(set(display_shards)), 6)
+        self.assertTrue(all(not u["isolated"] for u in flat if u.get("display", False)))
         display = next(u for u in flat if neighbor in u["tests"])
         self.assertEqual(display["timeout_seconds"], 600)
         self.assertEqual(display["tests"], [neighbor])
@@ -127,7 +132,7 @@ class Sharding(unittest.TestCase):
                 output = io.StringIO()
                 with mock.patch.object(sys, "argv", ["ci_shards.py", "requirements", "--plan", str(path), "--index", str(index)]), contextlib.redirect_stdout(output):
                     cs.main()
-                self.assertEqual(output.getvalue().strip(), "compiler_inputs=" + wanted)
+                self.assertEqual(output.getvalue().strip(), "compiler_inputs=" + wanted + "\ndisplay_workload=")
 
     def test_slow_inventory_requires_every_manifest_test_enabled(self):
         entries = [("mcp_server", "mcp1", "source", "any")]
@@ -344,10 +349,10 @@ class ArchiveEnvironment(unittest.TestCase):
                  mock.patch.object(subprocess, "check_output", return_value="host: x86_64-pc-windows-msvc\n"), \
                  mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], code)) as check, \
                  mock.patch.object(ca, "run") as online, contextlib.redirect_stdout(io.StringIO()):
-                ca.fetch_locked()
-            self.assertEqual(check.call_args.args[0], ["cargo", "fetch", "--locked", "--target", "x86_64-pc-windows-msvc", "--offline"])
+                ca.fetch_locked([])
+            self.assertEqual(check.call_args.args[0], ["cargo", "metadata", *ca.CARGO_CONFIG, "--locked", "--filter-platform", "x86_64-pc-windows-msvc", "--format-version", "1", "--offline"])
             if code:
-                online.assert_called_once_with(["cargo", "fetch", "--locked", "--target", "x86_64-pc-windows-msvc"])
+                online.assert_called_once_with(["cargo", "metadata", *ca.CARGO_CONFIG, "--locked", "--filter-platform", "x86_64-pc-windows-msvc", "--format-version", "1"], ca.os.devnull)
             else:
                 online.assert_not_called()
 
@@ -357,6 +362,89 @@ class ArchiveEnvironment(unittest.TestCase):
             with mock.patch.object(ca, "ROOT", root):
                 ca.restore_test_environment(root / "absent-artifact", [])
             self.assertTrue((root / "target" / "tmp").is_dir())
+
+
+class DisplayInputs(unittest.TestCase):
+    def witness(self, root):
+        unit = {"display": True, "suite": 0,
+                "tests": [cs.DISPLAY_PARITY_PREFIX + "talk_recut_matches_ten_frames_exactly"]}
+        data = {"suites": [{"label": "kinewright_media", "path": "/target/debug/deps/kinewright_media-0123456789abcdef", "cwd": str(root)}]}
+        return unit, data
+
+    def write_canonical_input(self, root):
+        directory, manifest, _ = di.paths("talk_recut")
+        directory.mkdir()
+        (directory / "0.mp4").write_bytes(b"original canonical video bytes")
+        (directory / "document.json").write_text('{"original":"document"}')
+
+        def reference(name):
+            path = directory / name
+            return {"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+        (directory / "media.json").write_text(json.dumps({"files": [reference("0.mp4")]}))
+        manifest.write_text(json.dumps({"key": "talk_recut", "document": reference("document.json"), "media": reference("media.json")}))
+
+    def prepare(self, root, unit, data):
+        def generate(args, **kwargs):
+            self.assertIn("--ignored", args)
+            self.assertIn(di.PREPARE_TEST, args)
+            self.assertEqual(kwargs["env"]["PF1_ONLY"], "talk_recut")
+            self.assertNotIn("PF1_FROZEN_INPUT", kwargs["env"])
+            self.write_canonical_input(root)
+            kwargs["stdout"].write(log("kinewright_media", [di.PREPARE_TEST]).split("\n", 1)[1])
+
+        with mock.patch.object(subprocess, "run", side_effect=generate), contextlib.redirect_stdout(io.StringIO()):
+            di.prepare(data, [unit], root / "results")
+
+    def test_canonical_preparation_is_reused_and_inputs_are_hash_checked(self):
+        with tempfile.TemporaryDirectory(prefix="kinewright-display-input-") as directory:
+            root = Path(directory)
+            unit, data = self.witness(root)
+            with mock.patch.object(di, "ROOT", root):
+                self.prepare(root, unit, data)
+                with mock.patch.object(subprocess, "run", side_effect=AssertionError("must reuse prepared bytes")), contextlib.redirect_stdout(io.StringIO()):
+                    di.prepare(data, [unit], root / "results")
+                env = di.environment(unit)
+                self.assertEqual(env["PF1_ROOT"], str(root))
+                self.assertEqual(Path(env["PF1_FROZEN_INPUT"]).name, "workload.json")
+                self.assertNotIn("PF1_ONLY", env)
+                (di.paths("talk_recut")[0] / "0.mp4").write_bytes(b"changed video bytes")
+                with self.assertRaisesRegex(ValueError, "artifact SHA-256"):
+                    di.environment(unit)
+
+    def test_changed_manifest_missing_file_and_partial_preparation_fail(self):
+        for fault in ("manifest", "missing", "partial", "identity", "escape"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="kinewright-display-input-") as directory:
+                root = Path(directory)
+                unit, data = self.witness(root)
+                with mock.patch.object(di, "ROOT", root):
+                    self.prepare(root, unit, data)
+                    folder, manifest, ready = di.paths("talk_recut")
+                    if fault == "manifest":
+                        manifest.write_bytes(manifest.read_bytes() + b"\n")
+                    elif fault == "missing":
+                        (folder / "0.mp4").unlink()
+                    elif fault == "partial":
+                        ready.unlink()
+                    else:
+                        value = json.loads(manifest.read_text())
+                        if fault == "identity": value["key"] = "feed_4x5"
+                        else: value["document"]["path"] = "../outside-input"
+                        manifest.write_text(json.dumps(value))
+                        ready.write_text(json.dumps({"manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}))
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises((ValueError, FileNotFoundError)):
+                        di.prepare(data, [unit], root / "results")
+
+    def test_failed_or_empty_preparation_never_marks_the_cache_ready(self):
+        for error in (subprocess.TimeoutExpired("prepare", 1800), subprocess.CalledProcessError(101, "prepare"), None):
+            with self.subTest(error=error), tempfile.TemporaryDirectory(prefix="kinewright-display-input-") as directory:
+                root = Path(directory)
+                unit, data = self.witness(root)
+                with mock.patch.object(di, "ROOT", root), \
+                     mock.patch.object(subprocess, "run", side_effect=error), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises((subprocess.SubprocessError, ValueError, st.UnparsableLog)):
+                        di.prepare(data, [unit], root / "results")
+                    self.assertFalse(di.paths("talk_recut")[2].exists())
 
 
 if __name__ == "__main__":

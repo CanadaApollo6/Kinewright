@@ -13,6 +13,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ci_shards
+import ci_display_inputs
 import slow_tests as st
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,16 +32,16 @@ def run(args, output=None):
     print(f"command wall seconds: {time.monotonic() - started:.3f}", flush=True)
 
 
-def fetch_locked():
+def fetch_locked(features):
     host = next(line.removeprefix("host: ") for line in
                 subprocess.check_output(["rustc", "-vV"], text=True).splitlines() if line.startswith("host: "))
-    args = ["cargo", "fetch", "--locked", "--target", host]
+    args = ["cargo", "metadata", *CARGO_CONFIG, "--locked", "--filter-platform", host, "--format-version", "1", *features]
     cached = subprocess.run([*args, "--offline"], cwd=ROOT, capture_output=True, text=True)
     if cached.returncode:
-        print("Dependency cache incomplete; fetch the locked host dependencies online.", flush=True)
-        run(args)
+        print("Dependency cache incomplete; resolve the locked workspace dependencies online.", flush=True)
+        run(args, os.devnull)
     else:
-        print("Locked host dependencies are cached; build without an index refresh.", flush=True)
+        print("Locked workspace dependencies are cached; build without an index refresh.", flush=True)
 
 
 def build(tier, count):
@@ -48,7 +49,7 @@ def build(tier, count):
     directory.mkdir(exist_ok=True)
     archive = directory / "tests.tar.zst"
     features = ["--features", st.feature_list(st.read_manifest())] if tier == "slow" else []
-    fetch_locked()
+    fetch_locked(features)
     run(["cargo", "nextest", "archive", *CARGO_CONFIG, "--timings", "--frozen", "--workspace", *features,
          "--archive-file", str(archive)])
     with archive.open("rb") as source:
@@ -122,6 +123,8 @@ def extract(index=None):
         raise ValueError("extracted test paths or inventory differ from builder")
     units = data["shards"][index] if index is not None else [u for shard in data["shards"] for u in shard]
     restore_test_environment(directory, units)
+    if index is not None:
+        ci_display_inputs.prepare(data, units, ROOT / "ci-results")
 
 
 def predecessor(pack):
