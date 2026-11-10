@@ -700,27 +700,13 @@ impl ProjectStore {
     ) -> Result<CertifiedMediaInput, BundleError> {
         let interpretation = entry.media_interpretation()?;
         let mut memo = self.media_admission_memo(entry)?;
-        let reused = self.certify_media_parts(
+        let source = self.certify_media_parts(
             &entry.object,
             entry.chunk_table_ref()?,
             context,
-            memo.as_ref(),
+            Some((entry, &mut memo)),
             Arc::clone(&cancel),
-        );
-        let source = match reused {
-            Err(_) if memo.is_some() => {
-                self.forget_media_admission(entry)?;
-                memo = None;
-                self.certify_media_parts(
-                    &entry.object,
-                    entry.chunk_table_ref()?,
-                    context,
-                    None,
-                    Arc::clone(&cancel),
-                )?
-            }
-            result => result?,
-        };
+        )?;
         if memo.is_some() {
             return CertifiedMediaInput::from_admitted_source(source, interpretation);
         }
@@ -738,7 +724,10 @@ impl ProjectStore {
         source: &ObjectRef,
         table_ref: &ObjectRef,
         context: Option<&ObjectRef>,
-        memo: Option<&kinewright_media::owned_io::SourceAdmissionMemo>,
+        memo: Option<(
+            &OwnedInputEntry,
+            &mut Option<kinewright_media::owned_io::SourceAdmissionMemo>,
+        )>,
         cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedSource, BundleError> {
         let table = self.shared_chunk_table(table_ref)?;
@@ -747,15 +736,23 @@ impl ProjectStore {
         let mut roots = vec![source.clone(), table_ref.clone()];
         roots.extend(context.cloned());
         let pin = self.pin(&roots)?;
-        if let Some(memo) = memo {
-            let source = memo
-                .reissue(
-                    file,
-                    Arc::clone(&table.chunks),
-                    Arc::new((pin, table)),
-                    self.decoder_reserver(),
-                )
-                .map_err(io_error)?;
+        if let Some((entry, memo)) = memo
+            && let Some(admitted) = memo.as_ref()
+        {
+            let source = match admitted.reissue(
+                file,
+                Arc::clone(&table.chunks),
+                Arc::new((pin, table)),
+                self.decoder_reserver(),
+            ) {
+                Ok(source) => source,
+                Err(kinewright_media::owned_io::OwnedIoError::InvalidCertificate(_)) => {
+                    self.forget_media_admission(entry)?;
+                    *memo = None;
+                    return self.certify_media_parts(source, table_ref, context, None, cancel);
+                }
+                Err(error) => return Err(io_error(error)),
+            };
             return self.bind_source_read_authority(source);
         }
         #[cfg(any(test, feature = "test-util"))]
@@ -1272,6 +1269,48 @@ mod tests {
             "C0_CHANGED_SOURCE_RECERTIFICATION_REJECTS_DAMAGE"
         );
         drop((first_pins, second_pins));
+    }
+
+    #[test]
+    fn s3_transient_open_error_keeps_memo_and_next_call_warm() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_root, mut owner) = session("c0-transient-memo-open");
+        let (_asset, entry, _pins) = import(&mut owner, 1, 3456);
+        let original = owner.store().certify_media_entry(&entry).unwrap();
+        assert!(!original.certification_was_cold());
+        let root = owner.store().resolved_root().unwrap();
+        let assets = root.with_file_name(format!(
+            "{}.kinewright-assets",
+            root.file_stem().unwrap().to_string_lossy()
+        ));
+        let objects = assets.join("studio/objects");
+        let permissions = objects.metadata().unwrap().permissions();
+        std::fs::set_permissions(&objects, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let expected = owner.store().open_input_descriptor(&entry.object).err();
+        let refused = owner.store().certify_media_entry(&entry).err();
+        std::fs::set_permissions(objects, permissions).unwrap();
+        let expected = expected.expect("fixture must refuse the temporary directory permission");
+        let refused = refused.expect("transient open must remain refused");
+        assert_eq!(
+            std::mem::discriminant(&refused),
+            std::mem::discriminant(&expected)
+        );
+        assert_eq!(refused.to_string(), expected.to_string());
+        assert!(
+            owner
+                .store()
+                .media_admission_memo(&entry)
+                .unwrap()
+                .is_some(),
+            "C0_TRANSIENT_OPEN_KEEPS_ADMISSION_MEMO"
+        );
+        original.verify_unchanged().unwrap();
+        let warm = owner.store().certify_media_entry(&entry).unwrap();
+        assert!(
+            !warm.certification_was_cold(),
+            "C0_TRANSIENT_RETRY_STAYS_WARM"
+        );
+        warm.verify_unchanged().unwrap();
     }
 
     #[test]

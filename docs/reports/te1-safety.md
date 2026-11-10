@@ -300,3 +300,25 @@ Media recertification uses the existing background job and cancellation signal, 
 Failed reads are delivered once then evicted; cached successes recheck their actual source's original stamp before publication, using existing failure words and no source hashing under the owner lock.
 Narrow verification passed: Project owned_media 12, media owned_io/memo 41, te1_media_only 5, te1_safety 8, media wait/Stop/pause 6, te15_a 9, and four adjacent tamper tests (85 total; logs under `target/te1-recert/`).
 fmt, workspace Clippy, Windows Clippy and slow-test lint passed; no whole-crate suites or mutation pairs ran, `scripts/__pycache__/` was removed, and owner-lock deadlines remain deferred.
+
+## Merge follow-up: transient errors and included-test formatting
+
+Based on merge `ae129e44`, GLM F1 now evicts an admission memo only when `SourceAdmissionMemo::reissue` returns its typed `InvalidCertificate` verdict. This covers changed stamps and native/chunk binding mismatches. Errors from opening/statting the source, obtaining tables or pins, and binding read authority propagate without eviction. The cold import path and full verification after an invalid memo remain intact. No string matching is used to classify failures.
+
+The ordinary regression keeps a warm certificate, temporarily removes search permission on its private objects directory, and confirms that opening the source refuses. Certification returns the same error variant and words, the memo remains present, and restoring the directory permissions leaves the original file stamp unchanged. The next certification is warm. Permissions are restored before assertions. The complete `owned_media` module passed 14 tests, including damaged-source and changed-stamp recertification controls.
+
+GLM F4 is formatting only: `rustfmt --edition 2024 --config skip_children=true` was run on `writer_host/te1_media_only_tests.rs`. No expectation, oracle, deadline or media-worker behavior changed in that file. The measurement pin is unchanged; neither modified source file is a hashed driver or bridge input. Model/option values remain OPEN.
+
+Completed follow-up gates, read from ended logs under `target/te1-5/safety-followup/`:
+
+| Gate | Result | Log |
+|---|---|---|
+| fmt | PASS | `fmt.log` |
+| bare-fmt | PASS | `bare-fmt.log` |
+| clippy-eval | PASS | `clippy-eval.log` |
+| clippy-default | PASS | `clippy-default.log` |
+| windows | PASS | `windows.log` |
+| media-only | 5 passed, 0 failed, 1 ignored | `media-only.log` |
+| owned-media | 14 passed, 0 failed, 0 ignored | `owned-media.log` |
+
+Windows evidence is cross-compilation/lint only. The final owned-media run includes the error-variant and error-word equality checks. The first clippy pass caught a decimal permission literal in the new test; it is now octal, with unchanged permission bits. No additional mutation pair, whole suite, maximal, paid entry, installed-provider command or dry launch ran. All owned build/test commands ended before commit, and no real grant folder or credentials were accessed.

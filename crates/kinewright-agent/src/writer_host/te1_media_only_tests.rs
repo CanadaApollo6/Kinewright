@@ -248,51 +248,92 @@ fn te1_media_only_frame_request(core: &Core, frame: i64) -> serde_json::Value {
 
 fn te1_media_only_video_object(f: &Fixture, core: &Core) -> std::path::PathBuf {
     let document = core.export_history().unwrap().document;
-    let clip = document.tracks.iter().flat_map(|track| &track.clips)
-        .find(|clip| clip.id == kinewright_core::ClipId(3)).unwrap();
+    let clip = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == kinewright_core::ClipId(3))
+        .unwrap();
     let asset = document.asset(clip.asset).unwrap();
     let owner = f.host.owner.upgrade().unwrap();
     let host = owner.lock().unwrap();
-    let manifest = host.owner().unwrap().store().unwrap().read_input_manifest(&f.brief.inputs).unwrap();
-    let entry = manifest.entries.iter().find(|entry| entry.matches_media_asset(asset)).unwrap();
+    let manifest = host
+        .owner()
+        .unwrap()
+        .store()
+        .unwrap()
+        .read_input_manifest(&f.brief.inputs)
+        .unwrap();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.matches_media_asset(asset))
+        .unwrap();
     te1_safety_find_object(f.temp.root(), &entry.object.sha256).unwrap()
 }
 
 fn te1_media_only_move_stamp(path: &std::path::Path) {
     let file = std::fs::File::options().write(true).open(path).unwrap();
     let modified = file.metadata().unwrap().modified().unwrap();
-    file.set_times(std::fs::FileTimes::new().set_modified(modified + Duration::from_secs(2))).unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(modified + Duration::from_secs(2)))
+        .unwrap();
 }
 
 #[test]
 fn te1_media_only_failed_read_can_retry_after_decoder_capacity_returns() {
-    use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    };
     let (f, run, _child, core, mcp, _) = te14_media_fixture();
     f.host.runtime.stop();
     let owner = f.host.owner.upgrade().unwrap();
     let held = {
         let host = owner.lock().unwrap();
-        host.owner().unwrap().store().unwrap().reserve_decoder_for_fixture(
-            kinewright_project::storage_budget::StorageLimits::default().decoder_bytes,
-        ).unwrap()
+        host.owner()
+            .unwrap()
+            .store()
+            .unwrap()
+            .reserve_decoder_for_fixture(
+                kinewright_project::storage_budget::StorageLimits::default().decoder_bytes,
+            )
+            .unwrap()
     };
     let request = te1_media_only_frame_request(&core, 0);
     let before = f.projection(&run).tasks[1].progress.decisions.len();
     let failed = mcp.wire("read_task_evidence", request.clone());
     assert_eq!(failed.is_error, Some(true));
-    assert!(serde_json::to_string(&failed).unwrap().contains("Media evidence worker could not produce the requested page."));
+    assert!(
+        serde_json::to_string(&failed)
+            .unwrap()
+            .contains("Media evidence worker could not produce the requested page.")
+    );
     assert_eq!(f.projection(&run).tasks[1].progress.decisions.len(), before);
     drop(held);
     let retry_decode = Arc::new(AtomicU8::new(0));
     owner.lock().unwrap().hooks.context_media_outcome = Some(retry_decode.clone());
     let recovered = te14_outcome(mcp.wire("read_task_evidence", request.clone()));
-    assert!(serde_json::to_string(&recovered).unwrap().contains("owned_frame_sample"));
-    assert_eq!(retry_decode.load(Ordering::Acquire), 1, "TE1_FAILED_READ_RETRIED_DECODER");
+    assert!(
+        serde_json::to_string(&recovered)
+            .unwrap()
+            .contains("owned_frame_sample")
+    );
+    assert_eq!(
+        retry_decode.load(Ordering::Acquire),
+        1,
+        "TE1_FAILED_READ_RETRIED_DECODER"
+    );
     let unexpected = Arc::new(AtomicU8::new(0));
     owner.lock().unwrap().hooks.context_media_outcome = Some(unexpected.clone());
-    assert_eq!(recovered, te14_outcome(mcp.wire("read_task_evidence", request)));
+    assert_eq!(
+        recovered,
+        te14_outcome(mcp.wire("read_task_evidence", request))
+    );
     assert_eq!(unexpected.load(Ordering::Acquire), 0);
-    assert_eq!(f.projection(&run).tasks[1].progress.decisions.len(), before + 1);
+    assert_eq!(
+        f.projection(&run).tasks[1].progress.decisions.len(),
+        before + 1
+    );
 }
 
 #[test]
@@ -304,8 +345,11 @@ fn te1_media_only_cached_sample_rechecks_source_before_publication() {
     let first = mcp.wire("read_task_evidence", request.clone());
     assert_eq!(first.is_error, Some(false));
     let before = f.projection(&run).tasks[1].progress.decisions.len();
-    let mut file = std::fs::File::options().read(true).write(true)
-        .open(te1_media_only_video_object(&f, &core)).unwrap();
+    let mut file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(te1_media_only_video_object(&f, &core))
+        .unwrap();
     let length = file.metadata().unwrap().len();
     file.seek(std::io::SeekFrom::End(-1)).unwrap();
     let mut byte = [0];
@@ -315,14 +359,25 @@ fn te1_media_only_cached_sample_rechecks_source_before_publication() {
     file.sync_all().unwrap();
     assert_eq!(file.metadata().unwrap().len(), length);
     let refused = mcp.wire("read_task_evidence", request);
-    assert_eq!(refused.is_error, Some(true), "TE1_CACHED_SOURCE_CHANGE_REFUSED");
-    assert!(serde_json::to_string(&refused).unwrap().contains("Media evidence worker could not produce the requested page."));
+    assert_eq!(
+        refused.is_error,
+        Some(true),
+        "TE1_CACHED_SOURCE_CHANGE_REFUSED"
+    );
+    assert!(
+        serde_json::to_string(&refused)
+            .unwrap()
+            .contains("Media evidence worker could not produce the requested page.")
+    );
     assert_eq!(f.projection(&run).tasks[1].progress.decisions.len(), before);
 }
 
 #[test]
 fn te1_media_only_stamp_refresh_continues_after_wait_and_stop_cancels_it() {
-    use std::sync::{Arc, Barrier, atomic::{AtomicU8, AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+    };
     let (f, run, child, core, mcp, _) = te14_media_fixture();
     f.host.runtime.stop();
     let owner = f.host.owner.upgrade().unwrap();
@@ -339,11 +394,16 @@ fn te1_media_only_stamp_refresh_continues_after_wait_and_stop_cancels_it() {
             host.hooks.context_media_outcome = Some(outcome.clone());
             let cold = cold.clone();
             let gate = gate.clone();
-            host.owner().unwrap().store().unwrap().hold_next_cold_media_for_fixture(Arc::new(move || {
-                cold.fetch_add(1, Ordering::AcqRel);
-                gate.0.wait();
-                gate.1.wait();
-            })).unwrap();
+            host.owner()
+                .unwrap()
+                .store()
+                .unwrap()
+                .hold_next_cold_media_for_fixture(Arc::new(move || {
+                    cold.fetch_add(1, Ordering::AcqRel);
+                    gate.0.wait();
+                    gate.1.wait();
+                }))
+                .unwrap();
             host.hooks.runs[&run].tasks[&child].endpoint()
         };
         let request = te1_media_only_frame_request(&core, i64::from(stop));
@@ -361,15 +421,27 @@ fn te1_media_only_stamp_refresh_continues_after_wait_and_stop_cancels_it() {
             let reply = read.join().unwrap();
             if stop {
                 let request = f.control(&f.editor, &run, RunAction::Stop);
-                let stopped = call(&f, &f.editor, HostCommand::DispatchOrchestration {
-                    request: Box::new(request),
-                }, 0);
-                assert_eq!(stopped.orchestration.unwrap().decision, CommandDecision::Applied);
+                let stopped = call(
+                    &f,
+                    &f.editor,
+                    HostCommand::DispatchOrchestration {
+                        request: Box::new(request),
+                    },
+                    0,
+                );
+                assert_eq!(
+                    stopped.orchestration.unwrap().decision,
+                    CommandDecision::Applied
+                );
             }
             gate.1.wait();
             reply
         });
-        assert!(serde_json::to_string(&retry).unwrap().contains("Retry shortly"));
+        assert!(
+            serde_json::to_string(&retry)
+                .unwrap()
+                .contains("Retry shortly")
+        );
         let until = Instant::now() + Duration::from_secs(5);
         while endpoint.media_read_pending_for_fixture() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
@@ -378,12 +450,23 @@ fn te1_media_only_stamp_refresh_continues_after_wait_and_stop_cancels_it() {
         assert_eq!(outcome.load(Ordering::Acquire), if stop { 2 } else { 1 });
         if !stop {
             let sample = te14_outcome(mcp.wire("read_task_evidence", request));
-            assert!(serde_json::to_string(&sample).unwrap().contains("owned_frame_sample"));
-            assert_eq!(cold.load(Ordering::Acquire), 1, "TE1_RECERTIFICATION_NOT_RESTARTED");
+            assert!(
+                serde_json::to_string(&sample)
+                    .unwrap()
+                    .contains("owned_frame_sample")
+            );
+            assert_eq!(
+                cold.load(Ordering::Acquire),
+                1,
+                "TE1_RECERTIFICATION_NOT_RESTARTED"
+            );
         }
     }
     assert_eq!(cold.load(Ordering::Acquire), 2);
-    assert_eq!(f.projection(&run).tasks[1].progress.decisions.len(), before + 1);
+    assert_eq!(
+        f.projection(&run).tasks[1].progress.decisions.len(),
+        before + 1
+    );
 }
 
 #[test]
