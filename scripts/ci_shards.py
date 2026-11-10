@@ -136,6 +136,7 @@ def plan(listing, tier, count):
                 cost = estimates.get((suite["label"], names[0]), 150 if st.host_os() == "windows" else 80)
             units.append({"suite": suite_index, "tests": names, "full": not split and tier == "fast",
                           "isolated": isolated, "estimate": cost, "compiler_inputs": compiler, "display": display,
+                          "preserved": control_batch or compiler,
                           "dedicated": display or control_batch or compiler or (not isolated and cost > 120 and suite["label"] != "kinewright_app"),
                           "threads": 1 if control_batch else (1 if suite["label"] == "kinewright_media" else 4),
                           "timeout_seconds": 1800 if display else 600})
@@ -143,7 +144,12 @@ def plan(listing, tier, count):
     ordered = sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"]))
     # Display workloads get separate runners and finish before the parallel tail.
     # Control/compiler fixtures and other long units retain exclusive runners.
-    long_tests = [u for u in ordered if (u.get("dedicated", False) or (u["isolated"] and u["estimate"] > 240))][:max(0, count - 2)]
+    mandatory = [u for u in ordered if u.get("display", False) or u.get("preserved", False)]
+    if len(mandatory) > max(0, count - 2):
+        raise ValueError("too few shards for mandatory display and preserved runners")
+    opportunistic = [u for u in ordered if u not in mandatory and
+                     (u.get("dedicated", False) or (u["isolated"] and u["estimate"] > 240))]
+    long_tests = mandatory + opportunistic[:max(0, count - 2 - len(mandatory))]
     for slot, unit in enumerate(long_tests, 1):
         shards[slot].append(unit)
     available = ([i for i, shard in enumerate(shards) if any(u.get("display", False) for u in shard)] +

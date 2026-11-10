@@ -86,6 +86,25 @@ class Sharding(unittest.TestCase):
         rows = [(result["suites"][u["suite"]]["label"], p, "ok") for u in flat for p in u["tests"]]
         st.verify_exact_rows(expected, rows)
 
+    def test_stale_large_hints_cannot_displace_display_or_preserved_runners(self):
+        data = listing()
+        display_names = [cs.DISPLAY_PARITY_PREFIX + name + "_matches_ten_frames_exactly"
+                         for name in ("typical_1080p", "blend_heavy_1080p", "explainer_16x9", "reel_9x16", "feed_4x5", "talk_recut")]
+        stale = [f"stale_test_{i}" for i in range(30)]
+        data["rust-suites"]["kinewright_media"]["testcases"].update({name: {"ignored": False} for name in [*display_names, *stale]})
+        controls = cs.CONTROL_PREFIX + "cold_certification_switch"
+        data["rust-suites"]["kinewright_agent"] = {"binary-path": "/target/debug/deps/kinewright_agent-0123456789abcdef",
+                                                   "cwd": "/repo", "testcases": {name: {"ignored": False} for name in (controls, cs.COMPILER_PROBE)}}
+        with mock.patch.object(cs, "weights", return_value=({("kinewright_media", name): 9999 for name in stale}, {})):
+            result = cs.plan(data, "fast", 14)
+        positions = [i for i, shard in enumerate(result["shards"]) for u in shard if u.get("display", False)]
+        self.assertEqual(len(set(positions)), 6)
+        for name in (controls, cs.COMPILER_PROBE):
+            self.assertEqual(len(next(shard for shard in result["shards"] if any(name in u["tests"] for u in shard))), 1)
+        expected = [(s["label"], p) for s in result["suites"] for p in s["tests"]]
+        rows = [(result["suites"][u["suite"]]["label"], p, "ok") for shard in result["shards"] for u in shard for p in u["tests"]]
+        st.verify_exact_rows(expected, rows)
+
     def test_inventory_rejects_a_dropped_suite_or_an_unlisted_binary(self):
         data = listing()
         data["test-count"] = 8
