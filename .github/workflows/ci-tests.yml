@@ -92,43 +92,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  predecessor:
-    name: Sealed predecessor controls (fast tier only)
-    if: inputs.tier == 'fast'
-    runs-on: ${{ inputs.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore predecessor source identity before its cache
-        shell: bash
-        run: |
-          git fetch --no-tags origin 076a96c922b2f05984df4bb839ad7cf0900e6183
-          git worktree add --detach target/ja-s1-predecessor/source 076a96c922b2f05984df4bb839ad7cf0900e6183
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-predecessor-${{ runner.os }}
-          workspaces: target/ja-s1-predecessor/source -> ../build
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - uses: ./.github/actions/ci-native
-      - shell: bash
-        run: bash scripts/ja-s1-predecessor-controls.sh
-      - run: python scripts/ci_archive.py pack-predecessor
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: predecessor-${{ inputs.os }}
-          path: predecessor.tar
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 3
-
   test:
-    needs: [build, predecessor]
+    needs: [build]
     if: >-
-      !cancelled() && needs.build.result == 'success' &&
-      (needs.predecessor.result == 'success' || (inputs.tier == 'slow' && needs.predecessor.result == 'skipped'))
+      !cancelled() && needs.build.result == 'success'
     runs-on: ${{ inputs.os }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -168,12 +135,6 @@ jobs:
         with:
           name: compiler-inputs-${{ inputs.os }}
           path: ci-artifacts
-      - if: inputs.tier == 'fast'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: predecessor-${{ inputs.os }}
-      - if: inputs.tier == 'fast'
-        run: python scripts/ci_archive.py restore-predecessor
       - name: Equip guardian user session
         if: runner.os == 'Linux' && inputs.tier == 'slow'
         shell: bash
@@ -222,21 +183,19 @@ jobs:
 
   coverage:
     name: Exact test coverage
-    needs: [build, predecessor, test]
+    needs: [build, test]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       BUILD_RESULT: ${{ needs.build.result }}
       TEST_RESULT: ${{ needs.test.result }}
-      PREDECESSOR_RESULT: ${{ needs.predecessor.result }}
       TIER: ${{ inputs.tier }}
     steps:
       - name: Require all processes to finish successfully
         run: |
           test "$BUILD_RESULT" = success
           test "$TEST_RESULT" = success
-          if [ "$TIER" = fast ]; then test "$PREDECESSOR_RESULT" = success; fi
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:

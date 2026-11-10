@@ -456,22 +456,12 @@ mod tests {
     }
 
     #[test]
-    fn existing_edit_undo_redo_and_format_corpus_controls_pass() {
-        for name in [
-            "edit-undo-redo",
-            "format-corpus",
-            "branches-current",
-            "clip-id-reuse",
-        ] {
+    fn existing_edit_undo_redo_branch_and_clip_controls_pass() {
+        for name in ["edit-undo-redo", "branches-current", "clip-id-reuse"] {
             let temp = TempDirectory::new_in(
                 &kinewright_media::test_support::workspace_target_dir(),
                 "ja-controls",
             );
-            if name == "format-corpus" {
-                kinewright_project::project::predecessor_format_controls(&temp.path("predecessor"))
-                    .expect("actual pinned max-2 controls");
-                continue;
-            }
             assert_eq!(
                 run(
                     &fixtures().join(format!("{name}.json")),

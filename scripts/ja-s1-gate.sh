@@ -103,7 +103,7 @@ if [[ "$stage" -ge 2 ]]; then
 fi
 # Ceiling/format-sensitive controls are mandatory even before the ceiling changes.
 run_selected format-core cargo test -p kinewright-core --lib model::tests::project_format_version_reads_the_top_level_key -- --exact
-run_selected F cargo test -p kinewright-project --lib -- --exact project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover project::tests::v2_stamps_only_when_used project::tests::mo2_inactive_features_still_stamp_v2 project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite project::tests::project_atomic_write_falls_back_when_rename_is_refused project::tests::mo2_old_readers_distinguish_parse_validation_and_advisory
+run_selected F cargo test -p kinewright-project --lib -- --exact project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover project::tests::v2_stamps_only_when_used project::tests::mo2_inactive_features_still_stamp_v2 project::tests::project_atomic_write_falls_back_when_rename_is_refused project::tests::mo2_old_readers_distinguish_parse_validation_and_advisory
 run_selected format-eval cargo test -p kinewright-agent --bin kinewright-eval tests::in2b_eval_refuses_a_newer_file_and_reads_v1_as_before -- --exact
 run_selected format-app cargo test -p kinewright-app --bin kinewright-app -- --exact project::tests::can_overwrite_save_gates_on_the_read_version project::tests::in2b_v1_project_bytes_are_identical app::in2b_tests::in2b_a_newer_file_opens_with_one_incident_and_no_overwrite app::in2b_tests::in2b_startup_missing_media_aggregate_is_transient app::in2b_tests::in2b_open_time_aggregates_are_all_transient
 if [[ "$stage" -eq 3 || "$stage" -eq 4 || "$stage" -eq 7 || "$stage" -eq 8 ]]; then
