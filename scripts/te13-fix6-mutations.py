@@ -29,7 +29,7 @@ add('dead-attachment-has-no-authority', C,
     'subject.as_deref()',
     'te13_fix6_dead_caller_is_blocked_not_waiting', 'TE13_FIX6_NO_RETRY_WORDS')
 add('paused-is-not-expired', M,
-    'HostRefusal::new(&reason, "the run is paused; retry after it resumes")',
+    'HostRefusal::new(\n        reason,\n        if reason == "task_authority_paused" {\n            "the run is paused; retry after it resumes"\n        } else {\n            "task authority expired"\n        },\n    )',
     'HostRefusal::new("task_authority_expired", "task authority expired")',
     'te13_fix6_paused_run_still_waits_and_tells_the_caller', 'TE13_FIX6_PAUSED_IS_NOT_EXPIRED')
 add('paused-still-waits', C,

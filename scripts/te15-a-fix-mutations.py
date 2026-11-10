@@ -16,12 +16,12 @@ H = 'writer_host::hooks_tests::tests::'
 W = H+'te15_a_fix_repeated_decode_ends_after_two_timeouts'
 def add(name, before, after, witness, marker):
     h.PAIRS.append((name, P, before, after, 'kinewright-agent', witness, marker))
-add('cold-provenance', '            cold_certification: true,', '            cold_certification: false,', W, 'TE15_FIX_COLD_RETRY')
-add('warm-provenance', '            cold_certification: false,', '            cold_certification: true,', W, 'TE15_FIX_WARM_TERMINAL')
-add('retry-uses-memo', 'let memo = self.media_admission_memo(entry)?;', 'let memo = None;', H+'te15_a_fix_cold_decode_succeeds_on_warm_retry', 'TE15_FIX_REAL_WARM_MEMO')
+# Retired cold-provenance: Pending reads no longer branch on cold/warm provenance; the retained job continues after the HTTP wait. See te15-a/phase-tail.
+# Retired warm-provenance: Pending reads no longer branch on cold/warm provenance; the retained job continues after the HTTP wait. See te15-a/phase-tail.
+# Retired retry-uses-memo: Media reads retain their certified source even after memo eviction and do not reopen an admission lease. See te14-fix1/cold-cert-owner.
 for script, attr, names in [
     ('te15-a-mutations.py', 'h', {'phase-tail','finished-deadline','begin-liveness'}),
-    ('te14-fix2-mutations.py', 'harness', {'verification-phase','decode-phase','busy-retry','wait-deadline','stop-wait','pause-wait','worker-failure-words'}),
+    ('te14-fix2-mutations.py', 'harness', {'verification-phase','busy-retry','wait-deadline','stop-wait','pause-wait','worker-failure-words'}),
     ('te14-fix1-mutations.py', 'harness', {'decoder-cancel'}),
 ]:
     spec = importlib.util.spec_from_file_location('te15_fix_near_'+script.replace('-','_'), ROOT/'scripts'/script)

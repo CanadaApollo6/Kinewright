@@ -23,14 +23,14 @@ def add(name,file,before,after,witness,marker):
 def host(name,file,before,after,test,marker):add(name,file,before,after,H+'te15_b2b_'+test,marker)
 e.PAIRS=[]
 # Trusting a caller's plan instead of reading lead approval is the missing-grant mutant.
-add('grant-required',G,'    private_dir(folder)?;', '    return Ok(ConsumedGrant {grant:expected.clone(),authority:LaunchAuthority::Unpaid});\n    private_dir(folder)?;', 'te1_eval::grant::tests::te15_b2b_grant_boundary','B2B_MISSING_GRANT')
+add('grant-required',G,'    check_directory(folder, true)?;', '    return Ok(ConsumedGrant {grant:expected.clone(),authority:LaunchAuthority::Unpaid});\n    check_directory(folder, true)?;', 'te1_eval::grant::tests::te15_b2b_grant_boundary','B2B_MISSING_GRANT')
 add('candidate-six-sample',A+'te1_eval/analysis.rs','rows.len() != 6','rows.len() != 12','te15_b2b_analysis_retains_six_candidate_rows','B2B_SIX_CANDIDATES_ONLY')
 add('candidate-arm-only',G,'        || grant.arm != "candidate"\n','', 'te1_eval::grant::tests::te15_b2b_candidate_grant_only','B2B_ONLY_CANDIDATE_GRANT')
 add('grant-exact-plan',G,'if &grant != expected {','if false {','te1_eval::grant::tests::te15_b2b_grant_boundary','B2B_CHANGED_GRANT')
-reuse='options.write(true).create_new(true).mode(0o600);'
+reuse='OFlags::RDWR | OFlags::CREATE | OFlags::EXCL'
 for name,test,marker in [('grant-one-use','boundary','B2B_REUSED_GRANT'),('grant-interruption','interrupted','B2B_INTERRUPTION_NO_RETRY')]:
- add(name,G,reuse,'options.write(true).create(true).truncate(true).mode(0o600);','te1_eval::grant::tests::te15_b2b_grant_'+test,marker)
-add('grant-durable-before-construction',G,[( 'durable(&receipt)?;','let _ = &receipt;'),('durable(&File::open(&consumed)?)?;',''),('durable(&File::open(folder)?)?;','')],None,'te1_eval::grant::tests::te15_b2b_grant_durability','B2B_SYNC_BEFORE_CONSTRUCTION')
+ add(name,G,reuse,'OFlags::RDWR | OFlags::CREATE | OFlags::TRUNC','te1_eval::grant::tests::te15_b2b_grant_'+test,marker)
+add('grant-durable-before-construction',G,[( 'durable(&receipt)?;','let _ = &receipt;'),('durable(&consumed)?;',''),('durable(folder)?;','')],None,'te1_eval::grant::tests::te15_b2b_grant_durability','B2B_SYNC_BEFORE_CONSTRUCTION')
 text=(ROOT/G).read_text();start=text.index('    for name in [');end=text.index(' {',start)
 add('grant-run-identity',G,text[start:end], '    for name in [format!("id-{id}.json")]', 'te1_eval::grant::tests::te15_b2b_grant_boundary','B2B_RUN_ID_REUSED')
 start=text.index('        if value["model"]');end=text.index('        {',start)

@@ -40,7 +40,7 @@ m.add('inverse-add-clip', [(C, '''        "add_clip"
 m.add('add-track-class', [(C, '        "add_track"\n        | "add_clip"', '        "add_clip"')], H+'add_track_is_permitted_in_scope', 'FOL_PREPARE')
 m.add('operation-decision-list', [(C, '"trim_clip" => Some("trim"),', '"trim_clip" => None,')], U+'every_operation_is_decided', 'FOL_OPERATION_DECISION')
 m.add('legacy-refusal-words', [(C, '        "consent_missing",', '        "consent_required",')], H+'legacy_history_refuses', 'FOL_LEGACY_WORDS')
-m.add('policy-refusal-words', [(S, 'format!("consent_policy: {e}")', 'format!("{e}")')], H+'policy_and_turn_reasons', 'FOL_POLICY_WORDS')
+m.add('policy-refusal-words', [(S, 'else {\n                                "consent_policy"\n                            }', 'else {\n                                ""\n                            }')], H+'policy_and_turn_reasons', 'FOL_POLICY_WORDS')
 m.add('turn-refusal-words', [(C, '                    "consent_turn",', '                    "consent_required",')], H+'policy_and_turn_reasons', 'FOL_TURN_WORDS')
 m.add('scope-refusal-words', [(C, 'problem("consent_scope", format!("{reason}. Tell the Director."))', 'problem("consent_required", format!("{reason}. Tell the Director."))')], H+'scope_reason_tells_director', 'FOL_SCOPE_WORDS')
 m.add('broker-refusal-words', [(B, 'Self::Capacity => "consent_broker_capacity",', 'Self::Capacity => "consent_required",')], H+'broker_capacity_has_its_reason', 'FOL_BROKER_WORDS')
