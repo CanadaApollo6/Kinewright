@@ -266,25 +266,30 @@ impl TaskMcp {
         {
             use kinewright_project::usage_measurement::ToolResult;
             let authority = self.endpoint.authority();
-            // Retain this task's bounded observer even during host/run teardown.
-            // Check host first to preserve the host -> measurement lock order.
-            let attached = self.host.upgrade().is_some_and(|owner| {
-                self.lock_reply_owner(&owner).is_ok_and(|host| {
-                    host.hooks.runs.get(&authority.run).is_some_and(|run| {
+            // Check host before measurements to preserve the lock order.
+            // Contention at a retired endpoint is not evidence of detachment:
+            // its per-run measurement entry remains retained for accounting.
+            let incomplete = match self.host.upgrade() {
+                None => true,
+                Some(owner) => match self.lock_reply_owner(&owner) {
+                    Ok(host) => !host.hooks.runs.get(&authority.run).is_some_and(|run| {
                         run.tasks.contains_key(&authority.task)
                             && run
                                 .measurements
                                 .get(&authority.task)
                                 .is_some_and(|observer| Arc::ptr_eq(observer, &self.measurements))
-                    })
-                })
-            });
+                    }),
+                    // A busy owner (or retirement while waiting) proves nothing
+                    // about attachment. Poison remains a measurement failure.
+                    Err(_) => owner.is_poisoned(),
+                },
+            };
             let mut measurements = self.measurements.lock().unwrap_or_else(|error| {
                 let mut measurements = error.into_inner();
                 measurements.incomplete = true;
                 measurements
             });
-            measurements.incomplete |= !attached;
+            measurements.incomplete |= incomplete;
             if let Some(bytes) = bytes {
                 measurements.result(ToolResult {
                     attempt: authority.attempt.0.clone(),
@@ -1138,7 +1143,7 @@ impl TaskMcp {
         if result.is_err() {
             self.measurements
                 .lock()
-                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .incomplete = true;
         }
         result

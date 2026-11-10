@@ -764,20 +764,11 @@ fn te15_b2b_kept_observer_after_publication() {
     assert!(endpoint.check_live().is_err());
     assert!(!measurements.lock().unwrap().incomplete);
     trace.lock().unwrap().calls.clear();
-    let (held_tx, held_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let held_owner = owner.clone();
-    let holder = std::thread::spawn(move || {
-        let _guard = held_owner.lock().unwrap();
-        held_tx.send(()).unwrap();
-        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+    let (appended, timely) = te15_b2b_while_owner_held(&owner, || {
+        let start = Instant::now();
+        let appended = control.eval_observe("publish_result", args, &reply);
+        (appended, start.elapsed() < Duration::from_secs(2))
     });
-    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let start = Instant::now();
-    let appended = control.eval_observe("publish_result", args, &reply);
-    let timely = start.elapsed() < Duration::from_secs(2);
-    release_tx.send(()).unwrap();
-    holder.join().unwrap();
     assert!(
         appended.is_ok() && timely,
         "TE1_MERGE_OBSERVE_WITHOUT_OWNER_WAIT"
@@ -798,4 +789,180 @@ fn te15_b2b_kept_observer_after_publication() {
         trace.lock().unwrap().errors.is_empty(),
         "TE1_MERGE_STOP_SKIPS_FIXTURE_ACTION"
     );
+}
+
+#[cfg(all(feature = "te1-eval", target_os = "linux"))]
+fn te15_b2b_while_owner_held<T>(
+    owner: &Arc<std::sync::Mutex<super::super::HostCommandOwner>>,
+    action: impl FnOnce() -> T,
+) -> T {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let ready = Arc::new(AtomicBool::new(false));
+    let finish = Arc::new(AtomicBool::new(false));
+    let held_owner = Arc::clone(owner);
+    let signal = Arc::clone(&ready);
+    let release = Arc::clone(&finish);
+    let holder = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let _guard = loop {
+            if release.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return;
+            }
+            match held_owner.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(_)) => return,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            }
+        };
+        signal.store(true, Ordering::Release);
+        while !release.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ready.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let held = ready.load(Ordering::Acquire) && owner.try_lock().is_err();
+    let result = held.then(action);
+    finish.store(true, Ordering::Release);
+    holder.join().unwrap();
+    assert!(held, "TE1_REPLY_OWNER_HELD_BY_OTHER_THREAD");
+    result.unwrap()
+}
+
+#[cfg(all(feature = "te1-eval", target_os = "linux"))]
+#[test]
+fn te15_b2b_retired_reply_sizes_survive_contention() {
+    if !te15_fix_counting_child("te15_b2b_retired_reply_sizes_survive_contention") {
+        return;
+    }
+    let (f, _) = te15_fix_setup("codex");
+    let r = c5_fix10_run_from(f);
+    r.f.host.runtime.stop();
+    let owner = r.f.host.owner.upgrade().unwrap();
+    let (control, endpoint, measurements) = {
+        let host = owner.lock().unwrap();
+        let retained = &host.hooks.runs[&r.run];
+        let endpoint = retained.tasks[&r.child].endpoint();
+        let measurements = Arc::clone(&retained.measurements[&r.child]);
+        let control = super::super::task_mcp::TaskMcp::new(
+            Arc::downgrade(&owner),
+            host.run_producer(&r.run).unwrap(),
+            endpoint.clone(),
+            host.evaluation_observer.clone(),
+            Arc::clone(&measurements),
+            None,
+        );
+        (control, endpoint, measurements)
+    };
+    let result = c5_fix10_freeze(&r.editor, &r.child);
+    let args = c5_fix10_publish(&r.editor, &r.child, result);
+    let reply = r.editor.wire("publish_result", args);
+    assert_eq!(reply.is_error, Some(false));
+    assert!(endpoint.check_live().is_err());
+    let (count, bytes) = {
+        let observed = measurements.lock().unwrap();
+        assert!(!observed.incomplete);
+        (observed.result_count, observed.result_bytes)
+    };
+    let (complete, timely) = te15_b2b_while_owner_held(&owner, || {
+        let start = Instant::now();
+        let complete = control.record_size("publish_result", Some(123));
+        (complete, start.elapsed() < Duration::from_secs(2))
+    });
+    assert!(complete && timely, "TE1_RETIRED_SIZE_CONTENTION_COMPLETE");
+    {
+        let observed = measurements.lock().unwrap();
+        assert!(!observed.incomplete);
+        assert_eq!(observed.result_count, count + 1);
+        assert_eq!(observed.result_bytes, bytes + 123);
+        let last = observed.results.last().unwrap();
+        assert_eq!(last.serialized_bytes, 123);
+        assert_eq!(last.tool, "publish_result");
+    }
+    spending_change(
+        &r.f,
+        &r.attempt,
+        super::super::native_invocation::SpendingChange::Clock,
+        native_now(&r.f, &r.run),
+        0,
+        true,
+    )
+    .unwrap();
+    let accounting = spending_record(&r.f, &r.run);
+    let saved = accounting
+        .tasks
+        .iter()
+        .find(|task| task.task == r.child.0)
+        .unwrap()
+        .measurements
+        .as_ref()
+        .unwrap();
+    assert!(!saved.incomplete);
+    assert_eq!(saved.result_count, count + 1);
+    assert_eq!(saved.result_bytes, bytes + 123);
+    // A confirmed missing binding still marks the endpoint's retained Arc.
+    let detached_binding = owner
+        .lock()
+        .unwrap()
+        .hooks
+        .runs
+        .get_mut(&r.run)
+        .unwrap()
+        .measurements
+        .remove(&r.child)
+        .unwrap();
+    assert!(Arc::ptr_eq(&detached_binding, &measurements));
+    assert!(!control.record_size("publish_result", Some(7)));
+    let detached = measurements.lock().unwrap();
+    assert!(detached.incomplete, "TE1_CONFIRMED_SIZE_DETACH_INCOMPLETE");
+    assert_eq!(detached.result_count, count + 2);
+    assert_eq!(detached.result_bytes, bytes + 130);
+}
+
+#[cfg(all(feature = "te1-eval", target_os = "linux"))]
+#[test]
+fn te15_b2b_observer_error_survives_poisoned_measurements() {
+    if !te15_fix_counting_child("te15_b2b_observer_error_survives_poisoned_measurements") {
+        return;
+    }
+    let (f, _) = te15_fix_setup("codex");
+    let (run, execution, _director) = c4_director(&f);
+    f.host.runtime.stop();
+    let owner = f.host.owner.upgrade().unwrap();
+    let (control, measurements) = {
+        let host = owner.lock().unwrap();
+        let retained = &host.hooks.runs[&run];
+        let measurements = Arc::clone(&retained.measurements[&execution.task]);
+        let observer = Arc::new(crate::te1_eval::observe::Observations::new(
+            1,
+            Arc::new(std::sync::Mutex::new(crate::te1_eval::Trace::default())),
+        ));
+        assert!(host.evaluation_observer.set(observer).is_ok());
+        let control = super::super::task_mcp::TaskMcp::new(
+            Arc::downgrade(&owner),
+            host.run_producer(&run).unwrap(),
+            retained.tasks[&execution.task].endpoint(),
+            host.evaluation_observer.clone(),
+            Arc::clone(&measurements),
+            None,
+        );
+        (control, measurements)
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = measurements.lock().unwrap();
+            panic!("intentional measurement poison");
+        }))
+        .is_err()
+    );
+    let reply = rmcp::model::CallToolResult::structured(serde_json::json!({}));
+    let error = control
+        .eval_observe("task_status", serde_json::json!({}), &reply)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "unbound eval MCP observation");
+    assert!(measurements.lock().unwrap_err().into_inner().incomplete);
 }
