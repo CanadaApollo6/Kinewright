@@ -83,7 +83,6 @@ kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_
 
 # kinewright_project
 kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # Historical direct filesystem injection bypasses authority; C7 real GUI writer witness covers production exclusion
-kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs any on-demand  # manual pre-land check: scripts/mo2-old-reader-check.sh
 ownership_w2_measure w2_long_session_save_cost crates/kinewright-project/tests/ownership_w2_measure.rs linux on-demand  # on-demand measurement
 save_cost_measure long_session_save_cost crates/kinewright-project/tests/save_cost_measure.rs linux on-demand  # on-demand measurement
 
