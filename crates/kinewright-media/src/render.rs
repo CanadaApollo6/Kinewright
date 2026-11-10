@@ -225,7 +225,7 @@ impl VideoSourceKey {
         self.asset
     }
 
-    fn new(
+    pub(crate) fn new(
         asset: AssetId,
         path: &Path,
         fingerprint: &MediaSourceFingerprint,

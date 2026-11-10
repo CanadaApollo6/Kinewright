@@ -1580,12 +1580,12 @@ pub(crate) fn select_history(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<BoundedHistory, BundleError> {
-    Ok(
-        observed_bound(history, limits)?.unwrap_or_else(|| BoundedHistory {
+    observed_bound(history, limits, |bounded| {
+        bounded.unwrap_or_else(|| BoundedHistory {
             history: history.clone(),
             floor: None,
-        }),
-    )
+        })
+    })
 }
 
 /// [`bound_history`], borrowing `history` when it already fits (the common
@@ -1594,20 +1594,23 @@ fn bound_history_borrowed<'a>(
     history: &'a HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<Cow<'a, HistorySnapshot>, BundleError> {
-    Ok(match observed_bound(history, limits)? {
+    observed_bound(history, limits, |bounded| match bounded {
         Some(selected) => Cow::Owned(selected.history),
         None => Cow::Borrowed(history),
     })
 }
 
-/// `None`: `history` fits as it is.
-fn observed_bound(
+/// Bound `history` and turn the result (`None`: it fits as it is) into the
+/// caller's value. The test-util profile times both, so a caller's copy of
+/// a fitting history is counted once, inside this one call.
+fn observed_bound<T>(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-) -> Result<Option<BoundedHistory>, BundleError> {
+    finish: impl FnOnce(Option<BoundedHistory>) -> T,
+) -> Result<T, BundleError> {
     #[cfg(any(test, feature = "test-util"))]
     let started = std::time::Instant::now();
-    let result = bound_history_inner(history, limits);
+    let result = bound_history_inner(history, limits).map(finish);
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::note_history_bound(started.elapsed());
     result

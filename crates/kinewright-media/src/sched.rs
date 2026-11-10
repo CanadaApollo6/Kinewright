@@ -896,13 +896,16 @@ impl<K, F> Readers<K, F> {
 
     /// K-1: reserve `bytes` if live stays ≤ `limit`.
     fn reserve(&mut self, bytes: usize, limit: usize) -> bool {
-        let fits = self
-            .live
-            .checked_add(bytes)
-            .is_some_and(|next| next <= limit);
+        Self::reserve_in(&mut self.live, &mut self.peak, bytes, limit)
+    }
+
+    /// `reserve` over the two counters it changes, so `admit` can reserve
+    /// while it still borrows the required frames' source keys.
+    fn reserve_in(live: &mut usize, peak: &mut usize, bytes: usize, limit: usize) -> bool {
+        let fits = live.checked_add(bytes).is_some_and(|next| next <= limit);
         if fits {
-            self.live += bytes;
-            self.peak = self.peak.max(self.live);
+            *live += bytes;
+            *peak = (*peak).max(*live);
         }
         fits
     }
@@ -2128,21 +2131,19 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn admit(&mut self, generated: usize) -> Admission<F> {
         let set = self.required_bytes.saturating_add(generated);
         debug_assert!(set <= self.budget, "K-3: a set over C was posted");
-        let missing: Vec<(&K, i64)> = (self.required.iter())
-            .filter(|(key, at, ())| self.missing(key, *at))
-            .map(|(key, at, ())| (key, at))
-            .collect();
         // Amendment R66 [S2c] (K-1, the one charge rule; F13): a time a
         // reader still keeps decoded is reserved at max(charge, d), as K-3
         // counted it (a playback that left it, then one requiring it again
-        // before its reader moved on).
-        let missing: Vec<((K, i64), usize)> = (missing.into_iter())
-            .map(|(key, at)| ((key.clone(), at), self.kept_charge(key, at)))
+        // before its reader moved on). The source keys stay borrowed from
+        // `required`; `reserved` clones one only for a source's first frame.
+        let missing: Vec<(&K, i64, usize)> = (self.required.iter())
+            .filter(|(key, at, ())| self.missing(key, *at))
+            .map(|(key, at, ())| (key, at, self.kept_charge(key, at)))
             .collect();
-        let q = missing.iter().map(|(_, bytes)| bytes).sum::<usize>() + generated;
-        if self.reserve(q, self.budget) {
-            for ((key, at), bytes) in missing {
-                self.reserved.insert_owned(key, at, bytes);
+        let q = missing.iter().map(|(_, _, bytes)| bytes).sum::<usize>() + generated;
+        if Self::reserve_in(&mut self.live, &mut self.peak, q, self.budget) {
+            for (key, at, bytes) in missing {
+                self.reserved.insert(key, at, bytes);
             }
             self.draining = false;
             return Admission::Ready { generated };
@@ -2731,29 +2732,30 @@ mod tests {
     /// On-demand measurement for the ownership fixes (H3): scheduler passes
     /// over an 8-source timeline (one playhead per source, 1 required and 9
     /// lookahead times each), each pass a post, an admission, every reader
-    /// run until it waits, and a resolve. The key has the heap shape of
-    /// `VideoSourceKey` (a path, a SHA-256 string, a colour tag string), whose
-    /// constructor is private to `render`. Prints one `H3_PASS` line.
+    /// run until it waits, and a resolve. The keys are real
+    /// `VideoSourceKey`s with a path and a SHA-256 fingerprint. Prints one
+    /// `H3_PASS` line.
     #[test]
     #[ignore = "on-demand measurement"]
     fn h3_multi_source_scheduler_pass_cost() {
-        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-        struct MeasureKey {
-            asset: u64,
-            path: std::path::PathBuf,
-            sha256: Option<String>,
-            transfer: Option<String>,
-            fps: (i64, i64),
-        }
+        type MeasureKey = crate::render::VideoSourceKey;
         const SOURCES: u64 = 8;
         const PASSES: i64 = 20_000;
         let keys: Vec<MeasureKey> = (0..SOURCES)
-            .map(|asset| MeasureKey {
-                asset,
-                path: format!("/media/footage/day-02/A00{asset}_C014_0921KX.mov").into(),
-                sha256: Some(format!("{asset:064x}")),
-                transfer: Some("bt709".to_owned()),
-                fps: (30_000, 1_001),
+            .map(|asset| {
+                let path = format!("/media/footage/day-02/A00{asset}_C014_0921KX.mov");
+                crate::render::VideoSourceKey::new(
+                    kinewright_core::AssetId(asset),
+                    std::path::Path::new(&path),
+                    &kinewright_core::MediaSourceFingerprint {
+                        content_sha256: Some(format!("{asset:064x}")),
+                        byte_len: Some(4_000_000_000),
+                    },
+                    kinewright_core::Rational::new(30_000, 1_001).expect("fps"),
+                    &kinewright_core::ColorDescription::unknown(),
+                    None,
+                    None,
+                )
             })
             .collect();
         let mut readers: Readers<MeasureKey, Fr> = Readers::new(8).with_budget(10_000 * F);
