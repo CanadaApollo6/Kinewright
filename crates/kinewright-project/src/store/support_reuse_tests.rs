@@ -1,17 +1,22 @@
-//! Differential proof for the save's reuse of its check-step support fields.
+//! Differential proof for the save's reuse of its own earlier passes over the history.
 //!
 //! Each case runs the same edits and saves twice, in fresh bundles: once as the product
-//! runs (the history's fields, walked by the check step, travel with the checked bytes
-//! into `admit_checked_history`) and once with `io_observer::without_support_reuse` (the
-//! old path: the support inventory decodes the just-sealed history again). After every
-//! save it requires:
+//! runs and once with `io_observer::without_save_reuse` (the old path). With reuse, the
+//! commit check takes the fit check's encoding of a history that fits as it is instead of
+//! serializing it again; the replay shadow and the sealing take the check decode's
+//! preflight charge instead of preflighting the same bytes again; and the history's
+//! support fields, walked by the check, travel with the checked bytes into
+//! `admit_checked_history` instead of the support inventory decoding the just-sealed
+//! history again. After every save it requires:
 //!
 //! - the same written history and document objects, byte for byte (other records carry
 //!   fresh random identifiers, so the same kinds and byte lengths stand in for them);
 //! - the same support inventory in the newest store manifest;
 //! - every memoized history's fields equal to a fresh decode of that object's bytes on
 //!   disk (the fields belong to the sealed bytes, also when bounding rewrote the history);
-//! - exactly one history decode fewer per changed-history save with reuse on;
+//! - exactly one history decode fewer per changed-history save with reuse on, and with it
+//!   three preflights fewer (that decode's, the replay shadow's and the sealing's), and
+//!   the same counts on a save that sealed no new history;
 //! - a reopen of the bundle, whose reader decodes every record and refuses an inventory
 //!   that differs from the one written.
 
@@ -120,6 +125,8 @@ struct Written {
     inventory: BTreeSet<String>,
     /// History decodes the save ran.
     decodes: u64,
+    /// Record preflights the save ran.
+    preflights: u64,
     /// The store's cache of support fields and the memo's fields, for every history and
     /// document object (by sha256): the state the next save starts from.
     support_cache: BTreeMap<String, BTreeSet<String>>,
@@ -158,7 +165,7 @@ fn decoded_fields(store: &ProjectStore, bytes: &[u8]) -> BTreeSet<String> {
 /// Read back one save, and require every memoized history's fields to equal a fresh
 /// decode of the bytes that history's object holds. Returns how many memoized histories
 /// were checked.
-fn written(bundle: &ProjectBundle, decodes: u64) -> (Written, usize) {
+fn written(bundle: &ProjectBundle, (decodes, preflights): (u64, u64)) -> (Written, usize) {
     let store = &bundle.store;
     let resting = {
         let usage = store.inner.usage.lock().unwrap();
@@ -255,6 +262,7 @@ fn written(bundle: &ProjectBundle, decodes: u64) -> (Written, usize) {
             shapes,
             inventory,
             decodes,
+            preflights,
             support_cache,
             memo_fields,
             resting,
@@ -290,16 +298,22 @@ fn run(case: &Case, root: &Path, reuse: bool) -> Run {
     let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     let save = |bundle: &mut ProjectBundle| {
-        let before = io_observer::history_decode_count();
+        let (decodes, preflights) = (
+            io_observer::history_decode_count(),
+            io_observer::preflight_count(),
+        );
         if reuse {
             bundle.save(&core, &inputs).unwrap();
         } else {
-            io_observer::without_support_reuse(|| bundle.save(&core, &inputs).unwrap());
+            io_observer::without_save_reuse(|| bundle.save(&core, &inputs).unwrap());
         }
-        io_observer::history_decode_count() - before
+        (
+            io_observer::history_decode_count() - decodes,
+            io_observer::preflight_count() - preflights,
+        )
     };
-    let decodes = save(&mut bundle);
-    let mut saves = vec![written(&bundle, decodes).0];
+    let counts = save(&mut bundle);
+    let mut saves = vec![written(&bundle, counts).0];
     let mut memoized = 0;
     if let Some(limits) = &case.limits {
         drop(bundle);
@@ -314,8 +328,8 @@ fn run(case: &Case, root: &Path, reuse: bool) -> Run {
         step(&core);
         let exported = core.export_history().unwrap();
         rewritten.push(bound_history(&exported, &limits).unwrap() != exported);
-        let decodes = save(&mut bundle);
-        let (this_save, memoized_here) = written(&bundle, decodes);
+        let counts = save(&mut bundle);
+        let (this_save, memoized_here) = written(&bundle, counts);
         memoized += memoized_here;
         saves.push(this_save);
     }
@@ -358,15 +372,23 @@ fn differential(case: &Case) -> Run {
         );
         assert_eq!(new_save.resting, old_save.resting, "{label}: resting usage");
         assert!(!new_save.inventory.is_empty(), "{label}: empty inventory");
-        // One decode fewer when the save sealed a new history, none otherwise.
+        // One decode fewer when the save sealed a new history, none otherwise; and with
+        // it three preflights of the checked bytes: the skipped decode's, the replay
+        // shadow's and the sealing's.
         assert!(
-            new_save.decodes + 1 == old_save.decodes || new_save.decodes == old_save.decodes,
-            "{label}: decodes {} with reuse, {} without",
+            (new_save.decodes + 1 == old_save.decodes
+                && new_save.preflights + 3 == old_save.preflights)
+                || (new_save.decodes == old_save.decodes
+                    && new_save.preflights == old_save.preflights),
+            "{label}: decodes {} and preflights {} with reuse, {} and {} without",
             new_save.decodes,
-            old_save.decodes
+            new_save.preflights,
+            old_save.decodes,
+            old_save.preflights
         );
     }
     let saved = |run: &Run| run.saves.iter().map(|s| s.decodes).sum::<u64>();
+    let preflights = |run: &Run| run.saves.iter().map(|s| s.preflights).sum::<u64>();
     assert!(
         saved(&new) < saved(&old),
         "{}: reuse never skipped a decode",
@@ -380,12 +402,14 @@ fn differential(case: &Case) -> Run {
         case.name
     );
     eprintln!(
-        "SUPPORT_REUSE case={} saves={} decodes_old={} decodes_new={} memoized_checked={} \
-         rewritten_saves={} floored={}",
+        "SUPPORT_REUSE case={} saves={} decodes_old={} decodes_new={} preflights_old={} \
+         preflights_new={} memoized_checked={} rewritten_saves={} floored={}",
         case.name,
         new.saves.len(),
         saved(&old),
         saved(&new),
+        preflights(&old),
+        preflights(&new),
         new.memoized,
         new.rewritten.iter().filter(|r| **r).count(),
         new.floored
@@ -563,22 +587,41 @@ fn fields_checked_for_other_bytes_are_not_used() {
         (fields, io_observer::history_decode_count() - before)
     };
 
-    // Checked bytes of `first`, sealed bytes of `second`: nothing to reuse.
+    let preflights = |store: &mut ProjectStore, record: &HistorySnapshot, checked| {
+        let before = io_observer::preflight_count();
+        let admitted = store.admit_checked_history(record, checked).unwrap();
+        (admitted, io_observer::preflight_count() - before)
+    };
+    // An unchecked admission of a fresh history (`first`), for the preflights it runs.
+    let (_, unchecked) = preflights(store, &first, None);
+
+    // Checked bytes of `first`, sealed bytes of `second`: nothing to reuse; the sealing
+    // preflights its own bytes, as an unchecked admission does.
     let (_, other) = store
         .check_history_bytes(serde_json::to_vec(&first).unwrap())
         .unwrap();
-    let (sealed, support) = store.admit_checked_history(&second, Some(other)).unwrap();
+    let ((sealed, support), ran) = preflights(store, &second, Some(other));
     assert!(support.is_none(), "fields of other bytes were offered");
+    assert_eq!(
+        ran, unchecked,
+        "the check's charge was used for other bytes"
+    );
     let bytes = object_bytes(store, &sealed.reference);
     let (fields, ran) = decodes(store, std::slice::from_ref(&sealed.reference), None);
     assert_eq!(ran, 1, "the support read did not decode the history");
     assert_eq!(fields, decoded_fields(store, &bytes));
 
-    // `third`'s own check: its fields are offered, bound to its sealed object.
+    // `third`'s own check: its charge stands in for the sealing's preflight, and its
+    // fields are offered, bound to its sealed object.
     let (_, own) = store
         .check_history_bytes(serde_json::to_vec(&third).unwrap())
         .unwrap();
-    let (third_sealed, third_support) = store.admit_checked_history(&third, Some(own)).unwrap();
+    let ((third_sealed, third_support), ran) = preflights(store, &third, Some(own));
+    assert_eq!(
+        ran + 1,
+        unchecked,
+        "the sealing preflighted the checked bytes again"
+    );
     let third_support = third_support.expect("own fields are offered");
     // Offered for a different object (`fourth`), they are not used: `fourth` is decoded.
     let fourth_sealed = store.admit_record(&fourth).unwrap();
@@ -611,5 +654,57 @@ fn fields_checked_for_other_bytes_are_not_used() {
             .get(&third_sealed.reference.sha256)
             .map(|cached| BTreeSet::clone(cached)),
         Some(fields)
+    );
+}
+
+/// The fit check's encoding stays with the history it encodes: a history that fits as it is
+/// is selected for publication with exactly `to_vec` of it, handed out once; a floored
+/// selection carries none, so its check serializes the rewritten history; and a selection
+/// that is not for publication keeps none.
+#[test]
+fn fit_encoding_is_of_the_selected_history_only() {
+    let core = Core::spawn(tracks(8)).unwrap();
+    toggles(&core, TrackId(1), 0, 40);
+    let history = core.export_history().unwrap();
+    let mut fitting =
+        crate::bundle_commit::select_publication(&history, &StorageLimits::default()).unwrap();
+    let (selected, encoding) = fitting.selection();
+    assert_eq!(*selected, history);
+    assert_eq!(
+        encoding
+            .expect("a fitting history carries its encoding")
+            .bytes(),
+        serde_json::to_vec(&history).unwrap()
+    );
+    assert!(
+        fitting.selection().1.is_none(),
+        "the encoding was handed out twice"
+    );
+    assert!(
+        crate::bundle_commit::select_history(&history, &StorageLimits::default())
+            .unwrap()
+            .selection()
+            .1
+            .is_none(),
+        "a selection not for publication kept an encoding"
+    );
+
+    for chunk in 1..12 {
+        toggles(&core, TrackId(1 + chunk % 8), chunk * 40, 40);
+    }
+    let history = core.export_history().unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 1 << 20,
+        ..StorageLimits::default()
+    };
+    let mut floored = crate::bundle_commit::select_publication(&history, &limits).unwrap();
+    assert_ne!(
+        *floored.history(),
+        history,
+        "the case never reached the floor path"
+    );
+    assert!(
+        floored.selection().1.is_none(),
+        "a floored selection carried an encoding"
     );
 }

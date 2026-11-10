@@ -2589,13 +2589,23 @@ impl ProjectStore {
             &mut fields,
             self.limits(),
         )?;
-        Ok((checked, CheckedHistoryBytes { bytes, fields }))
+        // The decode charged exactly `preflight_record(&bytes, self.limits())`.
+        let charge = checked.decoded_charge();
+        Ok((
+            checked,
+            CheckedHistoryBytes {
+                bytes,
+                charge,
+                fields,
+            },
+        ))
     }
     /// [`Self::admit_record`] for a history the commit check decoded from `checked`'s bytes.
-    /// It also returns the check's support fields, bound to the sealed object, when the
-    /// sealed bytes are exactly the checked bytes; [`Self::support_fields`] then
-    /// uses them in place of decoding that object again. Otherwise it returns none, and the
-    /// support read decodes the object as before.
+    /// When the bytes it seals are exactly the checked bytes, it takes the check's
+    /// preflight charge in place of preflighting them again, and it returns the check's
+    /// support fields bound to the sealed object; [`Self::support_fields`] then uses them
+    /// in place of decoding that object again. Otherwise it preflights the bytes, returns no
+    /// fields, and the support read decodes the object as before.
     pub(crate) fn admit_checked_history(
         &mut self,
         record: &kinewright_core::HistorySnapshot,
@@ -2639,9 +2649,16 @@ impl ProjectStore {
         if bytes.len() != capacity {
             return Err(BundleError::Corrupt("unstable record serialization".into()));
         }
+        let checked = checked.and_then(|checked| checked.matching(&bytes));
         let preflight = self.reserve(0, self.limits().decoded_record_bytes, 0, false)?;
-        let decoded =
-            preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?;
+        let decoded = match &checked {
+            // These are the checked bytes, which the check's decode preflighted under these
+            // same (fixed) limits; preflighting them again would repeat that pass exactly.
+            Some(checked) => checked.charge,
+            None => {
+                preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?
+            }
+        };
         drop(preflight);
         if self.run_budget_active()
             && !self.is_terminal_publication()
@@ -2688,7 +2705,7 @@ impl ProjectStore {
             .map_err(|_| BundleError::Capacity("memo poisoned"))?
             .remember(&sealed.reference, record, decoded, None, self.limits());
         let support = checked
-            .and_then(|checked| checked.fields_for(&bytes, &sealed.reference, self.limits()))
+            .and_then(|checked| checked.fields_for(&sealed.reference, self.limits()))
             .map(|fields| SealedSupport {
                 reference: sealed.reference.clone(),
                 decoded,
@@ -2766,34 +2783,36 @@ impl ProjectStore {
         Ok(decoded_reservation.hold(value))
     }
 }
-/// A history's encoded bytes and the support fields one decode of exactly these bytes
-/// observed. Only [`ProjectStore::check_history_bytes`] makes one, so the fields cannot
-/// belong to any other bytes, and they leave it only for sealed bytes equal to these.
+/// A history's encoded bytes with the preflight charge and the support fields one decode
+/// of exactly these bytes observed. Only [`ProjectStore::check_history_bytes`] makes one,
+/// so the charge and fields cannot belong to any other bytes, and sealing uses them only
+/// for bytes equal to these.
 pub(crate) struct CheckedHistoryBytes {
     bytes: Vec<u8>,
+    charge: u64,
     fields: BTreeSet<String>,
 }
 impl CheckedHistoryBytes {
+    /// The checked bytes, for the path without reuse.
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    /// The fields, when `sealed` (with its `reference`) is exactly the checked bytes.
+    /// `self`, when `sealed` is exactly the checked bytes.
+    fn matching(self, sealed: &[u8]) -> Option<Self> {
+        #[cfg(any(test, feature = "test-util"))]
+        if crate::io_observer::save_reuse_disabled() {
+            return None;
+        }
+        (self.bytes == sealed).then_some(self)
+    }
+    /// The fields of matched bytes sealed as `reference`.
     ///
     /// A history over the support-read size cap is left to `support_fields`, which
     /// refuses it there, as it always has.
-    fn fields_for(
-        self,
-        sealed: &[u8],
-        reference: &ObjectRef,
-        limits: &StorageLimits,
-    ) -> Option<BTreeSet<String>> {
-        #[cfg(any(test, feature = "test-util"))]
-        if crate::io_observer::support_reuse_disabled() {
-            return None;
-        }
+    fn fields_for(self, reference: &ObjectRef, limits: &StorageLimits) -> Option<BTreeSet<String>> {
         (reference.record_kind == RecordKind::History
-            && reference.byte_length <= limits.control_bytes
-            && self.bytes == sealed)
+            && reference.byte_length <= limits.control_bytes)
             .then_some(self.fields)
     }
 }
@@ -2913,6 +2932,8 @@ pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u
         return Err(BundleError::Capacity("encoded record cap"));
     }
     // serde_json's unescape scratch may grow geometrically; reserve it before typed parsing.
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::note_preflight();
     let scratch = (bytes.len() as u64)
         .checked_mul(2)
         .ok_or(BundleError::Capacity("parser scratch overflow"))?;

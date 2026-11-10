@@ -256,7 +256,7 @@ impl Ja1EditingSession {
             .cursor
             .undo
             .len()
-            .saturating_sub(selected.history.cursor.undo.len());
+            .saturating_sub(selected.history().cursor.undo.len());
         let text = format!(
             "Saving your current work removes {lost} oldest Undo entries. Current content, complete Redo and the open gesture are preserved."
         );
