@@ -70,11 +70,10 @@ pub fn history_decode_count() -> u64 {
     HISTORY_DECODES.with(std::cell::Cell::get)
 }
 thread_local! { static SAVE_REUSE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-/// Run `run` with a save's reuse of its own earlier passes turned off: the commit check
-/// serializes the history again instead of taking the fit check's encoding, and the
-/// replay shadow and sealing preflight the bytes again instead of taking the check's
-/// charge, and the support inventory decodes the just-sealed history again instead of
-/// taking the check's fields. This is the path before reuse.
+/// Run `run` with a save's reuse of its commit check turned off: the replay shadow and
+/// the sealing preflight the checked bytes again instead of taking the check's charge, and
+/// the support inventory decodes the just-sealed history again instead of taking the
+/// check's fields. This is the path before reuse.
 pub fn without_save_reuse<T>(run: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {

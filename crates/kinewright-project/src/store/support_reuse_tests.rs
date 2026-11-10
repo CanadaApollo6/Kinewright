@@ -2,12 +2,10 @@
 //!
 //! Each case runs the same edits and saves twice, in fresh bundles: once as the product
 //! runs and once with `io_observer::without_save_reuse` (the old path). With reuse, the
-//! commit check takes the fit check's encoding of a history that fits as it is instead of
-//! serializing it again; the replay shadow and the sealing take the check decode's
-//! preflight charge instead of preflighting the same bytes again; and the history's
-//! support fields, walked by the check, travel with the checked bytes into
-//! `admit_checked_history` instead of the support inventory decoding the just-sealed
-//! history again. After every save it requires:
+//! replay shadow and the sealing take the check decode's preflight charge instead of
+//! preflighting the same bytes again, and the history's support fields, walked by the
+//! check, travel with the checked bytes into `admit_checked_history` instead of the support
+//! inventory decoding the just-sealed history again. After every save it requires:
 //!
 //! - the same written history and document objects, byte for byte (other records carry
 //!   fresh random identifiers, so the same kinds and byte lengths stand in for them);
@@ -657,54 +655,115 @@ fn fields_checked_for_other_bytes_are_not_used() {
     );
 }
 
-/// The fit check's encoding stays with the history it encodes: a history that fits as it is
-/// is selected for publication with exactly `to_vec` of it, handed out once; a floored
-/// selection carries none, so its check serializes the rewritten history; and a selection
-/// that is not for publication keeps none.
-#[test]
-fn fit_encoding_is_of_the_selected_history_only() {
+/// A limit profile that restricts one field to the given value.
+type Restrict = fn(u64) -> StorageLimits;
+
+/// One save of a 158-batch history under `restrict(limit)`, after a first save at default
+/// limits, with reuse on or off. Returns the save's result and, when it succeeded, the
+/// history and document objects it left.
+fn save_at_limit(
+    reuse: bool,
+    restrict: Restrict,
+    limit: u64,
+) -> (Result<(), String>, BTreeMap<String, Vec<u8>>) {
+    let temp = TempDirectory::new_in(&root(), "exact-limit");
     let core = Core::spawn(tracks(8)).unwrap();
-    toggles(&core, TrackId(1), 0, 40);
-    let history = core.export_history().unwrap();
-    let mut fitting =
-        crate::bundle_commit::select_publication(&history, &StorageLimits::default()).unwrap();
-    let (selected, encoding) = fitting.selection();
-    assert_eq!(*selected, history);
-    assert_eq!(
-        encoding
-            .expect("a fitting history carries its encoding")
-            .bytes(),
-        serde_json::to_vec(&history).unwrap()
-    );
+    toggles(&core, TrackId(1), 0, 150);
+    let mut bundle = ProjectBundle::activate(
+        &temp.path("p.kinewright"),
+        BundleWriteAdmission::new_document(),
+    )
+    .unwrap();
+    let inputs = bundle.empty_inputs().unwrap().reference.clone();
+    bundle.save(&core, &inputs).unwrap();
+    toggles(&core, TrackId(2), 150, 8);
+    let result = bundle
+        .restrict_limits_probe(restrict(limit))
+        .and_then(|()| {
+            if reuse {
+                bundle.save(&core, &inputs)
+            } else {
+                io_observer::without_save_reuse(|| bundle.save(&core, &inputs))
+            }
+        })
+        .map(drop)
+        .map_err(|error| format!("{error:?}"));
+    let content = if result.is_ok() {
+        written(&bundle, (0, 0)).0.content
+    } else {
+        BTreeMap::new()
+    };
+    (result, content)
+}
+
+/// The smallest limit at which the save succeeds, with reuse on or off, searched below
+/// `ceiling` (which must accept).
+fn smallest_limit(reuse: bool, restrict: Restrict, ceiling: u64) -> u64 {
+    let (mut refused, mut accepted) = (0, ceiling);
+    assert!(save_at_limit(reuse, restrict, accepted).0.is_ok());
+    while accepted - refused > 1 {
+        let middle = refused + (accepted - refused) / 2;
+        if save_at_limit(reuse, restrict, middle).0.is_ok() {
+            accepted = middle;
+        } else {
+            refused = middle;
+        }
+    }
+    accepted
+}
+
+/// Refusal identity at one exact cumulative limit. Reuse skips the support decode's
+/// transient reservations and takes none of its own, so at an exact limit it could accept
+/// where the old path refuses, and never the reverse: wherever the old path accepts, reuse
+/// accepts and writes the same bytes; one byte under reuse's own exact limit, both refuse
+/// with the same error. Returns the two smallest accepting limits (old, new).
+fn exact_limit_differential(name: &str, restrict: Restrict, ceiling: u64) -> (u64, u64) {
+    let old = smallest_limit(false, restrict, ceiling);
+    let new = smallest_limit(true, restrict, ceiling);
+    eprintln!("SUPPORT_REUSE exact_limit={name} smallest_old={old} smallest_new={new}");
     assert!(
-        fitting.selection().1.is_none(),
-        "the encoding was handed out twice"
-    );
-    assert!(
-        crate::bundle_commit::select_history(&history, &StorageLimits::default())
-            .unwrap()
-            .selection()
-            .1
-            .is_none(),
-        "a selection not for publication kept an encoding"
+        new <= old,
+        "{name}: reuse needs a larger limit: {new} > {old}"
     );
 
-    for chunk in 1..12 {
-        toggles(&core, TrackId(1 + chunk % 8), chunk * 40, 40);
-    }
-    let history = core.export_history().unwrap();
-    let limits = StorageLimits {
-        branch_history_bytes: 1 << 20,
-        ..StorageLimits::default()
-    };
-    let mut floored = crate::bundle_commit::select_publication(&history, &limits).unwrap();
-    assert_ne!(
-        *floored.history(),
-        history,
-        "the case never reached the floor path"
+    let (old_result, old_content) = save_at_limit(false, restrict, old);
+    let (new_result, new_content) = save_at_limit(true, restrict, old);
+    assert_eq!((old_result, new_result), (Ok(()), Ok(())), "{name}");
+    assert!(!new_content.is_empty());
+    assert_eq!(
+        new_content, old_content,
+        "{name}: objects at the exact limit"
     );
+
+    let (old_refusal, _) = save_at_limit(false, restrict, new - 1);
+    let (new_refusal, _) = save_at_limit(true, restrict, new - 1);
     assert!(
-        floored.selection().1.is_none(),
-        "a floored selection carried an encoding"
+        new_refusal.is_err(),
+        "{name}: reuse accepted under its smallest limit"
     );
+    assert_eq!(
+        old_refusal, new_refusal,
+        "{name}: refusals under the exact limit"
+    );
+    (old, new)
+}
+
+/// The live-history limit (where an earlier draft of the support reuse refused): the save's
+/// live-history peak is set by the commit check, not by the support read, so both paths
+/// need exactly the same limit here. No one-way case (reuse accepting where the old path
+/// refuses) was found: not here, and not at `metadata_bytes`, whose usage varies by a few
+/// bytes from bundle to bundle (random identifiers printed in decimal), so an exact
+/// metadata limit is not reproducible; both paths' smallest metadata limits were within
+/// that noise of each other.
+#[test]
+fn exact_live_history_limit_refuses_the_same_with_and_without_reuse() {
+    let (old, new) = exact_limit_differential(
+        "live_history_bytes",
+        |limit| StorageLimits {
+            live_history_bytes: limit,
+            ..StorageLimits::default()
+        },
+        StorageLimits::default().live_history_bytes,
+    );
+    assert_eq!(new, old);
 }

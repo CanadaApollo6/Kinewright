@@ -213,7 +213,7 @@ impl Ja1EditingSession {
             return Err(BundleError::Capacity("rescue selected graph/overlap"));
         }
         let ordinary = crate::bundle_commit::select_history(history, limits)?;
-        if ordinary.history() != history {
+        if ordinary.history != *history {
             return Err(BundleError::Capacity("rescue selected branch history"));
         }
         Ok(roots)
@@ -247,10 +247,10 @@ impl Ja1EditingSession {
             // graph/readability predicates use Core's same legal oldest-first transition search.
             let ordinary = crate::bundle_commit::select_history(before, &limits)?;
             let selected = if self
-                .rescue_graph(ordinary.history(), &unavailable, &limits)
+                .rescue_graph(&ordinary.history, &unavailable, &limits)
                 .is_ok()
             {
-                ordinary.into_history()
+                ordinary.history
             } else {
                 kinewright_core::HistoryTransition::find_floor(
                     before.clone(),

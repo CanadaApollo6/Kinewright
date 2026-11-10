@@ -1523,14 +1523,14 @@ impl ProjectBundle {
                 .clone();
             }
         }
-        let mut bounded = crate::bundle_commit::select_publication(&aligned, self.store.limits())?;
+        let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;
         let transition = if aligned.floor_offset == selected.floor_offset {
-            bounded.take_floor()
-        } else if bounded.history().floor_offset > selected.floor_offset {
+            bounded.floor
+        } else if bounded.history.floor_offset > selected.floor_offset {
             Some(
                 kinewright_core::HistoryTransition::floor(
                     selected.clone(),
-                    usize::try_from(bounded.history().floor_offset - selected.floor_offset)
+                    usize::try_from(bounded.history.floor_offset - selected.floor_offset)
                         .map_err(|_| BundleError::Capacity("floor offset"))?,
                 )
                 .map_err(history_error)?,
@@ -1547,17 +1547,16 @@ impl ProjectBundle {
             root_sha256: None,
             candidate_base: base.map(|reference| (branch.clone(), reference.clone())),
         });
-        self.publish_pending(selected, &mut bounded, inputs, branch)
+        self.publish_pending(selected, &bounded.history, inputs, branch)
     }
 
     pub(crate) fn publish_pending(
         &mut self,
         history: &HistorySnapshot,
-        selected: &mut crate::bundle_commit::BoundedHistory,
+        selected: &HistorySnapshot,
         inputs: &ObjectRef,
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
-        let (selected, encoding) = selected.selection();
         let result = crate::bundle_commit::BundleCommit::publish_branch_selected(
             self,
             history,
@@ -1565,7 +1564,6 @@ impl ProjectBundle {
             branch,
             None,
             Some(selected),
-            encoding,
         );
         match result {
             Ok(report) => {

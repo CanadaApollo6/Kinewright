@@ -181,7 +181,7 @@ impl BundleCopy {
             map.insert(inputs.clone(), rebound.clone());
             target.evidence.push(inputs.clone());
             reader.prove_snapshot(&source, &snapshot)?;
-            crate::bundle_commit::BundleCommit::publish(&mut target, bounded.history(), &rebound)
+            crate::bundle_commit::BundleCommit::publish(&mut target, &bounded.history, &rebound)
         })();
         result(
             target,
@@ -1112,16 +1112,16 @@ impl SessionStore {
         let frozen = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let mut bounded = crate::bundle_commit::select_publication(&frozen, &limits)?;
-        let barrier = crate::bundle::pending_floor(core, bounded.take_floor())?;
+        let bounded = crate::bundle_commit::select_history(&frozen, &limits)?;
+        let history = &bounded.history;
+        let barrier = crate::bundle::pending_floor(core, bounded.floor)?;
         let roots = [inputs.clone()];
         let source = self.store.begin_copy(
             &roots,
             frozen_size(
                 &self.store,
                 &roots,
-                bounded
-                    .history()
+                history
                     .encoded_bytes()
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?,
             )?,
@@ -1153,7 +1153,7 @@ impl SessionStore {
                 target.store.verify(&reference)?;
             }
             let id = target.manual_branch_id.clone();
-            let report = target.publish_pending(&frozen, &mut bounded, &rebound, &id)?;
+            let report = target.publish_pending(&frozen, history, &rebound, &id)?;
             Ok(report)
         })();
         let copy = result(target, before, prepared, source, map, publication)?;

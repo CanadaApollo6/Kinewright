@@ -293,7 +293,7 @@ impl BundleCommit {
             Self::publish_branch(bundle, &after, inputs, target, None)
         } else {
             let branch = target.clone();
-            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after), None)
+            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))
         };
         if let Err(error) = publication {
             if !matches!(
@@ -436,15 +436,8 @@ impl BundleCommit {
             .ok_or(BundleError::Capacity("manual sequence"))?;
         // Selecting the exact accepted history forbids a unilateral manual floor in C9.
         let branch = bundle.manual_branch_id.clone();
-        let publication = Self::publish_branch_selected(
-            bundle,
-            &after,
-            inputs,
-            &branch,
-            None,
-            Some(&after),
-            None,
-        );
+        let publication =
+            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after));
         match publication {
             Ok(report) => {
                 bundle.pending_command = None;
@@ -508,7 +501,7 @@ impl BundleCommit {
         branch_id: &crate::bundle_records::BranchId,
         seed: Option<&LineageRecord>,
     ) -> Result<BundleSaveReport, BundleError> {
-        Self::publish_branch_selected(bundle, history, inputs, branch_id, seed, None, None)
+        Self::publish_branch_selected(bundle, history, inputs, branch_id, seed, None)
     }
     #[allow(clippy::too_many_lines)]
     pub(crate) fn publish_branch_selected(
@@ -518,7 +511,6 @@ impl BundleCommit {
         branch_id: &crate::bundle_records::BranchId,
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
-        encoding: Option<FitEncoding>,
     ) -> Result<BundleSaveReport, BundleError> {
         Self::publish_branch_impl(
             bundle,
@@ -527,7 +519,6 @@ impl BundleCommit {
             branch_id,
             seed,
             selected,
-            encoding,
             None,
             false,
             None,
@@ -552,7 +543,6 @@ impl BundleCommit {
             None,
             Some(selected),
             None,
-            None,
             false,
             None,
             envelopes,
@@ -573,7 +563,6 @@ impl BundleCommit {
             &selection.target_branch,
             Some(&selection.restore.lineage),
             Some(&selection.restore.history),
-            None,
             Some(selection),
             false,
             None,
@@ -601,7 +590,6 @@ impl BundleCommit {
             None,
             Some(&history),
             None,
-            None,
             true,
             None,
             &[],
@@ -625,7 +613,6 @@ impl BundleCommit {
             None,
             Some(history),
             None,
-            None,
             false,
             Some((source, contexts)),
             &[],
@@ -648,7 +635,6 @@ impl BundleCommit {
             None,
             Some(history),
             None,
-            None,
             false,
             None,
             &[],
@@ -670,7 +656,6 @@ impl BundleCommit {
         branch_id: &crate::bundle_records::BranchId,
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
-        encoding: Option<FitEncoding>,
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
         metadata_only: bool,
         rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
@@ -807,8 +792,6 @@ impl BundleCommit {
                 ));
             }
         }
-        // The fit check's encoding is of `selected` (they come from one `BoundedHistory`).
-        let encoding = selected.and(encoding);
         let bounded: Cow<'_, HistorySnapshot> = if let Some(selected) = selected {
             if selected.floor_offset < aligned.floor_offset {
                 return Err(BundleError::HistoryBarrierInvariant);
@@ -824,16 +807,8 @@ impl BundleCommit {
         let (checked, check_bytes) = if old_history.as_ref().is_some_and(|old| ***old == *bounded) {
             (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
         } else {
-            #[cfg(any(test, feature = "test-util"))]
-            let encoding = encoding.filter(|_| !crate::io_observer::save_reuse_disabled());
-            // `bounded` is `selected` here whenever there is an encoding, and the fit check
-            // made it with this same `to_vec`, so serializing again would repeat it.
-            let serialized = match encoding {
-                Some(FitEncoding(bytes)) => bytes,
-                None => {
-                    serde_json::to_vec(&bounded).map_err(|e| BundleError::Corrupt(e.to_string()))?
-                }
-            };
+            let serialized =
+                serde_json::to_vec(&bounded).map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let (checked, check_bytes) = bundle.store.check_history_bytes(serialized)?;
             // The decode preflighted these bytes under these limits and charged exactly
             // that; the replay shadow takes the same charge without preflighting again.
@@ -1592,50 +1567,9 @@ impl BundleCommit {
         }))
     }
 }
-/// A history selected for publication, with the floor transition that produced it and,
-/// when it fit as it was, the encoding the fit check made of it. The fields are private
-/// so the encoding cannot be separated from, or outlive a change to, the history it
-/// encodes.
 pub(crate) struct BoundedHistory {
-    history: HistorySnapshot,
-    floor: Option<kinewright_core::HistoryTransition>,
-    encoding: Option<FitEncoding>,
-}
-impl BoundedHistory {
-    pub(crate) const fn history(&self) -> &HistorySnapshot {
-        &self.history
-    }
-    pub(crate) fn into_history(self) -> HistorySnapshot {
-        self.history
-    }
-    pub(crate) const fn take_floor(&mut self) -> Option<kinewright_core::HistoryTransition> {
-        self.floor.take()
-    }
-    /// The history with the fit check's encoding of it, which a publication may check in
-    /// place of serializing the history again. The encoding is handed out once.
-    pub(crate) const fn selection(&mut self) -> (&HistorySnapshot, Option<FitEncoding>) {
-        (&self.history, self.encoding.take())
-    }
-}
-/// `serde_json::to_vec` of a history, made by the fit check of [`bound_history_inner`]
-/// and kept only with that history, in a [`BoundedHistory`].
-pub(crate) struct FitEncoding(Vec<u8>);
-#[cfg(all(test, target_os = "linux"))]
-impl FitEncoding {
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-/// What the fit check decided: the history fits as it is (with its encoding), or the
-/// selected floor.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "made once per bound and taken apart by the caller at once"
-)]
-enum Bound {
-    Fits(Vec<u8>),
-    Floored(BoundedHistory),
+    pub history: HistorySnapshot,
+    pub floor: Option<kinewright_core::HistoryTransition>,
 }
 
 pub(crate) fn bound_history(
@@ -1649,30 +1583,11 @@ pub(crate) fn select_history(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<BoundedHistory, BundleError> {
-    observed_bound(history, limits, |bounded| match bounded {
-        Bound::Fits(_) => BoundedHistory {
+    observed_bound(history, limits, |bounded| {
+        bounded.unwrap_or_else(|| BoundedHistory {
             history: history.clone(),
             floor: None,
-            encoding: None,
-        },
-        Bound::Floored(selected) => selected,
-    })
-}
-
-/// [`select_history`] for a publication of the selected history, which keeps the fit
-/// check's encoding of a history that fits as it is for the publication's commit check.
-pub(crate) fn select_publication(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<BoundedHistory, BundleError> {
-    observed_bound(history, limits, |bounded| match bounded {
-        // `history.clone()` serializes exactly as `history` does: the encoding is of it.
-        Bound::Fits(encoding) => BoundedHistory {
-            history: history.clone(),
-            floor: None,
-            encoding: Some(FitEncoding(encoding)),
-        },
-        Bound::Floored(selected) => selected,
+        })
     })
 }
 
@@ -1683,18 +1598,18 @@ fn bound_history_borrowed<'a>(
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<Cow<'a, HistorySnapshot>, BundleError> {
     observed_bound(history, limits, |bounded| match bounded {
-        Bound::Floored(selected) => Cow::Owned(selected.history),
-        Bound::Fits(_) => Cow::Borrowed(history),
+        Some(selected) => Cow::Owned(selected.history),
+        None => Cow::Borrowed(history),
     })
 }
 
-/// Bound `history` and turn the result into the caller's value. The test-util
-/// profile times both, so a caller's copy of a fitting history is counted once,
-/// inside this one call.
+/// Bound `history` and turn the result (`None`: it fits as it is) into the
+/// caller's value. The test-util profile times both, so a caller's copy of
+/// a fitting history is counted once, inside this one call.
 fn observed_bound<T>(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-    finish: impl FnOnce(Bound) -> T,
+    finish: impl FnOnce(Option<BoundedHistory>) -> T,
 ) -> Result<T, BundleError> {
     #[cfg(any(test, feature = "test-util"))]
     let started = std::time::Instant::now();
@@ -1711,25 +1626,24 @@ fn observed_bound<T>(
 fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-) -> Result<Bound, BundleError> {
-    // The encoding of `h` when it fits.
-    let fit = |h: &HistorySnapshot| -> Option<Vec<u8>> {
-        let encoded = h.encoded_bytes().ok()?;
+) -> Result<Option<BoundedHistory>, BundleError> {
+    let fits = |h: &HistorySnapshot| -> bool {
+        let Ok(encoded) = h.encoded_bytes() else {
+            return false;
+        };
         if encoded > limits.branch_history_bytes {
-            return None;
+            return false;
         }
-        let bytes = serde_json::to_vec(h).ok()?;
+        let Ok(bytes) = serde_json::to_vec(h) else {
+            return false;
+        };
         crate::store::preflight_record(&bytes, limits)
             .is_ok_and(|n| n <= limits.branch_history_bytes)
-            .then_some(bytes)
     };
-    let fits = |h: &HistorySnapshot| fit(h).is_some();
     // Keep the common small checkpoint path direct. For a long session, component
     // costs can reject the original stream without first serializing tens of MiB.
-    if history.batches.len() <= 64
-        && let Some(encoding) = fit(history)
-    {
-        return Ok(Bound::Fits(encoding));
+    if history.batches.len() <= 64 && fits(history) {
+        return Ok(None);
     }
     // Independent JSON subtrees give a lower bound without reserializing every suffix.
     // Zeroing counters only shortens their encoding; the final fit/replay remains authoritative.
@@ -1754,9 +1668,9 @@ fn bound_history_inner(
     };
     if history.batches.len() > 64
         && undo[0].saturating_add(redo[0]).saturating_add(batches[0]) <= limits.branch_history_bytes
-        && let Some(encoding) = fit(history)
+        && fits(history)
     {
-        return Ok(Bound::Fits(encoding));
+        return Ok(None);
     }
     let document_cost = record_cost(&*history.document, limits)?;
     let skeleton = serde_json::json!({"floor_offset":1,"baseline":null,"document":null,"batches":[],"cursor":{"undo":[],"redo":[]}});
@@ -1829,10 +1743,9 @@ fn bound_history_inner(
         fits,
     )
     .map(|transition| {
-        Bound::Floored(BoundedHistory {
+        Some(BoundedHistory {
             history: transition.after().clone(),
             floor: Some(transition),
-            encoding: None,
         })
     })
     .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))

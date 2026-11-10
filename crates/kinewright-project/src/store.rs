@@ -2931,9 +2931,9 @@ pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u
     if bytes.len() as u64 > limits.decoded_record_bytes {
         return Err(BundleError::Capacity("encoded record cap"));
     }
-    // serde_json's unescape scratch may grow geometrically; reserve it before typed parsing.
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::note_preflight();
+    // serde_json's unescape scratch may grow geometrically; reserve it before typed parsing.
     let scratch = (bytes.len() as u64)
         .checked_mul(2)
         .ok_or(BundleError::Capacity("parser scratch overflow"))?;
