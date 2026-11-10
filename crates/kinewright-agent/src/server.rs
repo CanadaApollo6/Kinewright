@@ -2874,6 +2874,11 @@ impl KinewrightMcp {
                 "AddLutAsset cannot be submitted through apply_edit_plan; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
             ));
         }
+        if let Some(endpoint) = &self.task_endpoint
+            && let Err(error) = endpoint.check_batch_history(&self.core, operations)
+        {
+            return Ok(error_text(error));
+        }
         let confirmation = plan_confirmation_description(&before, operations);
         if self.task_control.is_none()
             && let Some(description) = confirmation.as_ref()

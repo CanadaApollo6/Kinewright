@@ -1,7 +1,10 @@
 #[derive(Clone, Copy, Debug)]
 enum PersonLatch {
     Storage,
+    Specialist,
     Sends,
+    Attempts,
+    Cuts,
 }
 
 #[allow(
@@ -9,6 +12,18 @@ enum PersonLatch {
     reason = "one fixture constructs validated storage and send-count latches with dirty task work"
 )]
 fn person_latched_fixture(latch: PersonLatch) -> (Fixture, RunId, HostClient) {
+    person_latched_fixture_inner(latch, true, false)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "shared real run and dirty-task fixture with explicit latch controls"
+)]
+fn person_latched_fixture_inner(
+    latch: PersonLatch,
+    private_claim: bool,
+    staged: bool,
+) -> (Fixture, RunId, HostClient) {
     use kinewright_project::orchestration_accounting::{
         ProviderMetadata, ProviderSelection, SendConsumption,
     };
@@ -39,6 +54,14 @@ fn person_latched_fixture(latch: PersonLatch) -> (Fixture, RunId, HostClient) {
             f,
             kinewright_project::storage_budget::StorageLimits {
                 objects: 512,
+                ..Default::default()
+            },
+        )
+    } else if matches!(latch, PersonLatch::Specialist) {
+        c5_fix1_apply_limits(
+            f,
+            kinewright_project::storage_budget::StorageLimits {
+                versions: kinewright_project::run_admission::SPECIALIST_BASES + 4,
                 ..Default::default()
             },
         )
@@ -86,18 +109,28 @@ fn person_latched_fixture(latch: PersonLatch) -> (Fixture, RunId, HostClient) {
     let (execution, client, endpoint, core) = c4_reserve_task(&f, &run, &child);
     history_turn(&f, &execution, &client, &endpoint, 1, true);
     c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &child), &core);
-    let claim_root = f.temp.path("person-machine");
-    let mut claim = crate::execution_claim::MachineClaim::acquire_fixture(
-        &claim_root,
-        parent.project.as_str(),
-        run.0.as_str(),
-    )
-    .unwrap();
-    claim.reserve(&unbound_identity(&parent)).unwrap();
-    claim.reserve(&unbound_identity(&execution)).unwrap();
-    drop(claim);
+    if private_claim {
+        let claim_root = f.temp.path("person-machine");
+        let mut claim = crate::execution_claim::MachineClaim::acquire_fixture(
+            &claim_root,
+            parent.project.as_str(),
+            run.0.as_str(),
+        )
+        .unwrap();
+        claim.reserve(&unbound_identity(&parent)).unwrap();
+        claim.reserve(&unbound_identity(&execution)).unwrap();
+        drop(claim);
+    }
+    let producer = f.producer(&run);
     let host = f.host.owner.upgrade().unwrap();
     let mut owner = host.lock().unwrap();
+    if staged {
+        let mut state = owner.spending_scope(&producer, &run).unwrap();
+        owner
+            .persist_runtime_task(&mut state, &execution, false)
+            .unwrap();
+        // Deliberately leave the paired H1 cut unpublished at peak overlap.
+    }
     if matches!(latch, PersonLatch::Storage) {
         let mut refused = false;
         for n in 0_u64..256 {
@@ -115,7 +148,48 @@ fn person_latched_fixture(latch: PersonLatch) -> (Fixture, RunId, HostClient) {
             }
         }
         assert!(refused, "PERSON_STORAGE_LATCH");
-    } else {
+    } else if matches!(latch, PersonLatch::Specialist) {
+        let mut refused = false;
+        match owner
+            .owner_mut()
+            .unwrap()
+            .fork_durable_branch("specialist quota pressure")
+        {
+            Ok(mut branch) => {
+                for _ in 0..16 {
+                    let locked =
+                        branch.core().export_history().unwrap().document.tracks[0].sync_lock;
+                    assert!(matches!(
+                        branch
+                            .core()
+                            .request(kinewright_core::Command::Do(
+                                kinewright_core::Operation::SetTrackSyncLock {
+                                    track: kinewright_core::TrackId(81),
+                                    locked: !locked
+                                }
+                            ))
+                            .unwrap(),
+                        kinewright_core::Event::DocumentChanged { .. }
+                    ));
+                    match owner
+                        .owner_mut()
+                        .unwrap()
+                        .persist_durable_branch(&mut branch)
+                    {
+                        Ok(_) => {}
+                        Err(kinewright_project::bundle::BundleError::RunLimit) => {
+                            refused = true;
+                            break;
+                        }
+                        Err(error) => panic!("C3_SPECIALIST_WRONG_REFUSAL {error}"),
+                    }
+                }
+            }
+            Err(kinewright_project::bundle::BundleError::RunLimit) => refused = true,
+            Err(error) => panic!("C3_SPECIALIST_WRONG_REFUSAL {error}"),
+        }
+        assert!(refused, "C3_SPECIALIST_SLOT_LATCH");
+    } else if matches!(latch, PersonLatch::Sends) {
         let state = owner
             .owner()
             .unwrap()
@@ -177,6 +251,16 @@ fn person_latched_fixture(latch: PersonLatch) -> (Fixture, RunId, HostClient) {
             ),
             "PERSON_SEND_CAP_LATCH"
         );
+    }
+    if matches!(latch, PersonLatch::Attempts | PersonLatch::Cuts) {
+        // Isolate the shared sticky latch; actual attempt/cut admission guards
+        // retain their independent unit witnesses. No sends are seeded here.
+        owner
+            .owner()
+            .unwrap()
+            .store()
+            .unwrap()
+            .exhaust_run_budget_probe();
     }
     assert!(owner.owner().unwrap().store().unwrap().run_limit_reached());
     drop(owner);

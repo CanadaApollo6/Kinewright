@@ -1,6 +1,6 @@
 //! Paired incremental-save measurement; no timing threshold is a correctness assertion.
 #![cfg(all(feature = "test-util", target_os = "linux"))]
-use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Core, Event, Operation, TrackId};
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
@@ -35,28 +35,7 @@ struct SaveCostFixture {
 fn fixture() -> SaveCostFixture {
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-save-cost");
     let path = temp.path("project.kinewright");
-    let document = Document {
-        duration: kinewright_core::TimeCode(900),
-        tracks: (1..=12)
-            .map(|track| Track {
-                id: TrackId(track),
-                kind: TrackKind::Video,
-                sync_lock: true,
-                clips: (0..10)
-                    .map(|clip| {
-                        serde_json::from_value(serde_json::json!({
-                            "id": track * 100 + clip + 1, "asset": 0,
-                            "source_range": {"start": 0, "end": 90},
-                            "content": {"solid": {"r": 20, "g": 40, "b": 60}},
-                            "timeline_start": clip * 90, "effects": [], "transition_in": null
-                        }))
-                        .unwrap()
-                    })
-                    .collect(),
-            })
-            .collect(),
-        ..Document::default()
-    };
+    let document = kinewright_project::c0_fixtures::save_cost_document();
     let core = Core::spawn(document).unwrap();
     for n in 0..24 {
         edit(&core, n % 2 == 0);

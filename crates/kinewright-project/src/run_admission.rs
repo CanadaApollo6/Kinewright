@@ -17,9 +17,13 @@ pub const HISTORY_BYTES: u64 = 1 << 20;
 pub const RECORD_BYTES: u64 = 8 << 20;
 pub const DECODED_BYTES: u64 = 32 << 20;
 pub const OBJECTS: u64 = 256;
+pub const SPECIALIST_BASES: u64 = TASKS as u64 * 2;
 pub const METADATA: u64 = 256 << 20;
 pub const OWNED: u64 = 8 << 20;
-pub const LIVE_HISTORY: u64 = 16 << 20;
+// At most two branches per task: retained base/delta, retained capture and
+// staged decoded history (each bounded to 1 MiB), plus 16 MiB for serial
+// replay/old-capture overlap. Ordinary writes cannot spend this allowance.
+pub const LIVE_HISTORY: u64 = TASKS as u64 * 2 * 3 * HISTORY_BYTES + (16 << 20);
 pub const GRAPH_LEVELS: u64 = 8;
 pub const REASON: &str = "Run limit reached. Stop this run to finish cleanup.";
 thread_local! { static READ_HEADROOM: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
@@ -148,7 +152,16 @@ impl ProjectStore {
             .is_some_and(|token| token.matches_store(self))
     }
     pub(crate) fn is_project_publication(&self) -> bool {
-        self.is_terminal_publication() || self.is_person_publication()
+        self.is_terminal_publication()
+            || self.is_person_publication()
+            || self.is_cleanup_publication()
+    }
+    pub(crate) fn specialist_version_limit(&self) -> u64 {
+        if self.run_budget_active() && !self.is_project_publication() {
+            self.limits().versions.saturating_sub(SPECIALIST_BASES)
+        } else {
+            self.limits().versions
+        }
     }
     /// Return an owned H1 record; headroom cannot escape as a retained reservation.
     pub fn read_run_record(
@@ -171,6 +184,7 @@ impl ProjectStore {
     pub(crate) fn run_error(&self, error: BundleError) -> BundleError {
         if self.run_budget_active()
             && !self.is_person_publication()
+            && !self.is_cleanup_publication()
             && matches!(error, BundleError::Capacity(_))
         {
             self.note_run_limit();
@@ -411,6 +425,15 @@ impl crate::bundle::ProjectBundle {
             || raw.branch_history_bytes < HISTORY_BYTES
             || raw.graph_depth < 2 * GRAPH_LEVELS
             || limits.pending_commands == 0
+            || self
+                .evidence
+                .iter()
+                .filter(|reference| {
+                    reference.record_kind == crate::bundle_records::RecordKind::SpecialistBase
+                })
+                .count() as u64
+                + SPECIALIST_BASES
+                > raw.versions
             || limits.live_history_bytes < HISTORY_BYTES
             || (index.runs.len() + index.orchestration.len()) as u64 + 1 > limits.versions
             || self.issuers.len() as u64 + u64::from(incoming_issuer) + 4 > limits.issuers
@@ -592,6 +615,9 @@ impl crate::bundle::ProjectBundle {
         let terminal = before
             .as_ref()
             .is_some_and(|before| terminal_progress(before, update));
+        if let Some(cleanup) = &self.store.cleanup_publication {
+            cleanup.check_transition(update, terminal)?;
+        }
         self.cut_authority(&index, before.as_ref(), update, terminal)?;
         if terminal {
             crate::orchestration_accounting::encode(update.receipt(), TERMINAL_RECEIPT_BYTES)
@@ -702,6 +728,19 @@ impl crate::bundle::ProjectBundle {
 }
 
 impl crate::editing_session::Ja1EditingSession {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn run_budget_probe(
+        &self,
+        run: &crate::orchestration_records::RunId,
+    ) -> Result<RunBudget, BundleError> {
+        let _reading = reading(self.store()?);
+        self.active_bundle()?
+            .run_index()?
+            .budgets
+            .get(run)
+            .cloned()
+            .ok_or(BundleError::HistoryChanged)
+    }
     /// Check before staging a task freeze, using the same publication policy.
     pub fn run_transition_admission(
         &mut self,

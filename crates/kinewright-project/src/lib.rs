@@ -117,3 +117,12 @@ pub mod run_admission;
 
 #[cfg(test)]
 mod person_admission_tests;
+
+#[cfg(all(test, feature = "test-util"))]
+mod cleanup_measurement_tests;
+
+pub mod cleanup_admission;
+pub mod task_history_admission;
+
+#[cfg(test)]
+mod cleanup_quota_tests;

@@ -1000,3 +1000,55 @@ include!("effect_execution.rs");
 
 include!("codex_prompt.rs");
 include!("native_wake.rs");
+
+// Only these two receivers own guardian retirement evidence. Borrowing it here
+// keeps raw cleanup authority inside their synchronous retirement transaction.
+enum CleanupEvidence<'a, 'b> {
+    Retirement(&'a crate::guardian::AttemptRetirementProof<'b>),
+    Completed(&'a crate::guardian::CleanupProof),
+}
+struct CleanupOwner<'owner, 'proof, 'retirement> {
+    host: &'owner mut HostCommandOwner,
+    publication: Option<kinewright_project::cleanup_admission::CleanupPublication>,
+    _proof: CleanupEvidence<'proof, 'retirement>,
+}
+impl std::ops::Deref for CleanupOwner<'_, '_, '_> {
+    type Target = HostCommandOwner;
+    fn deref(&self) -> &Self::Target {
+        self.host
+    }
+}
+impl std::ops::DerefMut for CleanupOwner<'_, '_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.host
+    }
+}
+impl Drop for CleanupOwner<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.host
+            .owner_mut()
+            .expect("cleanup retains its owner")
+            .end_cleanup_publication(self.publication.take().expect("cleanup publication owner"));
+    }
+}
+impl HostCommandOwner {
+    fn cleanup_publication<'owner, 'proof, 'retirement>(
+        &'owner mut self,
+        identity: &ExecutionIdentity,
+        proof: CleanupEvidence<'proof, 'retirement>,
+    ) -> Result<CleanupOwner<'owner, 'proof, 'retirement>, HostError> {
+        let native = match &proof {
+            CleanupEvidence::Retirement(proof) => proof.identity(),
+            CleanupEvidence::Completed(proof) => proof.identity(),
+        };
+        if !same_native_attempt(identity, native) {
+            return Err(refused("cleanup admission proof scope changed"));
+        }
+        let publication = self.owner_mut()?.begin_cleanup_publication(identity)?;
+        Ok(CleanupOwner {
+            host: self,
+            publication: Some(publication),
+            _proof: proof,
+        })
+    }
+}

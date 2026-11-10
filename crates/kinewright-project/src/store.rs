@@ -128,6 +128,7 @@ pub struct ProjectStore {
     inner: Arc<StoreInner>,
     pub(crate) publication: Option<crate::run_admission::TerminalAdmission>,
     pub(crate) person_publication: Option<PersonAdmission>,
+    pub(crate) cleanup_publication: Option<crate::cleanup_admission::CleanupAdmission>,
 }
 #[derive(Clone)]
 pub(crate) struct PersonAdmission {
@@ -179,6 +180,7 @@ impl RetainedReadAdmission {
             inner: Arc::clone(&self.hold.pin.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         };
         if store
             .inner
@@ -200,6 +202,7 @@ impl RetainedReadAdmission {
             inner: Arc::clone(&self.hold.pin.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         };
         store.reserve_copy_read(0, encoded_bytes, 0, false, true)
     }
@@ -211,6 +214,7 @@ impl RetainedReadAdmission {
             inner: Arc::clone(&self.hold.pin.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         };
         ProjectStore::inspect_borrowed_destination(path, &[&store])
     }
@@ -234,6 +238,7 @@ impl RetainedReadAdmission {
             inner: Arc::clone(&self.hold.pin.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         };
         let path = ProjectStore::object_path(reference)?;
         crate::namespace::note("rescue_permission_read", path.as_path());
@@ -707,6 +712,7 @@ impl ProjectStore {
             }),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         })
     }
     pub(crate) fn admission_key(&self) -> usize {
@@ -727,12 +733,22 @@ impl ProjectStore {
             publication: Some(token),
             // A manual Save can reconcile an already-admitted terminal cut.
             person_publication: self.person_publication.clone(),
+            cleanup_publication: self.cleanup_publication.clone(),
         })
+    }
+    pub(crate) fn publication_clone_for_cleanup(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            publication: None,
+            person_publication: None,
+            cleanup_publication: None,
+        }
     }
     pub(crate) fn person_publication_store(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
             publication: self.publication.clone(),
+            cleanup_publication: None,
             person_publication: Some(PersonAdmission {
                 key: self.admission_key(),
                 // Keep this identity alive for the scoped publisher.
@@ -939,6 +955,7 @@ impl ProjectStore {
         recover: bool,
     ) -> Result<SealedObject, BundleError> {
         self.admit_run_write()?;
+        self.check_cleanup_kind(reference.record_kind)?;
         reference.validate()?;
         let _working = self.reserve(0, (1 << 20) + 65_536, 0, false)?;
         let mut dependencies = dependencies.to_vec();
@@ -1472,6 +1489,7 @@ impl ProjectStore {
             inner: Arc::clone(&self.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         };
         Arc::new(move |bytes| {
             store
@@ -1486,6 +1504,7 @@ impl ProjectStore {
             inner: Arc::clone(&self.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         };
         Arc::new(move |bytes| {
             store.check_read_authority().map_err(|e| e.to_string())?;
@@ -2633,9 +2652,16 @@ impl ProjectStore {
         let decoded =
             preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?;
         drop(preflight);
+        // Candidate deltas share the task admission bound: their retained
+        // capture is part of the same finite cleanup allowance.
         if self.run_budget_active()
             && !self.is_project_publication()
-            && decoded > crate::run_admission::DECODED_BYTES
+            && decoded
+                > if T::KIND == RecordKind::SpecialistBase {
+                    crate::run_admission::HISTORY_BYTES
+                } else {
+                    crate::run_admission::DECODED_BYTES
+                }
         {
             self.note_run_limit();
             return Err(BundleError::RunLimit);
@@ -3836,6 +3862,7 @@ impl ProjectStore {
             // reconciliation of an already admitted publication.
             if self.run_budget_active()
                 && !self.is_person_publication()
+                && !self.is_cleanup_publication()
                 && matches!(error, BundleError::Capacity(_))
             {
                 BundleError::RunLimit
@@ -4405,6 +4432,7 @@ impl StorePin {
             inner: Arc::clone(&self.inner),
             publication: None,
             person_publication: None,
+            cleanup_publication: None,
         }
     }
 }

@@ -90,6 +90,7 @@ struct Ingress {
     authority: RuntimeTaskAuthority,
     actor: kinewright_core::ActorIdentity,
     policy: TaskPolicy,
+    history_admission: Option<kinewright_project::task_history_admission::TaskHistoryAdmission>,
 }
 
 #[derive(Clone)]
@@ -121,6 +122,7 @@ impl TaskEndpoint {
         policy: TaskPolicy,
         authority: RuntimeTaskAuthority,
         core: &Core,
+        history_admission: Option<kinewright_project::task_history_admission::TaskHistoryAdmission>,
     ) -> Self {
         Self(Arc::new(Ingress {
             gate: Mutex::new(()),
@@ -135,12 +137,13 @@ impl TaskEndpoint {
             policy,
             authority,
             actor: core.actor_identity(),
+            history_admission,
         }))
     }
     #[cfg(any(test, feature = "eval-harness"))]
     #[must_use]
     pub fn for_fixture(policy: TaskPolicy, authority: RuntimeTaskAuthority, core: &Core) -> Self {
-        Self::from_authorized_owner(policy, authority, core)
+        Self::from_authorized_owner(policy, authority, core, None)
     }
     #[must_use]
     pub fn authority(&self) -> &RuntimeTaskAuthority {
@@ -324,6 +327,7 @@ impl TaskEndpoint {
         self.0
             .policy
             .validate_history_change(&history.document, &after.document)?;
+        self.check_history(&after)?;
         Ok((history, after, operations))
     }
     pub(crate) fn history_step(
@@ -345,6 +349,44 @@ impl TaskEndpoint {
             return Err("task history differs from validated transition".into());
         }
         Ok(actual)
+    }
+    pub(crate) fn check_history(
+        &self,
+        history: &kinewright_core::HistorySnapshot,
+    ) -> Result<(), String> {
+        match &self.0.history_admission {
+            Some(admission) => admission.check(history),
+            None => kinewright_project::task_history_admission::check_history(
+                history,
+                &kinewright_project::storage_budget::StorageLimits::default(),
+            ),
+        }
+        .map_err(|error| error.to_string())
+    }
+    pub(crate) fn check_batch_history(
+        &self,
+        core: &Core,
+        operations: &[Operation],
+    ) -> Result<(), String> {
+        let history = core.export_history().map_err(|error| error.to_string())?;
+        let private = Core::spawn(std::sync::Arc::clone(&history.baseline))
+            .map_err(|error| error.to_string())?;
+        private
+            .restore_history(history)
+            .map_err(|error| error.to_string())?;
+        if matches!(
+            private
+                .request(kinewright_core::Command::DoBatch(operations.to_vec()))
+                .map_err(|error| error.to_string())?,
+            kinewright_core::Event::DocumentChanged { .. }
+        ) {
+            self.check_history(
+                &private
+                    .export_history()
+                    .map_err(|error| error.to_string())?,
+            )?;
+        }
+        Ok(())
     }
     pub(crate) fn validate_batch(
         &self,
@@ -421,6 +463,7 @@ impl EditorTask {
             },
             authority,
             registration.core(),
+            Some(owner.task_history_admission(&registration)?),
         );
         Ok(Self {
             endpoint,
@@ -483,6 +526,7 @@ impl EditorTask {
             },
             authority,
             registration.core(),
+            Some(owner.task_history_admission(&registration)?),
         );
         Ok(Self {
             endpoint,
@@ -509,6 +553,13 @@ impl EditorTask {
                 .map_err(BundleError::Unsupported)?;
             self.endpoint.revoke();
         }
+        // Frozen work can outlive its closed registration. Its new endpoint
+        // remains sealed below and grants no edit authority.
+        let history_admission = if self.frozen.is_some() {
+            None
+        } else {
+            Some(owner.task_history_admission(&self.registration)?)
+        };
         self.endpoint = TaskEndpoint::from_authorized_owner(
             TaskPolicy {
                 role: brief.role,
@@ -516,6 +567,7 @@ impl EditorTask {
             },
             authority,
             self.registration.core(),
+            history_admission,
         );
         if self.frozen.is_some() {
             self.endpoint
