@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+pub(crate) type ObserverSlot = Arc<std::sync::OnceLock<Arc<Observations>>>;
 pub(crate) struct Observations {
     pub trace: Arc<Mutex<Trace>>,
     contexts: Mutex<BTreeMap<(String, String), SendContext>>,
@@ -84,12 +85,14 @@ impl Observations {
     }
     pub fn call(
         &self,
-        task: &str,
-        attempt: &str,
+        endpoint: &crate::orchestration::tasks::TaskEndpoint,
         name: &str,
         args: Value,
         result: &CallToolResult,
     ) -> io::Result<()> {
+        let authority = endpoint.authority();
+        let task = authority.task.0.as_str();
+        let attempt = authority.attempt.0.as_str();
         let context = self
             .contexts
             .lock()
@@ -131,6 +134,7 @@ impl Observations {
             && context.brief["role"] != "director"
             && name == "prepare_edit_plan"
             && !refused
+            && endpoint.check_live().is_ok()
             && !self.conflict.swap(true, Ordering::AcqRel)
         {
             self.injecting.store(true, Ordering::Release);

@@ -561,7 +561,14 @@ fn te15_b2b_native_publication_injection() {
                 })
                 .unwrap();
         }
-        owner.lock().unwrap().evaluation_observer = Some(observer);
+        assert!(
+            owner
+                .lock()
+                .unwrap()
+                .evaluation_observer
+                .set(observer)
+                .is_ok()
+        );
         if finish {
             let reply = r
                 .editor
@@ -668,4 +675,127 @@ fn te15_b2b_merge_replay_same_final_document() {
         "B2B_REAL_MERGE_READ_REPLAY_REFUSED"
     );
     assert_eq!(measurement.history, document, "B2B_SAME_FINAL_DOCUMENT");
+}
+
+#[cfg(all(feature = "te1-eval", target_os = "linux"))]
+#[test]
+fn te15_b2b_kept_observer_after_publication() {
+    if !te15_fix_counting_child("te15_b2b_kept_observer_after_publication") {
+        return;
+    }
+    let (f, _) = te15_fix_setup("codex");
+    let r = c5_fix10_run_from(f);
+    r.f.host.runtime.stop();
+    let owner = r.f.host.owner.upgrade().unwrap();
+    let (control, endpoint, measurements, slot) = {
+        let host = owner.lock().unwrap();
+        let endpoint = host.hooks.runs[&r.run].tasks[&r.child].endpoint();
+        let auth = host
+            .attachments
+            .iter()
+            .find(|a| {
+                a.producer_scope
+                    .as_ref()
+                    .is_some_and(|s| s.endpoint.as_ref() == Some(&endpoint.authority().endpoint))
+            })
+            .unwrap()
+            .auth
+            .clone();
+        let measurements = host.hooks.runs[&r.run].measurements[&r.child].clone();
+        let slot = host.evaluation_observer.clone();
+        let control = super::super::task_mcp::TaskMcp::new(
+            Arc::downgrade(&owner),
+            auth,
+            endpoint.clone(),
+            slot.clone(),
+            measurements.clone(),
+            None,
+        );
+        (control, endpoint, measurements, slot)
+    };
+    let empty = rmcp::model::CallToolResult::structured(serde_json::json!({}));
+    control
+        .eval_observe("task_status", serde_json::json!({}), &empty)
+        .unwrap();
+    assert!(!measurements.lock().unwrap().incomplete);
+    let trace = Arc::new(std::sync::Mutex::new(crate::te1_eval::Trace::default()));
+    let observer = Arc::new(crate::te1_eval::observe::Observations::new(
+        6,
+        trace.clone(),
+    ));
+    let state = r.f.projection(&r.run);
+    for attempt in &state.attempts {
+        let index = state
+            .tasks
+            .iter()
+            .position(|t| t.id == attempt.identity.task)
+            .unwrap();
+        observer
+            .bind(crate::te1_eval::SendContext {
+                endpoint: String::new(),
+                identity: serde_json::to_value(&attempt.identity).unwrap(),
+                brief: serde_json::to_value(&state.tasks[index].brief).unwrap(),
+                prompt: String::new(),
+                fixtures: serde_json::Value::Null,
+                child_index: index,
+            })
+            .unwrap();
+    }
+    assert!(
+        owner
+            .lock()
+            .unwrap()
+            .evaluation_observer
+            .set(observer.clone())
+            .is_ok()
+    );
+    assert!(Arc::ptr_eq(slot.get().unwrap(), &observer));
+    let result = c5_fix10_freeze(&r.editor, &r.child);
+    let args = r
+        .editor
+        .control(OrchestrationCommand::PublishResult(Box::new(
+            PublishResult {
+                task: r.child.clone(),
+                result,
+            },
+        )));
+    let reply = r.editor.wire("publish_result", args.clone());
+    assert_eq!(reply.is_error, Some(false));
+    assert!(endpoint.check_live().is_err());
+    assert!(!measurements.lock().unwrap().incomplete);
+    trace.lock().unwrap().calls.clear();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held_owner = owner.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = held_owner.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+    });
+    held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let start = Instant::now();
+    let appended = control.eval_observe("publish_result", args, &reply);
+    let timely = start.elapsed() < Duration::from_secs(2);
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(
+        appended.is_ok() && timely,
+        "TE1_MERGE_OBSERVE_WITHOUT_OWNER_WAIT"
+    );
+    assert_eq!(
+        trace.lock().unwrap().calls.len(),
+        1,
+        "TE1_MERGE_RETIRED_PUBLICATION_RECORDED"
+    );
+    assert!(
+        !measurements.lock().unwrap().incomplete,
+        "TE1_MERGE_RETIRED_PUBLICATION_COMPLETE"
+    );
+    control
+        .eval_observe("prepare_edit_plan", serde_json::json!({}), &empty)
+        .unwrap();
+    assert!(
+        trace.lock().unwrap().errors.is_empty(),
+        "TE1_MERGE_STOP_SKIPS_FIXTURE_ACTION"
+    );
 }

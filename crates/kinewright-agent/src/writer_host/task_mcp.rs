@@ -87,6 +87,8 @@ pub(crate) struct TaskMcp {
     endpoint: TaskEndpoint,
     issuer: Arc<Mutex<Option<IssuerId>>>,
     terminal_state: Arc<Mutex<Option<Value>>>,
+    #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+    evaluation_observer: crate::te1_eval::observe::ObserverSlot,
     #[cfg(target_os = "linux")]
     measurements: Arc<Mutex<kinewright_project::usage_measurement::Measurements>>,
     #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
@@ -104,6 +106,17 @@ struct Control {
 }
 fn refused(reason: &str) -> HostError {
     HostRefusal::new("task_scope", reason).into()
+}
+fn task_authority_error(reason: &str) -> HostError {
+    HostRefusal::new(
+        reason,
+        if reason == "task_authority_paused" {
+            "the run is paused; retry after it resumes"
+        } else {
+            "task authority expired"
+        },
+    )
+    .into()
 }
 
 /// C5 fix 10: the product's own name of an MCP call, for its refusal record.
@@ -206,6 +219,44 @@ pub(crate) fn refusal_code(
 }
 
 impl TaskMcp {
+    pub(super) fn lock_owner<'a>(
+        &self,
+        owner: &'a Mutex<HostCommandOwner>,
+    ) -> Result<std::sync::MutexGuard<'a, HostCommandOwner>, HostError> {
+        loop {
+            self.endpoint
+                .check_live()
+                .map_err(|why| task_authority_error(&why))?;
+            match owner.try_lock() {
+                Ok(host) => {
+                    self.endpoint
+                        .check_live()
+                        .map_err(|why| task_authority_error(&why))?;
+                    return Ok(host);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(refused("host owner unavailable"));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    #[cfg(all(test, target_os = "linux"))]
+                    self.endpoint.signal_owner_wait_for_fixture();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+    }
+    fn lock_reply_owner<'a>(
+        &self,
+        owner: &'a Mutex<HostCommandOwner>,
+    ) -> Result<std::sync::MutexGuard<'a, HostCommandOwner>, HostError> {
+        if self.endpoint.check_live().is_err() {
+            owner
+                .try_lock()
+                .map_err(|_| refused("host owner unavailable"))
+        } else {
+            self.lock_owner(owner)
+        }
+    }
     pub(crate) fn with_confirmations(mut self, broker: crate::ConfirmationBroker) -> Self {
         self.confirmations = Some(broker);
         self
@@ -218,7 +269,7 @@ impl TaskMcp {
             // Retain this task's bounded observer even during host/run teardown.
             // Check host first to preserve the host -> measurement lock order.
             let attached = self.host.upgrade().is_some_and(|owner| {
-                owner.lock().is_ok_and(|host| {
+                self.lock_reply_owner(&owner).is_ok_and(|host| {
                     host.hooks.runs.get(&authority.run).is_some_and(|run| {
                         run.tasks.contains_key(&authority.task)
                             && run
@@ -264,7 +315,7 @@ impl TaskMcp {
     ) {
         #[cfg(target_os = "linux")]
         if let Some(host) = self.host.upgrade()
-            && let Ok(mut host) = host.lock()
+            && let Ok(mut host) = self.lock_reply_owner(&host)
         {
             let _ = host.record_tool_refusal(self.endpoint.authority(), tool, code);
         }
@@ -275,6 +326,8 @@ impl TaskMcp {
         host: Weak<Mutex<HostCommandOwner>>,
         auth: HostAuth,
         endpoint: TaskEndpoint,
+        #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+        evaluation_observer: crate::te1_eval::observe::ObserverSlot,
         #[cfg(target_os = "linux")] measurements: Arc<
             Mutex<kinewright_project::usage_measurement::Measurements>,
         >,
@@ -289,6 +342,8 @@ impl TaskMcp {
             endpoint,
             issuer: Arc::default(),
             terminal_state: Arc::default(),
+            #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+            evaluation_observer,
             #[cfg(target_os = "linux")]
             measurements,
             #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
@@ -312,9 +367,7 @@ impl TaskMcp {
     }
     fn call_inner(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
         let owner = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
-        let mut host = owner
-            .lock()
-            .map_err(|_| refused("host owner unavailable"))?;
+        let mut host = self.lock_owner(&owner)?;
         // Uncertain storage cannot serve resolve_task_mcp's projection. Only
         // the retained original finish may reach exact-envelope reconciliation.
         if name == "finish_task" && host.hooks.pending.is_some() {
@@ -360,11 +413,19 @@ impl TaskMcp {
                         let prepared = host.prepare_media_context(index, &state, record, &read)?;
                         let rendered = {
                             drop(host);
-                            prepared.render(&self.endpoint, &owner)?
+                            match prepared.render(&self.endpoint, &owner) {
+                                Ok(rendered) => rendered,
+                                Err(error) => {
+                                    if prepared.failed()?
+                                        && let Ok(mut host) = self.lock_owner(&owner)
+                                    {
+                                        prepared.discard_failed(&mut host, &state.run, &task)?;
+                                    }
+                                    return Err(error);
+                                }
+                            }
                         };
-                        let mut host = owner
-                            .lock()
-                            .map_err(|_| refused("host owner unavailable"))?;
+                        let mut host = self.lock_owner(&owner)?;
                         let (index, state, task) =
                             host.resolve_task_mcp(&self.auth, &self.endpoint)?;
                         let record = state
@@ -550,9 +611,7 @@ impl TaskMcp {
                 };
                 HostRefusal::new("provider_wait", reason)
             })?;
-            host = owner
-                .lock()
-                .map_err(|_| refused("host owner unavailable"))?;
+            host = self.lock_owner(&owner)?;
             host.resolve_task_mcp(&self.auth, &self.endpoint)?;
             if host.bind_publication(&request)? != bound {
                 let why = "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.";
@@ -673,7 +732,10 @@ impl TaskMcp {
         arguments: Value,
     ) -> Option<Result<Value, HostError>> {
         let host = self.host.upgrade()?;
-        let mut host = host.lock().ok()?;
+        let mut host = match self.lock_reply_owner(&host) {
+            Ok(host) => host,
+            Err(error) => return Some(Err(error)),
+        };
         if host.hooks.pending.is_some() {
             return Some(self.retry_pending_finish(&mut host, arguments));
         }
@@ -814,13 +876,9 @@ impl HostCommandOwner {
         if self.native_recovery_pending || self.recovery_only {
             return Err(HostRefusal::new("recovery_frozen", "native recovery is pending").into());
         }
-        endpoint.check_live().map_err(|reason| {
-            HostError::from(if reason == "task_authority_paused" {
-                HostRefusal::new(&reason, "the run is paused; retry after it resumes")
-            } else {
-                HostRefusal::new(&reason, "task authority expired")
-            })
-        })?;
+        endpoint
+            .check_live()
+            .map_err(|why| task_authority_error(&why))?;
         let index = self.resolve_attachment(Some(&auth.bearer()))?;
         let authority = endpoint.authority();
         let scope = self.attachments[index]
@@ -1073,23 +1131,16 @@ impl TaskMcp {
         args: Value,
         result: &rmcp::model::CallToolResult,
     ) -> std::io::Result<()> {
-        let Some(host) = self.host.upgrade() else {
+        let Some(observer) = self.evaluation_observer.get() else {
             return Ok(());
         };
-        let observer = host
-            .lock()
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .evaluation_observer
-            .clone();
-        if let Some(observer) = observer {
-            observer.call(
-                self.endpoint.authority().task.0.as_str(),
-                self.endpoint.authority().attempt.0.as_str(),
-                name,
-                args,
-                result,
-            )?;
+        let result = observer.call(&self.endpoint, name, args, result);
+        if result.is_err() {
+            self.measurements
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .incomplete = true;
         }
-        Ok(())
+        result
     }
 }

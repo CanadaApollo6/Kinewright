@@ -81,6 +81,8 @@ struct Ingress {
     gate: Mutex<()>,
     #[cfg(test)]
     admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(all(test, target_os = "linux"))]
+    owner_wait: Mutex<Option<Arc<std::sync::Barrier>>>,
     phase: AtomicU8,
     revoked: AtomicBool,
     paused: AtomicBool,
@@ -124,6 +126,8 @@ impl TaskEndpoint {
             gate: Mutex::new(()),
             #[cfg(test)]
             admission_hook: Mutex::new(None),
+            #[cfg(all(test, target_os = "linux"))]
+            owner_wait: Mutex::new(None),
             phase: AtomicU8::new(INGRESS_OPEN),
             revoked: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -156,6 +160,16 @@ impl TaskEndpoint {
     }
     pub(crate) fn media_read_live(&self) -> bool {
         self.check_live().is_ok() && self.0.phase.load(Ordering::Acquire) == INGRESS_OPEN
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn observe_next_owner_wait_for_fixture(&self, gate: Arc<std::sync::Barrier>) {
+        *self.0.owner_wait.lock().unwrap() = Some(gate);
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn signal_owner_wait_for_fixture(&self) {
+        if let Some(gate) = self.0.owner_wait.lock().unwrap().take() {
+            gate.wait();
+        }
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn media_read_pending_for_fixture(&self) -> bool {

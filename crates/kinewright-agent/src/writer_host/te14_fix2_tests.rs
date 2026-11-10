@@ -328,12 +328,16 @@ fn te14_fix2_classification_is_host_owned() {
     }
 }
 fn te14_fix2_media_wait(cold: bool, action: u8) {
-    use std::sync::{Arc, Barrier};
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::{Duration, Instant};
     let (f, run, child, core, mcp, _) = te14_media_fixture();
     f.host.runtime.stop();
     let owner = f.host.owner.upgrade().unwrap();
     let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
+    let unexpected_cold = Arc::new(AtomicBool::new(false));
     let endpoint = {
         let mut host = owner.lock().unwrap();
         host.hooks.context_media_wait = Some(if action == 0 {
@@ -343,18 +347,16 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
         });
         host.hooks.context_media_prepare_delay = Some(Duration::from_millis(80));
         let endpoint = host.hooks.runs[&run].tasks[&child].endpoint();
+        host.hooks.context_media_gate = Some(gate.clone());
         if cold {
             let store = host.owner().unwrap().store().unwrap();
             store.clear_media_memo_for_fixture().unwrap();
-            let gate = gate.clone();
+            let unexpected_cold = unexpected_cold.clone();
             store
                 .hold_next_cold_media_for_fixture(Arc::new(move || {
-                    gate.0.wait();
-                    gate.1.wait();
+                    unexpected_cold.store(true, Ordering::Release);
                 }))
                 .unwrap();
-        } else {
-            host.hooks.context_media_gate = Some(gate.clone());
         }
         endpoint
     };
@@ -431,11 +433,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
     let words = serde_json::to_string(&first).unwrap();
     if action == 0 {
         assert!(
-            words.contains(if cold {
-                "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned."
-            } else {
-                "Media decode or seek did not finish within the 30-second wait. Don't retry this read; replan without guessing."
-            }),
+            words.contains("Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned."),
             "TE14_FIX2_MEDIA_WORDS {words}"
         );
         assert!(
@@ -444,7 +442,7 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
                 .contains("Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned."),
             "TE14_FIX2_BUSY_RETRY"
         );
-        if cold {
+        {
             let sample = te14_outcome(mcp.wire("read_task_evidence", request));
             assert!(
                 !sample["items"].as_array().unwrap().is_empty(),
@@ -459,13 +457,14 @@ fn te14_fix2_media_wait(cold: bool, action: u8) {
     } else {
         assert!(words.contains("no longer live"), "TE14_FIX2_REVOKED_WORDS");
     }
+    assert!(!unexpected_cold.load(Ordering::Acquire));
 }
 #[test]
 fn te14_fix2_verification_wait_retry_then_sample() {
     te14_fix2_media_wait(true, 0);
 }
 #[test]
-fn te14_fix2_decode_overrun_is_not_retryable() {
+fn te14_fix2_decode_overrun_reuses_pending_read() {
     te14_fix2_media_wait(false, 0);
 }
 #[test]
@@ -762,10 +761,11 @@ fn te14_fix2_real_scale_measurements() {
             .unwrap()
             .clear_media_memo_for_fixture()
             .unwrap();
+        drop(host);
         let now = Instant::now();
-        host.restore_native_run(&run).unwrap();
+        super::super::run_inputs::restore(&owner, &run).unwrap();
         println!(
-            "TE14_FIX2_SCALE phase=cold_restore_owner_locked bytes={bytes} seconds={:.6}",
+            "TE14_FIX2_SCALE phase=cold_restore bytes={bytes} seconds={:.6}",
             now.elapsed().as_secs_f64()
         );
     }

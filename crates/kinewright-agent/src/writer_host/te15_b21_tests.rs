@@ -544,6 +544,8 @@ mod tests {
             b.f.host.owner.clone(),
             auth,
             endpoint.clone(),
+            #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+            host.evaluation_observer.clone(),
             Arc::default(),
             None,
         );

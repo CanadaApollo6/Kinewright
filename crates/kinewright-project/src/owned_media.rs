@@ -418,9 +418,18 @@ impl CertifiedMediaInput {
         source: CertifiedSource,
         interpretation: MediaInterpretation,
     ) -> Result<Self, BundleError> {
-        let probe = source
-            .probe(Arc::new(AtomicBool::new(false)))
-            .map_err(io_error)?;
+        Self::from_verified_source_with_cancel(
+            source,
+            interpretation,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+    fn from_verified_source_with_cancel(
+        source: CertifiedSource,
+        interpretation: MediaInterpretation,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, BundleError> {
+        let probe = source.probe(cancel).map_err(io_error)?;
         if !interpretation.matches_probe(&probe)? {
             return Err(BundleError::Corrupt("probe/interpretation conflict".into()));
         }
@@ -446,6 +455,9 @@ impl CertifiedMediaInput {
     #[must_use]
     pub fn identity(&self) -> kinewright_media::owned_io::CertifiedIdentity {
         self.source.identity()
+    }
+    pub fn verify_unchanged(&self) -> Result<(), BundleError> {
+        self.source.verify_unchanged().map_err(io_error)
     }
     pub fn cursor(
         &self,
@@ -579,8 +591,13 @@ impl ProjectStore {
     ) -> Result<(MediaAsset, OwnedInputEntry, Vec<SealedObject>), BundleError> {
         let (source, table) = self.admit_measured_media(reader, length)?;
         let sealed_table = self.admit_record(&table)?;
-        let certificate =
-            self.certify_media_parts(&source.reference, &sealed_table.reference, None, None)?;
+        let certificate = self.certify_media_parts(
+            &source.reference,
+            &sealed_table.reference,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )?;
         let cancel = Arc::new(AtomicBool::new(false));
         let probe = certificate.probe(Arc::clone(&cancel)).map_err(io_error)?;
         let probed_color = probe.color_description.clone();
@@ -656,39 +673,60 @@ impl ProjectStore {
         &self,
         reference: &OwnedInputRef,
     ) -> Result<CertifiedMediaInput, BundleError> {
+        self.certify_media_input_with_cancel(reference, Arc::new(AtomicBool::new(false)))
+    }
+    pub fn certify_media_input_with_cancel(
+        &self,
+        reference: &OwnedInputRef,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<CertifiedMediaInput, BundleError> {
         let manifest = self.read_input_manifest(&reference.manifest_ref)?;
         if !manifest.entries.contains(&reference.entry) {
             return Err(BundleError::Identity("media manifest binding".into()));
         }
-        self.certify_media_entry_in_context(&reference.entry, Some(&reference.manifest_ref))
+        self.certify_media_entry_in_context(&reference.entry, Some(&reference.manifest_ref), cancel)
     }
     pub(crate) fn certify_media_entry(
         &self,
         entry: &OwnedInputEntry,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_entry_in_context(entry, None)
+        self.certify_media_entry_in_context(entry, None, Arc::new(AtomicBool::new(false)))
     }
     fn certify_media_entry_in_context(
         &self,
         entry: &OwnedInputEntry,
         context: Option<&ObjectRef>,
+        cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedMediaInput, BundleError> {
         let interpretation = entry.media_interpretation()?;
-        let memo = self.media_admission_memo(entry)?;
-        #[cfg(any(test, feature = "test-util"))]
-        if memo.is_none() {
-            self.observe_cold_media_for_fixture()?;
-        }
-        let source = self.certify_media_parts(
+        let mut memo = self.media_admission_memo(entry)?;
+        let reused = self.certify_media_parts(
             &entry.object,
             entry.chunk_table_ref()?,
             context,
             memo.as_ref(),
-        )?;
+            Arc::clone(&cancel),
+        );
+        let source = match reused {
+            Err(_) if memo.is_some() => {
+                self.forget_media_admission(entry)?;
+                memo = None;
+                self.certify_media_parts(
+                    &entry.object,
+                    entry.chunk_table_ref()?,
+                    context,
+                    None,
+                    Arc::clone(&cancel),
+                )?
+            }
+            result => result?,
+        };
         if memo.is_some() {
             return CertifiedMediaInput::from_admitted_source(source, interpretation);
         }
-        let certificate = CertifiedMediaInput::from_verified_source(source, interpretation)?;
+        let certificate =
+            CertifiedMediaInput::from_verified_source_with_cancel(source, interpretation, cancel)?;
+        certificate.verify_unchanged()?;
         self.remember_media_admission(
             entry,
             certificate.source.admission_memo().map_err(io_error)?,
@@ -701,6 +739,7 @@ impl ProjectStore {
         table_ref: &ObjectRef,
         context: Option<&ObjectRef>,
         memo: Option<&kinewright_media::owned_io::SourceAdmissionMemo>,
+        cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedSource, BundleError> {
         let table = self.shared_chunk_table(table_ref)?;
         table.table.validate_binding(source, self.limits())?;
@@ -719,7 +758,9 @@ impl ProjectStore {
                 .map_err(io_error)?;
             return self.bind_source_read_authority(source);
         }
-        let source = CertifiedSource::verify(
+        #[cfg(any(test, feature = "test-util"))]
+        self.observe_cold_media_for_fixture()?;
+        let source = CertifiedSource::verify_with_cancel(
             file,
             parse_digest(&source.sha256)?,
             source.byte_length,
@@ -727,6 +768,7 @@ impl ProjectStore {
             Arc::clone(&table.chunks),
             Arc::new((pin, table)),
             self.decoder_reserver(),
+            cancel,
         )
         .map_err(io_error)?;
         self.bind_source_read_authority(source)
@@ -1095,7 +1137,13 @@ mod tests {
         assert!(
             owner
                 .store()
-                .certify_media_parts(&blob.reference, &hashed.reference, None, None)
+                .certify_media_parts(
+                    &blob.reference,
+                    &hashed.reference,
+                    None,
+                    None,
+                    Arc::new(AtomicBool::new(false)),
+                )
                 .is_err(),
             "C0_CONFLICTING_TABLE_BINDING_REFUSED"
         );
@@ -1215,20 +1263,62 @@ mod tests {
             .open_audio(Arc::new(AtomicBool::new(false)))
             .expect("C0_UNRELATED_DAMAGE_DOES_NOT_BLOCK_SELECTED_CERTIFICATE");
         assert!(decoder.next_frame().unwrap().is_some());
-        let damaged = owner
-            .store()
-            .certify_media_input(&OwnedInputRef {
-                manifest_ref: sealed.reference.clone(),
-                entry: second,
-            })
-            .unwrap();
+        let damaged = owner.store().certify_media_input(&OwnedInputRef {
+            manifest_ref: sealed.reference.clone(),
+            entry: second,
+        });
         assert!(
-            damaged
-                .open_audio(Arc::new(AtomicBool::new(false)))
-                .is_err(),
-            "C0_MEMO_DOES_NOT_BYPASS_ACTUAL_USE_CHUNK_CHECKS"
+            damaged.is_err_and(|error| error.to_string().contains("damaged certified input")),
+            "C0_CHANGED_SOURCE_RECERTIFICATION_REJECTS_DAMAGE"
         );
         drop((first_pins, second_pins));
+    }
+
+    #[test]
+    fn s3_changed_stamp_recertifies_unchanged_bytes_and_refreshes_memo() {
+        let (_root, mut owner) = session("c0-source-stamp-refresh");
+        let (_asset, entry, _pins) = import(&mut owner, 1, 3456);
+        let sealed = owner
+            .admit_inputs(&manifest(&owner, vec![entry.clone()]))
+            .unwrap();
+        let reference = OwnedInputRef {
+            manifest_ref: sealed.reference.clone(),
+            entry,
+        };
+        let original = owner.store().certify_media_input(&reference).unwrap();
+        assert!(!original.certification_was_cold());
+        let root = owner.store().resolved_root().unwrap();
+        let assets = root.with_file_name(format!(
+            "{}.kinewright-assets",
+            root.file_stem().unwrap().to_string_lossy()
+        ));
+        let file = File::options()
+            .write(true)
+            .open(
+                assets
+                    .join("studio/objects")
+                    .join(&reference.entry.object.sha256),
+            )
+            .unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        file.set_times(
+            std::fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(2)),
+        )
+        .unwrap();
+        assert!(original.verify_unchanged().is_err());
+        let refreshed = owner.store().certify_media_input(&reference).unwrap();
+        assert!(refreshed.certification_was_cold());
+        refreshed.verify_unchanged().unwrap();
+        let mut decoder = refreshed
+            .open_audio(Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        assert!(decoder.next_frame().unwrap().is_some());
+        let warm = owner.store().certify_media_input(&reference).unwrap();
+        assert!(
+            !warm.certification_was_cold(),
+            "C0_REFRESHED_STAMP_IS_MEMOIZED"
+        );
+        warm.verify_unchanged().unwrap();
     }
 
     #[test]

@@ -123,6 +123,8 @@ fn te1_review_native_size_observer_survives_missing_host_and_poison() {
                 },
                 owner.run_producer(&run).unwrap(),
                 retained.tasks[&execution.task].endpoint(),
+                #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+                owner.evaluation_observer.clone(),
                 retained.measurements[&execution.task].clone(),
                 None,
             )

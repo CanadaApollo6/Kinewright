@@ -1414,6 +1414,17 @@ pub struct FrozenContext {
     _document_charge: StorageReservation,
     reserve_frame: std::sync::Arc<kinewright_media::owned_io::CursorReservation>,
 }
+pub struct FrozenContextRequest {
+    snapshot: PinnedSnapshot,
+}
+impl FrozenContextRequest {
+    pub fn open(self) -> Result<FrozenContext, BundleError> {
+        self.snapshot
+            .pin
+            .read_store()
+            .build_frozen_context(self.snapshot)
+    }
+}
 impl ProjectBundle {
     pub fn frozen_context(&self, key: &SnapshotKey) -> Result<FrozenContext, BundleError> {
         let snapshot = self.read_snapshot(key)?;
@@ -1423,15 +1434,23 @@ impl ProjectBundle {
         &self,
         descriptor: &SnapshotDescriptor,
     ) -> Result<FrozenContext, BundleError> {
+        self.prepare_frozen_context_descriptor(descriptor)?.open()
+    }
+    pub fn prepare_frozen_context_descriptor(
+        &self,
+        descriptor: &SnapshotDescriptor,
+    ) -> Result<FrozenContextRequest, BundleError> {
         self.validate_snapshot(descriptor)?;
         let roots = descriptor.references();
         let pin = self.store.pin(&roots)?;
         let charges = vec![charge_value(&self.store, descriptor)?];
-        self.store.build_frozen_context(PinnedSnapshot {
-            descriptor: descriptor.clone(),
-            pin,
-            roots,
-            _charges: charges,
+        Ok(FrozenContextRequest {
+            snapshot: PinnedSnapshot {
+                descriptor: descriptor.clone(),
+                pin,
+                roots,
+                _charges: charges,
+            },
         })
     }
 }
@@ -1702,6 +1721,14 @@ impl FrozenContext {
         store.reserve(bytes, 3 * bytes, 0, true)
     }
 
+    /// Recheck certified descriptors without rereading the footage.
+    pub fn verify_certification_current(&self) -> Result<(), BundleError> {
+        self.snapshot.pin.read_store().check_read_authority()?;
+        for lease in &self.certified_input_leases {
+            lease.verify_certification_current()?;
+        }
+        Ok(())
+    }
     /// Check retained native descriptors, failure latches and one verified chunk
     /// before releasing an originating attachment. Later chunks remain verified
     /// by the existing cursor on demand; this is not a new full-media scan.
@@ -1805,6 +1832,13 @@ impl crate::editing_session::Ja1EditingSession {
         descriptor: &SnapshotDescriptor,
     ) -> Result<FrozenContext, BundleError> {
         self.active_bundle()?.frozen_context_descriptor(descriptor)
+    }
+    pub fn prepare_frozen_context_descriptor(
+        &self,
+        descriptor: &SnapshotDescriptor,
+    ) -> Result<FrozenContextRequest, BundleError> {
+        self.active_bundle()?
+            .prepare_frozen_context_descriptor(descriptor)
     }
     pub fn studio_versions(&self) -> Result<Vec<SnapshotKey>, BundleError> {
         Ok(self

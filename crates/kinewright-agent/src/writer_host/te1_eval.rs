@@ -718,7 +718,10 @@ impl Studio {
             .ok_or_else(|| io_error("eval owner gone"))?;
         let mut locked = owner.lock().map_err(io_error)?;
         locked.fixture_director = false;
-        locked.evaluation_observer = Some(observer.clone());
+        locked
+            .evaluation_observer
+            .set(observer.clone())
+            .map_err(|_| io_error("eval observer already installed"))?;
         let explanation = locked
             .owner_mut()
             .map_err(io_error)?

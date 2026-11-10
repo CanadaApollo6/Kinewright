@@ -315,8 +315,14 @@ fn bytes_rows(bytes: &[u8]) -> Vec<Value> {
 }
 
 pub(super) struct PreparedMediaRead {
-    lease: kinewright_project::owned_inputs::InputLeaseRequest,
-    alive: Arc<std::sync::atomic::AtomicBool>,
+    work: Arc<MediaReadWork>,
+    deadline: std::time::Instant,
+    #[cfg(test)]
+    poll_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
+}
+struct MediaReadInput {
+    source: kinewright_project::owned_inputs::CertifiedMediaInput,
+    refresh: kinewright_project::owned_inputs::InputLeaseRequest,
     micros: i64,
     audio: bool,
     at: i64,
@@ -325,9 +331,6 @@ pub(super) struct PreparedMediaRead {
     clip_id: ClipId,
     cursor: Option<String>,
     binding: Value,
-    deadline: std::time::Instant,
-    #[cfg(test)]
-    poll_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     switch_generation: Option<u64>,
     #[cfg(test)]
     gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
@@ -337,9 +340,23 @@ pub(super) struct PreparedMediaRead {
     outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 pub(super) struct RenderedMediaRead {
+    source: kinewright_project::owned_inputs::CertifiedMediaInput,
     binding: Value,
     value: Value,
     switch_generation: Option<u64>,
+}
+pub(super) struct MediaReadWork {
+    key: Value,
+    state: std::sync::Mutex<MediaReadState>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    switch_generation: Option<u64>,
+}
+enum MediaReadState {
+    Queued(Box<MediaReadInput>),
+    Running,
+    Ready(Result<Arc<RenderedMediaRead>, HostRefusal>),
+    Failed,
 }
 
 // FFmpeg's linesize includes padding. Never expose padding or inactive samples.
@@ -371,19 +388,6 @@ fn visible_prefix(
 }
 const MEDIA_READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RETRY: &str = "Media source verification or an earlier read is still running. Retry shortly; no page is charged until a sample is returned.";
-const MEDIA_PREPARING_RETRY: &str = "Media evidence preparation exceeded this wait. Retry shortly; no page is charged until a sample is returned.";
-const MEDIA_DECODE_TIMEOUT: &str = "Media decode or seek did not finish within the 30-second wait. Don't retry this read; replan without guessing.";
-enum MediaReadPhase {
-    Verifying,
-    Decoding { cold: bool },
-    Assembling { cold: bool },
-}
-struct CancelMediaRead(Arc<std::sync::atomic::AtomicBool>);
-impl Drop for CancelMediaRead {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Release);
-    }
-}
 fn media_unavailable() -> HostError {
     refused("Media read cancelled because the task is no longer live or its source changed.")
 }
@@ -392,78 +396,170 @@ fn media_failed() -> HostError {
 }
 impl PreparedMediaRead {
     pub(super) fn render(
-        self,
+        &self,
         endpoint: &crate::orchestration::tasks::TaskEndpoint,
         owner: &Arc<std::sync::Mutex<HostCommandOwner>>,
-    ) -> Result<RenderedMediaRead, HostError> {
-        use std::sync::atomic::Ordering;
-        let permit = endpoint.begin_media_read().map_err(|error| match error {
-            crate::orchestration::tasks::MediaReadStartError::Busy => refused(MEDIA_RETRY),
-            crate::orchestration::tasks::MediaReadStartError::Unavailable => media_unavailable(),
-        })?;
-        let alive = Arc::clone(&self.alive);
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let signal = Arc::clone(&cancel);
-        let phase = Arc::new(std::sync::Mutex::new(MediaReadPhase::Verifying));
-        let worker_phase = Arc::clone(&phase);
-        let _cancel_on_exit = CancelMediaRead(Arc::clone(&cancel));
-        let deadline = self.deadline;
+    ) -> Result<Arc<RenderedMediaRead>, HostError> {
+        let owner = Arc::downgrade(owner);
+        let started = self.work.start(endpoint, &owner)?;
         #[cfg(test)]
-        let poll_gate = self.poll_gate.clone();
-        let switch_generation = self.switch_generation;
-        #[cfg(test)]
-        let outcome = self.outcome.clone();
-        let worker = std::thread::Builder::new()
-            .name("task-media-read".into())
-            .spawn(move || {
-                let _permit = permit;
-                let result = self.decode(&signal, &worker_phase);
-                #[cfg(test)]
-                if let Some(outcome) = outcome {
-                    outcome.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release);
-                }
-                result
-            })
-            .map_err(|_| media_failed())?;
-        #[cfg(test)]
-        Self::decode_gate(poll_gate.as_ref());
+        MediaReadInput::decode_gate(self.poll_gate.as_ref());
         loop {
-            let mut stopped = !endpoint.media_read_live() || !alive.load(Ordering::Acquire);
-            if let Ok(host) = owner.try_lock() {
-                stopped |= host.switch_frozen || host.recovering;
-                stopped |= host
-                    .owner()
-                    .ok()
-                    .and_then(|project| project.manual_switch_generation().ok())
-                    != switch_generation;
-                #[cfg(target_os = "linux")]
-                {
-                    stopped |= host.native_recovery_pending || host.recovery_only;
-                }
-            }
-            if stopped {
+            if self.work.stopped(endpoint, &owner) {
+                self.work
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Release);
                 return Err(media_unavailable());
             }
-            if worker.is_finished() {
-                return worker
-                    .join()
-                    .map_err(|_| media_failed())?
-                    .map_err(|_| media_failed());
+            {
+                let mut state = self.work.state.lock().map_err(|_| media_failed())?;
+                match &*state {
+                    MediaReadState::Ready(result) => {
+                        let result = result.clone();
+                        if result.is_err() {
+                            *state = MediaReadState::Failed;
+                        }
+                        return result.map_err(HostError::from);
+                    }
+                    MediaReadState::Failed => return Err(media_failed()),
+                    MediaReadState::Queued(_) | MediaReadState::Running => {}
+                }
             }
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                let phase = phase.lock().map_err(|_| media_failed())?;
-                return Err(refused(match *phase {
-                    MediaReadPhase::Verifying => MEDIA_RETRY,
-                    MediaReadPhase::Decoding { cold: false }
-                    | MediaReadPhase::Assembling { cold: false } => MEDIA_DECODE_TIMEOUT,
-                    MediaReadPhase::Decoding { cold: true }
-                    | MediaReadPhase::Assembling { cold: true } => MEDIA_PREPARING_RETRY,
-                }));
+            if !started || std::time::Instant::now() >= self.deadline {
+                return Err(refused(MEDIA_RETRY));
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+    pub(super) fn discard_failed(
+        &self,
+        host: &mut HostCommandOwner,
+        run: &RunId,
+        task: &TaskId,
+    ) -> Result<(), HostError> {
+        if self.failed()?
+            && let Some(run) = host.hooks.runs.get_mut(run)
+            && run
+                .media_reads
+                .get(task)
+                .is_some_and(|work| Arc::ptr_eq(work, &self.work))
+        {
+            run.media_reads.remove(task);
+        }
+        Ok(())
+    }
+    pub(super) fn failed(&self) -> Result<bool, HostError> {
+        Ok(matches!(
+            *self.work.state.lock().map_err(|_| media_failed())?,
+            MediaReadState::Failed
+        ))
+    }
+}
+impl MediaReadWork {
+    fn stopped(
+        &self,
+        endpoint: &crate::orchestration::tasks::TaskEndpoint,
+        owner: &std::sync::Weak<std::sync::Mutex<HostCommandOwner>>,
+    ) -> bool {
+        if !endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        let Some(owner) = owner.upgrade() else {
+            return true;
+        };
+        let Ok(host) = owner.try_lock() else {
+            return false;
+        };
+        let stopped = host.switch_frozen
+            || host.recovering
+            || host
+                .owner()
+                .ok()
+                .and_then(|project| project.manual_switch_generation().ok())
+                != self.switch_generation;
+        #[cfg(target_os = "linux")]
+        let stopped = stopped || host.native_recovery_pending || host.recovery_only;
+        stopped
+    }
+    fn pending(&self) -> Result<bool, HostError> {
+        Ok(!matches!(
+            *self.state.lock().map_err(|_| media_failed())?,
+            MediaReadState::Ready(_) | MediaReadState::Failed
+        ))
+    }
+    fn start(
+        self: &Arc<Self>,
+        endpoint: &crate::orchestration::tasks::TaskEndpoint,
+        owner: &std::sync::Weak<std::sync::Mutex<HostCommandOwner>>,
+    ) -> Result<bool, HostError> {
+        let mut state = self.state.lock().map_err(|_| media_failed())?;
+        if !matches!(*state, MediaReadState::Queued(_)) {
+            return Ok(false);
+        }
+        let permit = endpoint.begin_media_read().map_err(|error| match error {
+            crate::orchestration::tasks::MediaReadStartError::Busy => refused(MEDIA_RETRY),
+            crate::orchestration::tasks::MediaReadStartError::Unavailable => media_unavailable(),
+        })?;
+        let MediaReadState::Queued(input) = std::mem::replace(&mut *state, MediaReadState::Running)
+        else {
+            unreachable!()
+        };
+        let work = Arc::clone(self);
+        let owner = owner.clone();
+        let endpoint = endpoint.clone();
+        if std::thread::Builder::new()
+            .name("task-media-watch".into())
+            .spawn(move || {
+                let signal = Arc::clone(&work.cancel);
+                let result = std::thread::Builder::new()
+                    .name("task-media-read".into())
+                    .spawn(move || {
+                        let _permit = permit;
+                        #[cfg(test)]
+                        let outcome = input.outcome.clone();
+                        let result = input.decode(&signal);
+                        #[cfg(test)]
+                        if let Some(outcome) = outcome {
+                            outcome.store(
+                                if result.is_ok() { 1 } else { 2 },
+                                std::sync::atomic::Ordering::Release,
+                            );
+                        }
+                        result
+                    })
+                    .map_err(|_| media_failed())
+                    .and_then(|worker| {
+                        loop {
+                            if work.stopped(&endpoint, &owner) {
+                                work.cancel
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            if worker.is_finished() {
+                                let result = worker.join().map_err(|_| media_failed())?;
+                                return if work.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                    Err(media_unavailable())
+                                } else {
+                                    result
+                                };
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    });
+                *work
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = MediaReadState::Ready(
+                    result.map(Arc::new).map_err(|_| media_failed().refusal()),
+                );
+            })
+            .is_err()
+        {
+            *state = MediaReadState::Ready(Err(media_failed().refusal()));
+        }
+        Ok(true)
+    }
+}
+impl MediaReadInput {
     #[cfg(test)]
     fn decode_gate(gate: Option<&Arc<(std::sync::Barrier, std::sync::Barrier)>>) {
         if let Some(gate) = gate {
@@ -471,26 +567,22 @@ impl PreparedMediaRead {
             gate.1.wait();
         }
     }
-    // Cold certification may outlive a cancelled caller. The worker retains
-    // its real pins and endpoint permit until that operation exits; no second
-    // worker on the endpoint can accumulate behind it. Decode is cancellable.
     fn decode(
         self,
         cancel: &Arc<std::sync::atomic::AtomicBool>,
-        phase: &std::sync::Mutex<MediaReadPhase>,
     ) -> Result<RenderedMediaRead, HostError> {
         use base64::Engine as _;
         #[cfg(test)]
         let gate = self.gate;
         #[cfg(test)]
         let assembly_gate = self.assembly_gate;
-        let lease = self.lease.open()?;
-        if cancel.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(media_unavailable());
-        }
-        let source = lease.certified_source()?;
-        let cold = source.certification_was_cold();
-        *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Decoding { cold };
+        check_context_cancel(Some(cancel.as_ref()))?;
+        let source = if self.source.verify_unchanged().is_ok() {
+            self.source
+        } else {
+            self.refresh.certified_media_source(Arc::clone(cancel))?
+        };
+        source.verify_unchanged()?;
         let mut value = if self.audio {
             let mut decoder = source.open_audio(Arc::clone(cancel))?;
             #[cfg(test)]
@@ -502,7 +594,6 @@ impl PreparedMediaRead {
                 .next_frame()
                 .map_err(|_| refused("owned audio unavailable"))?
                 .ok_or_else(|| refused("owned audio unavailable"))?;
-            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling { cold };
             #[cfg(test)]
             Self::decode_gate(assembly_gate.as_ref());
             let channels = usize::from(frame.channels());
@@ -584,7 +675,6 @@ impl PreparedMediaRead {
                 .next_frame()
                 .map_err(|_| refused("owned frame unavailable"))?
                 .ok_or_else(|| refused("owned frame unavailable"))?;
-            *phase.lock().map_err(|_| media_failed())? = MediaReadPhase::Assembling { cold };
             #[cfg(test)]
             Self::decode_gate(assembly_gate.as_ref());
             let descriptor = frame
@@ -629,6 +719,7 @@ impl PreparedMediaRead {
         let value = page(&rows, &binding, self.cursor.as_deref(), PAGE_BYTES - 4096)?;
         check_context_cancel(Some(cancel.as_ref()))?;
         Ok(RenderedMediaRead {
+            source,
             binding,
             value,
             switch_generation: self.switch_generation,
@@ -1030,7 +1121,6 @@ impl HostCommandOwner {
         task: &TaskRecord,
         read: &EvidenceRead,
     ) -> Result<PreparedMediaRead, HostError> {
-        use kinewright_project::owned_inputs::OwnedInputRef;
         let wait = MEDIA_READ_LIMIT;
         #[cfg(test)]
         let wait = self.hooks.context_media_wait.take().unwrap_or(wait);
@@ -1067,19 +1157,45 @@ impl HostCommandOwner {
             .iter()
             .find(|e| e.matches_media_asset(asset))
             .ok_or_else(|| refused("media is not owned by task inputs"))?;
-        let lease = store.input_lease_request(&OwnedInputRef {
-            manifest_ref: task.brief.inputs.clone(),
-            entry: entry.clone(),
-        })?;
+        let run = self.hooks.runs.get(&state.run).ok_or_else(media_failed)?;
+        let lease = run
+            .inputs
+            .context
+            .certified_input_leases
+            .iter()
+            .find(|lease| lease.identity().entry == *entry)
+            .ok_or_else(media_failed)?;
+        let source = lease.certified_source()?;
+        let endpoint = run.tasks.get(&task.id).ok_or_else(media_failed)?.endpoint();
+        let switch_generation = self.owner()?.manual_switch_generation().ok();
         let micros = i64::try_from(
             i128::from(at) * 1_000_000 * i128::from(asset.fps.denominator())
                 / i128::from(asset.fps.numerator()),
         )
         .map_err(|_| refused("media time overflow"))?;
         let binding = json!({"run":state.run,"task":task.id,"source":task.brief.scope.base,"evidence":read.evidence});
-        Ok(PreparedMediaRead {
-            lease,
-            alive: Arc::clone(&self.attachments[index].alive),
+        let key = json!({"endpoint":endpoint.authority().endpoint,"revision":read.revision,"cursor":read.cursor,"binding":binding,"switch_generation":switch_generation});
+        if let Some(work) = run.media_reads.get(&task.id) {
+            let failed = matches!(
+                *work.state.lock().map_err(|_| media_failed())?,
+                MediaReadState::Failed
+            );
+            if work.key == key && !failed && !work.cancel.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Ok(PreparedMediaRead {
+                    work: Arc::clone(work),
+                    deadline,
+                    #[cfg(test)]
+                    poll_gate: self.hooks.context_media_poll_gate.take(),
+                });
+            }
+            if work.pending()? {
+                return Err(refused(MEDIA_RETRY));
+            }
+        }
+        let input = MediaReadInput {
+            source,
+            refresh: lease.media_recertification_request()?,
             micros,
             audio,
             at,
@@ -1088,16 +1204,32 @@ impl HostCommandOwner {
             clip_id,
             cursor: read.cursor.clone(),
             binding,
-            deadline,
-            #[cfg(test)]
-            poll_gate: self.hooks.context_media_poll_gate.take(),
-            switch_generation: self.owner()?.manual_switch_generation().ok(),
+            switch_generation,
             #[cfg(test)]
             gate: self.hooks.context_media_gate.take(),
             #[cfg(test)]
             assembly_gate: self.hooks.context_media_assembly_gate.take(),
             #[cfg(test)]
             outcome: self.hooks.context_media_outcome.take(),
+        };
+        let work = Arc::new(MediaReadWork {
+            key,
+            state: std::sync::Mutex::new(MediaReadState::Queued(Box::new(input))),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            alive: Arc::clone(&self.attachments[index].alive),
+            switch_generation,
+        });
+        self.hooks
+            .runs
+            .get_mut(&state.run)
+            .ok_or_else(media_failed)?
+            .media_reads
+            .insert(task.id.clone(), Arc::clone(&work));
+        Ok(PreparedMediaRead {
+            work,
+            deadline,
+            #[cfg(test)]
+            poll_gate: self.hooks.context_media_poll_gate.take(),
         })
     }
     pub(super) fn finish_media_context(
@@ -1115,6 +1247,20 @@ impl HostCommandOwner {
             || self.owner()?.manual_switch_generation().ok() != rendered.switch_generation
         {
             return Err(refused("stale evidence revision after decode"));
+        }
+        if rendered.source.verify_unchanged().is_err() {
+            if let Some(run) = self.hooks.runs.get_mut(&state.run)
+                && let Some(work) = run.media_reads.get(&task.id)
+            {
+                let cached = matches!(
+                    &*work.state.lock().map_err(|_| media_failed())?,
+                    MediaReadState::Ready(Ok(cached)) if std::ptr::eq(cached.as_ref(), rendered)
+                );
+                if cached {
+                    run.media_reads.remove(&task.id);
+                }
+            }
+            return Err(media_failed());
         }
         self.record_expansion(
             index,

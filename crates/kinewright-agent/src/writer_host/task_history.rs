@@ -376,7 +376,7 @@ impl HostCommandOwner {
             let frozen_result = frozen_result.map(|mut result| {
                 if let Some(reference) = self
                     .evaluation_observer
-                    .as_ref()
+                    .get()
                     .and_then(|observer| observer.native_child_report(state, &identity.task))
                 {
                     result.explanation = reference;

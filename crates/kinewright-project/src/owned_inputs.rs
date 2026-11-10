@@ -64,6 +64,15 @@ pub struct InputLeaseRequest {
     identity: OwnedInputRef,
 }
 impl InputLeaseRequest {
+    /// Refresh an already admitted media binding outside the owner's mutex.
+    pub fn certified_media_source(
+        self,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<CertifiedMediaInput, BundleError> {
+        self.hold
+            .read_store()
+            .certify_media_input_with_cancel(&self.identity, cancel)
+    }
     pub fn open(self) -> Result<OwnedInputLease, BundleError> {
         self.hold.read_store().lease_input(&self.identity)
     }
@@ -71,6 +80,7 @@ impl InputLeaseRequest {
 /// Retains the actual store authority and physical charge. It grants no decoder certification.
 pub struct OwnedInputLease {
     file: File,
+    certified_metadata: std::fs::Metadata,
     pin: StorePin,
     identity: OwnedInputRef,
     owner_epoch: u64,
@@ -128,15 +138,40 @@ impl OwnedInputLease {
         identity: OwnedInputRef,
         owner_epoch: u64,
         source: Option<CertifiedMediaInput>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, BundleError> {
+        let certified_metadata = file.metadata()?;
+        Ok(Self {
             file,
+            certified_metadata,
             pin,
             identity,
             owner_epoch,
             source,
             cursor: None,
+        })
+    }
+    pub(crate) fn verify_certification_current(&self) -> Result<(), BundleError> {
+        self.pin.read_store().check_read_authority()?;
+        if let Some(source) = &self.source {
+            return source.verify_unchanged();
         }
+        let current = self.file.metadata()?;
+        let certified = &self.certified_metadata;
+        let changed =
+            current.len() != certified.len() || current.modified()? != certified.modified()?;
+        #[cfg(unix)]
+        let changed = {
+            use std::os::unix::fs::MetadataExt as _;
+            changed
+                || (current.ctime(), current.ctime_nsec())
+                    != (certified.ctime(), certified.ctime_nsec())
+        };
+        if changed {
+            return Err(BundleError::Corrupt(
+                "input changed since certification".into(),
+            ));
+        }
+        Ok(())
     }
     pub fn certify_decoder_open(&self) -> Result<DecoderOpenReceipt, BundleError> {
         self.certified_source()?;
@@ -157,6 +192,16 @@ impl OwnedInputLease {
         self.source
             .clone()
             .ok_or_else(|| BundleError::Unsupported("input is not certified media".into()))
+    }
+    /// Retain the exact previously authorized binding for off-lock recertification.
+    pub fn media_recertification_request(&self) -> Result<InputLeaseRequest, BundleError> {
+        Ok(InputLeaseRequest {
+            hold: self
+                .pin
+                .read_store()
+                .pin(std::slice::from_ref(&self.identity.manifest_ref))?,
+            identity: self.identity.clone(),
+        })
     }
     fn verified_cursor(
         &mut self,
@@ -308,12 +353,6 @@ impl ProjectStore {
         } else {
             self.open_verified(&reference.entry.object)?
         };
-        Ok(OwnedInputLease::new(
-            file,
-            pin,
-            reference.clone(),
-            self.owner_epoch(),
-            source,
-        ))
+        OwnedInputLease::new(file, pin, reference.clone(), self.owner_epoch(), source)
     }
 }

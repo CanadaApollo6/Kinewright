@@ -252,6 +252,7 @@ struct Source {
     read_authority: Option<ReadAuthority>,
     file: File,
     verified_identity: OnceLock<memo::FileIdentity>,
+    certified_stamp: memo::FileStamp,
     failure: Mutex<Option<OwnedIoError>>,
     identity: CertifiedIdentity,
     chunks: Arc<[[u8; 32]]>,
@@ -312,6 +313,30 @@ impl CertifiedSource {
         lifetime: LifetimeGuard,
         reserve_cursor: Arc<CursorReservation>,
     ) -> Result<Self, OwnedIoError> {
+        Self::verify_with_cancel(
+            file,
+            source_sha256,
+            source_length,
+            table_sha256,
+            chunk_sha256,
+            lifetime,
+            reserve_cursor,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Complete verification using the caller's cancellation signal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_with_cancel(
+        file: File,
+        source_sha256: [u8; 32],
+        source_length: u64,
+        table_sha256: [u8; 32],
+        chunk_sha256: Arc<[[u8; 32]]>,
+        lifetime: LifetimeGuard,
+        reserve_cursor: Arc<CursorReservation>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, OwnedIoError> {
         let source = Self::new(
             file,
             source_sha256,
@@ -321,7 +346,7 @@ impl CertifiedSource {
             lifetime,
             reserve_cursor,
         )?;
-        let mut cursor = source.cursor(Arc::new(AtomicBool::new(false)))?;
+        let mut cursor = source.cursor(cancel)?;
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; AVIO_BUFFER_BYTES];
         loop {
@@ -336,6 +361,7 @@ impl CertifiedSource {
                 "complete source digest".into(),
             ));
         }
+        source.verify_unchanged()?;
         memo::mark_verified(&source)?;
         Ok(source)
     }
@@ -367,6 +393,7 @@ impl CertifiedSource {
         Ok(Self(
             Arc::new(Source {
                 read_authority: None,
+                certified_stamp: memo::FileStamp::of_file(&file)?,
                 file,
                 verified_identity: OnceLock::new(),
                 failure: Mutex::new(None),

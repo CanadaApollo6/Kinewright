@@ -4,18 +4,14 @@ use super::{
     orchestration::{HostRun, ProducerScope},
 };
 use crate::orchestration::orchestration_records::{RunId, TaskBrief};
-use kinewright_project::{
-    bundle_records::BranchCheckpoint,
-    studio_records::{SnapshotDescriptor, SnapshotKey, VersionId},
-};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Constructed only from the host owner's admitted and charged frozen context.
 /// Neither the wire nor a GUI callback can construct this value.
 pub struct HostOwnedInputClosure {
-    context: Arc<kinewright_project::studio_store::FrozenContext>,
-    inputs: Arc<kinewright_media::owned_io::PlaybackInputs>,
+    pub(super) context: Arc<kinewright_project::studio_store::FrozenContext>,
+    pub(super) inputs: Arc<kinewright_media::owned_io::PlaybackInputs>,
 }
 impl HostOwnedInputClosure {
     fn ready(&self) -> Result<(), HostError> {
@@ -47,29 +43,23 @@ impl HostCommandOwner {
         }
         self.owner()?
             .validate_orchestration_scope(&self.owner()?.active_manual_project()?, brief)?;
-        let checkpoint = self
-            .owner()?
-            .store()?
-            .read_record::<BranchCheckpoint>(&brief.scope.base.checkpoint)?;
-        let descriptor = SnapshotDescriptor {
-            key: SnapshotKey {
-                project: self.owner()?.active_manual_project()?,
-                version: VersionId::fresh()?,
-                head: checkpoint.head_id.clone(),
-                document_hash: checkpoint.document_hash.clone(),
-                input_manifest_ref: checkpoint.input_manifest_ref.clone(),
-            },
-            checkpoint_ref: brief.scope.base.checkpoint.clone(),
-            document_ref: checkpoint.document_ref.clone(),
-            lineage_ref: checkpoint.lineage_ref.clone(),
-            input_manifest_ref: checkpoint.input_manifest_ref.clone(),
-            revision_refs: vec![],
-            parent_version: None,
-            run_provenance: None,
+        let descriptor = self.run_input_descriptor(&brief.scope.base.checkpoint)?;
+        let prepared = if let Some(prepared) = self.hooks.prepared_run_inputs.take() {
+            prepared
+        } else {
+            let manifest = self.owner()?.store()?.read_input_manifest(&brief.inputs)?;
+            if !manifest.entries.is_empty() {
+                return Err(HostRefusal::new(
+                    "continuation_inputs",
+                    "Run inputs are not ready. Try again from the project window.",
+                )
+                .into());
+            }
+            self.prepare_run_inputs(&brief.scope.base.checkpoint)?
+                .open()?
         };
-        drop(checkpoint);
-        let context = Arc::new(self.owner()?.frozen_context_descriptor(&descriptor)?);
-        let inputs = context.playback_inputs()?;
+        prepared.recheck(&descriptor, self.owner()?.store()?.owner_epoch())?;
+        let HostOwnedInputClosure { context, inputs } = prepared;
         let producer = self.issue_attachment(
             format!("host-run:{}", run.0.as_str()),
             AttachmentRole::Producer,
@@ -98,6 +88,7 @@ impl HostCommandOwner {
                 producer,
                 inputs: HostOwnedInputClosure { context, inputs },
                 tasks: BTreeMap::new(),
+                media_reads: BTreeMap::new(),
                 continuable: true,
                 last_continue: Some(continue_floor),
                 #[cfg(target_os = "linux")]

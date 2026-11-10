@@ -441,11 +441,8 @@ pub(crate) fn recover_run(
             .as_str(),
         run.0.as_str(),
     )?;
-    let (producer, state) = host
-        .lock()
-        .map_err(|_| io::Error::other("host owner poisoned"))?
-        .restore_native_run(run)
-        .map_err(io::Error::other)?;
+    let (producer, state) =
+        crate::writer_host::run_inputs::restore(host, run).map_err(io::Error::other)?;
     let retained = claim.recovery_identities().to_vec();
     for native in retained {
         let attempt = host

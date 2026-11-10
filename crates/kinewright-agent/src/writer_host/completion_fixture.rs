@@ -145,7 +145,17 @@ impl WriterHost {
                 director: brief.clone(),
             })),
         )?;
-        let receipt = owner.dispatch_orchestration(index, &start)?;
+        let inputs = owner.prepare_run_inputs(&brief.scope.base.checkpoint)?;
+        drop(owner);
+        let inputs = inputs.open()?;
+        let mut owner = host
+            .lock()
+            .map_err(|_| HostRefusal::new("fixture", "host poisoned"))?;
+        let index = owner.resolve_attachment(Some(&self.auth.bearer()))?;
+        owner.hooks.prepared_run_inputs = Some(inputs);
+        let receipt = owner.dispatch_orchestration(index, &start);
+        owner.hooks.prepared_run_inputs = None;
+        let receipt = receipt?;
         let run: RunId = receipt
             .envelope
             .identity("run")

@@ -149,6 +149,7 @@ pub(super) struct HostRun {
     pub producer: HostAuth,
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,
+    pub media_reads: BTreeMap<TaskId, Arc<super::task_context::MediaReadWork>>,
     pub continuable: bool,
     pub last_continue: Option<u64>,
     #[cfg(target_os = "linux")]
@@ -159,6 +160,7 @@ pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
     pub pending_edit_applications: Vec<(RunId, Vec<u8>)>,
+    pub prepared_run_inputs: Option<super::HostOwnedInputClosure>,
     // A fixture can present an old/corrupt grant at the read boundary without rewriting a fixed grant.
     #[cfg(all(test, target_os = "linux"))]
     pub consent_fixture: Option<super::task_mcp::consent::ConsentFixture>,
@@ -1845,6 +1847,8 @@ impl HostCommandOwner {
                     .auth
                     .clone(),
                 endpoint,
+                #[cfg(all(feature = "te1-eval", target_os = "linux"))]
+                self.evaluation_observer.clone(),
                 #[cfg(target_os = "linux")]
                 measurements,
                 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
