@@ -147,7 +147,7 @@ impl TimelineBranch {
         base_revision: TimelineRevision,
         base_document: Arc<Document>,
     ) -> Result<Self, BranchError> {
-        let core = Core::spawn((*base_document).clone())?;
+        let core = Core::spawn(Arc::clone(&base_document))?;
         Ok(Self {
             name: name.into(),
             base_revision,
@@ -182,7 +182,7 @@ impl TimelineBranch {
         base_revision: TimelineRevision,
         base_document: Arc<Document>,
     ) -> Result<Self, BranchError> {
-        let core = Core::spawn_at((*base_document).clone(), base_revision)?;
+        let core = Core::spawn_at(Arc::clone(&base_document), base_revision)?;
         Ok(Self {
             name: name.into(),
             base_revision,

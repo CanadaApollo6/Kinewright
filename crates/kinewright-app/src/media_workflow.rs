@@ -2306,7 +2306,7 @@ impl KinewrightApp {
             Ok(_) => {
                 let library = self.projects[project_index].rebuild_lut_library();
                 if project_index == self.focused_project {
-                    self.lut_publisher.set_lut_library(library);
+                    self.lut_publisher.set_lut_library(&library);
                 }
                 self.status = format!("Restored look {}", response.title);
             }

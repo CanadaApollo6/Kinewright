@@ -1615,9 +1615,8 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     assert!(reference_encode(1.35) > 1.0);
     assert!(reference_encode(0.9) < 1.0);
 
-    let contributions =
-        measure_node_contributions(&analysis, Arc::clone(&document), TimeCode::ZERO, &request)
-            .expect("the double renders");
+    let contributions = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &request)
+        .expect("the double renders");
     assert_eq!(contributions.attribution, NODE_ATTRIBUTION_REMOVED);
     assert_eq!(contributions.baseline_range_basis_points, 10_000);
     assert_eq!(contributions.baseline_gamut_basis_points, 0);
@@ -1654,7 +1653,7 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
         0.9,
         BTreeMap::from([(EffectId(3), 1.0), (EffectId(2), 1.5)]),
     );
-    let contributions = measure_node_contributions(&analysis, document, TimeCode::ZERO, &request)
+    let contributions = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &request)
         .expect("the double renders");
     let inactive = &contributions.nodes[0];
     assert!(!inactive.active);
@@ -1668,9 +1667,8 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
         vec![primary_node(4), primary_node(5)],
     ]));
     let analysis = GainAnalysis::new(0.5, BTreeMap::new());
-    let contributions =
-        measure_node_contributions(&analysis, Arc::clone(&document), TimeCode::ZERO, &request)
-            .expect("the double renders");
+    let contributions = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &request)
+        .expect("the double renders");
     let order: Vec<(u64, u64)> = contributions
         .nodes
         .iter()
@@ -1682,9 +1680,8 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
     let second: Vec<Effect> = (10..=17).map(primary_node).collect();
     let document = Arc::new(managed_document_with_tracks(&[first, second]));
     let analysis = GainAnalysis::new(0.5, BTreeMap::new());
-    let contributions =
-        measure_node_contributions(&analysis, Arc::clone(&document), TimeCode::ZERO, &request)
-            .expect("the double renders");
+    let contributions = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &request)
+        .expect("the double renders");
     assert_eq!(contributions.considered_node_count, 17);
     assert!(contributions.truncated);
     assert_eq!(contributions.nodes.len(), MAX_QC_NODE_CONTRIBUTIONS);
@@ -1725,7 +1722,7 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
         (10..=16).map(primary_node).collect(),
     ]));
     let analysis = GainAnalysis::new(0.5, BTreeMap::new());
-    let contributions = measure_node_contributions(&analysis, document, TimeCode::ZERO, &request)
+    let contributions = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &request)
         .expect("the double renders");
     assert_eq!(contributions.considered_node_count, 16);
     assert!(!contributions.truncated);
@@ -1737,7 +1734,7 @@ fn cc6_per_node_contribution_attributes_clipping_to_the_node_that_causes_it() {
         max_nodes: 0,
         ..range_request(None)
     };
-    let error = measure_node_contributions(&analysis, document, TimeCode::ZERO, &budget)
+    let error = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &budget)
         .expect_err("an out-of-range budget refuses");
     let MediaError::ColorQc(ref refusal) = error else {
         panic!("a node budget refusal must arrive as MediaError::ColorQc, not {error:?}")
@@ -2152,9 +2149,8 @@ fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
         (TimeCode(20), ClipId(2), EffectId(2)),
     ] {
         let analysis = GainAnalysis::new(0.5, BTreeMap::new());
-        let contributions =
-            measure_node_contributions(&analysis, Arc::clone(&sorted), at, &request)
-                .expect("the double renders");
+        let contributions = measure_node_contributions(&analysis, &sorted, at, &request)
+            .expect("the double renders");
         assert_eq!(
             contributions.considered_node_count, 1,
             "exactly the on-screen clip's colour nodes are candidates at {at:?}"
@@ -2164,15 +2160,14 @@ fn cc6_per_node_candidates_find_the_on_screen_clip_whatever_the_clip_order() {
     }
     // Past the last clip there is genuinely nothing on screen.
     let analysis = GainAnalysis::new(0.5, BTreeMap::new());
-    let contributions =
-        measure_node_contributions(&analysis, Arc::clone(&sorted), TimeCode(30), &request)
-            .expect("the double renders");
+    let contributions = measure_node_contributions(&analysis, &sorted, TimeCode(30), &request)
+        .expect("the double renders");
     assert_eq!(contributions.considered_node_count, 0);
     assert!(contributions.nodes.is_empty());
 
     let unsorted = Arc::new(track_document(&[(2, TimeCode(15)), (1, TimeCode::ZERO)]));
     let analysis = GainAnalysis::new(0.5, BTreeMap::new());
-    let error = measure_node_contributions(&analysis, unsorted, TimeCode::ZERO, &request)
+    let error = measure_node_contributions(&analysis, &unsorted, TimeCode::ZERO, &request)
         .expect_err("the on-screen clip is found, and removing from it is refused");
     let message = error.to_string();
     assert!(
@@ -2207,9 +2202,8 @@ fn mo1_per_node_candidates_skip_disabled_effects() {
         off,
     ]]));
     let analysis = GainAnalysis::new(0.9, BTreeMap::from([(EffectId(1), 1.0)]));
-    let contributions =
-        measure_node_contributions(&analysis, Arc::clone(&document), TimeCode::ZERO, &request)
-            .expect("the double renders");
+    let contributions = measure_node_contributions(&analysis, &document, TimeCode::ZERO, &request)
+        .expect("the double renders");
     assert_eq!(contributions.considered_node_count, 1);
     assert_eq!(contributions.nodes.len(), 1);
     assert_eq!(contributions.nodes[0].effect, EffectId(1));
@@ -2218,7 +2212,7 @@ fn mo1_per_node_candidates_skip_disabled_effects() {
     // identically, including the render count (no wasted scratch render).
     let removed = Arc::new(managed_document_with_tracks(&[vec![active_wheels_node(1)]]));
     let analysis = GainAnalysis::new(0.9, BTreeMap::from([(EffectId(1), 1.0)]));
-    let expected = measure_node_contributions(&analysis, removed, TimeCode::ZERO, &request)
+    let expected = measure_node_contributions(&analysis, &removed, TimeCode::ZERO, &request)
         .expect("the double renders");
     assert_eq!(
         contributions.nodes[0].range_basis_points_delta,

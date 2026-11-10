@@ -250,7 +250,9 @@ impl CandidateDelta {
         }
         state.document = self.document;
         state.revision = self.revision;
-        state.op_log.truncate(self.op_log_len);
+        if state.op_log.len() > self.op_log_len {
+            Arc::make_mut(&mut state.op_log).truncate(self.op_log_len);
+        }
         state.batches.truncate(self.batches_len);
         state.identity_effects = self.identity_effects;
     }

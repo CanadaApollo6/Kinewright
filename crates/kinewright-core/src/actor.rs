@@ -542,7 +542,11 @@ impl Core {
     /// # Panics
     ///
     /// Panics if the operating system cannot create the actor thread.
-    pub fn spawn(initial_document: Document) -> Result<Self, OpError> {
+    ///
+    /// A caller that already holds an `Arc<Document>` passes it as is: the
+    /// actor copies on write (each edit applies to its own scratch copy), so
+    /// sharing the caller's document is as safe as a deep copy.
+    pub fn spawn(initial_document: impl Into<Arc<Document>>) -> Result<Self, OpError> {
         Self::spawn_at(initial_document, TimelineRevision::default())
     }
 
@@ -564,10 +568,11 @@ impl Core {
     ///
     /// Panics if the operating system cannot create the actor thread.
     pub fn spawn_at(
-        initial_document: Document,
+        initial_document: impl Into<Arc<Document>>,
         revision: TimelineRevision,
     ) -> Result<Self, OpError> {
         static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
+        let initial_document = initial_document.into();
         initial_document.validate()?;
         #[allow(deprecated, reason = "Rust 1.92 MSRV predates AtomicU64::try_update")]
         let identity = ActorIdentity(
@@ -758,7 +763,9 @@ struct CoreState {
     revision: TimelineRevision,
     undo: Vec<HistoryEntry>,
     redo: Vec<HistoryEntry>,
-    op_log: Vec<Operation>,
+    /// Shared with `Query::OpLog` replies; appends copy only while a reply
+    /// is still held.
+    op_log: Arc<Vec<Operation>>,
 }
 
 impl CoreState {
@@ -768,8 +775,8 @@ impl CoreState {
             batch_count: self.batches.len(),
         }
     }
-    fn new(document: Document, revision: TimelineRevision) -> Self {
-        let document = Arc::new(document);
+    fn new(document: impl Into<Arc<Document>>, revision: TimelineRevision) -> Self {
+        let document = document.into();
         Self {
             history_epoch: 0,
             next_floor_id: 0,
@@ -782,19 +789,21 @@ impl CoreState {
             revision,
             undo: Vec::new(),
             redo: Vec::new(),
-            op_log: Vec::new(),
+            op_log: Arc::new(Vec::new()),
         }
     }
 
     fn do_operation(&mut self, operation: Operation) -> Result<Arc<Document>, OpError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        let effects =
-            crate::operation::apply_batch_observed(&mut after, std::slice::from_ref(&operation))
-                .map_err(|error| match error {
-                    BatchError::OperationFailed { error, .. } => error,
-                    BatchError::Empty => unreachable!(),
-                })?;
+        let effects = crate::operation::apply_batch_observed_in_place(
+            &mut after,
+            std::slice::from_ref(&operation),
+        )
+        .map_err(|error| match error {
+            BatchError::OperationFailed { error, .. } => error,
+            BatchError::Empty => unreachable!(),
+        })?;
         self.identity_effects = effects;
         self.undo.push(HistoryEntry {
             document: before,
@@ -802,7 +811,7 @@ impl CoreState {
             coalesce_key: None,
         });
         self.redo.clear();
-        self.op_log.push(operation);
+        Arc::make_mut(&mut self.op_log).push(operation);
         self.document = Arc::new(after);
         self.increment_revision();
         Ok(Arc::clone(&self.document))
@@ -811,14 +820,15 @@ impl CoreState {
     fn do_batch(&mut self, operations: Vec<Operation>) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        self.identity_effects = crate::operation::apply_batch_observed(&mut after, &operations)?;
+        self.identity_effects =
+            crate::operation::apply_batch_observed_in_place(&mut after, &operations)?;
         self.undo.push(HistoryEntry {
             document: before,
             operations: operations.clone(),
             coalesce_key: None,
         });
         self.redo.clear();
-        self.op_log.extend(operations);
+        Arc::make_mut(&mut self.op_log).extend(operations);
         self.document = Arc::new(after);
         self.increment_revision();
         Ok(Arc::clone(&self.document))
@@ -837,7 +847,8 @@ impl CoreState {
     ) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        self.identity_effects = crate::operation::apply_batch_observed(&mut after, &operations)?;
+        self.identity_effects =
+            crate::operation::apply_batch_observed_in_place(&mut after, &operations)?;
         match self.undo.last_mut() {
             Some(entry) if entry.coalesce_key.as_deref() == Some(coalesce_key) => {
                 entry.operations.extend(operations.iter().cloned());
@@ -849,7 +860,7 @@ impl CoreState {
             }),
         }
         self.redo.clear();
-        self.op_log.extend(operations);
+        Arc::make_mut(&mut self.op_log).extend(operations);
         self.document = Arc::new(after);
         self.increment_revision();
         Ok(Arc::clone(&self.document))
@@ -893,7 +904,7 @@ impl CoreState {
                 document: Arc::clone(&self.document),
             },
             Query::Clip(id) => QueryResult::Clip(self.document.clip(*id).cloned()),
-            Query::OpLog => QueryResult::OpLog(Arc::new(self.op_log.clone())),
+            Query::OpLog => QueryResult::OpLog(Arc::clone(&self.op_log)),
             Query::AppliedOperations => QueryResult::AppliedOperations(Arc::new(
                 self.undo
                     .iter()
@@ -921,12 +932,48 @@ impl CoreState {
         }
     }
 
+    /// `self.history() == *other`, compared field by field without building
+    /// the snapshot (which would copy every batch and every entry's
+    /// operations).
+    ///
+    /// The snapshot types are destructured without `..`, so a field added to
+    /// `HistorySnapshot`, `HistoryCursor` or `GestureBoundary` is a compile
+    /// error here rather than a field `history() ==` compares and this skips.
+    fn history_matches(&self, other: &HistorySnapshot) -> bool {
+        fn entries_match(entries: &[HistoryEntry], boundaries: &[GestureBoundary]) -> bool {
+            entries.len() == boundaries.len()
+                && entries.iter().zip(boundaries).all(|(entry, boundary)| {
+                    let GestureBoundary {
+                        document,
+                        operations,
+                        coalesce_key,
+                    } = boundary;
+                    entry.document == *document
+                        && entry.operations == *operations
+                        && entry.coalesce_key == *coalesce_key
+                })
+        }
+        let HistorySnapshot {
+            floor_offset,
+            baseline,
+            document,
+            batches,
+            cursor: HistoryCursor { undo, redo },
+        } = other;
+        self.floor_offset == *floor_offset
+            && self.baseline == *baseline
+            && self.document == *document
+            && self.batches == *batches
+            && entries_match(&self.undo, undo)
+            && entries_match(&self.redo, redo)
+    }
+
     fn restore(snapshot: &HistorySnapshot) -> Result<Self, HistoryError> {
         snapshot
             .baseline
             .validate()
             .map_err(|_| HistoryError::Corrupt)?;
-        let mut candidate = Self::new((*snapshot.baseline).clone(), TimelineRevision(0));
+        let mut candidate = Self::new(Arc::clone(&snapshot.baseline), TimelineRevision(0));
         for batch in &snapshot.batches {
             if !matches!(
                 execute_command(&mut candidate, batch.command.clone().into()),
@@ -936,7 +983,7 @@ impl CoreState {
             }
         }
         candidate.floor_offset = snapshot.floor_offset;
-        if candidate.history() != *snapshot {
+        if !candidate.history_matches(snapshot) {
             return Err(HistoryError::Corrupt);
         }
         Ok(candidate)
@@ -956,7 +1003,7 @@ impl CoreState {
                 HistoryError::SaveInProgress
             });
         }
-        if self.history() != transition.before {
+        if !self.history_matches(&transition.before) {
             return Err(HistoryError::CaptureChanged);
         }
         if transition.after.floor_offset <= self.floor_offset {
@@ -1005,7 +1052,7 @@ impl CoreState {
                 let started = std::time::Instant::now();
                 // The barrier kept the prefix unchanged. Replay only the current suffix
                 // through the ordinary executor, including commands accepted during IO.
-                let mut candidate = Self::new((*baseline).clone(), TimelineRevision(0));
+                let mut candidate = Self::new(Arc::clone(&baseline), TimelineRevision(0));
                 candidate.floor_offset = offset;
                 for batch in self.batches.get(discard..).ok_or(HistoryError::Corrupt)? {
                     if !matches!(
@@ -1071,7 +1118,7 @@ pub(crate) fn floor_history(
         return Err(HistoryError::Corrupt);
     }
     CoreState::restore(before)?;
-    let mut prefix = CoreState::new((*before.baseline).clone(), TimelineRevision(0));
+    let mut prefix = CoreState::new(Arc::clone(&before.baseline), TimelineRevision(0));
     for batch in &before.batches[..discard] {
         if !matches!(
             execute_command(&mut prefix, batch.command.clone().into()),
@@ -1092,7 +1139,7 @@ pub(crate) fn find_floor_history(
         .baseline
         .validate()
         .map_err(|_| HistoryError::Corrupt)?;
-    let mut prefix = CoreState::new((*before.baseline).clone(), TimelineRevision(0));
+    let mut prefix = CoreState::new(Arc::clone(&before.baseline), TimelineRevision(0));
     for (index, batch) in before.batches.iter().enumerate() {
         if !matches!(
             execute_command(&mut prefix, batch.command.clone().into()),
@@ -1120,14 +1167,14 @@ pub(crate) fn find_floor_history(
                 }
             }
             complete.floor_offset = before.floor_offset;
-            if complete.history() != *before {
+            if !complete.history_matches(before) {
                 return Err(HistoryError::Corrupt);
             }
             return Ok(after);
         }
     }
     prefix.floor_offset = before.floor_offset;
-    if prefix.history() != *before {
+    if !prefix.history_matches(before) {
         return Err(HistoryError::Corrupt);
     }
     Err(HistoryError::Capacity)
@@ -1150,7 +1197,7 @@ fn floor_from_prefix(
     {
         return Err(HistoryError::Corrupt);
     }
-    let mut suffix = CoreState::new((*prefix.document).clone(), TimelineRevision(0));
+    let mut suffix = CoreState::new(Arc::clone(&prefix.document), TimelineRevision(0));
     for batch in &before.batches[discard..] {
         if !matches!(
             execute_command(&mut suffix, batch.command.clone().into()),
@@ -1193,7 +1240,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                                 && live.load(Ordering::Acquire)
                                 && cut.actor == identity
                                 && cut.revision == state.revision
-                                && cut.history == state.history()
+                                && state.history_matches(&cut.history)
                         } else {
                             attachment == AttachmentState::Live
                         };
@@ -1284,7 +1331,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
                         if cut.actor != identity
                             || cut.revision != state.revision
-                            || cut.history != state.history()
+                            || !state.history_matches(&cut.history)
                         {
                             return Err(HistoryError::CaptureChanged);
                         }
@@ -1384,7 +1431,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     if attachment != AttachmentState::Frozen
                         || cut.actor != identity
                         || cut.revision != state.revision
-                        || cut.history != state.history()
+                        || !state.history_matches(&cut.history)
                         || state.pending_floor.is_some()
                         || manual
                             .as_ref()
@@ -1468,7 +1515,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     ))
                 } else if expected
                     .as_deref()
-                    .is_some_and(|before| state.history() != *before)
+                    .is_some_and(|before| !state.history_matches(before))
                 {
                     Err(HistoryError::Corrupt)
                 } else {
@@ -1514,7 +1561,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     document: Arc::clone(&state.document),
                     undo: state.undo.iter().map(observe).collect(),
                     redo: state.redo.iter().map(observe).collect(),
-                    op_log: state.op_log.clone(),
+                    op_log: (*state.op_log).clone(),
                 });
             }
             CoreMessage::Subscribe(subscriber) => {

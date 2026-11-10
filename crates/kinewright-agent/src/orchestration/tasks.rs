@@ -308,7 +308,8 @@ impl TaskEndpoint {
             &boundary.operations,
         )?;
         let operations = boundary.operations.clone();
-        let private = Core::spawn((*history.baseline).clone()).map_err(|e| e.to_string())?;
+        let private =
+            Core::spawn(std::sync::Arc::clone(&history.baseline)).map_err(|e| e.to_string())?;
         private
             .restore_history(history.clone())
             .map_err(|e| e.to_string())?;

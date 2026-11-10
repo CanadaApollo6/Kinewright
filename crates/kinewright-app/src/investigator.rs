@@ -1562,7 +1562,7 @@ impl KinewrightApp {
             cost_events,
             cancel,
             result: result_rx,
-            budgets: settings.budgets.clone(),
+            budgets: settings.budgets,
         };
         self.projects[project_index]
             .investigator

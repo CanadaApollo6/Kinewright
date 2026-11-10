@@ -15,7 +15,7 @@ pub(crate) fn replay_prefix(
     history: &HistorySnapshot,
     count: usize,
 ) -> Result<HistorySnapshot, BundleError> {
-    let prefix = Core::spawn((*history.baseline).clone())
+    let prefix = Core::spawn(std::sync::Arc::clone(&history.baseline))
         .map_err(|e| BundleError::Corrupt(e.to_string()))?;
     for batch in history
         .batches
@@ -136,7 +136,7 @@ impl ProjectBundle {
             redo: vec![],
             split_ancestry: original.split_ancestry.clone(),
         };
-        let candidate = Core::spawn((*source_history.document).clone())
+        let candidate = Core::spawn(std::sync::Arc::clone(&source_history.document))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let frozen = candidate
             .export_history()

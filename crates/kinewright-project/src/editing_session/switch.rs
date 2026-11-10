@@ -84,7 +84,7 @@ impl Ja1EditingSession {
         }
         let core = self.activate_host_cut_prepared(
             cut,
-            committed.history.clone(),
+            std::borrow::Cow::Borrowed(&committed.history),
             &committed.current.history.sha256,
             super::HostActivationKind::Switch,
             |_| Ok(()),

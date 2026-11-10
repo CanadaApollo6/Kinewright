@@ -74,10 +74,9 @@ struct Candidate {
 /// [`super::ColorQcError::NodeRemovalRejected`] code and says so in its own
 /// words, rather than being flattened into a [`MediaError::Backend`] string an
 /// agent surface could only report as an unavailable working proof.
-#[allow(clippy::needless_pass_by_value)]
 pub fn measure_node_contributions(
     analysis: &dyn Analysis,
-    document: Arc<Document>,
+    document: &Arc<Document>,
     at: TimeCode,
     request: &ColorQcRequest,
 ) -> Result<ColorQcNodeContributions, MediaError> {
@@ -86,20 +85,19 @@ pub fn measure_node_contributions(
 
 /// The baseline report and the attribution, so a caller that wants both pays
 /// for exactly one baseline render rather than two.
-#[allow(clippy::needless_pass_by_value)]
 fn contributions_with_baseline(
     analysis: &dyn Analysis,
-    document: Arc<Document>,
+    document: &Arc<Document>,
     at: TimeCode,
     request: &ColorQcRequest,
 ) -> Result<(ColorQcReport, ColorQcNodeContributions), MediaError> {
     validate_node_budget(request.max_nodes).map_err(MediaError::ColorQc)?;
-    let baseline_proof = analysis.working_proof_for_document(Arc::clone(&document), at)?;
+    let baseline_proof = analysis.working_proof_for_document(Arc::clone(document), at)?;
     let baseline = measure_color_qc(&baseline_proof, request).map_err(MediaError::ColorQc)?;
     let baseline_range = baseline.range.clamped_basis_points;
     let baseline_gamut = baseline.gamut.out_of_gamut_basis_points;
 
-    let candidates = candidates_at(&document, at);
+    let candidates = candidates_at(document, at);
     let considered = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
     let limit = usize::from(request.max_nodes).min(MAX_QC_NODE_CONTRIBUTIONS);
     let truncated = candidates.len() > limit;
@@ -157,10 +155,9 @@ fn contributions_with_baseline(
 ///
 /// Returns a media error for the same reasons as
 /// [`measure_node_contributions`].
-#[allow(clippy::needless_pass_by_value)]
 pub fn measure_color_qc_with_nodes(
     analysis: &dyn Analysis,
-    document: Arc<Document>,
+    document: &Arc<Document>,
     at: TimeCode,
     request: &ColorQcRequest,
 ) -> Result<ColorQcReport, MediaError> {

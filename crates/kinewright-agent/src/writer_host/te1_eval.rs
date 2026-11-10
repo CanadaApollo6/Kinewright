@@ -977,7 +977,8 @@ impl Studio {
         self.host.shutdown().map_err(io_error)?;
         let loaded =
             kinewright_project::bundle::LoadedBundle::read(&self.path).map_err(io_error)?;
-        let reopened_manual = Core::spawn((*manual.baseline).clone()).map_err(io_error)?;
+        let reopened_manual =
+            Core::spawn(std::sync::Arc::clone(&manual.baseline)).map_err(io_error)?;
         loaded.restore_manual(&reopened_manual).map_err(io_error)?;
         if reopened_manual.export_history().map_err(io_error)? != manual
             || manual.cursor.redo.len() != 1

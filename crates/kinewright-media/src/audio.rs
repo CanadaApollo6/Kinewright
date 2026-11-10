@@ -3444,9 +3444,11 @@ impl AudioMixProcessor {
         }
     }
 
-    pub(crate) fn mix_chunk(
+    /// `track_buffers` is only read: export passes slices of its whole-track
+    /// mixes (no per-chunk copy), the live mixer its own accumulation buffers.
+    pub(crate) fn mix_chunk<B: AsRef<[f32]>>(
         &mut self,
-        track_buffers: &HashMap<TrackId, Vec<f32>>,
+        track_buffers: &HashMap<TrackId, B>,
         start_sample: u64,
         sample_frames: usize,
     ) -> Result<Vec<f32>, MediaError> {
@@ -3455,9 +3457,9 @@ impl AudioMixProcessor {
     }
 
     /// AU1 §6: `mix_chunk` plus post-stage and post-bus copies for measurement.
-    pub(crate) fn mix_chunk_with_stems(
+    pub(crate) fn mix_chunk_with_stems<B: AsRef<[f32]>>(
         &mut self,
-        track_buffers: &HashMap<TrackId, Vec<f32>>,
+        track_buffers: &HashMap<TrackId, B>,
         start_sample: u64,
         sample_frames: usize,
     ) -> Result<MixChunkStems, MediaError> {
@@ -3465,9 +3467,9 @@ impl AudioMixProcessor {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn mix(
+    fn mix<B: AsRef<[f32]>>(
         &mut self,
-        track_buffers: &HashMap<TrackId, Vec<f32>>,
+        track_buffers: &HashMap<TrackId, B>,
         start_sample: u64,
         sample_frames: usize,
         collect_stems: bool,
@@ -3480,7 +3482,7 @@ impl AudioMixProcessor {
 
         for index in 0..self.track_order.len() {
             let track = self.track_order[index];
-            let Some(samples) = track_buffers.get(&track) else {
+            let Some(samples) = track_buffers.get(&track).map(AsRef::as_ref) else {
                 self.stages[index].skip_ramp(start_sample, sample_frames, ramp_frames);
                 if collect_stems {
                     let staged = &mut self.staged[index];
@@ -4420,7 +4422,7 @@ impl AudioRuntime {
                 Arc::clone(&error_flag),
                 monitor_gain_tenth_db,
                 Arc::clone(diagnostics),
-                callback_authority.clone(),
+                callback_authority,
             )?),
             #[cfg(any(test, feature = "test-util"))]
             Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach_with_authority(
@@ -6027,7 +6029,9 @@ mod tests {
         // 512 absent frames is more than the 240-frame ramp: it settles in the gap.
         let mut processor = AudioMixProcessor::new(&document, 48_000, 1, None);
         processor.update_audio_mix(&muted);
-        let gap = processor.mix_chunk(&HashMap::new(), 0, 512).unwrap();
+        let gap = processor
+            .mix_chunk(&HashMap::<TrackId, Vec<f32>>::new(), 0, 512)
+            .unwrap();
         assert!(
             gap.iter().all(|sample| *sample == 0.0),
             "a chunk with no media is silent"
@@ -6045,7 +6049,9 @@ mod tests {
 
         let mut partial = AudioMixProcessor::new(&document, 48_000, 1, None);
         partial.update_audio_mix(&muted);
-        partial.mix_chunk(&HashMap::new(), 0, 100).unwrap();
+        partial
+            .mix_chunk(&HashMap::<TrackId, Vec<f32>>::new(), 0, 100)
+            .unwrap();
         let after_gap = partial.mix_chunk(&buffers, 100, 512).unwrap();
         assert_close(after_gap[0], 1.0 - 101.0 / 240.0);
         assert!(
@@ -6308,6 +6314,65 @@ mod tests {
             ],
             "wav",
         )
+    }
+
+    /// On-demand measurement for the ownership fixes (H4): the export mix of a
+    /// 10-minute stereo document with two audio tracks. Prints one `H4_MIX`
+    /// line with the wall time of one whole `mix_audio` pass.
+    #[test]
+    #[ignore = "on-demand measurement"]
+    fn h4_ten_minute_stereo_mix_cost() {
+        crate::initialize_ffmpeg().unwrap();
+        let fps = Rational::new(30, 1).unwrap();
+        let frames = 30 * 600;
+        let source = GeneratedMedia::ffmpeg(
+            "h4-measure-stereo",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=600",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_f32le",
+            ],
+            "wav",
+        );
+        let asset = |id| MediaAsset {
+            duration: TimeCode(frames),
+            ..audio_asset(id, source.path(), "h4-stereo", fps)
+        };
+        let track = |id| Track {
+            id: TrackId(id),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![audio_clip(id, id, 0..frames, 0)],
+        };
+        let document = Document {
+            investigator: None,
+            catalog: kinewright_core::MediaCatalog::default(),
+            audio_mix: AudioMix::default(),
+            color_context: kinewright_core::ColorContext::default(),
+            lut_assets: Vec::new(),
+            tracks: vec![track(1), track(2)],
+            media_pool: vec![asset(1), asset(2)],
+            markers: Vec::new(),
+            fps,
+            resolution: (64, 64),
+            duration: TimeCode(frames),
+        };
+        let settings = parity_settings(fps);
+        let warm = crate::export::mix_audio(&document, &settings).unwrap();
+        let started = std::time::Instant::now();
+        let mixed = crate::export::mix_audio(&document, &settings).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(mixed.len(), warm.len());
+        println!(
+            "H4_MIX tracks=2 seconds=600 samples={} mix_ms={:.1}",
+            mixed.len(),
+            elapsed.as_secs_f64() * 1e3,
+        );
     }
 
     fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {

@@ -92,7 +92,7 @@ impl Ja1EditingSession {
                 .core
                 .export_history()
                 .map_err(crate::bundle::history_error)?;
-            let candidate = Core::spawn((*before.baseline).clone())
+            let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
                 .map_err(|error| BundleError::Corrupt(error.to_string()))?;
             crate::ProjectAttachment::new(&candidate)
                 .map_err(crate::bundle::history_error)?
@@ -287,7 +287,7 @@ impl Ja1EditingSession {
             .checked_add(1)
             .ok_or(BundleError::Capacity("asset ID overflow"))?;
         let prepared = self.prepare_owned_media_with_color(path, AssetId(next), color)?;
-        let candidate = Core::spawn((*before.baseline).clone())
+        let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let attachment =
             crate::ProjectAttachment::new(&candidate).map_err(crate::bundle::history_error)?;

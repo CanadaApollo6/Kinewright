@@ -106,7 +106,7 @@ impl Ja1EditingSession {
                 "rescue destination must be fresh".into(),
             ));
         }
-        let b_core = Core::spawn((*selection.history.baseline).clone())
+        let b_core = Core::spawn(std::sync::Arc::clone(&selection.history.baseline))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let b_attachment = ProjectAttachment::new(&b_core).map_err(crate::bundle::history_error)?;
         b_attachment

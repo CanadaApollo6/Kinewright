@@ -1188,11 +1188,11 @@ impl KinewrightApp {
         }
 
         let document = Arc::clone(&self.focused().document);
-        let availability = self.focused().lut_availability.clone();
+        let availability = &self.focused().lut_availability;
         let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
             document: &document,
-            availability: &availability,
+            availability,
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
@@ -1246,11 +1246,11 @@ impl KinewrightApp {
         let document = Arc::clone(&self.focused().document);
         let playhead_local = clip_playhead_local(clip, self.focused().position);
         clip_enable_header(ui, &document, clip, playhead_local, &mut pending);
-        let availability = self.focused().lut_availability.clone();
+        let availability = &self.focused().lut_availability;
         let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
             document: &document,
-            availability: &availability,
+            availability,
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
@@ -1290,11 +1290,11 @@ impl KinewrightApp {
         if let Some(color) = solid {
             solid_color_row(ui, clip.id, color, &mut pending);
         }
-        let availability = self.focused().lut_availability.clone();
+        let availability = &self.focused().lut_availability;
         let qc_clipping = self.color_qc.node_clipping();
         let looks = LookInspectorContext {
             document: &document,
-            availability: &availability,
+            availability,
             qc_clipping: &qc_clipping,
             store_unavailable: self.focused().lut_store_unavailable_reason(),
         };
@@ -3004,8 +3004,13 @@ fn matte_section_body(
         );
     });
 
-    let matte_names: Vec<&'static str> = kinewright_core::matte_parameter_names().to_vec();
-    color_node_keyframe_rows(ui, clip.id, effect, &matte_names, pending);
+    color_node_keyframe_rows(
+        ui,
+        clip.id,
+        effect,
+        kinewright_core::matte_parameter_names(),
+        pending,
+    );
     ui.colored_label(color::TEXT_MUTED, MATTE_KEYFRAME_NOTE);
 }
 

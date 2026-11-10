@@ -2706,7 +2706,7 @@ impl HostCommandOwner {
                 .initial_core
                 .export_history()
                 .map_err(|e| HostError::Protocol(e.to_string()))?;
-            let core = Core::spawn((*history.document).clone())
+            let core = Core::spawn(std::sync::Arc::clone(&history.document))
                 .map_err(|e| HostError::Protocol(e.to_string()))?;
             (core, None)
         };

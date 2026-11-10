@@ -274,7 +274,7 @@ impl Ja1EditingSession {
         let bundle = self.active_bundle_mut()?;
         let checkpoint = bundle.checkpoint(&base.branch)?.clone();
         let history = bundle.branch_history(&base.branch)?;
-        let core = Core::spawn((*history.document).clone())
+        let core = Core::spawn(std::sync::Arc::clone(&history.document))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let frozen = core
             .export_history()
@@ -535,7 +535,7 @@ impl Ja1EditingSession {
         if self.dirty()? {
             return Err(BundleError::HistoryChanged);
         }
-        let core = Core::spawn((*live.document).clone())
+        let core = Core::spawn(std::sync::Arc::clone(&live.document))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let bundle = self.active_bundle_mut()?;
         let target = bundle.manual_branch_id().clone();

@@ -1599,10 +1599,10 @@ pub(crate) mod feedback_capture {
                 let log = evidence(owner, &bytes, &dependencies)?;
                 let voice = VoiceRef {
                     note_id: self.note_id.clone(),
-                    audio_ref: audio.reference.clone(),
+                    audio_ref: audio.reference,
                     duration_micros: duration,
                     range: None,
-                    playhead_log_ref: Some(log.reference.clone()),
+                    playhead_log_ref: Some(log.reference),
                     original_asr_ref: None,
                     chosen_transcript_revision: None,
                 };
@@ -2040,7 +2040,7 @@ pub(crate) mod feedback_capture {
         }
         fn advance_voice_head(owner: &mut ProjectBundle) {
             let history = owner.branch_history(owner.manual_branch_id()).unwrap();
-            let core = kinewright_core::Core::spawn((*history.document).clone()).unwrap();
+            let core = kinewright_core::Core::spawn(Arc::clone(&history.document)).unwrap();
             core.restore_history((*history).clone()).unwrap();
             move_for_asr(owner, &core, 1);
         }

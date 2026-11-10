@@ -1301,11 +1301,7 @@ fn load_builtin(asset: &LutAsset, name: &str) -> (Option<Arc<CubeLut>>, LutAvail
     match metadata_mismatch(asset, &lut) {
         Some(mismatch) => (
             None,
-            metadata_mismatch_status(
-                status.path.clone(),
-                status.observed_sha256.clone(),
-                mismatch,
-            ),
+            metadata_mismatch_status(status.path.clone(), status.observed_sha256, mismatch),
         ),
         None => (Some(lut), status),
     }
@@ -1373,11 +1369,7 @@ fn load_imported(
     match metadata_mismatch(asset, &lut) {
         Some(mismatch) => (
             None,
-            metadata_mismatch_status(
-                verified.path.clone(),
-                verified.observed_sha256.clone(),
-                mismatch,
-            ),
+            metadata_mismatch_status(verified.path.clone(), verified.observed_sha256, mismatch),
         ),
         None => (Some(lut), verified),
     }

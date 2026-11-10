@@ -13,7 +13,10 @@ use crate::{
     store::SealedObject,
 };
 use kinewright_core::{ClipId, Core, HistorySnapshot, JournalCommand};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitBarrier {
@@ -189,8 +192,7 @@ impl BundleCommit {
                             "Core floor differs from acknowledged checkpoint".into(),
                         )
                     })?
-                    .after()
-                    .clone();
+                    .into_after();
             }
             if **acknowledged != before {
                 return Err(BundleError::Unsupported(
@@ -220,20 +222,26 @@ impl BundleCommit {
             None
         };
         let after = if envelope.command.is_none() && envelope.transition.is_none() {
-            before.clone()
+            before
         } else {
-            let candidate = Core::spawn((*before.baseline).clone())
+            let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let attachment = bundle.attach_core(&candidate)?;
+            // A transition needs `before` again; otherwise the restore takes it.
+            let (restored, transition_before) = if envelope.transition.is_some() {
+                (before.clone(), Some(before))
+            } else {
+                (before, None)
+            };
             attachment
-                .restore_history(before.clone())
+                .restore_history(restored)
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if let Some(transition) = &envelope.transition {
+            if let Some((transition, before)) = envelope.transition.as_ref().zip(transition_before)
+            {
                 let checkpoint = bundle.branches.get(target).ok_or_else(|| {
                     BundleError::Corrupt("transition without acknowledged checkpoint".into())
                 })?;
-                let install =
-                    crate::bundle_branch::transition(transition, checkpoint, before.clone())?;
+                let install = crate::bundle_branch::transition(transition, checkpoint, before)?;
                 attachment
                     .install_history_transition(install)
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -741,19 +749,19 @@ impl BundleCommit {
                 Some(crate::receipts::HistoryRequest::Floor { .. })
             )
         });
-        let aligned = if let Some(old) = &old_history
+        let aligned: Cow<'_, HistorySnapshot> = if let Some(old) = &old_history
             && history.floor_offset < old.floor_offset
         {
-            kinewright_core::HistoryTransition::floor(
-                history.clone(),
-                usize::try_from(old.floor_offset - history.floor_offset)
-                    .map_err(|_| BundleError::Capacity("history floor offset"))?,
+            Cow::Owned(
+                kinewright_core::HistoryTransition::floor_after(
+                    history,
+                    usize::try_from(old.floor_offset - history.floor_offset)
+                        .map_err(|_| BundleError::Capacity("history floor offset"))?,
+                )
+                .map_err(|_| BundleError::Corrupt("history before durable floor".into()))?,
             )
-            .map_err(|_| BundleError::Corrupt("history before durable floor".into()))?
-            .after()
-            .clone()
         } else {
-            history.clone()
+            Cow::Borrowed(history)
         };
         if !explicit_floor
             && old_history.as_ref().is_some_and(|old| {
@@ -773,9 +781,8 @@ impl BundleCommit {
         {
             let cut = usize::try_from(aligned.floor_offset - old.floor_offset)
                 .map_err(|_| BundleError::Capacity("history floor offset"))?;
-            let expected = kinewright_core::HistoryTransition::floor((***old).clone(), cut)
+            let expected = kinewright_core::HistoryTransition::floor_after(old, cut)
                 .map_err(|_| BundleError::Corrupt("unproved history floor".into()))?;
-            let expected = expected.after();
             if aligned.baseline != expected.baseline
                 || aligned.batches.len() < expected.batches.len()
                 || aligned.batches[..expected.batches.len()] != expected.batches
@@ -785,17 +792,17 @@ impl BundleCommit {
                 ));
             }
         }
-        let bounded = if let Some(selected) = selected {
+        let bounded: Cow<'_, HistorySnapshot> = if let Some(selected) = selected {
             if selected.floor_offset < aligned.floor_offset {
                 return Err(BundleError::HistoryBarrierInvariant);
             }
-            selected.clone()
-        } else if old_history.as_ref().is_some_and(|old| ***old == aligned) {
-            aligned.clone()
+            Cow::Borrowed(selected)
+        } else if old_history.as_ref().is_some_and(|old| ***old == *aligned) {
+            Cow::Borrowed(&*aligned)
         } else {
-            bound_history(&aligned, bundle.store.limits())?
+            bound_history_borrowed(&aligned, bundle.store.limits())?
         };
-        let checked = if old_history.as_ref().is_some_and(|old| ***old == bounded) {
+        let checked = if old_history.as_ref().is_some_and(|old| ***old == *bounded) {
             std::sync::Arc::clone(old_history.as_ref().unwrap())
         } else {
             let serialized =
@@ -814,7 +821,7 @@ impl BundleCommit {
                     &serialized,
                     bundle.store.limits(),
                 )?)?;
-            let core = Core::spawn((*checked.baseline).clone())
+            let core = Core::spawn(std::sync::Arc::clone(&checked.baseline))
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             bundle
                 .attach_core(&core)?
@@ -939,7 +946,7 @@ impl BundleCommit {
             .transpose()?;
         let floor_seed = if let Some(discard) = floor_discard {
             let old = if aligned.floor_offset < checked.floor_offset {
-                &aligned
+                &*aligned
             } else {
                 &***old_history
                     .as_ref()
@@ -1573,9 +1580,37 @@ pub(crate) fn select_history(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<BoundedHistory, BundleError> {
+    observed_bound(history, limits, |bounded| {
+        bounded.unwrap_or_else(|| BoundedHistory {
+            history: history.clone(),
+            floor: None,
+        })
+    })
+}
+
+/// [`bound_history`], borrowing `history` when it already fits (the common
+/// path) instead of copying it.
+fn bound_history_borrowed<'a>(
+    history: &'a HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<Cow<'a, HistorySnapshot>, BundleError> {
+    observed_bound(history, limits, |bounded| match bounded {
+        Some(selected) => Cow::Owned(selected.history),
+        None => Cow::Borrowed(history),
+    })
+}
+
+/// Bound `history` and turn the result (`None`: it fits as it is) into the
+/// caller's value. The test-util profile times both, so a caller's copy of
+/// a fitting history is counted once, inside this one call.
+fn observed_bound<T>(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+    finish: impl FnOnce(Option<BoundedHistory>) -> T,
+) -> Result<T, BundleError> {
     #[cfg(any(test, feature = "test-util"))]
     let started = std::time::Instant::now();
-    let result = bound_history_inner(history, limits);
+    let result = bound_history_inner(history, limits).map(finish);
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::note_history_bound(started.elapsed());
     result
@@ -1588,7 +1623,7 @@ pub(crate) fn select_history(
 fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-) -> Result<BoundedHistory, BundleError> {
+) -> Result<Option<BoundedHistory>, BundleError> {
     let fits = |h: &HistorySnapshot| -> bool {
         let Ok(encoded) = h.encoded_bytes() else {
             return false;
@@ -1605,10 +1640,7 @@ fn bound_history_inner(
     // Keep the common small checkpoint path direct. For a long session, component
     // costs can reject the original stream without first serializing tens of MiB.
     if history.batches.len() <= 64 && fits(history) {
-        return Ok(BoundedHistory {
-            history: history.clone(),
-            floor: None,
-        });
+        return Ok(None);
     }
     // Independent JSON subtrees give a lower bound without reserializing every suffix.
     // Zeroing counters only shortens their encoding; the final fit/replay remains authoritative.
@@ -1635,10 +1667,7 @@ fn bound_history_inner(
         && undo[0].saturating_add(redo[0]).saturating_add(batches[0]) <= limits.branch_history_bytes
         && fits(history)
     {
-        return Ok(BoundedHistory {
-            history: history.clone(),
-            floor: None,
-        });
+        return Ok(None);
     }
     let document_cost = record_cost(&*history.document, limits)?;
     let skeleton = serde_json::json!({"floor_offset":1,"baseline":null,"document":null,"batches":[],"cursor":{"undo":[],"redo":[]}});
@@ -1710,9 +1739,11 @@ fn bound_history_inner(
         },
         fits,
     )
-    .map(|transition| BoundedHistory {
-        history: transition.after().clone(),
-        floor: Some(transition),
+    .map(|transition| {
+        Some(BoundedHistory {
+            history: transition.after().clone(),
+            floor: Some(transition),
+        })
     })
     .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))
 }

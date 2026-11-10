@@ -168,7 +168,7 @@ impl ProjectBundle {
         }
         crate::bundle_commit::validate_document_inputs(&history.document, &inputs)?;
         crate::bundle_commit::validate_inputs(&history, &retained)?;
-        let core = Core::spawn((*history.baseline).clone())
+        let core = Core::spawn(std::sync::Arc::clone(&history.baseline))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         self.attach_core(&core)?
             .restore_history((*history).clone())

@@ -157,6 +157,17 @@ impl HistoryTransition {
         let after = crate::actor::floor_history(&before, discard_batches)?;
         Ok(Self { before, after })
     }
+    /// [`Self::floor`]'s `after` alone, for a caller that only compares it:
+    /// the same proof and the same errors, without taking (or copying)
+    /// `before`.
+    /// # Errors
+    /// As [`Self::floor`].
+    pub fn floor_after(
+        before: &HistorySnapshot,
+        discard_batches: usize,
+    ) -> Result<HistorySnapshot, HistoryError> {
+        crate::actor::floor_history(before, discard_batches)
+    }
 
     /// Close the final gesture only after the entire reconciled suffix equals the cut.
     /// Uses the ordinary Undo/Redo executor to close the key without another undo entry.
@@ -170,8 +181,8 @@ impl HistoryTransition {
         if before != *reconciled {
             return Err(HistoryError::Corrupt);
         }
-        let candidate =
-            Core::spawn((*before.baseline).clone()).map_err(|_| HistoryError::Corrupt)?;
+        let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
+            .map_err(|_| HistoryError::Corrupt)?;
         candidate
             .history_save_owner(&RecoveryReplayProof)?
             .restore_history(&RecoveryReplayProof, before.clone())?;
@@ -205,5 +216,10 @@ impl HistoryTransition {
     #[must_use]
     pub const fn after(&self) -> &HistorySnapshot {
         &self.after
+    }
+    /// The `after` snapshot, by value (no copy).
+    #[must_use]
+    pub fn into_after(self) -> HistorySnapshot {
+        self.after
     }
 }

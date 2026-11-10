@@ -1090,7 +1090,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             false,
             u64::MAX,
         )?;
-        let core = kinewright_core::Core::spawn((*history.baseline).clone())
+        let core = kinewright_core::Core::spawn(std::sync::Arc::clone(&history.baseline))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         crate::history_save::ProjectAttachment::new(&core)
             .map_err(crate::bundle::history_error)?
@@ -1340,7 +1340,7 @@ pub fn assess(path: &Path) -> Result<RecoveryAssessment, BundleError> {
         let history_error = match history {
             Err(error) => Some(error.to_string()),
             Ok(history) => {
-                let core = kinewright_core::Core::spawn((*history.baseline).clone())
+                let core = kinewright_core::Core::spawn(std::sync::Arc::clone(&history.baseline))
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?;
                 crate::history_save::ProjectAttachment::new(&core)
                     .map_err(crate::bundle::history_error)?

@@ -2616,7 +2616,8 @@ impl Preview {
                     .map(|frame| RgbaImage {
                         width: frame.width,
                         height: frame.height,
-                        pixels: (*frame.rgba).clone(),
+                        pixels: Arc::try_unwrap(frame.rgba)
+                            .unwrap_or_else(|shared| (*shared).clone()),
                     });
                 self.settle_titles();
                 self.renderer.restore_authority(resumed);

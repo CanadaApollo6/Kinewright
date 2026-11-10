@@ -116,7 +116,7 @@ impl DecodeInput {
             Self::Legacy(_) => vec![],
             Self::Certified(input) => input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .filter_map(|slot| slot.index)
@@ -1019,22 +1019,29 @@ pub struct CertifiedProbe {
     pub color_description: ColorDescription,
 }
 
+/// The format context reads through `avio`'s context and cursor, so it must
+/// close before they are freed. That order is not left to field order: the
+/// format sits in a `ManuallyDrop` and `Drop for CertifiedInput` (in
+/// `bridge`) closes it before any field is dropped.
 pub(crate) struct CertifiedInput {
-    format: ffmpeg::format::context::Input,
+    format: std::mem::ManuallyDrop<ffmpeg::format::context::Input>,
     avio: bridge::Avio,
     probe_charges: Vec<LifetimeGuard>,
     decoder_bound: Option<DecoderBound>,
 }
 impl CertifiedInput {
-    fn open(source: &CertifiedSource, cancel: Arc<AtomicBool>) -> Result<Self, OwnedIoError> {
-        crate::initialize_ffmpeg().map_err(decoder_error)?;
-        let (format, avio) = bridge::Avio::open(source.cursor(cancel)?)?;
-        let mut input = Self {
-            format,
+    fn from_parts(format: ffmpeg::format::context::Input, avio: bridge::Avio) -> Self {
+        Self {
+            format: std::mem::ManuallyDrop::new(format),
             avio,
             probe_charges: Vec::new(),
             decoder_bound: None,
-        };
+        }
+    }
+    fn open(source: &CertifiedSource, cancel: Arc<AtomicBool>) -> Result<Self, OwnedIoError> {
+        crate::initialize_ffmpeg().map_err(decoder_error)?;
+        let (format, avio) = bridge::Avio::open(source.cursor(cancel)?)?;
+        let mut input = Self::from_parts(format, avio);
         if input.format.nb_streams() as usize > MAX_CERTIFIED_STREAMS {
             return Err(OwnedIoError::Capacity("too many certified streams".into()));
         }
@@ -1224,7 +1231,7 @@ impl CertifiedVideoDecoder {
     pub fn cached_chunk_indices(&self) -> [Option<u64>; CACHE_SLOTS] {
         self.input
             .avio
-            .cursor
+            .cursor()
             .slots
             .each_ref()
             .map(|slot| slot.index)
@@ -1232,7 +1239,7 @@ impl CertifiedVideoDecoder {
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn delivered_bytes(&self) -> u64 {
-        self.input.avio.cursor.delivered_bytes
+        self.input.avio.cursor().delivered_bytes
     }
 
     pub fn next_frame(&mut self) -> Result<Option<CertifiedVideoFrame>, OwnedIoError> {
@@ -1296,7 +1303,7 @@ impl CertifiedAudioDecoder {
     pub fn cached_chunk_indices(&self) -> [Option<u64>; CACHE_SLOTS] {
         self.input
             .avio
-            .cursor
+            .cursor()
             .slots
             .each_ref()
             .map(|slot| slot.index)
@@ -1304,7 +1311,7 @@ impl CertifiedAudioDecoder {
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn delivered_bytes(&self) -> u64 {
-        self.input.avio.cursor.delivered_bytes
+        self.input.avio.cursor().delivered_bytes
     }
 
     pub fn next_frame(&mut self) -> Result<Option<CertifiedAudioFrame>, OwnedIoError> {
@@ -1386,6 +1393,8 @@ mod bridge {
             .stream(0)
             .ok_or_else(|| decoder_error("still stream missing"))?
             .parameters();
+        // SAFETY: `parameters` wraps the live stream's codec parameters, and
+        // `input` is borrowed exclusively, so nothing else reads them now.
         unsafe {
             (*parameters.as_mut_ptr()).width = i32::try_from(width).expect("bounded width");
             (*parameters.as_mut_ptr()).height = i32::try_from(height).expect("bounded height");
@@ -1394,12 +1403,14 @@ mod bridge {
     }
 
     pub(super) fn dynamic_stream_table(input: &ffmpeg::format::context::Input) -> bool {
+        // SAFETY: a field read of the live format context `input` wraps.
         unsafe { (*input.as_ptr()).ctx_flags & ffi::AVFMTCTX_NOHEADER != 0 }
     }
 
     pub(super) fn decoder_bound(
         parameters: &ffmpeg::codec::Parameters,
     ) -> Result<DecoderBound, OwnedIoError> {
+        // SAFETY: `parameters` wraps live codec parameters for the borrow.
         let parameters = unsafe { &*parameters.as_ptr() };
         let (pixels, channels, frame_bytes) =
             if parameters.codec_type == ffi::AVMediaType::AVMEDIA_TYPE_VIDEO {
@@ -1466,6 +1477,7 @@ mod bridge {
             count: 1,
             kind: ffmpeg::codec::threading::Type::None,
         });
+        // SAFETY: `context` is a live codec context this function owns, not yet opened.
         unsafe {
             (*context.as_mut_ptr()).max_pixels = bound.allocation_pixels;
             (*context.as_mut_ptr()).max_samples =
@@ -1478,6 +1490,9 @@ mod bridge {
         bounds: &[Option<DecoderBound>],
     ) -> Result<(), OwnedIoError> {
         let mut options = vec![ptr::null_mut(); bounds.len()];
+        // SAFETY: `input` wraps a live format context borrowed exclusively.
+        // `options` holds one dictionary pointer per stream (FFmpeg's contract
+        // for `avformat_find_stream_info`), each freed before returning.
         unsafe {
             // options.c refuses new streams before allocating their decoder context.
             (*input.as_mut_ptr()).max_streams =
@@ -1512,35 +1527,74 @@ mod bridge {
         Ok(())
     }
 
+    /// The custom AVIO context and the cursor its callbacks read through.
+    ///
+    /// `FFmpeg` holds raw pointers to the cursor (the AVIO `opaque`, the format's
+    /// `opaque` and its interrupt callback's `opaque`). The cursor is therefore
+    /// a raw allocation from `Box::into_raw`, never a live `Box`: a `Box`
+    /// asserts unique ownership, and using it would invalidate the pointers
+    /// `FFmpeg` dereferences later. Rust reaches the cursor only through the same
+    /// pointer ([`Avio::cursor`], [`Avio::cursor_mut`]), and `Drop` frees it
+    /// after the AVIO context, once `FFmpeg` can no longer call back.
     pub(super) struct Avio {
         context: NonNull<ffi::AVIOContext>,
-        pub(super) cursor: Box<VerifiedCursor>,
+        cursor: NonNull<VerifiedCursor>,
     }
-    // FFmpeg calls these callbacks synchronously. Moving the owner cannot overlap calls.
+    // SAFETY: `Avio` owns its AVIO context and cursor outright; FFmpeg touches
+    // them only synchronously, inside calls made on the thread that currently
+    // owns the `Avio` and its format context. They move between threads
+    // together (inside `CertifiedInput`), and nothing else keeps a pointer to
+    // either, so moving the owner cannot overlap a callback.
     unsafe impl Send for Avio {}
+
+    /// Frees a cursor allocated by `Box::into_raw` that `FFmpeg` never received
+    /// or can no longer reach.
+    ///
+    /// # Safety
+    ///
+    /// `cursor` came from `Box::into_raw`, is freed only once, and no pointer
+    /// to it is used afterwards.
+    unsafe fn free_cursor(cursor: NonNull<VerifiedCursor>) {
+        // SAFETY: the caller's contract above.
+        drop(unsafe { Box::from_raw(cursor.as_ptr()) });
+    }
 
     impl Avio {
         #[allow(clippy::too_many_lines)]
         pub(super) fn open(
             cursor: VerifiedCursor,
         ) -> Result<(ffmpeg::format::context::Input, Self), OwnedIoError> {
-            let mut cursor = Box::new(cursor);
+            let cursor = NonNull::new(Box::into_raw(Box::new(cursor)))
+                .expect("Box::into_raw never returns null");
+            // SAFETY: every pointer below is either freshly allocated by FFmpeg
+            // and null-checked before use, or is `cursor`, which stays allocated
+            // until `Avio::drop` (or the explicit `free_cursor` on the two
+            // failure paths before an `Avio` owns it). The format context's `pb`
+            // is our custom context (AVFMT_FLAG_CUSTOM_IO), so FFmpeg never
+            // frees it; the returned `Input` closes the format before `Avio`
+            // frees the context and cursor (`Drop for CertifiedInput`, and the
+            // local drop order on the error paths here: `input` is declared
+            // after `avio`, so it drops first). The callbacks match FFmpeg's
+            // signatures and are only called synchronously from the
+            // `avformat_open_input` below or later FFmpeg calls on this format.
             unsafe {
                 let buffer = ffi::av_malloc(AVIO_BUFFER_BYTES).cast::<u8>();
                 if buffer.is_null() {
+                    free_cursor(cursor);
                     return Err(OwnedIoError::Capacity("AVIO buffer allocation".into()));
                 }
                 let context = ffi::avio_alloc_context(
                     buffer,
                     c_int::try_from(AVIO_BUFFER_BYTES).expect("bounded AVIO buffer"),
                     0,
-                    ptr::from_mut(cursor.as_mut()).cast(),
+                    cursor.as_ptr().cast(),
                     Some(read),
                     None,
                     Some(seek),
                 );
                 let Some(context) = NonNull::new(context) else {
                     ffi::av_free(buffer.cast());
+                    free_cursor(cursor);
                     return Err(OwnedIoError::Capacity("AVIO context allocation".into()));
                 };
                 let mut avio = Self { context, cursor };
@@ -1549,11 +1603,11 @@ mod bridge {
                     return Err(OwnedIoError::Capacity("format allocation".into()));
                 }
                 (*format).pb = context.as_ptr();
-                (*format).opaque = ptr::from_mut(avio.cursor.as_mut()).cast();
+                (*format).opaque = cursor.as_ptr().cast();
                 (*format).flags |= ffi::AVFMT_FLAG_CUSTOM_IO;
                 (*format).io_open = Some(deny_open);
                 (*format).interrupt_callback.callback = Some(interrupt);
-                (*format).interrupt_callback.opaque = ptr::from_mut(avio.cursor.as_mut()).cast();
+                (*format).interrupt_callback.opaque = cursor.as_ptr().cast();
                 (*format).max_streams =
                     i32::try_from(MAX_CERTIFIED_STREAMS).expect("bounded stream count");
                 (*format).probesize = 32_768;
@@ -1561,7 +1615,7 @@ mod bridge {
                 let formats = SINGLE_OBJECT_DEMUXERS;
                 let protocols = c"none";
                 #[cfg(test)]
-                let (formats, protocols) = match avio.cursor.source.hooks.open_policy {
+                let (formats, protocols) = match avio.cursor().source.hooks.open_policy {
                     super::TestOpenPolicy::Production => (formats, protocols),
                     super::TestOpenPolicy::ProtocolGuard => (c"concat,hls,wav,mpegts", protocols),
                     super::TestOpenPolicy::FormatGuard => (formats, c"file"),
@@ -1604,23 +1658,41 @@ mod bridge {
                 Ok((input, avio))
             }
         }
+        /// The cursor, for Rust-side reads.
+        pub(super) fn cursor(&self) -> &VerifiedCursor {
+            // SAFETY: `cursor` is live until `drop`. FFmpeg dereferences it
+            // only inside its own calls, which run synchronously on the thread
+            // that owns this `Avio`; no such call is in progress while Rust
+            // holds this borrow, because callers in this module only take it
+            // between FFmpeg calls and never hold it across one.
+            unsafe { self.cursor.as_ref() }
+        }
+        /// The cursor, for Rust-side writes. Same rule as [`Avio::cursor`].
+        pub(super) fn cursor_mut(&mut self) -> &mut VerifiedCursor {
+            // SAFETY: as in `cursor`; `&mut self` also excludes every other
+            // Rust borrow of the cursor.
+            unsafe { self.cursor.as_mut() }
+        }
         pub(super) fn cancel(&self) -> Arc<AtomicBool> {
-            Arc::clone(&self.cursor.cancel)
+            Arc::clone(&self.cursor().cancel)
         }
         pub(super) fn check(&mut self) -> Result<(), OwnedIoError> {
-            self.cursor.check()?;
+            self.cursor_mut().check()?;
+            // SAFETY: `context` is the live AVIO context this `Avio` owns, and
+            // no FFmpeg call is running on it while `&mut self` is held.
             unsafe {
                 if self.context.as_ref().error == ffi::AVERROR(ffmpeg::error::EAGAIN) {
                     self.context.as_mut().error = 0;
                     self.context.as_mut().eof_reached = 0;
                 }
             }
+            // SAFETY: as above; a plain field read of the live context.
             let buffer_size = unsafe { self.context.as_ref().buffer_size };
             if buffer_size < 0
                 || usize::try_from(buffer_size).expect("nonnegative AVIO buffer")
                     > AVIO_BUFFER_BYTES
             {
-                return self.cursor.fail(OwnedIoError::Capacity(
+                return self.cursor_mut().fail(OwnedIoError::Capacity(
                     "format exceeded bounded AVIO buffer".into(),
                 ));
             }
@@ -1628,6 +1700,7 @@ mod bridge {
         }
         #[cfg(test)]
         pub(super) fn buffer_size(&self) -> usize {
+            // SAFETY: a plain field read of the live context this `Avio` owns.
             usize::try_from(unsafe { self.context.as_ref().buffer_size }).unwrap()
         }
     }
@@ -1651,20 +1724,36 @@ mod bridge {
             }),
         );
         let source = source.with_read_authority(authority).unwrap();
-        let mut cursor = Box::new(source.cursor(Arc::new(AtomicBool::new(false))).unwrap());
+        let cursor = NonNull::new(Box::into_raw(Box::new(
+            source.cursor(Arc::new(AtomicBool::new(false))).unwrap(),
+        )))
+        .unwrap();
+        // SAFETY: as in `Avio::open`: the buffer and context are null-checked,
+        // and on either failure the buffer and `cursor` are freed before the
+        // panic (as `Avio::open`'s failure paths do), so neither leaks;
+        // otherwise `avio` owns both from here and frees them when it drops.
+        // The reads run synchronously on this thread while no Rust borrow of
+        // the cursor is live.
         unsafe {
             let buffer = ffi::av_malloc(AVIO_BUFFER_BYTES).cast::<u8>();
-            assert!(!buffer.is_null());
-            let context = NonNull::new(ffi::avio_alloc_context(
+            if buffer.is_null() {
+                free_cursor(cursor);
+                panic!("AVIO buffer allocation");
+            }
+            let context = ffi::avio_alloc_context(
                 buffer,
                 c_int::try_from(AVIO_BUFFER_BYTES).unwrap(),
                 0,
-                ptr::from_mut(cursor.as_mut()).cast(),
+                cursor.as_ptr().cast(),
                 Some(read),
                 None,
                 Some(seek),
-            ))
-            .unwrap();
+            );
+            let Some(context) = NonNull::new(context) else {
+                ffi::av_free(buffer.cast());
+                free_cursor(cursor);
+                panic!("AVIO context allocation");
+            };
             let mut avio = Avio { context, cursor };
             let mut bytes = [0; 32];
             busy.store(true, Ordering::Release);
@@ -1685,13 +1774,29 @@ mod bridge {
     }
     impl Drop for Avio {
         fn drop(&mut self) {
-            // The format has closed first. FFmpeg may replace the buffer while probing.
+            // SAFETY: the format that read through this context has closed
+            // first (`Drop for CertifiedInput`, or `Avio::open`'s own error
+            // paths), so FFmpeg holds no other use of the context. FFmpeg may
+            // replace the buffer while probing, so the current one is freed.
             unsafe {
                 let mut context = self.context.as_ptr();
                 ffi::av_free((*context).buffer.cast());
                 (*context).buffer = ptr::null_mut();
                 ffi::avio_context_free(&raw mut context);
             }
+            // SAFETY: the context and the format are gone, so no FFmpeg
+            // callback can reach the cursor any more; it came from
+            // `Box::into_raw` in `Avio::open` and is freed only here.
+            unsafe { free_cursor(self.cursor) };
+        }
+    }
+
+    impl Drop for super::CertifiedInput {
+        fn drop(&mut self) {
+            // SAFETY: `format` is dropped exactly once, here, and never used
+            // again. Closing it first means FFmpeg is done with `avio`'s
+            // context and cursor before the fields drop and free them.
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.format) };
         }
     }
 
@@ -1702,7 +1807,18 @@ mod bridge {
         _flags: c_int,
         _options: *mut *mut ffi::AVDictionary,
     ) -> c_int {
-        let cursor = unsafe { &mut *(*format).opaque.cast::<VerifiedCursor>() };
+        // SAFETY: FFmpeg passes the live format context that is opening a
+        // nested input. Ours carries the cursor in `opaque`; a context whose
+        // `opaque` was not copied (null) is refused without touching it.
+        let Some(cursor) = (unsafe { format.as_ref() })
+            .and_then(|format| NonNull::new(format.opaque.cast::<VerifiedCursor>()))
+        else {
+            return ffi::AVERROR(ffmpeg::error::EACCES);
+        };
+        // SAFETY: a non-null `opaque` on a context with our `io_open` is the
+        // cursor `Avio::open` installed, live until `Avio::drop`, and FFmpeg
+        // calls this synchronously while no Rust borrow of the cursor is live.
+        let cursor = unsafe { &mut *cursor.as_ptr() };
         #[cfg(test)]
         cursor
             .source
@@ -1716,6 +1832,8 @@ mod bridge {
     }
     #[cfg(test)]
     pub(super) fn callback_read(cursor: &mut VerifiedCursor, buffer: &mut [u8]) -> i32 {
+        // SAFETY: `cursor` and `buffer` are live exclusive borrows, and the
+        // length is the buffer's own.
         unsafe {
             read(
                 std::ptr::from_mut(cursor).cast(),
@@ -1726,10 +1844,14 @@ mod bridge {
     }
     #[cfg(test)]
     pub(super) fn append_stream(input: &mut ffmpeg::format::context::Input) -> bool {
+        // SAFETY: `input` wraps a live format context borrowed exclusively.
         unsafe { !ffi::avformat_new_stream(input.as_mut_ptr(), ptr::null()).is_null() }
     }
     #[cfg(test)]
     pub(super) fn secondary_open(input: &mut CertifiedInput, url: &CStr) -> i32 {
+        // SAFETY: `input` is borrowed exclusively, so its format and cursor are
+        // live and no other FFmpeg call runs; the nested context is null-checked
+        // and freed here, and `io_open` is our `deny_open`.
         unsafe {
             let format = input.format.as_mut_ptr();
             let nested = ffi::avformat_alloc_context();
@@ -1751,18 +1873,24 @@ mod bridge {
         }
     }
     unsafe extern "C" fn interrupt(opaque: *mut c_void) -> c_int {
-        // The Box stays alive until format and AVIO teardown have completed.
+        // SAFETY: `opaque` is the cursor `Avio::open` installed; it stays
+        // allocated until the format and AVIO context are torn down, and
+        // FFmpeg calls this synchronously while no Rust borrow of it is live.
         let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
         i32::from(
             matches!(cursor.check(), Err(error) if error != OwnedIoError::TemporarilyUnavailable),
         )
     }
     unsafe extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, length: c_int) -> c_int {
+        // SAFETY: as in `interrupt`: `opaque` is our live cursor, reached only
+        // from this synchronous callback.
         let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
         let result = catch_unwind(AssertUnwindSafe(|| {
             if length <= 0 {
                 return cursor.fail(OwnedIoError::Damaged("invalid AVIO read size".into()));
             }
+            // SAFETY: FFmpeg hands a writable buffer of `length` bytes, and
+            // `length > 0` was checked above.
             let output = unsafe {
                 std::slice::from_raw_parts_mut(
                     buffer,
@@ -1795,6 +1923,8 @@ mod bridge {
         }
     }
     unsafe extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
+        // SAFETY: as in `interrupt`: `opaque` is our live cursor, reached only
+        // from this synchronous callback.
         let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
         let result = catch_unwind(AssertUnwindSafe(|| {
             if whence & ffi::AVSEEK_SIZE != 0 {
@@ -2380,7 +2510,7 @@ mod tests {
             !decoder
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk)),
@@ -2421,7 +2551,7 @@ mod tests {
             !decoder
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk)),
@@ -2468,7 +2598,7 @@ mod tests {
             !video
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk))
@@ -2477,7 +2607,7 @@ mod tests {
             !audio
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk))
@@ -2486,10 +2616,10 @@ mod tests {
         for input in [&mut video.input, &mut audio.input] {
             let seek = input
                 .avio
-                .cursor
+                .cursor_mut()
                 .seek(SeekFrom::Start(chunk * CHUNK_BYTES as u64));
             if seek.is_ok() {
-                assert!(bridge::callback_read(&mut input.avio.cursor, &mut [0; 32]) < 0);
+                assert!(bridge::callback_read(input.avio.cursor_mut(), &mut [0; 32]) < 0);
             } else {
                 assert_damaged(seek);
             }
@@ -2553,12 +2683,7 @@ mod tests {
         );
         let source = source(&path);
         let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
-        let header = CertifiedInput {
-            format,
-            avio,
-            probe_charges: Vec::new(),
-            decoder_bound: None,
-        };
+        let header = CertifiedInput::from_parts(format, avio);
         assert_eq!(
             header.format.nb_streams(),
             0,
@@ -2611,12 +2736,7 @@ mod tests {
         );
         let source = source(&path);
         let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
-        let header = CertifiedInput {
-            format,
-            avio,
-            probe_charges: Vec::new(),
-            decoder_bound: None,
-        };
+        let header = CertifiedInput::from_parts(format, avio);
         assert_eq!(
             header.format.nb_streams(),
             2,
@@ -2647,12 +2767,7 @@ mod tests {
         let directory = TempDirectory::new("kinewright-owned-probe-limit");
         let source = source(&wav_fixture(&directory));
         let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
-        let mut header = CertifiedInput {
-            format,
-            avio,
-            probe_charges: Vec::new(),
-            decoder_bound: None,
-        };
+        let mut header = CertifiedInput::from_parts(format, avio);
         assert_eq!(header.format.nb_streams(), 1);
         assert!(
             bridge::append_stream(&mut header.format),

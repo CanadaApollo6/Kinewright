@@ -227,7 +227,7 @@ impl ColorQcSource for AnalysisColorQcSource {
             baseline: Mutex::new(None),
         };
         let report = kinewright_core::nodes::measure_color_qc_with_nodes(
-            &analysis, document, key.frame, request,
+            &analysis, &document, key.frame, request,
         )?;
         let metadata = analysis
             .baseline_metadata()

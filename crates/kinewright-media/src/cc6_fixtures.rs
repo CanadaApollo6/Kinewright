@@ -1802,7 +1802,7 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
         .into_legacy_fixture();
     let contributions = kinewright_core::nodes::measure_node_contributions(
         &engine,
-        Arc::new(document.clone()),
+        &Arc::new(document.clone()),
         TimeCode::ZERO,
         &ColorQcRequest::default(),
     )
@@ -1840,7 +1840,7 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
     assert_eq!(reversed_production, vec![3, 2, 1]);
     let reversed_core = kinewright_core::nodes::measure_node_contributions(
         &engine,
-        Arc::new(reversed),
+        &Arc::new(reversed),
         TimeCode::ZERO,
         &ColorQcRequest::default(),
     )
