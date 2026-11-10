@@ -69,6 +69,23 @@ pub(crate) fn note_history_decode() {
 pub fn history_decode_count() -> u64 {
     HISTORY_DECODES.with(std::cell::Cell::get)
 }
+thread_local! { static SUPPORT_REUSE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Run `run` with the save's reuse of its check-step support fields turned off, so a
+/// just-sealed history is decoded again for the support inventory (the path before reuse).
+pub fn without_support_reuse<T>(run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SUPPORT_REUSE_OFF.with(|off| off.set(false));
+        }
+    }
+    SUPPORT_REUSE_OFF.with(|off| off.set(true));
+    let _reset = Reset;
+    run()
+}
+pub(crate) fn support_reuse_disabled() -> bool {
+    SUPPORT_REUSE_OFF.with(std::cell::Cell::get)
+}
 thread_local! {static SYNC_PROFILE: RefCell<Option<SyncProfile>>=const{RefCell::new(None)};}
 #[cfg(target_os = "linux")]
 pub(crate) fn measure_sync<T, E>(run: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
