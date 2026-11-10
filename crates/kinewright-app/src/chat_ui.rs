@@ -730,10 +730,11 @@ impl KinewrightApp {
             return;
         }
         if self.harness[index].model.is_none() {
-            let models = self.harness[index].models.clone();
-            self.harness[index].model = restore_choice(ctx, harness.model_memory_id(), |id| {
+            let models = &self.harness[index].models;
+            let restored = restore_choice(ctx, harness.model_memory_id(), |id| {
                 models.iter().any(|model| model.id == id)
             });
+            self.harness[index].model = restored;
         }
         let effective = self.harness_model_or_default(harness).map(str::to_owned);
         let (efforts, tiers) = {
@@ -897,9 +898,7 @@ impl KinewrightApp {
                     thread.name = thread_title(&message);
                 }
                 thread.chat.push(ChatEntry::User(message.clone()));
-                thread
-                    .provenance
-                    .record(ProvenanceKind::Prompt, message.clone());
+                thread.provenance.record(ProvenanceKind::Prompt, message);
                 thread.input.clear();
                 thread.running = true;
                 thread.last_activity = Instant::now();

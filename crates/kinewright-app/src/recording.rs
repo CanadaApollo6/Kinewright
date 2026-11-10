@@ -1599,10 +1599,10 @@ pub(crate) mod feedback_capture {
                 let log = evidence(owner, &bytes, &dependencies)?;
                 let voice = VoiceRef {
                     note_id: self.note_id.clone(),
-                    audio_ref: audio.reference.clone(),
+                    audio_ref: audio.reference,
                     duration_micros: duration,
                     range: None,
-                    playhead_log_ref: Some(log.reference.clone()),
+                    playhead_log_ref: Some(log.reference),
                     original_asr_ref: None,
                     chosen_transcript_revision: None,
                 };

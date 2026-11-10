@@ -177,7 +177,7 @@ pub(crate) fn get_color_qc(
     };
 
     let report = if per_node {
-        nodes::measure_color_qc_with_nodes(analysis, Arc::clone(document), at, &request)
+        nodes::measure_color_qc_with_nodes(analysis, document, at, &request)
             .map_err(|error| media_refusal(&error, "per_node"))?
     } else {
         let proof = analysis

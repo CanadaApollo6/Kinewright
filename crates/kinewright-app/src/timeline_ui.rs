@@ -2895,14 +2895,7 @@ fn paint_clip(
     if dragging {
         painter.rect_filled(rect, radius::SM, color::SURFACE_ACTIVE);
     }
-    paint_derived_markers(
-        painter,
-        clip_bounds,
-        media,
-        asset,
-        source_range.clone(),
-        rect,
-    );
+    paint_derived_markers(painter, clip_bounds, media, asset, source_range, rect);
     paint_clip_chrome(painter, rect, hovered, selected, dragging);
     if hovered || selected || dragging {
         painter.rect_filled(
@@ -3784,10 +3777,8 @@ pub(super) fn clip_speed_operations(
     let current_duration = document
         .clip_duration(clip)
         .map_err(|error| error.to_string())?;
-    let mut resped = clip.clone();
-    resped.speed_percent = speed_percent;
     let new_duration = document
-        .clip_duration(&resped)
+        .clip_duration_at_speed(clip, speed_percent)
         .map_err(|error| error.to_string())?;
     let current_end = clip
         .timeline_start

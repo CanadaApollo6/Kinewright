@@ -1210,13 +1210,9 @@ impl FfmpegMediaEngine {
     ///
     /// Built-in looks need no publication at all: they are generated in this
     /// binary and resolve straight from the pinned bake table.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "Shared library publication matches the existing caller-owned handoff"
-    )]
-    pub fn set_lut_library(&self, library: Arc<LutLibrary>) {
+    pub fn set_lut_library(&self, library: &LutLibrary) {
         if let Ok(mut published) = self.lut_lattices.write() {
-            published.merge(&library);
+            published.merge(library);
         }
         let _ = self.control_tx.send(Control::LutLatticesPublished);
     }
@@ -3036,19 +3032,19 @@ impl Worker {
                 self.inputs = None;
                 if grant.as_ref().is_none_or(|grant| grant.check().is_err()) {
                     self.legacy_media = None;
-                    self.set_document(&Arc::new(Document::default()), issued.stamp);
+                    self.set_document(Arc::new(Document::default()), issued.stamp);
                     self.fail(MediaError::MediaAdmissionRequired);
                     return;
                 }
                 self.legacy_media = grant;
-                self.set_document(&doc, issued.stamp);
+                self.set_document(doc, issued.stamp);
             }
             Control::RefuseDocument(issued) => {
                 self.take_requests_before(issued);
                 self.apply_control(issued);
                 self.inputs = None;
                 self.legacy_media = None;
-                self.set_document(&Arc::new(Document::default()), issued.stamp);
+                self.set_document(Arc::new(Document::default()), issued.stamp);
                 self.fail(MediaError::MediaAdmissionRequired);
             }
             Control::SetCertified(inputs, issued) => {
@@ -3056,7 +3052,7 @@ impl Worker {
                 self.apply_control(issued);
                 self.inputs = Some(Arc::clone(&inputs));
                 self.legacy_media = None;
-                self.set_document(&inputs.document, issued.stamp);
+                self.set_document(Arc::clone(&inputs.document), issued.stamp);
             }
             Control::LutLatticesPublished => self.rebind_lut_library(),
             Control::UpdateCertifiedAudio(kind, inputs) => {
@@ -3344,7 +3340,7 @@ impl Worker {
     /// with each other or with a re-cue. `None` re-cues.
     fn update_audio(&mut self, kind: LiveAudioChange, doc: Arc<Document>) {
         match kind {
-            LiveAudioChange::None => self.recue_audio(&doc),
+            LiveAudioChange::None => self.recue_audio(doc),
             LiveAudioChange::Mix => {
                 self.update_audio_mix(doc);
             }
@@ -3361,7 +3357,7 @@ impl Worker {
     /// fall back to the same pause-and-re-cue branch the chain path uses.
     fn update_clip_shaping(&mut self, doc: Arc<Document>) {
         if !can_retarget_audio_mix(&self.document, &doc) {
-            self.recue_audio(&doc);
+            self.recue_audio(doc);
             return;
         }
         let applied = self
@@ -3372,12 +3368,12 @@ impl Worker {
             self.document = doc;
             return;
         }
-        self.recue_audio(&doc);
+        self.recue_audio(doc);
     }
 
     /// AU2 §5.8: "a pause and re-cue", not a rewind. No transport call
     /// stamped it, so its image carries the newest stamp handled (R-1).
-    fn recue_audio(&mut self, doc: &Arc<Document>) {
+    fn recue_audio(&mut self, doc: Arc<Document>) {
         let at = self.clock.position();
         let stamp = self.handled;
         self.set_document(doc, stamp);
@@ -3389,7 +3385,7 @@ impl Worker {
 
     fn update_audio_mix(&mut self, doc: Arc<Document>) -> bool {
         if !can_retarget_audio_mix(&self.document, &doc) {
-            self.recue_audio(&doc);
+            self.recue_audio(doc);
             return false;
         }
         self.document = doc;
@@ -3412,14 +3408,15 @@ impl Worker {
         true
     }
 
-    fn set_document(&mut self, doc: &Document, stamp: FrameStamp) {
+    fn set_document(&mut self, doc: Arc<Document>, stamp: FrameStamp) {
         self.pause();
         // AU3 §3.9: a new document is a new programme.
         self.loudness.reset(None, doc.fps);
-        self.document = Arc::new(doc.clone());
+        let fps = doc.fps;
+        self.document = doc;
         self.generation += 1;
         self.rebind_lut_library();
-        self.clock.set_fps(doc.fps);
+        self.clock.set_fps(fps);
         self.clock.set_frame(TimeCode::ZERO);
         self.last_position = None;
         self.post_paused(TimeCode::ZERO, stamp);

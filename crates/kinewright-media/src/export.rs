@@ -1234,7 +1234,7 @@ pub(crate) fn mix_pass(
             .iter()
             .map(|(track, samples)| {
                 let end = start.saturating_add(sample_count).min(samples.len());
-                (*track, samples[start..end].to_vec())
+                (*track, &samples[start..end])
             })
             .collect::<HashMap<_, _>>();
         if run_stems {

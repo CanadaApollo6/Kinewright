@@ -3295,10 +3295,12 @@ pub(crate) fn thumbnail(
     let frame = cache
         .frame_at_or_before(at)
         .ok_or_else(|| MediaError::Backend(format!("no video frame decoded at {at}")))?;
+    // The cache held the other reference; with it gone the pixels move out.
+    drop(cache);
     Ok(RgbaImage {
         width: frame.width,
         height: frame.height,
-        pixels: (*frame.rgba).clone(),
+        pixels: Arc::try_unwrap(frame.rgba).unwrap_or_else(|shared| (*shared).clone()),
     })
 }
 

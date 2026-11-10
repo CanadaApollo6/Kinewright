@@ -1573,20 +1573,25 @@ impl KinewrightMcp {
         }
         // Preserve the operation's result even if live authorization/refresh
         // fails after a commit. Only the optional metadata may disappear.
-        let original_content = reply.as_ref().ok().map(|result| result.content.clone());
-        let (mut outcome, failed) = match reply {
-            Ok(result) => {
-                let failed = result.is_error == Some(true);
-                let outcome = result.structured_content.unwrap_or_else(|| {
+        let (mut outcome, failed, original_content) = match reply {
+            Ok(CallToolResult {
+                content,
+                structured_content,
+                is_error,
+                ..
+            }) => {
+                let failed = is_error == Some(true);
+                let outcome = structured_content.unwrap_or_else(|| {
                     serde_json::json!({
-                        "content": result.content, "is_error": failed
+                        "content": &content, "is_error": failed
                     })
                 });
-                (outcome, failed)
+                (outcome, failed, Some(content))
             }
             Err(error) => (
                 serde_json::json!({"error":error.message,"code":error.code}),
                 true,
+                None,
             ),
         };
         let TaskReplyMetadata {

@@ -1650,6 +1650,20 @@ impl Document {
     ///
     /// Returns an error for a missing media asset or an unrepresentable frame-rate mapping.
     pub fn clip_duration(&self, clip: &Clip) -> Result<TimeCode, OpError> {
+        self.clip_duration_at_speed(clip, clip.speed_percent)
+    }
+
+    /// [`Document::clip_duration`] as if the clip played at `speed_percent`,
+    /// without building a re-speeded copy of the clip.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Document::clip_duration`].
+    pub fn clip_duration_at_speed(
+        &self,
+        clip: &Clip,
+        speed_percent: u32,
+    ) -> Result<TimeCode, OpError> {
         if clip.content.is_span() {
             return clip
                 .source_range
@@ -1660,7 +1674,8 @@ impl Document {
         let asset = self
             .asset(clip.asset)
             .ok_or(OpError::MissingAsset(clip.asset))?;
-        let effective = clip_effective_fps(asset.fps, clip).map_err(OpError::TimeMapping)?;
+        let effective =
+            crate::speed_scaled_fps(asset.fps, speed_percent).map_err(OpError::TimeMapping)?;
         map_source_range_to_project(clip.source_range.clone(), effective, self.fps)
             .map_err(OpError::TimeMapping)
     }

@@ -625,7 +625,7 @@ fn cc7_canonical_plan(gpu: &FixtureGpu, scenario: Cc7Scenario, label: &str) -> C
     let (operations, library) = match scenario {
         Cc7Scenario::LogLike => {
             let (directory, asset, library) = cc7_import_log_inverse_cube(CC7_LOG_CUBE_SIZE, false);
-            engine.set_lut_library(Arc::clone(&library));
+            engine.set_lut_library(&library);
             store = Some(directory);
             (
                 cc7_lut_backed_canonical_operations(scenario, asset),
@@ -634,7 +634,7 @@ fn cc7_canonical_plan(gpu: &FixtureGpu, scenario: Cc7Scenario, label: &str) -> C
         }
         Cc7Scenario::CreativeLook => {
             let (asset, library) = cc7_warm_look_asset();
-            engine.set_lut_library(Arc::clone(&library));
+            engine.set_lut_library(&library);
             (
                 cc7_lut_backed_canonical_operations(scenario, asset),
                 library,
@@ -1558,7 +1558,7 @@ fn cc7_measure_log_inverse(
     let (directory, asset, library) = cc7_import_log_inverse_cube(size, identity);
     let cube_bytes = asset.byte_len;
     let engine = cc7_engine(gpu);
-    engine.set_lut_library(library);
+    engine.set_lut_library(&library);
     let committed = scene.commit(
         "cc7-c",
         &cc7_lut_backed_canonical_operations(Cc7Scenario::LogLike, asset),
@@ -2092,7 +2092,7 @@ fn cc7_warm_look_out_of_gamut_count_is_exact_on_the_deep_shadow_patch() {
     let engine = cc7_engine(&gpu);
     let scene = cc7_camera_a_scene("cc7-e");
     let (warm, library) = cc7_warm_look_asset();
-    engine.set_lut_library(library);
+    engine.set_lut_library(&library);
     let committed = scene.commit(
         "cc7-e",
         &cc7_lut_backed_canonical_operations(Cc7Scenario::CreativeLook, warm),

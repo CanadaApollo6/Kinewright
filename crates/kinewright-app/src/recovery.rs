@@ -613,7 +613,7 @@ fn recorder_loop(
     mut writer: JournalWriter,
     events: &Receiver<Event>,
     controls: &Receiver<RecorderControl>,
-    runtime_error: &Arc<Mutex<Option<String>>>,
+    runtime_error: &Mutex<Option<String>>,
 ) {
     loop {
         select! {
@@ -648,7 +648,7 @@ fn recorder_loop(
 fn drain_events(
     events: &Receiver<Event>,
     writer: &mut JournalWriter,
-    runtime_error: &Arc<Mutex<Option<String>>>,
+    runtime_error: &Mutex<Option<String>>,
 ) -> bool {
     while let Ok(event) = events.try_recv() {
         if !record_event(writer, event, runtime_error) {
@@ -661,7 +661,7 @@ fn drain_events(
 fn record_event(
     writer: &mut JournalWriter,
     event: Event,
-    runtime_error: &Arc<Mutex<Option<String>>>,
+    runtime_error: &Mutex<Option<String>>,
 ) -> bool {
     let Event::DocumentChanged {
         journal_command: Some(command),
@@ -1269,7 +1269,7 @@ impl Drop for Recovery {
     }
 }
 
-fn remove_file_best_effort(path: &Path, runtime_error: &Arc<Mutex<Option<String>>>) {
+fn remove_file_best_effort(path: &Path, runtime_error: &Mutex<Option<String>>) {
     if let Err(error) = fs::remove_file(path)
         && error.kind() != io::ErrorKind::NotFound
     {

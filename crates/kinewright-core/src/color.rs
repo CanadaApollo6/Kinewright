@@ -835,7 +835,7 @@ impl<'de> Deserialize<'de> for ColorContext {
                     delivery: if delivery_matches_default {
                         current.delivery
                     } else {
-                        legacy.delivery.clone()
+                        legacy.delivery
                     },
                 };
                 let managed = migrated.working_matches_managed_sdr()

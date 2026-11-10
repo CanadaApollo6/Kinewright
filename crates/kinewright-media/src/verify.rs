@@ -783,7 +783,7 @@ pub(crate) fn verify_delivery_output(
     let bits = depth.bits();
 
     let probed_asset = probe_path(path, AssetId(0))?;
-    let probed = probed_asset.color_description.clone();
+    let probed = probed_asset.color_description;
 
     let expected_frames = implied_frame_count(document, settings)?;
 

@@ -618,7 +618,7 @@ impl KinewrightApp {
         let (media_status_tx, media_status_rx) = mpsc::channel();
         let (cache_clear_tx, cache_clear_rx) = mpsc::channel();
         let controls = media.controls();
-        let playback: Arc<dyn Playback> = controls.clone();
+        let playback: Arc<dyn Playback> = controls;
         let lut_publisher = media;
         let sidecar_writer = SidecarWriter::new();
         let sidecar_mode = if project_path.is_some() {
@@ -1280,7 +1280,7 @@ impl KinewrightApp {
     /// one publication rule rather than one per call site.
     pub(crate) fn publish_focused_lut_library(&self) {
         self.lut_publisher
-            .set_lut_library(Arc::clone(&self.focused().lut_library));
+            .set_lut_library(&self.focused().lut_library);
     }
 
     /// The injected `.bak` rename for the next session creation, if any
@@ -1804,7 +1804,7 @@ impl KinewrightApp {
             session.project_path.as_deref(),
             session.sidecar.authority.clone(),
         );
-        self.lut_publisher.set_lut_library(library);
+        self.lut_publisher.set_lut_library(&library);
     }
 
     /// N2/B-4: the newer-format note was about the old path's bytes — a
@@ -3405,7 +3405,7 @@ impl KinewrightApp {
                     self.projects[project_index].revision = revision;
                     if previous_document.lut_assets != doc.lut_assets {
                         let library = self.projects[project_index].rebuild_lut_library();
-                        self.lut_publisher.set_lut_library(library);
+                        self.lut_publisher.set_lut_library(&library);
                     }
                     self.projects[project_index].transcript_selection = None;
                     if self.projects[project_index]
@@ -3868,7 +3868,7 @@ impl KinewrightApp {
             let selected_clip = self.selected_media_clip();
             let import = ui
                 .add_enabled(unavailable.is_none(), egui::Button::new("Import LUT…"))
-                .on_hover_text(unavailable.clone().unwrap_or_else(|| {
+                .on_hover_text(unavailable.unwrap_or_else(|| {
                     "Import a .cube into this project's store and apply it to the selected clip"
                         .to_owned()
                 }));
