@@ -103,6 +103,7 @@ fn te15_b2af1_accepted_refresh_paths() {
 fn te15_b2af1_case5_read_before_merge() {
     let mut trace = Trace {
         sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        case5_deceptive_child: Some(json!("cut")),
         ..Trace::default()
     };
     trace.calls.push(call(
@@ -234,6 +235,7 @@ fn te15_b2b_effective_merge_order() {
     merge.task = json!("director");
     let mut trace = Trace {
         sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        case5_deceptive_child: Some(json!("cut")),
         calls: vec![bad.clone(), read.clone(), merge.clone(), merge.clone()],
         ..Trace::default()
     };
@@ -266,6 +268,7 @@ fn te15_b2b_finish_publication_order() {
     merge.task = json!("director");
     let mut trace = Trace {
         sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        case5_deceptive_child: Some(json!("cut")),
         calls: vec![bad.clone(), read.clone(), merge.clone()],
         ..Trace::default()
     };
@@ -303,6 +306,7 @@ fn te15_b2b_fu2_publication_replay() {
     };
     let mut trace = Trace {
         sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        case5_deceptive_child: Some(json!("deceptive")),
         ..Trace::default()
     };
     for outcome_wrapped in [false, true] {
@@ -346,7 +350,7 @@ fn te15_b2b_fu2_first_qualifying_publication() {
             json!({"completion_status":{"publication_receipt":{"id":id},"result":{"explanation":{"sha256":id}}}}),
             false,
         );
-        c.task = json!(id);
+        c.task = json!("first");
         c
     };
     let mut read = call(
@@ -368,6 +372,7 @@ fn te15_b2b_fu2_first_qualifying_publication() {
     };
     let mut trace = Trace {
         sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        case5_deceptive_child: Some(json!("first")),
         calls: vec![
             publication("first"),
             merge(1),
@@ -389,4 +394,65 @@ fn te15_b2b_fu2_first_qualifying_publication() {
         observed(5, &trace),
         "FU2_FIRST_SUCCESSFUL_QUALIFYING_PUBLICATION"
     );
+}
+
+#[test]
+fn te15_b2b_fu3_earlier_reviewer() {
+    let trace = std::sync::Arc::new(std::sync::Mutex::new(Trace {
+        sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        ..Trace::default()
+    }));
+    let observer = crate::te1_eval::observe::Observations::new(5, trace.clone());
+    for (task, index) in [("reviewer", 2), ("deceptive", 1)] {
+        observer
+            .bind(crate::te1_eval::SendContext {
+                endpoint: String::new(),
+                identity: json!({"task":task,"attempt":task}),
+                brief: json!({}),
+                prompt: String::new(),
+                fixtures: Value::Null,
+                child_index: index,
+            })
+            .unwrap();
+    }
+    let publish = |task: &str| {
+        let mut c = call(
+            "finish_task",
+            json!({}),
+            json!({"completion_status":{
+                "publication_receipt":{"id":task},"result":{"explanation":{"sha256":task}}
+            }}),
+            false,
+        );
+        c.task = json!(task);
+        c
+    };
+    let mut merge = call(
+        "merge_task",
+        json!({"command":{"value":{"task":"corrected"}}}),
+        json!({"receipt":{"id":"merge"}}),
+        false,
+    );
+    merge.task = json!("director");
+    for tool in ["read_task_result", "read_child_result"] {
+        let mut read = call(
+            tool,
+            json!({"reference":{"sha256":"deceptive"},"child":"deceptive"}),
+            json!({"unmet":"correct-homophone","proof":"failed"}),
+            false,
+        );
+        read.task = json!("director");
+        let mut trace = trace.lock().unwrap();
+        assert_eq!(trace.case5_deceptive_child, Some(json!("deceptive")));
+        trace.calls = vec![
+            publish("reviewer"),
+            publish("deceptive"),
+            read,
+            merge.clone(),
+        ];
+        assert!(
+            observed(5, &trace),
+            "FU3_EARLIER_REVIEWER_DOES_NOT_STEAL_ANCHOR"
+        );
+    }
 }

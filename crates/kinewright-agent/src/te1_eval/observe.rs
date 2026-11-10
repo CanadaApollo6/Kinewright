@@ -56,6 +56,8 @@ impl Observations {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
     pub fn bind(&self, context: SendContext) -> io::Result<()> {
+        let deceptive_child =
+            (self.case == 5 && context.child_index == 1).then(|| context.identity["task"].clone());
         let key = (
             context.identity["task"]
                 .as_str()
@@ -73,7 +75,11 @@ impl Observations {
         if contexts.insert(key, context).is_some() {
             return Err(error("duplicate eval attempt binding"));
         }
-        self.trace.lock().map_err(error)?.bound_attempts += 1;
+        let mut trace = self.trace.lock().map_err(error)?;
+        trace.bound_attempts += 1;
+        if let Some(child) = deceptive_child {
+            trace.case5_deceptive_child = Some(child);
+        }
         Ok(())
     }
     pub fn call(

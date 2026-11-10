@@ -44,12 +44,12 @@
     "render": "production preview compared with oracle at frames 0,20,49,50,51,52,89,90,99"
   },
   "driver_sources_sha256": {
-    "te1_eval.rs": "937b1fb6e3290b5ca4092ca9a8464b35b36afe3d095db185755b07d625b3c6fd",
+    "te1_eval.rs": "14afd20b44d0e1a866930e1ed4c21e910234b713e0efe4caadab0e3f6f94f7e6",
     "te1_eval/analysis.rs": "95d082a0484f8e08757a3c444dd54d6ab25d7e4c06a1bf4f9e30971242fe39a0",
-    "te1_eval/checks.rs": "6482e39de83f858af8371ac8f138ec75a901e6f1b0bde49578b46aeb6b9b9904",
+    "te1_eval/checks.rs": "410b436e1a1b557d5ea247210b44ba7210eb4ccf84bfc97d7c86601fe25f1df1",
     "te1_eval/grant.rs": "b51fde0406ac45e56d8d1f86b65462a5c77e12f560638c71d866da03c6e5f449",
-    "te1_eval/observe.rs": "2c82192a6677eb47cb62e612d50954c621631dabde12db11ae28edbaf8a9f89e",
-    "te1_eval/pin.rs": "c40f3ce5a7df1ac8f37eb0728a6c656d640e0301974baf9b1f11d5ef8112f27f",
+    "te1_eval/observe.rs": "5f8c0ffdd771e4c66b3483d9d4a4c3a7cdd5cd0266fce5ac020a24fac174270b",
+    "te1_eval/pin.rs": "96d963d1375f5224a9fde78ddf300f8655a4ca3b25fc6fae7721091185cd48d4",
     "te1_eval/recipe.rs": "de09e30617dea2a2c0ddb3ac9cad41980f0f11bc02839c8b112ab3fc28aeef85"
   },
   "driver_tool_retries": {
@@ -116,7 +116,7 @@
     "checkout": "before a paid command record git rev-parse HEAD matching the reviewed head and empty git status --porcelain",
     "dry_pass": "lead attestation for same pin/provider/launcher and actual guardian/CLI hashes, egress denied, stdin EOF, first progress and proc startup; separately authorised qualification is still required",
     "entry": "KINEWRIGHT_TE1_RUN=id KINEWRIGHT_TE1_PLAN=/private/plan.json cargo test -p kinewright-agent --features te1-eval --test te1_paid te1_one_granted_run -- --ignored --exact --nocapture",
-    "guardian": "fallback hardening: hash after the consume lock is held and recheck after native setup immediately before each paid guardian preparation; mismatch refuses; post-consumption refusal leaves the grant spent; executable-handle binding and the remaining pathname check/use gap are open",
+    "guardian": "fallback hardening: hash after the consume lock is held and recheck after native setup immediately before each paid guardian preparation; mismatch refuses before any provider session starts, but contained unpaid --version probes may already have run; post-consumption refusal leaves the grant spent; executable-handle binding and the remaining pathname check/use gap are open",
     "paid_exclusivity": "no other job may build or run in this worktree during a paid run; the paid command holds /tmp/kinewright-cargo-heavy.lock for its whole life",
     "policy": "one lead-owned file per run, fixed local-account home (HOME must agree), owned no-symlink folder chain opened by handle; private grant file and atomic 0700 consumed directory; required expires_at_unix_seconds, strictly future and at most 24 hours ahead; complete plan/pin identity equality except a lower positive wall_millis; durable create-new grant and run receipts before native authority; no automatic retry; temporary receipts cannot authorise native execution",
     "storage": "never move, copy back or restore ~/.local/share/kinewright-eval between runs; the home-to-grants chain must not be group- or other-writable"

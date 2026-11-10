@@ -38,6 +38,8 @@ pub(crate) struct SendContext {
 }
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Trace {
+    #[serde(default)]
+    pub case5_deceptive_child: Option<Value>,
     pub initial_tracks: Vec<u64>,
     pub feedback_revisions: Vec<Value>,
     pub scripted_sends: usize,
