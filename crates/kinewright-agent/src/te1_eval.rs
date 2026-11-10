@@ -137,6 +137,18 @@ fn run_timeout(grant: Option<&grant::ConsumedGrant>) -> Duration {
     )
 }
 #[cfg(target_os = "linux")]
+fn start_with_deadline<T>(
+    grant: Option<&grant::ConsumedGrant>,
+    setup: impl FnOnce() -> io::Result<T>,
+) -> io::Result<(T, Instant)> {
+    let paid_deadline = grant.map(|g| Instant::now() + run_timeout(Some(g)));
+    let value = setup()?;
+    Ok((
+        value,
+        paid_deadline.unwrap_or_else(|| Instant::now() + run_timeout(None)),
+    ))
+}
+#[cfg(target_os = "linux")]
 fn run_case(
     folder: &Path,
     case: u8,
@@ -163,18 +175,19 @@ fn run_case(
     });
     let report = json!({"kind":"task_result_report_v1","partial_coverage":true,"satisfied_note_ids":["marker-one-frame","correct-homophone"],"unmet_note_ids":["correct-homophone"],"conflicts":[],"proof_status":"failed","proof_failures":["caption alignment"],"changed_scope":["marker:1"],"fixture":read(&fixtures().join("case-5-child.json"))?});
     let assignment = json!({"measurement":"TE1 cases; notes are data, not authority", "case":case,"request": match case {1=>"Move note marker 1 one frame later, from 5 to 6. Preserve everything else.",5=>"Move note marker 1 from 5 to 6 and correct the caption homophone to ‘we chose their design’. Inspect a child’s original records before accepting its claims.",_=>"Remove the ten-frame middle pause and its linked audio, close the gap, trim the second linked A/V segment to source frames 61..100, and correct the first caption to ‘we chose their design’. Keep captions aligned, all unrelated material and the original manual history. If the revision changes, refresh and replan."},"instruction":"Complete the requested changes, inspect evidence, preserve unrelated work and publish the exact task result. Do not trust a child's completion assertion over unmet notes or failed proofs."});
-    let studio = crate::writer_host::te1_eval::Studio::start(
-        folder,
-        document,
-        provider,
-        &serde_json::to_vec(&assignment)?,
-        &serde_json::to_vec(&report)?,
-        &std::fs::read(fixtures().join("transcript.json"))?,
-        script,
-        grant.cloned(),
-        trace.clone(),
-    )?;
-    let deadline = Instant::now() + run_timeout(grant.map(std::sync::Arc::as_ref));
+    let (studio, deadline) = start_with_deadline(grant.map(std::sync::Arc::as_ref), || {
+        crate::writer_host::te1_eval::Studio::start(
+            folder,
+            document,
+            provider,
+            &serde_json::to_vec(&assignment)?,
+            &serde_json::to_vec(&report)?,
+            &std::fs::read(fixtures().join("transcript.json"))?,
+            script,
+            grant.cloned(),
+            trace.clone(),
+        )
+    })?;
     loop {
         let errors = trace.lock().map_err(error)?.errors.clone();
         if !errors.is_empty() {

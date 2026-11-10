@@ -913,11 +913,21 @@ impl adapters::GuardianLauncher for NativeGuardianLauncher {
         attempt: AdmittedAttempt,
         invocation: AuthorizedInvocation,
     ) -> Result<adapters::ContainedSession, adapters::LaunchError> {
-        self.launch_native(&attempt, &invocation)
+        self.launch_native(&attempt, &invocation, || Ok(()))
             .map_err(adapters::LaunchError)
     }
 }
 impl NativeGuardianLauncher {
+    #[cfg(feature = "te1-eval")]
+    pub(crate) fn launch_verified(
+        &self,
+        attempt: &AdmittedAttempt,
+        invocation: &AuthorizedInvocation,
+        verify_guardian: impl FnOnce() -> io::Result<()>,
+    ) -> Result<adapters::ContainedSession, adapters::LaunchError> {
+        self.launch_native(attempt, invocation, verify_guardian)
+            .map_err(adapters::LaunchError)
+    }
     #[cfg(test)]
     fn fail_startup(&self, point: StartupFailure) -> io::Result<()> {
         if self.startup_failure == Some(point) {
@@ -934,6 +944,7 @@ impl NativeGuardianLauncher {
         &self,
         attempt: &AdmittedAttempt,
         invocation: &AuthorizedInvocation,
+        verify_guardian: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<adapters::ContainedSession> {
         invocation
             .validate(invocation.profile().session_config(), attempt)
@@ -1034,6 +1045,7 @@ impl NativeGuardianLauncher {
             } => credential_mount.clone(),
             ProviderSandbox::ContainmentOnly => None,
         };
+        verify_guardian()?;
         let native = ContainedSession::prepare(
             &mut claim_guard,
             &mut owner,

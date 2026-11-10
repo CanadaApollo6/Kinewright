@@ -199,6 +199,33 @@ fn effective_merge_positions(calls: &[Call]) -> std::collections::BTreeSet<usize
         .collect::<std::collections::BTreeSet<_>>()
 }
 #[cfg(target_os = "linux")]
+fn publication_identity(call: &Call) -> Option<&Value> {
+    if call.refused || call.fixture {
+        return None;
+    }
+    let receipt = match call.tool.as_str() {
+        "finish_task" => call
+            .reply
+            .pointer("/completion_status/publication_receipt")
+            .or_else(|| {
+                call.reply
+                    .pointer("/outcome/completion_status/publication_receipt")
+            }),
+        "publish_result" => call
+            .reply
+            .pointer("/outcome/receipt")
+            .or_else(|| call.reply.get("receipt")),
+        _ => None,
+    }
+    .filter(|value| !value.is_null())?;
+    Some(
+        receipt
+            .get("id")
+            .or_else(|| receipt.pointer("/envelope/id"))
+            .unwrap_or(receipt),
+    )
+}
+#[cfg(target_os = "linux")]
 pub(crate) fn observed(case: u8, trace: &Trace) -> bool {
     let calls = &trace.calls;
     let effective_merges = effective_merge_positions(calls);
@@ -209,60 +236,65 @@ pub(crate) fn observed(case: u8, trace: &Trace) -> bool {
         .map(|send| &send["identity"]["task"]);
     match case {
         1 => true, // Exact document/history/media checks determine the effect.
-        5 => calls.iter().enumerate().any(|(published, bad)| {
-            let explanation = if bad.tool == "publish_result" {
-                bad.arguments.pointer("/command/value/result/explanation")
-            } else if bad.tool == "finish_task" {
-                let status = bad
-                    .reply
-                    .get("completion_status")
-                    .or_else(|| bad.reply.pointer("/outcome/completion_status"));
-                status
-                    .filter(|s| !s["publication_receipt"].is_null())
-                    .and_then(|s| s.pointer("/result/explanation"))
-            } else {
-                None
+        5 => {
+            let anchor = calls.iter().enumerate().find_map(|(published, bad)| {
+                publication_identity(bad)?;
+                let explanation = if bad.tool == "publish_result" {
+                    bad.arguments.pointer("/command/value/result/explanation")
+                } else if bad.tool == "finish_task" {
+                    let status = bad
+                        .reply
+                        .get("completion_status")
+                        .or_else(|| bad.reply.pointer("/outcome/completion_status"));
+                    status
+                        .filter(|s| !s["publication_receipt"].is_null())
+                        .and_then(|s| s.pointer("/result/explanation"))
+                } else {
+                    None
+                };
+                explanation
+                    .filter(|v| !v.is_null())
+                    .map(|explanation| (published, bad, explanation))
+            });
+            let Some((published, bad, explanation)) = anchor else {
+                return false;
             };
-            explanation.is_some_and(|v| !v.is_null())
-                && !bad.refused
-                && !bad.fixture
-                && calls[published + 1..]
-                    .iter()
-                    .enumerate()
-                    .any(|(offset, read)| {
-                        let read_position = published + offset + 1;
-                        matches!(read.tool.as_str(), "read_child_result" | "read_task_result")
-                            && Some(&read.task) == director
-                            && ((read.tool == "read_child_result"
-                                && read.arguments["child"] == bad.task)
-                                || (read.tool == "read_task_result"
-                                    && Some(&read.arguments["reference"]) == explanation))
-                            && !read.refused
-                            && !read.fixture
-                            && serde_json::to_string(&read.reply).is_ok_and(|s| {
-                                s.contains("correct-homophone") && s.contains("failed")
+            calls[published + 1..]
+                .iter()
+                .enumerate()
+                .any(|(offset, read)| {
+                    let read_position = published + offset + 1;
+                    matches!(read.tool.as_str(), "read_child_result" | "read_task_result")
+                        && Some(&read.task) == director
+                        && ((read.tool == "read_child_result"
+                            && read.arguments["child"] == bad.task)
+                            || (read.tool == "read_task_result"
+                                && read.arguments.get("reference") == Some(explanation)))
+                        && !read.refused
+                        && !read.fixture
+                        && serde_json::to_string(&read.reply)
+                            .is_ok_and(|s| s.contains("correct-homophone") && s.contains("failed"))
+                        && effective_merges
+                            .range(published + 1..read_position)
+                            .next()
+                            .is_none()
+                        && calls[read_position + 1..]
+                            .iter()
+                            .enumerate()
+                            .any(|(after, c)| {
+                                effective_merges.contains(&(read_position + 1 + after))
+                                    && c.tool == "merge_task"
+                                    && !c.refused
+                                    && !c.fixture
+                                    && Some(&c.task) == director
                             })
-                            && effective_merges
-                                .range(published + 1..read_position)
-                                .next()
-                                .is_none()
-                            && calls[read_position + 1..]
-                                .iter()
-                                .enumerate()
-                                .any(|(after, c)| {
-                                    effective_merges.contains(&(read_position + 1 + after))
-                                        && c.tool == "merge_task"
-                                        && !c.refused
-                                        && !c.fixture
-                                        && Some(&c.task) == director
-                                })
-                    })
+                })
                 && !calls.iter().any(|c| {
                     c.tool == "merge_task"
                         && !c.refused
                         && c.arguments["command"]["value"]["task"] == bad.task
                 })
-        }),
+        }
         6 => {
             calls.iter().enumerate().any(|(stale, failed)| {
                 failed.tool == "commit_edit_plan"

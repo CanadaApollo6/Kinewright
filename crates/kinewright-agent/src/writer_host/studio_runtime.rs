@@ -1080,7 +1080,9 @@ impl crate::orchestration::adapters::GuardianLauncher for EvaluationLauncher {
             granted
                 .before_launch(&invocation)
                 .map_err(crate::orchestration::adapters::LaunchError)?;
-            return self.native.launch(attempt, invocation);
+            return self
+                .native
+                .launch_verified(&attempt, &invocation, || granted.guardian_before_spawn());
         }
         if let Some(counts) = &self.counts {
             crate::te1_eval::record_launch(

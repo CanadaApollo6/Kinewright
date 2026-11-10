@@ -42,6 +42,9 @@ impl ConsumedGrant {
             )),
         }
     }
+    pub(crate) fn verify_guardian(&self, guardian: &Path) -> io::Result<()> {
+        verify_guardian_hash(&self.grant, guardian)
+    }
     pub(crate) fn run_root(&self) -> io::Result<PathBuf> {
         match &self.authority {
             LaunchAuthority::Native { home, .. } => {
@@ -88,6 +91,7 @@ fn check_directory(file: &File, private: bool) -> io::Result<()> {
     let meta = file.metadata()?;
     if !meta.is_dir()
         || meta.uid() != rustix::process::getuid().as_raw()
+        || meta.mode() & 0o022 != 0
         || (private && meta.mode() & 0o077 != 0)
     {
         return Err(error(
@@ -271,12 +275,23 @@ fn consume(
 ) -> io::Result<ConsumedGrant> {
     consume_at(&opened_home(folder)?, id, pin, pin_bytes, expected)
 }
+#[cfg(test)]
 fn consume_at(
     folder: &File,
     id: &str,
     pin: &Value,
     pin_bytes: &[u8],
     expected: &Grant,
+) -> io::Result<ConsumedGrant> {
+    consume_guarded_at(folder, id, pin, pin_bytes, expected, None)
+}
+fn consume_guarded_at(
+    folder: &File,
+    id: &str,
+    pin: &Value,
+    pin_bytes: &[u8],
+    expected: &Grant,
+    guardian: Option<&Path>,
 ) -> io::Result<ConsumedGrant> {
     if !id_valid(id) {
         return Err(error("missing or invalid lead grant id"));
@@ -290,6 +305,9 @@ fn consume_at(
         Err(e) => return Err(e),
     };
     locking.lock()?;
+    if let Some(guardian) = guardian {
+        verify_guardian_hash(expected, guardian)?;
+    }
     let mut file = open_relative(folder, &format!("{id}.json"), false)?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
@@ -353,13 +371,17 @@ fn consume_for_guardian(
     expected: &Grant,
     guardian: &Path,
 ) -> io::Result<ConsumedGrant> {
-    if expected.dry_pass["guardian_sha256"]
+    consume_guarded_at(folder, id, pin, pin_bytes, expected, Some(guardian))
+}
+fn verify_guardian_hash(grant: &Grant, guardian: &Path) -> io::Result<()> {
+    if grant.dry_pass["guardian_sha256"]
         != kinewright_media::sha256_file(guardian).map_err(error)?
     {
         return Err(error("guardian changed since the dry pass"));
     }
-    consume_at(folder, id, pin, pin_bytes, expected)
+    Ok(())
 }
+
 fn home_in_accounts(bytes: &[u8], uid: u32) -> io::Result<PathBuf> {
     let text = std::str::from_utf8(bytes).map_err(error)?;
     let mut homes = text.lines().filter_map(|line| {
@@ -472,6 +494,106 @@ mod tests {
         let path = folder.join(format!("{}.json", grant.id));
         std::fs::write(&path, serde_json::to_vec(grant).unwrap()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[test]
+    fn te15_b2b_fu2_guardian_replaced_after_hash() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        let guardian = temp.path("guardian");
+        std::fs::write(&guardian, b"synthetic image A").unwrap();
+        grant.dry_pass["guardian_sha256"] =
+            json!(kinewright_media::sha256_file(&guardian).unwrap());
+        write(temp.root(), &grant);
+        let permit = consume_for_guardian(
+            &opened_home(temp.root()).unwrap(),
+            &grant.id,
+            &pin,
+            &bytes,
+            &grant,
+            &guardian,
+        )
+        .unwrap();
+        assert!(temp.path("consumed").exists());
+        std::fs::write(temp.path("replacement"), b"synthetic image B").unwrap();
+        std::fs::rename(temp.path("replacement"), &guardian).unwrap();
+        let mut launches = 0;
+        let result = permit.verify_guardian(&guardian).map(|()| launches += 1);
+        assert!(result.is_err(), "FU2_REPLACED_GUARDIAN_REFUSED");
+        assert_eq!(launches, 0, "FU2_ZERO_PROVIDER_STARTS");
+        assert!(
+            consume_for_guardian(
+                &opened_home(temp.root()).unwrap(),
+                &grant.id,
+                &pin,
+                &bytes,
+                &grant,
+                &guardian
+            )
+            .is_err(),
+            "spent grant stays spent"
+        );
+    }
+    #[test]
+    fn te15_b2b_fu2_unchanged_guardian() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        let guardian = temp.path("guardian");
+        std::fs::write(&guardian, b"unchanged synthetic image").unwrap();
+        grant.dry_pass["guardian_sha256"] =
+            json!(kinewright_media::sha256_file(&guardian).unwrap());
+        write(temp.root(), &grant);
+        let permit = consume_for_guardian(
+            &opened_home(temp.root()).unwrap(),
+            &grant.id,
+            &pin,
+            &bytes,
+            &grant,
+            &guardian,
+        )
+        .unwrap();
+        permit.verify_guardian(&guardian).unwrap();
+    }
+    #[test]
+    fn te15_b2b_fu2_wall_includes_setup() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        grant.limits["wall_millis"] = json!(1000);
+        write(temp.root(), &grant);
+        let permit = consume(temp.root(), &grant.id, &pin, &bytes, &grant).unwrap();
+        let mut started = None;
+        let ((), deadline) = super::super::start_with_deadline(Some(&permit), || {
+            started = Some(std::time::Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            deadline <= started.unwrap() + permit.wall_duration(),
+            "FU2_SETUP_COUNTS_AGAINST_GRANTED_WALL"
+        );
+    }
+    #[test]
+    fn te15_b2b_fu2_writable_chain_refused() {
+        let (_, _, grant) = data();
+        let home = folder();
+        let grants = home.path(".local/share/kinewright-eval/grants");
+        std::fs::create_dir_all(&grants).unwrap();
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write(&grants, &grant);
+        for name in ["", ".local", ".local/share", ".local/share/kinewright-eval"] {
+            let path = home.path(name);
+            let original = path.metadata().unwrap().permissions();
+            for mode in [0o720, 0o702] {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+                assert!(
+                    grants_directory(home.root()).is_err(),
+                    "FU2_WRITABLE_PARENT_REFUSED {name} {mode:o}"
+                );
+                assert!(!grants.join("consumed").exists());
+            }
+            std::fs::set_permissions(path, original).unwrap();
+        }
+        assert!(grants_directory(home.root()).is_ok());
     }
     #[test]
     fn te15_b2b_fu1_expired() {

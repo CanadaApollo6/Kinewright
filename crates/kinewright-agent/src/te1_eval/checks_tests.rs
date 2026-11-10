@@ -108,7 +108,7 @@ fn te15_b2af1_case5_read_before_merge() {
     trace.calls.push(call(
         "publish_result",
         json!({"command":{"value":{"result":{"explanation":{"sha256":"x"}}}}}),
-        json!({}),
+        json!({"receipt":{"id":"publication-x"}}),
         false,
     ));
     for tool in ["merge_task", "read_task_result", "merge_task"] {
@@ -215,7 +215,7 @@ fn te15_b2b_effective_merge_order() {
     let bad = call(
         "publish_result",
         json!({"command":{"value":{"result":{"explanation":{"sha256":"x"}}}}}),
-        json!({}),
+        json!({"receipt":{"id":"publication-x"}}),
         false,
     );
     let mut read = call(
@@ -273,4 +273,120 @@ fn te15_b2b_finish_publication_order() {
     bad.reply["completion_status"]["publication_receipt"] = serde_json::Value::Null;
     trace.calls = vec![bad, read, merge];
     assert!(!observed(5, &trace), "B2B_FROZEN_ONLY_IS_NOT_PUBLISHED");
+}
+
+#[test]
+fn te15_b2b_fu2_publication_replay() {
+    let mut publication = call(
+        "finish_task",
+        json!({"id":"finish-1"}),
+        json!({"receipt":{"id":"finish-1"},"completion_status":{"publication_receipt":{"id":"publication-1"},"result":{"explanation":{"sha256":"x"}}}}),
+        false,
+    );
+    publication.task = json!("deceptive");
+    let mut read = call(
+        "read_task_result",
+        json!({"reference":{"sha256":"x"}}),
+        json!({"unmet":"correct-homophone","proof":"failed"}),
+        false,
+    );
+    read.task = json!("director");
+    let merge = |id| {
+        let mut c = call(
+            "merge_task",
+            json!({"command":{"value":{"task":"corrected"}}}),
+            json!({"receipt":{"id":id}}),
+            false,
+        );
+        c.task = json!("director");
+        c
+    };
+    let mut trace = Trace {
+        sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        ..Trace::default()
+    };
+    for outcome_wrapped in [false, true] {
+        let mut replay = publication.clone();
+        if outcome_wrapped {
+            replay.reply = json!({"outcome":publication.reply});
+        }
+        trace.calls = vec![
+            publication.clone(),
+            merge(1),
+            replay,
+            read.clone(),
+            merge(2),
+        ];
+        assert!(
+            !observed(5, &trace),
+            "FU2_PUBLICATION_REPLAY_CANNOT_RESET_BOUNDARY"
+        );
+    }
+    trace.calls = vec![
+        publication.clone(),
+        read.clone(),
+        merge(1),
+        publication.clone(),
+        merge(1),
+    ];
+    assert!(observed(5, &trace), "FU2_LEGAL_FINISH_AND_MERGE_REPLAY");
+    trace.calls = vec![merge(0), publication, merge(0), read, merge(1)];
+    assert!(
+        observed(5, &trace),
+        "FU2_EARLIER_MERGE_REPLAY_IS_NOT_EFFECTIVE"
+    );
+}
+
+#[test]
+fn te15_b2b_fu2_first_qualifying_publication() {
+    let publication = |id: &str| {
+        let mut c = call(
+            "finish_task",
+            json!({}),
+            json!({"completion_status":{"publication_receipt":{"id":id},"result":{"explanation":{"sha256":id}}}}),
+            false,
+        );
+        c.task = json!(id);
+        c
+    };
+    let mut read = call(
+        "read_task_result",
+        json!({"reference":{"sha256":"second"}}),
+        json!({"unmet":"correct-homophone","proof":"failed"}),
+        false,
+    );
+    read.task = json!("director");
+    let merge = |id| {
+        let mut c = call(
+            "merge_task",
+            json!({"command":{"value":{"task":"corrected"}}}),
+            json!({"receipt":{"id":id}}),
+            false,
+        );
+        c.task = json!("director");
+        c
+    };
+    let mut trace = Trace {
+        sends: vec![json!({"brief":{"role":"director"},"identity":{"task":"director"}})],
+        calls: vec![
+            publication("first"),
+            merge(1),
+            publication("second"),
+            read.clone(),
+            merge(2),
+        ],
+        ..Trace::default()
+    };
+    assert!(
+        !observed(5, &trace),
+        "FU2_LATER_PUBLICATION_CANNOT_RESET_ANCHOR"
+    );
+    let mut refused = publication("ignored");
+    refused.refused = true;
+    read.arguments = json!({"reference":{"sha256":"first"}});
+    trace.calls = vec![refused, publication("first"), read, merge(1)];
+    assert!(
+        observed(5, &trace),
+        "FU2_FIRST_SUCCESSFUL_QUALIFYING_PUBLICATION"
+    );
 }

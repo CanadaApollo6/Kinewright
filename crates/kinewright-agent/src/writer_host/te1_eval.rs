@@ -1057,6 +1057,9 @@ pub(super) struct NativeEvaluation {
     observer: Arc<crate::te1_eval::observe::Observations>,
 }
 impl NativeEvaluation {
+    pub(super) fn guardian_before_spawn(&self) -> io::Result<()> {
+        self.permit.verify_guardian(self.permit.guardian()?)
+    }
     pub(super) fn before_launch(&self, invocation: &AuthorizedInvocation) -> io::Result<()> {
         let identity = invocation.profile().binding().identity();
         {
