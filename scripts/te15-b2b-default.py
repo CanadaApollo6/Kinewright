@@ -15,9 +15,8 @@ assert code==0,'B2B_DEFAULT_BUILD'
 artifacts=[]
 for line in (OUT/'build.jsonl').read_text().splitlines():
     value=json.loads(line)
-    if value.get('reason')=='compiler-artifact' and value['target']['name'] in ['kinewright_agent','kinewright-agent','kinewright-job-guardian','kinewright-eval','te1-measurement-pin']:
+    if value.get('reason')=='compiler-artifact' and value['target']['name'] in ['kinewright_agent','kinewright-agent','kinewright-job-guardian','kinewright-eval']:
         assert 'te1-eval' not in value['features'],'B2B_DEFAULT_EXCLUDES_FEATURE'
-        assert value['target']['name']!='te1-measurement-pin','B2B_DEFAULT_EXCLUDES_PIN_BIN'
         for name in value['filenames']:
             path=Path(name)
             if path.suffix not in ['.rlib',''] or not path.is_file():continue

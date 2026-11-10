@@ -44,13 +44,23 @@
     "render": "production preview compared with oracle at frames 0,20,49,50,51,52,89,90,99"
   },
   "driver_sources_sha256": {
-    "te1_eval.rs": "41afd804f521391708520559080a7f1548ce98303559612fa1e65029ed5ae0c5",
+    "te1_eval.rs": "ebd59bda2b2b04a83d2b52d419ebd0c6120c7959cd7e89a6cb940044df756b4f",
     "te1_eval/analysis.rs": "95d082a0484f8e08757a3c444dd54d6ab25d7e4c06a1bf4f9e30971242fe39a0",
-    "te1_eval/checks.rs": "177043f14b66cb65cb84effb7cf2ab4c78b19638d83b800ebcde9396ff1a5765",
-    "te1_eval/grant.rs": "cde8dbfbcba87de35a95b151d58dc34e2eb64489b7fb4cf1b6e11dd9e79d9345",
+    "te1_eval/checks.rs": "049983dcac1ff13309847b3143452b70d884b396f17f21fde59bb7fac06fe334",
+    "te1_eval/grant.rs": "2962f0322e9d2eb0a1166ad0888c79e5b16d1a40e6bc1ad4ce67bfc9a2c1ecc4",
     "te1_eval/observe.rs": "2c82192a6677eb47cb62e612d50954c621631dabde12db11ae28edbaf8a9f89e",
-    "te1_eval/pin.rs": "a05774949a36c57a7b898e456a80027d1804ad887202acba07ec59171f76cd4e",
+    "te1_eval/pin.rs": "9135562d39fac7ba2c56e794b19c94a6767da5c2c19f79cba3073c43ab522718",
     "te1_eval/recipe.rs": "de09e30617dea2a2c0ddb3ac9cad41980f0f11bc02839c8b112ab3fc28aeef85"
+  },
+  "driver_tool_retries": {
+    "condition": "explicit task_busy refusal only",
+    "maximum_retries": 20,
+    "other_refusals": "never retried; no automatic retry of an interrupted run",
+    "pause_millis": 100,
+    "tools": [
+      "prepare_edit_plan",
+      "commit_edit_plan"
+    ]
   },
   "embedded_title_font_sha256": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031",
   "fixture_and_oracle_sha256": {
@@ -103,9 +113,17 @@
   },
   "lead_grant": {
     "arm": "candidate only; no preceding run required",
+    "checkout": "before a paid command record git rev-parse HEAD matching the reviewed head and empty git status --porcelain",
     "dry_pass": "lead attestation for same pin/provider/launcher and actual guardian/CLI hashes, egress denied, stdin EOF, first progress and proc startup; separately authorised qualification is still required",
     "entry": "KINEWRIGHT_TE1_RUN=id KINEWRIGHT_TE1_PLAN=/private/plan.json cargo test -p kinewright-agent --features te1-eval --test te1_paid te1_one_granted_run -- --ignored --exact --nocapture",
-    "policy": "one lead-owned file per run, fixed local-account home (HOME must agree), private owned directory and file; complete plan/pin identity equality; durable create-new grant and run receipts before native authority; no automatic retry; temporary receipts cannot authorise native execution"
+    "guardian": "compare the actual guardian hash with the dry attestation before consuming the grant",
+    "policy": "one lead-owned file per run, fixed local-account home (HOME must agree), owned no-symlink folder chain opened by handle; private grant file and atomic 0700 consumed directory; required expires_at_unix_seconds, strictly future and at most 24 hours ahead; complete plan/pin identity equality except a lower positive wall_millis; durable create-new grant and run receipts before native authority; no automatic retry; temporary receipts cannot authorise native execution",
+    "storage": "never move, copy back or restore ~/.local/share/kinewright-eval between runs"
+  },
+  "limit_semantics": {
+    "grant_wall": "wall_millis may be lowered to a positive value, never raised; all other limit fields must equal the pin",
+    "tokens_per_task": "2,000,000 reported tokens per task is a stop threshold: stop new work after reported usage passes it; an in-flight turn can overshoot; provider tools supply no hard per-turn cap and there is no run-total token cap",
+    "worst_case": "up to 32 native attempt contexts, at most 3 live at once, and a driver wall deadline of at most 21,600,000 ms (6 hours); 32 times 2,000,000 is NOT a 64,000,000-token bound"
   },
   "limits": {
     "max_live_attempts": 3,

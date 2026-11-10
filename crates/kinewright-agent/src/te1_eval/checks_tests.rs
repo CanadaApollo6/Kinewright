@@ -124,7 +124,9 @@ fn te15_b2af1_case5_read_before_merge() {
         c.task = json!("director");
         trace.calls.push(c);
     }
-    assert!(observed(5, &trace), "TE15_B2AF1_READ_ALTERNATIVE");
+    assert!(!observed(5, &trace), "FU1_FIRST_MERGE_BEFORE_READ_REFUSED");
+    trace.calls.remove(1);
+    assert!(observed(5, &trace), "FU1_READ_BEFORE_FIRST_MERGE");
     trace.calls.retain(|c| c.tool != "read_task_result");
     assert!(!observed(5, &trace), "TE15_B2AF1_READ_REQUIRED");
 }

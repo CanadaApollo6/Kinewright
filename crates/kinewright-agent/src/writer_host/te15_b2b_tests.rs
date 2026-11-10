@@ -408,6 +408,10 @@ fn b2b_unpack(path: &std::path::Path, archive: &serde_json::Value) {
     }
     std::fs::write(path, archive["root"].as_str().unwrap()).unwrap();
 }
+/// Prerequisites are prepared runtime binaries/fixtures, persistent target scratch,
+/// and the synthetic catalog installed by `te15_fix_counting_child`.
+/// Complete CI targets pass after setup. Fresh solo retry readiness remains
+/// unverified; see the bounded attempt in the B2b follow-ups report.
 #[test]
 fn te15_b2b_fork_crash() {
     const KEY: &str = "KINEWRIGHT_B2B_FORK_CRASH";
@@ -459,9 +463,14 @@ fn te15_b2b_fork_crash() {
             "writer_host::hooks_tests::tests::te15_b2b_fork_crash",
         ])
         .env(KEY, &output)
-        .status()
+        .output()
         .unwrap();
-    assert!(result.success());
+    assert!(
+        result.status.success(),
+        "crash child failed: {}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
     let source = std::path::Path::new(value["source_root"].as_str().unwrap());
     assert!(source.starts_with(kinewright_media::test_support::workspace_target_dir()));

@@ -75,6 +75,10 @@ fn b202_fault(point: super::super::task_preparation::PreparationCheckpoint) {
         "B202_SAME_EFFECT"
     );
 }
+/// Prerequisites are prepared runtime binaries/fixtures, persistent target scratch,
+/// and the synthetic catalog installed by `te15_fix_counting_child`.
+/// Complete CI targets pass after setup. Fresh solo retry readiness remains
+/// unverified; see the bounded attempt in the B2b follow-ups report.
 #[test]
 fn te15_b202_after_history() {
     if !te15_fix_counting_child("te15_b202_after_history") {

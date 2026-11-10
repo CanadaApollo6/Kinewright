@@ -130,6 +130,13 @@ pub fn run_scripted(
     run_case(folder, case, provider, Some(outcome), None)
 }
 #[cfg(target_os = "linux")]
+fn run_timeout(grant: Option<&grant::ConsumedGrant>) -> Duration {
+    grant.map_or(
+        Duration::from_secs(300),
+        grant::ConsumedGrant::wall_duration,
+    )
+}
+#[cfg(target_os = "linux")]
 fn run_case(
     folder: &Path,
     case: u8,
@@ -167,7 +174,7 @@ fn run_case(
         grant.cloned(),
         trace.clone(),
     )?;
-    let deadline = Instant::now() + Duration::from_secs(if grant.is_some() { 21600 } else { 300 });
+    let deadline = Instant::now() + run_timeout(grant.map(std::sync::Arc::as_ref));
     loop {
         let errors = trace.lock().map_err(error)?.errors.clone();
         if !errors.is_empty() {
@@ -213,7 +220,7 @@ fn run_case(
     })
 }
 
-/// MCP transport and reply observations are shared unchanged by both arms.
+/// Eval MCP transport and reply observations.
 #[cfg(target_os = "linux")]
 struct Mcp {
     runtime: tokio::runtime::Runtime,
@@ -751,6 +758,7 @@ mod output_tests {
         grant::Grant {
             version: 1,
             id: "output-witness".into(),
+            expires_at_unix_seconds: 0,
             pin_sha256: "temporary".into(),
             provider: "codex".into(),
             case: 1,

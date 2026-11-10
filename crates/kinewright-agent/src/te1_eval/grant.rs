@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,7 @@ pub struct Grant {
     pub models_and_options: Value,
     pub limits: Value,
     pub run_identity: String,
+    pub expires_at_unix_seconds: u64,
     pub dry_pass: Value,
 }
 pub(crate) struct ConsumedGrant {
@@ -48,6 +49,13 @@ impl ConsumedGrant {
             }
             LaunchAuthority::Unpaid => Err(error("temporary receipts have no paid output root")),
         }
+    }
+    pub(crate) fn wall_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.grant.limits["wall_millis"]
+                .as_u64()
+                .expect("validated grant wall"),
+        )
     }
     pub(crate) fn grant(&self) -> &Grant {
         &self.grant
@@ -76,15 +84,76 @@ fn id_valid(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-fn private_dir(path: &Path) -> io::Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
+fn check_directory(file: &File, private: bool) -> io::Result<()> {
+    let meta = file.metadata()?;
     if !meta.is_dir()
         || meta.uid() != rustix::process::getuid().as_raw()
-        || meta.mode() & 0o077 != 0
+        || (private && meta.mode() & 0o077 != 0)
     {
-        return Err(error("grant folder must be a private owned directory"));
+        return Err(error(
+            "grant directory must be owned by this account and private where required",
+        ));
     }
     Ok(())
+}
+fn child_directory(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+    Ok(File::from(openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?))
+}
+fn opened_home(home: &Path) -> io::Result<File> {
+    if !home.is_absolute() {
+        return Err(error("grant home must be absolute"));
+    }
+    let mut directory = File::open("/")?;
+    for component in home.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => directory = child_directory(&directory, name)?,
+            _ => return Err(error("invalid grant home component")),
+        }
+    }
+    check_directory(&directory, false)?;
+    Ok(directory)
+}
+fn grants_directory(home: &Path) -> io::Result<File> {
+    let mut directory = opened_home(home)?;
+    for name in [".local", "share", "kinewright-eval", "grants"] {
+        directory = child_directory(&directory, std::ffi::OsStr::new(name))?;
+        check_directory(&directory, name == "grants")?;
+    }
+    Ok(directory)
+}
+fn unix_seconds() -> io::Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(error)?
+        .as_secs())
+}
+fn check_expiry(expires: u64) -> io::Result<()> {
+    let now = unix_seconds()?;
+    if expires <= now {
+        return Err(error("grant expired"));
+    }
+    if expires.saturating_sub(now) > 24 * 60 * 60 {
+        return Err(error("grant expiry exceeds 24 hours"));
+    }
+    Ok(())
+}
+fn limits_match(granted: &Value, pinned: &Value) -> bool {
+    let Some(wall) = granted["wall_millis"].as_u64() else {
+        return false;
+    };
+    if wall == 0 || pinned["wall_millis"].as_u64().is_none_or(|max| wall > max) {
+        return false;
+    }
+    let mut normalized = granted.clone();
+    normalized["wall_millis"] = pinned["wall_millis"].clone();
+    normalized == *pinned
 }
 #[cfg(test)]
 std::thread_local! { static FAIL_SYNC:std::cell::Cell<bool>=const {std::cell::Cell::new(false)}; }
@@ -95,15 +164,7 @@ fn durable(file: &File) -> io::Result<()> {
     }
     file.sync_all()
 }
-fn open_owned(path: &Path, create: bool) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed());
-    if create {
-        options.write(true).create_new(true).mode(0o600);
-    }
-    let file = options.open(path)?;
+fn checked_file(file: File) -> io::Result<File> {
     let meta = file.metadata()?;
     if !meta.is_file()
         || meta.nlink() != 1
@@ -113,6 +174,27 @@ fn open_owned(path: &Path, create: bool) -> io::Result<File> {
         return Err(error("grant must be a private owned regular file"));
     }
     Ok(file)
+}
+fn open_owned(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed());
+    checked_file(options.open(path)?)
+}
+fn open_relative(directory: &File, name: &str, create: bool) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let access = if create {
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL
+    } else {
+        OFlags::RDONLY
+    };
+    checked_file(File::from(openat(
+        directory,
+        name,
+        access | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?))
 }
 fn validate_grant(
     grant: Grant,
@@ -131,12 +213,13 @@ fn validate_grant(
         || !["codex", "claude"].contains(&grant.provider.as_str())
         || grant.arm != "candidate"
         || grant.models_and_options != pin["models_and_options"][&grant.provider]
-        || grant.limits != pin["limits"]
+        || !limits_match(&grant.limits, &pin["limits"])
         || grant.run_identity.len() != 32
         || !grant.run_identity.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(error("lead grant differs from the pinned run"));
     }
+    check_expiry(grant.expires_at_unix_seconds)?;
     for role in [
         "director", "editor", "reviewer", "motion", "audio", "colour",
     ] {
@@ -178,8 +261,18 @@ fn validate_grant(
     }
     Ok(candidate)
 }
+#[cfg(test)]
 fn consume(
     folder: &Path,
+    id: &str,
+    pin: &Value,
+    pin_bytes: &[u8],
+    expected: &Grant,
+) -> io::Result<ConsumedGrant> {
+    consume_at(&opened_home(folder)?, id, pin, pin_bytes, expected)
+}
+fn consume_at(
+    folder: &File,
     id: &str,
     pin: &Value,
     pin_bytes: &[u8],
@@ -188,15 +281,16 @@ fn consume(
     if !id_valid(id) {
         return Err(error("missing or invalid lead grant id"));
     }
-    private_dir(folder)?;
-    let lock = folder.join(".consume-lock");
-    let locking = match open_owned(&lock, true) {
+    check_directory(folder, true)?;
+    let locking = match open_relative(folder, ".consume-lock", true) {
         Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => open_owned(&lock, false)?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            open_relative(folder, ".consume-lock", false)?
+        }
         Err(e) => return Err(e),
     };
     locking.lock()?;
-    let mut file = open_owned(&folder.join(format!("{id}.json")), false)?;
+    let mut file = open_relative(folder, &format!("{id}.json"), false)?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
         .take(64 * 1024 + 1)
@@ -216,37 +310,55 @@ fn consume(
     Read::by_ref(&mut file)
         .take(64 * 1024 + 1)
         .read_to_end(&mut again)?;
-    let path_meta = std::fs::symlink_metadata(folder.join(format!("{id}.json")))?;
+    let path_meta = rustix::fs::statat(
+        folder,
+        format!("{id}.json"),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )?;
     let fd_meta = file.metadata()?;
     if again != bytes
-        || path_meta.file_type().is_symlink()
-        || path_meta.dev() != fd_meta.dev()
-        || path_meta.ino() != fd_meta.ino()
+        || rustix::fs::FileType::from_raw_mode(path_meta.st_mode)
+            != rustix::fs::FileType::RegularFile
+        || path_meta.st_dev != fd_meta.dev()
+        || path_meta.st_ino != fd_meta.ino()
         || fd_meta.nlink() != 1
     {
         return Err(error("grant changed before consumption"));
     }
     // An id and a run identity are both irrevocable, including failed starts.
-    let consumed = folder.join("consumed");
-    match std::fs::create_dir(&consumed) {
-        Ok(()) => {
-            std::fs::set_permissions(&consumed, std::fs::Permissions::from_mode(0o700))?;
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+    check_expiry(candidate.grant.expires_at_unix_seconds)?;
+    match rustix::fs::mkdirat(folder, "consumed", rustix::fs::Mode::RWXU) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(e) => return Err(e.into()),
     }
-    private_dir(&consumed)?;
+    let consumed = child_directory(folder, std::ffi::OsStr::new("consumed"))?;
+    check_directory(&consumed, true)?;
     for name in [
         format!("id-{id}.json"),
         format!("run-{}.json", candidate.grant.run_identity),
     ] {
-        let mut receipt = open_owned(&consumed.join(name), true)?;
+        let mut receipt = open_relative(&consumed, &name, true)?;
         receipt.write_all(&bytes)?;
         durable(&receipt)?;
     }
-    durable(&File::open(&consumed)?)?;
-    durable(&File::open(folder)?)?;
+    durable(&consumed)?;
+    durable(folder)?;
     Ok(candidate)
+}
+fn consume_for_guardian(
+    folder: &File,
+    id: &str,
+    pin: &Value,
+    pin_bytes: &[u8],
+    expected: &Grant,
+    guardian: &Path,
+) -> io::Result<ConsumedGrant> {
+    if expected.dry_pass["guardian_sha256"]
+        != kinewright_media::sha256_file(guardian).map_err(error)?
+    {
+        return Err(error("guardian changed since the dry pass"));
+    }
+    consume_at(folder, id, pin, pin_bytes, expected)
 }
 fn home_in_accounts(bytes: &[u8], uid: u32) -> io::Result<PathBuf> {
     let text = std::str::from_utf8(bytes).map_err(error)?;
@@ -289,7 +401,7 @@ pub(super) fn from_env(guardian: &Path) -> io::Result<ConsumedGrant> {
     }
     let plan = std::env::var_os("KINEWRIGHT_TE1_PLAN")
         .ok_or_else(|| error("a run plan is required; an env id alone is not approval"))?;
-    let mut plan_file = open_owned(&PathBuf::from(plan), false)?;
+    let mut plan_file = open_owned(&PathBuf::from(plan))?;
     let mut plan_bytes = Vec::new();
     Read::by_ref(&mut plan_file)
         .take(64 * 1024 + 1)
@@ -305,22 +417,16 @@ pub(super) fn from_env(guardian: &Path) -> io::Result<ConsumedGrant> {
     // Linux local-account metadata is public; no credential file is consulted.
     let home = account_home()?;
     check_home(&home, std::env::var_os("HOME").as_deref())?;
-    let mut permit = consume(
-        &home.join(".local/share/kinewright-eval/grants"),
+    let guardian = guardian.canonicalize()?;
+    let mut permit = consume_for_guardian(
+        &grants_directory(&home)?,
         &id,
         &pin,
         &pin_bytes,
         &expected,
+        &guardian,
     )?;
-    permit.authority = LaunchAuthority::Native {
-        guardian: guardian.canonicalize()?,
-        home,
-    };
-    if permit.grant.dry_pass["guardian_sha256"]
-        != kinewright_media::sha256_file(permit.guardian()?).map_err(error)?
-    {
-        return Err(error("guardian changed since the dry pass"));
-    }
+    permit.authority = LaunchAuthority::Native { guardian, home };
     Ok(permit)
 }
 
@@ -341,6 +447,7 @@ mod tests {
         let bytes = serde_json::to_vec(&pin).unwrap();
         let grant = Grant {
             version: 1,
+            expires_at_unix_seconds: unix_seconds().unwrap() + 3600,
             id: "temporary-run".into(),
             pin_sha256: kinewright_hash::sha256_bytes(&bytes),
             provider: "codex".into(),
@@ -365,6 +472,100 @@ mod tests {
         let path = folder.join(format!("{}.json", grant.id));
         std::fs::write(&path, serde_json::to_vec(grant).unwrap()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[test]
+    fn te15_b2b_fu1_expired() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        grant.expires_at_unix_seconds = unix_seconds().unwrap() - 1;
+        write(temp.root(), &grant);
+        let result = consume(temp.root(), &grant.id, &pin, &bytes, &grant);
+        assert!(result.is_err(), "FU1_EXPIRED_REFUSED");
+        assert!(!temp.path("consumed").exists(), "FU1_EXPIRED_NOT_CONSUMED");
+    }
+    #[test]
+    fn te15_b2b_fu1_expiry_too_far() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        grant.expires_at_unix_seconds = unix_seconds().unwrap() + 25 * 3600;
+        write(temp.root(), &grant);
+        assert!(consume(temp.root(), &grant.id, &pin, &bytes, &grant).is_err());
+        assert!(!temp.path("consumed").exists());
+    }
+    #[test]
+    fn te15_b2b_fu1_symlink_parent() {
+        let (pin, bytes, grant) = data();
+        let home = folder();
+        let real = home.path("real-local");
+        std::fs::create_dir_all(real.join("share/kinewright-eval/grants")).unwrap();
+        let grants = real.join("share/kinewright-eval/grants");
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write(&grants, &grant);
+        symlink(&real, home.path(".local")).unwrap();
+        let result = grants_directory(home.root())
+            .and_then(|dir| consume_at(&dir, &grant.id, &pin, &bytes, &grant));
+        assert!(result.is_err(), "FU1_PARENT_SYMLINK_REFUSED");
+        assert!(!grants.join("consumed").exists(), "FU1_PARENT_NOT_CONSUMED");
+        std::fs::remove_file(home.path(".local")).unwrap();
+        std::fs::rename(real, home.path(".local")).unwrap();
+        let dir = grants_directory(home.root()).unwrap();
+        consume_at(&dir, &grant.id, &pin, &bytes, &grant).unwrap();
+        assert_eq!(
+            home.path(".local/share/kinewright-eval/grants/consumed")
+                .metadata()
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    #[test]
+    fn te15_b2b_fu1_guardian_before_consumption() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        let guardian = temp.path("guardian");
+        std::fs::write(&guardian, b"rebuilt synthetic guardian").unwrap();
+        grant.dry_pass["guardian_sha256"] = serde_json::json!("old image");
+        write(temp.root(), &grant);
+        let dir = opened_home(temp.root()).unwrap();
+        assert!(consume_for_guardian(&dir, &grant.id, &pin, &bytes, &grant, &guardian).is_err());
+        assert!(!temp.path("consumed").exists());
+        grant.dry_pass["guardian_sha256"] =
+            serde_json::json!(kinewright_media::sha256_file(&guardian).unwrap());
+        write(temp.root(), &grant);
+        consume_for_guardian(&dir, &grant.id, &pin, &bytes, &grant, &guardian).unwrap();
+    }
+    #[test]
+    fn te15_b2b_fu1_lower_wall_used() {
+        let (pin, bytes, mut grant) = data();
+        let temp = folder();
+        grant.limits["wall_millis"] = serde_json::json!(1234);
+        write(temp.root(), &grant);
+        let permit = consume(temp.root(), &grant.id, &pin, &bytes, &grant).unwrap();
+        assert_eq!(
+            super::super::run_timeout(Some(&permit)),
+            std::time::Duration::from_millis(1234)
+        );
+    }
+    #[test]
+    fn te15_b2b_fu1_changed_limits_refused() {
+        let (pin, bytes, grant) = data();
+        for key in pin["limits"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .chain(std::iter::once(&"extra".to_owned()))
+        {
+            let temp = folder();
+            let mut changed = grant.clone();
+            changed.limits[key] = serde_json::json!(pin["limits"][key].as_u64().unwrap_or(0) + 1);
+            write(temp.root(), &changed);
+            assert!(
+                consume(temp.root(), &changed.id, &pin, &bytes, &changed).is_err(),
+                "changed {key}"
+            );
+            assert!(!temp.path("consumed").exists());
+        }
     }
     #[test]
     fn te15_b2b_candidate_grant_only() {
@@ -445,12 +646,13 @@ mod tests {
             "models_and_options",
             "limits",
             "run_identity",
+            "expires_at_unix_seconds",
         ] {
             let temp = folder();
             write(temp.root(), &grant);
             let mut value = serde_json::to_value(&grant).unwrap();
             value[field] = match field {
-                "case" => json!(1),
+                "case" | "expires_at_unix_seconds" => json!(1),
                 "models_and_options" | "limits" => json!({}),
                 _ => json!("changed"),
             };
@@ -521,7 +723,11 @@ mod tests {
     fn te15_b2b_grant_interrupted() {
         const KEY: &str = "KINEWRIGHT_B2B_TEMP_RECEIPT_CHILD";
         if let Some(root) = std::env::var_os(KEY) {
-            let (pin, bytes, grant) = data();
+            let (pin, bytes, _) = data();
+            let grant: Grant = serde_json::from_slice(
+                &std::fs::read(Path::new(&root).join("temporary-run.json")).unwrap(),
+            )
+            .unwrap();
             let _token = consume(Path::new(&root), &grant.id, &pin, &bytes, &grant).unwrap();
             // Terminate without Drop, just after the durable boundary, before construction.
             std::process::exit(0);

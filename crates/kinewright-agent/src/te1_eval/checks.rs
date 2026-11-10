@@ -230,6 +230,7 @@ pub(crate) fn observed(case: u8, trace: &Trace) -> bool {
                     .iter()
                     .enumerate()
                     .any(|(offset, read)| {
+                        let read_position = published + offset + 1;
                         matches!(read.tool.as_str(), "read_child_result" | "read_task_result")
                             && Some(&read.task) == director
                             && ((read.tool == "read_child_result"
@@ -241,15 +242,20 @@ pub(crate) fn observed(case: u8, trace: &Trace) -> bool {
                             && serde_json::to_string(&read.reply).is_ok_and(|s| {
                                 s.contains("correct-homophone") && s.contains("failed")
                             })
-                            && calls[published + offset + 2..].iter().enumerate().any(
-                                |(after, c)| {
-                                    effective_merges.contains(&(published + offset + 2 + after))
+                            && effective_merges
+                                .range(published + 1..read_position)
+                                .next()
+                                .is_none()
+                            && calls[read_position + 1..]
+                                .iter()
+                                .enumerate()
+                                .any(|(after, c)| {
+                                    effective_merges.contains(&(read_position + 1 + after))
                                         && c.tool == "merge_task"
                                         && !c.refused
                                         && !c.fixture
                                         && Some(&c.task) == director
-                                },
-                            )
+                                })
                     })
                 && !calls.iter().any(|c| {
                     c.tool == "merge_task"
