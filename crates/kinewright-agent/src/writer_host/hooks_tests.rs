@@ -58,6 +58,8 @@ mod tests {
     include!("te15_b21_tests.rs");
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
+    include!("run_limit_person_tests.rs");
+    include!("run_limit_cleanup_tests.rs");
     include!("c5_fix2_tests.rs");
     include!("c5_fix3_tests.rs");
     include!("c5_fix7_tests.rs");

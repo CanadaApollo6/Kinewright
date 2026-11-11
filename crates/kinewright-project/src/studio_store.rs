@@ -576,6 +576,13 @@ impl ProjectBundle {
         kind: crate::studio_records::FeedbackEvidenceKind,
         bytes: &[u8],
     ) -> Result<SealedObject, BundleError> {
+        self.with_person_publication(|bundle| bundle.feedback_evidence(kind, bytes))
+    }
+    fn feedback_evidence(
+        &mut self,
+        kind: crate::studio_records::FeedbackEvidenceKind,
+        bytes: &[u8],
+    ) -> Result<SealedObject, BundleError> {
         use crate::studio_records::{FRAME_PROOF_BYTES, FeedbackEvidenceKind};
         let limits = self.store.limits();
         match kind {
@@ -632,6 +639,19 @@ impl ProjectBundle {
         scope: MetadataScope,
         update: &MetadataUpdate,
     ) -> Result<ReceiptLookup, BundleError> {
+        if matches!(scope, MetadataScope::Feedback | MetadataScope::Snapshot) {
+            return self.with_person_publication(|bundle| {
+                bundle.metadata_publisher(envelope, scope, update)
+            });
+        }
+        self.metadata_publisher(envelope, scope, update)
+    }
+    fn metadata_publisher(
+        &mut self,
+        envelope: &MetadataEnvelope,
+        scope: MetadataScope,
+        update: &MetadataUpdate,
+    ) -> Result<ReceiptLookup, BundleError> {
         if matches!(update.change, MetadataChange::SaveVoice(_)) {
             return crate::voice_store::metadata_command(self, envelope, scope, update);
         }
@@ -664,7 +684,9 @@ impl ProjectBundle {
         if publication.note() != &voice.note_id {
             return Err(BundleError::HistoryBarrierInvariant);
         }
-        self.metadata_command_inner(envelope, scope, update, None)
+        self.with_person_publication(|bundle| {
+            bundle.metadata_command_inner(envelope, scope, update, None)
+        })
     }
     #[allow(
         clippy::too_many_lines,
@@ -1718,7 +1740,9 @@ impl FrozenContext {
         let store = self.snapshot.pin.read_store();
         store.check_read_authority()?;
         let bytes = crate::voice_ingress::AUDIO_BYTES + crate::voice_ingress::LOG_BYTES;
-        store.reserve(bytes, 3 * bytes, 0, true)
+        store
+            .person_publication_store()
+            .reserve(bytes, 3 * bytes, 0, true)
     }
 
     /// Recheck certified descriptors without rereading the footage.

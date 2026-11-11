@@ -168,14 +168,15 @@ impl HostCommandOwner {
         {
             return Err(refused("no durable unstarted launch fence"));
         }
+        let mut cleanup = self.cleanup_publication(identity, CleanupEvidence::Retirement(proof))?;
         if matches!(
             proof,
             crate::guardian::AttemptRetirementProof::NotDispatched(_)
         ) {
-            self.record_not_dispatched_usage(producer, identity)?;
-            state = self.spending_scope(producer, &identity.run)?;
+            cleanup.record_not_dispatched_usage(producer, identity)?;
+            state = cleanup.spending_scope(producer, &identity.run)?;
         }
-        self.persist_runtime_task(&mut state, identity, true)?;
+        cleanup.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
             .iter_mut()
@@ -210,7 +211,7 @@ impl HostCommandOwner {
             };
         }
         crate::orchestration::tasks::refresh_cleanup(&mut state);
-        self.publish_native(producer, state, identity, vec![])
+        cleanup.publish_native(producer, state, identity, vec![])
     }
     pub(crate) fn native_launch_intent(
         &self,

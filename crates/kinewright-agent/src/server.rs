@@ -2782,6 +2782,11 @@ impl KinewrightMcp {
             {
                 return error_text(error);
             }
+            if let Err(error) =
+                endpoint.check_batch_history(&self.core, std::slice::from_ref(&operation))
+            {
+                return error_text(error);
+            }
         }
         match self.core.request(Command::DoIfRevision {
             expected: expected_revision,
@@ -2873,6 +2878,11 @@ impl KinewrightMcp {
             return Ok(error_text(
                 "AddLutAsset cannot be submitted through apply_edit_plan; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
             ));
+        }
+        if let Some(endpoint) = &self.task_endpoint
+            && let Err(error) = endpoint.check_batch_history(&self.core, operations)
+        {
+            return Ok(error_text(error));
         }
         let confirmation = plan_confirmation_description(&before, operations);
         if self.task_control.is_none()
@@ -3735,6 +3745,15 @@ impl KinewrightMcp {
         expected_revision: TimelineRevision,
         operations: &[Operation],
     ) -> Result<Result<TimelineRevision, CallToolResult>, McpError> {
+        if let Some(endpoint) = &self.task_endpoint {
+            let (_, document) = self.snapshot()?;
+            if let Err(error) = endpoint.validate_batch(&document, operations) {
+                return Ok(Err(error_text(error)));
+            }
+            if let Err(error) = endpoint.check_batch_history(&self.core, operations) {
+                return Ok(Err(error_text(error)));
+            }
+        }
         let event = self
             .core
             .request(Command::DoBatchIfRevision {
