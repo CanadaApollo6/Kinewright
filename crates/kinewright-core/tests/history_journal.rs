@@ -1,79 +1,8 @@
 //! The previous document-bearing shape remains an independent test oracle.
 use kinewright_core::{Command, Core, Document, Event, HistorySnapshot, Operation, TrackId};
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct BoundaryOracle<'a> {
-    floor_offset: u64,
-    baseline: &'a Document,
-    document: &'a Document,
-    batches: &'a [kinewright_core::HistoryBatch],
-    cursor: &'a kinewright_core::HistoryCursor,
-}
-fn oracle(history: &HistorySnapshot) -> serde_json::Value {
-    let mut value = serde_json::to_value(BoundaryOracle {
-        floor_offset: history.floor_offset,
-        baseline: &history.baseline,
-        document: &history.document,
-        batches: &history.batches,
-        cursor: &history.cursor,
-    })
-    .unwrap();
-    // The old format also stored every surviving clip ID. Reconstruct that
-    // redundant field independently for the test-only legacy value.
-    let mut current: std::collections::BTreeSet<_> = history
-        .baseline
-        .tracks
-        .iter()
-        .flat_map(|track| track.clips.iter().map(|clip| clip.id))
-        .collect();
-    let mut undo = Vec::new();
-    let mut redo = Vec::new();
-    for (batch, encoded) in history
-        .batches
-        .iter()
-        .zip(value["batches"].as_array_mut().unwrap())
-    {
-        match &batch.command {
-            kinewright_core::JournalCommand::Undo => {
-                if let Some(previous) = undo.pop() {
-                    redo.push(current);
-                    current = previous;
-                }
-            }
-            kinewright_core::JournalCommand::Redo => {
-                if let Some(next) = redo.pop() {
-                    undo.push(current);
-                    current = next;
-                }
-            }
-            _ => {
-                let before = current.clone();
-                for (effect, encoded) in batch
-                    .identity_effects
-                    .iter()
-                    .zip(encoded["identity_effects"].as_array_mut().unwrap())
-                {
-                    let retained: Vec<_> = current
-                        .iter()
-                        .filter(|id| !effect.deleted.contains(id))
-                        .copied()
-                        .collect();
-                    encoded["retained"] = serde_json::to_value(retained).unwrap();
-                    for id in &effect.deleted {
-                        current.remove(id);
-                    }
-                    current.extend(&effect.created);
-                }
-                if batch.undo_entries > undo.len() {
-                    undo.push(before);
-                }
-                redo.clear();
-            }
-        }
-    }
-    value
-}
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::document_oracle as oracle;
 
 fn fixture(clips: usize) -> Document {
     let mut document = Document::default();
@@ -169,13 +98,21 @@ fn history_compact_gestures_empty_steps_and_abandoned_redo_match_oracle() {
                 "VERIFIED_BOUNDARIES_SHARE_STORAGE"
             );
         }
-        let mut bad = serde_json::to_value(&original).unwrap();
-        bad["journal"]["document_sha256"] = serde_json::Value::String("0".repeat(64));
-        assert!(serde_json::from_value::<HistorySnapshot>(bad).is_err());
-        for index in 0..original.cursor.undo.len() {
+        for field in ["baseline_sha256", "document_sha256"] {
             let mut bad = serde_json::to_value(&original).unwrap();
-            bad["journal"]["cursor"]["undo"][index] = serde_json::Value::String("0".repeat(64));
+            bad["journal"][field] = serde_json::Value::String("0".repeat(64));
             assert!(serde_json::from_value::<HistorySnapshot>(bad).is_err());
+        }
+        for (direction, entries) in [
+            ("undo", &original.cursor.undo),
+            ("redo", &original.cursor.redo),
+        ] {
+            for index in 0..entries.len() {
+                let mut bad = serde_json::to_value(&original).unwrap();
+                bad["journal"]["cursor"][direction][index] =
+                    serde_json::Value::String("0".repeat(64));
+                assert!(serde_json::from_value::<HistorySnapshot>(bad).is_err());
+            }
         }
     }
     let before = core.export_history().unwrap();
@@ -330,4 +267,174 @@ fn small_vector_transport_growth_is_reserved_before_replay() {
         "CAPTURE_MUST_RESERVE_THE_WIRE_ALLOCATION"
     );
     assert_eq!(wire.resolve().unwrap(), original);
+}
+
+#[test]
+fn generated_command_prefixes_equal_document_bearing_oracle() {
+    const SEED: u64 = 0x71e1_8a5e_f32a_b0ac;
+    let mut random = SEED;
+    for case in 0..32 {
+        let source = Core::spawn(Document {
+            tracks: vec![kinewright_core::Track {
+                id: TrackId(1),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut resumed = Core::spawn(Document::default()).unwrap();
+        resumed
+            .restore_history(source.export_history().unwrap())
+            .unwrap();
+        for step in 0..40 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let operation = Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: random & 1 == 0,
+            };
+            let command = if step == 0 {
+                Command::Undo
+            } else if step == 1 {
+                Command::Redo
+            } else {
+                match random % 6 {
+                    0 => Command::Undo,
+                    1 => Command::Redo,
+                    2 => Command::DoBatch(vec![
+                        operation,
+                        Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: true,
+                        },
+                    ]),
+                    3 | 4 => Command::DoBatchCoalesced {
+                        operations: vec![operation],
+                        coalesce_key: format!("gesture-{}", random % 3),
+                    },
+                    _ => Command::Do(operation),
+                }
+            };
+            for actor in [&source, &resumed] {
+                assert!(matches!(
+                    actor.request(command.clone()).unwrap(),
+                    Event::DocumentChanged { .. }
+                ));
+            }
+            let expected = source.export_history().unwrap();
+            assert_eq!(
+                resumed.export_history().unwrap(),
+                expected,
+                "seed={SEED:#x} case={case} step={step}"
+            );
+            history_oracle::assert_compact_roundtrip(&expected);
+            let encoded = serde_json::to_vec(&expected).unwrap();
+            let restored: HistorySnapshot = serde_json::from_slice(&encoded).unwrap();
+            resumed = Core::spawn(Document::default()).unwrap();
+            resumed.restore_history(restored).unwrap();
+        }
+    }
+}
+
+#[test]
+fn compact_applied_operations_contains_only_the_live_path() {
+    let core = Core::spawn(Document {
+        tracks: vec![kinewright_core::Track {
+            id: TrackId(1),
+            kind: kinewright_core::TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let a = Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    };
+    let marker = |id| Operation::AddMarker {
+        marker: kinewright_core::Marker {
+            id: kinewright_core::MarkerId(id),
+            position: kinewright_core::TimeCode(0),
+            label: format!("marker {id}"),
+            color_token: 0,
+        },
+    };
+    let c = marker(7);
+    for command in [
+        Command::Do(a.clone()),
+        Command::Do(marker(3)),
+        Command::Undo,
+        Command::Do(c.clone()),
+    ] {
+        assert!(matches!(
+            core.request(command).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+    }
+    let history = core.export_history().unwrap();
+    assert_eq!(history.applied_operations(), [a, c]);
+    assert_eq!(history.document.markers[0].id, kinewright_core::MarkerId(7));
+    history_oracle::assert_compact_roundtrip(&history);
+}
+
+#[test]
+fn compact_roundtrip_preserves_created_ids_when_an_undone_id_is_reused() {
+    let core = Core::spawn(Document {
+        tracks: vec![kinewright_core::Track {
+            id: TrackId(2),
+            kind: kinewright_core::TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let solid = |red| Operation::AddSolidClip {
+        track: TrackId(2),
+        timeline_start: kinewright_core::TimeCode(0),
+        duration: kinewright_core::TimeCode(90),
+        color: kinewright_core::SolidColor { r: red, g: 0, b: 0 },
+    };
+    for command in [
+        Command::Do(solid(0)),
+        Command::Undo,
+        Command::Do(solid(255)),
+    ] {
+        let event = core.request(command).unwrap();
+        assert!(matches!(event, Event::DocumentChanged { .. }), "{event:?}");
+        history_oracle::assert_compact_roundtrip(&core.export_history().unwrap());
+    }
+    let original = core.export_history().unwrap();
+    assert_eq!(
+        original.batches[0].identity_effects[0].created,
+        [kinewright_core::ClipId(1)]
+    );
+    assert_eq!(
+        original.batches[2].identity_effects[0].created,
+        [kinewright_core::ClipId(1)]
+    );
+    let restored: HistorySnapshot =
+        serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+    let reopened = Core::spawn(Document::default()).unwrap();
+    reopened.restore_history(restored).unwrap();
+    for command in [Command::Undo, Command::Redo] {
+        for actor in [&core, &reopened] {
+            assert!(matches!(
+                actor.request(command.clone()).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        assert_eq!(
+            core.export_history().unwrap(),
+            reopened.export_history().unwrap()
+        );
+    }
+    assert!(matches!(
+        &core.export_history().unwrap().document.tracks[0].clips[0].content,
+        kinewright_core::ClipContent::Solid(color) if color.r == 255
+    ));
 }

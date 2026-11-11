@@ -1066,3 +1066,170 @@ fn s3_committed_import_retains_inputs_when_following_save_fails() {
         "C0_IMPORT_RECOVERY_DOES_NOT_DUPLICATE"
     );
 }
+
+#[test]
+fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
+    use kinewright_core::{
+        Command, Core, Document, Effect, EffectId, Event, LutAssetId, Operation, ParamValue,
+        SolidColor, TimeCode, Track, TrackId, TrackKind,
+    };
+    use kinewright_media::{LutStore, parse_cube_lut_bytes};
+    use kinewright_project::{
+        bundle::{BundleWriteAdmission, ProjectBundle},
+        owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+    };
+    let temporary = temp("compact-history-lut-redo");
+    let project = temporary.path("source.kinewright");
+    let copy_path = temporary.path("copy.kinewright");
+    let external = temporary.path("look.cube");
+    let cube = b"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    std::fs::write(&external, cube).unwrap();
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let apply = |command| {
+        let event = core.request(command).unwrap();
+        assert!(matches!(event, Event::DocumentChanged { .. }), "{event:?}");
+    };
+    apply(Command::Do(Operation::AddSolidClip {
+        track: TrackId(1),
+        timeline_start: TimeCode(0),
+        duration: TimeCode(30),
+        color: SolidColor { r: 0, g: 0, b: 0 },
+    }));
+    let mut owner =
+        ProjectBundle::activate(&project, BundleWriteAdmission::new_document()).unwrap();
+    let empty = owner.empty_inputs().unwrap();
+    owner.save(&core, &empty.reference).unwrap();
+    let imported = LutStore::for_project(&project)
+        .unwrap()
+        .import_lut_asset(&external)
+        .unwrap()
+        .into_lut_asset(LutAssetId(1));
+    let object = ObjectRef {
+        sha256: imported.sha256.clone(),
+        byte_length: imported.byte_len,
+        record_kind: RecordKind::OwnedLut,
+    };
+    let blob = owner
+        .store_mut()
+        .unwrap()
+        .admit_blob(&mut &cube[..], &object, &[])
+        .unwrap();
+    let entry = OwnedInputEntry {
+        entry_id: format!("lut:1:{}:{}", object.sha256, object.byte_length),
+        object,
+        dependencies: vec![],
+        selected_stream: None,
+        time_base: None,
+        origin: None,
+        profile: None,
+    };
+    let inputs = owner
+        .admit_inputs(&OwnedInputManifest {
+            project_id: Some(owner.project_id().clone()),
+            session_id: None,
+            owner_epoch: owner.store().owner_epoch(),
+            entries: vec![entry.clone()],
+        })
+        .unwrap();
+    apply(Command::Do(Operation::AddLutAsset { asset: imported }));
+    owner.save(&core, &inputs.reference).unwrap();
+    apply(Command::Do(Operation::AddEffect {
+        clip: kinewright_core::ClipId(1),
+        effect: Effect {
+            id: EffectId(1),
+            enabled: true,
+            enabled_curve: None,
+            name: "creative_look".into(),
+            parameters: [("lut_asset_id".into(), ParamValue::Integer(1))].into(),
+            keyframes: std::collections::BTreeMap::default(),
+        },
+    }));
+    owner.save(&core, &inputs.reference).unwrap();
+    let applied = core.export_history().unwrap();
+    apply(Command::Undo);
+    apply(Command::Undo);
+    let undone = core.export_history().unwrap();
+    assert!(undone.document.lut_assets.is_empty());
+    assert_eq!(undone.cursor.redo.len(), 2);
+    drop(blob);
+    drop(inputs);
+    for _ in 0..4 {
+        owner.save(&core, &empty.reference).unwrap();
+        owner.collect_after_ack().unwrap();
+    }
+    drop(empty);
+    owner.collect_after_ack().unwrap();
+    std::fs::remove_file(external).unwrap();
+    drop(owner);
+    let loaded = LoadedBundle::read(&project).unwrap();
+    let original = Core::spawn(Document::default()).unwrap();
+    loaded.restore_manual(&original).unwrap();
+    assert_eq!(original.export_history().unwrap(), undone);
+    let mut owner = loaded.into_writer().unwrap();
+    let copy = match owner.save_as(&copy_path).unwrap() {
+        SaveAsOutcome::Copied(copy) => copy,
+        SaveAsOutcome::SameProject(_) => panic!("destination must be a distinct project"),
+    };
+    let destination = copy
+        .into_destination()
+        .unwrap_or_else(|_| panic!("copy did not commit"));
+    drop(destination);
+    drop(owner);
+    for path in [&project, &copy_path] {
+        let loaded = LoadedBundle::read(path).unwrap();
+        let checkpoint = loaded.manual_checkpoint().unwrap();
+        let manifests: Vec<_> = std::iter::once(&checkpoint.input_manifest_ref)
+            .chain(&checkpoint.history_input_manifest_refs)
+            .cloned()
+            .collect();
+        let restored = Core::spawn(Document::default()).unwrap();
+        loaded.restore_manual(&restored).unwrap();
+        assert_eq!(restored.export_history().unwrap(), undone);
+        let mut owner = loaded.into_writer().unwrap();
+        owner.collect_after_ack().unwrap();
+        let manifest_ref = manifests
+            .into_iter()
+            .find(|reference| {
+                owner
+                    .store()
+                    .read_input_manifest(reference)
+                    .unwrap()
+                    .entries
+                    .contains(&entry)
+            })
+            .expect("REDO_LUT_MANIFEST_RETAINED");
+        let resource = owner
+            .store()
+            .certify_resource_input(&OwnedInputRef {
+                manifest_ref,
+                entry: entry.clone(),
+            })
+            .unwrap();
+        assert_eq!(resource.bytes().unwrap(), cube);
+        assert_eq!(
+            parse_cube_lut_bytes(resource.bytes().unwrap())
+                .unwrap()
+                .size,
+            2
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                restored.request(Command::Redo).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        let redone = restored.export_history().unwrap();
+        assert_eq!(redone.document, applied.document);
+        assert_eq!(redone.cursor, applied.cursor);
+        assert_eq!(redone.applied_operations(), applied.applied_operations());
+    }
+}

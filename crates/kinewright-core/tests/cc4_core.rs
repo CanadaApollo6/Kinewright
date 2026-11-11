@@ -7,6 +7,10 @@
 //! keyframing policy. Every expected value is transcribed from the document by
 //! hand rather than read back out of the descriptor tables.
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
@@ -103,7 +107,7 @@ fn document_with_assets() -> Document {
         Operation::AddLutAsset {
             asset: imported_asset(id),
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect("a well-formed asset registers");
     }
     document
@@ -138,7 +142,7 @@ fn add(document: &mut Document, effect: Effect) -> Result<(), OpError> {
         clip: ClipId(1),
         effect,
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn insert(document: &mut Document, index: usize, effect: Effect) -> Result<(), OpError> {
@@ -147,7 +151,7 @@ fn insert(document: &mut Document, index: usize, effect: Effect) -> Result<(), O
         index,
         effect,
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn set_param(document: &mut Document, id: u64, name: &str, value: i64) -> Result<(), OpError> {
@@ -157,7 +161,7 @@ fn set_param(document: &mut Document, id: u64, name: &str, value: i64) -> Result
         name: name.to_owned(),
         value: ParamValue::Integer(value),
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn set_keyframes(
@@ -183,7 +187,7 @@ fn set_keyframes(
                 .collect(),
         },
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn effect_names(document: &Document) -> Vec<&str> {
@@ -465,7 +469,7 @@ fn add_lut_asset_rejects_malformed_metadata_by_field() {
         let error = Operation::AddLutAsset {
             asset: asset.clone(),
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect_err("a malformed record must be rejected");
         assert_eq!(
             error,
@@ -498,7 +502,7 @@ fn add_lut_asset_rejects_a_malformed_content_hash() {
             ..imported_asset(3)
         };
         let error = Operation::AddLutAsset { asset }
-            .apply(&mut document)
+            .apply_with_history_oracle(&mut document)
             .expect_err("a malformed hash must be rejected");
         assert_eq!(
             error,
@@ -525,7 +529,7 @@ fn add_lut_asset_rejects_a_duplicate_id_and_allocates_the_next_one() {
             ..imported_asset(2)
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect_err("a duplicate id must be rejected");
     assert_eq!(error, OpError::DuplicateLutAsset(LutAssetId(2)));
     assert_eq!(document.lut_assets.len(), 2);
@@ -559,7 +563,7 @@ fn remove_lut_asset_is_blocked_by_every_kind_of_reference() {
     assert_eq!(
         remove
             .clone()
-            .apply(&mut document.clone())
+            .apply_with_history_oracle(&mut document.clone())
             .expect_err("in use"),
         OpError::LutAssetInUse {
             lut_asset: LutAssetId(1),
@@ -573,12 +577,12 @@ fn remove_lut_asset_is_blocked_by_every_kind_of_reference() {
         clip: ClipId(1),
         effect: EffectId(1),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("removing an effect is legal");
     assert_eq!(
         remove
             .clone()
-            .apply(&mut document.clone())
+            .apply_with_history_oracle(&mut document.clone())
             .expect_err("bypassed nodes count"),
         OpError::LutAssetInUse {
             lut_asset: LutAssetId(1),
@@ -592,12 +596,12 @@ fn remove_lut_asset_is_blocked_by_every_kind_of_reference() {
         clip: ClipId(1),
         effect: EffectId(2),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("removing an effect is legal");
     assert_eq!(
         remove
             .clone()
-            .apply(&mut document.clone())
+            .apply_with_history_oracle(&mut document.clone())
             .expect_err("hold values count"),
         OpError::LutAssetInUse {
             lut_asset: LutAssetId(1),
@@ -611,10 +615,10 @@ fn remove_lut_asset_is_blocked_by_every_kind_of_reference() {
         effect: EffectId(3),
         name: "lut_asset_id".to_owned(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("clearing the curve is legal");
     remove
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect("the last reference is gone");
     assert_eq!(document.lut_asset(LutAssetId(1)), None);
     assert_eq!(document.lut_assets.len(), 1);
@@ -622,7 +626,7 @@ fn remove_lut_asset_is_blocked_by_every_kind_of_reference() {
         Operation::RemoveLutAsset {
             lut_asset: LutAssetId(1),
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect_err("the record is gone"),
         OpError::UnknownLutAsset(LutAssetId(1))
     );
@@ -1202,7 +1206,7 @@ fn convert_legacy_look_replaces_the_stage_in_place() {
         // §9.3: `intensity_percent` converts as `percent * 100`.
         mix_basis_points: 6_500,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("conversion is legal once the asset is registered");
 
     assert_eq!(
@@ -1245,7 +1249,7 @@ fn convert_legacy_look_accepts_an_external_cube_lut() {
         lut_asset: LutAssetId(2),
         mix_basis_points: 10_000,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("the caller imported the file first");
     assert_eq!(effect_names(&document), ["creative_look"]);
     assert_eq!(
@@ -1282,7 +1286,7 @@ fn convert_legacy_look_rejects_a_non_legacy_effect_and_a_missing_asset() {
             lut_asset: LutAssetId(1),
             mix_basis_points: 10_000,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect_err("a managed node is not a legacy look"),
         OpError::NotALegacyLook {
             clip: ClipId(1),
@@ -1297,7 +1301,7 @@ fn convert_legacy_look_rejects_a_non_legacy_effect_and_a_missing_asset() {
             lut_asset: LutAssetId(9),
             mix_basis_points: 10_000,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect_err("the asset must be registered first"),
         OpError::MissingLutAsset {
             clip: ClipId(1),
@@ -1312,7 +1316,7 @@ fn convert_legacy_look_rejects_a_non_legacy_effect_and_a_missing_asset() {
             lut_asset: LutAssetId(1),
             mix_basis_points: 10_001,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .expect_err("the mix is a descriptor value"),
         OpError::EffectParamOutOfRange {
             effect: "creative_look".to_owned(),
@@ -1408,7 +1412,7 @@ fn the_new_operations_survive_save_reopen_replay_and_undo() {
     Operation::AddLutAsset {
         asset: imported_asset(1),
     }
-    .apply(&mut initial)
+    .apply_with_history_oracle(&mut initial)
     .expect("the first asset registers");
 
     let operations = vec![
@@ -1778,7 +1782,7 @@ fn convert_legacy_look_accepts_the_default_preset_token() {
         lut_asset: LutAssetId(1),
         mix_basis_points: 10_000,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("the caller binds token 0 to the built-in identity asset");
     assert_eq!(effect_names(&document), ["creative_look"]);
 
@@ -1799,7 +1803,7 @@ fn convert_legacy_look_accepts_the_default_preset_token() {
         lut_asset: LutAssetId(1),
         mix_basis_points: 10_000,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("token 0 is never a special case in core");
     assert_eq!(effect_names(&document), ["creative_look"]);
 }
@@ -1847,7 +1851,7 @@ fn convert_legacy_look_carries_enabled_and_curve() {
         lut_asset: LutAssetId(1),
         mix_basis_points: 6_500,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("conversion is legal once the asset is registered");
 
     let converted = &document.clip(ClipId(1)).unwrap().effects[1];

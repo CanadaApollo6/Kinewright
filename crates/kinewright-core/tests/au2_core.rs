@@ -1,6 +1,10 @@
 //! AU2 EQ and dynamics — core contract tests (AU2 §7 items A1, A4, A7 and
 //! B2 to B6).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::collections::BTreeMap;
 
 use kinewright_core::{
@@ -369,7 +373,7 @@ fn document_with_one_clip() -> Document {
             assumed_from: None,
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -377,7 +381,7 @@ fn document_with_one_clip() -> Document {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -584,7 +588,7 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
             let error = Operation::UpsertAudioBus {
                 bus: bus_with(effects.clone()),
             }
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap_err();
             assert_eq!(
                 error,
@@ -609,7 +613,7 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
                 KeyframeInterpolation::Hold,
             )]),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         assert_eq!(doc.audio_mix.buses[0].effects[0].name, effect);
     }
@@ -641,7 +645,7 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
             let error = Operation::UpsertAudioBus {
                 bus: bus_with(effects.clone()),
             }
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap_err();
             assert_eq!(
                 error,
@@ -660,7 +664,7 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         Operation::UpsertAudioBus {
             bus: bus_with(vec![audio_effect(1, effect, &[(parameter, value)])]),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         doc.validate().unwrap();
     }
@@ -684,7 +688,7 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
             ),
         ]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.audio_mix.buses[0].effects.len(), 2);
     assert!(!is_static_audio_parameter(
@@ -718,7 +722,9 @@ fn audio_switches_take_hold_keyframes_only_and_latency_takes_none() {
         let mut bus = bus_with(vec![audio_effect(1, name, &[("bypass", 1)])]);
         // `audio_ducking` is the one node that needs a sidechain to be legal.
         bus.ducking_sidechain_tracks = vec![TrackId(1)];
-        Operation::UpsertAudioBus { bus }.apply(&mut doc).unwrap();
+        Operation::UpsertAudioBus { bus }
+            .apply_with_history_oracle(&mut doc)
+            .unwrap();
         assert_eq!(
             doc.audio_mix.buses[0].effects[0].static_integer_parameter("bypass"),
             Some(1),
@@ -783,7 +789,7 @@ fn a_chain_may_declare_twenty_milliseconds_of_lookahead_and_no_more() {
             ),
         ]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         doc.audio_mix.lookahead_milliseconds(),
@@ -814,7 +820,7 @@ fn a_chain_may_declare_twenty_milliseconds_of_lookahead_and_no_more() {
     let error = Operation::UpsertAudioBus {
         bus: bus_with(over_budget.clone()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -879,7 +885,7 @@ fn upsert_audio_bus_round_trips_one_of_each_new_node() {
 
     // And the same chain applies and survives the document invariant.
     let mut doc = document_with_one_clip();
-    operation.apply(&mut doc).unwrap();
+    operation.apply_with_history_oracle(&mut doc).unwrap();
     doc.validate().unwrap();
     assert_eq!(doc.audio_mix.buses[0].effects.len(), 4);
     assert_eq!(doc.audio_mix.lookahead_milliseconds().bus_stage, 10);
@@ -922,12 +928,12 @@ fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
     Operation::SetAudioMaster {
         master: AudioMaster::default(),
     }
-    .apply(&mut only_neutral)
+    .apply_with_history_oracle(&mut only_neutral)
     .unwrap();
     Operation::SetPanLaw {
         law: kinewright_core::PanLaw::Balance,
     }
-    .apply(&mut only_neutral)
+    .apply_with_history_oracle(&mut only_neutral)
     .unwrap();
 
     assert_eq!(only_neutral, untouched);
@@ -946,12 +952,12 @@ fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
     Operation::SetAudioMaster {
         master: master_with(-15, vec![audio_effect(1, "audio_gain", &[])]),
     }
-    .apply(&mut touched)
+    .apply_with_history_oracle(&mut touched)
     .unwrap();
     Operation::SetPanLaw {
         law: kinewright_core::PanLaw::ConstantPower,
     }
-    .apply(&mut touched)
+    .apply_with_history_oracle(&mut touched)
     .unwrap();
     assert!(!mix_is_empty(&touched.audio_mix));
     let bytes = serde_json::to_string(&touched).unwrap();
@@ -966,12 +972,12 @@ fn a_neutral_master_and_the_balance_law_never_reach_the_wire() {
     Operation::SetAudioMaster {
         master: touched.audio_mix.master.clone(),
     }
-    .apply(&mut touched)
+    .apply_with_history_oracle(&mut touched)
     .unwrap();
     Operation::SetPanLaw {
         law: touched.audio_mix.pan_law,
     }
-    .apply(&mut touched)
+    .apply_with_history_oracle(&mut touched)
     .unwrap();
     assert_eq!(touched, repeated);
 }
@@ -994,7 +1000,9 @@ fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
     for gain in [AUDIO_BUS_GAIN_MIN, 0, AUDIO_BUS_GAIN_MAX] {
         let mut bus = bus_with(Vec::new());
         bus.gain_tenth_db = gain;
-        Operation::UpsertAudioBus { bus }.apply(&mut doc).unwrap();
+        Operation::UpsertAudioBus { bus }
+            .apply_with_history_oracle(&mut doc)
+            .unwrap();
         assert_eq!(doc.audio_mix.buses[0].gain_tenth_db, gain);
         doc.validate().unwrap();
     }
@@ -1002,7 +1010,7 @@ fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
         Operation::SetAudioMaster {
             master: master_with(gain, Vec::new()),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         assert_eq!(doc.audio_mix.master.gain_tenth_db, gain);
         doc.validate().unwrap();
@@ -1013,7 +1021,7 @@ fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
         let mut bus = bus_with(Vec::new());
         bus.gain_tenth_db = gain;
         assert_eq!(
-            Operation::UpsertAudioBus { bus }.apply(&mut doc),
+            Operation::UpsertAudioBus { bus }.apply_with_history_oracle(&mut doc),
             Err(OpError::AudioBusGainOutOfRange {
                 bus: AudioBusId(1),
                 gain_tenth_db: gain,
@@ -1025,7 +1033,7 @@ fn bus_and_master_gain_share_the_audio_gain_domain_and_reject_outside_it() {
             Operation::SetAudioMaster {
                 master: master_with(gain, Vec::new()),
             }
-            .apply(&mut doc),
+            .apply_with_history_oracle(&mut doc),
             Err(OpError::AudioMasterGainOutOfRange {
                 gain_tenth_db: gain
             })
@@ -1204,7 +1212,7 @@ fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
             Operation::SetAudioMaster {
                 master: master.clone(),
             }
-            .apply(&mut doc),
+            .apply_with_history_oracle(&mut doc),
             Err(expected.clone())
         );
         assert_eq!(doc, before);
@@ -1224,12 +1232,12 @@ fn the_master_chain_carries_the_bus_rules_with_master_flavoured_errors() {
             ],
         ),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::UpsertAudioBus {
         bus: bus_with(vec![audio_effect(1, "audio_gain", &[])]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc.validate().unwrap();
     assert_eq!(
@@ -1306,13 +1314,13 @@ fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
                 clips: Vec::new(),
             },
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     Operation::UpsertAudioBus {
         bus: bus_with(Vec::new()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.audio_mix.next_bus_id(), AudioBusId(2));
 
@@ -1329,7 +1337,7 @@ fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
     Operation::UpsertAudioBus {
         bus: sparse.clone(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.audio_mix.next_bus_id(), AudioBusId(10));
     assert_eq!(
@@ -1351,7 +1359,7 @@ fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
 
     sparse.tracks = Vec::new();
     assert!(matches!(
-        Operation::UpsertAudioBus { bus: sparse }.apply(&mut doc),
+        Operation::UpsertAudioBus { bus: sparse }.apply_with_history_oracle(&mut doc),
         Err(OpError::InvalidAudioBus(AudioBusId(9)))
     ));
 }
@@ -1367,7 +1375,7 @@ fn a_coalesced_bus_fader_drag_is_one_undo_entry() {
             &[("threshold_tenth_db", -100)],
         )]),
     }
-    .apply(&mut initial)
+    .apply_with_history_oracle(&mut initial)
     .unwrap();
     let core = Core::spawn(initial.clone()).unwrap();
 
@@ -1450,7 +1458,7 @@ fn bus_effects_reject_disabled_or_keyframed_enable() {
         let error = Operation::UpsertAudioBus {
             bus: bus_with(effects.clone()),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap_err();
         assert_eq!(
             error,
@@ -1467,7 +1475,7 @@ fn bus_effects_reject_disabled_or_keyframed_enable() {
     Operation::UpsertAudioBus {
         bus: bus_with(vec![audio_effect(1, "audio_gain", &[])]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 }
 
@@ -1509,7 +1517,7 @@ fn bus_effect_curves_still_reject_negative_positions() {
     let error = Operation::UpsertAudioBus {
         bus: bus_with(effects.clone()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -1547,7 +1555,7 @@ fn master_effects_reject_disabled_or_keyframed_enable() {
         let error = Operation::SetAudioMaster {
             master: master_with(0, effects.clone()),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap_err();
         assert_eq!(
             error,

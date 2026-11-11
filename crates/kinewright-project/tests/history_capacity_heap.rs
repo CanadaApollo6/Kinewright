@@ -38,7 +38,12 @@ fn document(clips: usize) -> kinewright_core::Document {
 )]
 fn history_capacity_restored_heap_is_covered_by_typed_charge() {
     let mut results = vec![];
-    for (clips, edits, ripple) in [(400, 200, false), (400, 200, true), (1200, 200, false)] {
+    for (clips, edits, ripple) in [
+        (400, 200, false),
+        (400, 200, true),
+        (1200, 68, false),
+        (1200, 200, false),
+    ] {
         let core = Core::spawn(document(clips)).unwrap();
         for edit in 0..edits {
             let operations = if ripple && edit == 100 {
@@ -107,10 +112,10 @@ fn history_capacity_restored_heap_is_covered_by_typed_charge() {
             lineage_charge >= lineage_heap as u64,
             "LINEAGE_LIVE_UNDERCHARGED {lineage_charge} < {lineage_heap}"
         );
-        if clips == 400 && ripple {
+        if (clips == 400 && ripple) || (clips == 1200 && edits == 68) {
             assert!(
                 history_charge + lineage_charge <= kinewright_project::history_record::TASK_LIVE,
-                "REQUIRED_400_200_FITS history={history_charge} lineage={lineage_charge}"
+                "ADMITTED_HISTORY_FITS clips={clips} edits={edits} history={history_charge} lineage={lineage_charge}"
             );
         }
         let result = json!({"clips": clips, "edits": edits, "ripple_delete_20": ripple,

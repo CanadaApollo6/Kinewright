@@ -892,6 +892,13 @@ mod tests {
 
     #[test]
     fn s2h_cached_history_rolls_back_encoder_and_admission_refusals() {
+        fn roundtrip(harness: &Harness) {
+            let original = harness.state.history();
+            let bytes = serde_json::to_vec(&original).unwrap();
+            let restored: HistorySnapshot = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(restored, original, "REFUSED_TENTATIVE_EDIT_ROUNDTRIP");
+            assert_eq!(restored.applied_operations(), original.applied_operations());
+        }
         let mut harness = Harness::new(CoreState::new(Document::default(), TimelineRevision(0)));
         for command in [
             add_track(1),
@@ -913,6 +920,7 @@ mod tests {
                     harness.run(command.clone()),
                     Event::MutationRefused { .. }
                 ));
+                roundtrip(&harness);
                 harness.refusal.store(0, Ordering::Relaxed);
                 accepted(&harness.run(command));
                 harness.acknowledge();
@@ -925,6 +933,7 @@ mod tests {
         harness.run(Command::DoBatch(vec![]));
         harness.refusal.store(1, Ordering::Relaxed);
         harness.run(drag(true, "branch"));
+        roundtrip(&harness);
         harness.refusal.store(0, Ordering::Relaxed);
         accepted(&harness.run(drag(true, "branch")));
         assert!(harness.state.redo.is_empty());

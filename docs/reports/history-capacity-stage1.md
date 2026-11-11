@@ -88,7 +88,7 @@ Recommendation for the constants ruling: keep task 41 MiB and candidate 2 MiB pr
 
 ## Remaining stage-1 work and scope
 
-Not yet qualified by this first delivery: admitted 400/200 lifecycle, the 1,200-clip admitted edit count/lifecycle, task table at 40/120/400/1,200, full all-operation and pending-save/manual rollback oracle, non-latching candidate refusal lifecycle, LUT Redo retention through collection and Save As, complete crash matrix, release open/restore and after-change Save measurements, and truthful replay-failure fallback. These remain active work, including the final replay-failure commit specified by the brief. The already measured pre-change Save baseline is 272.8 ms median over twelve changed saves at `e0131f02`; no after-change number is claimed here.
+Not yet qualified by this first delivery: admitted 400/200 lifecycle, the 1,200-clip admitted edit count/lifecycle, end-to-end task table at 40/120/400/1,200, non-latching candidate refusal lifecycle, complete crash matrix, release open/restore measurements, and truthful replay-failure fallback. The follow-up sections below add the all-operation/pending-save/manual rollback oracle, LUT retention, isolated history capacity, the admitted-size heap and after-change Save measurements. These remain active work, including the final replay-failure commit specified by the brief. The already measured pre-change Save baseline is 272.8 ms median over twelve changed saves at `e0131f02`; no after-change number is claimed here.
 
 Overlap with the other workers: Core model/history/actor registration and Project records/store/publication/manual-history paths. No linear-run-storage implementation or old-reader/migration support is added. `target/` size and final gate counts are recorded below.
 
@@ -108,3 +108,51 @@ Portable-boundary verification: the hosted lost-Save fixture now uses 4,000 unsa
 | App (`slow-tests`) | 1,019 | 0 | 5 | `target/history-capacity/verified-full-app.log` |
 
 Fmt, slow-test lint (127 tests, 150 allowlist entries, 27 equipped-session skip sites), all-target clippy `-D warnings` for all four changed crates, and workspace test compilation **PASS**. The complete foreground batch exited 0. Evidence: `target/history-capacity/verified-*.log` and `first-delivery-gates.json`. `target/` is **35.57 GB (33.12 GiB; 35,565,739,976 bytes)**. Windows and paid/provider runs: **NOT RUN**.
+
+## Document-bearing oracle proof
+
+The old document-per-boundary serialization remains test-only in `crates/kinewright-core/tests/support/history_oracle.rs`. Existing valid-operation fixtures execute the same accepted operation directly and through Core, then compact-write/restore and compare the entire original snapshot, reconstructed old serialization, every cursor boundary, identity effects and `applied_operations`. Coverage is collected against the exhaustive 67-operation subject registry. An invalid pre-state or rejected replay fails the witness. No operation is excluded or silently repaired.
+
+The generated witness uses seed `0x71e18a5ef32ab0ac`, 32 sequences and 40 prefixes each. At every prefix the source and resumed actors run the same next command and must export exactly equal snapshots. Cases include Do, DoBatch, coalescing, empty Undo/Redo and new edits after Undo. Explicit cases pin `gesture(k), Undo, Redo, gesture(k)`, the A/B/Undo/C live path, public clip-ID reuse with different content, and corruption of each baseline/current/Undo/Redo hash. The pending-save witness adds a clip and splits it while I/O is pending, then checks both commit and abort, restored identity effects and later Undo/Redo. Manual rollback checks compact roundtrips after tentative execution is refused by encoder or admission; the original independent state/counter/pending/byte assertions remain.
+
+This is test-only evidence. Product code and the provisional budgets are unchanged by this commit. The final gate evidence and target size are recorded below.
+
+## Owned LUT and occurrence retention
+
+`compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as` imports a real parsed Cube after initial Save, admits its exact bytes as an owned LUT, registers it and applies `creative_look`. It undoes both commands, then performs four Saves with an empty current-input manifest and collection, drops the import pins and removes the external input. After reopen and Save As, both projects retain a history-bound owned-input manifest whose bytes certify and parse. Redo in both yields the exact original applied document, cursor and live operation path. The focused witness passed in 1.36 seconds and the first full Project run also passed it.
+
+`compact_lineage_keeps_original_occurrences_when_a_clip_id_is_reused` starts with one baseline clip, deletes it, recreates different content under the same public ID and undoes the recreation. The baseline map must retain the original occurrence and the Redo map the new occurrence, including its persisted creation batch. Full map equality survives compact serialization, fresh project open and Redo/Save. This exercises replacement of a map value under an unchanged public key. The full Project run passed it.
+
+## Capacity and heap follow-up
+
+The prospective native task admission guard over the note's fixture admitted the following counts. These are isolated history capacities; approval, run-record and other tool-path clamps are separate. The next count returned the existing actionable history message in every row. The strengthened measurement uses the task's actual retained seed, applies edits through its normal command path, freezes the admitted task and resolves the stored history exactly. It passed all four rows in 31.44 seconds. This qualifies the isolated native history path, not the still-pending complete tool lifecycle.
+
+| Seed clips | Accepted steps | Stored history encoded / decoded bytes | History + lineage live charge bytes | First binding quota |
+| ---: | ---: | --- | ---: | --- |
+| 40 | 316 | 87,685 / 1,108,483 | 11,111,334 | T = 1,111,040; next decoded charge 1,111,976 |
+| 120 | 316 | 87,687 / 1,108,487 | 23,792,182 | T = 1,111,040; next decoded charge 1,111,980 |
+| 400 | 203 | 58,430 / 744,162 | 42,967,044 | 41 MiB = 42,991,616; next pair 43,171,729 |
+| 1,200 | 68 | 19,180 / 242,105 | 42,806,274 | 41 MiB; next pair 43,419,880 |
+
+These streams are track sync-lock flag batches. The 400-clip row replaces step 101 with twenty tail ripple-deletes. The live charge in this table is for the native seed/capture; the separate restored-heap row below charges the wire reconstruction's capacities. Guard margins are 2,557 / 2,553 bytes of T and 24,572 / 185,342 bytes of the live bound respectively. Typed-charge margin is distinct from the measured heap headroom. Candidate and complete tool-path capacities remain unqualified by these rows. Detailed accepted/next-refused metrics, portable sizes, lineage sizes and replay bounds are in `target/history-capacity/native-task-capacity.json`.
+
+The 1,200/68 restored-heap witness passed. It measured history **20,618,400 bytes**, lineage **15,595,424 bytes**, and actor-only overhead **270,623 bytes**: **36,484,447 bytes (34.794 MiB)** resident, **15.14%** below the provisional 41 MiB task allowance. The restored typed pair charge was **42,849,570 bytes (40.865 MiB)**. Its portable history is 402,737 bytes and lineage is 328,908 bytes. The measured transient peak was 56,637,871 bytes. The serial excess over the restored pair is **19.478 MiB**; using this larger measured excess in the earlier envelope gives **523.478 MiB**, or **11.478 MiB over 512 before other metadata**. It remains unqualified. The required 400/200 row remains 33.682 MiB including its actor, with 17.85% heap headroom. Debug DHAT restore timings are allocation-instrumented diagnostics, not release latency claims.
+
+## Release Save measurement after the representation change
+
+Same `save_cost_measure` harness, release profile, three warm saves and twelve changed saves per point. All saves succeeded and published changed histories; each median includes fourteen fsync calls. Evidence: `target/history-capacity/save-cost-after.log`, `save-cost-after-result.json`, and the prior campaign under `target/run-limit-followups/`.
+
+| Initial edits | Before median ms | After median ms | After range ms | Before / after retained batches |
+| ---: | ---: | ---: | --- | --- |
+| 100 | 112.0 | 117.1 | 114.3–146.9 | 115 / 115 |
+| 400 | 137.2 | 143.1 | 141.5–146.4 | 415 / 415 |
+| 1,600 | 250.7 | 275.4 | 273.9–369.7 | 1,615 / 1,574 |
+| 3,000 | 272.8 | 275.3 | 273.3–282.0 | 1,690 / 1,574 |
+
+There is no same-history speed-up claim. At the high points the new admission/flooring schedule retains fewer batches, so those timings compare different retained work. At 100 and 400 the batch counts match and medians are 5.1/5.9 ms higher; fsync medians rose by 4.1/2.1 ms. The support-field walk at 3,000 fell from 46.9 to 9.3 ms, while whole-Save time stayed near 275 ms. These are two separate campaigns, not an interleaved performance experiment. The after campaign's load averages were 4.70/4.05/4.74 at start and 4.10/3.95/4.70 at end on twenty logical CPUs. Release open/restore and their breakdown remain pending.
+
+## Follow-up gate evidence
+
+The final foreground batch exited 0. Full **Core: 830 passed, 0 failed, 2 ignored**; full **Project (`test-util`): 455 passed, 0 failed, 3 ignored**. Fmt, slow-test lint (127 / 150 / 27), all-target clippy `-D warnings` for both changed crates, and workspace test compilation **PASS**. Coverage records all 67 operation kinds with no missing or excluded kind. Evidence: `target/history-capacity/all-operation-core.log`, `all-operation-coverage.json`, `proof-full-project.log`, `oracle-clippy.log`, `proof-project-clippy.log`, `proof-final-*.log` and `proof-gates.json`.
+
+`target/` is **35.91 GB (33.44 GiB; 35,906,908,160 bytes)**, including the 77 MB source archive prepared for the remaining restore comparison. Windows and paid/provider runs: **NOT RUN**. This follow-up changes tests and this report; product behavior and provisional constants remain those of the vertical delivery. The complete native tool lifecycle, candidate refusal, release restore/open and final replay-failure recovery remain active work.

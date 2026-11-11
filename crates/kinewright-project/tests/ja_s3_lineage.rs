@@ -585,3 +585,78 @@ fn s3_old_feedback_mapping_take_replacement_and_removal() {
         (TemporalStatus::Removed, SpatialStatus::Removed)
     );
 }
+
+#[test]
+fn compact_lineage_keeps_original_occurrences_when_a_clip_id_is_reused() {
+    use kinewright_core::{Document, SolidColor, Track, TrackKind};
+    use kinewright_project::bundle::BundleWriteAdmission;
+    let temporary = TempDirectory::new_in(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "compact-lineage-reused-clip",
+    );
+    let path = temporary.path("project.kinewright");
+    let mut document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    };
+    let solid = |red| Operation::AddSolidClip {
+        track: TrackId(1),
+        timeline_start: TimeCode(0),
+        duration: TimeCode(30),
+        color: SolidColor { r: red, g: 0, b: 0 },
+    };
+    solid(0).apply(&mut document).unwrap();
+    let core = Core::spawn(document).unwrap();
+    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let inputs = owner.empty_inputs().unwrap();
+    owner.save(&core, &inputs.reference).unwrap();
+    let branch = owner.manual_branch_id().clone();
+    let clip = kinewright_core::ClipId(1);
+    let original = owner.branch_lineage(&branch).unwrap().current[&clip].clone();
+    apply(&core, Operation::DeleteClip { clip });
+    apply(&core, solid(255));
+    owner.save(&core, &inputs.reference).unwrap();
+    let recreated = owner.branch_lineage(&branch).unwrap().current[&clip].clone();
+    assert_ne!(
+        recreated, original,
+        "REUSED_CLIP_GETS_A_DISTINCT_OCCURRENCE"
+    );
+    assert_eq!(
+        recreated.creation_batch_id,
+        owner.checkpoint(&branch).unwrap().batch_ids[1]
+    );
+    core.request(Command::Undo).unwrap();
+    owner.save(&core, &inputs.reference).unwrap();
+    let expected = owner.branch_lineage(&branch).unwrap();
+    assert_eq!(expected.baseline[&clip], original);
+    assert_eq!(expected.redo[0][&clip], recreated);
+    let wire = serde_json::to_vec(&*expected).unwrap();
+    let restored: kinewright_project::bundle_records::LineageRecord =
+        serde_json::from_slice(&wire).unwrap();
+    assert_eq!(&restored, &*expected);
+    let expected_history = core.export_history().unwrap();
+    drop(expected);
+    drop(inputs);
+    drop(owner);
+    let loaded = LoadedBundle::read(&path).unwrap();
+    let resumed = Core::spawn(Document::default()).unwrap();
+    loaded.restore_manual(&resumed).unwrap();
+    assert_eq!(resumed.export_history().unwrap(), expected_history);
+    let mut owner = loaded.into_writer().unwrap();
+    assert_eq!(
+        owner.branch_lineage(&branch).unwrap().redo[0][&clip],
+        recreated
+    );
+    resumed.request(Command::Redo).unwrap();
+    let inputs = owner.empty_inputs().unwrap();
+    owner.save(&resumed, &inputs.reference).unwrap();
+    assert_eq!(
+        owner.branch_lineage(&branch).unwrap().current[&clip],
+        recreated
+    );
+}

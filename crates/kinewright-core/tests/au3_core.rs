@@ -1,6 +1,10 @@
 //! AU3 loudness and delivery — core contract tests (AU3 §7 items A1 to A4
 //! and B1 to B3).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
@@ -110,7 +114,7 @@ fn document_with_one_audio_track() -> Document {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for (id, kind, track) in [
         (1, MediaKind::Video, TrackId(1)),
@@ -119,7 +123,7 @@ fn document_with_one_audio_track() -> Document {
         Operation::AddAsset {
             asset: asset(id, fps, kind),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         Operation::AddClip {
             track,
@@ -127,7 +131,7 @@ fn document_with_one_audio_track() -> Document {
             at: TimeCode::ZERO,
             source: TimeCode(0)..TimeCode(30),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     assert!(doc.duration > TimeCode::ZERO);
@@ -475,7 +479,9 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
 
     // Muted only.
     let mut muted = audible.clone();
-    set_mix(2, true, false).apply(&mut muted).unwrap();
+    set_mix(2, true, false)
+        .apply_with_history_oracle(&mut muted)
+        .unwrap();
     assert_eq!(
         no_audible_media_message(&muted),
         (Some(SILENCED.to_owned()), errors, export_ready),
@@ -484,7 +490,9 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
 
     // Silenced by another track's solo.
     let mut soloed = audible.clone();
-    set_mix(1, false, true).apply(&mut soloed).unwrap();
+    set_mix(1, false, true)
+        .apply_with_history_oracle(&mut soloed)
+        .unwrap();
     assert!(soloed.audio_mix.any_solo());
     assert!(!soloed.track_audible(TrackId(2)));
     assert_eq!(
@@ -495,7 +503,9 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
 
     // Soloing the audio-bearing track itself keeps it audible.
     let mut self_soloed = audible;
-    set_mix(2, false, true).apply(&mut self_soloed).unwrap();
+    set_mix(2, false, true)
+        .apply_with_history_oracle(&mut self_soloed)
+        .unwrap();
     assert_eq!(no_audible_media_message(&self_soloed).0, None);
 
     // Media-free: the original sentence.
@@ -504,7 +514,7 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
     Operation::AddAsset {
         asset: asset(1, fps, MediaKind::Video),
     }
-    .apply(&mut video_only)
+    .apply_with_history_oracle(&mut video_only)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -512,7 +522,7 @@ fn no_audible_media_names_mute_and_solo_and_the_defaults_hold() {
         at: TimeCode::ZERO,
         source: TimeCode(0)..TimeCode(30),
     }
-    .apply(&mut video_only)
+    .apply_with_history_oracle(&mut video_only)
     .unwrap();
     assert_eq!(
         no_audible_media_message(&video_only).0.as_deref(),
