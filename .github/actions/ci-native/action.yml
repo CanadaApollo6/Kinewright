@@ -14,47 +14,62 @@ runs:
         path: ${{ runner.temp }}/ffmpeg-archives
         key: ffmpeg-${{ runner.os }}-${{ steps.ffmpeg.outputs.sha }}
     - if: runner.os == 'Linux'
-      name: Read the runner image version
+      name: Read the runner image and package manifest
       id: image
       shell: bash
-      run: echo "key=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      env:
+        MANIFEST_HASH: ${{ hashFiles('scripts/install-linux-deps.sh', 'scripts/ci-linux-deps.sh', 'scripts/ci_apt_mirrors.py') }}
+      run: |
+        echo "key=$RUNNER_ARCH-$ImageOS-$ImageVersion-$MANIFEST_HASH" >> "$GITHUB_OUTPUT"
+        echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
 
     - if: runner.os == 'Linux'
       name: Restore apt archives
       id: apt-cache
       uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'
       with:
         path: ~/apt-archives
-        key: apt-${{ steps.image.outputs.key }}-${{ hashFiles('scripts/install-linux-deps.sh') }}
-        restore-keys: apt-
+        key: apt-${{ steps.image.outputs.key }}-complete
+        restore-keys: |
+          apt-${{ steps.image.outputs.key }}-complete-
+          apt-${{ steps.image.outputs.key }}-partial-
+          apt-${{ runner.arch }}-${{ steps.image.outputs.os }}-
+          apt-${{ steps.image.outputs.os }}-
 
     - if: runner.os == 'Linux'
-      name: Install native build dependencies
+      name: Install native build dependencies (five-minute deadline)
+      id: apt-install
+      shell: bash
+      run: ./scripts/ci-linux-deps.sh
+
+    - name: Inspect downloaded apt archives even after failure
+      if: always() && runner.os == 'Linux'
+      id: apt-collect
       shell: bash
       run: |
         set -euo pipefail
-        echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' |
-          sudo tee /etc/apt/apt.conf.d/99kinewright-keep-debs >/dev/null
-        mkdir -p ~/apt-archives
-        if compgen -G ~/apt-archives/'*.deb' >/dev/null; then
-          sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/
+        shopt -s nullglob
+        mkdir -p "$HOME/apt-archives"
+        downloaded=("$RUNNER_TEMP/kinewright-apt/archives/"*.deb)
+        if (( ${#downloaded[@]} > 0 )); then
+          cp "${downloaded[@]}" "$HOME/apt-archives/"
         fi
-        ./scripts/install-linux-deps.sh
-        # Drop archives the mirror no longer serves, so a cache restored
-        # from an older image does not grow without bound. A caching miss
-        # must not fail the job.
-        sudo apt-get autoclean -qq
-        if compgen -G /var/cache/apt/archives/'*.deb' >/dev/null; then
-          cp /var/cache/apt/archives/*.deb ~/apt-archives/
+        debs=("$HOME/apt-archives/"*.deb)
+        if (( ${#debs[@]} > 0 )); then
+          digest=$(sha256sum "${debs[@]}" | sha256sum | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "apt archives cached: ${#debs[@]} debs, $(du -sh "$HOME/apt-archives" | cut -f1)"
         fi
-        echo "apt archives cached: $(find ~/apt-archives -name "*.deb" | wc -l) debs, $(du -sh ~/apt-archives | cut -f1)"
 
-      # Saved here rather than in a post step: a slow download is exactly the
-      # run most likely to time out later, and a post step saves only when
-      # the whole job succeeds.
-    - name: Save apt archives
-      if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'
+    # Content keys let a partial download grow without an immutable-key collision.
+    # Prefer complete caches on restore, including caches saved by main/te1 pushes.
+    - name: Save apt archives even after failure
+      if: >-
+        always() && runner.os == 'Linux' && steps.apt-collect.outputs.digest != '' &&
+        steps.apt-cache.outputs.cache-matched-key != format('apt-{0}-{1}-{2}', steps.image.outputs.key, steps.apt-install.outcome == 'success' && 'complete' || 'partial', steps.apt-collect.outputs.digest)
       uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684
       with:
         path: ~/apt-archives
-        key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        key: apt-${{ steps.image.outputs.key }}-${{ steps.apt-install.outcome == 'success' && 'complete' || 'partial' }}-${{ steps.apt-collect.outputs.digest }}

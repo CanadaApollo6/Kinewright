@@ -4,6 +4,42 @@
 # Run from a fresh clone before scripts/setup-ffmpeg.sh.
 set -euo pipefail
 
+apt_packages=(
+    build-essential
+    g++
+    libstdc++-13-dev
+    libstdc++-14-dev
+    cmake
+    pkg-config
+    python3
+    xz-utils
+    libasound2-dev
+    libclang-dev
+    libgtk-3-dev
+    libvulkan-dev
+    mesa-vulkan-drivers
+    libx11-dev
+    libxrandr-dev
+    libxi-dev
+    libxcursor-dev
+    libxkbcommon-dev
+    libxkbcommon-x11-dev
+    libwayland-dev
+    libegl1-mesa-dev
+    patchelf
+    xvfb
+    x11-xserver-utils
+)
+
+if [[ "${1:-}" == --print-apt-packages ]]; then
+    printf '%s\n' "${apt_packages[@]}"
+    exit 0
+fi
+if [[ $# -ne 0 ]]; then
+    echo 'Usage: install-linux-deps.sh [--print-apt-packages]' >&2
+    exit 2
+fi
+
 run_as_root() {
     if [[ "${EUID}" -eq 0 ]]; then
         "$@"
@@ -13,32 +49,7 @@ run_as_root() {
 }
 
 if command -v apt-get >/dev/null 2>&1; then
-    packages=(
-        build-essential
-        g++
-        libstdc++-13-dev
-        libstdc++-14-dev
-        cmake
-        pkg-config
-        python3
-        xz-utils
-        libasound2-dev
-        libclang-dev
-        libgtk-3-dev
-        libvulkan-dev
-        mesa-vulkan-drivers
-        libx11-dev
-        libxrandr-dev
-        libxi-dev
-        libxcursor-dev
-        libxkbcommon-dev
-        libxkbcommon-x11-dev
-        libwayland-dev
-        libegl1-mesa-dev
-        patchelf
-        xvfb
-        x11-xserver-utils
-    )
+    packages=("${apt_packages[@]}")
 
     run_as_root apt-get update
     if [[ "${EUID}" -eq 0 ]]; then
