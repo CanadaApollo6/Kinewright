@@ -40,6 +40,14 @@ impl HistoryRole {
             Self::Candidate => CANDIDATE_LIVE,
         }
     }
+    pub(crate) fn replay_limit(self, limits: &StorageLimits) -> u64 {
+        match self {
+            Self::Ordinary => self.live_limit(limits),
+            // Native retained state uses its role budget. Its one serial
+            // replay uses the existing decoded window and raw total ledger.
+            Self::Task | Self::Candidate => limits.decoded_record_bytes,
+        }
+    }
 }
 // Provisional vertical-witness bounds. The full resident-envelope table accompanies
 // the first commit; final simultaneous-cap constants remain subject to the lead ruling.
@@ -95,6 +103,7 @@ impl HistoryRecord {
     /// The caller owns/pins the graph while the documents are being resolved.
     pub(crate) fn resolve(
         &self,
+        limits: &StorageLimits,
         mut read_document: impl FnMut(&ObjectRef) -> Result<StorageReservation<Document>, BundleError>,
         reserve: impl FnOnce(u64, HistoryRole) -> Result<StorageReservation, BundleError>,
     ) -> Result<StorageReservation<HistorySnapshot>, BundleError> {
@@ -109,10 +118,14 @@ impl HistoryRecord {
             .journal
             .resolve(Arc::new(baseline.take()), &document)
             .map_err(crate::bundle::history_error)?;
-        if super::history_size::history_live_bytes(&history)? > live {
+        let retained = super::history_size::history_live_bytes(&history)?;
+        if retained > live {
             return Err(BundleError::Corrupt(
                 "history replay exceeded its live reservation".into(),
             ));
+        }
+        if retained > self.role.live_limit(limits) {
+            return Err(BundleError::Capacity("role history memory"));
         }
         Ok(reservation.hold(history))
     }
@@ -170,6 +183,26 @@ impl ProjectStore {
     ) -> Result<StorageReservation, BundleError> {
         self.reserve_role_history_shadow(crate::history_size::history_live_bytes(history)?, role)
     }
+    pub(crate) fn reserve_history_replay(
+        &self,
+        live: u64,
+        role: HistoryRole,
+    ) -> Result<StorageReservation, BundleError> {
+        if live > role.replay_limit(self.limits()) {
+            return Err(BundleError::Capacity("history replay memory"));
+        }
+        self.reserve_copy_read(
+            0,
+            live,
+            if role == HistoryRole::Ordinary {
+                live
+            } else {
+                0
+            },
+            false,
+            true,
+        )
+    }
     pub(crate) fn reserve_role_history_shadow(
         &self,
         live: u64,
@@ -223,10 +256,11 @@ impl ProjectStore {
         let pin = self.pin(std::slice::from_ref(reference))?;
         let record = self.read_copy_record::<HistoryRecord>(reference, cleanup)?;
         let resolved = record.resolve(
+            self.limits(),
             |reference| self.read_copy_record(reference, cleanup),
             |live, role| {
-                if live > role.live_limit(self.limits()) {
-                    return Err(BundleError::Capacity("role history memory"));
+                if live > role.replay_limit(self.limits()) {
+                    return Err(BundleError::Capacity("history replay memory"));
                 }
                 self.reserve_copy_read(
                     0,
@@ -282,12 +316,13 @@ pub(crate) fn resolve_namespace_history(
         namespace, reference, usage, fields, limits,
     )?;
     record.resolve(
+        limits,
         |reference| {
             crate::bundle_recovery::read_record(namespace, reference, usage, fields, limits)
         },
         |live, role| {
-            if live > role.live_limit(limits) {
-                return Err(BundleError::Capacity("role history memory"));
+            if live > role.replay_limit(limits) {
+                return Err(BundleError::Capacity("history replay memory"));
             }
             StorageReservation::reserve(
                 usage,

@@ -1080,6 +1080,14 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             &input_manifests[&checkpoint.input_manifest_ref.sha256],
         )?;
         crate::bundle_commit::validate_inputs(&history, &retained_inputs)?;
+        if checkpoint.history_role != crate::history_record::HistoryRole::Ordinary {
+            let live = crate::history_size::history_live_bytes(&history)?
+                .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
+                .ok_or(BundleError::Capacity("role history memory"))?;
+            if live > checkpoint.history_role.live_limit(limits) {
+                return Err(BundleError::Capacity("role history memory"));
+            }
+        }
         // The resolver already executed the ordinary journal and checked every
         // retained hash. Avoid retaining another replay actor during graph admission.
         if lineage.current.keys().copied().collect::<BTreeSet<_>>()

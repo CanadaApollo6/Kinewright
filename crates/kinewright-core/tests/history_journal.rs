@@ -438,3 +438,49 @@ fn compact_roundtrip_preserves_created_ids_when_an_undone_id_is_reused() {
         kinewright_core::ClipContent::Solid(color) if color.r == 255
     ));
 }
+
+#[test]
+fn history_restore_charge_covers_replay_array_capacity() {
+    fn check_charge(core: &Core, case: &str) {
+        let captured = core.export_history().unwrap();
+        let estimate =
+            kinewright_core::history_size::restored_history_live_bytes(&captured).unwrap();
+        let restored: HistorySnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+        assert_eq!(restored, captured);
+        let actual = kinewright_core::history_size::history_live_bytes(&restored).unwrap();
+        assert!(
+            estimate >= actual,
+            "REPLAY_CAPACITIES_CHARGED case={case} estimate={estimate} actual={actual}"
+        );
+    }
+
+    let core = Core::spawn(fixture(40)).unwrap();
+    for edit in 0..203 {
+        core.request(Command::DoBatch(vec![Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: edit % 2 == 0,
+        }]))
+        .unwrap();
+    }
+    for undo_count in [0, 190] {
+        for _ in 0..undo_count {
+            core.request(Command::Undo).unwrap();
+        }
+        check_charge(&core, &format!("undo-{undo_count}"));
+    }
+    for count in [20, 1] {
+        core.request(Command::DoBatchCoalesced {
+            operations: vec![
+                Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: true
+                };
+                count
+            ],
+            coalesce_key: "capacity-growth".into(),
+        })
+        .unwrap();
+    }
+    check_charge(&core, "coalesced-arbitrary-start");
+}

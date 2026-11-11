@@ -111,7 +111,7 @@ pub(crate) fn check_role_history(
         crate::bundle_commit::lineage(&seed.branch_origin, history, &ids, Some(seed), Some(seed))?;
     let encoded =
         serde_json::to_vec(&lineage).map_err(|error| BundleError::Corrupt(error.to_string()))?;
-    let live = crate::history_size::history_live_bytes(history)?
+    let live = crate::history_size::native_history_live_bytes(history)?
         .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
         .ok_or(BundleError::RunAdmission(LIMIT_REASON))?;
     let replay = crate::history_size::replay_live_bound(
@@ -120,7 +120,7 @@ pub(crate) fn check_role_history(
         &history.document,
     )?;
     if live > role.live_limit(limits)
-        || replay > role.live_limit(limits)
+        || replay > role.replay_limit(limits)
         || encoded.len() as u64 > crate::run_admission::RECORD_BYTES
         || crate::store::preflight_record(&encoded, limits)? > crate::run_admission::DECODED_BYTES
     {
@@ -158,7 +158,7 @@ pub fn live_history_bytes_for_fixture(
     lineage: &crate::bundle_records::LineageRecord,
 ) -> Result<(u64, u64), BundleError> {
     Ok((
-        crate::history_size::history_live_bytes(history)?,
+        crate::history_size::native_history_live_bytes(history)?,
         crate::lineage_journal::live_bytes(lineage)?,
     ))
 }

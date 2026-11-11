@@ -76,6 +76,10 @@ fn largest_history(
     (low, accepted)
 }
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one matrix compares admission, staged persistence and fresh decoding"
+)]
 fn native_task_history_capacity_table() {
     for clips in [40, 120, 400, 1200] {
         let temporary = TempDirectory::new_in(
@@ -156,5 +160,22 @@ fn native_task_history_capacity_table() {
         if clips == 400 {
             assert!(edits >= 200, "REQUIRED_400_200");
         }
+        let decoded_lineage = owner
+            .store()
+            .unwrap()
+            .read_record::<kinewright_project::bundle_records::LineageRecord>(
+                &checkpoint.lineage_ref,
+            )
+            .unwrap();
+        let (decoded_history, decoded_lineage) =
+            kinewright_project::task_history_admission::live_history_bytes_for_fixture(
+                &restored,
+                &decoded_lineage,
+            )
+            .unwrap();
+        assert!(
+            decoded_history + decoded_lineage <= kinewright_project::history_record::TASK_LIVE,
+            "ADMITTED_TASK_DECODE_FITS_ROLE clips={clips} history={decoded_history} lineage={decoded_lineage}"
+        );
     }
 }

@@ -130,7 +130,11 @@ pub fn document_live_bytes(document: &Document) -> Result<u64, HistoryError> {
 }
 
 fn transport_padding<T>(values: &Vec<T>) -> Result<u64, HistoryError> {
-    if values.is_empty() {
+    replay_array_padding::<T>(values.len(), values.capacity())
+}
+
+fn replay_array_padding<T>(length: usize, retained_capacity: usize) -> Result<u64, HistoryError> {
+    if length == 0 {
         return Ok(0);
     }
     // JSON sequences have no exact size hint. Vec starts at its minimum
@@ -142,12 +146,11 @@ fn transport_padding<T>(values: &Vec<T>) -> Result<u64, HistoryError> {
     } else {
         1
     };
-    let capacity = values
-        .len()
+    let capacity = length
         .checked_next_power_of_two()
         .ok_or(HistoryError::Capacity)?
         .max(minimum);
-    allocation::<T>(capacity.saturating_sub(values.capacity()))
+    allocation::<T>(capacity.saturating_sub(retained_capacity))
 }
 
 fn transport_document_bytes(document: &Document) -> Result<u64, HistoryError> {
@@ -309,6 +312,54 @@ pub fn history_live_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError
     bytes
         .checked_add(bytes.div_ceil(10))
         .ok_or(HistoryError::Capacity)
+}
+
+/// Bound retained history after portable decoding and journal replay.
+/// # Errors
+/// Refuses arithmetic overflow or an excessive nested payload.
+pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
+    let undo_peak = history
+        .batches
+        .iter()
+        .map(|batch| batch.undo_entries)
+        .max()
+        .unwrap_or(0)
+        .max(history.cursor.undo.len());
+    let redo_peak = history
+        .batches
+        .iter()
+        .map(|batch| batch.redo_entries)
+        .max()
+        .unwrap_or(0)
+        .max(history.cursor.redo.len());
+    let mut padding = sum([
+        transport_document_bytes(&history.baseline)?
+            .saturating_sub(document_live_bytes(&history.baseline)?),
+        replay_array_padding::<crate::HistoryBatch>(
+            history.batches.len(),
+            history.batches.capacity(),
+        )?,
+        replay_array_padding::<crate::GestureBoundary>(undo_peak, history.cursor.undo.capacity())?,
+        replay_array_padding::<crate::GestureBoundary>(redo_peak, history.cursor.redo.capacity())?,
+    ])?;
+    for entry in history.cursor.undo.iter().chain(&history.cursor.redo) {
+        // Ordinary batches clone at exact length. Coalescing can double an
+        // arbitrary initial length, so a power-of-two bound is insufficient.
+        if entry.operations.len() > 1 {
+            let capacity = entry
+                .operations
+                .len()
+                .checked_mul(2)
+                .ok_or(HistoryError::Capacity)?;
+            padding = sum([
+                padding,
+                allocation::<crate::Operation>(
+                    capacity.saturating_sub(entry.operations.capacity()),
+                )?,
+            ])?;
+        }
+    }
+    sum([history_live_bytes(history)?, padding, padding.div_ceil(10)])
 }
 
 /// Reserve materialized states before replay starts. Growing commands contribute

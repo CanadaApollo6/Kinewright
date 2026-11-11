@@ -646,6 +646,23 @@ impl EditorTask {
             false,
         ))
     }
+    pub(crate) fn admit_merge(
+        &self,
+        owner: &Ja1EditingSession,
+        id: CommandId,
+    ) -> Result<(), BundleError> {
+        if let Some(envelope) = &self.merge_envelope {
+            return if envelope.id == id {
+                Ok(())
+            } else {
+                Err(BundleError::HistoryChanged)
+            };
+        }
+        validate_owner_authority(owner, self.endpoint.authority())?;
+        let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let envelope = owner.candidate_merge_envelope(frozen, id)?;
+        owner.admit_candidate_merge(frozen, &envelope)
+    }
     pub(crate) fn prepare_merge(
         &mut self,
         owner: &Ja1EditingSession,
@@ -660,7 +677,9 @@ impl EditorTask {
         }
         validate_owner_authority(owner, self.endpoint.authority())?;
         let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
-        self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
+        let envelope = owner.candidate_merge_envelope(frozen, id)?;
+        owner.admit_candidate_merge(frozen, &envelope)?;
+        self.merge_envelope = Some(envelope);
         Ok(())
     }
     pub(crate) fn frozen_delta(&self) -> Option<&[Operation]> {
@@ -759,7 +778,9 @@ impl EditorTask {
             .validate_batch(&document, frozen.delta())
             .map_err(BundleError::Unsupported)?;
         if self.merge_envelope.is_none() {
-            self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
+            let envelope = owner.candidate_merge_envelope(frozen, id)?;
+            owner.admit_candidate_merge(frozen, &envelope)?;
+            self.merge_envelope = Some(envelope);
         }
         let envelope = self
             .merge_envelope

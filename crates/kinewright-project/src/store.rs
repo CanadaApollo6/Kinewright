@@ -2696,26 +2696,16 @@ impl ProjectStore {
             &transport.baseline,
             &transport.document,
         )?;
-        if live > role.live_limit(self.limits()) {
-            return Err(BundleError::Capacity("role history memory"));
-        }
-        let reserve = self.reserve_copy_read(
-            0,
-            live,
-            if role == crate::history_record::HistoryRole::Ordinary {
-                live
-            } else {
-                0
-            },
-            false,
-            true,
-        )?;
+        let reserve = self.reserve_history_replay(live, role)?;
         let checked = reserve.hold(
             transport
                 .journal
                 .resolve(transport.baseline, &transport.document)
                 .map_err(crate::bundle::history_error)?,
         );
+        if crate::history_size::history_live_bytes(&checked)? > role.live_limit(self.limits()) {
+            return Err(BundleError::Capacity("role history memory"));
+        }
         let record = crate::history_record::HistoryRecord::capture(&checked, role)?;
         let raw = serde_json::to_value(&record.journal)
             .map_err(|error| BundleError::Corrupt(error.to_string()))?;
@@ -4188,7 +4178,7 @@ impl ProjectStore {
                 self.read_copy_record::<kinewright_core::Document>(&record.current_ref, true)?;
             let live =
                 crate::history_size::replay_live_bound(&record.journal, &baseline, &current)?;
-            if live > record.role.live_limit(limits) {
+            if live > record.role.replay_limit(limits) {
                 return Err(BundleError::Capacity("rescue live branch history"));
             }
         }

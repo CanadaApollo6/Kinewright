@@ -24,3 +24,11 @@ pub(crate) fn replay_live_bound(
     kinewright_core::history_size::replay_live_bound(journal, baseline, current)
         .map_err(crate::bundle::history_error)
 }
+
+/// Native admission includes capacities retained by a fresh decode and replay.
+pub(crate) fn native_history_live_bytes(
+    history: &kinewright_core::HistorySnapshot,
+) -> Result<u64, BundleError> {
+    kinewright_core::history_size::restored_history_live_bytes(history)
+        .map_err(crate::bundle::history_error)
+}

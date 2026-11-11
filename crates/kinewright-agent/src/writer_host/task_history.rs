@@ -523,6 +523,20 @@ impl HostCommandOwner {
         result?;
         self.checkpoint_task_history(producer, run, task)
     }
+    pub(super) fn admit_task_merge(
+        &self,
+        run: &RunId,
+        task: &TaskId,
+        id: CommandId,
+    ) -> Result<(), HostError> {
+        self.hooks
+            .runs
+            .get(run)
+            .and_then(|runtime| runtime.tasks.get(task))
+            .ok_or_else(|| refused("task actor missing"))?
+            .admit_merge(self.owner()?, id)
+            .map_err(HostError::from)
+    }
     pub fn merge_task_history(
         &mut self,
         producer: &HostAuth,

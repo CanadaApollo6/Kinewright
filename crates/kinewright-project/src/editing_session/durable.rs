@@ -433,6 +433,17 @@ impl Ja1EditingSession {
             transition: None,
         })
     }
+    /// Admit a merge before the task retains its pending envelope or checkpoint.
+    /// The commit rechecks the same head and revision before it mutates Core.
+    pub fn admit_candidate_merge(
+        &self,
+        frozen: &FrozenTaskResult,
+        envelope: &crate::receipts::CommandEnvelope,
+    ) -> Result<(), BundleError> {
+        let core = self.candidate_core(frozen.base())?;
+        self.preview_candidate_merge(&core, frozen, envelope)?;
+        Ok(())
+    }
     fn preview_candidate_merge(
         &self,
         core: &Core,
@@ -1338,7 +1349,7 @@ impl Ja1EditingSession {
                     // It still reserves the full transient cost in the ordinary pool.
                     store.reserve_copy_read(0, live, live, false, true)?
                 } else {
-                    store.reserve_role_history_shadow(live, guard.base.history_role)?
+                    store.reserve_history_replay(live, guard.base.history_role)?
                 };
             let materialized =
                 reservation.hold(source.resolve().map_err(crate::bundle::history_error)?);
