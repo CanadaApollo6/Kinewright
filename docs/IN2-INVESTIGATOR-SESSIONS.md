@@ -232,6 +232,8 @@ pub(crate) struct InvestigatorBudgets {
 
 ### 2.4 `Document.investigator`
 
+The old-file byte-identity and older-reader rules in this section were withdrawn on 2026-11-10 by Riel's decision.
+
 11. **One optional top-level field on `Document`** (`crates/kinewright-core/src/model.rs:1088-1121`, ten fields today), declared between `lut_assets` and `fps` — the position probe-1 P7 measured and probe-2 T11 built:
 
 ```rust

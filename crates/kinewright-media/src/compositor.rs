@@ -3924,8 +3924,6 @@ fn fritsch_carlson_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
 /// branch that never encodes, clamps, or decodes the colour that continues
 /// down the pipeline.
 ///
-/// `color_grade` is also absent: `Effect` deserialization canonicalises that
-/// name to `primary_correction`, so no live project state can carry it.
 /// Does this layer need the shader's legacy display-coded branch?
 ///
 /// Both compatibility stages run there: the historical display-coded controls
@@ -4011,10 +4009,7 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
                         params.reframe_focus_y = value / 10_000.0;
                     }
                 }
-                EffectUniform::Exposure
-                | EffectUniform::Temperature
-                | EffectUniform::Tint
-                | EffectUniform::PrimaryExposure
+                EffectUniform::PrimaryExposure
                 | EffectUniform::PrimaryTemperature
                 | EffectUniform::PrimaryTint
                 | EffectUniform::PrimaryContrast
@@ -5602,28 +5597,6 @@ mod tests {
             "coverage_on",
         ];
         assert_eq!(fields[52..], tail);
-    }
-
-    #[test]
-    fn legacy_color_grade_name_has_no_compositor_branch_of_its_own() {
-        let legacy = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
-        assert!(!legacy_stage_active(std::slice::from_ref(&legacy)));
-        let params = params_for(
-            std::slice::from_ref(&legacy),
-            TransitionRenderParams::default(),
-        );
-        assert!(params.exposure.abs() < f32::EPSILON);
-        assert!(params.temperature.abs() < f32::EPSILON);
-        assert!(params.tint.abs() < f32::EPSILON);
-
-        let mut canonical = legacy;
-        canonical.name = "primary_correction".to_owned();
-        assert_eq!(
-            grade_buffer_bytes(std::slice::from_ref(&canonical))
-                .expect("canonical primary node")
-                .len(),
-            GRADE_HEADER_BYTES + GRADE_NODE_BYTES
-        );
     }
 
     #[test]

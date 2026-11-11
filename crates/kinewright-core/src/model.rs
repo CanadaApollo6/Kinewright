@@ -57,12 +57,14 @@ id_type!(LutAssetId);
 pub const MARKER_COLOR_TOKEN_COUNT: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub enum TrackKind {
     Video,
     Audio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub enum MediaKind {
     Video,
     Audio,
@@ -93,6 +95,7 @@ impl MediaKind {
 /// byte length.  Validation lives at the operation/document boundary so this
 /// pure model remains usable while a media worker is still hashing a file.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MediaSourceFingerprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
@@ -125,6 +128,7 @@ impl MediaSourceFingerprint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MediaAsset {
     pub id: AssetId,
     pub path: PathBuf,
@@ -135,18 +139,13 @@ pub struct MediaAsset {
     pub fps: Rational,
     pub kind: MediaKind,
     pub resolution: Option<(u32, u32)>,
-    /// Content identity from a completed source hash. Missing in pre-M41
-    /// project files and therefore defaults to an explicit unknown identity.
+    /// Content identity from a completed source hash, omitted while unknown.
     #[serde(default, skip_serializing_if = "MediaSourceFingerprint::is_unknown")]
     #[schemars(default)]
     pub source_fingerprint: MediaSourceFingerprint,
     /// Source colour metadata from probing or an explicit user override.
     ///
-    /// Missing in pre-CC0 project files and therefore defaults to an explicit
-    /// unknown description. Unknown must not be treated as Rec.709 by
-    /// consumers without an explicit decision.
-    #[serde(default)]
-    #[schemars(default)]
+    /// Unknown must not be treated as Rec.709 without an explicit decision.
     pub color_description: ColorDescription,
     // Set by the recovery, never supplied: written by a
     // `SetAssetColorDescription` whose provenance is `AgentAssumption`,
@@ -166,6 +165,7 @@ pub struct MediaAsset {
 /// Probed replacement metadata supplied to the filesystem-owning media layer
 /// before a relink enters the pure Core operation path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RelinkCandidate {
     pub path: PathBuf,
     pub fingerprint: MediaSourceFingerprint,
@@ -177,13 +177,15 @@ pub struct RelinkCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
+#[serde(deny_unknown_fields)]
 pub enum ParamValue {
     Integer(i64),
     Boolean(bool),
     Text(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Effect {
     pub id: EffectId,
     /// A registered effect name from `EFFECT_DESCRIPTORS`.
@@ -211,45 +213,7 @@ pub struct Effect {
     pub enabled_curve: Option<AutomationCurve>,
 }
 
-#[derive(Debug, Deserialize)]
-struct EffectWire {
-    id: EffectId,
-    name: String,
-    parameters: BTreeMap<String, ParamValue>,
-    #[serde(default)]
-    keyframes: BTreeMap<String, AutomationCurve>,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    enabled_curve: Option<AutomationCurve>,
-}
-
-impl<'de> Deserialize<'de> for Effect {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = EffectWire::deserialize(deserializer)?;
-        let mut name = wire.name;
-        canonicalize_legacy_color_grade_name(&mut name);
-        Ok(Self {
-            id: wire.id,
-            name,
-            parameters: wire.parameters,
-            keyframes: wire.keyframes,
-            enabled: wire.enabled,
-            enabled_curve: wire.enabled_curve,
-        })
-    }
-}
-
 impl Effect {
-    /// Rewrite legacy names whose persisted meaning now has one canonical
-    /// representation before the effect enters live project state.
-    pub(crate) fn canonicalize_legacy_name(&mut self) {
-        canonicalize_legacy_color_grade_name(&mut self.name);
-    }
-
     /// Resolve a parameter at one clip-local frame, falling back to its static value.
     #[must_use]
     pub fn integer_parameter_at(&self, name: &str, at: TimeCode) -> Option<i64> {
@@ -306,13 +270,8 @@ impl Effect {
     }
 }
 
-fn canonicalize_legacy_color_grade_name(name: &mut String) {
-    if name == "color_grade" {
-        "primary_correction".clone_into(name);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Transition {
     /// A registered transition name from `TRANSITION_DESCRIPTORS`.
     /// Its compositor semantics are defined by the descriptor table.
@@ -323,6 +282,7 @@ pub struct Transition {
 
 /// Per-project investigator preferences (IN2 §2.4).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InvestigatorPreferences {
     /// Stable `IncidentCode::code()` strings this project never starts an
     /// investigator session for. An unrecognised string is inert
@@ -334,6 +294,7 @@ pub struct InvestigatorPreferences {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum ClipContent {
     #[default]
     Media,
@@ -351,6 +312,7 @@ pub enum ClipContent {
 // The fill enters working space through the same generated-content
 // conversion titles use (kept out of the doc: it is embedded in every tool).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SolidColor {
     pub r: u8,
     pub g: u8,
@@ -361,6 +323,7 @@ pub struct SolidColor {
 /// (scene-linear working space).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum BlendMode {
     #[default]
     Normal,
@@ -392,6 +355,7 @@ impl BlendMode {
 
 /// A project-local clip that repeatedly displays one frame from a real asset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FreezeFrame {
     /// The held frame in the referenced asset's source-frame time base.
     pub source_frame: TimeCode,
@@ -426,6 +390,7 @@ impl ClipContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Clip {
     pub id: ClipId,
     /// Media asset id. Title clips use the default id and ignore this field;
@@ -571,6 +536,7 @@ const fn time_code_is_zero(value: &TimeCode) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Track {
     pub id: TrackId,
     pub kind: TrackKind,
@@ -597,6 +563,7 @@ const fn track_sync_lock_is_default(sync_lock: &bool) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Marker {
     pub id: MarkerId,
     /// Position on the project timeline, in project frames.
@@ -608,6 +575,7 @@ pub struct Marker {
 
 /// One hierarchical media-pool bin. An asset belongs to at most one bin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MediaBin {
     pub id: BinId,
     pub name: String,
@@ -621,6 +589,7 @@ pub struct MediaBin {
 
 /// One labeled source range inside an ordered string-out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SourceSelect {
     pub asset: AssetId,
     pub source: std::ops::Range<TimeCode>,
@@ -631,6 +600,7 @@ pub struct SourceSelect {
 
 /// Ordered source selects used to review, compare, and build a rough cut.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StringOut {
     pub id: StringOutId,
     pub name: String,
@@ -640,6 +610,7 @@ pub struct StringOut {
 /// One synchronized source angle. `offset` is relative to the sync group's
 /// zero point and may be negative when this source starts early.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SyncGroupMember {
     pub asset: AssetId,
     pub offset: TimeCode,
@@ -648,6 +619,7 @@ pub struct SyncGroupMember {
 
 /// Reusable synchronization metadata and the stable foundation for multicam.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SyncGroup {
     pub id: SyncGroupId,
     pub name: String,
@@ -655,6 +627,7 @@ pub struct SyncGroup {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MediaCatalog {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
@@ -671,6 +644,7 @@ pub struct MediaCatalog {
 /// use the registered `audio_*` descriptors, and ducking sidechains reference
 /// the pre-bus signal from the listed tracks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioBus {
     pub id: AudioBusId,
     pub name: String,
@@ -699,6 +673,7 @@ pub struct AudioBus {
 /// `neutral` and `is_neutral` stay `const` (`Option::is_none` is `const`), so
 /// [`AudioMix::is_empty`]'s stated reason survives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TrackMix {
     pub track: TrackId,
     /// Integer tenths of a decibel, inclusive range `TRACK_MIX_GAIN_MIN..=TRACK_MIX_GAIN_MAX`.
@@ -807,6 +782,7 @@ pub const AUDIO_MASTER_GAIN_MAX: i32 = 120;
 /// fader, then its effects in order. It carries no sidechain, so
 /// `audio_ducking` is rejected on it (AU2 §5.4).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioMaster {
     /// Integer tenths of a decibel, inclusive range
     /// `AUDIO_MASTER_GAIN_MIN..=AUDIO_MASTER_GAIN_MAX`.
@@ -837,6 +813,7 @@ impl AudioMaster {
 /// How [`TrackMix::pan_percent`] becomes per-channel gains (AU2 §5.7).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum PanLaw {
     /// Centre is the exact identity; the law never boosts (AU1 §3.1).
     #[default]
@@ -859,6 +836,7 @@ impl PanLaw {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioMix {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
@@ -1073,6 +1051,7 @@ pub const LUT_SIZE_MAX: u32 = 65;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub enum LutAssetKind {
     /// A 3D `.cube` lattice, the only kind CC4 evaluates.
     #[serde(rename = "cube_3d")]
@@ -1101,6 +1080,7 @@ impl LutAssetKind {
 /// hash, so no user-supplied string ever reaches a path component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum LutAssetSource {
     /// Imported from a file the operator chose.
     Imported { source_path: String },
@@ -1118,6 +1098,7 @@ pub enum LutAssetSource {
 /// Availability (`verified` / `missing` / `changed` / `unreadable`) is runtime
 /// state and is deliberately absent here: it is never serialized (CC4 §2.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LutAsset {
     /// Stable project-local identity, allocated as `max(existing) + 1`.
     pub id: LutAssetId,
@@ -1251,16 +1232,26 @@ fn effect_references_lut_asset(effect: &Effect, id: LutAssetId) -> bool {
             })
 }
 
-/// The maximum project-file format version this build reads and may
-/// overwrite (`IN2B` §4 rule 1; MO2 R7).
-///
-/// Core-owned so the app-side envelope (`ProjectFile`) and the eval binary
-/// gate on the one reader, [`project_format_version`]. Every file written
-/// before the envelope is version 1 by definition. Writers stamp the
-/// document's minimum required version (`kinewright-project`'s
-/// `min_required_format_version`), so a file without MO2 features stays 1;
-/// recovery journal headers carry this maximum.
-pub const PROJECT_FORMAT_VERSION: u32 = 3;
+/// The single format written and read by this build.
+pub const PROJECT_FORMAT_VERSION: u32 = 4;
+
+/// The single refusal for a project, journal or sidecar in another format.
+pub const PROJECT_FORMAT_MISMATCH: &str = "This file is not in the current Kinewright format.";
+
+/// Decode the exact format written by this build.
+/// # Errors
+/// Refuses every other version number.
+pub fn deserialize_format_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    let version = u32::deserialize(deserializer)
+        .map_err(|_| <D::Error as serde::de::Error>::custom(PROJECT_FORMAT_MISMATCH))?;
+    if version == PROJECT_FORMAT_VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(PROJECT_FORMAT_MISMATCH))
+    }
+}
 
 /// The `format_version` of serialised project-file bytes (`IN2B` §4 rule 1).
 ///
@@ -1436,12 +1427,12 @@ fn skip_json_string(bytes: &[u8], index: usize) -> Option<usize> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Document {
     /// Video and audio tracks, ordered z-bottom to top.
     pub tracks: Vec<Track>,
     pub media_pool: Vec<MediaAsset>,
-    /// Project-level editorial notes. Missing in pre-M13 files and therefore
-    /// defaulted for backward-compatible project loading.
+    /// Project-level editorial notes, omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub markers: Vec<Marker>,
@@ -1454,22 +1445,15 @@ pub struct Document {
     #[schemars(default)]
     pub audio_mix: AudioMix,
     /// Distinct project working, monitoring, and delivery colour descriptions.
-    /// Missing in pre-CC0 files and defaulted to the current SDR Rec.709
-    /// application context.
-    #[serde(default)]
-    #[schemars(default)]
     pub color_context: ColorContext,
     /// Project-owned, content-hashed LUT asset records (CC4 §2.1).
     ///
-    /// Absent in every pre-CC4 project, so those projects load byte-unchanged
-    /// and re-save without the field until a look is added. The samples
+    /// Empty lists are omitted. The samples
     /// themselves never enter the document: only the 64-character digest does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub lut_assets: Vec<LutAsset>,
-    /// Per-project investigator preferences (IN2 §2.4). Absent in every
-    /// pre-IN2 project, so those projects load byte-unchanged and re-save
-    /// without the field until a preference is set.
+    /// Per-project investigator preferences, omitted until a preference is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub investigator: Option<InvestigatorPreferences>,
@@ -1822,7 +1806,7 @@ fn walk_serialized_support(
                 // Each alternative collects into its own set (no allocation until its
                 // first insert); a failed one is dropped whole, a successful one is
                 // merged. This replaces a copy of the whole accumulated set per
-                // alternative (`support_walk_tests` holds that walk as the oracle).
+                // alternative.
                 let mut candidate = BTreeSet::new();
                 if walk_serialized_support(
                     value,
@@ -1932,9 +1916,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        AutomationCurve, JournalCommand, Keyframe, KeyframeInterpolation, Operation, TrackKind,
-    };
+    use crate::{Keyframe, KeyframeInterpolation};
 
     fn effect(name: &str) -> Effect {
         Effect {
@@ -1962,205 +1944,6 @@ mod tests {
                     }],
                 },
             )]),
-        }
-    }
-
-    fn document_with_effects(effects: Vec<Effect>) -> Document {
-        let mut document = Document::default();
-        document.tracks.push(Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: vec![Clip {
-                enabled: true,
-                enabled_curve: None,
-                id: ClipId(1),
-                asset: AssetId(1),
-                source_range: TimeCode::ZERO..TimeCode(10),
-                content: ClipContent::Media,
-                timeline_start: TimeCode::ZERO,
-                effects,
-                transition_in: None,
-                link: None,
-                audio_gain_tenth_db: 0,
-                audio_fade_in_frames: TimeCode::ZERO,
-                audio_fade_out_frames: TimeCode::ZERO,
-                speed_percent: 100,
-                audio_gain_curve: None,
-                blend_mode: crate::BlendMode::Normal,
-            }],
-        });
-        document
-    }
-
-    #[test]
-    fn legacy_color_grade_wire_name_migrates_without_losing_effect_data() {
-        let original = effect("color_grade");
-        let wire = serde_json::to_value(&original).expect("effect should serialize");
-        assert_eq!(wire["name"], "color_grade");
-
-        let decoded: Effect = serde_json::from_value(wire).expect("legacy effect should decode");
-
-        assert_eq!(decoded.name, "primary_correction");
-        assert_eq!(decoded.id, original.id);
-        assert_eq!(decoded.parameters, original.parameters);
-        assert_eq!(decoded.keyframes, original.keyframes);
-        assert_eq!(
-            serde_json::to_value(decoded).expect("migrated effect should serialize")["name"],
-            "primary_correction"
-        );
-    }
-
-    #[test]
-    fn raw_in_memory_legacy_effect_keeps_its_wire_name_until_the_core_boundary() {
-        let legacy = effect("color_grade");
-        let canonical = effect("primary_correction");
-
-        assert_eq!(
-            serde_json::to_value(legacy).expect("legacy effect should serialize")["name"],
-            "color_grade"
-        );
-        assert_eq!(
-            serde_json::to_value(canonical).expect("canonical effect should serialize")["name"],
-            "primary_correction"
-        );
-    }
-
-    #[test]
-    fn legacy_effect_migration_preserves_project_vector_position() {
-        let original = document_with_effects(vec![
-            effect("brightness"),
-            effect("color_grade"),
-            effect("saturation"),
-        ]);
-        let wire = serde_json::to_value(&original).expect("document should serialize");
-        assert_eq!(
-            wire["tracks"][0]["clips"][0]["effects"][1]["name"],
-            "color_grade"
-        );
-
-        let decoded: Document = serde_json::from_value(wire).expect("document should decode");
-        let effects = &decoded.tracks[0].clips[0].effects;
-        assert_eq!(
-            effects
-                .iter()
-                .map(|effect| effect.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["brightness", "primary_correction", "saturation"]
-        );
-        assert_eq!(
-            effects[1].parameters,
-            original.tracks[0].clips[0].effects[1].parameters
-        );
-        assert_eq!(
-            effects[1].keyframes,
-            original.tracks[0].clips[0].effects[1].keyframes
-        );
-    }
-
-    #[test]
-    fn legacy_effect_inside_journal_operation_migrates_on_decode() {
-        let command = JournalCommand::Do(Operation::AddEffect {
-            clip: ClipId(1),
-            effect: effect("color_grade"),
-        });
-        let wire = serde_json::to_value(command).expect("journal command should serialize");
-        let decoded: JournalCommand =
-            serde_json::from_value(wire).expect("legacy journal operation should decode");
-
-        let JournalCommand::Do(Operation::AddEffect { effect, .. }) = decoded else {
-            panic!("expected an AddEffect journal command");
-        };
-        assert_eq!(effect.name, "primary_correction");
-        assert_eq!(effect.id, EffectId(7));
-    }
-
-    #[test]
-    fn unknown_effect_names_round_trip_without_renaming() {
-        let mut wire =
-            serde_json::to_value(effect("future_effect")).expect("future effect should serialize");
-        wire["name"] = json!("future_effect_v2");
-
-        let decoded: Effect = serde_json::from_value(wire).expect("future effect should decode");
-        assert_eq!(decoded.name, "future_effect_v2");
-        let round_trip = serde_json::to_value(decoded).expect("future effect should serialize");
-        assert_eq!(round_trip["name"], "future_effect_v2");
-    }
-
-    /// IN2B §4 rule 1: the dependency-free version reader answers the gate
-    /// question — missing key → 1, present → its value — and agrees with
-    /// `serde_json` on every valid document, including nested decoys and an
-    /// escaped key spelling.
-    ///
-    /// Not a §12 item: a unit test for the new reader, which stage C2's
-    /// envelope tests and stage D2's eval test drive through real files.
-    #[test]
-    fn project_format_version_reads_the_top_level_key() {
-        assert_eq!(PROJECT_FORMAT_VERSION, 3);
-        // Valid documents, differentially checked against `serde_json`.
-        for document in [
-            "{}",
-            "  {  }  ",
-            r#"{"tracks":[]}"#,
-            r#"{"format_version":1}"#,
-            r#"{"format_version":999}"#,
-            "{\n  \"format_version\" : 2,\n  \"tracks\": []\n}",
-            r#"{"tracks":[],"format_version":2}"#,
-            r#"{"nested":{"a":1,"b":[1,2]},"format_version":3}"#,
-            r#"{"nested":[{"a":1,"b":2},{"c":3}],"format_version":999}"#,
-            r#"{"asset":{"format_version":999}}"#,
-            r#"{"name":"format_version: 999"}"#,
-            r#"{"tracks":[{"format_version":999}],"format_version":2}"#,
-            r#"{"note":"}{,\"","format_version":3}"#,
-            r#"{"f\u006Frmat_version":7}"#,
-            r#"{"format_version":1,"document":{"tracks":[],"markers":[]}}"#,
-        ] {
-            let parsed: serde_json::Value = serde_json::from_str(document).unwrap();
-            let expected = parsed
-                .get("format_version")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|version| u32::try_from(version).ok())
-                .unwrap_or(1);
-            assert_eq!(
-                project_format_version(document.as_bytes()),
-                expected,
-                "{document}"
-            );
-        }
-        // A duplicated key is moot (the caller's parse rejects it); the
-        // reader answers last-wins and never fails.
-        assert_eq!(
-            project_format_version(br#"{"format_version":999,"format_version":2}"#),
-            2
-        );
-        // Malformed bytes read as 1; the caller's parse decides `Corrupt`.
-        for document in [
-            "",
-            "not json",
-            "[1,2]",
-            r#"{"format_version":}"#,
-            r#"{"format_version":null}"#,
-            r#"{"format_version":"2"}"#,
-            r#"{"format_version": 99"#,
-            r#"{"format_version":-1}"#,
-            r#"{"tracks":[]"#, // truncated
-        ] {
-            assert_eq!(project_format_version(document.as_bytes()), 1, "{document}");
-        }
-        assert_eq!(project_format_version(b"\xff\xfe{\xff"), 1);
-        // Oversize saturates to `u32::MAX` (N4 F9): a version past the u32
-        // range is newer than every gate, never legacy-1. `serde_json` has no
-        // saturation, so these assert directly rather than differentially.
-        for (document, expected) in [
-            (r#"{"format_version":4294967295}"#, u32::MAX),
-            (r#"{"format_version":4294967296}"#, u32::MAX),
-            (r#"{"format_version":99999999999999999999999}"#, u32::MAX),
-        ] {
-            assert_eq!(
-                project_format_version(document.as_bytes()),
-                expected,
-                "{document}"
-            );
         }
     }
 
@@ -2194,23 +1977,13 @@ mod tests {
         assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), disabled);
     }
 
-    /// MO1 R4: default-enabled effects serialize byte-identically to pre-MO1
-    /// documents (`enabled` skipped when true, curve skipped when absent),
-    /// and legacy wire payloads without the fields read back enabled.
+    /// The current writer omits enabled=true and an absent enable curve.
     #[test]
-    fn default_enabled_effect_stays_byte_identical() {
+    fn enabled_effect_omissions_round_trip_current_writer() {
         let plain = effect("brightness");
         let json = serde_json::to_string(&plain).unwrap();
         assert!(!json.contains("enabled"), "{json}");
-        let legacy = json!({
-            "id": 7,
-            "name": "brightness",
-            "parameters": {"exposure_milli_stops": 750},
-            "keyframes": {}
-        });
-        let read: Effect = serde_json::from_value(legacy).unwrap();
-        assert!(read.enabled);
-        assert_eq!(read.enabled_curve, None);
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), plain);
     }
 
     /// MO1 R4: `is_enabled_at` resolves the curve ≥ 1 test, else the static
@@ -2459,22 +2232,3 @@ mod tests {
         assert_eq!(off.enabled_curve, None);
     }
 }
-
-#[cfg(test)]
-mod s1_support_tests {
-    use super::*;
-    #[test]
-    fn raw_support_refuses_unknown_fields_before_projection() {
-        let mut document = serde_json::to_value(Document::default()).unwrap();
-        assert!(document_support_fields(&document).is_ok());
-        document["unsupported_disabled_resource"] = serde_json::json!({"enabled":false,"api":99});
-        assert!(document_support_fields(&document).is_err());
-        let mut operation = serde_json::json!({"AddTrack":{"track":{"id":71,"kind":"Video","sync_lock":true,"clips":[]}}});
-        assert!(operation_support_fields(&operation).is_ok());
-        operation["AddTrack"]["track"]["Code"] = serde_json::json!({"enabled":false});
-        assert!(operation_support_fields(&operation).is_err());
-    }
-}
-
-#[cfg(test)]
-mod support_walk_tests;

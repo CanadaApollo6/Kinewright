@@ -17,8 +17,6 @@ FIXTURES = ROOT / "crates/kinewright-agent/tests/fixtures/ja"
 def catalog_check():
     pins = json.loads((FIXTURES / "source-pins.json").read_text())
     assert pins["conflict_resolutions"] == [1, 2, 3, 4, 5]
-    assert "PROJECT_FORMAT_VERSION: u32 = 2" in (
-        ROOT / "crates/kinewright-core/src/model.rs").read_text()
     slots = json.loads((FIXTURES / "hash-slots.json").read_text())["slots"]
     assert len({s["fixture_id"] for s in slots}) == len(slots)
     assert sum(s["fixture_id"].startswith("text-") for s in slots) == 17
@@ -35,13 +33,11 @@ def catalog_check():
         editorial = json.loads((FIXTURES / "editorial-slots.json").read_text())["slots"]
         assert {s["fixture_id"] for s in editorial if s["fixture_id"].startswith("text-")} == {s["fixture_id"] for s in slots if s["fixture_id"].startswith("text-")}
         assert all(s["input_sha256"] is None and s["oracle_sha256"] is None for s in editorial)
-        for item in json.loads((FIXTURES / "writer-corpus-pins.json").read_text())["files"]:
-            assert hashlib.sha256((FIXTURES / item["path"]).read_bytes()).hexdigest() == item["sha256"]
     for row in rows:
         source = (ROOT / row["source"]).read_text()
         name = row["test"].split("::")[-1]
         assert name in source, row
-    print(f"catalog: {len(rows)} exact regression pins; {len(slots)} pending slots; ceiling 2")
+    print(f"catalog: {len(rows)} exact regression pins; {len(slots)} pending slots")
     return rows
 
 

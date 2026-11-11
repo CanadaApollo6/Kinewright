@@ -438,7 +438,7 @@ impl Baseline {
                     .is_some_and(|(_, before)| **before == document);
                 self.core = Some(Core::spawn(document).map_err(|e| e.to_string())?);
                 Ok(
-                    json!({"loaded":true,"read_version":version,"can_overwrite":kinewright_project::can_overwrite_save(version),
+                    json!({"loaded":true,"read_version":version,"can_overwrite":true,
                     "same_document":same_document,"writer_round_trip_equal":serialized.as_bytes() == raw,
                     "original_bytes_unchanged":fs::read(path).map_err(|e| e.to_string())? == raw,"file":file_value(path)?,"history":self.history()?}),
                 )

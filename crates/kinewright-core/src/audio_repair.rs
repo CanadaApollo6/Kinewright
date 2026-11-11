@@ -36,6 +36,7 @@ pub struct AudioRepairRequest {
 /// a manual `Default` (no derive) so the seven values are one literal each.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct AudioRepairProvenance {
     pub engine: String,
     pub measurement_rate: u32,
@@ -83,6 +84,7 @@ impl Default for AudioRepairProvenance {
 /// report must never gate one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct AudioRepairReport {
     pub range: std::ops::Range<TimeCode>,
     pub point: MixSpectrumPoint,

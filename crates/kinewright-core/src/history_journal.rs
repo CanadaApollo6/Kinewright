@@ -11,9 +11,11 @@ use crate::{
 /// Only identity facts not represented by the command. Surviving IDs are replayed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("required" = ["created", "deleted", "split_parent", "split_results"]))]
 pub struct JournalIdentityEffect {
     pub created: Vec<ClipId>,
     pub deleted: Vec<ClipId>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub split_parent: Option<Clip>,
     pub split_results: Vec<Clip>,
 }

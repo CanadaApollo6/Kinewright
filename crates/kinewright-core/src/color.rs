@@ -2,9 +2,8 @@
 //!
 //! The values in this module describe metadata, not a colour transform.  In
 //! particular, `Unknown` is an honest state: callers must not treat an asset
-//! with unknown metadata as Rec.709 without an explicit decision.  The
-//! `Other(String)` fallback keeps project files readable when a decoder learns
-//! about a value newer than this version of the core model.
+//! with unknown metadata as Rec.709 without an explicit decision. Persisted
+//! tags are the closed set emitted by the current probe and model.
 
 use std::hash::{Hash, Hasher};
 
@@ -23,44 +22,15 @@ macro_rules! color_tag {
         }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
-        #[schemars(with = "String")]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
         pub enum $name {
-            $($variant,)+
-            /// A value introduced by a newer decoder or project version.
-            Other(String),
+            $(#[serde(rename = $wire)] $variant,)+
         }
 
         impl Default for $name {
-            fn default() -> Self {
-                Self::Unknown
-            }
+            fn default() -> Self { Self::Unknown }
         }
 
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                match self {
-                    $(Self::$variant => serializer.serialize_str($wire),)+
-                    Self::Other(value) => serializer.serialize_str(value),
-                }
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Ok(match value.as_str() {
-                    $($wire => Self::$variant,)+
-                    _ => Self::Other(value),
-                })
-            }
-        }
     };
 }
 
@@ -78,6 +48,8 @@ color_tag! {
         Bt470M => "bt470_m",
         Bt470Bg => "bt470_bg",
         Film => "film",
+        Smpte428 => "smpte428",
+        Ebu3213 => "ebu3213",
     }
 }
 
@@ -97,6 +69,13 @@ color_tag! {
         Log => "log",
         LogC => "log_c",
         Log3G10 => "log3g10",
+        Smpte240M => "smpte240m",
+        LogSqrt => "log_sqrt",
+        Iec61966TwoFour => "iec61966_2_4",
+        Bt1361Ecg => "bt1361_ecg",
+        Bt2020Ten => "bt2020_10",
+        Bt2020Twelve => "bt2020_12",
+        Smpte428 => "smpte428",
     }
 }
 
@@ -115,6 +94,12 @@ color_tag! {
         ChromaDerivedNcl => "chroma_derived_ncl",
         ChromaDerivedCl => "chroma_derived_cl",
         Ictcp => "ictcp",
+        Bt470Bg => "bt470bg",
+        Fcc => "fcc",
+        Smpte2085 => "smpte2085",
+        IptC2 => "ipt_c2",
+        YcgcoRe => "ycgco_re",
+        YcgcoRo => "ycgco_ro",
     }
 }
 
@@ -153,29 +138,19 @@ color_tag! {
     }
 }
 
-/// The colour-pipeline semantics used to render a project.
-///
-/// `Legacy` is retained for projects whose pre-CC1 context cannot be proven to
-/// be the exact CC0 application default. `Other` keeps a newer pipeline state
-/// readable without pretending that this version can execute its semantics.
-///
-/// Per the CC1 contract (§4), an absent pipeline state means `legacy`, so
-/// `Legacy` is also the type-level default. Only a context whose working,
-/// monitoring, and delivery descriptions all match the managed SDR targets is
-/// stamped [`ColorPipelineState::ManagedSdrV1`]; see
-/// [`ColorContext::sdr_rec709`] for the target the first CC1 save writes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema, Default)]
-#[schemars(with = "String")]
+/// The current colour-pipeline semantics used to render a project.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum ColorPipelineState {
     #[default]
-    Legacy,
     ManagedSdrV1,
-    Other(String),
 }
 
 /// A managed SDR source profile accepted by the CC1 colour contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum ColorSourceProfile {
     Rec709Video,
     SrgbFull,
@@ -197,6 +172,7 @@ impl ColorSourceProfile {
 /// in their proof/status surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum ColorSourceProfileAssumption {
     D65,
 }
@@ -218,8 +194,7 @@ pub enum ColorSourceError {
     UnsupportedMatrix(ColorMatrix),
     #[error("source colour range is unknown")]
     UnknownRange,
-    #[error("unsupported source colour range: {0:?}")]
-    UnsupportedRange(ColorRange),
+
     #[error("source colour white point is unknown")]
     UnknownWhitePoint,
     #[error("unsupported source colour white point: {0:?}")]
@@ -251,7 +226,7 @@ impl ColorSourceError {
             Self::UnknownMatrix => "unknown_source_matrix",
             Self::UnsupportedMatrix(_) => "unsupported_source_matrix",
             Self::UnknownRange => "unknown_source_range",
-            Self::UnsupportedRange(_) => "unsupported_source_range",
+
             Self::UnknownWhitePoint => "unknown_source_white_point",
             Self::UnsupportedWhitePoint(_) => "unsupported_source_white_point",
             Self::UnknownBitDepth => "unknown_source_bit_depth",
@@ -267,7 +242,7 @@ impl ColorSourceError {
             Self::UnknownPrimaries | Self::UnsupportedPrimaries(_) => "primaries",
             Self::UnknownTransfer | Self::UnsupportedTransfer(_) => "transfer",
             Self::UnknownMatrix | Self::UnsupportedMatrix(_) => "matrix",
-            Self::UnknownRange | Self::UnsupportedRange(_) => "range",
+            Self::UnknownRange => "range",
             Self::UnknownWhitePoint | Self::UnsupportedWhitePoint(_) => "white_point",
             Self::UnknownBitDepth | Self::UnsupportedBitDepth(_) => "bit_depth",
             Self::UnsupportedCombination { .. } => "profile",
@@ -287,7 +262,7 @@ impl ColorSourceError {
             Self::UnsupportedPrimaries(value) => format!("{value:?}"),
             Self::UnsupportedTransfer(value) => format!("{value:?}"),
             Self::UnsupportedMatrix(value) => format!("{value:?}"),
-            Self::UnsupportedRange(value) => format!("{value:?}"),
+
             Self::UnsupportedWhitePoint(value) => format!("{value:?}"),
             Self::UnsupportedBitDepth(value) => format!("{value:?}"),
             Self::UnsupportedCombination {
@@ -314,9 +289,7 @@ impl ColorSourceError {
             Self::UnknownMatrix | Self::UnsupportedMatrix(_) => {
                 "bt709/rgb or rgb/identity in a matching profile"
             }
-            Self::UnknownRange | Self::UnsupportedRange(_) => {
-                "full or limited in a matching profile"
-            }
+            Self::UnknownRange => "full or limited in a matching profile",
             Self::UnknownWhitePoint | Self::UnsupportedWhitePoint(_) => {
                 "d65, or an explicit D65 assumption for BT.709"
             }
@@ -346,36 +319,8 @@ impl ColorSourceError {
     }
 }
 
-impl Serialize for ColorPipelineState {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::Legacy => serializer.serialize_str("legacy"),
-            Self::ManagedSdrV1 => serializer.serialize_str("managed_sdr_v1"),
-            Self::Other(value) => serializer.serialize_str(value),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ColorPipelineState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            "legacy" => Self::Legacy,
-            "managed_sdr_v1" => Self::ManagedSdrV1,
-            _ => Self::Other(value),
-        })
-    }
-}
-
 /// The source sample representation. Integer depths are named for the common
-/// video cases, while `Integer` and `Other` keep less common/future values
-/// representable without changing the project schema.
+/// video cases; `Integer` represents other numeric sample depths.
 ///
 /// CC1 §2.1 requires the named integer variants to be equivalent to their
 /// numeric form, so `Integer(8) == Eight`, `Integer(10) == Ten`, and so on.
@@ -394,7 +339,6 @@ pub enum ColorBitDepth {
     Float16,
     Float32,
     Integer(u16),
-    Other(String),
 }
 
 /// Canonical comparison form for [`ColorBitDepth`].
@@ -402,12 +346,11 @@ pub enum ColorBitDepth {
 /// The named integer variants and their numeric spellings collapse onto the
 /// same value so equality and hashing stay consistent with CC1 §2.1.
 #[derive(Debug, PartialEq, Eq, Hash)]
-enum CanonicalBitDepth<'a> {
+enum CanonicalBitDepth {
     Unknown,
     Integer(u16),
     Float16,
     Float32,
-    Other(&'a str),
 }
 
 impl ColorBitDepth {
@@ -440,7 +383,7 @@ impl ColorBitDepth {
         }
     }
 
-    fn canonical(&self) -> CanonicalBitDepth<'_> {
+    fn canonical(&self) -> CanonicalBitDepth {
         match self {
             Self::Unknown => CanonicalBitDepth::Unknown,
             Self::Eight => CanonicalBitDepth::Integer(8),
@@ -450,7 +393,6 @@ impl ColorBitDepth {
             Self::Float16 => CanonicalBitDepth::Float16,
             Self::Float32 => CanonicalBitDepth::Float32,
             Self::Integer(bits) => CanonicalBitDepth::Integer(*bits),
-            Self::Other(value) => CanonicalBitDepth::Other(value.as_str()),
         }
     }
 }
@@ -478,7 +420,7 @@ fn color_bit_depth_schema(generator: &mut SchemaGenerator) -> Schema {
                 "minimum": 0,
                 "maximum": u16::MAX
             },
-            { "type": "string" }
+            { "enum": ["unknown", "float16", "float32"] }
         ]
     })
 }
@@ -497,7 +439,6 @@ impl Serialize for ColorBitDepth {
             Self::Float16 => serializer.serialize_str("float16"),
             Self::Float32 => serializer.serialize_str("float32"),
             Self::Integer(bits) => serializer.serialize_u16(*bits),
-            Self::Other(value) => serializer.serialize_str(value),
         }
     }
 }
@@ -516,12 +457,15 @@ impl<'de> Deserialize<'de> for ColorBitDepth {
 
         match WireValue::deserialize(deserializer)? {
             WireValue::Integer(bits) => Ok(Self::integer(bits)),
-            WireValue::Text(value) => Ok(match value.as_str() {
-                "unknown" => Self::Unknown,
-                "float16" => Self::Float16,
-                "float32" => Self::Float32,
-                _ => Self::Other(value),
-            }),
+            WireValue::Text(value) => match value.as_str() {
+                "unknown" => Ok(Self::Unknown),
+                "float16" => Ok(Self::Float16),
+                "float32" => Ok(Self::Float32),
+                _ => Err(D::Error::unknown_variant(
+                    &value,
+                    &["unknown", "float16", "float32"],
+                )),
+            },
         }
     }
 }
@@ -534,31 +478,18 @@ impl<'de> Deserialize<'de> for ColorBitDepth {
 /// values.  The core model intentionally does not clamp or infer it: probe and
 /// override paths own validation, while consumers can inspect the raw value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorDescription {
-    #[serde(default)]
-    #[schemars(default)]
     pub primaries: ColorPrimaries,
-    #[serde(default)]
-    #[schemars(default)]
     pub transfer: ColorTransfer,
-    #[serde(default)]
-    #[schemars(default)]
     pub matrix: ColorMatrix,
-    #[serde(default)]
-    #[schemars(default)]
     pub range: ColorRange,
-    #[serde(default)]
-    #[schemars(default)]
     pub white_point: ColorWhitePoint,
-    #[serde(default)]
-    #[schemars(default)]
     pub bit_depth: ColorBitDepth,
     /// Confidence in the interpreted metadata, from 0.00% to 100.00%.
-    #[serde(default, deserialize_with = "deserialize_confidence_basis_points")]
-    #[schemars(default, range(max = 10_000))]
+    #[serde(deserialize_with = "deserialize_confidence_basis_points")]
+    #[schemars(range(max = 10_000))]
     pub confidence_basis_points: u16,
-    #[serde(default)]
-    #[schemars(default)]
     pub provenance: ColorProvenance,
 }
 
@@ -743,9 +674,6 @@ fn validate_source_fields(
     match &description.range {
         ColorRange::Unknown => return Err(ColorSourceError::UnknownRange),
         ColorRange::Full | ColorRange::Limited => {}
-        value @ ColorRange::Other(_) => {
-            return Err(ColorSourceError::UnsupportedRange(value.clone()));
-        }
     }
 
     match &description.white_point {
@@ -768,91 +696,14 @@ fn validate_source_fields(
 
 /// The colour descriptions used by the current application SDR pipeline.
 ///
-/// The three stages remain separate even while their defaults are fixed. The
-/// pipeline state is explicit on new project JSON. When reading a pre-CC1
-/// context whose state is absent, the custom deserializer migrates the old CC0
-/// working placeholder (CC1 §4.2) but only stamps `managed_sdr_v1` when the
-/// migrated working, monitoring, and delivery descriptions all match the
-/// managed SDR targets; a custom or incompatible context remains `Legacy` so
-/// later conformance can block it rather than guessing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+/// The working, monitoring and delivery stages are explicit in every saved context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorContext {
-    /// The versioned semantics of the working/monitoring/delivery descriptions.
     pub pipeline_state: ColorPipelineState,
-    #[serde(default)]
-    #[schemars(default)]
     pub working: ColorDescription,
-    #[serde(default)]
-    #[schemars(default)]
     pub monitoring: ColorDescription,
-    #[serde(default)]
-    #[schemars(default)]
     pub delivery: ColorDescription,
-}
-
-#[derive(Debug, Deserialize)]
-struct ColorContextWire {
-    #[serde(default)]
-    working: ColorDescription,
-    #[serde(default)]
-    monitoring: ColorDescription,
-    #[serde(default)]
-    delivery: ColorDescription,
-    #[serde(default)]
-    pipeline_state: Option<ColorPipelineState>,
-}
-
-impl<'de> Deserialize<'de> for ColorContext {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = ColorContextWire::deserialize(deserializer)?;
-        let legacy = Self {
-            pipeline_state: ColorPipelineState::Legacy,
-            working: wire.working,
-            monitoring: wire.monitoring,
-            delivery: wire.delivery,
-        };
-
-        Ok(match wire.pipeline_state {
-            Some(pipeline_state) => Self {
-                pipeline_state,
-                ..legacy
-            },
-            None if legacy.working_matches_cc0_placeholder() => {
-                let current = Self::sdr_rec709();
-                let monitoring_matches_default = legacy.monitoring_matches_cc0_default();
-                let delivery_matches_default = legacy.delivery_matches_cc0_default();
-                let migrated = Self {
-                    pipeline_state: ColorPipelineState::Legacy,
-                    working: current.working,
-                    monitoring: if monitoring_matches_default {
-                        current.monitoring
-                    } else {
-                        legacy.monitoring.clone()
-                    },
-                    delivery: if delivery_matches_default {
-                        current.delivery
-                    } else {
-                        legacy.delivery
-                    },
-                };
-                let managed = migrated.working_matches_managed_sdr()
-                    && migrated.monitoring_matches_managed_sdr()
-                    && migrated.delivery_matches_managed_sdr();
-                Self {
-                    pipeline_state: if managed {
-                        ColorPipelineState::ManagedSdrV1
-                    } else {
-                        ColorPipelineState::Legacy
-                    },
-                    ..migrated
-                }
-            }
-            None => legacy,
-        })
-    }
 }
 
 impl Default for ColorContext {
@@ -897,14 +748,12 @@ impl ColorContext {
         self == &Self::default()
     }
 
-    /// Whether this context selects the CC1 managed state and compatible
-    /// working, monitoring, and delivery targets. Explicit user overrides are
+    /// Whether this context has compatible working, monitoring and delivery targets. Explicit user overrides are
     /// accepted when their semantic fields match the managed targets and
     /// their confidence is valid and nonzero.
     #[must_use]
     pub fn is_managed_sdr_compatible(&self) -> bool {
-        matches!(self.pipeline_state, ColorPipelineState::ManagedSdrV1)
-            && self.working_matches_managed_sdr()
+        self.working_matches_managed_sdr()
             && self.monitoring_matches_managed_sdr()
             && self.delivery_matches_managed_sdr()
     }
@@ -929,19 +778,6 @@ impl ColorContext {
     pub fn delivery_matches_managed_sdr(&self) -> bool {
         color_description_matches_managed(&self.delivery, &Self::sdr_rec709().delivery)
     }
-
-    fn working_matches_cc0_placeholder(&self) -> bool {
-        self.working == ColorDescription::application_default(ColorMatrix::Rgb, ColorRange::Full)
-    }
-
-    fn monitoring_matches_cc0_default(&self) -> bool {
-        self.monitoring == ColorDescription::application_default(ColorMatrix::Rgb, ColorRange::Full)
-    }
-
-    fn delivery_matches_cc0_default(&self) -> bool {
-        self.delivery
-            == ColorDescription::application_default(ColorMatrix::Bt709, ColorRange::Limited)
-    }
 }
 
 fn color_description_matches_managed(
@@ -964,21 +800,9 @@ fn color_description_matches_managed(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::*;
-
-    fn old_cc0_context_json() -> Value {
-        let old = json!({
-            "working": ColorDescription::application_default(ColorMatrix::Rgb, ColorRange::Full),
-            "monitoring": ColorDescription::application_default(ColorMatrix::Rgb, ColorRange::Full),
-            "delivery": ColorDescription::application_default(
-                ColorMatrix::Bt709,
-                ColorRange::Limited,
-            ),
-        });
-        old
-    }
 
     #[test]
     fn default_is_managed_float16_and_serializes_pipeline_state() {
@@ -997,149 +821,6 @@ mod tests {
         assert_eq!(serialized["pipeline_state"], "managed_sdr_v1");
         assert_eq!(serialized["working"]["transfer"], "linear");
         assert_eq!(serialized["working"]["bit_depth"], "float16");
-    }
-
-    #[test]
-    fn exact_old_cc0_context_migrates_to_managed_sdr_v1() {
-        let migrated: ColorContext =
-            serde_json::from_value(old_cc0_context_json()).expect("old CC0 context should migrate");
-
-        assert_eq!(migrated, ColorContext::sdr_rec709());
-        assert_eq!(migrated.pipeline_state, ColorPipelineState::ManagedSdrV1);
-    }
-
-    #[test]
-    fn old_working_placeholder_migrates_without_rewriting_custom_targets() {
-        let mut old = old_cc0_context_json();
-        old["monitoring"]["transfer"] = json!("bt1886");
-        old["monitoring"]["provenance"] = json!("user_override");
-        old["delivery"]["transfer"] = json!("bt1886");
-        old["delivery"]["provenance"] = json!("user_override");
-
-        let migrated: ColorContext =
-            serde_json::from_value(old).expect("custom CC0 context should remain readable");
-
-        assert_eq!(
-            migrated.pipeline_state,
-            ColorPipelineState::Legacy,
-            "custom monitoring/delivery targets must not be stamped managed_sdr_v1"
-        );
-        assert!(!migrated.is_managed_sdr_compatible());
-        assert_eq!(
-            migrated.working,
-            ColorContext::sdr_rec709().working,
-            "the old working placeholder must become the managed Float16 working target"
-        );
-        assert_eq!(migrated.monitoring.transfer, ColorTransfer::Bt1886);
-        assert_eq!(
-            migrated.monitoring.provenance,
-            ColorProvenance::UserOverride
-        );
-        assert_eq!(migrated.delivery.transfer, ColorTransfer::Bt1886);
-        assert_eq!(migrated.delivery.provenance, ColorProvenance::UserOverride);
-    }
-
-    #[test]
-    fn custom_monitoring_target_migrates_working_but_remains_legacy() {
-        let mut old = old_cc0_context_json();
-        old["monitoring"]["transfer"] = json!("bt1886");
-        old["monitoring"]["provenance"] = json!("user_override");
-
-        let migrated: ColorContext =
-            serde_json::from_value(old).expect("custom monitoring should remain readable");
-
-        assert_eq!(migrated.pipeline_state, ColorPipelineState::Legacy);
-        assert_eq!(migrated.working, ColorContext::sdr_rec709().working);
-        assert!(migrated.working_matches_managed_sdr());
-        assert!(!migrated.monitoring_matches_managed_sdr());
-        assert!(migrated.delivery_matches_managed_sdr());
-        assert_eq!(migrated.monitoring.transfer, ColorTransfer::Bt1886);
-    }
-
-    #[test]
-    fn custom_delivery_target_migrates_working_but_remains_legacy() {
-        let mut old = old_cc0_context_json();
-        old["delivery"]["range"] = json!("full");
-        old["delivery"]["provenance"] = json!("user_override");
-
-        let migrated: ColorContext =
-            serde_json::from_value(old).expect("custom delivery should remain readable");
-
-        assert_eq!(migrated.pipeline_state, ColorPipelineState::Legacy);
-        assert_eq!(migrated.working, ColorContext::sdr_rec709().working);
-        assert!(!migrated.delivery_matches_managed_sdr());
-        assert_eq!(migrated.delivery.range, ColorRange::Full);
-    }
-
-    #[test]
-    fn absent_pipeline_state_is_legacy_per_cc1_section_4() {
-        #[derive(Debug, Deserialize)]
-        struct Wire {
-            #[serde(default)]
-            pipeline_state: ColorPipelineState,
-        }
-
-        assert_eq!(ColorPipelineState::default(), ColorPipelineState::Legacy);
-        let decoded: Wire =
-            serde_json::from_value(json!({})).expect("absent pipeline state should decode");
-        assert_eq!(decoded.pipeline_state, ColorPipelineState::Legacy);
-    }
-
-    #[test]
-    fn custom_context_without_pipeline_state_remains_legacy() {
-        let mut custom = old_cc0_context_json();
-        custom["working"]["transfer"] = json!("gamma22");
-        custom["working"]["provenance"] = json!("user_override");
-
-        let decoded: ColorContext =
-            serde_json::from_value(custom).expect("custom legacy context should remain readable");
-
-        assert_eq!(decoded.pipeline_state, ColorPipelineState::Legacy);
-        assert_eq!(decoded.working.transfer, ColorTransfer::Gamma22);
-        assert_eq!(decoded.working.provenance, ColorProvenance::UserOverride);
-    }
-
-    #[test]
-    fn explicit_legacy_state_is_preserved_even_for_old_defaults() {
-        let mut old = old_cc0_context_json();
-        old["pipeline_state"] = json!("legacy");
-
-        let decoded: ColorContext =
-            serde_json::from_value(old).expect("explicit legacy state should be preserved");
-
-        assert_eq!(decoded.pipeline_state, ColorPipelineState::Legacy);
-        assert_eq!(
-            decoded.working,
-            ColorDescription::application_default(ColorMatrix::Rgb, ColorRange::Full)
-        );
-    }
-
-    #[test]
-    fn future_pipeline_state_round_trips_as_other() {
-        let mut value =
-            serde_json::to_value(ColorContext::default()).expect("context should serialize");
-        value["pipeline_state"] = json!("managed_sdr_v2");
-
-        let decoded: ColorContext =
-            serde_json::from_value(value).expect("future pipeline state should remain readable");
-
-        assert_eq!(
-            decoded.pipeline_state,
-            ColorPipelineState::Other("managed_sdr_v2".to_owned())
-        );
-        let round_trip = serde_json::to_value(decoded).expect("future state should serialize");
-        assert_eq!(round_trip["pipeline_state"], "managed_sdr_v2");
-    }
-
-    #[test]
-    fn missing_context_fields_are_legacy_unknown_not_guessed_rec709() {
-        let decoded: ColorContext =
-            serde_json::from_value(json!({})).expect("empty legacy context should remain readable");
-
-        assert_eq!(decoded.pipeline_state, ColorPipelineState::Legacy);
-        assert!(decoded.working.is_unknown());
-        assert!(decoded.monitoring.is_unknown());
-        assert!(decoded.delivery.is_unknown());
     }
 
     #[test]
@@ -1237,10 +918,7 @@ mod tests {
         assert_eq!(ColorBitDepth::Unknown.integer_bits(), None);
         assert_ne!(ColorBitDepth::Eight, ColorBitDepth::Ten);
         assert_ne!(ColorBitDepth::Float16, ColorBitDepth::Sixteen);
-        assert_ne!(
-            ColorBitDepth::Other("eight".to_owned()),
-            ColorBitDepth::Eight
-        );
+        assert!(serde_json::from_str::<ColorBitDepth>("\"eight\"").is_err());
     }
 
     #[test]
@@ -1303,5 +981,53 @@ mod tests {
             Err(ColorSourceError::UnsupportedCombination { .. })
         ));
         assert_eq!(description.white_point, ColorWhitePoint::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod strict_current_color_tests {
+    use super::*;
+    #[test]
+    fn current_color_shape_requires_fields_and_rejects_unknown_tags() {
+        let current = serde_json::to_value(ColorContext::default()).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ColorContext>(current.clone()).unwrap(),
+            ColorContext::default()
+        );
+        for (field, tag) in [
+            ("primaries", "future_primaries"),
+            ("transfer", "future_transfer"),
+            ("matrix", "future_matrix"),
+            ("range", "future_range"),
+            ("white_point", "future_white"),
+            ("bit_depth", "future_depth"),
+            ("provenance", "future_provenance"),
+        ] {
+            let mut wire = current.clone();
+            wire["working"][field] = serde_json::json!(tag);
+            assert!(
+                serde_json::from_value::<ColorContext>(wire)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unknown variant"),
+                "{field}"
+            );
+        }
+        let mut pipeline = current.clone();
+        pipeline["pipeline_state"] = serde_json::json!("future_pipeline");
+        assert!(
+            serde_json::from_value::<ColorContext>(pipeline)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown variant")
+        );
+        let mut missing = current;
+        missing.as_object_mut().unwrap().remove("pipeline_state");
+        assert!(
+            serde_json::from_value::<ColorContext>(missing)
+                .unwrap_err()
+                .to_string()
+                .contains("missing field")
+        );
     }
 }

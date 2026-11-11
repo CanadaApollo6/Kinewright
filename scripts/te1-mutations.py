@@ -158,7 +158,7 @@ mutations = [
      ["--lib"], "eval::tests::te1_raw_observer_overflow_keeps_lower_bound_and_session_alive"),
     ("cross-platform-instructions", "crates/kinewright-agent/src/writer_host/codex_instructions.rs",
      "You are a Kinewright task agent.", "You are a Kinewright fixture agent.",
-     ["--lib"], "server::te1_surface_tests::te12_role_manifests_and_unrelated_surface_are_frozen"),
+     ["--lib"], "server::te1_surface_tests::te12_current_role_manifests_match_declared_tools_and_schemas"),
     ('zero-final-codex', "crates/kinewright-agent/src/orchestration/usage.rs",
      'if identity.complete\n        && matches!(adapter, UsageAdapter::Claude | UsageAdapter::Codex)', 'if identity.complete\n        && matches!(adapter, UsageAdapter::Claude)',
      ["--test", "te1_usage"], "te1_zero_final_after_accepted_send_is_unobserved_and_refuses_next_send"),

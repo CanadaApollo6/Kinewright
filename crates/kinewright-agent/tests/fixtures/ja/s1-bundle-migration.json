@@ -12,56 +12,56 @@
   "inputs": {
     "legacy": {
       "relative_file": "s1-migration-input.kinewright",
-      "sha256": "f58de3aaad5211ead878b265cceba464363bc142e1661abea91c8f55b61ace77",
-      "byte_length": 107,
+      "sha256": "7013fef89fab919bbc0e04ab698a8acd22cecf512ece9298962e3546c6e9dcf3",
+      "byte_length": 1040,
       "kind": "project"
     },
     "edit": {
       "relative_file": "command-add-track.json",
-      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-      "byte_length": 157,
+      "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+      "byte_length": 181,
       "kind": "current-command"
     },
     "portable-crash-model": {
       "relative_file": "s1-crash-model.json",
-      "sha256": "94dbd68d59d6ff905dd1100271e86b8dbab2cd2949b52688bff91b842ad2b1eb",
-      "byte_length": 92643,
+      "sha256": "da61b699682574367244b2c19c577fe39f54e00689d27060f606fcc6ff25d980",
+      "byte_length": 99462,
       "kind": "portable-dropped-write-model-input"
     },
     "sample-root": {
       "relative_file": "s1-v3-bundle/studio.kinewright",
-      "sha256": "4f853054d3f726467731497bea42a21fc43da19a73317cfb35fa649dd5513a6b",
+      "sha256": "cd6a336987d68107e328e6203e1ef2eb14ab63d202f362d37708a8e661d99ba0",
       "byte_length": 1846,
       "kind": "v3-bundle-root"
     },
     "sample-object-1": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/4a7b1b1f125cb5a164bd4f973c510037793830795ce299bc234ec3e2f4ef7400",
-      "sha256": "4a7b1b1f125cb5a164bd4f973c510037793830795ce299bc234ec3e2f4ef7400",
-      "byte_length": 147,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/0dde884becd2ca617697a199e1a802b8f59b8b64221a8be0bbcfe822ea12aef7",
+      "sha256": "0dde884becd2ca617697a199e1a802b8f59b8b64221a8be0bbcfe822ea12aef7",
+      "byte_length": 828,
       "kind": "v3-bundle-object"
     },
     "sample-object-2": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/80c1c6860dda73367223d6041fe43bd89e44fe64fe68a5d14c1b63846d7b233b",
-      "sha256": "80c1c6860dda73367223d6041fe43bd89e44fe64fe68a5d14c1b63846d7b233b",
-      "byte_length": 167,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/66b8262bd1584aa4c00ce5d2082b78dde67cb5ab96458aa9664282e03b3f3b45",
+      "sha256": "66b8262bd1584aa4c00ce5d2082b78dde67cb5ab96458aa9664282e03b3f3b45",
+      "byte_length": 147,
       "kind": "v3-bundle-object"
     },
     "sample-object-3": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/b712138dd316897f8cbb9f3d4026b0d89e4dc1efe7361b7dd7e8a673da890b25",
-      "sha256": "b712138dd316897f8cbb9f3d4026b0d89e4dc1efe7361b7dd7e8a673da890b25",
-      "byte_length": 114,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/cef8b5290a8e9d9edb3994a5d2dc3732fe14b78e163f0c79b6fd3fea3c44c5f2",
+      "sha256": "cef8b5290a8e9d9edb3994a5d2dc3732fe14b78e163f0c79b6fd3fea3c44c5f2",
+      "byte_length": 115,
       "kind": "v3-bundle-object"
     },
     "sample-object-4": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/c5f8a62a18a99db35acd9715f6fa1a8d8e1a6989d917c04cc4b4ac12fed0aa69",
-      "sha256": "c5f8a62a18a99db35acd9715f6fa1a8d8e1a6989d917c04cc4b4ac12fed0aa69",
-      "byte_length": 808,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/d6482056edac617b6107651f48c38ecd5c62daf0157007230daa5e47090b1c70",
+      "sha256": "d6482056edac617b6107651f48c38ecd5c62daf0157007230daa5e47090b1c70",
+      "byte_length": 5446,
       "kind": "v3-bundle-object"
     },
     "sample-object-5": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/cccb3ee78c577fea79b677428147150ed4e2aa06c8f1f8e9887600b22e1eeed3",
-      "sha256": "cccb3ee78c577fea79b677428147150ed4e2aa06c8f1f8e9887600b22e1eeed3",
-      "byte_length": 5372,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/db706499829352e473755210aecb121b79bb667a3c7e73650585bfc06a89538a",
+      "sha256": "db706499829352e473755210aecb121b79bb667a3c7e73650585bfc06a89538a",
+      "byte_length": 167,
       "kind": "v3-bundle-object"
     },
     "sample-object-6": {
@@ -77,14 +77,14 @@
       "kind": "v3-bundle-object"
     },
     "sample-object-8": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/fdc2dd70348b17834a343c123f73fc5bd86b5789a86d0c466a6dfcfee0548502",
-      "sha256": "fdc2dd70348b17834a343c123f73fc5bd86b5789a86d0c466a6dfcfee0548502",
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f99a0a244ce93d1c8fbdec2e3b12c793add03f199ed7cebc120ae97a2d695649",
+      "sha256": "f99a0a244ce93d1c8fbdec2e3b12c793add03f199ed7cebc120ae97a2d695649",
       "byte_length": 1489,
       "kind": "v3-bundle-object"
     },
     "sample-object-9": {
       "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
-      "sha256": "df9a12fec1e1c0a8072a58e11f4e504f4c803e196b0cda49b14895a915cd3d3a",
+      "sha256": "d6b4dcf2b8e7280bbf6be425aebab06ce4c5b232b4a52e2ee1c1e73c4cef02d6",
       "byte_length": 230,
       "kind": "v3-bundle-object"
     }

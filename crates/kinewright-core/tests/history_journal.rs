@@ -484,3 +484,51 @@ fn history_restore_charge_covers_replay_array_capacity() {
     }
     check_charge(&core, "coalesced-arbitrary-start");
 }
+
+#[test]
+fn history_transport_requires_its_current_typed_fields() {
+    let core = Core::spawn(fixture(10)).unwrap();
+    core.request(Command::DoBatch(vec![Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }]))
+    .unwrap();
+    let canonical = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    kinewright_core::history_journal_support_fields(&canonical["journal"]).unwrap();
+    for path in [
+        "",
+        "/journal",
+        "/journal/cursor",
+        "/journal/batches/0",
+        "/journal/batches/0/identity_effects/0",
+        "/journal/batches/0/command",
+    ] {
+        let mut malformed = canonical.clone();
+        malformed
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<HistorySnapshot>(malformed).is_err(),
+            "UNKNOWN_HISTORY_FIELD path={path}"
+        );
+    }
+    let mut missing = canonical;
+    missing
+        .pointer_mut("/journal/batches/0/identity_effects/0")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("split_parent")
+        .unwrap();
+    assert!(
+        kinewright_core::history_journal_support_fields(&missing["journal"]).is_err(),
+        "NULLABLE_IDENTITY_FIELD_IS_REQUIRED_BY_SCHEMA"
+    );
+    assert!(
+        serde_json::from_value::<HistorySnapshot>(missing).is_err(),
+        "NULLABLE_IDENTITY_FIELD_IS_REQUIRED"
+    );
+}

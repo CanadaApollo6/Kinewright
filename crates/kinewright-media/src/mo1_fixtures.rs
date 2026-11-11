@@ -1344,7 +1344,7 @@ fn untagged_jpeg_recovery_preserves_shadow_steps() {
         .color_description;
     assert_eq!(probed.primaries, ColorPrimaries::Unknown);
     assert_eq!(probed.transfer, ColorTransfer::Unknown);
-    assert_eq!(probed.matrix, ColorMatrix::Other("bt470bg".to_owned()));
+    assert_eq!(probed.matrix, ColorMatrix::Bt470Bg);
     assert_eq!(probed.range, ColorRange::Full);
     assert!(
         !kinewright_core::rec709_compatible(&probed),

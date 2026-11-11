@@ -1812,10 +1812,9 @@ fn revision_conflict(
 
 fn execute_operation(
     state: &mut CoreState,
-    mut operation: Operation,
+    operation: Operation,
     token: Option<CommandToken>,
 ) -> Event {
-    operation.canonicalize_legacy_effect_names();
     match state.do_operation(operation.clone()) {
         Ok(doc) => Event::DocumentChanged {
             doc,
@@ -1835,10 +1834,7 @@ fn execute_operation(
     }
 }
 
-fn execute_batch(state: &mut CoreState, mut operations: Vec<Operation>) -> Event {
-    for operation in &mut operations {
-        operation.canonicalize_legacy_effect_names();
-    }
+fn execute_batch(state: &mut CoreState, operations: Vec<Operation>) -> Event {
     match state.do_batch(operations.clone()) {
         Ok(doc) => Event::DocumentChanged {
             doc,
@@ -1853,12 +1849,9 @@ fn execute_batch(state: &mut CoreState, mut operations: Vec<Operation>) -> Event
 
 fn execute_batch_coalesced(
     state: &mut CoreState,
-    mut operations: Vec<Operation>,
+    operations: Vec<Operation>,
     coalesce_key: &str,
 ) -> Event {
-    for operation in &mut operations {
-        operation.canonicalize_legacy_effect_names();
-    }
     match state.do_batch_coalesced(operations.clone(), coalesce_key) {
         Ok(doc) => Event::DocumentChanged {
             doc,
@@ -1967,7 +1960,7 @@ mod tests {
         );
         let journal_json = serde_json::to_value(JournalCommand::Do(operation.clone())).unwrap();
         assert_eq!(
-            journal_json["Do"]["SetAssetColorDescription"]["asset"],
+            journal_json["payload"]["SetAssetColorDescription"]["asset"],
             serde_json::json!(1)
         );
 

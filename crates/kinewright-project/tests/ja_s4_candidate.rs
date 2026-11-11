@@ -12,7 +12,9 @@ use kinewright_project::{
 };
 
 fn flattened_document(path: &std::path::Path) -> Document {
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    let file: kinewright_project::ProjectFile =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    file.document
 }
 
 #[test]

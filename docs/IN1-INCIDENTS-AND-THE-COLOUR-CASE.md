@@ -599,6 +599,8 @@ MediaError::SourceColor(error) => MediaError::SourceColorForAsset {
 
 ### 4.4 `MediaAsset.assumed_from`, the widened guard, and the `AddAsset` refusal
 
+The old-project byte-preservation requirement below was withdrawn on 2026-11-10 by Riel’s decision; current writer omissions still round-trip.
+
 18. `MediaAsset` (`crates/kinewright-core/src/model.rs:121-145`) gains one field after `color_description` (`model.rs:144`):
 
 ```rust
@@ -1058,6 +1060,8 @@ pub enum QuestionKind { Recovery, #[default] Judgement }
 ```
 
 2. `#[serde(default)]` resolving to `Judgement` is required so every historic `human-review.json` still loads: every question asked before IN1 was a creative judgement question, and none was a recovery question. A test **must** assert that a v6-era question JSON without `kind` deserializes to `Judgement`.
+
+This older-question default and its compatibility test were withdrawn on 2026-11-10 by Riel’s decision; current question kinds are explicit.
 3. `QuestionKind::Recovery` is what IN4's "zero recovery questions asked" gate counts. IN1 adds the field and asks no recovery question; it pins no budget.
 4. `IncidentTelemetry` on `Incident`. **Every `Option` field skips when `None`** (N2/S4), so an unresolved incident costs one key:
 

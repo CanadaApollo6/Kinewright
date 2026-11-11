@@ -142,7 +142,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install native build dependencies
-        run: ./scripts/install-linux-deps.sh
+        uses: ./.github/actions/ci-native
+        timeout-minutes: 8
 
       - name: Validate release tag
         run: |

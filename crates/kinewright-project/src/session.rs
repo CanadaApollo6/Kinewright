@@ -37,7 +37,6 @@ pub struct SidecarSession {
     pub authority: Option<crate::LockfileHandle>,
     pub saved_digest: String,
     pub sidecar_writer: Arc<SidecarWriter>,
-    pub carried_sidecar_records: Vec<String>,
     pub refused_by_id: BTreeMap<IncidentId, Operation>,
     pub last_written_gen: u64,
     pub confirmed_written_gen: u64,
@@ -61,7 +60,6 @@ pub struct LoadedSidecarSession {
 /// What the open-time sidecar load hands the new session (`IN2B` §2 rule 5).
 struct LoadedSessionSidecar {
     saved_digest: String,
-    carried: Vec<String>,
     refused: BTreeMap<IncidentId, Operation>,
     walls: BTreeMap<IncidentId, Option<i64>>,
     last_written_gen: u64,
@@ -76,7 +74,6 @@ impl LoadedSessionSidecar {
     fn empty() -> Self {
         Self {
             saved_digest: String::new(),
-            carried: Vec::new(),
             refused: BTreeMap::new(),
             walls: BTreeMap::new(),
             last_written_gen: 0,
@@ -181,12 +178,6 @@ fn load_session_sidecar(
     let mut refuse_failed = false;
     match load_sidecar(&sidecar_path) {
         SidecarLoad::Absent => {}
-        SidecarLoad::Newer(version) => {
-            refuse_failed |= refused(format!(
-                "the sidecar was written by a newer Kinewright (format_version {version}); \
-                 the project opens with an empty history and the file is kept beside it"
-            ));
-        }
         SidecarLoad::Corrupt(reason) => {
             refuse_failed |= refused(format!(
                 "the sidecar could not be read ({reason}); \
@@ -226,13 +217,9 @@ fn load_session_sidecar(
             let mut log = incidents
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let report = log.restore(current.records, current.carried, opening, current.id_floor);
-            // The disk now matches memory (carried bytes included — a
-            // carried-only restore moves no generation, and must not force a
-            // rewrite of bytes already on disk), so the flush baseline is the
-            // post-restore generation, whatever it is.
+            let report = log.restore(current.records, opening);
+            // The restored log is the baseline for the next flush.
             loaded.last_written_gen = log.generation();
-            loaded.carried.clone_from(&report.carried);
             loaded.refused.clone_from(&report.refused);
             loaded.report = Some(report);
         }
@@ -289,7 +276,6 @@ impl SidecarSession {
                 authority,
                 saved_digest: loaded.saved_digest,
                 sidecar_writer: writer.unwrap_or_else(SidecarWriter::new),
-                carried_sidecar_records: loaded.carried,
                 refused_by_id: loaded.refused,
                 last_written_gen: loaded.last_written_gen,
                 confirmed_written_gen: loaded.last_written_gen,
@@ -307,8 +293,8 @@ impl SidecarSession {
     ///
     /// Records are built on the caller under a read lock; the running
     /// session's turns and visible counters flush into an `Investigating`
-    /// entry exactly as a live end would (§3 rule 4), the restored stash
-    /// rides by id (rule 13), and carried texts re-emit verbatim (rule 8b).
+    /// entry exactly as a live end would (§3 rule 4), and the restored stash
+    /// rides by id (rule 13).
     /// Both the joining flush and the background submit build through here,
     /// so one builder means one bytes shape. `prepare` runs at write time;
     /// headless passes `|_| None`.
@@ -330,12 +316,7 @@ impl SidecarSession {
         let open: BTreeSet<IncidentId> = log.open().map(|incident| incident.id).collect();
         self.refused_by_id.retain(|id, _| open.contains(id));
         let (records, report) = log.records(running.as_ref(), &self.refused_by_id);
-        let bytes = build_sidecar_bytes(
-            &records,
-            &self.carried_sidecar_records,
-            project_digest,
-            previous_digest,
-        )?;
+        let bytes = build_sidecar_bytes(&records, project_digest, previous_digest)?;
         Ok((bytes, report))
     }
 
@@ -389,7 +370,6 @@ impl SidecarSession {
             .any(|established| crate::same_project_file(established, &sidecar_path))
             && report.written_open == 0
             && report.written_resolved == 0
-            && self.carried_sidecar_records.is_empty()
             && occupied_path.exists()
         {
             return Ok(FlushOutcome::Occupied);
@@ -627,7 +607,7 @@ mod tests {
         let digest = digest_bytes(&fs::read(&project).expect("the project reads"));
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
         let bytes =
-            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+            build_sidecar_bytes(&two_records(), &digest, &digest).expect("the sidecar builds");
         fs::write(&sidecar, &bytes).expect("the occupied stem writes");
         let loaded = SidecarSession::load(
             &SidecarMode::None,
@@ -758,17 +738,16 @@ mod tests {
         assert_eq!(current.previous_digest, first);
     }
 
-    /// F1: legitimate clearing — resolving the last incident empties the
-    /// stem on the next save; establishment is not a refusal to clear.
+    /// Resolving incidents persists their outcomes on the established stem.
     #[test]
-    fn f1_resolving_the_last_incident_empties_the_stem() {
+    fn f1_resolving_incidents_persists_their_history() {
         let dir = TempDirectory::new("aw1-f1-clearing");
         let project = dir.path("edit.kinewright");
         write_project_document(&Document::default(), &project, None).expect("project writes");
         let digest = digest_bytes(&fs::read(&project).expect("the project reads"));
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
         let bytes =
-            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+            build_sidecar_bytes(&two_records(), &digest, &digest).expect("the sidecar builds");
         fs::write(&sidecar, &bytes).expect("the occupied stem writes");
         let loaded = SidecarSession::load(
             &SidecarMode::Load {
@@ -790,11 +769,17 @@ mod tests {
             2,
             "both records restore"
         );
-        session
-            .incidents
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
+        {
+            let mut log = session
+                .incidents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loop {
+                let next = log.open().next().map(|incident| incident.id);
+                let Some(id) = next else { break };
+                assert!(log.resolve(id, kinewright_core::IncidentOutcome::Explained));
+            }
+        }
         let outcome = session
             .flush_incidents(Some(&project), &digest, &digest, |_| None)
             .expect("the clearing flush reports");
@@ -805,6 +790,10 @@ mod tests {
         let SidecarLoad::Current(current) = load_sidecar(&sidecar) else {
             panic!("the cleared sidecar parses");
         };
-        assert!(current.records.is_empty(), "the stem is emptied");
+        assert_eq!(current.records.len(), 2);
+        assert!(current.records.iter().all(|record| matches!(
+            &record.state,
+            kinewright_core::IncidentState::Resolved(kinewright_core::IncidentOutcome::Explained)
+        )));
     }
 }

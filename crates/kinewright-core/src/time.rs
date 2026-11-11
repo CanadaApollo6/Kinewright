@@ -50,6 +50,7 @@ impl TimeCode {
 
 /// A positive rational number, used for exact frame rates such as 24000/1001.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Rational {
     numerator: u32,
     denominator: u32,

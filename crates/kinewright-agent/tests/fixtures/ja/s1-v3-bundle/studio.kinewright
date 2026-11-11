@@ -1,23 +1,23 @@
 {
   "format_version": 3,
   "studio": {
-    "project_id": "811fb9325053a688c759955a4931fdf2",
+    "project_id": "56a8a9164297db296a70c88fdb04d71a",
     "generation": 1,
-    "manual_branch_id": "50a4dbc6463f9f9f915322b18bfea622",
+    "manual_branch_id": "d9e7e289427d74daebbdb23d2478d91b",
     "manual_switch_generation": 0,
     "branch_index_ref": {
-      "sha256": "80c1c6860dda73367223d6041fe43bd89e44fe64fe68a5d14c1b63846d7b233b",
+      "sha256": "db706499829352e473755210aecb121b79bb667a3c7e73650585bfc06a89538a",
       "byte_length": 167,
       "record_kind": "branch_index"
     },
     "input_manifest_ref": {
-      "sha256": "b712138dd316897f8cbb9f3d4026b0d89e4dc1efe7361b7dd7e8a673da890b25",
-      "byte_length": 114,
+      "sha256": "cef8b5290a8e9d9edb3994a5d2dc3732fe14b78e163f0c79b6fd3fea3c44c5f2",
+      "byte_length": 115,
       "record_kind": "input_manifest"
     },
     "store_manifest_ref": {
-      "sha256": "cccb3ee78c577fea79b677428147150ed4e2aa06c8f1f8e9887600b22e1eeed3",
-      "byte_length": 5372,
+      "sha256": "d6482056edac617b6107651f48c38ecd5c62daf0157007230daa5e47090b1c70",
+      "byte_length": 5446,
       "record_kind": "store_manifest"
     }
   },

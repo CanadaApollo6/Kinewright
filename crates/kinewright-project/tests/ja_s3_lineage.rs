@@ -309,7 +309,8 @@ fn s3_old_feedback_mapping() {
     let transform: kinewright_core::Effect = serde_json::from_value(serde_json::json!({
         "id": 100, "name": "transform", "parameters": {},
         "keyframes": { "scale_percent": { "keyframes": [
-            { "at": 0, "value": 50 }, { "at": 10, "value": 100 }
+            { "at": 0, "value": 50, "interpolation": "linear" },
+            { "at": 10, "value": 100, "interpolation": "linear" }
         ] } }
     }))
     .unwrap();

@@ -376,14 +376,13 @@ fn builtin_asset_source_serializes_as_a_named_bake() {
     );
 }
 
-/// CC4 §2.1 and §9.1: a pre-CC4 project loads with no assets and re-saves
-/// without the key.
+/// The current writer omits an empty asset list.
 #[test]
-fn pre_cc4_projects_round_trip_without_a_lut_assets_key() {
+fn empty_lut_assets_are_omitted_by_the_current_writer() {
     let document: Document =
-        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
+        serde_json::from_str(&serde_json::to_string(&Document::default()).unwrap()).unwrap();
     assert!(document.lut_assets.is_empty());
-    document.validate().expect("a pre-CC4 project stays valid");
+    document.validate().expect("the current project is valid");
 
     let value = serde_json::to_value(&document).expect("document serializes");
     assert!(

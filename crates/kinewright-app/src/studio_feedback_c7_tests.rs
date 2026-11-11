@@ -143,7 +143,11 @@ fn s3_c7_revise_cut_exactly_once_across_lost_reply_and_restart() {
     );
     assert!(project.feedback.resume, "C7_RESUME");
     with_host(&attachment, |port| project.feedback.resume(port));
-    assert!(project.feedback.revise.is_none(), "C7_REQUEST_SETTLED");
+    assert!(
+        project.feedback.revise.is_none(),
+        "C7_REQUEST_SETTLED: {:?}",
+        project.feedback.message
+    );
     let replay = with_host(&attachment, |port| port.revise(&kept));
     let RunStart::Known(ReviseResult::Accepted { run_id, batch_id }) = &replay else {
         panic!("C7_ACCEPTED {replay:?}");

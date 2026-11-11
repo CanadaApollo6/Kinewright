@@ -1,8 +1,7 @@
 //! CC1 managed SDR conformance contracts.
 //!
 //! These tests hold the document-level behaviour that the CC1 spec makes
-//! normative: legacy colour semantics are reported and never silently
-//! translated, pre-CC0/CC0 projects migrate exactly as §4 describes, and every
+//! normative: current display-coded effects are reported without translation, and every
 //! §2.1 source failure is reported with a field, an observed value, and the
 //! allowed values.
 
@@ -14,10 +13,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
     AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
-    ColorPipelineState, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError,
-    ColorTransfer, ColorWhitePoint, DeliveryEncodeDepth, DeliveryProfile, Document, Effect,
-    EffectId, MediaAsset, MediaKind, Operation, ParamValue, QaSeverity, Rational, TimeCode, Track,
-    TrackId, TrackKind, classify_source, delivery_conformance, qa_document,
+    ColorPrimaries, ColorProvenance, ColorRange, ColorSourceError, ColorTransfer, ColorWhitePoint,
+    DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, MediaAsset, MediaKind,
+    Operation, ParamValue, QaSeverity, Rational, TimeCode, Track, TrackId, TrackKind,
+    classify_source, delivery_conformance, qa_document,
 };
 
 /// A path that always exists so `missing_media` never masks a colour issue.
@@ -147,81 +146,6 @@ fn legacy_brightness_is_reported_by_qa_and_delivery_without_silent_translation()
             .all(|effect| effect.name != "primary_correction"),
         "a legacy effect must never be rewritten into a managed primary"
     );
-}
-
-#[test]
-fn pre_cc0_project_without_color_context_receives_the_managed_defaults() {
-    let document: Document =
-        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
-
-    assert_eq!(
-        document.color_context.pipeline_state,
-        ColorPipelineState::ManagedSdrV1
-    );
-    assert_eq!(document.color_context, ColorContext::sdr_rec709());
-    assert!(document.color_context.is_managed_sdr_compatible());
-
-    let working = &document.color_context.working;
-    assert_eq!(working.primaries, ColorPrimaries::Bt709);
-    assert_eq!(working.transfer, ColorTransfer::Linear);
-    assert_eq!(working.matrix, ColorMatrix::Rgb);
-    assert_eq!(working.range, ColorRange::Full);
-    assert_eq!(working.white_point, ColorWhitePoint::D65);
-    assert_eq!(working.bit_depth, ColorBitDepth::Float16);
-
-    // §4.1 again: sources are explicitly unknown, never assumed Rec.709.
-    assert_eq!(document.media_pool.len(), 1);
-    assert_eq!(
-        document.media_pool[0].color_description,
-        ColorDescription::unknown()
-    );
-    assert!(classify_source(&document.media_pool[0].color_description).is_err());
-}
-
-#[test]
-fn cc0_document_with_old_working_placeholder_migrates_to_the_managed_working_target() {
-    let cc0_working = serde_json::json!({
-        "primaries": "bt709",
-        "transfer": "bt709",
-        "matrix": "rgb",
-        "range": "full",
-        "white_point": "d65",
-        "bit_depth": 8,
-        "confidence_basis_points": 10_000,
-        "provenance": "application_default"
-    });
-    let mut saved = serde_json::to_value(managed_document()).expect("document should serialize");
-    saved["color_context"] = serde_json::json!({
-        "working": cc0_working,
-        "monitoring": cc0_working,
-        "delivery": {
-            "primaries": "bt709",
-            "transfer": "bt709",
-            "matrix": "bt709",
-            "range": "limited",
-            "white_point": "d65",
-            "bit_depth": 8,
-            "confidence_basis_points": 10_000,
-            "provenance": "application_default"
-        }
-    });
-
-    let document: Document =
-        serde_json::from_value(saved).expect("a CC0 document should remain readable");
-
-    assert_eq!(
-        document.color_context.working,
-        ColorContext::sdr_rec709().working
-    );
-    assert_eq!(
-        document.color_context.working.bit_depth,
-        ColorBitDepth::Float16
-    );
-    assert_eq!(
-        document.color_context.pipeline_state,
-        ColorPipelineState::ManagedSdrV1
-    );
-    assert_eq!(document.color_context, ColorContext::sdr_rec709());
 }
 
 #[test]
