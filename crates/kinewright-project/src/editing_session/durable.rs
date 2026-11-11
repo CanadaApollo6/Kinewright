@@ -1132,6 +1132,7 @@ impl Ja1EditingSession {
         Ok(crate::task_history_admission::TaskHistoryAdmission {
             base: canonical.base().clone(),
             prefix,
+            floor_offset: canonical.floor_source.floor_offset,
             limits: self.registered_bundle(canonical)?.store().limits().clone(),
         })
     }

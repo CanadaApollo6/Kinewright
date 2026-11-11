@@ -11,6 +11,7 @@ pub const LIMIT_REASON: &str =
 pub struct TaskHistoryAdmission {
     pub(crate) base: SpecialistBaseRecord,
     pub(crate) prefix: Vec<Operation>,
+    pub(crate) floor_offset: u64,
     pub(crate) limits: StorageLimits,
 }
 impl TaskHistoryAdmission {
@@ -18,9 +19,18 @@ impl TaskHistoryAdmission {
     /// writes. The ordinary 1 MiB bound is deliberately conservative: cleanup
     /// has raw admission, while Finish/Freeze must remain available beforehand.
     pub fn check(&self, history: &HistorySnapshot) -> Result<(), BundleError> {
+        if history.floor_offset != self.floor_offset {
+            return Err(BundleError::HistoryChanged);
+        }
         check_history(history, &self.limits)?;
-        let mut base = self.base.clone();
-        base.full_applied_delta.clone_from(&self.prefix);
+        let mut base = SpecialistBaseRecord {
+            target_branch: self.base.target_branch.clone(),
+            base_head: self.base.base_head.clone(),
+            base_document_hash: self.base.base_document_hash.clone(),
+            original_baseline_ref: self.base.original_baseline_ref.clone(),
+            frozen_checkpoint_ref: self.base.frozen_checkpoint_ref.clone(),
+            full_applied_delta: self.prefix.clone(),
+        };
         base.full_applied_delta.extend(history.applied_operations());
         if base.full_applied_delta.len() > kinewright_core::HISTORY_COMMANDS {
             return Err(BundleError::RunAdmission(LIMIT_REASON));

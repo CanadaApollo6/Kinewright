@@ -352,6 +352,10 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
     history_turn(&f, &execution, &client, &endpoint, 1, true);
     let mcp = C4Mcp::new(&f, &run, &child);
     let before = core.export_history().unwrap();
+    let mut changed_floor = before.clone();
+    changed_floor.floor_offset += 1;
+    assert!(endpoint.check_history(&changed_floor).is_err());
+    assert_eq!(core.export_history().unwrap(), before);
     assert!(f.projection(&run).edit_approvals.is_empty());
     for operation in [
         serde_json::json!({"op":"set_track_sync_lock","track":1,"locked":false}),

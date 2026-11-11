@@ -8,12 +8,14 @@ use crate::{
     orchestration_records::{AttemptState, ExecutionIdentity},
     store::ProjectStore,
 };
+use std::sync::{Arc, Weak};
 
 #[derive(Clone)]
 pub(crate) struct CleanupAdmission {
     key: usize,
     _lifetime: std::sync::Arc<()>,
     identity: ExecutionIdentity,
+    scope: Weak<()>,
 }
 impl CleanupAdmission {
     pub(crate) fn check_transition(
@@ -21,6 +23,9 @@ impl CleanupAdmission {
         update: &ValidatedRunUpdate,
         terminal: bool,
     ) -> Result<(), BundleError> {
+        if self.scope.upgrade().is_none() {
+            return Ok(());
+        }
         if !terminal
             || update.projection().run != self.identity.run
             || !update.projection().attempts.iter().any(|attempt| {
@@ -33,19 +38,34 @@ impl CleanupAdmission {
         Ok(())
     }
 }
-/// Owned restoration capability. It cannot be serialized or supplied by a tool.
-/// The trusted host retains its guardian proof for this capability's whole scope.
-#[must_use = "the trusted host must restore ordinary admission on scope exit"]
+/// The sole strong lease keeps cleanup authority active in every store view.
+/// Dropping it restores ordinary admission, including during unwinding.
+#[must_use = "retain this lease throughout the proof-bearing cleanup transaction"]
 pub struct CleanupPublication {
-    ordinary: ProjectStore,
+    _scope: Arc<()>,
+}
+impl CleanupPublication {
+    fn begin(store: &mut ProjectStore, identity: &ExecutionIdentity) -> Self {
+        let scope = Arc::new(());
+        let mut writer = store.publication_clone_for_cleanup();
+        writer.cleanup_publication = Some(CleanupAdmission {
+            key: store.admission_key(),
+            _lifetime: store.admission_lifetime(),
+            identity: identity.clone(),
+            scope: Arc::downgrade(&scope),
+        });
+        *store = writer;
+        Self { _scope: scope }
+    }
 }
 impl ProjectStore {
     pub(crate) fn is_cleanup_publication(&self) -> bool {
-        self.cleanup_publication
-            .as_ref()
-            .is_some_and(|token| token.key == self.admission_key())
+        self.cleanup_publication.as_ref().is_some_and(|token| {
+            token.key == self.admission_key() && token.scope.upgrade().is_some()
+        })
     }
     pub(crate) fn check_cleanup_kind(&self, kind: RecordKind) -> Result<(), BundleError> {
+        // Cleanup uses exact task cuts and committed manual history, never floors or recovery-close transitions.
         if !self.is_cleanup_publication()
             || matches!(
                 kind,
@@ -99,29 +119,47 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::HistoryChanged);
         }
-        let mut writer = bundle.store.publication_clone_for_cleanup();
-        writer.cleanup_publication = Some(CleanupAdmission {
-            key: bundle.store.admission_key(),
-            _lifetime: bundle.store.admission_lifetime(),
-            identity: identity.clone(),
-        });
-        Ok(CleanupPublication {
-            ordinary: std::mem::replace(&mut bundle.store, writer),
-        })
+        Ok(CleanupPublication::begin(&mut bundle.store, identity))
     }
-    /// Restore the exact ordinary publisher retained at entry.
-    ///
-    /// # Panics
-    /// Panics if the trusted host replaced or lost its project owner while the
-    /// proof-bearing cleanup transaction held exclusive access.
-    pub fn end_cleanup_publication(&mut self, publication: CleanupPublication) {
-        let bundle = self
-            .active_bundle_mut()
-            .expect("cleanup retains its project owner");
-        assert_eq!(
-            bundle.store.admission_key(),
-            publication.ordinary.admission_key()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_limit_cleanup_handle_drop_restores_ordinary_admission() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "cleanup-handle-drop",
         );
-        bundle.store = publication.ordinary;
+        let project = crate::bundle_records::ProjectId::fresh().unwrap();
+        let mut store = ProjectStore::new(
+            crate::namespace::ProjectNamespace::acquire(&temp.path("project.kinewright")).unwrap(),
+            Some(project.clone()),
+            None,
+            crate::storage_budget::StorageLimits::default(),
+        )
+        .unwrap();
+        let identity: ExecutionIdentity = serde_json::from_value(serde_json::json!({
+            "version":1, "project":project, "run":"1".repeat(32),
+            "task":"2".repeat(32), "attempt":"3".repeat(32),
+            "nonce":"4".repeat(32), "owner_instance":"5".repeat(32),
+        }))
+        .unwrap();
+        store.set_run_budget(true);
+        store.note_run_limit();
+        let lease = CleanupPublication::begin(&mut store, &identity);
+        assert!(store.is_cleanup_publication());
+        store
+            .admit_document(&kinewright_core::Document::default())
+            .unwrap();
+        drop(lease);
+        assert!(!store.is_cleanup_publication());
+        assert!(store.run_limit_reached());
+        assert!(matches!(
+            store.admit_document(&kinewright_core::Document::default()),
+            Err(BundleError::RunLimit)
+        ));
     }
 }

@@ -1009,7 +1009,7 @@ enum CleanupEvidence<'a, 'b> {
 }
 struct CleanupOwner<'owner, 'proof, 'retirement> {
     host: &'owner mut HostCommandOwner,
-    publication: Option<kinewright_project::cleanup_admission::CleanupPublication>,
+    _publication: kinewright_project::cleanup_admission::CleanupPublication,
     _proof: CleanupEvidence<'proof, 'retirement>,
 }
 impl std::ops::Deref for CleanupOwner<'_, '_, '_> {
@@ -1021,14 +1021,6 @@ impl std::ops::Deref for CleanupOwner<'_, '_, '_> {
 impl std::ops::DerefMut for CleanupOwner<'_, '_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.host
-    }
-}
-impl Drop for CleanupOwner<'_, '_, '_> {
-    fn drop(&mut self) {
-        self.host
-            .owner_mut()
-            .expect("cleanup retains its owner")
-            .end_cleanup_publication(self.publication.take().expect("cleanup publication owner"));
     }
 }
 impl HostCommandOwner {
@@ -1047,7 +1039,7 @@ impl HostCommandOwner {
         let publication = self.owner_mut()?.begin_cleanup_publication(identity)?;
         Ok(CleanupOwner {
             host: self,
-            publication: Some(publication),
+            _publication: publication,
             _proof: proof,
         })
     }
