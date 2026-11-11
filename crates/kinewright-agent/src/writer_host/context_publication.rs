@@ -21,6 +21,11 @@ impl HostCommandOwner {
         decisions: Vec<ObjectRef>,
     ) -> Result<(), HostError> {
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
+        if !decisions.is_empty() {
+            projection
+                .check_task_context_capacity(&identity.task, 0, decisions.len())
+                .map_err(super::orchestration::scheduler_error)?;
+        }
         let issued = self.issue_metadata(index, None)?;
         projection
             .tasks
@@ -31,6 +36,29 @@ impl HostCommandOwner {
             .decisions
             .extend(decisions.clone());
         self.publish_native_issued(producer, projection, identity, decisions, issued)?;
+        Ok(())
+    }
+    /// Launch admission in `reserve_native_effect` covers both distinct intents.
+    /// Replaying the same intent cannot consume another slot.
+    #[cfg(target_os = "linux")]
+    pub(super) fn publish_native_attempt_decision(
+        &mut self,
+        producer: &HostAuth,
+        mut projection: RunProjection,
+        identity: &ExecutionIdentity,
+        decision: ObjectRef,
+    ) -> Result<(), HostError> {
+        let task = projection
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == identity.task)
+            .ok_or_else(|| refused("native task disappeared"))?;
+        if !task.progress.decisions.contains(&decision) {
+            task.progress.decisions.push(decision.clone());
+        }
+        let index = self.resolve_attachment(Some(&producer.bearer()))?;
+        let issued = self.issue_metadata(index, None)?;
+        self.publish_native_issued(producer, projection, identity, vec![decision], issued)?;
         Ok(())
     }
     pub(super) fn publish_native_issued(

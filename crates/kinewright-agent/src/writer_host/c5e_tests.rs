@@ -1273,7 +1273,7 @@ fn c5_linear_context_capacity_refuses_before_mutation_and_stop_still_works() {
         ),
         (
             false,
-            TASK_DECISION_LIMIT,
+            TASK_DECISION_LIMIT - NATIVE_ATTEMPT_DECISIONS,
             "task_decision_capacity",
             TASK_DECISION_CAPACITY_WORDS,
         ),

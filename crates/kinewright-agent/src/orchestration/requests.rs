@@ -210,7 +210,7 @@ pub(crate) fn apply_authorized(
                 return Err(Refusal::ScopeConflict);
             }
             let director_id = director.id.clone();
-            director.progress.check_context_capacity(0, 1)?;
+            state.check_task_context_capacity(&director_id, 0, 1)?;
             state
                 .tasks
                 .iter_mut()

@@ -1698,6 +1698,8 @@ impl HostCommandOwner {
                         branch: branch.clone(),
                     },
                 )?)?;
+                // A first fork and history cut are part of whole-launch
+                // decision admission, before this attempt's evidence was sealed.
                 state
                     .tasks
                     .iter_mut()

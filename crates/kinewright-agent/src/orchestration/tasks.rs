@@ -1328,14 +1328,12 @@ pub fn apply_lifecycle(
             feedback,
             decisions,
         } => {
+            state.check_task_context_capacity(task, feedback.len(), decisions.len())?;
             let record = state
                 .tasks
                 .iter_mut()
                 .find(|record| &record.id == task)
                 .ok_or(Refusal::ScopeConflict)?;
-            record
-                .progress
-                .check_context_capacity(feedback.len(), decisions.len())?;
             for reference in feedback.iter().chain(decisions) {
                 validate_reference(reference)?;
             }

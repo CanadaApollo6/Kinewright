@@ -22,10 +22,14 @@ pub const TASK_LIMIT: usize = crate::run_admission::TASKS;
 pub const ITEM_LIMIT: usize = 256;
 pub const TASK_FEEDBACK_LIMIT: usize = 256;
 pub const TASK_DECISION_LIMIT: usize = 240;
+/// First retained fork, history checkpoint, manifest, dispatch and containment intents.
+/// Reserved attempts hold this room against every other ordinary context writer.
+pub const NATIVE_ATTEMPT_DECISIONS: usize = 5;
 pub const TASK_RETAINED_DECISION_LIMIT: usize = 256;
 pub const TASK_FEEDBACK_CAPACITY_WORDS: &str =
     "Task feedback context is full. Stop this run and start a new run to supply more feedback.";
-pub const TASK_DECISION_CAPACITY_WORDS: &str = "Task decision context is full. Stop this run or use project recovery; start a new run for additional context.";
+pub const TASK_DECISION_CAPACITY_WORDS: &str =
+    "Task decision context is full. Stop this run; start a new run for additional context.";
 pub const ATTEMPT_LIMIT: usize = 3;
 pub const BACKGROUND_LIMIT: u32 = 256;
 
@@ -564,7 +568,10 @@ impl TaskProgress {
     /// Sixteen decision slots are held back from new work for terminal bookkeeping.
     pub fn check_recovery_decisions(&self, additions: usize) -> Result<(), Refusal> {
         self.check_retained_context()?;
-        if additions > TASK_RETAINED_DECISION_LIMIT.saturating_sub(self.decisions.len()) {
+        // A new recovery reason must leave room for a first terminal history cut.
+        if additions > 0
+            && additions > (TASK_RETAINED_DECISION_LIMIT - 1).saturating_sub(self.decisions.len())
+        {
             return Err(Refusal::TaskDecisionCapacity);
         }
         Ok(())
@@ -699,6 +706,37 @@ pub struct RunProjection {
     pub requests: Vec<RuntimeRequest>,
     pub results: Vec<ObjectRef>,
     pub usage: Vec<ObjectRef>,
+}
+
+impl RunProjection {
+    /// Conservatively protect the whole lifecycle allowance until containment.
+    /// This is derived from the durable attempt state, not a second reservation ledger.
+    pub fn check_task_context_capacity(
+        &self,
+        task: &TaskId,
+        feedback: usize,
+        decisions: usize,
+    ) -> Result<(), Refusal> {
+        let record = self
+            .tasks
+            .iter()
+            .find(|record| &record.id == task)
+            .ok_or(Refusal::ScopeConflict)?;
+        let held = if decisions > 0
+            && self.attempts.iter().any(|attempt| {
+                &attempt.identity.task == task && attempt.state == AttemptState::Reserved
+            }) {
+            NATIVE_ATTEMPT_DECISIONS
+        } else {
+            0
+        };
+        record.progress.check_context_capacity(
+            feedback,
+            decisions
+                .checked_add(held)
+                .ok_or(Refusal::TaskDecisionCapacity)?,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

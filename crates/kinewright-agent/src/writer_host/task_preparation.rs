@@ -385,23 +385,32 @@ impl HostCommandOwner {
                 RunWait::Provider,
             );
         }
+        let reason = if parent.is_none() {
+            DIRECTOR_RECOVERY
+        } else {
+            kind.words()
+        };
+        let reference = kinewright_project::bundle_records::ObjectRef {
+            sha256: kinewright_media::sha256_bytes(reason.as_bytes()),
+            byte_length: reason.len() as u64,
+            record_kind: kinewright_project::bundle_records::RecordKind::OwnedEvidence,
+        };
+        // At most two distinct child reasons and one Director reason can land
+        // on a task, however many attempt-specific replan effects it receives.
         for task in state
             .tasks
             .iter()
             .filter(|task| task.id == identity.task || Some(&task.id) == parent.as_ref())
         {
             task.progress
-                .check_recovery_decisions(1)
+                .check_recovery_decisions(usize::from(
+                    !task.progress.decisions.contains(&reference),
+                ))
                 .map_err(super::orchestration::scheduler_error)?;
         }
         if state.effects.len() >= ITEM_LIMIT {
             return Err(HostRefusal::new("task_preparation", "notification capacity").into());
         }
-        let reason = if parent.is_none() {
-            DIRECTOR_RECOVERY
-        } else {
-            kind.words()
-        };
         let reference = self.owner_mut()?.admit_host_grant(reason.as_bytes())?;
         for effect in state
             .effects
@@ -418,7 +427,9 @@ impl HostCommandOwner {
         child.state = TaskState::Cancelled;
         child.progress.capacity =
             crate::orchestration::orchestration_records::DependencyReservation::Free;
-        child.progress.decisions.push(reference.clone());
+        if !child.progress.decisions.contains(&reference) {
+            child.progress.decisions.push(reference.clone());
+        }
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let issued = self.issue_metadata(index, None)?;
         if !matches!(
@@ -437,7 +448,9 @@ impl HostCommandOwner {
                 .iter_mut()
                 .find(|t| t.id == parent)
                 .ok_or_else(refused)?;
-            parent.progress.decisions.push(reference.clone());
+            if !parent.progress.decisions.contains(&reference) {
+                parent.progress.decisions.push(reference.clone());
+            }
             let task = parent.id.clone();
             let lane = parent.brief.scope.base.branch.clone();
             let order = state

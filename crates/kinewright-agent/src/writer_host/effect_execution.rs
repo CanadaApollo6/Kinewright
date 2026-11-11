@@ -40,7 +40,6 @@ impl HostCommandOwner {
         if !self.run_recovery_blocks(&state)?.is_empty() {
             return Ok(None);
         }
-        self.archive_retired_attempts(&mut state)?;
         if state
             .attempts
             .iter()
@@ -102,6 +101,15 @@ impl HostCommandOwner {
         } else {
             SendKind::QueuedSteering
         };
+        // Admit the whole attempt before even archiving an old reservation: both
+        // actions can seal evidence. The terminal reserve never backs new work.
+        task.progress
+            .check_context_capacity(
+                0,
+                kinewright_project::orchestration_records::NATIVE_ATTEMPT_DECISIONS,
+            )
+            .map_err(super::orchestration::scheduler_error)?;
+        self.archive_retired_attempts(&mut state)?;
         let identity = ExecutionIdentity {
             version: 1,
             project: self.owner()?.project_id()?,
