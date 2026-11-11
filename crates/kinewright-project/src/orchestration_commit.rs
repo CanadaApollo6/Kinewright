@@ -670,7 +670,8 @@ fn task_history_refs(
     history: &crate::orchestration_records::TaskHistoryRecord,
     refs: &mut Vec<ObjectRef>,
 ) -> Result<(), Refusal> {
-    if history.base.branch == history.source.branch
+    if !history.edit_coverage.valid()
+        || history.base.branch == history.source.branch
         || history.base_ref.record_kind != RecordKind::SpecialistBase
         || history.candidate_base_ref.record_kind != RecordKind::SpecialistBase
         || history.base.checkpoint.record_kind != RecordKind::BranchCheckpoint

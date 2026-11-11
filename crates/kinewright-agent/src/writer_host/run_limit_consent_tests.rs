@@ -539,4 +539,5 @@ mod tests {
         assert!(root.starts_with(kinewright_media::test_support::workspace_target_dir()));
         std::fs::remove_dir_all(root).unwrap();
     }
+    include!("run_limit_audit_tests.rs");
 }

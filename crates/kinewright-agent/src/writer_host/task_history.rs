@@ -60,7 +60,7 @@ impl HostCommandOwner {
             .filter(|r| r.record_kind == RecordKind::RunIndex)
         {
             let record = self.owner()?.store()?.read_run_record(reference)?;
-            if let OrchestrationPayload::TaskHistory(history) = &record.payload {
+            if let OrchestrationPayload::TaskHistory(history) = record.payload {
                 if history.project != self.owner()?.project_id()?
                     || history.run != state.run
                     || history.task != task.id
@@ -68,7 +68,7 @@ impl HostCommandOwner {
                 {
                     return Err(refused("history scope changed"));
                 }
-                return Ok(Some((**history).clone()));
+                return Ok(Some(*history));
             }
         }
         Ok(None)
@@ -348,8 +348,9 @@ impl HostCommandOwner {
                 .ok_or_else(|| refused("task missing"))?
                 .brief
                 .clone();
-            let previous = self.saved_task_history(state, &identity.task)?;
-            let (source, base_ref, frozen) = runtime.persisted_history(self.owner_mut()?, fence)?;
+            let mut previous = self.saved_task_history(state, &identity.task)?;
+            let (source, base_ref, frozen, captured_history) =
+                runtime.persisted_history(self.owner_mut()?, fence)?;
             let base = self
                 .owner()?
                 .store()?
@@ -373,7 +374,8 @@ impl HostCommandOwner {
                 .1;
             let candidate_base_ref = self
                 .owner_mut()?
-                .persist_registered_task_checkpoint(&mut candidate)?;
+                .persist_registered_task_checkpoint(&mut candidate)?
+                .base_ref;
             let frozen_result = if frozen {
                 if let Some(history) = previous.as_ref().filter(|history| history.frozen) {
                     // Legacy freezes did not retain their returned result.
@@ -414,6 +416,31 @@ impl HostCommandOwner {
                 }
                 result
             });
+            let merge_envelope = runtime.original_merge_envelope().cloned();
+            if previous.as_ref().is_some_and(|old| {
+                old.source.branch != source.branch
+                    || old.base != brief.scope.base
+                    || (old.frozen && !frozen)
+                    || (old.merge_envelope.is_some() && old.merge_envelope != merge_envelope)
+            }) {
+                return Err(refused("original task history or receipts changed"));
+            }
+            let same = previous.as_ref().is_some_and(|old| {
+                old.attempt == identity.attempt
+                    && old.source == source
+                    && old.base_ref == base_ref
+                    && old.candidate_base_ref == candidate_base_ref
+                    && old.frozen == frozen
+                    && old.frozen_result == frozen_result
+                    && old.merge_envelope == merge_envelope
+            });
+            // Move the previous checkpoint's small lineage proof; it is not a second journal copy.
+            let mut edit_coverage = previous
+                .as_mut()
+                .map(|old| std::mem::take(&mut old.edit_coverage))
+                .unwrap_or_default();
+            let coverage_changed = runtime.had_approved_edit()
+                && edit_coverage.record(runtime.history_epoch(), captured_history);
             let history = TaskHistoryRecord {
                 project: identity.project.clone(),
                 run: state.run.clone(),
@@ -423,23 +450,15 @@ impl HostCommandOwner {
                 source,
                 base_ref,
                 candidate_base_ref,
+                edit_coverage,
                 frozen,
                 frozen_result,
-                merge_envelope: runtime.original_merge_envelope().cloned(),
+                merge_envelope,
                 merge_authority: previous
-                    .as_ref()
-                    .and_then(|history| history.merge_authority.clone()),
+                    .as_mut()
+                    .and_then(|history| history.merge_authority.take()),
             };
-            if previous.as_ref().is_some_and(|old| {
-                old.source.branch != history.source.branch
-                    || old.base != history.base
-                    || (old.frozen && !history.frozen)
-                    || (old.merge_envelope.is_some()
-                        && old.merge_envelope != history.merge_envelope)
-            }) {
-                return Err(refused("original task history or receipts changed"));
-            }
-            if previous.as_ref() == Some(&history) {
+            if same && !coverage_changed {
                 return Ok(());
             }
             let sealed = self

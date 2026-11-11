@@ -3427,6 +3427,7 @@ fn te13_fix3_retained_app(
         })
     });
     let history = TaskHistoryRecord {
+        edit_coverage: kinewright_project::edit_audit::KeptEditCoverage::default(),
         project: envelope.project.clone(),
         run: state.run.clone(),
         task,

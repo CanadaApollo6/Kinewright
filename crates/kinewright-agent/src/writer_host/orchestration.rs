@@ -44,6 +44,7 @@ pub struct MetadataIssuer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunViewPage {
+    pub missing_approved_edits: Vec<kinewright_project::edit_audit::MissingApprovedEdit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edit_approvals: Vec<super::EditApproval>,
     pub projection: RunProjection,
@@ -1345,8 +1346,10 @@ impl HostCommandOwner {
                 "This run cannot continue. Check Run details for the host's reason.".into()
             }
         });
+        let edits = self.edit_approval_summary(&projection);
         Ok(RunViewPage {
-            edit_approvals: self.edit_approval_details(&projection),
+            edit_approvals: edits.approvals,
+            missing_approved_edits: edits.missing,
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,

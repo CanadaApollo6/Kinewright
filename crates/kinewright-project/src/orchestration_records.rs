@@ -846,6 +846,7 @@ pub struct TaskHistoryRecord {
     /// Legacy lineage hint. Current recovery resolves the checkpoint-bound shared
     /// candidate record from `StudioRoot`, independently of task restore order.
     pub candidate_base_ref: ObjectRef,
+    pub edit_coverage: crate::edit_audit::KeptEditCoverage,
     pub frozen: bool,
     pub merge_envelope: Option<crate::receipts::CommandEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

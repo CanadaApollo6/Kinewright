@@ -884,7 +884,7 @@ fn c5e_run(size: C5eSize) {
     c5e_storage(&f, &mut storage);
     let host = f.host.owner.upgrade().unwrap();
     let owner = host.lock().unwrap();
-    let approvals = owner.edit_approval_details(&state);
+    let approvals = owner.edit_approval_summary(&state).approvals;
     assert_eq!(
         approvals.len(),
         size.approvals(),

@@ -4,9 +4,7 @@ use crate::writer_host::{HostCommandOwner, HostError, HostRefusal};
 use crate::{
     ConfirmationBroker,
     orchestration::{
-        orchestration_records::{
-            AttemptId, EndpointId, ITEM_LIMIT, Role, RunId, RunProjection, TaskId, TaskTurn,
-        },
+        orchestration_records::{ITEM_LIMIT, Role, RunId, RunProjection},
         policy::{TaskPolicy, operation_name},
     },
 };
@@ -28,49 +26,8 @@ struct RunEditConsent {
     tracks: BTreeSet<String>,
     classes: BTreeSet<String>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EditApproval {
-    pub task: TaskId,
-    pub removed_clips: usize,
-    pub removed_tracks: usize,
-    pub applied: bool,
-    pub issue: Option<String>,
-    pub digest: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BatchBinding {
-    project: ProjectId,
-    run: RunId,
-    task: TaskId,
-    attempt: AttemptId,
-    endpoint: EndpointId,
-    owner_epoch: u64,
-    turn: TaskTurn,
-    revision: TimelineRevision,
-    batch_sha256: String,
-    description: String,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApprovalRecord {
-    kind: String,
-    binding: BatchBinding,
-    consent: kinewright_project::bundle_records::ObjectRef,
-    digest: String,
-    #[serde(default)]
-    removed_clips: usize,
-    #[serde(default)]
-    removed_tracks: usize,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppliedRecord {
-    kind: String,
-    approval: kinewright_project::bundle_records::ObjectRef,
-    revision: TimelineRevision,
-}
+pub use kinewright_project::edit_audit::EditApproval;
+use kinewright_project::edit_audit::{AppliedRecord, ApprovalRecord, BatchBinding, RemovedObject};
 pub(in crate::writer_host) struct PendingEditApplication {
     run: RunId,
     bytes: Vec<u8>,
@@ -293,62 +250,52 @@ impl HostCommandOwner {
         );
         Ok(())
     }
-    pub(crate) fn edit_approval_details(&self, state: &RunProjection) -> Vec<EditApproval> {
-        let mut applied = BTreeSet::new();
-        let mut integrity = false;
-        for reference in &state.edit_applications {
-            let read = (|| -> Result<AppliedRecord, HostError> {
-                Ok(serde_json::from_slice(
-                    &self.owner()?.store()?.read_evidence(reference)?,
-                )?)
-            })();
-            match read {
-                Ok(r)
-                    if r.kind == "studio_edit_applied_v1"
-                        && state.edit_approvals.contains(&r.approval) =>
-                {
-                    applied.insert(r.approval);
+    pub(crate) fn edit_approval_summary(
+        &self,
+        state: &RunProjection,
+    ) -> kinewright_project::edit_audit::EditAuditSummary {
+        let mut live = Vec::new();
+        if let Some(run) = self.hooks.runs.get(&state.run) {
+            for (task, runtime) in &run.tasks {
+                if !runtime.had_approved_edit() {
+                    continue;
                 }
-                _ => integrity = true,
+                let Ok(identity) = runtime.core().history_change_id() else {
+                    continue;
+                };
+                let Some(position) = identity.position() else {
+                    continue;
+                };
+                live.push(kinewright_project::edit_audit::LiveEditCut {
+                    task: task.clone(),
+                    cut: kinewright_project::edit_audit::KeptHistoryCut {
+                        epoch: runtime.history_epoch().clone(),
+                        revision: identity.revision(),
+                        position,
+                    },
+                });
             }
         }
-        let mut rows = Vec::new();
-        for reference in &state.edit_approvals {
-            let read = (|| -> Result<ApprovalRecord, HostError> {
-                let record: ApprovalRecord =
-                    serde_json::from_slice(&self.owner()?.store()?.read_evidence(reference)?)?;
-                if record.kind != "studio_edit_approval_v1"
-                    || record.binding.run != state.run
-                    || record.binding.project != self.owner()?.active_manual_project()?
-                    || record.digest != digest(&record.binding)?
-                {
-                    return Err(scope("Edit record integrity check failed"));
+        self.owner()
+            .and_then(|owner| {
+                owner
+                    .edit_audit_summary(state, &live)
+                    .map_err(HostError::from)
+            })
+            .unwrap_or_else(|_| {
+                let mut summary = kinewright_project::edit_audit::EditAuditSummary::default();
+                if let Some(root) = state.tasks.first() {
+                    summary.approvals.push(EditApproval {
+                        task: root.id.clone(),
+                        removed_clips: 0,
+                        removed_tracks: 0,
+                        applied: false,
+                        issue: Some("Some edit records could not be verified.".into()),
+                        digest: String::new(),
+                    });
                 }
-                Ok(record)
-            })();
-            match read {
-                Ok(r) => rows.push(EditApproval {
-                    task: r.binding.task,
-                    removed_clips: r.removed_clips,
-                    removed_tracks: r.removed_tracks,
-                    digest: r.digest,
-                    applied: applied.contains(reference),
-                    issue: None,
-                }),
-                Err(_) => integrity = true,
-            }
-        }
-        if integrity {
-            rows.push(EditApproval {
-                task: state.tasks[0].id.clone(),
-                removed_clips: 0,
-                removed_tracks: 0,
-                digest: String::new(),
-                applied: false,
-                issue: Some("Some edit records could not be verified.".into()),
-            });
-        }
-        rows
+                summary
+            })
     }
 }
 
@@ -469,6 +416,7 @@ impl TaskMcp {
     fn batch_binding(
         &self,
         host: &HostCommandOwner,
+        core: &Core,
         revision: TimelineRevision,
         edit: &ConsentEdit<'_>,
         description: &str,
@@ -495,6 +443,24 @@ impl TaskMcp {
                 )
             })?;
         let authority = self.endpoint.authority();
+        if !self.endpoint.matches_core(core) {
+            return Err(scope("The task actor changed"));
+        }
+        let history = core
+            .history_change_id()
+            .map_err(|e| problem("consent_authority", e.to_string()))?;
+        if history.revision() != revision {
+            return Err(stale());
+        }
+        let history_position = history.position().ok_or_else(stale)?;
+        let history_epoch = host
+            .hooks
+            .runs
+            .get(&state.run)
+            .and_then(|run| run.tasks.get(&task))
+            .ok_or_else(|| scope("Task authority is unavailable"))?
+            .history_epoch()
+            .clone();
         Ok((
             BatchBinding {
                 project: authority.project.clone(),
@@ -503,6 +469,8 @@ impl TaskMcp {
                 attempt: authority.attempt.clone(),
                 endpoint: authority.endpoint.clone(),
                 owner_epoch: authority.owner_epoch,
+                history_epoch,
+                history_position,
                 turn,
                 revision,
                 batch_sha256: digest(edit)?,
@@ -535,6 +503,7 @@ impl TaskMcp {
         let host = lock_host(&owner, &self.endpoint)?;
         let (binding, state) = self.batch_binding(
             &host,
+            core,
             revision,
             &ConsentEdit::Batch(operations),
             description,
@@ -660,7 +629,13 @@ impl TaskMcp {
         {
             let owner = self.consent_host()?;
             let host = lock_host(&owner, &self.endpoint)?;
-            self.batch_binding(&host, revision, &ConsentEdit::Batch(&[]), "History step")?;
+            self.batch_binding(
+                &host,
+                core,
+                revision,
+                &ConsentEdit::Batch(&[]),
+                "History step",
+            )?;
         }
         let (before, after, operations) = self
             .endpoint
@@ -717,15 +692,21 @@ impl TaskMcp {
         let owner = self.consent_host()?;
         if description.is_none() {
             let host = lock_host(&owner, &self.endpoint)?;
-            let (binding, state) =
-                self.batch_binding(&host, revision, edit, "Reversible private-branch edit")?;
+            let (binding, state) = self.batch_binding(
+                &host,
+                core,
+                revision,
+                edit,
+                "Reversible private-branch edit",
+            )?;
             self.validate_consent(&host, &state, &binding, core, before, edit)?;
             return edit.apply(&self.endpoint, core, revision);
         }
         let description = description.ok_or_else(refused)?;
         let binding = {
             let host = lock_host(&owner, &self.endpoint)?;
-            self.batch_binding(&host, revision, edit, description)?.0
+            self.batch_binding(&host, core, revision, edit, description)?
+                .0
         };
         let request_digest = digest(&binding)?;
         let request = broker
@@ -733,7 +714,7 @@ impl TaskMcp {
             .map_err(|e| problem(e.code(), e.to_string()))?;
         let mut host = lock_host(&owner, &self.endpoint)?;
         let (current, mut state) =
-            self.batch_binding(&host, revision, edit, &request.description)?;
+            self.batch_binding(&host, core, revision, edit, &request.description)?;
         if request.digest != digest(&current)? {
             return Err(stale());
         }
@@ -747,7 +728,40 @@ impl TaskMcp {
                 "The run's edit-approval history is full. Tell the Director; this edit was not applied.",
             ));
         }
-        let (removed_clips, removed_tracks) = removed(before, &edit.after(before)?);
+        let after = edit.after(before)?;
+        let kept_clips = after
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .map(|clip| clip.id)
+            .collect::<BTreeSet<_>>();
+        let kept_tracks = after
+            .tracks
+            .iter()
+            .map(|track| track.id)
+            .collect::<BTreeSet<_>>();
+        let mut targets = Vec::new();
+        for track in &before.tracks {
+            for clip in &track.clips {
+                if !kept_clips.contains(&clip.id) {
+                    targets.push(RemovedObject::Clip {
+                        clip: clip.id,
+                        track: track.id,
+                    });
+                }
+            }
+            if !kept_tracks.contains(&track.id) {
+                targets.push(RemovedObject::Track { track: track.id });
+            }
+        }
+        let removed_clips = targets
+            .iter()
+            .filter(|target| matches!(target, RemovedObject::Clip { .. }))
+            .count();
+        let removed_tracks = targets
+            .iter()
+            .filter(|target| matches!(target, RemovedObject::Track { .. }))
+            .count();
         let record = ApprovalRecord {
             kind: "studio_edit_approval_v1".into(),
             binding: current,
@@ -755,6 +769,7 @@ impl TaskMcp {
             digest: request_digest,
             removed_clips,
             removed_tracks,
+            targets,
         };
         if host.hooks.pending_edit_applications.len() >= ITEM_LIMIT {
             return Err(problem(
@@ -769,7 +784,7 @@ impl TaskMcp {
             .map_err(capacity)?;
         // Authority reconciliation may finish earlier work. Fence the approval to
         // the resulting current projection and the unchanged live Core revision.
-        let (rechecked, fresh) = self.batch_binding(&host, revision, edit, description)?;
+        let (rechecked, fresh) = self.batch_binding(&host, core, revision, edit, description)?;
         if rechecked != record.binding {
             return Err(stale());
         }
@@ -858,6 +873,14 @@ impl TaskMcp {
         }
         let outcome = edit.apply(&self.endpoint, core, revision)?;
         if outcome.applied() {
+            if let Some(runtime) = host
+                .hooks
+                .runs
+                .get_mut(&execution.run)
+                .and_then(|run| run.tasks.get_mut(&execution.task))
+            {
+                runtime.record_approved_edit();
+            }
             // Both exact records were sealed before approval. The successful Core
             // outcome survives a non-capacity application-publication failure.
             let mut pending = PendingEditApplication {

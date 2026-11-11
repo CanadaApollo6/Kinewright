@@ -10,6 +10,7 @@ pub mod bundle_records;
 pub mod bundle_recovery;
 pub mod bundle_rescue;
 pub mod bundle_switch;
+pub mod edit_audit;
 pub mod editing_session;
 // JA-1 S3 C4
 pub mod feedback_mapping;
