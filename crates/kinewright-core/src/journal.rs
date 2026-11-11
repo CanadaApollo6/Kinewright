@@ -22,7 +22,6 @@ pub enum JournalCommand {
     /// an N-frame drag as N ordinary batches would turn one gesture into N
     /// undo steps, and a journaled [`JournalCommand::Undo`] recorded after the
     /// gesture would then unwind a single frame instead of the whole gesture.
-    ///
     DoBatchCoalesced {
         operations: Vec<Operation>,
         coalesce_key: String,

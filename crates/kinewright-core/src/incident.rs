@@ -33,8 +33,8 @@ use crate::{
 
 /// A source-colour failure that Kinewright classifies as an incident.
 ///
-/// Mirrors [`ColorSourceError`] one-to-one: **thirteen** incident codes from
-/// thirteen classifier variants (`IN1b` §3.2 rule 16, erratum `IN1b`-R4).
+/// Mirrors [`ColorSourceError`] one-to-one: **twelve** incident codes from
+/// twelve classifier variants (`IN1b` §3.2 rule 16, erratum `IN1b`-R4).
 ///
 /// Part A declared twelve, leaving `unknown_source_white_point` out because
 /// `color_description_from_decoder` never sets a white point, so every
@@ -236,7 +236,7 @@ impl MediaIncident {
     fn media_error(self) -> MediaError {
         match self {
             Self::UnsupportedDecoderFormat => MediaError::UnsupportedDecoderFormat {
-                path: std::path::PathBuf::new(),
+                path: std::path::PathBuf::new().into_boxed_path(),
                 format: String::new(),
                 declared_bit_depth: None,
                 decoder_bit_depth: None,
@@ -2355,37 +2355,35 @@ pub const POLICY: [PolicyEntry; 71] = [
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
     },
-    // Row 68 — `IN2B` §5 rule 1 #1: the panel asked, the worker failed.
+    // Row 67 — `IN2B` §5 rule 1 #1: the panel asked, the worker failed.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::PanelWorkerError),
         class: PolicyClass::Explain,
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
     },
-    // Row 69 — rule 1 #2: an earlier run left damage; the dialog asks what to do.
+    // Row 68 — rule 1 #2: an earlier run left damage; the dialog asks what to do.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::RecoveryDamage),
         class: PolicyClass::Explain,
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
     },
-    // Row 70 — rule 1 #3: recording stopped, so a future crash would lose work.
+    // Row 69 — rule 1 #3: recording stopped, so a future crash would lose work.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::RecoveryUnavailable),
         class: PolicyClass::Explain,
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
     },
-    // Row 71 — rule 1 #4: the project opens; only overwrite-save is refused.
-    // Row 72 — rule 1 #5: some history skipped; everything else loaded.
-    // Row 73 — rule 1 #6: the project opens with an empty history.
+    // Row 70: an unreadable sidecar leaves the project with an empty history.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::SidecarRefused),
         class: PolicyClass::Explain,
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Degrades,
     },
-    // Row 72 — rule 1 #7: the save succeeded; the history write failed.
+    // Row 71 — rule 1 #7: the save succeeded; the history write failed.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::SidecarWriteFailed),
         class: PolicyClass::Explain,
@@ -2402,28 +2400,17 @@ pub const POLICY: [PolicyEntry; 71] = [
 /// panel-sink groups the day they land, on a population Part A never measured;
 /// a `const` makes joining it an edit somebody reviews.
 ///
-/// **It is exactly `POLICY[12..66]` — rows 14–67, contiguous** — which is a
+/// **It is exactly `POLICY[12..66]` — rows 13–66, contiguous** — which is a
 /// checkable property and not a coincidence: [`POLICY`] declares the three
 /// `AutoApply` rows first, then the colour rows the recovery vocabulary can and
 /// cannot serve, then everything else (IN2 §3.1 rule 3).
 ///
-/// **Thirteen codes are off it, for exactly two reasons**, both of which the
-/// table prints (IN2 §3.1 rule 2):
-///
-/// - **it has a deterministic recovery** — [`deterministic_recovery`] builds
-///   one, so the card already has a button and a code with a button must never
-///   spend a model. Three rows: `unknown_source_range`,
-///   `unknown_source_bit_depth`, `unknown_source_white_point`.
-/// - **no honest recovery exists in Part A and a session cannot invent one** —
-///   the seven `unsupported_source_*` rows, whose probe carries a *known*
-///   non-Rec.709 value that a recovery would have to overwrite
-///   (IN2 §7 rule 5). A session would spend a model to arrive at the sentence
-///   the card already shows.
-///
-/// Plus the three `AutoApply` rows, which the router owns. **13 off, 54 on.**
-/// Everything else is on it, including every row IN2 §7 measured *unbuildable*:
-/// a row with no button and no honest operation is exactly the row a session is
-/// for.
+/// Seventeen current codes are outside this list: three `AutoApply` rows,
+/// three deterministic recoveries, six unsupported source-colour meanings,
+/// and five persistence-status labels. The router owns the first group;
+/// deterministic recoveries already have a button; unsupported source meanings
+/// cannot be repaired honestly by a session; persistence statuses start no session.
+/// The remaining 54 codes are eligible.
 pub const INVESTIGATOR_ALLOWLIST: [IncidentCode; 54] = [
     IncidentCode::Media(MediaIncident::UnsupportedDecoderFormat),
     IncidentCode::Media(MediaIncident::BackendUnclassified),
@@ -2483,24 +2470,16 @@ pub const INVESTIGATOR_ALLOWLIST: [IncidentCode; 54] = [
 
 /// The plain-language body every `Explain` recovery carries.
 ///
-/// Exhaustive with **no wildcard arm**, so a seventy-fifth code breaks the
-/// build. **Twenty-eight** codes delegate to a shipped `recovery_action()` and
-/// no string of theirs is restated here (`IN1b` §3.7 rule 34); the delegated
-/// set carries **16** distinct sentences, because
-/// `ColorSourceError::recovery_action()` is a `const fn` with no `match` and
-/// returns one sentence for all thirteen source-colour codes. Rewriting those
-/// thirteen per code is IN1 §13 D8 and is owned by IN3. The remaining
-/// **46** bodies are written — 39 in `IN1b` §5.6, 7 in `IN2B` §5 rule 1 —
-/// and are copied here verbatim, so the whole table carries 62 distinct
-/// sentences over 72 codes and the 61 non-colour bodies are pairwise distinct.
+/// Exhaustive over all 71 current codes, with no wildcard arm. Twenty-seven
+/// codes delegate to a shipped `recovery_action()`: twelve source-colour codes
+/// share one sentence and fifteen other codes use their own accessor. The other
+/// 44 bodies are written here. The table has 60 distinct bodies; all 59
+/// non-colour bodies are pairwise distinct.
 #[must_use]
-// 72 arms carrying 46 written sentences: the bodies are the deliverable and
-// they are read as prose, so splitting the table across helper functions would
-// scatter the thing a reviewer is asked to read in one pass (`IN1b` §5.6, N0/Q4).
 #[allow(clippy::too_many_lines)]
 pub fn explain_body(code: IncidentCode) -> &'static str {
     match code {
-        // Delegated, all thirteen to the one shipped sentence.
+        // Delegated, all twelve to the one shipped sentence.
         IncidentCode::SourceColor(incident) => incident.source_error().recovery_action(),
         // Delegated, one sentence each.
         IncidentCode::DeliveryColor(incident) => incident.recovery_action(),
@@ -2712,7 +2691,7 @@ pub fn policy_recovery(
         // The sentence is core's and is never composed by a caller
         // (IN1 §2.5 rule 46). `explain_body` supersedes Part A's direct call to
         // `code.source_error().recovery_action()`, delegating to that same
-        // accessor for the thirteen colour rows so they keep the shipped
+        // accessor for the twelve colour rows so they keep the shipped
         // sentence verbatim (`IN1b` §3.7 rule 34).
         //
         // A row with a buildable operation offers **a button and the
@@ -2738,7 +2717,7 @@ pub fn policy_recovery(
 /// The deterministic recovery an `Explain` row offers, when one is buildable
 /// from the evidence the incident already carries (IN2 §7).
 ///
-/// An **exhaustive match with no wildcard**, so a seventy-fifth code cannot
+/// An **exhaustive match with no wildcard**, so a new code cannot
 /// silently default to "no button": every code is named, and the fifty-eight
 /// that IN2 §7's table does not discuss return `None` through one explicit
 /// `|`-joined arm.
@@ -2795,7 +2774,7 @@ pub fn deterministic_recovery(
 /// Whether [`deterministic_recovery`] has a builder for this code at all.
 ///
 /// The **exhaustive match with no wildcard** IN2 §7 rule 2 requires: every one
-/// of the seventy-two codes is named, so another code cannot silently
+/// of the current codes is named, so another code cannot silently
 /// default to "no button". The `false` arm's groups are named in order, and the
 /// reason each group is `false` is in [`deterministic_recovery`]'s own
 /// documentation.
@@ -4707,7 +4686,7 @@ mod tests {
         }
     }
 
-    /// `IN1b` §9 clause 2: 72 rows, an explicit no-wildcard `ordinal()`, every
+    /// `IN1b` §9 clause 2: 71 rows, an explicit no-wildcard `ordinal()`, every
     /// **colour** row `Blocks`, and every row's severity equal to `IN1b` §3.6
     /// rule 31's table plus the four `IN2B` §5 `Degrades` rows. Replaces Part
     /// A's
@@ -4784,7 +4763,7 @@ mod tests {
         }
     }
 
-    /// Thirteen for thirteen, with **no** `None` case (erratum `IN1b`-R4).
+    /// Twelve for twelve, with **no** `None` case (erratum `IN1b`-R4).
     #[test]
     fn in1_source_colour_incidents_mirror_the_classifier_one_to_one() {
         let mut mapped = BTreeSet::new();
@@ -5236,7 +5215,7 @@ mod tests {
             ),
             (
                 MediaError::UnsupportedDecoderFormat {
-                    path: "a.mov".into(),
+                    path: std::path::Path::new("a.mov").into(),
                     format: "yuv422p10le".to_owned(),
                     declared_bit_depth: Some(10),
                     decoder_bit_depth: Some(10),
@@ -5673,7 +5652,7 @@ mod tests {
     }
 
     /// `IN1b` §7 item 6 and erratum `IN1b`-R14: accessor against accessor over
-    /// every delegating code, and `field` equal to `code.field()` over all 72.
+    /// every delegating code, and `field` equal to `code.field()` over all 71.
     #[test]
     fn in1b_every_code_delegates_its_string_to_the_accessor_that_owns_it() {
         let mut delegating = 0_usize;
@@ -5691,7 +5670,7 @@ mod tests {
                     assert_eq!(
                         code.code(),
                         MediaError::UnsupportedDecoderFormat {
-                            path: std::path::PathBuf::new(),
+                            path: std::path::PathBuf::new().into_boxed_path(),
                             format: String::new(),
                             declared_bit_depth: None,
                             decoder_bit_depth: None,
@@ -5815,8 +5794,8 @@ mod tests {
         );
     }
 
-    /// `IN1b` §9 clause 4: every one of the 72 codes reaches a body, the 61
-    /// non-colour bodies are pairwise distinct, the 13 colour bodies are each
+    /// `IN1b` §9 clause 4: every one of the 71 codes reaches a body, the 59
+    /// non-colour bodies are pairwise distinct, the 12 colour bodies are each
     /// `ColorSourceError::recovery_action()`'s one sentence, and the 15
     /// non-colour delegating rows equal their own accessor's string.
     #[test]
@@ -5865,17 +5844,17 @@ mod tests {
         assert_eq!(delegated, 15);
     }
 
-    /// IN2B §12 item 11, §5 rules 1–3: the seven new codes carry written
+    /// IN2B §12 item 11, §5 rules 1–3: the five current codes carry written
     /// bodies, tail `POLICY` rows in declaration order, and the allowlist is
     /// untouched.
     ///
-    /// The seven `label_headline` arms live in the app crate, so their exact
+    /// The five `label_headline` arms live in the app crate, so their exact
     /// strings are pinned by the re-pinned headline test there (`IN2B` §5
     /// rule 1); this test pins everything core owns — the §5 table values,
     /// the bodies, the tail rows and the allowlist slice.
     #[test]
     fn in2b_current_persistence_codes_carry_written_bodies_and_tail_rows() {
-        let seven = [
+        let persistence_rows = [
             (
                 LabelIncident::PanelWorkerError,
                 "panel_worker_error",
@@ -5908,7 +5887,7 @@ mod tests {
             ),
         ];
         let mut bodies = BTreeSet::new();
-        for (index, (incident, code, field, severity)) in seven.iter().enumerate() {
+        for (index, (incident, code, field, severity)) in persistence_rows.iter().enumerate() {
             let code_value = IncidentCode::Label(*incident);
             assert_eq!(incident.code(), *code);
             assert_eq!(incident.field(), *field);
@@ -5936,7 +5915,7 @@ mod tests {
         assert_eq!(INVESTIGATOR_ALLOWLIST.len(), 54);
         let rows: Vec<IncidentCode> = POLICY[12..66].iter().map(|entry| entry.code).collect();
         assert_eq!(INVESTIGATOR_ALLOWLIST.to_vec(), rows);
-        for (incident, code, _, _) in &seven {
+        for (incident, code, _, _) in &persistence_rows {
             assert!(
                 !INVESTIGATOR_ALLOWLIST.contains(&IncidentCode::Label(*incident)),
                 "{code} stays off the allowlist (IN2 §3.1 reason 2)"
@@ -6347,7 +6326,7 @@ mod tests {
     }
 
     /// The worst serialised incident over IN2 §4.2 rule 11's product, measured
-    /// against the implementation rather than a prototype: the **72** declared
+    /// against the implementation rather than a prototype: the **71** declared
     /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
     /// amended by erratum `IN1b`-A-R13, times **two probes**, times
     /// {no proposal, a proposal at the cap}, times {open, investigating,
@@ -6383,7 +6362,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved_on_every_subject_shape() {
         // The core twin of `in1b_every_code_fits_the_measured_ceiling`, grown
-        // over IN2 §4.2 rule 11's product: 72 codes x 8 subject shapes x
+        // over IN2 §4.2 rule 11's product: 71 codes x 8 subject shapes x
         // 2 probes x {no proposal, a proposal at the cap} x {open,
         // investigating, resolved with all telemetry, resolved without the two
         // new fields} x IN2B §10 rule 5's {no name, a name at the cap}.
@@ -6637,7 +6616,8 @@ mod tests {
         MediaError::UnsupportedDecoderFormat {
             path: std::path::PathBuf::from(
                 "/home/editor/Projects/Feature 2026/Media/Day 12/A012C003_260915_R1AB.mov",
-            ),
+            )
+            .into_boxed_path(),
             format: "yuv422p10le".to_owned(),
             declared_bit_depth: Some(10),
             decoder_bit_depth: Some(10),
@@ -8129,7 +8109,7 @@ mod tests {
     /// `IN2B` §12 item 1 (`IN2B` §3 rule 3): `from_code` round-trips every
     /// `POLICY` row and rejects unknown strings.
     #[test]
-    fn in2b_from_code_round_trips_all_seventy_four_codes_and_rejects_three_unknowns() {
+    fn in2b_from_code_round_trips_all_current_codes_and_rejects_three_unknowns() {
         assert_eq!(POLICY.len(), 71);
         for entry in &POLICY {
             assert_eq!(

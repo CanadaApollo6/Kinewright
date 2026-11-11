@@ -1266,9 +1266,44 @@ mod durable_bundle {
         }
         (temp, path, original, trace, bytes, writer)
     }
+    type ModeledPublication = (
+        TempDirectory,
+        PathBuf,
+        Vec<u8>,
+        kinewright_project::io_observer::IoTrace,
+        std::collections::BTreeMap<String, Vec<u8>>,
+        String,
+    );
+
     #[cfg(not(target_os = "linux"))]
+    fn modeled_publication() -> ModeledPublication {
+        frozen_modeled_publication()
+    }
+
+    #[test]
+    fn bundle_crash_cuts_preserve_acknowledged_graph() {
+        check_crash_cuts(modeled_publication());
+    }
+
+    #[test]
+    fn each_missing_barrier_breaks_storage_crash_model() {
+        check_missing_barriers(modeled_publication());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frozen_bundle_crash_cuts_preserve_acknowledged_graph() {
+        check_crash_cuts(frozen_modeled_publication());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frozen_each_missing_barrier_breaks_storage_crash_model() {
+        check_missing_barriers(frozen_modeled_publication());
+    }
+
     #[allow(clippy::type_complexity)]
-    fn modeled_publication() -> (
+    fn frozen_modeled_publication() -> (
         TempDirectory,
         PathBuf,
         Vec<u8>,
@@ -1305,6 +1340,10 @@ mod durable_bundle {
                     "bundle_B3" => "bundle_B3",
                     "bundle_B4" => "bundle_B4",
                     "bundle_B5" => "bundle_B5",
+                    // These observations do not mutate filesystem state.
+                    "publication_reopen_fit" => "publication_reopen_fit",
+                    "publication_memo_hit" => "publication_memo_hit",
+                    "root_rename_attempt" => "root_rename_attempt",
                     value => panic!("unknown frozen event {value}"),
                 };
                 let relative: PathBuf = event["components"]
@@ -1345,9 +1384,8 @@ mod durable_bundle {
         )
     }
 
-    #[test]
-    fn bundle_crash_cuts_preserve_acknowledged_graph() {
-        let (_temp, path, original, trace, bytes, next) = modeled_publication();
+    fn check_crash_cuts(publication: ModeledPublication) {
+        let (_temp, path, original, trace, bytes, next) = publication;
         let old = kinewright_media::sha256_bytes(&original);
         let mut model = CrashFs::new(&path, &original);
         let mut acknowledged = false;
@@ -1391,9 +1429,8 @@ mod durable_bundle {
                 .any(|e| e.operation == "in_place_fallback")
         );
     }
-    #[test]
-    fn each_missing_barrier_breaks_storage_crash_model() {
-        let (_temp, path, original, trace, bytes, next) = modeled_publication();
+    fn check_missing_barriers(publication: ModeledPublication) {
+        let (_temp, path, original, trace, bytes, next) = publication;
         let assets = path.with_extension("kinewright-assets");
         let original_hash = kinewright_media::sha256_bytes(&original);
         let first_metadata = trace

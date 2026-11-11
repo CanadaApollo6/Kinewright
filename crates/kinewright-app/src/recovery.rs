@@ -324,7 +324,7 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
     let header: JournalHeader = serde_json::from_slice(header_line).map_err(|error| Damage {
         offset: MAGIC.len(),
         ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
-        reason: format!("the initial document snapshot is corrupt: {error}"),
+        reason: format!("the journal header could not be read: {error}"),
     })?;
     if let Err(error) = header.initial_document.validate() {
         return Err(Damage {

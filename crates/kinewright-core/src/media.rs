@@ -1981,7 +1981,8 @@ pub enum MediaError {
     )]
     UnsupportedDecoderFormat {
         /// The source path involved in the failed managed decode.
-        path: PathBuf,
+        // The error keeps an immutable path, without a platform-specific growable buffer header.
+        path: Box<Path>,
         /// The `FFmpeg` pixel-format name when available.
         format: String,
         /// The declared source integer depth, if it was valid enough to read.
@@ -2040,11 +2041,9 @@ pub enum MediaError {
     /// The same refusal with the asset, the path, the probed description and
     /// the assumption `contextual_managed_decode_error` exists to add.
     ///
-    /// Boxed. The payload is 300-odd bytes of probed description and typed
-    /// refusal; inline it would put every `Result<_, MediaError>` signature in
-    /// the workspace over `clippy::result_large_err`'s 128-byte threshold, and
-    /// `MediaError` is this workspace's universal media return type. The
-    /// rendered sentence is unaffected: `Display` forwards through the box to
+    /// Boxed so the path, probed description and typed refusal stay out of
+    /// every `Result<_, MediaError>` payload. `MediaError` is the workspace's
+    /// shared media return type. `Display` forwards through the box to
     /// [`SourceColorRefusal`], which owns the template.
     #[error("{0}")]
     SourceColorForAsset(Box<SourceColorRefusal>),
@@ -2121,6 +2120,9 @@ pub enum MediaError {
     #[error("{0}")]
     Backend(String),
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<MediaError>() == 80);
 
 impl MediaError {
     /// Return the machine-readable recovery code, when this error has one.
@@ -3176,8 +3178,8 @@ mod tests {
 
     #[test]
     fn in1_the_boxed_refusal_keeps_media_error_small_enough_to_return_by_value() {
-        // IN1 §4.1 rule 2's payload is 300-odd bytes. Boxing it is what keeps
-        // every `Result<_, MediaError>` in the workspace under
+        // Structured source refusals stay boxed so the shared error remains small.
+        // Every `Result<_, MediaError>` in the workspace stays under
         // `clippy::result_large_err`'s 128-byte threshold without an allow.
         assert!(
             std::mem::size_of::<MediaError>() <= 128,
@@ -3558,7 +3560,7 @@ mod tests {
             MediaError::NotImplemented,
             MediaError::Cancelled,
             MediaError::UnsupportedDecoderFormat {
-                path: std::path::PathBuf::new(),
+                path: std::path::PathBuf::new().into_boxed_path(),
                 format: String::new(),
                 declared_bit_depth: None,
                 decoder_bit_depth: None,

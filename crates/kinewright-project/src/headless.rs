@@ -209,6 +209,188 @@ mod tests {
 
     use super::*;
 
+    fn exact_tree(path: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            rows: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    rows.insert(path.strip_prefix(root).unwrap().to_path_buf(), vec![]);
+                    visit(root, &path, rows);
+                } else {
+                    assert!(metadata.is_file());
+                    rows.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(&path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut rows = std::collections::BTreeMap::new();
+        visit(path, path, &mut rows);
+        rows
+    }
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each refused route checks the full before and after inventory"
+    )]
+    fn current_studio_save_and_plain_save_as_refuse_before_any_mutation() {
+        use crate::bundle::BundleWriteAdmission;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-s1-headless-admission",
+        );
+        let recovery = temp.path("recovery");
+        std::fs::create_dir(&recovery).unwrap();
+        let control = temp.path("control.kinewright");
+        write_project_document(&Document::default(), &control, None).unwrap();
+        let (mut session, _) = loaded_session(&control);
+        note(&session, "eligible pending sidecar record");
+        let renames = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&renames);
+        session.sidecar_writer.set_rename_hook(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+        let legacy = serialize_project_document(&Document::default()).unwrap();
+        let sample = include_bytes!(
+            "../../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
+        );
+        for (case, source_bytes, dest_bytes, same) in [
+            (
+                "plain-studio",
+                legacy.as_bytes(),
+                Some(sample.as_slice()),
+                false,
+            ),
+            ("studio-new", sample.as_slice(), None, false),
+            (
+                "studio-existing",
+                sample.as_slice(),
+                Some(legacy.as_bytes()),
+                false,
+            ),
+            ("studio-same", sample.as_slice(), None, true),
+        ] {
+            let source = temp.path(&format!("{case}/source/studio.kinewright"));
+            let target = if same {
+                source.clone()
+            } else {
+                temp.path(&format!("{case}/target/studio.kinewright"))
+            };
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(&source, source_bytes).unwrap();
+            if let Some(bytes) = dest_bytes {
+                std::fs::write(&target, bytes).unwrap();
+            }
+            let admission = BundleWriteAdmission::read(&source).unwrap();
+            let retained = admission.clone();
+            for (index, path) in [&source, &target].into_iter().enumerate() {
+                let assets = path.with_extension("kinewright-assets");
+                std::fs::create_dir_all(&assets).unwrap();
+                if std::fs::read(path).is_ok_and(|bytes| bytes.as_slice() == sample.as_slice()) {
+                    let source_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets");
+                    for (relative, bytes) in exact_tree(&source_assets) {
+                        let destination = assets.join(&relative);
+                        if source_assets.join(&relative).is_dir() {
+                            std::fs::create_dir_all(destination).unwrap();
+                        } else {
+                            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                            std::fs::write(destination, bytes).unwrap();
+                        }
+                    }
+                }
+                std::fs::write(
+                    assets.join("distinct-owned-input"),
+                    format!("{case}-{index}"),
+                )
+                .unwrap();
+                std::fs::write(
+                    sidecar_path_for_project(Some(path)).unwrap(),
+                    format!("occupied-{case}-{index}"),
+                )
+                .unwrap();
+            }
+            let before = exact_tree(temp.root());
+            let digest = session.saved_digest.clone();
+            let established = session.established.clone();
+            let generations = (
+                session.last_written_gen,
+                session.confirmed_written_gen,
+                session.incidents.read().unwrap().generation(),
+            );
+            let (result, trace) = crate::io_observer::observe(|| {
+                save_headless(
+                    &Document::default(),
+                    &admission,
+                    &target,
+                    None,
+                    &mut session,
+                    "",
+                    TimelineRevision::default(),
+                    &recovery,
+                    None,
+                )
+            });
+            assert!(
+                matches!(result, Err(ProjectSaveError::UnsupportedBundle { .. })),
+                "{case}"
+            );
+            assert_eq!(
+                renames.load(Ordering::SeqCst),
+                0,
+                "ADMISSION_PRECEDES_SIDECAR {case}"
+            );
+            assert!(trace.events.is_empty(), "{case}: {:?}", trace.events);
+            assert_eq!(exact_tree(temp.root()), before, "{case}");
+            assert_eq!(admission, retained);
+            assert_eq!(session.saved_digest, digest);
+            assert_eq!(session.established, established);
+            assert_eq!(
+                (
+                    session.last_written_gen,
+                    session.confirmed_written_gen,
+                    session.incidents.read().unwrap().generation()
+                ),
+                generations
+            );
+        }
+        let admission = BundleWriteAdmission::read(&control).unwrap();
+        let mut changed = Document::default();
+        changed.markers.push(kinewright_core::Marker {
+            id: kinewright_core::MarkerId(1),
+            position: kinewright_core::TimeCode::ZERO,
+            label: "admitted control".into(),
+            color_token: 0,
+        });
+        let previous = session.saved_digest.clone();
+        save_headless(
+            &changed,
+            &admission,
+            &control,
+            None,
+            &mut session,
+            &previous,
+            TimelineRevision::default(),
+            &recovery,
+            None,
+        )
+        .unwrap();
+        assert_eq!(load_document(&control).unwrap().0, changed);
+        assert!(
+            renames.load(Ordering::SeqCst) > 0,
+            "the real sidecar write hook was armed"
+        );
+    }
     /// Observe one plain project incident into the session log.
     fn note(session: &SidecarSession, text: &str) {
         session

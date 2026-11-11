@@ -7482,7 +7482,7 @@ pub(crate) mod in1_tests {
         let revision = second.focused().revision;
         second.note_observation(IncidentObservation::from_media_error(
             &MediaError::UnsupportedDecoderFormat {
-                path: PathBuf::from("clip.mov"),
+                path: PathBuf::from("clip.mov").into_boxed_path(),
                 format: "yuv444p12le".to_owned(),
                 declared_bit_depth: Some(12),
                 decoder_bit_depth: None,
@@ -11311,7 +11311,192 @@ mod in2b_tests {
         FlushOutcome, ProjectFile, SidecarLoad, load_sidecar, sidecar_matches_project,
     };
 
-    #[cfg(windows)]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "full app caller refusal matrix and successful control"
+    )]
+    fn current_studio_save_and_plain_save_as_refuse_before_any_mutation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-s1-app-admission",
+        );
+        let recovery = temp.path("recovery");
+        fs::create_dir(&recovery).unwrap();
+        crate::recovery::with_ja_directory(recovery.clone(), || {
+            let legacy = serialize_project_document(&Document::default()).unwrap();
+            let studio = include_bytes!(
+                "../../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
+            );
+            for (case, source_bytes, destination_bytes, same) in [
+                (
+                    "plain-studio",
+                    legacy.as_bytes(),
+                    Some(studio.as_slice()),
+                    false,
+                ),
+                ("studio-new", studio.as_slice(), None, false),
+                (
+                    "studio-existing",
+                    studio.as_slice(),
+                    Some(legacy.as_bytes()),
+                    false,
+                ),
+                ("studio-same", studio.as_slice(), None, true),
+            ] {
+                let source = temp.path(&format!("{case}/source/studio.kinewright"));
+                let target = if same {
+                    source.clone()
+                } else {
+                    temp.path(&format!("{case}/target/studio.kinewright"))
+                };
+                fs::create_dir_all(source.parent().unwrap()).unwrap();
+                fs::create_dir_all(target.parent().unwrap()).unwrap();
+                fs::write(&source, source_bytes).unwrap();
+                if let Some(bytes) = destination_bytes {
+                    fs::write(&target, bytes).unwrap();
+                }
+                let (mut app, engine) = in2b_harness(Document::default(), None);
+                let before_open = admission_tree(temp.root());
+                let ((), open_trace) =
+                    kinewright_project::io_observer::observe(|| app.open_project(&source));
+                assert_eq!(
+                    app.focused().project_path.as_deref(),
+                    Some(source.as_path())
+                );
+                if app.focused().source_admission.is_studio() {
+                    assert_eq!(
+                        admission_tree(temp.root()),
+                        before_open,
+                        "read-only open changed filesystem bytes"
+                    );
+                    assert!(
+                        open_trace.events.is_empty(),
+                        "read-only open mutated: {:?}",
+                        open_trace.events
+                    );
+                }
+                // Keep every downstream mutator eligible. Source admission must be the deciding guard.
+                app.focused_mut().sidecar_suspended = false;
+                app.focused_mut().recovery_suspended = false;
+                app.focused_mut()
+                    .established
+                    .insert(sidecar_path_for_project(Some(&source)).unwrap());
+                let renames = Arc::new(AtomicUsize::new(0));
+                let count = Arc::clone(&renames);
+                app.focused()
+                    .sidecar_writer
+                    .set_rename_hook(Arc::new(move || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }));
+                app.focused()
+                    .incidents
+                    .write()
+                    .unwrap()
+                    .observe(IncidentObservation::plain(
+                        IncidentCode::Label(LabelIncident::Project),
+                        IncidentSubject::Project,
+                        "pending eligible sidecar entry",
+                        TimelineRevision::default(),
+                    ));
+                for (index, path) in [&source, &target].into_iter().enumerate() {
+                    let assets = path.with_extension("kinewright-assets");
+                    fs::create_dir_all(&assets).unwrap();
+                    let sample=Path::new(env!("CARGO_MANIFEST_DIR")).join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets");
+                    if fs::read(path).is_ok_and(|bytes| bytes.as_slice() == studio.as_slice()) {
+                        for (relative, bytes) in admission_tree(&sample) {
+                            let destination = assets.join(&relative);
+                            if sample.join(&relative).is_dir() {
+                                fs::create_dir_all(destination).unwrap();
+                            } else {
+                                fs::write(destination, bytes).unwrap();
+                            }
+                        }
+                    }
+                    fs::write(
+                        assets.join("distinguishable-input"),
+                        format!("{case}-{index}"),
+                    )
+                    .unwrap();
+                    fs::write(
+                        sidecar_path_for_project(Some(path)).unwrap(),
+                        format!("occupied-{case}-{index}"),
+                    )
+                    .unwrap();
+                }
+                for session in &app.projects {
+                    if !session.source_admission.is_studio() {
+                        session
+                            .recovery
+                            .ja_observe()
+                            .expect("eligible recorder is ready");
+                    }
+                }
+                let before = admission_tree(temp.root());
+                let old_path = app.focused().project_path.clone();
+                let admission = app.focused().source_admission.clone();
+                let digest = app.focused().saved_digest.clone();
+                let history = app.focused().core.export_history().unwrap();
+                let generations = (
+                    app.focused().last_written_gen,
+                    app.focused().confirmed_written_gen,
+                    app.focused().incidents.read().unwrap().generation(),
+                );
+                let (result, trace) =
+                    kinewright_project::io_observer::observe(|| app.write_project(&target));
+                assert!(
+                    matches!(result, Err(ProjectSaveError::UnsupportedBundle { .. })),
+                    "{case}: {result:?}"
+                );
+                assert_eq!(
+                    renames.load(Ordering::SeqCst),
+                    0,
+                    "ADMISSION_PRECEDES_SIDECAR"
+                );
+                assert!(trace.events.is_empty(), "{case}: {:?}", trace.events);
+                assert_eq!(admission_tree(temp.root()), before, "{case}");
+                assert_eq!(app.focused().project_path, old_path);
+                assert_eq!(app.focused().source_admission, admission);
+                assert_eq!(app.focused().saved_digest, digest);
+                assert_eq!(app.focused().core.export_history().unwrap(), history);
+                assert_eq!(
+                    (
+                        app.focused().last_written_gen,
+                        app.focused().confirmed_written_gen,
+                        app.focused().incidents.read().unwrap().generation()
+                    ),
+                    generations
+                );
+                in2b_quiesce_engine(&engine);
+                in2b_shutdown(&mut app);
+            }
+            let control = temp.path("admitted-control.kinewright");
+            fs::write(&control, &legacy).unwrap();
+            let (mut app, engine) = in2b_harness(Document::default(), Some(control.clone()));
+            let core = app.focused().core.clone();
+            let Event::DocumentChanged { doc, revision, .. } = core
+                .request(Command::Do(Operation::AddTrack {
+                    track: Track {
+                        id: TrackId(81),
+                        kind: TrackKind::Video,
+                        sync_lock: true,
+                        clips: vec![],
+                    },
+                }))
+                .unwrap()
+            else {
+                panic!("control edit refused")
+            };
+            app.focused_mut().document = doc;
+            app.focused_mut().revision = revision;
+            app.write_project(&control).unwrap();
+            assert_eq!(load_document(&control).unwrap().0, *app.focused().document);
+            assert!(app.focused().source_admission.legacy_document().is_ok());
+            in2b_quiesce_engine(&engine);
+            in2b_shutdown(&mut app);
+        });
+    }
     fn admission_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(path).unwrap() {

@@ -2731,7 +2731,7 @@ mod tests {
             &unsupported_source(),
             None,
             MediaError::UnsupportedDecoderFormat {
-                path: "/media/ten-bit.mov".into(),
+                path: Path::new("/media/ten-bit.mov").into(),
                 format: "yuv420p10le".to_owned(),
                 declared_bit_depth: Some(10),
                 decoder_bit_depth: Some(8),

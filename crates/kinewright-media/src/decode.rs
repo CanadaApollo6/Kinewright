@@ -586,7 +586,7 @@ fn unsupported_decoder_format(
     reason: impl Into<String>,
 ) -> MediaError {
     MediaError::UnsupportedDecoderFormat {
-        path: path.to_path_buf(),
+        path: path.into(),
         format: decoder_format_name(pixel),
         declared_bit_depth,
         decoder_bit_depth,
@@ -3812,7 +3812,7 @@ mod tests {
                 decoder_bit_depth,
                 reason,
             } => {
-                assert_eq!(path, Path::new("/tmp/source.mov"));
+                assert_eq!(path.as_ref(), Path::new("/tmp/source.mov"));
                 assert_eq!(format, "unknown");
                 assert_eq!(declared_bit_depth, Some(10));
                 assert_eq!(decoder_bit_depth, None);

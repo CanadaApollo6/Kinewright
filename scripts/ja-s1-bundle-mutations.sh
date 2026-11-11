@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/setup-ffmpeg.sh
 export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 TMPDIR="$PWD/target/ja-s1-tmp"
-nice -n 19 python3 -I - "${1:?absolute evidence directory}" <<'PY'
+nice -n 19 python3 -I - "${1:?absolute evidence directory}" "${@:2}" <<'PY'
 from pathlib import Path
 import gzip,hashlib,os,re,subprocess,sys,time
 out=Path(sys.argv[1]);assert out.is_absolute();out.mkdir(parents=True,exist_ok=True)
@@ -29,9 +29,13 @@ add('corrupt-history',project/'store.rs','''        if measured != reference.byt
         {''','''        if false && (measured != reference.byte_length
             || !digest.as_ref().is_ok_and(|h| h == &reference.sha256))
         {''','durable_bundle::corrupt_history_quarantines_without_rewriting_usable_versions')
+add('source-destination-admission',project/'bundle.rs', '    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {', '    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {\n        if !destination.as_os_str().is_empty() {return Ok(());}', 'headless::tests::current_studio_save_and_plain_save_as_refuse_before_any_mutation', 'project-lib')
+add('app-source-destination-admission',project/'bundle.rs', '    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {', '    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {\n        if !destination.as_os_str().is_empty() {return Ok(());}', 'app::in2b_tests::current_studio_save_and_plain_save_as_refuse_before_any_mutation', 'app')
 add('history-reopen',project/'bundle.rs','''        core.restore_history((*branch.1).clone())''','''        core.restore_history(kinewright_core::Core::spawn((*branch.1.document).clone()).unwrap().export_history().unwrap())''','history_loss_fixture_revised_preserves_one_entry','agent')
 add('comment-baseline','crates/kinewright-agent/src/ja_harness/revised.rs','"binding_present":root.receipt_index_ref.is_some()','"binding_present":true','comment_observer_persists_exact_bytes_then_missing_receipt','agent')
+selected=set(sys.argv[2:]);assert selected <= {case[0] for case in cases}, selected
 for name,path,anchor,replacement,witness,target in cases:
+ if selected and name not in selected:continue
  if (out/f'{name}-restored.log.gz').exists():continue
  original=path.read_bytes();source=original.decode();assert source.count(anchor)==1,(name,source.count(anchor))
  args={'storage':['-p','kinewright-project','--features','test-util','--test','ja_s1_storage'], 'project-lib':['-p','kinewright-project','--features','test-util','--lib'], 'app':['-p','kinewright-app','--bin','kinewright-app'], 'agent':['-p','kinewright-agent','--features','eval-harness','--test','ja_s1'], 'eval':['-p','kinewright-agent','--features','eval-harness','--bin','kinewright-eval']}[target]

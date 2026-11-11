@@ -737,7 +737,7 @@ impl ColorProofError {
                 reason,
             } => Self::UnsupportedDecoderFormat {
                 stage,
-                path,
+                path: path.into_path_buf(),
                 format,
                 declared_bit_depth,
                 decoder_bit_depth,

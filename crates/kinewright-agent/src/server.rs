@@ -27570,7 +27570,7 @@ mod tests {
 
         let unsupported_media = Arc::new(NoopMedia {
             proof_error: Some(MediaError::UnsupportedDecoderFormat {
-                path: PathBuf::from("fixture.mp4"),
+                path: PathBuf::from("fixture.mp4").into_boxed_path(),
                 format: "yuv444p10le".to_owned(),
                 declared_bit_depth: Some(8),
                 decoder_bit_depth: Some(10),
@@ -29351,7 +29351,8 @@ mod tests {
         MediaError::UnsupportedDecoderFormat {
             path: PathBuf::from(
                 "/home/editor/Projects/Feature 2026/Media/Day 12/A012C003_260915_R1AB.mov",
-            ),
+            )
+            .into_boxed_path(),
             format: "yuv422p10le".to_owned(),
             declared_bit_depth: Some(10),
             decoder_bit_depth: Some(10),
