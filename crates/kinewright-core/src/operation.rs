@@ -20,6 +20,7 @@ use crate::{
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub enum Operation {
     AddAsset {
         asset: MediaAsset,
@@ -31,8 +32,8 @@ pub enum Operation {
     RelinkAsset {
         asset: AssetId,
         candidate: RelinkCandidate,
-        /// Legacy assets may have no persisted source fingerprint. Re-linking
-        /// those assets requires an explicit user decision because matching
+        /// Assets without a source fingerprint require an explicit user
+        /// decision when re-linking because matching
         /// technical metadata does not prove byte identity.
         allow_unverified_source: bool,
     },
@@ -531,21 +532,6 @@ impl Operation {
     /// Returns an operation error without mutating `doc` when validation fails.
     pub fn apply(&self, doc: &mut Document) -> Result<(), OpError> {
         <Self as ApplyOp>::apply(self, doc)
-    }
-
-    /// Canonicalize compatibility aliases before history or journal capture.
-    pub(crate) fn canonicalize_legacy_effect_names(&mut self) {
-        match self {
-            Self::AddEffect { effect, .. } | Self::InsertEffect { effect, .. } => {
-                effect.canonicalize_legacy_name();
-            }
-            Self::AddAdjustmentClip { effects, .. } => {
-                effects
-                    .iter_mut()
-                    .for_each(Effect::canonicalize_legacy_name);
-            }
-            _ => {}
-        }
     }
 }
 
@@ -1451,11 +1437,7 @@ fn apply_unchecked(operation: &Operation, doc: &mut Document) -> Result<(), OpEr
         } => convert_legacy_look(doc, *clip, *effect, *lut_asset, *mix_basis_points),
         Operation::AddLutAsset { asset } => add_lut_asset(doc, asset.clone()),
         Operation::RemoveLutAsset { lut_asset } => remove_lut_asset(doc, *lut_asset),
-        Operation::AddEffect { clip, effect } => {
-            let mut effect = effect.clone();
-            effect.canonicalize_legacy_name();
-            add_effect(doc, *clip, effect)
-        }
+        Operation::AddEffect { clip, effect } => add_effect(doc, *clip, effect.clone()),
         Operation::RemoveEffect { clip, effect } => remove_effect(doc, *clip, *effect),
         Operation::SetEffectParam {
             clip,
@@ -5788,6 +5770,7 @@ fn validate_catalog(doc: &Document) -> Result<(), OpError> {
 /// (erratum `IN1b`-A-R3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum IncidentFamily {
     /// Set the value inside the range the message names.
     Bounds,

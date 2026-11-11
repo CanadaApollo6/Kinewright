@@ -1938,8 +1938,8 @@ mod tests {
 
     use half::f16;
     use kinewright_core::{
-        Analysis, AssetId, Clip, ClipContent, ColorPipelineState, ColorTransfer, EffectId,
-        LutAssetId, MediaAsset, ParamValue, Track, TrackId, TrackKind,
+        Analysis, AssetId, Clip, ClipContent, ColorTransfer, EffectId, LutAssetId, MediaAsset,
+        ParamValue, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -2412,19 +2412,6 @@ mod tests {
         assert!(!renderer.cache_title_frame(title_key(1), working_frame_with_bytes(120)));
         assert!(renderer.title_cache.is_empty());
         assert_eq!(renderer.cache_stats().bytes, 0);
-    }
-
-    #[test]
-    fn managed_renderer_rejects_legacy_and_future_contexts() {
-        let mut legacy = Document::default();
-        legacy.color_context.pipeline_state = ColorPipelineState::Legacy;
-        let error = validate_managed_context(&legacy).expect_err("legacy must be rejected");
-        assert!(error.to_string().contains("pipeline_state=Legacy"));
-
-        let mut future = Document::default();
-        future.color_context.pipeline_state = ColorPipelineState::Other("managed_sdr_v2".into());
-        let error = validate_managed_context(&future).expect_err("future state must be rejected");
-        assert!(error.to_string().contains("managed_sdr_v2"));
     }
 
     #[test]

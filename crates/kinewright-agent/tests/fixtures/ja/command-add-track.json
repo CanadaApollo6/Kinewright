@@ -1,5 +1,6 @@
 {
-  "Do": {
+  "command": "Do",
+  "payload": {
     "AddTrack": {
       "track": {
         "id": 71,

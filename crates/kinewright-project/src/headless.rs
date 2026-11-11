@@ -1,8 +1,7 @@
 //! Headless save orchestration (AW1 §2): serialize → sidecar flush →
 //! project bytes. No journal step: headless owns no journals, and only a
 //! session that replayed recovery data may retire one (AF3) — an
-//! unreplayed pending journal always survives a headless save. The caller
-//! gates newer-format overwrite first, as the app's save prologue does.
+//! unreplayed pending journal always survives a headless save.
 
 use std::path::Path;
 
@@ -210,202 +209,6 @@ mod tests {
 
     use super::*;
 
-    fn exact_tree(path: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
-        fn visit(
-            root: &Path,
-            path: &Path,
-            rows: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
-        ) {
-            for entry in std::fs::read_dir(path).unwrap() {
-                let path = entry.unwrap().path();
-                let metadata = std::fs::symlink_metadata(&path).unwrap();
-                if metadata.is_dir() {
-                    rows.insert(path.strip_prefix(root).unwrap().to_path_buf(), vec![]);
-                    visit(root, &path, rows);
-                } else {
-                    assert!(metadata.is_file());
-                    rows.insert(
-                        path.strip_prefix(root).unwrap().to_path_buf(),
-                        std::fs::read(&path).unwrap(),
-                    );
-                }
-            }
-        }
-        let mut rows = std::collections::BTreeMap::new();
-        visit(path, path, &mut rows);
-        rows
-    }
-    #[test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "each refused route checks the full before and after inventory"
-    )]
-    fn save_as_unsupported_source_or_destination_has_zero_mutations() {
-        use crate::bundle::BundleWriteAdmission;
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        let temp = TempDirectory::new("ja-s1-headless-admission");
-        let recovery = temp.path("recovery");
-        std::fs::create_dir(&recovery).unwrap();
-        let control = temp.path("control.kinewright");
-        write_project_document(&Document::default(), &control, None).unwrap();
-        let (mut session, _) = loaded_session(&control);
-        note(&session, "eligible pending sidecar record");
-        let renames = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&renames);
-        session.sidecar_writer.set_rename_hook(Arc::new(move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-        }));
-        let legacy = serialize_project_document(&Document::default()).unwrap();
-        let sample = include_bytes!(
-            "../../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
-        );
-        for (case, source_bytes, dest_bytes, same) in [
-            (
-                "future-new",
-                legacy
-                    .replacen(
-                        '{',
-                        &format!(
-                            "{{\"format_version\":{},",
-                            kinewright_core::PROJECT_FORMAT_VERSION + 1
-                        ),
-                        1,
-                    )
-                    .into_bytes(),
-                None,
-                false,
-            ),
-            ("studio-new", sample.to_vec(), None, false),
-            (
-                "studio-existing",
-                sample.to_vec(),
-                Some(legacy.as_bytes().to_vec()),
-                false,
-            ),
-            ("studio-same", sample.to_vec(), None, true),
-            (
-                "legacy-studio",
-                legacy.as_bytes().to_vec(),
-                Some(sample.to_vec()),
-                false,
-            ),
-            (
-                "legacy-future",
-                legacy.as_bytes().to_vec(),
-                Some(
-                    legacy
-                        .replacen(
-                            '{',
-                            &format!(
-                                "{{\"format_version\":{},",
-                                kinewright_core::PROJECT_FORMAT_VERSION + 1
-                            ),
-                            1,
-                        )
-                        .into_bytes(),
-                ),
-                false,
-            ),
-        ] {
-            let source = temp.path(&format!("{case}-source.kinewright"));
-            let target = if same {
-                source.clone()
-            } else {
-                temp.path(&format!("{case}-target.kinewright"))
-            };
-            std::fs::write(&source, &source_bytes).unwrap();
-            if let Some(bytes) = dest_bytes {
-                std::fs::write(&target, bytes).unwrap();
-            }
-            let admission = BundleWriteAdmission::read(&source).unwrap();
-            let retained = admission.clone();
-            for (index, path) in [&source, &target].into_iter().enumerate() {
-                let assets = path.with_extension("kinewright-assets");
-                std::fs::create_dir_all(&assets).unwrap();
-                std::fs::write(
-                    assets.join("distinct-owned-input"),
-                    format!("{case}-{index}"),
-                )
-                .unwrap();
-                std::fs::write(
-                    sidecar_path_for_project(Some(path)).unwrap(),
-                    format!("occupied-{case}-{index}"),
-                )
-                .unwrap();
-                let base = recovery.join(journal_file_name(path));
-                std::fs::write(&base, format!("base-{case}-{index}")).unwrap();
-                let allocated =
-                    crate::allocate_journal_path(&recovery, Some(path), Path::new(""), &[]);
-                std::fs::write(allocated, format!("suffix-{case}-{index}")).unwrap();
-            }
-            let before = exact_tree(temp.root());
-            let digest = session.saved_digest.clone();
-            let established = session.established.clone();
-            let generations = (
-                session.last_written_gen,
-                session.confirmed_written_gen,
-                session.incidents.read().unwrap().generation(),
-            );
-            let (result, trace) = crate::io_observer::observe(|| {
-                save_headless(
-                    &Document::default(),
-                    &admission,
-                    &target,
-                    None,
-                    &mut session,
-                    "",
-                    TimelineRevision::default(),
-                    &recovery,
-                    None,
-                )
-            });
-            assert!(result.is_err(), "{case}");
-            assert!(trace.events.is_empty(), "{case}: {:?}", trace.events);
-            assert_eq!(renames.load(Ordering::SeqCst), 0, "{case}");
-            assert_eq!(exact_tree(temp.root()), before, "{case}");
-            assert_eq!(admission, retained);
-            assert_eq!(session.saved_digest, digest);
-            assert_eq!(session.established, established);
-            assert_eq!(
-                (
-                    session.last_written_gen,
-                    session.confirmed_written_gen,
-                    session.incidents.read().unwrap().generation()
-                ),
-                generations
-            );
-        }
-        let admission = BundleWriteAdmission::read(&control).unwrap();
-        let mut changed = Document::default();
-        changed.markers.push(kinewright_core::Marker {
-            id: kinewright_core::MarkerId(1),
-            position: kinewright_core::TimeCode::ZERO,
-            label: "admitted control".into(),
-            color_token: 0,
-        });
-        let previous = session.saved_digest.clone();
-        save_headless(
-            &changed,
-            &admission,
-            &control,
-            None,
-            &mut session,
-            &previous,
-            TimelineRevision::default(),
-            &recovery,
-            None,
-        )
-        .unwrap();
-        assert_eq!(load_document(&control).unwrap().0, changed);
-        assert!(
-            renames.load(Ordering::SeqCst) > 0,
-            "the real sidecar write hook was armed"
-        );
-    }
-
     /// Observe one plain project incident into the session log.
     fn note(session: &SidecarSession, text: &str) {
         session
@@ -504,8 +307,8 @@ mod tests {
         assert_eq!(reloaded, document, "the round trip is identical");
         assert_eq!(
             version,
-            crate::min_required_format_version(&document),
-            "the save stamps the document's minimum version"
+            kinewright_core::PROJECT_FORMAT_VERSION,
+            "the save stamps the current format"
         );
         assert_eq!(
             report.project.digest, digest,
@@ -556,7 +359,7 @@ mod tests {
             TimelineRevision::default(),
         ));
         let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
-        let foreign_bytes = build_sidecar_bytes(&records, &[], &foreign_digest, &foreign_digest)
+        let foreign_bytes = build_sidecar_bytes(&records, &foreign_digest, &foreign_digest)
             .expect("the foreign sidecar builds");
         let occupied_sidecar = sidecar_path_for_project(Some(&occupied)).expect("derived");
         std::fs::write(&occupied_sidecar, &foreign_bytes).expect("the foreign stem writes");
@@ -967,7 +770,7 @@ mod tests {
             TimelineRevision::default(),
         ));
         let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
-        let foreign_bytes = build_sidecar_bytes(&records, &[], &foreign_digest, &foreign_digest)
+        let foreign_bytes = build_sidecar_bytes(&records, &foreign_digest, &foreign_digest)
             .expect("the foreign sidecar builds");
         let target_sidecar = sidecar_path_for_project(Some(&target)).expect("derived");
         std::fs::write(&target_sidecar, &foreign_bytes).expect("the foreign stem writes");
@@ -1021,11 +824,11 @@ mod tests {
         assert_eq!(baks, 0, "no .bak litter from the failed save");
         std::fs::remove_dir(&target).expect("cleanup");
         std::fs::rename(&stash, &target).expect("the target file returns");
-        session
+        *session
             .incidents
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
         let report = save_headless(
             &changed,
             &admission,

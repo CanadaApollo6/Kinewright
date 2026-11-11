@@ -327,7 +327,13 @@ fn separable(description: &ColorDescription) -> bool {
         | ColorTransfer::Log
         | ColorTransfer::LogC
         | ColorTransfer::Log3G10
-        | ColorTransfer::Other(_) => false,
+        | ColorTransfer::Smpte240M
+        | ColorTransfer::LogSqrt
+        | ColorTransfer::Iec61966TwoFour
+        | ColorTransfer::Bt1361Ecg
+        | ColorTransfer::Bt2020Ten
+        | ColorTransfer::Bt2020Twelve
+        | ColorTransfer::Smpte428 => false,
     };
     let matrix = match description.matrix {
         ColorMatrix::Identity | ColorMatrix::Rgb | ColorMatrix::Bt709 => true,
@@ -340,7 +346,12 @@ fn separable(description: &ColorDescription) -> bool {
         | ColorMatrix::ChromaDerivedNcl
         | ColorMatrix::ChromaDerivedCl
         | ColorMatrix::Ictcp
-        | ColorMatrix::Other(_) => false,
+        | ColorMatrix::Bt470Bg
+        | ColorMatrix::Fcc
+        | ColorMatrix::Smpte2085
+        | ColorMatrix::IptC2
+        | ColorMatrix::YcgcoRe
+        | ColorMatrix::YcgcoRo => false,
     };
     transfer && matrix
 }

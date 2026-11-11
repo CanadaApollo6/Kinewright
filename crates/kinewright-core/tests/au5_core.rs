@@ -253,7 +253,7 @@ fn au5_descriptor_tables_match_the_contract_exactly() {
     assert!(!is_audio_effect("audio_hum"));
     assert!(!is_audio_effect("audio_click"));
 
-    assert_eq!(EFFECT_DESCRIPTORS.len(), 28);
+    assert_eq!(EFFECT_DESCRIPTORS.len(), 27);
     let tail: Vec<&str> = EFFECT_DESCRIPTORS
         .iter()
         .rev()

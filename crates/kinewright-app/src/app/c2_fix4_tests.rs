@@ -93,7 +93,6 @@ mod tests {
                 crate::media_access::MediaBackend::Engine(fixture.shared()),
                 &SidecarMode::None,
                 None,
-                PROJECT_FORMAT_VERSION,
                 None,
             )
             .unwrap(),
@@ -109,7 +108,10 @@ mod tests {
         b.request_frame(TimeCode(30));
         hold.wait();
         let opens = (grant_a.locator_opens(), grant_b.locator_opens());
-        app.enable_ja1();
+        let recovery_root = TempDirectory::new_in(&workspace_target_dir(), "activation-recovery");
+        crate::recovery::with_ja_directory(recovery_root.root().into(), || {
+            app.enable_ja1();
+        });
         let waited = app.focused().ja1.is_none() && app.focused().ja1_activation.is_some();
         std::fs::copy(blue.path(), red.path()).unwrap();
         drop(hold);
@@ -188,10 +190,17 @@ mod tests {
             !grant.is_quiescent(),
             "the real transcript job owns a work lease"
         );
-        app.enable_ja1();
+        crate::recovery::with_ja_directory(root.root().into(), || {
+            app.enable_ja1();
+        });
         let ctx = egui::Context::default();
         let deadline = Instant::now() + Duration::from_secs(10);
         while app.focused().ja1.is_none() {
+            assert!(
+                app.focused().ja1_activation.is_some(),
+                "activation must remain pending before testing its save guard: {}",
+                app.status
+            );
             assert!(
                 !app.save_project(false),
                 "pending activation must not save legacy data"

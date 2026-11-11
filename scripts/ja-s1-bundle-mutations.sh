@@ -29,12 +29,7 @@ add('corrupt-history',project/'store.rs','''        if measured != reference.byt
         {''','''        if false && (measured != reference.byte_length
             || !digest.as_ref().is_ok_and(|h| h == &reference.sha256))
         {''','durable_bundle::corrupt_history_quarantines_without_rewriting_usable_versions')
-add('source-destination-admission',project/'bundle.rs','''    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {''','''    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {
-        if !destination.as_os_str().is_empty() {return Ok(());}''','headless::tests::save_as_unsupported_source_or_destination_has_zero_mutations','project-lib')
-add('app-source-destination-admission',project/'bundle.rs','''    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {''','''    pub fn authorize_legacy_write(&self, destination: &Path) -> Result<(), ProjectSaveError> {
-        if !destination.as_os_str().is_empty() {return Ok(());}''','app::in2b_tests::save_as_unsupported_source_or_destination_has_zero_mutations','app')
 add('history-reopen',project/'bundle.rs','''        core.restore_history((*branch.1).clone())''','''        core.restore_history(kinewright_core::Core::spawn((*branch.1.document).clone()).unwrap().export_history().unwrap())''','history_loss_fixture_revised_preserves_one_entry','agent')
-add('eval-v3','crates/kinewright-agent/src/bin/kinewright-eval.rs','    let read = project_format_version(bytes);','    let read = project_format_version(bytes); if read == 3 {return Ok(());}','tests::rerender_refuses_v3_before_projection_or_output','eval')
 add('comment-baseline','crates/kinewright-agent/src/ja_harness/revised.rs','"binding_present":root.receipt_index_ref.is_some()','"binding_present":true','comment_observer_persists_exact_bytes_then_missing_receipt','agent')
 for name,path,anchor,replacement,witness,target in cases:
  if (out/f'{name}-restored.log.gz').exists():continue

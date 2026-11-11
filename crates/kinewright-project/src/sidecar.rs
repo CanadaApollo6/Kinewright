@@ -2,9 +2,7 @@
 //!
 //! The sidecar carries the incident log across runs as JSON: an envelope with a
 //! format version and a digest pair, plus one record per persisted incident
-//! ([`kinewright_core::IncidentRecord`]). Records that do not parse — or whose
-//! code this build predates — are carried verbatim and re-emitted byte-equal,
-//! never pruned and never trusted.
+//! ([`kinewright_core::IncidentRecord`]). Unreadable sidecars use the corrupt-file path.
 //!
 //! Writes land through the ONE [`SidecarWriter`] thread per app (N2/B-5):
 //! sequence-numbered jobs keyed by path, stale jobs dropped, per-job unique
@@ -26,16 +24,9 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{
     IncidentCode, IncidentObservation, IncidentRecord, IncidentSubject, LabelIncident,
-    TimelineRevision, from_code,
+    PROJECT_FORMAT_VERSION, TimelineRevision,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
-
-/// The sidecar format version this build writes (`IN2B` §2 rule 2).
-///
-/// Independent of the project's counter: coupling them would force a sidecar
-/// bump every time the document format moves and vice versa (d11).
-pub const SIDECAR_FORMAT_VERSION: u32 = 1;
 
 /// The sidecar suffix: `<stem>.kinewright-incidents` (d1).
 pub const SIDECAR_SUFFIX: &str = "kinewright-incidents";
@@ -73,8 +64,7 @@ pub enum SidecarMode {
     /// rule 2).
     Load { project_digest: String },
     /// Ungated load: recovery restore, whose document is definitionally newer
-    /// than the last save, so the digest cannot match. Version arms still
-    /// apply (`IN2B` §4 rule 5).
+    /// than the last save, so the digest cannot match. Strict decoding still applies.
     RecoveryNoDigest,
     /// No load and no IO: new projects.
     None,
@@ -83,16 +73,7 @@ pub enum SidecarMode {
 /// A sidecar that parsed and passed the version gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedSidecar {
-    /// Records that parsed, in file order — including unknown-code records,
-    /// which `restore` aggregates while their raw texts ride in `carried`
-    /// (N4/F3).
     pub records: Vec<IncidentRecord>,
-    /// Raw record texts carried verbatim: unparseable records plus every
-    /// unknown-code record's source slice, byte-equal, in file order.
-    pub carried: Vec<String>,
-    /// The highest `id` over all carried raw values, for `restore`'s
-    /// `id_floor` (N4/F2). `None` when no carried value carries a `u64` id.
-    pub id_floor: Option<u64>,
     /// The envelope's digest pair (`IN2B` §2 rule 9).
     pub project_digest: String,
     /// The digest before the save that wrote this sidecar (`""` when the
@@ -100,121 +81,47 @@ pub struct LoadedSidecar {
     pub previous_digest: String,
 }
 
-/// What loading a sidecar file returns (`IN2B` §2 rule 2).
-///
-/// Exactly the four arms probe BP7 prototyped. The digest gate (rule 9) is not
-/// a fifth arm: the caller applies [`sidecar_matches_project`] to `Current`
-/// and refuses on mismatch, same disposition as `Corrupt`.
+/// A complete current sidecar, an absent file, or an unreadable file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidecarLoad {
-    /// No file: an empty log, silently.
     Absent,
-    /// Parsed and version-gated; the caller still checks the digest pair.
     Current(LoadedSidecar),
-    /// A newer writer's file: refused, never rewritten.
-    Newer(u32),
-    /// Truncated, torn, invalid JSON, versionless, or wrongly shaped:
-    /// refused, with the reason.
     Corrupt(String),
 }
 
-/// The envelope as written (`IN2B` §2 rule 2), minus the version.
-///
-/// `load_sidecar` gates `format_version` through the `Value` first (missing →
-/// `Corrupt`, oversize → `Corrupt`, newer → `Newer`), so the typed pass reads
-/// only the digests and the raw records; the version key is ignored here.
-/// Writes go through [`build_sidecar_bytes`] so carried texts re-emit
-/// verbatim rather than through a normalising `Value` round trip (rule 8b).
+/// The current typed sidecar. Every record must decode in full.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SidecarFile {
+    #[serde(deserialize_with = "kinewright_core::deserialize_format_version")]
+    #[serde(rename = "format_version")]
+    _format_version: u32,
     project_digest: String,
     previous_digest: String,
-    records: Vec<Box<RawValue>>,
+    records: Vec<IncidentRecord>,
 }
 
-/// Load and parse a sidecar file: the four arms, no digest gate, no rename.
-///
-/// * Missing file → `Absent`. Any other IO error → `Corrupt`.
-/// * Invalid JSON, a non-object envelope, or a wrongly shaped envelope →
-///   `Corrupt` with the reason.
-/// * Missing `format_version` → `Corrupt("missing format_version")`: the
-///   sidecar has no legacy, so unlike the `Document` it defaults nothing
-///   (N1.1/OQ4).
-/// * A `format_version` that is not a `u32` (string, float, negative, or too
-///   large) → `Corrupt` (BR40: oversize reads as `Corrupt`, not `Newer` — a
-///   version past the `u32` range is malformed input to the envelope's `u32`
-///   field, and `Corrupt` preserves the bytes via `.bak` exactly as `Newer`
-///   does).
-/// * `format_version` above [`SIDECAR_FORMAT_VERSION`] → `Newer(v)`. Version 0
-///   loads: the gate is newer-side only.
-/// * Records parse per element (rule 8b): unparseable elements pass into
-///   `carried` untouched, and unknown-code records join them (N4/F3) while
-///   still reaching `restore` for the aggregate — body #5 stays true.
+/// Read a sidecar without modifying it. An unreadable shape is corrupt.
 #[must_use]
 pub fn load_sidecar(sidecar_path: &Path) -> SidecarLoad {
     let bytes = match fs::read(sidecar_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return SidecarLoad::Absent,
-        Err(error) => {
-            return SidecarLoad::Corrupt(format!("could not read the sidecar: {error}"));
-        }
+        Err(error) => return SidecarLoad::Corrupt(format!("could not read the sidecar: {error}")),
     };
-    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
-        Err(error) => return SidecarLoad::Corrupt(trim_json_error(&error)),
-    };
-    let Some(envelope) = value.as_object() else {
-        return SidecarLoad::Corrupt("the sidecar is not a JSON object".to_owned());
-    };
-    let Some(raw_version) = envelope.get("format_version") else {
-        return SidecarLoad::Corrupt("missing format_version".to_owned());
-    };
-    let Some(version_wide) = raw_version.as_u64() else {
-        return SidecarLoad::Corrupt(format!(
-            "format_version is not a version number: {raw_version}"
-        ));
-    };
-    if version_wide > u64::from(u32::MAX) {
-        return SidecarLoad::Corrupt(format!(
-            "format_version {version_wide} is larger than a u32 (BR40)"
-        ));
+    match serde_json::from_slice::<SidecarFile>(&bytes) {
+        Ok(SidecarFile {
+            _format_version: _,
+            records,
+            project_digest,
+            previous_digest,
+        }) => SidecarLoad::Current(LoadedSidecar {
+            records,
+            project_digest,
+            previous_digest,
+        }),
+        Err(error) => SidecarLoad::Corrupt(trim_json_error(&error)),
     }
-    let version = u32::try_from(version_wide).unwrap_or(u32::MAX);
-    if version > SIDECAR_FORMAT_VERSION {
-        return SidecarLoad::Newer(version);
-    }
-    let file: SidecarFile = match serde_json::from_slice(&bytes) {
-        Ok(file) => file,
-        Err(error) => return SidecarLoad::Corrupt(trim_json_error(&error)),
-    };
-    let mut records = Vec::with_capacity(file.records.len());
-    let mut carried = Vec::new();
-    let mut id_floor: Option<u64> = None;
-    for raw in &file.records {
-        let text = raw.get();
-        match serde_json::from_str::<IncidentRecord>(text) {
-            Err(_) => {
-                id_floor = id_floor.max(carried_raw_id(text));
-                carried.push(text.to_owned());
-            }
-            Ok(record) => {
-                if from_code(&record.code).is_none() {
-                    // N4/F3: carried verbatim for the next write AND passed to
-                    // `restore`, which skips, counts and aggregates (body #5).
-                    id_floor = id_floor.max(Some(record.id.0));
-                    carried.push(text.to_owned());
-                }
-                records.push(record);
-            }
-        }
-    }
-    SidecarLoad::Current(LoadedSidecar {
-        records,
-        carried,
-        id_floor,
-        project_digest: file.project_digest,
-        previous_digest: file.previous_digest,
-    })
 }
 
 /// One line of a serde error: file position without the multi-line context.
@@ -225,21 +132,6 @@ fn trim_json_error(error: &serde_json::Error) -> String {
         .next()
         .unwrap_or("invalid JSON")
         .to_owned()
-}
-
-/// The `id` a carried raw value carries, when it parses that far (N4/F2).
-///
-/// Anything else — a non-object, a missing `id`, a non-`u64` `id` —
-/// contributes nothing to the floor: core clamps and resumes above what it
-/// is given, and an unreadable id cannot collide by construction because no
-/// restored entry holds it.
-fn carried_raw_id(text: &str) -> Option<u64> {
-    #[derive(Deserialize)]
-    struct CarriedId {
-        #[serde(default)]
-        id: Option<u64>,
-    }
-    serde_json::from_str::<CarriedId>(text).ok()?.id
 }
 
 /// Whether a loaded sidecar pairs with project bytes of this digest (`IN2B` §2
@@ -257,8 +149,7 @@ pub fn sidecar_matches_project(loaded: &LoadedSidecar, project_digest: &str) -> 
 ///
 /// The target is `<sidecar>.bak`, or `.bak.1`, `.bak.2`, … — the first name
 /// that does not exist, so a second refusal never overwrites the first.
-/// Returns the path the bytes moved to. A newer build never reads a `.bak` on
-/// its own; the person renames it back by hand (N-10).
+/// Returns the path the bytes moved to. Backups are never loaded automatically.
 /// # Errors
 /// Returns the rename's IO error, with the sidecar left in place.
 pub fn refuse_sidecar(sidecar_path: &Path) -> io::Result<PathBuf> {
@@ -332,18 +223,11 @@ pub fn sidecar_write_failed_observation(
     observation
 }
 
-/// Serialise an envelope: pretty, with carried texts re-emitted verbatim
-/// (`IN2B` §2 rules 1, 8b).
-///
-/// Parsed records render pretty (the §2 worked shape); carried texts ride as
-/// [`RawValue`], so the round trip is byte-equal, not value-equal — a
-/// normalising `Value` pass would rewrite history this build cannot read.
-/// Consecutive writes over an unchanged log are byte-identical.
+/// Serialize the current incident records with their project digest pair.
 /// # Errors
-/// Returns the serialisation failure as a string.
+/// Returns the serialization failure as a string.
 pub fn build_sidecar_bytes(
     records: &[IncidentRecord],
-    carried: &[String],
     project_digest: &str,
     previous_digest: &str,
 ) -> Result<Vec<u8>, String> {
@@ -352,23 +236,15 @@ pub fn build_sidecar_bytes(
         format_version: u32,
         project_digest: &'a str,
         previous_digest: &'a str,
-        records: Vec<Box<RawValue>>,
+        records: &'a [IncidentRecord],
     }
-    let mut raws = Vec::with_capacity(records.len() + carried.len());
-    for record in records {
-        let text = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
-        raws.push(RawValue::from_string(text).map_err(|error| error.to_string())?);
-    }
-    for text in carried {
-        raws.push(RawValue::from_string(text.clone()).map_err(|error| error.to_string())?);
-    }
-    let envelope = WriteEnvelope {
-        format_version: SIDECAR_FORMAT_VERSION,
+    serde_json::to_vec_pretty(&WriteEnvelope {
+        format_version: PROJECT_FORMAT_VERSION,
         project_digest,
         previous_digest,
-        records: raws,
-    };
-    serde_json::to_vec_pretty(&envelope).map_err(|error| error.to_string())
+        records,
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// What one synchronous sidecar flush did (`IN2B` §2 rules 4–5, N-5).
@@ -739,31 +615,9 @@ fn write_one_job(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::time::{Instant, SystemTime};
-
-    use kinewright_core::IncidentLog;
     use kinewright_media::test_support::TempDirectory;
 
     use super::*;
-
-    /// Three records through the production builder: observed, never
-    /// hand-built, so the shapes under test are shapes the writer emits.
-    fn three_records() -> Vec<IncidentRecord> {
-        let mut log = IncidentLog::with_start(Instant::now(), Some(SystemTime::UNIX_EPOCH));
-        for n in 0..3 {
-            log.observe(IncidentObservation::plain(
-                IncidentCode::Label(LabelIncident::Project),
-                IncidentSubject::Project,
-                format!("in2b sidecar record {n}"),
-                TimelineRevision::default(),
-            ));
-        }
-        let (records, report) = log.records(None, &BTreeMap::new());
-        assert_eq!(records.len(), 3);
-        assert_eq!(report.written_open, 3);
-        records
-    }
 
     #[test]
     fn sidecar_paths_derive_from_the_stem_beside_the_project() {
@@ -790,8 +644,6 @@ mod tests {
     fn sidecar_matches_project_accepts_either_digest() {
         let loaded = LoadedSidecar {
             records: Vec::new(),
-            carried: Vec::new(),
-            id_floor: None,
             project_digest: "aa".to_owned(),
             previous_digest: "bb".to_owned(),
         };
@@ -889,93 +741,9 @@ mod tests {
             r#"{"project_digest":"aa","previous_digest":"aa","records":[]}"#,
         )
         .expect("fixture writes");
-        assert_eq!(
-            load_sidecar(&versionless),
-            SidecarLoad::Corrupt("missing format_version".to_owned())
-        );
-    }
-
-    #[test]
-    fn oversize_format_version_reads_as_corrupt_br40() {
-        // BR40 (N4.1): a sidecar `format_version` too large for `u32` reads
-        // as `Corrupt`, not `Newer` — it is malformed input to the envelope's
-        // `u32` field, and `Corrupt` preserves the bytes via `.bak` exactly
-        // as `Newer` does.
-        let temp = TempDirectory::new("in2b-sidecar-br40");
-        let path = temp.path("oversize.kinewright-incidents");
-        fs::write(
-            &path,
-            r#"{"format_version":99999999999,"project_digest":"aa","previous_digest":"aa","records":[]}"#,
-        )
-        .expect("fixture writes");
-        let loaded = load_sidecar(&path);
         assert!(
-            matches!(loaded, SidecarLoad::Corrupt(_)),
-            "oversize reads as Corrupt, got {loaded:?}"
+            matches!(load_sidecar(&versionless), SidecarLoad::Corrupt(reason) if reason.contains("missing field `format_version`"))
         );
-        // A merely newer version still reads as Newer.
-        fs::write(
-            &path,
-            r#"{"format_version":999,"project_digest":"aa","previous_digest":"aa","records":[]}"#,
-        )
-        .expect("fixture writes");
-        assert_eq!(load_sidecar(&path), SidecarLoad::Newer(999));
-    }
-
-    #[test]
-    fn unparseable_and_unknown_records_carry_verbatim_with_id_floor() {
-        let temp = TempDirectory::new("in2b-sidecar-carry");
-        let records = three_records();
-        let good_text = serde_json::to_string(&records[0]).expect("record serialises");
-        let mut unknown = records[1].clone();
-        unknown.code = "no_such_code_xyz".to_owned();
-        let unknown_text = serde_json::to_string(&unknown).expect("record serialises");
-        // Unparseable as `IncidentRecord` (missing fields), carrying a high id.
-        let bad_text = r#"{"id": 9000, "bogus": [1, 2, {"nested": true}]}"#;
-        let digest = digest_bytes(b"project-bytes");
-        let envelope = format!(
-            "{{\n  \"format_version\": 1,\n  \"project_digest\": \"{digest}\",\n  \"previous_digest\": \"{digest}\",\n  \"records\": [\n    {good_text},\n    {bad_text},\n    {unknown_text}\n  ]\n}}"
-        );
-        let path = temp.path("carry.kinewright-incidents");
-        fs::write(&path, &envelope).expect("fixture writes");
-
-        let SidecarLoad::Current(loaded) = load_sidecar(&path) else {
-            panic!("one bad record does not refuse the file");
-        };
-        // The good record and the unknown-code record both parse; the
-        // unknown-code record still reaches `restore` for the aggregate (F3).
-        assert_eq!(loaded.records.len(), 2);
-        assert_eq!(loaded.records[1].code, "no_such_code_xyz");
-        // Both carried texts are byte-equal to their source slices.
-        assert_eq!(loaded.carried, vec![bad_text.to_owned(), unknown_text]);
-        // The floor covers every carried id, parsed or not (F2).
-        assert_eq!(loaded.id_floor, Some(9000));
-        assert!(sidecar_matches_project(&loaded, &digest));
-        assert!(!sidecar_matches_project(&loaded, "0000000000000000"));
-    }
-
-    #[test]
-    fn carried_texts_reemit_verbatim_and_consecutive_writes_match() {
-        let records = three_records();
-        // Element slices as a read produces them: inner whitespace kept, no
-        // padding (`from_string` trims padding, but read-side raws never
-        // carry any — padding between elements belongs to no value).
-        let carried = vec![
-            "{\"id\": 7,\n   \"bogus\": true}".to_owned(),
-            "[1,2]".to_owned(),
-        ];
-        let first =
-            build_sidecar_bytes(&records[..1], &carried, "aabbcc", "aabbcc").expect("builds");
-        let text = String::from_utf8(first.clone()).expect("sidecars are UTF-8");
-        for raw in &carried {
-            assert!(
-                text.contains(raw),
-                "carried bytes appear verbatim in the rewritten sidecar"
-            );
-        }
-        let second =
-            build_sidecar_bytes(&records[..1], &carried, "aabbcc", "aabbcc").expect("rebuilds");
-        assert_eq!(first, second, "consecutive writes are byte-identical");
     }
 
     #[test]
@@ -1100,5 +868,46 @@ mod writer_authority_tests {
             .handle
             .release()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod strict_sidecar_tests {
+    use super::*;
+    use kinewright_media::test_support::TempDirectory;
+    #[test]
+    fn unknown_sidecar_fields_and_records_are_corrupt_and_left_untouched() {
+        let temp = TempDirectory::new("strict-sidecar");
+        let path = temp.path("edit.kinewright-incidents");
+        let mut log = kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
+        let _ = log.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::Project),
+            IncidentSubject::Project,
+            "current record",
+            TimelineRevision::default(),
+        ));
+        let (records, _) = log.records(None, &std::collections::BTreeMap::new());
+        let current: serde_json::Value =
+            serde_json::from_slice(&build_sidecar_bytes(&records, "digest", "previous").unwrap())
+                .unwrap();
+        let mut envelope = current.clone();
+        envelope["extra"] = serde_json::json!(true);
+        let mut record = current.clone();
+        record["records"][0]["extra"] = serde_json::json!(true);
+        let mut code = current;
+        code["records"][0]["code"] = serde_json::json!("unregistered_code");
+        for (wire, expected) in [
+            (envelope, "unknown field `extra`"),
+            (record, "unknown field `extra`"),
+            (code, "unknown incident code: unregistered_code"),
+        ] {
+            let bytes = serde_json::to_vec(&wire).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(
+                matches!(load_sidecar(&path), SidecarLoad::Corrupt(reason) if reason.contains(expected)),
+                "{expected}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
     }
 }

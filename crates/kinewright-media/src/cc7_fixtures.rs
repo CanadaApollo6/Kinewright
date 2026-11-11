@@ -4127,14 +4127,13 @@ const CC7_EVAL_TEST_SOURCES: [&str; 2] = [
 /// published-benchmark check of §7.7, written where the other published
 /// manifests' checks live, and it is declared here rather than renamed
 /// (§11.3's "or be named explicitly in the inventory").
-const CC7_EVAL_TESTS: [&str; 28] = [
+const CC7_EVAL_TESTS: [&str; 27] = [
     // eval.rs — the shared-runner half.
     "cc7_a_v5_result_serialises_byte_identically_without_measurements",
     "cc7_track_keyframes_match_expected_reads_the_committed_document",
     "cc7_a_colour_assertion_without_evidence_fails_rather_than_passing",
     "cc7_only_colour_assertions_emit_measurements",
     "cc7_a_colour_request_is_derived_from_the_assertions_only",
-    "cc7_human_review_v1_files_still_load_and_score",
     "cc7_human_review_v2_round_trips_blind_id_and_questions",
     "cc7_accepted_requires_every_question_answered",
     "cc7_blind_ids_are_derived_from_the_artifact_digest",
@@ -4463,8 +4462,8 @@ fn cc7_declared_test_names_exist_in_their_source_files() {
         "a CC7 test name is declared in two inventory arrays"
     );
     assert_eq!(
-        total, 96,
-        "the CC7 slice declares 96 tests across five crates"
+        total, 95,
+        "the CC7 slice declares 95 tests across five crates"
     );
     for name in CC7_EXPLICIT_TEST_NAMES {
         assert!(

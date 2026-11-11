@@ -47,7 +47,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, type_size};
 
-const FORMAT_VERSION: u32 = 1;
 const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
@@ -73,29 +72,24 @@ pub(crate) fn with_ja_directory<T>(directory: PathBuf, run: impl FnOnce() -> T) 
     run()
 }
 
-/// The default project version: journals written before Part B read as 1
-/// (`IN2B` §4 rule 5, N-4 — a named fn, not a bare `default`).
-fn v1() -> u32 {
-    1
+/// Use the same recovery root for the GUI recorder and Studio activation.
+pub(crate) fn directory() -> PathBuf {
+    #[cfg(test)]
+    if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
+        return directory;
+    }
+    default_recovery_directory()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JournalHeader {
-    format_version: u32,
-    /// The owning project's save path; `None` for unsaved projects. Optional
-    /// with a default so journals from before multi-project still parse.
+    #[serde(deserialize_with = "kinewright_core::deserialize_format_version")]
+    #[serde(rename = "format_version")]
+    _format_version: u32,
+    /// The owning project's save path; the writer omits it for unsaved projects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_path: Option<PathBuf>,
-    /// The project `format_version` the writing build stamped: its own
-    /// `PROJECT_FORMAT_VERSION` const, not the session's read version — the
-    /// journal describes the bytes this build wrote (`IN2B` §4 rule 5, N-4).
-    /// MO2 R7: the maximum supported, never the initial snapshot's minimum —
-    /// later operations may need features the snapshot lacks.
-    /// The journal's own strict `format_version` gate above is unchanged:
-    /// the two versions answer different questions ("can I parse this
-    /// journal?" vs "can I run this project?").
-    #[serde(default = "v1")]
-    writer_format_version: u32,
     initial_document: Document,
 }
 
@@ -219,12 +213,12 @@ impl JournalWriter {
         // takeover scan never has to guess which spelling a relative header
         // meant — legacy relative headers stay readable but never claim.
         let header = serde_json::to_vec(&JournalHeader {
-            format_version: FORMAT_VERSION,
+            _format_version: PROJECT_FORMAT_VERSION,
             // H5: a path with no identity writes no header path (never claims).
             project_path: authority
                 .as_ref()
                 .map(|writer| writer.resolved_identity().to_path_buf()),
-            writer_format_version: PROJECT_FORMAT_VERSION,
+
             initial_document: initial_document.clone(),
         })
         .map_err(|error| format!("could not serialize recovery snapshot: {error}"))?;
@@ -282,7 +276,7 @@ struct ParsedCommand {
 struct ParsedJournal {
     project_path: Option<PathBuf>,
     initial_document: Document,
-    writer_format_version: u32,
+
     commands: Vec<ParsedCommand>,
     #[cfg(test)]
     header_end: usize,
@@ -294,7 +288,7 @@ struct ParsedJournal {
 struct RecoveryReport {
     project_path: Option<PathBuf>,
     document: Document,
-    writer_format_version: u32,
+
     recovered_commands: usize,
     damage: Option<Damage>,
 }
@@ -332,16 +326,6 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
         ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
         reason: format!("the initial document snapshot is corrupt: {error}"),
     })?;
-    if header.format_version != FORMAT_VERSION {
-        return Err(Damage {
-            offset: MAGIC.len(),
-            ignored_bytes: bytes.len().saturating_sub(MAGIC.len()),
-            reason: format!(
-                "journal format {} is not supported by this build",
-                header.format_version
-            ),
-        });
-    }
     if let Err(error) = header.initial_document.validate() {
         return Err(Damage {
             offset: MAGIC.len(),
@@ -386,7 +370,7 @@ fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
     Ok(ParsedJournal {
         project_path: header.project_path,
         initial_document: header.initial_document,
-        writer_format_version: header.writer_format_version,
+
         commands,
         #[cfg(test)]
         header_end,
@@ -490,7 +474,7 @@ fn replay(parsed: ParsedJournal) -> Inspection {
     Inspection::Recoverable(RecoveryReport {
         project_path,
         document,
-        writer_format_version: parsed.writer_format_version,
+
         recovered_commands,
         damage,
     })
@@ -749,10 +733,6 @@ pub(crate) struct RestoreRequest {
     pub(crate) document: Document,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) journal_path: PathBuf,
-    /// The journal's writer version (`IN2B` §4 rule 5): the restore is
-    /// refused when it exceeds this build's const, before the document is
-    /// trusted.
-    pub(crate) writer_format_version: u32,
 }
 
 /// App-owned recovery lifecycle. All filesystem and UI behavior stays here.
@@ -780,21 +760,13 @@ impl Recovery {
     }
 
     pub(crate) fn start(core: &Core, project_path: Option<&Path>) -> Self {
-        #[cfg(test)]
-        if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
-            return Self::start_in(directory, core, project_path);
-        }
-        Self::start_in(default_recovery_directory(), core, project_path)
+        Self::start_in(directory(), core, project_path)
     }
 
     /// Start a per-project recorder without repeating the process-startup
     /// recovery scan. Only the startup session owns restore decisions.
     pub(crate) fn start_attached(core: &Core, project_path: Option<&Path>) -> Self {
-        #[cfg(test)]
-        if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
-            return Self::start_attached_in(directory, core, project_path);
-        }
-        Self::start_attached_in(default_recovery_directory(), core, project_path)
+        Self::start_attached_in(directory(), core, project_path)
     }
 
     #[cfg(test)]
@@ -816,7 +788,7 @@ impl Recovery {
             64 * 1024 * 1024,
         )?;
         let parsed = parse_journal(&bytes).map_err(|e| e.reason)?;
-        let observed = serde_json::json!({"path":self.path,"writer_format_version":parsed.writer_format_version,
+        let observed = serde_json::json!({"path":self.path,
             "initial_document":parsed.initial_document,"commands":parsed.commands.iter().map(|c| &c.command).collect::<Vec<_>>(),
             "damage":parsed.damage.map(|d| d.reason),"gui_post_scan_exclusion":"pending_baseline_witness"});
         Ok((bytes, observed))
@@ -1114,7 +1086,6 @@ impl Recovery {
                 document: report.document.clone(),
                 project_path: report.project_path.clone(),
                 journal_path: entry.journal_path.clone(),
-                writer_format_version: report.writer_format_version,
             });
         }
         outcome
@@ -1195,15 +1166,6 @@ impl Recovery {
                 false
             }
         }
-    }
-
-    /// A cross-version restore was refused (`IN2B` §4 rule 5): drop the
-    /// pending entry so this run stops offering it, but keep the file — a
-    /// newer build restores it. Unlike `consume_pending`, nothing is
-    /// deleted.
-    pub(crate) fn shelve_pending(&mut self, journal_path: &Path) {
-        self.pending
-            .retain(|entry| entry.journal_path != journal_path);
     }
 
     /// Preserve process-startup restore decisions when their owning project closes.
@@ -1367,7 +1329,7 @@ mod tests {
         AssetId, ClipId, Command, Effect, EffectId, Event, Marker, MarkerId, MediaAsset, MediaKind,
         Operation, ParamValue, Rational, TimeCode, Title, Track, TrackId, TrackKind,
     };
-    use kinewright_project::{journal_file_name, min_required_format_version};
+    use kinewright_project::journal_file_name;
     use proptest::prelude::*;
 
     use super::*;
@@ -1486,9 +1448,9 @@ mod tests {
         let mut bytes = MAGIC.to_vec();
         bytes.extend(
             serde_json::to_vec(&JournalHeader {
-                format_version: FORMAT_VERSION,
+                _format_version: PROJECT_FORMAT_VERSION,
                 project_path: project_path.map(Path::to_path_buf),
-                writer_format_version: PROJECT_FORMAT_VERSION,
+
                 initial_document: initial.clone(),
             })
             .unwrap(),
@@ -1501,9 +1463,7 @@ mod tests {
         bytes
     }
 
-    /// `None` also serializes exactly like a pre-multi-project header (the
-    /// identity field is skipped), so every test through here doubles as a
-    /// legacy-format compatibility check.
+    /// Encode the current unsaved-project journal, whose optional path is omitted.
     fn encoded_journal(initial: &Document, commands: &[JournalCommand]) -> Vec<u8> {
         encoded_journal_for(None, initial, commands)
     }
@@ -2156,113 +2116,6 @@ mod tests {
         assert!(!journal_path.exists());
     }
 
-    /// Craft header-only journal bytes with a chosen writer version line.
-    fn journal_bytes_with_header_line(header_line: &[u8]) -> Vec<u8> {
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(header_line);
-        bytes.push(b'\n');
-        bytes
-    }
-
-    /// MO2 R7: a journal whose initial snapshot needs only v1 still stamps
-    /// the maximum supported version, because an appended MO2 operation can
-    /// need v2 — the header is never downgraded to the snapshot's minimum.
-    #[test]
-    fn mo2_v1_snapshot_journal_keeps_the_maximum_writer_version() {
-        let initial = Document {
-            tracks: vec![Track {
-                id: TrackId(1),
-                kind: TrackKind::Video,
-                sync_lock: true,
-                clips: Vec::new(),
-            }],
-            ..Document::default()
-        };
-        assert_eq!(min_required_format_version(&initial), 1);
-        let command = JournalCommand::Do(Operation::AddSolidClip {
-            track: TrackId(1),
-            timeline_start: TimeCode(0),
-            duration: TimeCode(30),
-            color: kinewright_core::SolidColor { r: 9, g: 8, b: 7 },
-        });
-        let directory = TestDirectory::new("mo2-writer-version");
-        let mut writer = JournalWriter::create(&directory.journal(), None, &initial).unwrap();
-        writer.append(&command).unwrap();
-        drop(writer);
-        let Inspection::Recoverable(report) = inspect_path(&directory.journal()) else {
-            panic!("expected a recoverable journal");
-        };
-        assert_eq!(report.document, execute(&initial, &[command]));
-        assert_eq!(min_required_format_version(&report.document), 2);
-        assert_eq!(report.writer_format_version, PROJECT_FORMAT_VERSION);
-        assert!(report.writer_format_version >= min_required_format_version(&report.document));
-    }
-
-    /// `IN2B` §4 rule 5's parse/write halves: pre-Part-B headers (no key)
-    /// read as 1, the writer stamps its own const, and a 999 writer version
-    /// carries through the parse.
-    #[test]
-    fn journal_headers_carry_the_writer_format_version() {
-        // A pre-Part-B header has no `writer_format_version` key at all.
-        let initial = serde_json::to_vec(&Document::default()).expect("the snapshot serialises");
-        // Splice the snapshot in as raw JSON (no re-parse games: the header
-        // is bytes on a wire, built as bytes).
-        let mut old_line = br#"{"format_version":1,"initial_document":"#.to_vec();
-        old_line.extend_from_slice(&initial);
-        old_line.push(b'}');
-        let parsed =
-            parse_journal(&journal_bytes_with_header_line(&old_line)).expect("old headers parse");
-        assert_eq!(parsed.writer_format_version, 1);
-
-        // The writer stamps its own const, not the session's read version.
-        let directory = TestDirectory::new("writer-version");
-        let path = directory.0.join("stamp.journal");
-        drop(JournalWriter::create(&path, None, &Document::default()).expect("journal creates"));
-        let bytes = fs::read(&path).expect("the journal reads");
-        let parsed = parse_journal(&bytes).expect("the stamped journal parses");
-        assert_eq!(parsed.writer_format_version, PROJECT_FORMAT_VERSION);
-
-        // A 999 writer version carries through the parse untouched.
-        let header = serde_json::to_vec(&JournalHeader {
-            format_version: FORMAT_VERSION,
-            project_path: None,
-            writer_format_version: 999,
-            initial_document: Document::default(),
-        })
-        .expect("the 999 header serialises");
-        let parsed =
-            parse_journal(&journal_bytes_with_header_line(&header)).expect("999 headers parse");
-        assert_eq!(parsed.writer_format_version, 999);
-    }
-
-    /// A cross-version journal scans `Recoverable` — the refusal happens at
-    /// restore time (`apply_restore_request` notes the incident), not at
-    /// scan time, so the dialog still offers it and the incident has a
-    /// trigger.
-    #[test]
-    fn cross_version_journals_scan_recoverable_for_the_dialog() {
-        let directory = TestDirectory::new("cross-version-scan");
-        let header = serde_json::to_vec(&JournalHeader {
-            format_version: FORMAT_VERSION,
-            project_path: None,
-            writer_format_version: 999,
-            initial_document: Document::default(),
-        })
-        .expect("the 999 header serialises");
-        fs::write(
-            directory.0.join("cross.journal"),
-            journal_bytes_with_header_line(&header),
-        )
-        .expect("the 999 journal writes");
-        let pending = scan_directory(&directory.0);
-        assert_eq!(pending.len(), 1);
-        let PendingState::Recoverable(report) = &pending[0].state else {
-            panic!("a replayable 999 journal scans Recoverable");
-        };
-        assert_eq!(report.writer_format_version, 999);
-        assert_eq!(report.recovered_commands, 0);
-    }
-
     /// Item 23: both recovery modals note damage-only. The constructors
     /// shape code/subject/tag/transient; the headless dialog reports
     /// damage renders — and a clean prompt reports none, because the
@@ -2316,7 +2169,7 @@ mod tests {
         let report = |damage| RecoveryReport {
             project_path: None,
             document: Document::default(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
+
             recovered_commands: 3,
             damage,
         };
@@ -2376,7 +2229,6 @@ mod tests {
 }
 
 /// Actual `JournalWriter` observation, shared by the C7 witness and additive S0 fixture.
-/// This helper also compiles against the predecessor's unchanged GUI writer.
 #[cfg(test)]
 #[allow(
     clippy::too_many_lines,

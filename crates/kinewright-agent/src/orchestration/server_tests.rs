@@ -654,7 +654,10 @@ fn s4_editor_result_to_candidate() {
     let manual_history = manual.export_history().unwrap();
     let manual_pending = permit.pending().unwrap();
     let manual_attachment = owner.current_switch_attachment().unwrap();
-    let flattened: Document = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let flattened =
+        serde_json::from_slice::<kinewright_project::ProjectFile>(&std::fs::read(&path).unwrap())
+            .unwrap()
+            .document;
     for (index, (role, operations)) in [
         (Role::Editor,json!([{"op":"split_clip","clip":1,"at":50}])),
         (Role::Audio,json!([{"op":"set_track_mix","track":2,"gain_tenth_db":-60,"pan_percent":0,"mute":false,"solo":false}])),
@@ -691,7 +694,7 @@ fn s4_editor_result_to_candidate() {
         assert_eq!(manual.export_history().unwrap(),manual_history);
         assert_eq!(permit.pending().unwrap(),manual_pending);
         assert_eq!(owner.current_switch_attachment().unwrap().current,manual_attachment.current);
-        assert_eq!(serde_json::from_slice::<Document>(&std::fs::read(&path).unwrap()).unwrap(),flattened);
+        assert_eq!(serde_json::from_slice::<kinewright_project::ProjectFile>(&std::fs::read(&path).unwrap()).unwrap().document,flattened);
     }
 }
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// How a three-point source selection is committed to the target track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum ThreePointMode {
     /// Open time at the record point, honoring cross-track sync locks.
     Insert,

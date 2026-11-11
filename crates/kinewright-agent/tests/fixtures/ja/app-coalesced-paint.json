@@ -13,8 +13,8 @@
   "inputs": {
     "initial": {
       "relative_file": "synthetic-blue-project.kinewright",
-      "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
-      "byte_length": 1491,
+      "sha256": "733bb37ddc7326671d8951637924b204d238f8a54adcce900a4fc07009ce6c07",
+      "byte_length": 1490,
       "kind": "synthetic-control"
     },
     "gesture": {

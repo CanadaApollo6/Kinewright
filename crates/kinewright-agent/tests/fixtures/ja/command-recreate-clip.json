@@ -1,5 +1,6 @@
 {
-  "Do": {
+  "command": "Do",
+  "payload": {
     "AddSolidClip": {
       "track": 71,
       "timeline_start": 0,

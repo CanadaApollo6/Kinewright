@@ -56,20 +56,6 @@
     "witness_file": "crates/kinewright-project/src/owned_media.rs"
   },
   {
-    "id": "unknown-video-profile",
-    "file": "crates/kinewright-project/src/owned_media.rs",
-    "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
-    "target": "lib",
-    "edits": [
-      {
-        "old": "        if video {\n            kinewright_core::classify_source_with_assumption(\n                &self.effective_color,\n                self.source_profile_assumption,\n            )\n            .map_err(|error| {\n                BundleError::Unsupported(format!(\"unusable video colour interpretation: {error:?}\"))\n            })?;\n        }\n",
-        "new": ""
-      }
-    ],
-    "expected_panic": "C0_UNKNOWN_VIDEO_PROFILE_REFUSED",
-    "witness_file": "crates/kinewright-project/src/owned_media.rs"
-  },
-  {
     "id": "table-source-binding",
     "file": "crates/kinewright-project/src/owned_media.rs",
     "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer",

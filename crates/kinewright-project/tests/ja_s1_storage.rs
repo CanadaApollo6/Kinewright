@@ -567,9 +567,8 @@ mod bounded_store {
 
 mod durable_bundle {
     use super::*;
-    use kinewright_core::Document;
     #[cfg(target_os = "linux")]
-    use kinewright_core::{Command, Core, Operation, Track, TrackId, TrackKind};
+    use kinewright_core::{Command, Core, Document, Operation, Track, TrackId, TrackKind};
     #[cfg(target_os = "linux")]
     use kinewright_project::bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle};
     use std::path::{Path, PathBuf};
@@ -626,28 +625,6 @@ mod durable_bundle {
         let mut out = std::collections::BTreeMap::new();
         walk(path, path, &mut out);
         out
-    }
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn legacy_writer_corpus_remains_byte_exact() {
-        let directory =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../kinewright-agent/tests/fixtures/ja");
-        let pins: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.join("writer-corpus-pins.json")).unwrap())
-                .unwrap();
-        assert_eq!(pins["files"].as_array().unwrap().len(), 4);
-        for pin in pins["files"].as_array().unwrap() {
-            let bytes = fs::read(directory.join(pin["path"].as_str().unwrap())).unwrap();
-            assert_eq!(kinewright_media::sha256_bytes(&bytes), pin["sha256"]);
-            let file: kinewright_project::ProjectFile = serde_json::from_slice(&bytes).unwrap();
-            assert!(file.studio.is_none());
-            assert_eq!(
-                kinewright_project::serialize_project_document(&file.document)
-                    .unwrap()
-                    .as_bytes(),
-                bytes
-            );
-        }
     }
     #[test]
     #[cfg(target_os = "linux")]
@@ -993,8 +970,9 @@ mod durable_bundle {
                     }
                 }
             } else {
-                let document: Document = serde_json::from_value(raw).map_err(|e| e.to_string())?;
-                document.validate().map_err(|e| e.to_string())?;
+                let envelope: kinewright_project::ProjectFile =
+                    serde_json::from_value(raw).map_err(|e| e.to_string())?;
+                envelope.document.validate().map_err(|e| e.to_string())?;
             }
             Ok(kinewright_media::sha256_bytes(root))
         }
@@ -1611,9 +1589,9 @@ mod durable_bundle {
             "ja-s1-migration",
         );
         let path = temp.path("edit.kinewright");
-        let bytes=b"{\"tracks\":[],\"media_pool\":[],\"fps\":{\"numerator\":30,\"denominator\":1},\"duration\":0,\"resolution\":[1920,1080]}";
-        // The source deliberately has independent compact whitespace and omitted default fields.
-        fs::write(&path, bytes).unwrap();
+        let bytes = kinewright_project::serialize_project_document(&Document::default()).unwrap();
+        // Conversion accepts the current plain-file shape.
+        fs::write(&path, &bytes).unwrap();
         let admission = BundleWriteAdmission::read(&path).unwrap();
         let core = Core::spawn(admission.legacy_document().unwrap()).unwrap();
         edit(&core);
@@ -1640,12 +1618,12 @@ mod durable_bundle {
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         let backup = recovery["pre_migration"]["sha256"].as_str().unwrap();
         let backup_path = temp.path(&format!("edit.kinewright-assets/studio/objects/{backup}"));
-        assert_eq!(fs::read(&backup_path).unwrap(), bytes);
+        assert_eq!(fs::read(&backup_path).unwrap(), bytes.as_bytes());
         let inputs = bundle.empty_inputs().unwrap();
         bundle.save(&core, &inputs.reference).unwrap();
         drop(inputs);
         drop(bundle);
-        assert_eq!(fs::read(&backup_path).unwrap(), bytes);
+        assert_eq!(fs::read(&backup_path).unwrap(), bytes.as_bytes());
         let admission = BundleWriteAdmission::read(&path).unwrap();
         let bundle = ProjectBundle::activate(&path, admission).unwrap();
         assert_eq!(bundle.project_id(), &id);

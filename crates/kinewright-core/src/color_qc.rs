@@ -138,6 +138,7 @@ fn ycbcr_scale(bits: u8) -> f64 {
 /// before an export exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum YCbCrLegalSource {
     /// Computed from the *unclamped* delivery-encoded `R'G'B'` of a working
     /// proof. Its excursion set is exactly the §3.2 range set; what it adds is
@@ -152,6 +153,7 @@ pub enum YCbCrLegalSource {
 
 /// Legal-range excursions on one `Y'CbCr` plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlaneLegalExcursion {
     pub below_count: u64,
     pub above_count: u64,
@@ -245,6 +247,7 @@ impl PlaneLegalExcursion {
 /// sitting exactly on a bound — 75 % blue is `Cb = 240.0` exactly — is not an
 /// excursion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct YCbCrLegalReport {
     /// 8 or 10.
     pub bit_depth: u8,
@@ -274,6 +277,7 @@ pub const QC_GAMUT_EXCEPTION_BASIS_POINTS: u32 = 10;
 /// exactly, since `1.099·1^0.45 − 0.099 = 1.000000` in both `f64` and `f32` —
 /// is **not** an excursion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelRangeExcursion {
     pub over_pixel_count: u64,
     pub under_pixel_count: u64,
@@ -292,6 +296,7 @@ pub struct ChannelRangeExcursion {
 /// the **delivery-encoded** value, so the measurement is on
 /// [`encode_bt709_delivery`]'s unclamped output rather than on linear light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorRangeReport {
     pub red: ChannelRangeExcursion,
     pub green: ChannelRangeExcursion,
@@ -335,6 +340,7 @@ brighter than diffuse white.";
 ///
 /// Reporting `d` is a measurement, not a mapping: nothing applies it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorGamutReport {
     pub out_of_gamut_pixel_count: u64,
     pub out_of_gamut_basis_points: u32,
@@ -408,6 +414,7 @@ pub const SKIN_MAX_SPREAD_CENTIDEGREES: i32 = 18_000;
 /// deliberately, **not** CC2's integer vectorscope axes, which are a display
 /// convenience with a different geometry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SkinDiagnostics {
     pub region_pixel_count: u64,
     /// Pixels whose chroma is at or above [`SKIN_MIN_CHROMA_MILLIONTHS`].
@@ -449,6 +456,7 @@ pub const NODE_ATTRIBUTION_REMOVED: &str = "node_removed";
 /// means this node adds clipping. Clipping is not additive: the deltas do not
 /// sum to the total and no consumer may assume they do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorNodeQcContribution {
     pub clip: ClipId,
     pub effect: EffectId,
@@ -462,6 +470,7 @@ pub struct ColorNodeQcContribution {
 
 /// Per-node clipping attribution for one frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorQcNodeContributions {
     pub baseline_range_basis_points: u32,
     pub baseline_gamut_basis_points: u32,
@@ -476,6 +485,7 @@ pub struct ColorQcNodeContributions {
 /// One optional QC measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum ColorQcCheck {
     Range,
     Gamut,
@@ -541,6 +551,7 @@ const MAX_QC_NODE_CONTRIBUTIONS_U8: u8 = 16;
 
 /// The resolved population one report was measured over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorQcRegion {
     pub normalized_roi: NormalizedRoi,
     pub pixel_roi: PixelRoi,
@@ -560,6 +571,7 @@ pub struct ColorQcRegion {
 
 /// How a [`ColorQcReport`] was computed, so the choices are auditable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorQcProvenance {
     pub engine: String,
     /// `f32`: the QC engine computes `e` in the precision the delivery clamp
@@ -592,6 +604,7 @@ impl Default for ColorQcProvenance {
 
 /// One reportable QC finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorQcException {
     pub code: String,
     pub severity: QaSeverity,
@@ -621,6 +634,7 @@ pub struct ColorQcException {
 /// `QaReport::export_ready` gates an export, and a QC report must never gate
 /// one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColorQcReport {
     /// Always [`crate::WORKING_PROOF_STAGE`].
     pub stage: String,

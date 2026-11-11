@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use kinewright_core::{
     BlendMode, ClipContent, Document, IncidentCode, IncidentEvidence, IncidentObservation,
-    IncidentSubject, LabelIncident, LutAssetId, PROJECT_FORMAT_VERSION, RejectionIncident,
-    TimelineRevision,
+    IncidentSubject, LutAssetId, PROJECT_FORMAT_VERSION, RejectionIncident, TimelineRevision,
 };
 use kinewright_media::LutStore;
 
@@ -78,12 +77,6 @@ pub enum ProjectSaveError {
     },
     Serialize(String),
     Write(String),
-    /// Overwrite-save refused: the session read a newer file (`IN2B` §4
-    /// rule 3). The save path re-surfaces the rule-4 card instead of noting,
-    /// so this variant never opens a second incident.
-    NewerFormat {
-        read_version: u32,
-    },
     /// Overwrite-save refused: route to Save As (N6/H2 — a suspended
     /// session, or a path open in another session, cannot overwrite its
     /// file). The save path posts the notice to the status line instead of
@@ -114,11 +107,6 @@ impl std::fmt::Display for ProjectSaveError {
                 write!(formatter, "could not serialize the project: {reason}")
             }
             Self::Write(reason) => write!(formatter, "could not write the project file: {reason}"),
-            Self::NewerFormat { read_version } => write!(
-                formatter,
-                "saving over this project is disabled: it was written by a newer Kinewright \
-                 (format_version {read_version}) — use Save As"
-            ),
             Self::SaveAsRequired { notice } | Self::PathOpenElsewhere { notice } => {
                 write!(formatter, "{notice}")
             }
@@ -147,8 +135,7 @@ impl ProjectSaveError {
     pub const fn incident_code(&self) -> IncidentCode {
         match self {
             // The refusal variants are unreachable in practice: the save path
-            // intercepts them before noting (belt and braces, as for
-            // `NewerFormat`). A refusal must never open an incident — they
+            // intercepts them before noting. A refusal must never open an incident; they
             // share the save-failure code only so the type stays total.
             // `SessionNotLoaded` is headless-only; the app never observes it.
             Self::UnsupportedBundle { .. }
@@ -158,7 +145,6 @@ impl ProjectSaveError {
             | Self::PathOpenElsewhere { .. }
             | Self::SessionNotLoaded
             | Self::LockLost { .. } => IncidentCode::Rejection(RejectionIncident::ProjectSave),
-            Self::NewerFormat { .. } => IncidentCode::Label(LabelIncident::ProjectNewerFormat),
         }
     }
 
@@ -166,21 +152,13 @@ impl ProjectSaveError {
     ///
     /// `ProjectSave { reason }` evidence keeps which half failed —
     /// serialising or writing — which is what the written body tells the
-    /// person to act on. The newer-format arm builds the shared rule-4
-    /// observation instead (same text as the open-time note, so even a
-    /// double-note dedups) — the save path intercepts the variant before it
-    /// can note, so this arm is belt and braces.
+    /// person to act on.
     #[must_use]
     pub fn incident_observation(
         &self,
         subject: IncidentSubject,
         revision: TimelineRevision,
     ) -> IncidentObservation {
-        if let Self::NewerFormat { read_version } = self {
-            let mut observation = project_newer_format_observation(*read_version, revision);
-            observation.subject = subject;
-            return observation;
-        }
         IncidentObservation {
             code: self.incident_code(),
             subject,
@@ -213,77 +191,15 @@ pub fn derive_lut_store(project_path: Option<&Path>) -> Result<Option<LutStore>,
     }
 }
 
-/// Serialize one document to `path`, derive the new store, and copy every
-/// referenced asset across when the store root moved (CC4 §2.2, §10.3.11).
-///
-/// This is the dialog-free half of Save/Save As. It is deliberately a free
-/// function over borrowed state rather than a method on the app so the
-/// relocatability fixture can drive the exact code the UI runs without an
-/// eframe render state, a GPU adapter, or a window.
-/// The default `format_version`: every legacy file without the key reads as 1
-/// (`IN2B` §4 rule 1). A named fn, so the default is greppable, not magic.
-fn v1() -> u32 {
-    1
-}
-
-/// Whether a version serialises away: v1 writes are byte-identical to the
-/// pre-envelope shape, so the key appears only after the first real bump.
-/// Takes the reference because `skip_serializing_if` mandates `fn(&u32)`.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_v1(version: &u32) -> bool {
-    *version == 1
-}
-
-/// A project file on disk: the app-side envelope over the core-owned version
-/// const (`IN2B` §4 rule 1).
-///
-/// `#[serde(flatten)]` keeps the document's fields at top level with the
-/// version key first; missing parses as 1 (every legacy file) and a v1 write
-/// skips the key entirely. No `Document` field, no struct-level serde
-/// attribute on `Document`, no 55-site pass.
+/// The current project envelope. The plain writer always stamps the core version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectFile {
-    #[serde(default = "v1", skip_serializing_if = "is_v1")]
     pub format_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub studio: Option<crate::bundle::StudioRoot>,
     #[serde(flatten)]
     pub document: Document,
-}
-
-/// Whether the session that read `read_version` may save over its own file
-/// (`IN2B` §4 rule 3): at most the maximum version this build supports.
-///
-/// This numeric ceiling is combined with retained raw support admission at every save.
-/// Unsupported sources remain read-only, including generic Save As.
-#[must_use]
-pub fn can_overwrite_save(read_version: u32) -> bool {
-    read_version <= PROJECT_FORMAT_VERSION
-}
-
-/// The observation a newer-format encounter notes: exactly one
-/// `project_newer_format` per file (`IN2B` §4 rules 4–5, §5 rule 1 #4).
-///
-/// One constructor for the newer-file open, the cross-version recovery
-/// refusal, and the refused overwrite-save — same code, same subject, same
-/// text for the same version, so even a double-note dedups instead of
-/// doubling. Transient, like every §5 note.
-#[must_use]
-pub fn project_newer_format_observation(
-    read_version: u32,
-    revision: TimelineRevision,
-) -> IncidentObservation {
-    let mut observation = IncidentObservation::plain(
-        IncidentCode::Label(LabelIncident::ProjectNewerFormat),
-        IncidentSubject::Project,
-        format!(
-            "this project was written by a newer Kinewright (format_version {read_version}); \
-             Save and Save As are disabled; this source is read-only"
-        ),
-        revision,
-    );
-    observation.transient = true;
-    observation
 }
 
 /// Whether two spellings name the same native file (N2/S-13).
@@ -400,17 +316,6 @@ pub fn canonical_project_identity(path: &Path) -> Result<PathBuf, ProjectIdentit
     })
 }
 
-/// MO2 R7: the lowest format version able to read `document` — the version
-/// the writer stamps.
-///
-/// 2 iff the document uses adjustment or solid content, a non-`normal`
-/// blend, or a transition outside the M20 three; else 1, so a file without
-/// MO2 features keeps its v1 bytes. v2 is one union: CC8 S2 adds its
-/// disjuncts here (N6 R-B), never a rival predicate.
-#[must_use]
-pub fn min_required_format_version(document: &Document) -> u32 {
-    required_format_version(document, None)
-}
 /// One required-version union for the retained bundle and legacy empty-bundle route.
 #[must_use]
 pub fn required_format_version(
@@ -441,14 +346,13 @@ pub fn required_format_version(
 
 /// Serialise a document inside the file envelope (`IN2B` §4 rules 1–2).
 ///
-/// The writer stamps [`min_required_format_version`] — never the session's
-/// read version: the bytes are this build's, whatever it opened (MO2 R7).
+/// The writer stamps the current core format version.
 /// # Errors
 /// Returns `ProjectSaveError::Serialize` when the document does not serialise.
 pub fn serialize_project_document(document: &Document) -> Result<String, ProjectSaveError> {
     let file = ProjectFile {
         studio: None,
-        format_version: min_required_format_version(document),
+        format_version: PROJECT_FORMAT_VERSION,
         document: document.clone(),
     };
     serde_json::to_string_pretty(&file)
@@ -736,11 +640,9 @@ fn write_project_bytes_at(
 
 /// Load a project file: one read, one parse (`IN2B` §4 rule 2).
 ///
-/// Returns the parsed document with the envelope version it read (missing → 1,
-/// every legacy file) and the FNV-1a digest of the file bytes (§2 rule 9 —
-/// the sidecar gate reuses it, no second read, no TOCTOU). The parse is
-/// `from_slice::<ProjectFile>` then unwrap: the envelope parses legacy files
-/// directly via the default, never probe-then-parse.
+/// Returns the parsed document, its envelope version and the FNV-1a digest
+/// of the file bytes (§2 rule 9 —
+/// the sidecar gate reuses it, with no second read).
 /// # Errors
 /// Returns the read, parse, or validation failure as a string.
 pub fn load_document(path: &Path) -> Result<(Document, u32, String), String> {
@@ -908,36 +810,7 @@ mod tests {
         );
     }
 
-    /// R1: save bytes are byte-identical pre/post cutover over the corpus.
-    /// Goldens captured on unmodified `6c2bdec` before the AW1 S1 move; the
-    /// moved serialiser is byte-identical code, so these pin it against drift.
-    #[test]
-    fn r1_save_bytes_are_byte_identical_pre_post_cutover() {
-        let default_json =
-            serialize_project_document(&Document::default()).expect("the default serialises");
-        assert_eq!(default_json.len(), 1017);
-        assert_eq!(
-            digest_bytes(default_json.as_bytes()),
-            "5228b756413bcab5",
-            "the default envelope keeps its pre-cutover digest"
-        );
-        let fixture: &[u8] =
-            include_bytes!("../../kinewright-core/tests/fixtures/pre_m13_project.json");
-        let file: ProjectFile = serde_json::from_slice(fixture).expect("the fixture parses");
-        let envelope = serialize_project_document(&file.document).expect("the envelope serialises");
-        assert_eq!(envelope.len(), 1891);
-        assert_eq!(
-            digest_bytes(envelope.as_bytes()),
-            "7f899f0203ea23fb",
-            "the fixture envelope keeps its pre-cutover digest"
-        );
-    }
-
-    /// The M20-corpus envelope bytes on `13e3cb1`, before MO2 R7.
-    const V1_RICH_LEN: usize = 2818;
-    const V1_RICH_DIGEST: &str = "973547bf2726430b";
-
-    fn mo2_v1_document() -> Document {
+    fn document_with_video_clip() -> Document {
         use kinewright_core::{
             AssetId, MediaAsset, MediaKind, MediaSourceFingerprint, Operation, Rational, TimeCode,
             Track, TrackId, TrackKind, Transition,
@@ -999,79 +872,12 @@ mod tests {
         doc
     }
 
-    /// MO2 §13 gate 11 (R7): MO2-feature files stamp 2 and reopen as 2; the
-    /// v1 corpus — every M20 transition included — stays 1 and writes the
-    /// pre-MO2 bytes (digests captured on `13e3cb1`, before the predicate).
-    #[test]
-    fn v2_stamps_only_when_used() {
-        use kinewright_core::{BlendMode, Operation, SolidColor, TimeCode, TrackId, Transition};
-        let fixture: &[u8] =
-            include_bytes!("../../kinewright-core/tests/fixtures/pre_m13_project.json");
-        let legacy: ProjectFile = serde_json::from_slice(fixture).expect("the fixture parses");
-        let v1 = mo2_v1_document();
-        for doc in [&Document::default(), &legacy.document, &v1] {
-            assert_eq!(min_required_format_version(doc), 1);
-            let json = serialize_project_document(doc).expect("v1 serialises");
-            assert!(!json.contains("format_version"), "v1 skips the key");
-        }
-        let v1_json = serialize_project_document(&v1).expect("v1 serialises");
-        assert_eq!(
-            (v1_json.len(), digest_bytes(v1_json.as_bytes()).as_str()),
-            (V1_RICH_LEN, V1_RICH_DIGEST),
-            "the M20 corpus writes its pre-MO2 bytes"
-        );
-
-        let first = v1.tracks[0].clips[0].id;
-        let features = [
-            Operation::AddAdjustmentClip {
-                track: TrackId(1),
-                timeline_start: TimeCode(240),
-                duration: TimeCode(30),
-                effects: Vec::new(),
-            },
-            Operation::AddSolidClip {
-                track: TrackId(1),
-                timeline_start: TimeCode(240),
-                duration: TimeCode(30),
-                color: SolidColor { r: 1, g: 2, b: 3 },
-            },
-            Operation::SetClipBlendMode {
-                clip: first,
-                blend_mode: BlendMode::Screen,
-            },
-            Operation::AddTransition {
-                clip: first,
-                transition: Transition {
-                    name: "push_left".to_owned(),
-                    duration: TimeCode(10),
-                },
-            },
-        ];
-        let dir = TempDirectory::new("mo2-gate11-v2");
-        for (index, feature) in features.into_iter().enumerate() {
-            let mut doc = v1.clone();
-            feature.apply(&mut doc).expect("the MO2 feature applies");
-            assert_eq!(min_required_format_version(&doc), 2, "{feature:?}");
-            let path = dir.path(&format!("mo2-{index}.kinewright"));
-            let report = write_project_document(&doc, &path, None).expect("v2 writes");
-            let bytes = fs::read_to_string(&path).expect("v2 reads");
-            assert!(
-                bytes.starts_with("{\n  \"format_version\": 2,"),
-                "v2 stamps first: {feature:?}"
-            );
-            let (reopened, version, digest) = load_document(&path).expect("v2 reopens");
-            assert_eq!((reopened, version), (doc, 2));
-            assert_eq!(digest, report.digest);
-            assert!(can_overwrite_save(version), "this build overwrites v2");
-        }
-    }
-
-    /// The four MO2 R7 features on `mo2_v1_document`, each with the clip
+    /// The four MO2 R7 features on `document_with_video_clip`, each with the clip
     /// that carries it: an adjustment, a solid, a non-`normal` blend and a
     /// geometric transition.
     fn mo2_feature_documents() -> Vec<(&'static str, Document, kinewright_core::ClipId)> {
         use kinewright_core::{BlendMode, Operation, SolidColor, TimeCode, TrackId, Transition};
-        let v1 = mo2_v1_document();
+        let v1 = document_with_video_clip();
         let first = v1.tracks[0].clips[0].id;
         let features = [
             (
@@ -1133,119 +939,6 @@ mod tests {
             .collect()
     }
 
-    /// MO2 R7 (review 2 S1): the predicate scans every clip, active or not —
-    /// a feature on a disabled clip, a key-disabled clip or a muted track
-    /// still stamps 2 through the real writer and reopens as 2, since the
-    /// bytes carry the feature whether or not it renders today.
-    #[test]
-    fn mo2_inactive_features_still_stamp_v2() {
-        use kinewright_core::{KeyframeInterpolation, Operation, TimeCode, TrackId};
-        let dir = TempDirectory::new("mo2-r7-inactive");
-        for (name, doc, carrier) in mo2_feature_documents() {
-            let hold_off = kinewright_core::AutomationCurve {
-                keyframes: vec![kinewright_core::Keyframe {
-                    at: TimeCode(0),
-                    value: 0,
-                    interpolation: KeyframeInterpolation::Hold,
-                    tangent_in: 0,
-                    tangent_out: 0,
-                }],
-            };
-            let states = [
-                (
-                    "disabled",
-                    Operation::SetClipEnabled {
-                        clip: carrier,
-                        enabled: false,
-                    },
-                ),
-                (
-                    "key-disabled",
-                    Operation::SetClipEnabledCurve {
-                        clip: carrier,
-                        curve: Some(hold_off),
-                    },
-                ),
-                (
-                    "muted",
-                    Operation::SetTrackMix {
-                        track: TrackId(1),
-                        gain_tenth_db: 0,
-                        pan_percent: 0,
-                        mute: true,
-                        solo: false,
-                    },
-                ),
-            ];
-            for (state, operation) in states {
-                let mut inactive = doc.clone();
-                operation.apply(&mut inactive).expect("the state applies");
-                match state {
-                    "disabled" => assert!(!inactive.clip(carrier).expect("carrier").enabled),
-                    "key-disabled" => assert!(
-                        !inactive
-                            .clip(carrier)
-                            .expect("carrier")
-                            .is_enabled_at(TimeCode(0))
-                    ),
-                    _ => assert!(inactive.track_mix(TrackId(1)).mute),
-                }
-                assert_eq!(min_required_format_version(&inactive), 2, "{name}/{state}");
-                let path = dir.path(&format!("{name}-{state}.kinewright"));
-                let report = write_project_document(&inactive, &path, None).expect("v2 writes");
-                let bytes = fs::read_to_string(&path).expect("v2 reads");
-                assert!(
-                    bytes.starts_with("{\n  \"format_version\": 2,"),
-                    "{name}/{state} stamps 2"
-                );
-                let (reopened, version, digest) = load_document(&path).expect("v2 reopens");
-                assert_eq!((reopened, version), (inactive, 2), "{name}/{state}");
-                assert_eq!(digest, report.digest);
-            }
-
-            // Review 2 N1: a feature on a clip past the document duration is
-            // an invalid document (never loaded), but the pure predicate
-            // still counts it — the scan is unconditional.
-            let mut outside = doc.clone();
-            outside.duration = outside.clip(carrier).expect("carrier").timeline_start;
-            assert_eq!(min_required_format_version(&outside), 2, "{name}/outside");
-        }
-    }
-
-    /// This build admits supported legacy bytes and refuses unsupported variants and versions.
-    #[test]
-    fn mo2_old_readers_distinguish_parse_validation_and_advisory() {
-        let directory = TempDirectory::new("ja-s1-supported-legacy");
-        let doc = mo2_v1_document();
-        let source = serialize_project_document(&doc).unwrap();
-        let path = directory.path("legacy.kinewright");
-        fs::write(&path, &source).unwrap();
-        assert_eq!(load_document(&path).unwrap().0, doc);
-        let mut raw = serde_json::to_value(&doc).unwrap();
-        raw["tracks"][0]["clips"][0]["content"] = serde_json::json!("hologram");
-        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-        assert!(
-            load_document(&path)
-                .unwrap_err()
-                .contains("unsupported variant")
-        );
-        let mut raw = serde_json::to_value(&doc).unwrap();
-        raw["tracks"][0]["clips"][0]["transition_in"] =
-            serde_json::json!({"name":"iris_open","duration":10});
-        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-        assert!(load_document(&path).unwrap_err().contains("iris_open"));
-        let mut raw = serde_json::to_value(&doc).unwrap();
-        raw["format_version"] = serde_json::json!(PROJECT_FORMAT_VERSION + 1);
-        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-        assert!(
-            load_document(&path)
-                .unwrap_err()
-                .contains("exceeds supported")
-        );
-        assert!(can_overwrite_save(3));
-        assert!(!can_overwrite_save(4));
-    }
-
     /// An unknown field on a clip refuses before projection, and the refused file keeps its bytes.
     #[test]
     fn unknown_blend_field_is_refused_and_the_file_is_untouched() {
@@ -1261,5 +954,33 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         assert!(load_document(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod current_format_tests {
+    use super::*;
+    #[test]
+    fn current_project_envelope_refuses_unknown_fields() {
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&serialize_project_document(&Document::default()).unwrap())
+                .unwrap();
+        wire.as_object_mut()
+            .unwrap()
+            .insert("unexpected_root".into(), true.into());
+        let error = serde_json::from_value::<ProjectFile>(wire).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unexpected_root`")
+        );
+    }
+
+    #[test]
+    fn plain_writer_stamps_the_current_version() {
+        let encoded = serialize_project_document(&Document::default()).unwrap();
+        let current: ProjectFile = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(current.format_version, PROJECT_FORMAT_VERSION);
+        assert_eq!(current.document, Document::default());
     }
 }

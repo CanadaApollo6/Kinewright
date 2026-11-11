@@ -10,8 +10,8 @@
   "inputs": {
     "unsupported": {
       "relative_file": "unsupported-v3-code.kinewright",
-      "sha256": "e6496b3ef8304e6c3dfb53574e36b4ad9f65fe2482df7eb959e6ddc1ddbb5c32",
-      "byte_length": 1385,
+      "sha256": "4962e3504250b65b384168618e377d078a2445ccfe6a74e9e6f9261fef518ded",
+      "byte_length": 1386,
       "kind": "opaque-future-project"
     }
   },
@@ -78,8 +78,8 @@
   "oracles": {
     "empty": {
       "relative_file": "writer-v1-empty.kinewright",
-      "sha256": "59611abbbf40aed579dda09a9f7d4900904dc06af7badd96cd475df200062326",
-      "byte_length": 1017,
+      "sha256": "7013fef89fab919bbc0e04ab698a8acd22cecf512ece9298962e3546c6e9dcf3",
+      "byte_length": 1040,
       "kind": "writer-bytes"
     },
     "false": {

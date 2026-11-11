@@ -294,30 +294,6 @@
       "stage": 1,
       "package": "kinewright-project",
       "target": "lib",
-      "test": "project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover",
-      "source": "crates/kinewright-project/src/project.rs",
-      "lane": "portable"
-    },
-    {
-      "stage": 1,
-      "package": "kinewright-project",
-      "target": "lib",
-      "test": "project::tests::v2_stamps_only_when_used",
-      "source": "crates/kinewright-project/src/project.rs",
-      "lane": "portable"
-    },
-    {
-      "stage": 1,
-      "package": "kinewright-project",
-      "target": "lib",
-      "test": "project::tests::mo2_inactive_features_still_stamp_v2",
-      "source": "crates/kinewright-project/src/project.rs",
-      "lane": "portable"
-    },
-    {
-      "stage": 1,
-      "package": "kinewright-project",
-      "target": "lib",
       "test": "project::tests::unknown_blend_field_is_refused_and_the_file_is_untouched",
       "source": "crates/kinewright-project/src/project.rs",
       "lane": "portable"
@@ -328,14 +304,6 @@
       "target": "lib",
       "test": "project::tests::project_atomic_write_falls_back_when_rename_is_refused",
       "source": "crates/kinewright-project/src/project.rs",
-      "lane": "portable"
-    },
-    {
-      "stage": 1,
-      "package": "kinewright-app",
-      "target": "bin:kinewright-app",
-      "test": "project::tests::can_overwrite_save_gates_on_the_read_version",
-      "source": "crates/kinewright-app/src/project.rs",
       "lane": "portable"
     }
   ]

@@ -1104,9 +1104,9 @@ fn guard_alias_spellings_race_one_owner() {
 fn alias_header_journal(recovery: &Path, header_project: &Path, named_as: &Path) -> PathBuf {
     let journal = recovery.join(journal_file_name(named_as));
     let header = serde_json::json!({
-        "format_version": 1,
+        "format_version": kinewright_core::PROJECT_FORMAT_VERSION,
         "project_path": header_project,
-        "writer_format_version": 1,
+
         "initial_document": kinewright_core::Document::default(),
     });
     let mut bytes = JOURNAL_MAGIC.to_vec();
@@ -1643,7 +1643,7 @@ fn h4_name_matched_journal_of_any_type_refuses() {
         match kind {
             "symlink" | "dangling" => {
                 if kind == "symlink" {
-                    fs::write(&real, b"KINEWRIGHT-JOURNAL 1\n{}\n").unwrap();
+                    fs::write(&real, b"KINEWRIGHT-JOURNAL\n{}\n").unwrap();
                 }
                 std::os::unix::fs::symlink(&real, &named).unwrap();
             }
@@ -1733,7 +1733,7 @@ fn h3_big_alias_document_identifies_in_bounded_memory() {
     {
         let mut file = std::io::BufWriter::new(fs::File::create(&alias).unwrap());
         file.write_all(JOURNAL_MAGIC).unwrap();
-        file.write_all(br#"{"format_version":1,"initial_document":{"clips":["#)
+        file.write_all(br#"{"format_version":4,"initial_document":{"clips":["#)
             .unwrap();
         let clip = format!(r#"{{"id":1,"label":"{}"}}"#, "x".repeat(1024));
         for index in 0..64 * 1024 {
@@ -1745,7 +1745,7 @@ fn h3_big_alias_document_identifies_in_bounded_memory() {
         let path = crate::project::canonical_project_identity(&fx.project).unwrap();
         write!(
             file,
-            r#"]}},"project_path":{},"writer_format_version":1}}"#,
+            r#"]}},"project_path":{}}}"#,
             serde_json::to_string(&path).unwrap()
         )
         .unwrap();

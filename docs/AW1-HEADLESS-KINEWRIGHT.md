@@ -162,6 +162,8 @@ changes.
   file (pre-existing, unchanged); hard links are a known limitation —
   two hard links to one file hold distinct identities and can
   double-own (race N5); the AF5 network-FS limit still applies.)
+The pre-F4 journal-name compatibility rules below were withdrawn on 2026-11-10 by Riel's decision. Canonical-name and current-header recovery checks remain.
+
 - AF3 → §5/S7: the takeover check scans the recovery dir once — base
   journal, every allocator `-N` suffix, and alias-named journals via the
   header's `project_path` — after obtaining the lock, on every ownership

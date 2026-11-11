@@ -16,6 +16,7 @@ use crate::{
 /// presents a provisional cut list as complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum TimelineBeatAnalysisState {
     Ready,
     Pending {
@@ -29,6 +30,7 @@ pub enum TimelineBeatAnalysisState {
 
 /// One musical onset selected to pace the target clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatPacingPoint {
     pub beat_asset: AssetId,
     pub beat_track: TrackId,
@@ -55,6 +57,7 @@ impl From<TimelineBeat> for BeatPacingPoint {
 
 /// A deterministic set of cuts chosen from mapped timeline beats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatPacingPlan {
     pub target_clip: ClipId,
     pub range: Range<TimeCode>,
@@ -73,6 +76,7 @@ pub struct BeatPacingPlan {
 /// earliest feasible source subrange and reports the exact subset consumed by
 /// the resulting real-time edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontageSelect {
     pub asset: AssetId,
     pub source_range: Range<TimeCode>,
@@ -80,6 +84,7 @@ pub struct BeatMontageSelect {
 
 /// A musical boundary chosen between two adjacent montage shots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontageCutAnchor {
     /// Zero-based index of the shot immediately before this cut.
     pub after_shot_index: usize,
@@ -88,6 +93,7 @@ pub struct BeatMontageCutAnchor {
 
 /// One fully resolved, real-time shot in a beat montage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontageShot {
     pub select_index: usize,
     pub asset: AssetId,
@@ -100,6 +106,7 @@ pub struct BeatMontageShot {
 
 /// An inspectable, executable hard-cut montage paced to one music asset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontagePlan {
     pub target_track: TrackId,
     pub music_asset: AssetId,
@@ -120,6 +127,7 @@ pub struct BeatMontagePlan {
 /// consecutive run contains more than `maximum_similar_run` shots whose
 /// adjacent durations differ by at most `similar_tolerance_frames`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontageCadenceContract {
     pub minimum_duration_buckets: usize,
     pub duration_bucket_frames: TimeCode,
@@ -129,6 +137,7 @@ pub struct BeatMontageCadenceContract {
 
 /// Computed evidence for a beat-montage cadence contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontageCadenceSummary {
     /// Project-frame duration of each shot in montage order.
     pub durations: Vec<TimeCode>,
@@ -142,6 +151,7 @@ pub struct BeatMontageCadenceSummary {
 
 /// Inspectable evidence for a repaired beat-montage anchor schedule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMontageAnchorRepair {
     pub preferred_anchors: Vec<TimeCode>,
     pub resolved_anchors: Vec<TimeCode>,
@@ -155,6 +165,7 @@ pub struct BeatMontageAnchorRepair {
 /// How a music-fit plan uses the selected material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MusicFitStrategy {
     /// Start on one detected beat and make a straight, real-time edit whose
     /// duration exactly matches the requested project range.
@@ -167,24 +178,28 @@ pub enum MusicFitStrategy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MusicDurationFit {
     ExactProjectRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MusicPlaybackMode {
     RealTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MusicRepeatMode {
     None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", content = "frames", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MusicEndBeatAlignment {
     Exact,
     /// Signed source-frame distance from the nearest detected beat to the
@@ -193,6 +208,7 @@ pub enum MusicEndBeatAlignment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicBeatAnchor {
     pub source_frame: TimeCode,
     pub strength_basis_points: u16,
@@ -203,6 +219,7 @@ pub struct MusicBeatAnchor {
 /// The planner may resolve the out point within `maximum_drift_frames`, but
 /// never broadens that limit or silently falls back to a start-only fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicEndAnchor {
     pub preferred_source_end: TimeCode,
     pub maximum_drift_frames: TimeCode,
@@ -210,6 +227,7 @@ pub struct MusicEndAnchor {
 
 /// Inspectable evidence for an end-anchored music fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicEndAnchorEvidence {
     /// The caller's requested half-open source end boundary.
     pub target_source_end: TimeCode,
@@ -226,6 +244,7 @@ pub struct MusicEndAnchorEvidence {
 /// that were *not* used so callers cannot mistake a straight cut for looping
 /// or time stretching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicFitPlan {
     pub target_track: TrackId,
     pub asset: AssetId,
@@ -238,7 +257,6 @@ pub struct MusicFitPlan {
     pub repeat: MusicRepeatMode,
     pub source_end_alignment: MusicEndBeatAlignment,
     /// Present only when the caller asked for an explicit source-end target.
-    #[serde(default)]
     pub end_anchor: Option<MusicEndAnchorEvidence>,
     pub operations: Vec<Operation>,
 }
@@ -266,6 +284,7 @@ pub const MUSIC_STRUCTURE_MAX_PHRASE_BARS: u8 = 32;
 /// music-theory understanding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MusicStructureRole {
     Beat,
     Bar,
@@ -274,6 +293,7 @@ pub enum MusicStructureRole {
 
 /// Inferred structure parameters and their strength provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicStructureParameters {
     pub project_fps: crate::Rational,
     pub meter_beats: u8,
@@ -293,6 +313,7 @@ pub struct MusicStructureParameters {
 
 /// One exact, inspectable onset in the requested project range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicStructureCandidate {
     pub asset: AssetId,
     pub track: TrackId,
@@ -314,6 +335,7 @@ pub struct MusicStructureCandidate {
 
 /// A deterministic, read-only heuristic analysis of musical structure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MusicStructureAnalysis {
     pub music_asset: AssetId,
     pub timeline_range: Range<TimeCode>,

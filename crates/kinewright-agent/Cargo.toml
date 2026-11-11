@@ -18,7 +18,7 @@ repository.workspace = true
 # the shipping binary links an agent library with no fixture data in it.
 default = ["eval-harness"]
 # MO2 R7: the harness saves its project fixtures through the shared project
-# writer, so they stamp the same minimum-required format version.
+# writer, so they stamp the current format version.
 eval-harness = [
     "dep:rustls",
     "dep:rustls-native-certs",

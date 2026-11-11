@@ -1446,9 +1446,7 @@ fn clip_content_name(content: &ClipContent) -> &'static str {
 
 /// Classify one effect through Core's single source of truth so agent status,
 /// QA, and delivery conformance cannot report different codes for the same
-/// effect. `color_grade` deliberately has no arm here: Core canonicalises that
-/// wire name to `primary_correction` on load, so it can never reach this
-/// function.
+/// effect.
 fn legacy_warning(effect_index: usize, effect: &Effect) -> Option<Value> {
     let stage = effect_compatibility_stage(&effect.name)?;
     let (compatibility_stage, message) = match stage {

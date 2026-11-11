@@ -1,5 +1,6 @@
 {
-  "Do": {
+  "command": "Do",
+  "payload": {
     "DeleteClip": {
       "clip": 1
     }

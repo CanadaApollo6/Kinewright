@@ -242,6 +242,8 @@ revision-gated, journalled):
 **R29 [S2].** These defaults, reference resolutions, and validation rules apply
 identically to operations, deserialization, replay, and rendering.
 
+The minimum-version predicate and compatibility ceiling below were withdrawn on 2026-11-10 by Riel’s decision; this build writes and reads one format version.
+
 Format policy (after AW1 S1, through `kinewright-project`). v2 predicate =
 **any** of: `space=Hdr2020`; non-default white/peak; any source override;
 retained HDR source metadata; any non-default `OutputTarget`/intent selection;

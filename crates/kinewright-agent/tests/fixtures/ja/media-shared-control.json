@@ -11,8 +11,8 @@
   "inputs": {
     "initial": {
       "relative_file": "synthetic-red-project.kinewright",
-      "sha256": "b01388e07fb5c11c598a748282daef7b12478fd061f5a7b4a133787f737ec44f",
-      "byte_length": 1491,
+      "sha256": "260fb80c47cac532bca594137032a3d9fc5e5a3c194b7cc98ee9ed8776e2133c",
+      "byte_length": 1490,
       "kind": "synthetic-control"
     }
   },

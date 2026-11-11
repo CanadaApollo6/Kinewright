@@ -29,8 +29,8 @@
     },
     "undo": {
       "relative_file": "command-undo.json",
-      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-      "byte_length": 7,
+      "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+      "byte_length": 24,
       "kind": "input"
     }
   },

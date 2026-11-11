@@ -62,8 +62,6 @@ pub enum SourceColorIncident {
     UnsupportedTransfer,
     /// The declared matrix coefficients are outside the managed CC1 set.
     UnsupportedMatrix,
-    /// The declared sample range is outside the managed CC1 set.
-    UnsupportedRange,
     /// The declared white point is outside the managed CC1 set.
     UnsupportedWhitePoint,
     /// The declared bit depth is outside the managed CC1 set.
@@ -114,7 +112,7 @@ impl SourceColorIncident {
             ColorSourceError::UnsupportedPrimaries(_) => Self::UnsupportedPrimaries,
             ColorSourceError::UnsupportedTransfer(_) => Self::UnsupportedTransfer,
             ColorSourceError::UnsupportedMatrix(_) => Self::UnsupportedMatrix,
-            ColorSourceError::UnsupportedRange(_) => Self::UnsupportedRange,
+
             ColorSourceError::UnsupportedWhitePoint(_) => Self::UnsupportedWhitePoint,
             ColorSourceError::UnsupportedBitDepth(_) => Self::UnsupportedBitDepth,
             ColorSourceError::UnsupportedCombination { .. } => Self::UnsupportedCombination,
@@ -145,7 +143,7 @@ impl SourceColorIncident {
                 ColorSourceError::UnsupportedTransfer(ColorTransfer::Unknown)
             }
             Self::UnsupportedMatrix => ColorSourceError::UnsupportedMatrix(ColorMatrix::Unknown),
-            Self::UnsupportedRange => ColorSourceError::UnsupportedRange(ColorRange::Unknown),
+
             Self::UnsupportedWhitePoint => {
                 ColorSourceError::UnsupportedWhitePoint(ColorWhitePoint::Unknown)
             }
@@ -177,11 +175,11 @@ impl SourceColorIncident {
             Self::UnsupportedPrimaries => 5,
             Self::UnsupportedTransfer => 6,
             Self::UnsupportedMatrix => 7,
-            Self::UnsupportedRange => 8,
-            Self::UnsupportedWhitePoint => 9,
-            Self::UnsupportedBitDepth => 10,
-            Self::UnsupportedCombination => 11,
-            Self::UnknownWhitePoint => 12,
+
+            Self::UnsupportedWhitePoint => 8,
+            Self::UnsupportedBitDepth => 9,
+            Self::UnsupportedCombination => 10,
+            Self::UnknownWhitePoint => 11,
         }
     }
 }
@@ -598,7 +596,7 @@ impl RejectionIncident {
 }
 
 /// One code per source label the application still reports under
-/// (`IN1b` §3.2 rule 12), plus the seven `IN2B` §5 rows.
+/// (`IN1b` §3.2 rule 12), plus the five current persistence-status rows.
 ///
 /// Fifteen are placeholders — the label's failures have no typed payload yet —
 /// and two are not: `look_incomplete` and `media_incomplete` exist because
@@ -648,10 +646,6 @@ pub enum LabelIncident {
     RecoveryDamage,
     /// `Recovery unavailable`, with no typed payload (`IN2B` §5).
     RecoveryUnavailable,
-    /// `Newer project format`, with no typed payload (`IN2B` §5).
-    ProjectNewerFormat,
-    /// `Sidecar unknown codes`, with no typed payload (`IN2B` §5).
-    SidecarUnknownCodes,
     /// `Sidecar refused`, with no typed payload (`IN2B` §5).
     SidecarRefused,
     /// `Sidecar write failed`, with no typed payload (`IN2B` §5).
@@ -683,8 +677,6 @@ impl LabelIncident {
             Self::PanelWorkerError => "panel_worker_error",
             Self::RecoveryDamage => "recovery_damage",
             Self::RecoveryUnavailable => "recovery_unavailable",
-            Self::ProjectNewerFormat => "project_newer_format",
-            Self::SidecarUnknownCodes => "sidecar_unknown_codes",
             Self::SidecarRefused => "sidecar_refused",
             Self::SidecarWriteFailed => "sidecar_write_failed",
         }
@@ -704,16 +696,14 @@ impl LabelIncident {
             Self::Media | Self::MediaIncomplete => "media",
             Self::Agent => "agent",
             Self::Recording => "recording",
-            Self::Project | Self::ProjectNewerFormat => "project",
+            Self::Project => "project",
             Self::Captions => "captions",
             Self::Mixer => "mixer",
             Self::MediaCache => "media_cache",
             Self::Timeline => "timeline",
             Self::PanelWorkerError => "panel",
             Self::RecoveryDamage | Self::RecoveryUnavailable => "recovery",
-            Self::SidecarUnknownCodes | Self::SidecarRefused | Self::SidecarWriteFailed => {
-                "sidecar"
-            }
+            Self::SidecarRefused | Self::SidecarWriteFailed => "sidecar",
         }
     }
 
@@ -739,23 +729,15 @@ impl LabelIncident {
             Self::PanelWorkerError => 17,
             Self::RecoveryDamage => 18,
             Self::RecoveryUnavailable => 19,
-            Self::ProjectNewerFormat => 20,
-            Self::SidecarUnknownCodes => 21,
-            Self::SidecarRefused => 22,
-            Self::SidecarWriteFailed => 23,
+            Self::SidecarRefused => 20,
+            Self::SidecarWriteFailed => 21,
         }
     }
 }
 
 /// The exhaustive set of incident codes Kinewright declares.
 ///
-/// **74 codes** (`IN1b` §3.2 rule 12, `IN2B` E-B9): thirteen source-colour,
-/// two media, four delivery-colour, five delivery-verification, six colour-QC,
-/// eleven operation families, the minted LUT-asset and revision-conflict rows,
-/// seven typed rejections and twenty-four source labels. All seventy-four are
-/// reachable: the eleven delivery-verification and colour-QC rows through the
-/// `IN2B` §6 seams and the seven §5 labels through their notes, so `IN1b` §3.2
-/// rule 13's exemption is spent and the count reads 74/0.
+/// Current source, media, delivery, operation, rejection and status codes.
 ///
 /// There is no catch-all, no `Unclassified` and no `Other(String)` (IN1 §2.2
 /// rule 9). It also carries no `#[non_exhaustive]`, because that would force a
@@ -835,15 +817,15 @@ impl IncidentCode {
     const fn table_index(self) -> usize {
         match self {
             Self::SourceColor(incident) => incident.table_index(),
-            Self::Media(incident) => 13 + incident.table_index(),
-            Self::DeliveryColor(incident) => 15 + incident.table_index(),
-            Self::DeliveryVerification(incident) => 19 + incident.table_index(),
-            Self::ColorQc(incident) => 24 + incident.table_index(),
-            Self::Operation(family) => 30 + family_index(family),
-            Self::LutAssetPolicy => 41,
-            Self::EditRevisionConflict => 42,
-            Self::Rejection(incident) => 43 + incident.table_index(),
-            Self::Label(incident) => 50 + incident.table_index(),
+            Self::Media(incident) => 12 + incident.table_index(),
+            Self::DeliveryColor(incident) => 14 + incident.table_index(),
+            Self::DeliveryVerification(incident) => 18 + incident.table_index(),
+            Self::ColorQc(incident) => 23 + incident.table_index(),
+            Self::Operation(family) => 29 + family_index(family),
+            Self::LutAssetPolicy => 40,
+            Self::EditRevisionConflict => 41,
+            Self::Rejection(incident) => 42 + incident.table_index(),
+            Self::Label(incident) => 49 + incident.table_index(),
         }
     }
 }
@@ -880,11 +862,13 @@ impl Serialize for IncidentCode {
     }
 }
 
-// There is deliberately no `Deserialize` for `IncidentCode`, and there still
-// is not: the code-string-to-code direction arrives by erratum E-B8 as
-// [`from_code`], a scan over [`POLICY`] — a scan cannot disagree with the
-// table it scans, where a derive would mint a second source of truth.
-// `IncidentCode` itself stays serialise-only.
+impl<'de> Deserialize<'de> for IncidentCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        from_code(&code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown incident code: {code}")))
+    }
+}
 
 /// A session-unique incident identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -942,6 +926,7 @@ pub enum IncidentSeverity {
 /// (`"export_job"`, `"project"`, `"agent"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum IncidentSubject {
     /// One media file that keeps refusing.
     Asset(AssetId),
@@ -999,6 +984,7 @@ impl IncidentSubject {
 /// with it, and a delegating variant never falls back to a `reason` string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum IncidentEvidence {
     /// A CC1 source-colour refusal on the managed decode path.
     ///
@@ -1105,6 +1091,7 @@ impl IncidentEvidence {
 /// broker (IN1 §6.3 rule 17, §13 D6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum IncidentOutcome {
     /// The recovery was applied.
     Applied,
@@ -1132,6 +1119,7 @@ pub enum IncidentOutcome {
 /// and is declared between `Open` and `Resolved` (IN2 §3.6 rule 32).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "outcome")]
+#[serde(deny_unknown_fields)]
 pub enum IncidentState {
     /// Outstanding.
     Open,
@@ -1160,6 +1148,7 @@ impl IncidentState {
 /// **Not [`Copy`]** since IN2 §5.4 rule 12: [`IncidentResolver::Session`]
 /// carries owned strings. Probe-2 measured the fallout at zero sites.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IncidentTelemetry {
     /// Wall time from observation to resolution, measured at the router.
     ///
@@ -1212,6 +1201,7 @@ pub struct IncidentTelemetry {
 /// rule 4's shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum IncidentResolver {
     /// The deterministic router applied the recovery itself.
     Router,
@@ -1323,6 +1313,7 @@ pub enum RecordProposalError {
 
 /// A typed fix an investigator session proposes for one incident (IN2 §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IncidentProposal {
     /// The branch's applied operations, in order. **Never serialised**:
     /// [`Operation`] has 57 variants and several carry unbounded payloads, so a
@@ -1963,22 +1954,9 @@ pub struct PolicyEntry {
 /// The declared policy for every [`IncidentCode`], one row per code, in the
 /// enum's declaration order (`IN1b` §3.6 rule 28).
 ///
-/// **74 rows**: 3 `AutoApply`, 0 `AskFirst`, 71 `Explain`; 57 `Blocks`,
-/// 17 `Degrades`, 0 `Informs`. A row's severity answers one question — *did
-/// the thing the person asked for happen?* — derived from the site's own
-/// control flow and declared once per code (`IN1b` §3.6 rule 30). The seventeen
-/// `Degrades` rows are the five delivery-verification rows (the export **was**
-/// written), the six colour-QC rows (nothing was mutated),
-/// `look_incomplete`/`media_incomplete` (the project opened or saved without
-/// all of its looks or media), and the four `IN2B` §5 project/sidecar rows
-/// (the project opened or saved — only the history or the save-into-downgrade
-/// degraded). `Informs` has no Part B row and stays declared for IN3.
-///
-/// IN1 §9 clause 1's "every row `Blocks`" is superseded by erratum `IN1b`-R1a:
-/// it was true of a twelve-row table in which every row stopped a managed
-/// decode, and is false of a seventy-four-row table in which seventeen rows
-/// report work that completed with a loss.
-pub const POLICY: [PolicyEntry; 74] = [
+/// 71 rows: 3 `AutoApply`, 68 `Explain`; 56 `Blocks` and 15 `Degrades`.
+/// Severity records whether the requested work stopped or completed with a loss.
+pub const POLICY: [PolicyEntry; 71] = [
     PolicyEntry {
         code: IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
         class: PolicyClass::AutoApply,
@@ -2023,12 +2001,6 @@ pub const POLICY: [PolicyEntry; 74] = [
     },
     PolicyEntry {
         code: IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
-        class: PolicyClass::Explain,
-        predicate: PolicyPredicate::Always,
-        severity: IncidentSeverity::Blocks,
-    },
-    PolicyEntry {
-        code: IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
         class: PolicyClass::Explain,
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Blocks,
@@ -2405,19 +2377,7 @@ pub const POLICY: [PolicyEntry; 74] = [
         severity: IncidentSeverity::Blocks,
     },
     // Row 71 — rule 1 #4: the project opens; only overwrite-save is refused.
-    PolicyEntry {
-        code: IncidentCode::Label(LabelIncident::ProjectNewerFormat),
-        class: PolicyClass::Explain,
-        predicate: PolicyPredicate::Always,
-        severity: IncidentSeverity::Degrades,
-    },
     // Row 72 — rule 1 #5: some history skipped; everything else loaded.
-    PolicyEntry {
-        code: IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
-        class: PolicyClass::Explain,
-        predicate: PolicyPredicate::Always,
-        severity: IncidentSeverity::Degrades,
-    },
     // Row 73 — rule 1 #6: the project opens with an empty history.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::SidecarRefused),
@@ -2425,7 +2385,7 @@ pub const POLICY: [PolicyEntry; 74] = [
         predicate: PolicyPredicate::Always,
         severity: IncidentSeverity::Degrades,
     },
-    // Row 74 — rule 1 #7: the save succeeded; the history write failed.
+    // Row 72 — rule 1 #7: the save succeeded; the history write failed.
     PolicyEntry {
         code: IncidentCode::Label(LabelIncident::SidecarWriteFailed),
         class: PolicyClass::Explain,
@@ -2442,7 +2402,7 @@ pub const POLICY: [PolicyEntry; 74] = [
 /// panel-sink groups the day they land, on a population Part A never measured;
 /// a `const` makes joining it an edit somebody reviews.
 ///
-/// **It is exactly `POLICY[13..67]` — rows 14–67, contiguous** — which is a
+/// **It is exactly `POLICY[12..66]` — rows 14–67, contiguous** — which is a
 /// checkable property and not a coincidence: [`POLICY`] declares the three
 /// `AutoApply` rows first, then the colour rows the recovery vocabulary can and
 /// cannot serve, then everything else (IN2 §3.1 rule 3).
@@ -2532,9 +2492,9 @@ pub const INVESTIGATOR_ALLOWLIST: [IncidentCode; 54] = [
 /// thirteen per code is IN1 §13 D8 and is owned by IN3. The remaining
 /// **46** bodies are written — 39 in `IN1b` §5.6, 7 in `IN2B` §5 rule 1 —
 /// and are copied here verbatim, so the whole table carries 62 distinct
-/// sentences over 74 codes and the 61 non-colour bodies are pairwise distinct.
+/// sentences over 72 codes and the 61 non-colour bodies are pairwise distinct.
 #[must_use]
-// 74 arms carrying 46 written sentences: the bodies are the deliverable and
+// 72 arms carrying 46 written sentences: the bodies are the deliverable and
 // they are read as prose, so splitting the table across helper functions would
 // scatter the thing a reviewer is asked to read in one pass (`IN1b` §5.6, N0/Q4).
 #[allow(clippy::too_many_lines)]
@@ -2674,14 +2634,8 @@ pub fn explain_body(code: IncidentCode) -> &'static str {
         IncidentCode::Label(LabelIncident::RecoveryUnavailable) => {
             "Crash recovery is not recording in this run, so a future crash would lose unsaved work. The message is the journal recorder's own error; save now — work already saved is unaffected, but edits made while this warning stands may not survive a crash."
         }
-        IncidentCode::Label(LabelIncident::ProjectNewerFormat) => {
-            "This project file was written by a newer Kinewright than this one. It opens so nothing is lost, but saving over it is disabled — saving would silently drop what the newer version added. Use Save As to keep working in a copy, or open the project in the newer Kinewright."
-        }
-        IncidentCode::Label(LabelIncident::SidecarUnknownCodes) => {
-            "Some of this project's saved incident history used codes this Kinewright does not know, so those records were skipped and everything else loaded. The count is on the card; open the project in a newer Kinewright to see the full history."
-        }
         IncidentCode::Label(LabelIncident::SidecarRefused) => {
-            "This project's saved incident history could not be loaded. The message names why — a damaged file, a newer writer, or a history file that belongs to a different project. The project itself opens normally with an empty history, and the unreadable file is kept beside it, never deleted."
+            "This project's saved incident history could not be loaded. The message names why — a damaged file or a history file that belongs to a different project. The project itself opens normally with an empty history, and the unreadable file is kept beside it, never deleted."
         }
         IncidentCode::Label(LabelIncident::SidecarWriteFailed) => {
             "The project saved, but its incident history could not be written beside it. The message names why. The history is still live in this run and will be written again on the next save, or when the project closes."
@@ -2841,7 +2795,7 @@ pub fn deterministic_recovery(
 /// Whether [`deterministic_recovery`] has a builder for this code at all.
 ///
 /// The **exhaustive match with no wildcard** IN2 §7 rule 2 requires: every one
-/// of the seventy-four codes is named, so a seventy-fifth cannot silently
+/// of the seventy-two codes is named, so another code cannot silently
 /// default to "no button". The `false` arm's groups are named in order, and the
 /// reason each group is `false` is in [`deterministic_recovery`]'s own
 /// documentation.
@@ -2861,7 +2815,6 @@ const fn has_deterministic_recovery(code: IncidentCode) -> bool {
             SourceColorIncident::UnsupportedPrimaries
             | SourceColorIncident::UnsupportedTransfer
             | SourceColorIncident::UnsupportedMatrix
-            | SourceColorIncident::UnsupportedRange
             | SourceColorIncident::UnsupportedWhitePoint
             | SourceColorIncident::UnsupportedBitDepth
             | SourceColorIncident::UnsupportedCombination
@@ -2947,14 +2900,13 @@ const fn has_deterministic_recovery(code: IncidentCode) -> bool {
             | LabelIncident::Mixer
             | LabelIncident::MediaCache
             | LabelIncident::Timeline
-            // The seven `IN2B` §5 labels: `Plain` evidence carries no
+            // The current persistence-status labels: `Plain` evidence carries no
             // buildable operation either — and no session (off the allowlist,
             // IN2 §3.1 reason 2).
             | LabelIncident::PanelWorkerError
             | LabelIncident::RecoveryDamage
             | LabelIncident::RecoveryUnavailable
-            | LabelIncident::ProjectNewerFormat
-            | LabelIncident::SidecarUnknownCodes
+
             | LabelIncident::SidecarRefused
             | LabelIncident::SidecarWriteFailed,
         ) => false,
@@ -3030,7 +2982,6 @@ pub fn assume_rec709_operation(asset: AssetId, probed: &ColorDescription) -> Ope
 /// integer depth `8..=16`, so a known `Full` range and a known `Ten` depth
 /// survive untouched and are admitted. `ColorPrimaries::Srgb` is refused
 /// deliberately, because the only recovery IN1 ships targets `rec709_video`.
-/// `Other(_)` in any tag is matched by no arm and therefore yields `false`.
 #[must_use]
 pub fn rec709_compatible(probed: &ColorDescription) -> bool {
     matches!(
@@ -3121,8 +3072,8 @@ pub fn persisted_stop(stop: &str) -> &str {
 ///
 /// A scan over [`POLICY`], not a generated match: a scan cannot disagree with
 /// the table it scans, and at most a few hundred records per load the linear
-/// scan is unmeasurable. Total over all 74 codes; unknown — including `""`
-/// and wrong-case — resolves to `None` and feeds the rule-6 aggregate.
+/// scan is unmeasurable. Total over the current codes; unknown — including `""`
+/// and wrong-case — resolves to `None`. Persisted incident-code decoding refuses it.
 #[must_use]
 pub fn from_code(code: &str) -> Option<IncidentCode> {
     POLICY
@@ -3171,12 +3122,12 @@ pub struct RunningInvestigation {
 /// not in the record cannot drift from it. Field order is the §2 worked
 /// example's; every `Option` skips when absent, as the wire does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IncidentRecord {
     /// Resumes `next_id` above the loaded maximum.
     pub id: IncidentId,
-    /// The IN1 §2.2 rule 5 wire value; `from_code` at restore, unknown strings
-    /// feeding the rule-6 aggregate.
-    pub code: String,
+    /// The current incident code, decoded strictly from its wire string.
+    pub code: IncidentCode,
     /// Dedup axis and card anchor.
     pub subject: IncidentSubject,
     /// Frozen evidence: what was seen, verbatim.
@@ -3198,7 +3149,6 @@ pub struct IncidentRecord {
     pub count: u32,
     /// The writer emits only `Open` / `Resolved`; a record-`Investigating`
     /// (hand-written only) maps to `Open` at load.
-    #[serde(flatten)]
     pub state: IncidentState,
     /// Spend accounting, verbatim modulo the rule-14 stop category — and never
     /// `resolved_after`, which is log-origin-relative (the builder clears it,
@@ -3240,27 +3190,17 @@ pub struct RestoreReport {
     pub restored_open: usize,
     /// Entries restored resolved (counted by loaded state).
     pub restored_resolved: usize,
-    /// One entry per distinct unknown code string, in first-seen order, with
-    /// its count.
-    pub unknown_codes: Vec<(String, usize)>,
     /// Revision fields (record `revision` plus proposal `base_revision`) that
     /// differed from the opening revision and were rebased to it.
     pub rebased: usize,
-    /// The passed-through raw record texts, untouched (§2 rule 8b).
-    pub carried: Vec<String>,
     /// Every record's `refused_op`, keyed by the record's `id` (§3 rule 13).
     pub refused: BTreeMap<IncidentId, Operation>,
     /// Records skipped for an unusable id: the second and later records
     /// sharing an id (the first wins), and any record with an id past
     /// [`MAX_RESTORED_ID`] (N4 F4, N4.1). Over-ceiling records with an unknown
-    /// code are counted in [`Self::unknown_codes`] instead, per F3.
+    /// code is rejected during decoding.
     pub invalid_ids: usize,
 }
-
-/// Fixed prefix of the unknown-code aggregate's `observed`; the skipped total
-/// renders once at note time and the suffix is stable thereafter (`IN2B` §3
-/// rule 6, N-6). The dash is U+2014, matching the contract's string.
-const UNKNOWN_CODES_OBSERVED_PREFIX: &str = "incidents used codes this build does not know — ";
 
 /// How many resolved incidents a sidecar write keeps (`IN2B` §2 rule 11).
 ///
@@ -3271,56 +3211,9 @@ const MAX_PERSISTED_RESOLVED: usize = 256;
 
 /// The highest id that can restore (N4.1).
 ///
-/// Records past it are skipped and counted — resuming above them could
-/// overflow `next_id` or saturate `observe` onto a live id — and an `id_floor`
-/// past it is clamped to it, so `next_id` after restore is at most
-/// `MAX_RESTORED_ID + 1` and `observe` never saturates in practice.
+/// Records past it are skipped and counted. This leaves headroom above every
+/// accepted id, so restore cannot overflow `next_id` onto a live id.
 const MAX_RESTORED_ID: u64 = u64::MAX / 2;
-
-/// The id-relevant outcome of scanning restore's records (N4.1).
-struct RestoreIdResume {
-    /// The value `next_id` resumes to; `None` when nothing restorable was
-    /// seen and no floor was given, in which case `restore` leaves `next_id`
-    /// put (an empty log's is 1).
-    next_id: Option<u64>,
-    /// How many unknown-code records were skipped: `restore` notes its
-    /// rule-6 aggregate — consuming one fresh id — exactly when nonzero.
-    unknown_skipped: usize,
-}
-
-/// Pure id resume for [`IncidentLog::restore`]: above every restorable id in
-/// `ids` — at or below `MAX_RESTORED_ID`, known- or unknown-coded alike —
-/// and the `id_floor` clamped to the ceiling, via `checked_add`.
-///
-/// Split out so Kani can prove the resume arithmetic without the serde and
-/// heap machinery of `restore`; `restore` is its only caller. Each pair is
-/// `(id, code_known)`; unknown-code records always reach the scan (they
-/// count toward `unknown_skipped` whether or not their id is restorable),
-/// while over-ceiling and duplicate known ids never do — the former must
-/// not move the maximum, the latter cannot — exactly as the inline loop did
-/// (N4 F2, F4, N4.1).
-fn restore_id_resume(ids: &[(u64, bool)], id_floor: Option<u64>) -> RestoreIdResume {
-    let mut max_id: Option<u64> = None;
-    let mut unknown_skipped = 0_usize;
-    for &(id, known) in ids {
-        if !known {
-            unknown_skipped += 1;
-        }
-        if id <= MAX_RESTORED_ID {
-            max_id = Some(max_id.map_or(id, |max| max.max(id)));
-        }
-    }
-    // Above EVERY restorable id: restored, unknown-code, and the raw carried
-    // values' floor from the app, clamped to the ceiling. `checked_add`, never
-    // `saturating_add` — overflow is impossible by construction now, and the
-    // checked form documents that rather than trusting it (N4 F2, N4.1).
-    let floor = id_floor.map(|floor| floor.min(MAX_RESTORED_ID));
-    let highest = max_id.into_iter().chain(floor).max();
-    RestoreIdResume {
-        next_id: highest.and_then(|max| max.checked_add(1)),
-        unknown_skipped,
-    }
-}
 
 /// Past this many compact-JSON bytes the refused-op stash is omitted from the
 /// record (`IN2B` §0.4 d5): IN2 §3.4 rule 23's elision, reused rather than
@@ -3928,8 +3821,7 @@ impl IncidentLog {
     /// not move it: the flusher asks "anything new since the last write",
     /// and a no-op is not news. The MCP threads mutate through the same
     /// handle, so they count too. `restore` bumps once per restored entry —
-    /// one mutation per entry, as `observe` — and its unknown-code aggregate
-    /// notes through `observe`, which bumps for itself.
+    /// one mutation per entry, as `observe`.
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
@@ -4109,28 +4001,6 @@ impl IncidentLog {
         self.suppressed.insert(key);
         self.bump_generation();
         true
-    }
-
-    /// Drop every open entry carrying `code`, returning how many went.
-    ///
-    /// A live-log removal, not a resolution (`IN2B` §2 rule 7, N2/B-4): Save As
-    /// drops the open `project_newer_format` note because it was about the old
-    /// path's bytes, and carrying it would badge a clean copy with a false
-    /// card. No `Resolved` is recorded, no suppression is written, and resolved
-    /// entries with the code are left alone. Carried walls for dropped ids go
-    /// with them. Bumps the generation when anything was dropped, like every
-    /// `&mut` writer.
-    pub fn remove_open_with_code(&mut self, code: IncidentCode) -> usize {
-        let before = self.entries.len();
-        self.entries
-            .retain(|entry| !(entry.state.is_open() && entry.code == code));
-        let dropped = before - self.entries.len();
-        if dropped > 0 {
-            let live: BTreeSet<IncidentId> = self.entries.iter().map(|entry| entry.id).collect();
-            self.loaded_wall.retain(|id, _| live.contains(id));
-            self.bump_generation();
-        }
-        dropped
     }
 
     /// Point an open incident at the revision it is now stated against.
@@ -4403,7 +4273,7 @@ impl IncidentLog {
         telemetry.resolved_after = None;
         IncidentRecord {
             id: entry.id,
-            code: entry.code.code().to_owned(),
+            code: entry.code,
             subject: entry.subject,
             observed: entry.observed.clone(),
             allowed: entry.allowed.clone(),
@@ -4502,39 +4372,16 @@ impl IncidentLog {
         i64::try_from(millis).ok()
     }
 
-    /// Restore records into this log (`IN2B` §3 rules 1–10, 13–14).
-    ///
-    /// Writes into this log, never swapping it; requires an empty log and runs
-    /// before any note. Everything derived is recomputed from the *current*
-    /// policy table and nothing derived is trusted; `revision`/`base_revision`
-    /// rebase to `opening`; `opened_at` is set from the stored offset and the
-    /// wall filed in `loaded_wall`. Hand-written strings restore under
-    /// observe's serialised-length caps (`subject_name`, proposal
-    /// summary/explanation); `observed` has no cap at observe and restores
-    /// verbatim (N4 F6). `next_id` resumes above every restorable id in the
-    /// file — restored, unknown-code, and the `id_floor` the app computed from
-    /// the raw carried values, clamped to `MAX_RESTORED_ID` — via `checked_add`,
-    /// so it never overflows onto a live id (N4 F2, N4.1). Unknown code strings
-    /// are skipped, counted, and reported once through a single
-    /// `sidecar_unknown_codes` aggregate noted last, after the resume, so its
-    /// id can neither collide with a restored id nor disturb the order.
-    /// Duplicate ids keep the first record and count the rest; records past
-    /// `MAX_RESTORED_ID` are skipped and counted (unknown-code ones in the
-    /// unknown-codes aggregate, others in `invalid_ids`) (N4 F4, N4.1).
-    /// `carried` passes through untouched. Restore enqueues nothing, resolves
-    /// nothing and notifies nothing.
-    ///
+    /// Restore current records into an empty log and recompute derived policy.
+    /// Duplicate and over-ceiling ids are counted and skipped. Resume above
+    /// the highest accepted id; revisions rebase to the opening revision.
     /// # Panics
-    ///
-    /// Panics in every build, not just debug, when the log is non-empty:
-    /// restore runs once, into an empty log, before any note (N4 F7).
+    /// Panics when the log is not empty: restore runs before any observation.
     #[must_use]
     pub fn restore(
         &mut self,
         records: Vec<IncidentRecord>,
-        carried: Vec<String>,
         opening: TimelineRevision,
-        id_floor: Option<u64>,
     ) -> RestoreReport {
         assert!(
             self.entries.is_empty(),
@@ -4543,57 +4390,23 @@ impl IncidentLog {
         let mut report = RestoreReport {
             restored_open: 0,
             restored_resolved: 0,
-            unknown_codes: Vec::new(),
             rebased: 0,
-            carried,
             refused: BTreeMap::new(),
             invalid_ids: 0,
         };
-        // The id-relevant scan of the records, collected for the pure
-        // resume below: `(id, code_known)`. Unknown-code records always reach
-        // it (they count toward the aggregate whether or not their id is
-        // restorable); over-ceiling and duplicate known ids never do — the
-        // first record with an id wins (N4 F4, N4.1).
-        let mut id_inputs: Vec<(u64, bool)> = Vec::new();
-        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        let mut highest: Option<u64> = None;
+        let mut seen = BTreeSet::new();
         for stored in records {
             let id = stored.id.0;
-            let over_ceiling = id > MAX_RESTORED_ID;
-            let Some(code) = from_code(&stored.code) else {
-                // Unknown-code records count in the aggregate whether or not
-                // they are restorable — but only restorable ids count toward
-                // the resume (N4.1).
-                Self::count_unknown(&mut report.unknown_codes, stored.code);
-                id_inputs.push((id, false));
-                continue;
-            };
-            // Past the ceiling, or a duplicate: skipped and counted (N4 F4,
-            // N4.1). The first record with an id wins.
-            if over_ceiling || !seen.insert(id) {
+            if id > MAX_RESTORED_ID || !seen.insert(id) {
                 report.invalid_ids += 1;
                 continue;
             }
-            id_inputs.push((id, true));
-            self.restore_one(code, stored, opening, &mut report);
+            highest = Some(highest.map_or(id, |max| max.max(id)));
+            self.restore_one(stored.code, stored, opening, &mut report);
         }
-        let resume = restore_id_resume(&id_inputs, id_floor);
-        if let Some(next) = resume.next_id {
-            self.next_id = next;
-        }
-        if resume.unknown_skipped > 0 {
-            let mut aggregate = IncidentObservation::plain(
-                IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
-                IncidentSubject::Project,
-                format!(
-                    "{UNKNOWN_CODES_OBSERVED_PREFIX}{} skipped",
-                    resume.unknown_skipped
-                ),
-                opening,
-            );
-            // Every note with a §5 code is transient (§5 rule 1): the load
-            // re-aggregates what the next write drops.
-            aggregate.transient = true;
-            let _ = self.observe(aggregate);
+        if let Some(highest) = highest {
+            self.next_id = highest + 1;
         }
         report
     }
@@ -4695,15 +4508,6 @@ impl IncidentLog {
         });
         self.bump_generation();
     }
-
-    /// Count one unknown code string in first-seen order (§3 rule 6).
-    fn count_unknown(unknown_codes: &mut Vec<(String, usize)>, code: String) {
-        if let Some(entry) = unknown_codes.iter_mut().find(|entry| entry.0 == code) {
-            entry.1 += 1;
-        } else {
-            unknown_codes.push((code, 1));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -4794,7 +4598,6 @@ mod tests {
             ColorSourceError::UnknownMatrix,
             ColorSourceError::UnsupportedMatrix(ColorMatrix::Bt2020Ncl),
             ColorSourceError::UnknownRange,
-            ColorSourceError::UnsupportedRange(ColorRange::Other("weird".to_owned())),
             ColorSourceError::UnknownWhitePoint,
             ColorSourceError::UnsupportedWhitePoint(ColorWhitePoint::D50),
             ColorSourceError::UnknownBitDepth,
@@ -4822,91 +4625,89 @@ mod tests {
                 SourceColorIncident::UnsupportedPrimaries => 5,
                 SourceColorIncident::UnsupportedTransfer => 6,
                 SourceColorIncident::UnsupportedMatrix => 7,
-                SourceColorIncident::UnsupportedRange => 8,
-                SourceColorIncident::UnsupportedWhitePoint => 9,
-                SourceColorIncident::UnsupportedBitDepth => 10,
-                SourceColorIncident::UnsupportedCombination => 11,
-                SourceColorIncident::UnknownWhitePoint => 12,
+
+                SourceColorIncident::UnsupportedWhitePoint => 8,
+                SourceColorIncident::UnsupportedBitDepth => 9,
+                SourceColorIncident::UnsupportedCombination => 10,
+                SourceColorIncident::UnknownWhitePoint => 11,
             },
             IncidentCode::Media(incident) => match incident {
-                MediaIncident::UnsupportedDecoderFormat => 13,
-                MediaIncident::BackendUnclassified => 14,
+                MediaIncident::UnsupportedDecoderFormat => 12,
+                MediaIncident::BackendUnclassified => 13,
             },
             IncidentCode::DeliveryColor(incident) => match incident {
-                DeliveryColorIncident::UnsupportedCodec => 15,
-                DeliveryColorIncident::UnsupportedField => 16,
-                DeliveryColorIncident::PixelFormatDepthMismatch => 17,
-                DeliveryColorIncident::EncoderPixelFormatUnavailable => 18,
+                DeliveryColorIncident::UnsupportedCodec => 14,
+                DeliveryColorIncident::UnsupportedField => 15,
+                DeliveryColorIncident::PixelFormatDepthMismatch => 16,
+                DeliveryColorIncident::EncoderPixelFormatUnavailable => 17,
             },
             IncidentCode::DeliveryVerification(incident) => match incident {
-                DeliveryVerificationIncident::NotFullResolution => 19,
-                DeliveryVerificationIncident::PlaneOutOfContainer => 20,
-                DeliveryVerificationIncident::FrameCountMismatch => 21,
-                DeliveryVerificationIncident::FrameCountOutOfRange => 22,
-                DeliveryVerificationIncident::BudgetLaneMismatch => 23,
+                DeliveryVerificationIncident::NotFullResolution => 18,
+                DeliveryVerificationIncident::PlaneOutOfContainer => 19,
+                DeliveryVerificationIncident::FrameCountMismatch => 20,
+                DeliveryVerificationIncident::FrameCountOutOfRange => 21,
+                DeliveryVerificationIncident::BudgetLaneMismatch => 22,
             },
             IncidentCode::ColorQc(incident) => match incident {
-                ColorQcIncident::ProxyProofRefused => 24,
-                ColorQcIncident::RasterLengthMismatch => 25,
-                ColorQcIncident::EmptyPopulation => 26,
-                ColorQcIncident::NodeBudgetExceeded => 27,
-                ColorQcIncident::MatteRegionRasterMismatch => 28,
-                ColorQcIncident::NodeRemovalRejected => 29,
+                ColorQcIncident::ProxyProofRefused => 23,
+                ColorQcIncident::RasterLengthMismatch => 24,
+                ColorQcIncident::EmptyPopulation => 25,
+                ColorQcIncident::NodeBudgetExceeded => 26,
+                ColorQcIncident::MatteRegionRasterMismatch => 27,
+                ColorQcIncident::NodeRemovalRejected => 28,
             },
             IncidentCode::Operation(family) => match family {
-                IncidentFamily::Bounds => 30,
-                IncidentFamily::Malformed => 31,
-                IncidentFamily::Duplicate => 32,
-                IncidentFamily::Placement => 33,
-                IncidentFamily::Missing => 34,
-                IncidentFamily::Structure => 35,
-                IncidentFamily::Relink => 36,
-                IncidentFamily::Unrepresentable => 37,
-                IncidentFamily::UnknownName => 38,
-                IncidentFamily::Internal => 39,
-                IncidentFamily::ColorPolicy => 40,
+                IncidentFamily::Bounds => 29,
+                IncidentFamily::Malformed => 30,
+                IncidentFamily::Duplicate => 31,
+                IncidentFamily::Placement => 32,
+                IncidentFamily::Missing => 33,
+                IncidentFamily::Structure => 34,
+                IncidentFamily::Relink => 35,
+                IncidentFamily::Unrepresentable => 36,
+                IncidentFamily::UnknownName => 37,
+                IncidentFamily::Internal => 38,
+                IncidentFamily::ColorPolicy => 39,
             },
-            IncidentCode::LutAssetPolicy => 41,
-            IncidentCode::EditRevisionConflict => 42,
+            IncidentCode::LutAssetPolicy => 40,
+            IncidentCode::EditRevisionConflict => 41,
             IncidentCode::Rejection(incident) => match incident {
-                RejectionIncident::EditPlan => 43,
-                RejectionIncident::DeliveryVariant => 44,
-                RejectionIncident::AgentBranch => 45,
-                RejectionIncident::SourceEdit => 46,
-                RejectionIncident::Relink => 47,
-                RejectionIncident::ProjectSave => 48,
-                RejectionIncident::CaptionPlan => 49,
+                RejectionIncident::EditPlan => 42,
+                RejectionIncident::DeliveryVariant => 43,
+                RejectionIncident::AgentBranch => 44,
+                RejectionIncident::SourceEdit => 45,
+                RejectionIncident::Relink => 46,
+                RejectionIncident::ProjectSave => 47,
+                RejectionIncident::CaptionPlan => 48,
             },
             IncidentCode::Label(incident) => match incident {
-                LabelIncident::Operations => 50,
-                LabelIncident::Look => 51,
-                LabelIncident::LookIncomplete => 52,
-                LabelIncident::Export => 53,
-                LabelIncident::SourceMonitor => 54,
-                LabelIncident::Relink => 55,
-                LabelIncident::AgentBranch => 56,
-                LabelIncident::TranscriptEdit => 57,
-                LabelIncident::Media => 58,
-                LabelIncident::MediaIncomplete => 59,
-                LabelIncident::Agent => 60,
-                LabelIncident::Recording => 61,
-                LabelIncident::Project => 62,
-                LabelIncident::Captions => 63,
-                LabelIncident::Mixer => 64,
-                LabelIncident::MediaCache => 65,
-                LabelIncident::Timeline => 66,
-                LabelIncident::PanelWorkerError => 67,
-                LabelIncident::RecoveryDamage => 68,
-                LabelIncident::RecoveryUnavailable => 69,
-                LabelIncident::ProjectNewerFormat => 70,
-                LabelIncident::SidecarUnknownCodes => 71,
-                LabelIncident::SidecarRefused => 72,
-                LabelIncident::SidecarWriteFailed => 73,
+                LabelIncident::Operations => 49,
+                LabelIncident::Look => 50,
+                LabelIncident::LookIncomplete => 51,
+                LabelIncident::Export => 52,
+                LabelIncident::SourceMonitor => 53,
+                LabelIncident::Relink => 54,
+                LabelIncident::AgentBranch => 55,
+                LabelIncident::TranscriptEdit => 56,
+                LabelIncident::Media => 57,
+                LabelIncident::MediaIncomplete => 58,
+                LabelIncident::Agent => 59,
+                LabelIncident::Recording => 60,
+                LabelIncident::Project => 61,
+                LabelIncident::Captions => 62,
+                LabelIncident::Mixer => 63,
+                LabelIncident::MediaCache => 64,
+                LabelIncident::Timeline => 65,
+                LabelIncident::PanelWorkerError => 66,
+                LabelIncident::RecoveryDamage => 67,
+                LabelIncident::RecoveryUnavailable => 68,
+                LabelIncident::SidecarRefused => 69,
+                LabelIncident::SidecarWriteFailed => 70,
             },
         }
     }
 
-    /// `IN1b` §9 clause 2: 74 rows, an explicit no-wildcard `ordinal()`, every
+    /// `IN1b` §9 clause 2: 72 rows, an explicit no-wildcard `ordinal()`, every
     /// **colour** row `Blocks`, and every row's severity equal to `IN1b` §3.6
     /// rule 31's table plus the four `IN2B` §5 `Degrades` rows. Replaces Part
     /// A's
@@ -4914,8 +4715,8 @@ mod tests {
     /// whose "every row `Blocks`" is erratum `IN1b`-R1a.
     #[test]
     fn in1b_policy_covers_every_incident_code_exactly_once_with_its_declared_severity() {
-        assert_eq!(POLICY.len(), 74);
-        let mut seen = [0_usize; 74];
+        assert_eq!(POLICY.len(), 71);
+        let mut seen = [0_usize; 71];
         let mut blocks = 0_usize;
         let mut degrades = 0_usize;
         let mut informs = 0_usize;
@@ -4933,8 +4734,6 @@ mod tests {
                 | IncidentCode::Label(
                     LabelIncident::LookIncomplete
                     | LabelIncident::MediaIncomplete
-                    | LabelIncident::ProjectNewerFormat
-                    | LabelIncident::SidecarUnknownCodes
                     | LabelIncident::SidecarRefused
                     | LabelIncident::SidecarWriteFailed,
                 ) => IncidentSeverity::Degrades,
@@ -4968,13 +4767,13 @@ mod tests {
             seen.iter().all(|count| *count == 1),
             "every code must have exactly one POLICY row, got {seen:?}"
         );
-        assert_eq!((blocks, degrades, informs), (57, 17, 0));
-        assert_eq!((auto_apply, ask_first, explain), (3, 0, 71));
+        assert_eq!((blocks, degrades, informs), (56, 15, 0));
+        assert_eq!((auto_apply, ask_first, explain), (3, 0, 68));
     }
 
     #[test]
     fn in1_policy_rows_are_declared_in_table_order() {
-        assert_eq!(POLICY.len(), 74, "erratum `IN1b`-R15");
+        assert_eq!(POLICY.len(), 71, "erratum `IN1b`-R15");
         for (index, entry) in POLICY.iter().enumerate() {
             assert_eq!(
                 ordinal(entry.code),
@@ -5001,7 +4800,7 @@ mod tests {
                 error.code()
             );
         }
-        assert_eq!(mapped.len(), 13);
+        assert_eq!(mapped.len(), 12);
     }
 
     #[test]
@@ -5658,7 +5457,8 @@ mod tests {
             ColorPrimaries::Bt470M,
             ColorPrimaries::Bt470Bg,
             ColorPrimaries::Film,
-            ColorPrimaries::Other("x".to_owned()),
+            ColorPrimaries::Smpte428,
+            ColorPrimaries::Ebu3213,
         ];
         let transfers = [
             ColorTransfer::Unknown,
@@ -5674,7 +5474,13 @@ mod tests {
             ColorTransfer::Log,
             ColorTransfer::LogC,
             ColorTransfer::Log3G10,
-            ColorTransfer::Other("x".to_owned()),
+            ColorTransfer::Smpte240M,
+            ColorTransfer::LogSqrt,
+            ColorTransfer::Iec61966TwoFour,
+            ColorTransfer::Bt1361Ecg,
+            ColorTransfer::Bt2020Ten,
+            ColorTransfer::Bt2020Twelve,
+            ColorTransfer::Smpte428,
         ];
         let matrices = [
             ColorMatrix::Unknown,
@@ -5689,14 +5495,14 @@ mod tests {
             ColorMatrix::ChromaDerivedNcl,
             ColorMatrix::ChromaDerivedCl,
             ColorMatrix::Ictcp,
-            ColorMatrix::Other("x".to_owned()),
+            ColorMatrix::Bt470Bg,
+            ColorMatrix::Fcc,
+            ColorMatrix::Smpte2085,
+            ColorMatrix::IptC2,
+            ColorMatrix::YcgcoRe,
+            ColorMatrix::YcgcoRo,
         ];
-        let ranges = [
-            ColorRange::Unknown,
-            ColorRange::Full,
-            ColorRange::Limited,
-            ColorRange::Other("x".to_owned()),
-        ];
+        let ranges = [ColorRange::Unknown, ColorRange::Full, ColorRange::Limited];
         let white_points = [
             ColorWhitePoint::Unknown,
             ColorWhitePoint::D50,
@@ -5704,7 +5510,6 @@ mod tests {
             ColorWhitePoint::D60,
             ColorWhitePoint::D65,
             ColorWhitePoint::Dci,
-            ColorWhitePoint::Other("x".to_owned()),
         ];
         let bit_depths = [
             ColorBitDepth::Unknown,
@@ -5719,7 +5524,6 @@ mod tests {
             ColorBitDepth::Integer(8),
             ColorBitDepth::Integer(16),
             ColorBitDepth::Integer(17),
-            ColorBitDepth::Other("x".to_owned()),
         ];
 
         let mut checked = 0_u32;
@@ -5775,7 +5579,7 @@ mod tests {
     /// Every declared code, in `POLICY`'s own order. Written out rather than
     /// read from `POLICY`, so a test that quantifies over the code set cannot
     /// be satisfied by a table that lost a row.
-    const EVERY_INCIDENT_CODE: [IncidentCode; 74] = [
+    const EVERY_INCIDENT_CODE: [IncidentCode; 71] = [
         IncidentCode::SourceColor(SourceColorIncident::UnknownPrimaries),
         IncidentCode::SourceColor(SourceColorIncident::UnknownTransfer),
         IncidentCode::SourceColor(SourceColorIncident::UnknownMatrix),
@@ -5784,7 +5588,6 @@ mod tests {
         IncidentCode::SourceColor(SourceColorIncident::UnsupportedPrimaries),
         IncidentCode::SourceColor(SourceColorIncident::UnsupportedTransfer),
         IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
-        IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
         IncidentCode::SourceColor(SourceColorIncident::UnsupportedWhitePoint),
         IncidentCode::SourceColor(SourceColorIncident::UnsupportedBitDepth),
         IncidentCode::SourceColor(SourceColorIncident::UnsupportedCombination),
@@ -5846,8 +5649,6 @@ mod tests {
         IncidentCode::Label(LabelIncident::PanelWorkerError),
         IncidentCode::Label(LabelIncident::RecoveryDamage),
         IncidentCode::Label(LabelIncident::RecoveryUnavailable),
-        IncidentCode::Label(LabelIncident::ProjectNewerFormat),
-        IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
         IncidentCode::Label(LabelIncident::SidecarRefused),
         IncidentCode::Label(LabelIncident::SidecarWriteFailed),
     ];
@@ -5872,7 +5673,7 @@ mod tests {
     }
 
     /// `IN1b` §7 item 6 and erratum `IN1b`-R14: accessor against accessor over
-    /// every delegating code, and `field` equal to `code.field()` over all 74.
+    /// every delegating code, and `field` equal to `code.field()` over all 72.
     #[test]
     fn in1b_every_code_delegates_its_string_to_the_accessor_that_owns_it() {
         let mut delegating = 0_usize;
@@ -5935,7 +5736,7 @@ mod tests {
                 | IncidentCode::Label(_) => {}
             }
         }
-        assert_eq!(delegating, 29, "`IN1b` §3.2 rule 12's 29 existing strings");
+        assert_eq!(delegating, 28, "current delegated strings");
 
         // Every code string is distinct, and every one opens an incident whose
         // `field` is the code's own (IN1 §2.3b rule 25, erratum `IN1b`-R14).
@@ -5957,7 +5758,7 @@ mod tests {
             };
             assert_eq!(log.get(id).unwrap().field, code.field());
         }
-        assert_eq!(strings.len(), 74);
+        assert_eq!(strings.len(), 71);
     }
 
     /// `IN1b` §9 clause 3: a predicated row reached with no probed description
@@ -6014,7 +5815,7 @@ mod tests {
         );
     }
 
-    /// `IN1b` §9 clause 4: every one of the 74 codes reaches a body, the 61
+    /// `IN1b` §9 clause 4: every one of the 72 codes reaches a body, the 61
     /// non-colour bodies are pairwise distinct, the 13 colour bodies are each
     /// `ColorSourceError::recovery_action()`'s one sentence, and the 15
     /// non-colour delegating rows equal their own accessor's string.
@@ -6059,8 +5860,8 @@ mod tests {
             assert_eq!(recoveries[0].label, "How to fix this");
             assert_eq!(recoveries[0].kind, RecoveryKind::Explain(body));
         }
-        assert_eq!(colour, 13);
-        assert_eq!(non_colour.len(), 61);
+        assert_eq!(colour, 12);
+        assert_eq!(non_colour.len(), 59);
         assert_eq!(delegated, 15);
     }
 
@@ -6073,7 +5874,7 @@ mod tests {
     /// rule 1); this test pins everything core owns — the §5 table values,
     /// the bodies, the tail rows and the allowlist slice.
     #[test]
-    fn in2b_the_seven_new_codes_carry_written_bodies_headlines_and_tail_rows() {
+    fn in2b_current_persistence_codes_carry_written_bodies_and_tail_rows() {
         let seven = [
             (
                 LabelIncident::PanelWorkerError,
@@ -6094,18 +5895,6 @@ mod tests {
                 IncidentSeverity::Blocks,
             ),
             (
-                LabelIncident::ProjectNewerFormat,
-                "project_newer_format",
-                "project",
-                IncidentSeverity::Degrades,
-            ),
-            (
-                LabelIncident::SidecarUnknownCodes,
-                "sidecar_unknown_codes",
-                "sidecar",
-                IncidentSeverity::Degrades,
-            ),
-            (
                 LabelIncident::SidecarRefused,
                 "sidecar_refused",
                 "sidecar",
@@ -6123,7 +5912,7 @@ mod tests {
             let code_value = IncidentCode::Label(*incident);
             assert_eq!(incident.code(), *code);
             assert_eq!(incident.field(), *field);
-            assert_eq!(code_value.table_index(), 67 + index);
+            assert_eq!(code_value.table_index(), 66 + index);
             assert_eq!(code_value.field(), *field);
             let body = explain_body(code_value);
             assert!(!body.is_empty(), "{code} has no body");
@@ -6131,21 +5920,21 @@ mod tests {
                 bodies.insert(body),
                 "{code} shares its body with another new code"
             );
-            let row = &POLICY[67 + index];
+            let row = &POLICY[66 + index];
             assert_eq!(
                 row.code,
                 code_value,
                 "tail row {} names its code",
-                68 + index
+                67 + index
             );
             assert_eq!(row.class, PolicyClass::Explain);
             assert_eq!(row.predicate, PolicyPredicate::Always);
             assert_eq!(row.severity, *severity);
         }
-        assert_eq!(bodies.len(), 7);
-        assert_eq!(POLICY.len(), 74);
+        assert_eq!(bodies.len(), 5);
+        assert_eq!(POLICY.len(), 71);
         assert_eq!(INVESTIGATOR_ALLOWLIST.len(), 54);
-        let rows: Vec<IncidentCode> = POLICY[13..67].iter().map(|entry| entry.code).collect();
+        let rows: Vec<IncidentCode> = POLICY[12..66].iter().map(|entry| entry.code).collect();
         assert_eq!(INVESTIGATOR_ALLOWLIST.to_vec(), rows);
         for (incident, code, _, _) in &seven {
             assert!(
@@ -6558,7 +6347,7 @@ mod tests {
     }
 
     /// The worst serialised incident over IN2 §4.2 rule 11's product, measured
-    /// against the implementation rather than a prototype: the **74** declared
+    /// against the implementation rather than a prototype: the **72** declared
     /// codes times the **eight** subject variants of `IN1b` §3.3 rule 17 as
     /// amended by erratum `IN1b`-A-R13, times **two probes**, times
     /// {no proposal, a proposal at the cap}, times {open, investigating,
@@ -6594,7 +6383,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn in2b_the_ceiling_holds_with_names_saturated_and_819_unmoved_on_every_subject_shape() {
         // The core twin of `in1b_every_code_fits_the_measured_ceiling`, grown
-        // over IN2 §4.2 rule 11's product: 74 codes x 8 subject shapes x
+        // over IN2 §4.2 rule 11's product: 72 codes x 8 subject shapes x
         // 2 probes x {no proposal, a proposal at the cap} x {open,
         // investigating, resolved with all telemetry, resolved without the two
         // new fields} x IN2B §10 rule 5's {no name, a name at the cap}.
@@ -6726,7 +6515,7 @@ mod tests {
         );
         assert_eq!(
             measured,
-            74 * 8 * 2 * 2 * 4 * 2,
+            71 * 8 * 2 * 2 * 4 * 2,
             "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds and the IN2B §10 rule 5 name arm"
         );
         // N5/G1: exactly half the shapes carry a name saturated at the
@@ -6859,14 +6648,14 @@ mod tests {
 
     fn worst_probe() -> ColorDescription {
         ColorDescription {
-            primaries: ColorPrimaries::Unknown,
+            primaries: ColorPrimaries::DisplayP3,
             transfer: ColorTransfer::Unknown,
             matrix: ColorMatrix::Unknown,
-            range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+            range: ColorRange::Unknown,
             white_point: ColorWhitePoint::Unknown,
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 4_000,
-            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+            provenance: ColorProvenance::Inferred,
         }
     }
 
@@ -6875,9 +6664,7 @@ mod tests {
     /// `AutoApply` rows and IN2 §7 rows 1-3, which are the only rows on which
     /// this slice changed the `recoveries` array (erratum A-R9).
     ///
-    /// `worst_probe`'s `ColorRange::Other(_)` is refused by `rec709_compatible`
-    /// (`incident.rs:2370-2391`), which admits `range` only in
-    /// `Unknown | Limited | Full`, so that probe builds no operation at all.
+    /// A compatible probe includes the operation-valued recovery in size accounting.
     fn rec709_compatible_worst_probe() -> ColorDescription {
         ColorDescription {
             primaries: ColorPrimaries::Unknown,
@@ -6887,7 +6674,7 @@ mod tests {
             white_point: ColorWhitePoint::Unknown,
             bit_depth: ColorBitDepth::Sixteen,
             confidence_basis_points: u16::MAX,
-            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+            provenance: ColorProvenance::Inferred,
         }
     }
 
@@ -6977,10 +6764,10 @@ mod tests {
             // Every colour row's `observed` comes from
             // `ColorSourceError::observed()`; the widest is the formatted tuple.
             IncidentCode::SourceColor(_) => ColorSourceError::UnsupportedCombination {
-                primaries: ColorPrimaries::Other("display_p3_container".to_owned()),
-                transfer: ColorTransfer::Other("arri_logc4_wide".to_owned()),
-                matrix: ColorMatrix::Other("ictcp_constant_intensity".to_owned()),
-                range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+                primaries: ColorPrimaries::DisplayP3,
+                transfer: ColorTransfer::Smpte2084,
+                matrix: ColorMatrix::Ictcp,
+                range: ColorRange::Unknown,
             }
             .observed(),
             IncidentCode::Media(_)
@@ -7057,7 +6844,7 @@ mod tests {
     /// IN2 §7 rule 4's sixteen, with its `buildable?` column. The tests below
     /// read this column rather than a literal, so the count of buildable rows
     /// is whatever the table says and is never written twice (N2.5/B8).
-    const DETERMINISTIC_SIXTEEN: [(IncidentCode, bool); 16] = [
+    const DETERMINISTIC_CASES: [(IncidentCode, bool); 15] = [
         (
             IncidentCode::SourceColor(SourceColorIncident::UnknownRange),
             true,
@@ -7080,10 +6867,6 @@ mod tests {
         ),
         (
             IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
-            false,
-        ),
-        (
-            IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
             false,
         ),
         (
@@ -7205,7 +6988,7 @@ mod tests {
         }
 
         // Rows 14-67, contiguous.
-        let rows: Vec<IncidentCode> = POLICY[13..67].iter().map(|entry| entry.code).collect();
+        let rows: Vec<IncidentCode> = POLICY[12..66].iter().map(|entry| entry.code).collect();
         assert_eq!(INVESTIGATOR_ALLOWLIST.to_vec(), rows);
 
         // No member yields an `Operation` recovery under any evidence IN2 §7
@@ -7235,7 +7018,7 @@ mod tests {
         // The converse, read from IN2 §7 rule 4's own column: every row the
         // table marks `yes` yields one, and they are exactly the `Explain`
         // codes that do.
-        let expected_buildable: BTreeSet<IncidentCode> = DETERMINISTIC_SIXTEEN
+        let expected_buildable: BTreeSet<IncidentCode> = DETERMINISTIC_CASES
             .iter()
             .filter(|(_, buildable)| *buildable)
             .map(|(code, _)| *code)
@@ -7513,7 +7296,7 @@ mod tests {
     /// `kinewright-app`, which owns `card_actions`.
     #[test]
     fn in2_the_three_deterministic_rows_offer_a_button_and_the_sentence() {
-        let buildable: Vec<IncidentCode> = DETERMINISTIC_SIXTEEN
+        let buildable: Vec<IncidentCode> = DETERMINISTIC_CASES
             .iter()
             .filter(|(_, is_buildable)| *is_buildable)
             .map(|(code, _)| *code)
@@ -7565,7 +7348,7 @@ mod tests {
     /// IN2 §9.1 item 7, §7 rule 5 — the predicate **and** the reachability.
     #[test]
     fn in2_an_unsupported_colour_row_still_offers_only_its_sentence() {
-        let reached: [(IncidentCode, ColorDescription); 7] = [
+        let reached: [(IncidentCode, ColorDescription); 6] = [
             (
                 IncidentCode::SourceColor(SourceColorIncident::UnsupportedPrimaries),
                 ColorDescription {
@@ -7584,13 +7367,6 @@ mod tests {
                 IncidentCode::SourceColor(SourceColorIncident::UnsupportedMatrix),
                 ColorDescription {
                     matrix: ColorMatrix::Bt2020Ncl,
-                    ..all_unknown_probe()
-                },
-            ),
-            (
-                IncidentCode::SourceColor(SourceColorIncident::UnsupportedRange),
-                ColorDescription {
-                    range: ColorRange::Other("weird".to_owned()),
                     ..all_unknown_probe()
                 },
             ),
@@ -7651,7 +7427,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 7);
+        assert_eq!(checked, 6);
     }
 
     /// IN2 §9.1 item 8, §7 rule 6 — each of rows 11-16 through its **real**
@@ -7707,7 +7483,7 @@ mod tests {
         ];
         assert_eq!(cases.len(), 6);
 
-        let table: BTreeSet<&str> = DETERMINISTIC_SIXTEEN[10..16]
+        let table: BTreeSet<&str> = DETERMINISTIC_CASES[9..15]
             .iter()
             .map(|(code, _)| code.code())
             .collect();
@@ -7976,27 +7752,6 @@ mod tests {
     /// IN2 §9.1 item 12, §9.2 clause 13, §2.4.
     #[test]
     fn in2_a_muted_code_round_trips_through_the_document_byte_identically() {
-        // The pre-IN2 project has no `investigator` key and loads and re-saves
-        // byte-unchanged. The same pin lives in `tests/contracts.rs`; it is
-        // repeated here because clause 13 is about the field this slice adds.
-        let legacy: Document = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/pre_m13_project.json"
-        )))
-        .unwrap();
-        assert!(legacy.investigator.is_none());
-        let round_tripped = serde_json::to_vec(&legacy).unwrap();
-        assert!(
-            !round_tripped
-                .windows(12)
-                .any(|window| window == b"investigator")
-        );
-        assert_eq!(round_tripped.len(), 1_215);
-        assert_eq!(
-            format!("{:016x}", fnv1a64_digest(&round_tripped)),
-            "c9da3186e131e4fd"
-        );
-
         // One muted code round-trips, and an unrecognised string is inert.
         let muted = Document {
             investigator: Some(InvestigatorPreferences {
@@ -8276,25 +8031,12 @@ mod tests {
             "operations never serialise: {body}"
         );
         assert_json_round_trip(&proposal);
-        // `#[serde(skip)]` ignores the key even when a hand-written record
-        // carries it: operations never resurrect through the derive.
-        let decoded = serde_json::from_str::<IncidentProposal>(
+        // A record cannot supply operations that the writer never emits.
+        let error = serde_json::from_str::<IncidentProposal>(
             r#"{"operations":[1,2,3],"operation_count":2,"summary":"s","explanation":"e","base_revision":41,"stale":false}"#,
         )
-        .unwrap();
-        assert!(decoded.operations.is_empty());
-        assert_eq!(decoded.operation_count, 2);
-    }
-
-    /// FNV-1a 64, the digest `tests/contracts.rs` pins the legacy round trip
-    /// with.
-    fn fnv1a64_digest(bytes: &[u8]) -> u64 {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-        hash
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `operations`"));
     }
 
     /// Minimal hand-built record: the caller overrides the fields its item
@@ -8302,7 +8044,7 @@ mod tests {
     fn stored_record(id: u64, code: &str) -> IncidentRecord {
         IncidentRecord {
             id: IncidentId(id),
-            code: code.to_owned(),
+            code: from_code(code).expect("current incident code"),
             subject: IncidentSubject::Project,
             observed: format!("observed {id}"),
             allowed: None,
@@ -8388,7 +8130,7 @@ mod tests {
     /// `POLICY` row and rejects unknown strings.
     #[test]
     fn in2b_from_code_round_trips_all_seventy_four_codes_and_rejects_three_unknowns() {
-        assert_eq!(POLICY.len(), 74);
+        assert_eq!(POLICY.len(), 71);
         for entry in &POLICY {
             assert_eq!(
                 from_code(entry.code.code()),
@@ -8444,16 +8186,9 @@ mod tests {
             parsed_records_with_resolved_after(vec![auto_apply.clone(), explained, conflict]);
 
         let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed,
-            vec!["{\"carried\":true}".to_owned()],
-            TimelineRevision(100),
-            None,
-        );
+        let report = log.restore(parsed, TimelineRevision(100));
         assert_eq!(report.restored_open, 2);
         assert_eq!(report.restored_resolved, 1);
-        assert!(report.unknown_codes.is_empty());
-        assert_eq!(report.carried, vec!["{\"carried\":true}".to_owned()]);
         assert_eq!(report.rebased, 3);
         for (id, evidence, subject, code) in [
             (
@@ -8511,48 +8246,6 @@ mod tests {
         assert_eq!(fresh, IncidentId(13));
     }
 
-    /// `IN2B` §12 item 3 (`IN2B` §3 rule 6): unknown codes skip, count, and
-    /// report once through a single aggregate.
-    #[test]
-    fn in2b_restore_skips_unknown_codes_and_aggregates_once() {
-        let mut first = stored_record(1, "nope_a");
-        first.observed = "first".to_owned();
-        let mut second = stored_record(2, "nope_b");
-        second.observed = "second".to_owned();
-        let mut third = stored_record(3, "nope_a");
-        third.observed = "third".to_owned();
-        let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![first, second, third]),
-            Vec::new(),
-            TimelineRevision(100),
-            None,
-        );
-        assert_eq!(report.restored_open, 0);
-        assert_eq!(report.restored_resolved, 0);
-        assert_eq!(
-            report.unknown_codes,
-            vec![("nope_a".to_owned(), 2), ("nope_b".to_owned(), 1)]
-        );
-        assert_eq!(log.len(), 1);
-        let aggregate = log.open().next().unwrap();
-        assert_eq!(
-            aggregate.code,
-            IncidentCode::Label(LabelIncident::SidecarUnknownCodes)
-        );
-        assert_eq!(
-            aggregate.observed,
-            "incidents used codes this build does not know — 3 skipped"
-        );
-        assert_eq!(aggregate.count, 1);
-        // The aggregate is transient and the next write drops it, to be
-        // re-aggregated at the next load (N4 F10).
-        assert!(aggregate.transient);
-        let (_, write_report) = log.records(None, &BTreeMap::new());
-        assert_eq!(write_report.written_open, 0);
-        assert_eq!(write_report.dropped_transient_open, 1);
-    }
-
     /// `IN2B` §12 item 4 (`IN2B` §3 rule 7): every loaded proposal is stale
     /// with no operations.
     #[test]
@@ -8560,12 +8253,7 @@ mod tests {
         let mut stored = stored_record(5, IncidentCode::EditRevisionConflict.code());
         stored.proposal = Some(live_looking_proposal());
         let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![stored]),
-            Vec::new(),
-            TimelineRevision(100),
-            None,
-        );
+        let report = log.restore(parsed_records(vec![stored]), TimelineRevision(100));
         assert_eq!(report.restored_open, 1);
         let loaded = log.get(IncidentId(5)).unwrap();
         let proposal = loaded.proposal.as_ref().unwrap();
@@ -8586,12 +8274,7 @@ mod tests {
         second.observed = "another value".to_owned();
         second.state = IncidentState::Resolved(IncidentOutcome::Explained);
         let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![first, second]),
-            Vec::new(),
-            TimelineRevision(100),
-            None,
-        );
+        let report = log.restore(parsed_records(vec![first, second]), TimelineRevision(100));
         assert_eq!(report.restored_resolved, 2);
         let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
             code,
@@ -8620,12 +8303,7 @@ mod tests {
         second.state = IncidentState::Resolved(IncidentOutcome::Explained);
         second.proposal = Some(live_looking_proposal());
         let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![first, second]),
-            Vec::new(),
-            TimelineRevision(100),
-            None,
-        );
+        let report = log.restore(parsed_records(vec![first, second]), TimelineRevision(100));
         assert_eq!(report.rebased, 4);
         for id in [IncidentId(1), IncidentId(2)] {
             let loaded = log.get(id).unwrap();
@@ -8866,12 +8544,7 @@ mod tests {
         assert_eq!(first_records[1].opened_wall_millis, Some(1_000_002_500));
         let origin_two = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
         let mut second_log = IncidentLog::with_start(Instant::now(), Some(origin_two));
-        let _ = second_log.restore(
-            first_records.clone(),
-            Vec::new(),
-            TimelineRevision(100),
-            None,
-        );
+        let _ = second_log.restore(first_records.clone(), TimelineRevision(100));
         let (second_records, _) = second_log.records(None, &BTreeMap::new());
         assert_eq!(second_records.len(), 2);
         for (first, second) in first_records.iter().zip(second_records.iter()) {
@@ -9044,12 +8717,7 @@ mod tests {
             stale: false,
         });
         let mut log = IncidentLog::with_start(Instant::now(), None);
-        let _ = log.restore(
-            parsed_records(vec![stored]),
-            Vec::new(),
-            TimelineRevision(100),
-            None,
-        );
+        let _ = log.restore(parsed_records(vec![stored]), TimelineRevision(100));
         let loaded = log.get(IncidentId(1)).unwrap();
         let name = loaded.subject_name.as_ref().unwrap();
         assert!(json_escaped_len(name) <= SUBJECT_NAME_CEILING_BYTES);
@@ -9059,58 +8727,6 @@ mod tests {
         assert!(json_escaped_len(&proposal.summary) <= INVESTIGATOR_EXPLANATION_CEILING_BYTES);
         assert!(json_escaped_len(&proposal.explanation) <= INVESTIGATOR_EXPLANATION_CEILING_BYTES);
         assert!(!proposal.summary.is_empty() && !proposal.explanation.is_empty());
-    }
-
-    /// N4 F2: `next_id` resumes above EVERY id in the file — restored,
-    /// unknown-code, and the `id_floor` the app computed from the raw carried
-    /// values core cannot parse.
-    #[test]
-    fn restore_resumes_above_every_id_in_the_file() {
-        // Unknown-code ids count toward the resume (the aggregate consumes the
-        // resumed id, so the first fresh open lands one above it).
-        let known = stored_record(7, IncidentCode::EditRevisionConflict.code());
-        let unknown = stored_record(500, "code_from_the_future");
-        let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![known, unknown]),
-            Vec::new(),
-            TimelineRevision(1),
-            None,
-        );
-        assert_eq!(report.restored_open, 1);
-        assert_eq!(
-            report.unknown_codes,
-            vec![("code_from_the_future".to_owned(), 1)]
-        );
-        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
-            IncidentCode::EditRevisionConflict,
-            IncidentSubject::Asset(AssetId(77)),
-            "fresh",
-            TimelineRevision(1),
-        )) else {
-            panic!("a fresh observation must open");
-        };
-        assert_eq!(fresh, IncidentId(502));
-
-        // The app's floor covers the raw carried values.
-        let known = stored_record(7, IncidentCode::EditRevisionConflict.code());
-        let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![known]),
-            vec![r#"{"id":902}"#.to_owned()],
-            TimelineRevision(1),
-            Some(902),
-        );
-        assert_eq!(report.carried, vec![r#"{"id":902}"#.to_owned()]);
-        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
-            IncidentCode::EditRevisionConflict,
-            IncidentSubject::Asset(AssetId(77)),
-            "fresh",
-            TimelineRevision(1),
-        )) else {
-            panic!("a fresh observation must open");
-        };
-        assert_eq!(fresh, IncidentId(903));
     }
 
     /// N4 F4, N4.1: unusable ids keep the first record and count the rest — a
@@ -9130,9 +8746,7 @@ mod tests {
         let mut log = IncidentLog::with_start(Instant::now(), None);
         let report = log.restore(
             parsed_records(vec![first, second, maxed, third]),
-            Vec::new(),
             TimelineRevision(1),
-            None,
         );
         assert_eq!(report.restored_open, 2);
         assert_eq!(report.invalid_ids, 2);
@@ -9167,9 +8781,7 @@ mod tests {
         let mut log = IncidentLog::with_start(Instant::now(), None);
         let report = log.restore(
             parsed_records(vec![with_session, without_session]),
-            Vec::new(),
             TimelineRevision(1),
-            None,
         );
         assert_eq!(report.restored_open, 2);
         let loaded = log.get(IncidentId(1)).unwrap();
@@ -9213,7 +8825,7 @@ mod tests {
         )) else {
             panic!("the first observation must open");
         };
-        let _ = log.restore(Vec::new(), Vec::new(), TimelineRevision(9), None);
+        let _ = log.restore(Vec::new(), TimelineRevision(9));
     }
 
     /// N4 F8: [`compact_json_len`] is exact for [`Operation`] because it
@@ -9225,21 +8837,13 @@ mod tests {
         require_eq::<Operation>();
     }
 
-    /// N4.1: the restorable id ceiling — records past `MAX_RESTORED_ID` are
-    /// skipped and counted, and an `id_floor` past it is clamped to it, so
-    /// `next_id` never overflows onto a live id.
+    /// Restore resumes above the largest accepted id without overflowing.
     #[test]
-    fn restore_enforces_the_id_ceiling() {
-        // A floor of `u64::MAX` clamps to the ceiling: the fresh id lands
-        // above every file id instead of colliding with restored id 1.
-        let known = stored_record(1, IncidentCode::EditRevisionConflict.code());
+    fn restore_resumes_above_the_highest_valid_id() {
+        let mut known = stored_record(1, IncidentCode::EditRevisionConflict.code());
+        known.id = IncidentId(MAX_RESTORED_ID);
         let mut log = IncidentLog::with_start(Instant::now(), None);
-        let _ = log.restore(
-            parsed_records(vec![known]),
-            Vec::new(),
-            TimelineRevision(1),
-            Some(u64::MAX),
-        );
+        let _ = log.restore(parsed_records(vec![known]), TimelineRevision(1));
         let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
             IncidentCode::EditRevisionConflict,
             IncidentSubject::Asset(AssetId(77)),
@@ -9249,37 +8853,6 @@ mod tests {
             panic!("a fresh observation must open");
         };
         assert_eq!(fresh, IncidentId(MAX_RESTORED_ID + 1));
-
-        // `u64::MAX - 1` refuses: known-code to `invalid_ids`, unknown-code to
-        // the aggregate — neither restores, neither counts toward the resume.
-        let mut refused = stored_record(1, IncidentCode::EditRevisionConflict.code());
-        refused.id = IncidentId(u64::MAX - 1);
-        let mut strange = stored_record(2, "code_from_the_future");
-        strange.id = IncidentId(u64::MAX - 1);
-        let mut log = IncidentLog::with_start(Instant::now(), None);
-        let report = log.restore(
-            parsed_records(vec![refused, strange]),
-            Vec::new(),
-            TimelineRevision(1),
-            None,
-        );
-        assert_eq!(report.restored_open, 0);
-        assert_eq!(report.invalid_ids, 1);
-        assert_eq!(
-            report.unknown_codes,
-            vec![("code_from_the_future".to_owned(), 1)]
-        );
-        assert!(log.get(IncidentId(u64::MAX - 1)).is_none());
-        let Observed::Opened(fresh) = log.observe(IncidentObservation::plain(
-            IncidentCode::EditRevisionConflict,
-            IncidentSubject::Asset(AssetId(77)),
-            "fresh",
-            TimelineRevision(1),
-        )) else {
-            panic!("a fresh observation must open");
-        };
-        // The resume is untouched by the refused ids: the aggregate took 1.
-        assert_eq!(fresh, IncidentId(2));
     }
 }
 
@@ -9360,43 +8933,6 @@ mod kani_proofs {
             };
         }
         len
-    }
-
-    /// N4.1: the resume id lands above every restorable input id and above
-    /// the clamped floor, and the next `observe` id stays far below
-    /// `u64::MAX`. The resume id itself is the checked one — the rule-6
-    /// aggregate takes it and is pushed into `entries`, so it is a live id
-    /// the moment one is noted — and the floor half is checked explicitly,
-    /// since dropping it leaves a `fresh > id`-only harness green.
-    #[kani::proof]
-    #[kani::unwind(8)]
-    fn kani_restore_id_resume() {
-        const N: usize = 4;
-        let count: usize = kani::any();
-        kani::assume(count <= N);
-        let ids: [(u64, bool); N] = kani::any();
-        let id_floor: Option<u64> = kani::any();
-        let resume = super::restore_id_resume(&ids[..count], id_floor);
-        // `restore` requires an empty log, whose `next_id` is 1 — and only
-        // `observe`'s open arm moves `next_id`, always alongside an
-        // `entries.push`, so empty means 1 exactly.
-        let resumed = resume.next_id.unwrap_or(1);
-        let fresh = resumed + u64::from(resume.unknown_skipped > 0);
-        // One assert over the whole conjunction: the resume clears every
-        // restorable id and the clamped floor, and the next observe id
-        // keeps headroom below `u64::MAX` (`observe`'s `saturating_add`
-        // never sticks; Kani also checks the `+ 1` above for overflow).
-        let mut ok = fresh <= super::MAX_RESTORED_ID + 2;
-        for i in 0..count {
-            ok &= ids[i].0 > super::MAX_RESTORED_ID || resumed > ids[i].0;
-        }
-        if let Some(floor) = id_floor {
-            ok &= resumed > floor.min(super::MAX_RESTORED_ID);
-        }
-        kani::assert(
-            ok,
-            "resume clears every restorable id and the clamped floor; next observe keeps headroom",
-        );
     }
 
     /// BR2: [`super::compact_json_len`] is exact for no-float shapes. This

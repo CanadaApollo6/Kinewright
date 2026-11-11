@@ -47,7 +47,7 @@ wgpu = { workspace = true, features = ["counters"] }
 [target.'cfg(windows)'.dependencies]
 winapi-util = "=0.1.11"
 
-# Follow ../kinewright-hash/Cargo.toml: deny permits the local AVIO FFI allowance;
+# Follow ../kinewright-hash/Cargo.toml: deny permits the local native FFI allowance;
 # Cargo cannot override an inherited forbid.
 [lints.rust]
 unsafe_code = "deny"

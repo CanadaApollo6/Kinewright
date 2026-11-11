@@ -1,5 +1,6 @@
 {
-  "Do": {
+  "command": "Do",
+  "payload": {
     "SetTrackSyncLock": {
       "track": 71,
       "locked": false

@@ -162,12 +162,6 @@ pub(crate) struct ProjectSession {
     /// app-side, so core's `loaded_wall` stays private. A `None` stamp
     /// shows no recency rather than a lie.
     pub(crate) loaded_walls: BTreeMap<IncidentId, Option<i64>>,
-    /// The `format_version` this session read (`IN2B` §4 rule 3): the
-    /// envelope's version at open, or the journal's writer version after a
-    /// recovery restore. Gates overwrite-save via
-    /// [`can_overwrite_save`](kinewright_project::can_overwrite_save);
-    /// Save As resets it — the bytes on the new path are this build's.
-    pub(crate) format_version: u32,
     /// The recovery cause of the sidecar suspension (N6.1/J5): only a
     /// recovered copy routes overwrite-save to Save As — an H3 suspension
     /// blocks sidecar writes, never the project save.
@@ -337,8 +331,7 @@ impl ProjectSession {
     /// restore passes `RecoveryNoDigest`, new projects pass `None`.
     /// `sidecar_writer` is the app's shared writer; `None` spawns a private
     /// one for headless-test isolation. `refuse_rename` injects the `.bak`
-    /// rename (N6/H3); `None` renames for real. `format_version` is the
-    /// envelope version the session read (§4 rule 3).
+    /// rename (N6/H3); `None` renames for real.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_lines)]
     pub(crate) fn create(
@@ -350,7 +343,6 @@ impl ProjectSession {
         media_backend: crate::media_access::MediaBackend,
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
-        format_version: u32,
         refuse_rename: Option<&RefuseRename>,
     ) -> Result<Self, String> {
         let name = name.into();
@@ -448,7 +440,6 @@ impl ProjectSession {
             loaded_open_ids,
             subject_missing,
             loaded_walls: loaded.loaded_walls,
-            format_version,
             // The load only ever suspends for H3 — the recovery cause is
             // set by `apply_restore_request` (N6.1/J5).
             recovery_suspended: !writable,
@@ -1092,17 +1083,15 @@ mod tests {
     use super::*;
     use kinewright_core::{
         Clip, ClipContent, ColorDescription, Document, Effect, EffectId, IncidentCode,
-        IncidentEvidence, IncidentObservation, LUT_ASSET_ID_PARAMETER, LabelIncident, LutAsset,
-        MediaAsset, MediaSourceFingerprint, Operation, PROJECT_FORMAT_VERSION, ParamValue,
-        Rational, Track, apply_batch,
+        IncidentObservation, LUT_ASSET_ID_PARAMETER, LabelIncident, LutAsset, MediaAsset,
+        MediaSourceFingerprint, Operation, ParamValue, Rational, Track, apply_batch,
     };
     use kinewright_media::{BuiltinLook, LutAssetImport, test_support::TempDirectory};
     #[cfg(unix)]
     use kinewright_project::write_file_atomic;
     use kinewright_project::{
-        ProjectFile, build_sidecar_bytes, can_overwrite_save, derive_lut_store, digest_bytes,
-        load_sidecar, same_project_file, serialize_project_document, sidecar_matches_project,
-        sidecar_path_for_project, write_project_document,
+        build_sidecar_bytes, derive_lut_store, digest_bytes, load_sidecar, same_project_file,
+        sidecar_matches_project, sidecar_path_for_project, write_project_document,
     };
 
     /// A media backend that does nothing, so the real `AgentThread` seam can
@@ -1507,8 +1496,7 @@ mod tests {
         write_project_document(&document, &project, None).expect("write succeeds");
 
         // The open path `ProjectSession::create` runs.
-        let reloaded: Document =
-            serde_json::from_str(&fs::read_to_string(&project).expect("read")).expect("parse");
+        let (reloaded, _, _) = kinewright_project::load_document(&project).expect("reopen");
         let startup_store = derive_lut_store(Some(&project))
             .expect("the root is usable")
             .expect("a saved project has a root");
@@ -1738,7 +1726,9 @@ mod tests {
         );
         assert!(report.lut_store_copy_failed.is_empty());
         let written = fs::read_to_string(&project).expect("the project file exists");
-        let reloaded: Document = serde_json::from_str(&written).expect("valid project JSON");
+        let reloaded = serde_json::from_str::<kinewright_project::ProjectFile>(&written)
+            .expect("valid current project envelope")
+            .document;
         assert_eq!(reloaded.lut_assets.len(), 1);
         assert_eq!(reloaded.lut_assets[0].sha256, sha256);
         // The store file is content-addressed and lives beside the project.
@@ -1787,7 +1777,9 @@ mod tests {
         .expect("the store file copies");
 
         let json = fs::read_to_string(&moved_project).expect("the copied project reads");
-        let moved_document: Document = serde_json::from_str(&json).expect("valid project JSON");
+        let moved_document = serde_json::from_str::<kinewright_project::ProjectFile>(&json)
+            .expect("valid current project envelope")
+            .document;
         moved_document
             .validate()
             .expect("the copied project is valid");
@@ -1963,8 +1955,7 @@ mod tests {
             .expect("AddLutAsset is accepted");
         assert_eq!(document.lut_assets.len(), 2);
         write_project_document(&document, &project, Some(&store)).expect("write");
-        let reloaded: Document =
-            serde_json::from_str(&fs::read_to_string(&project).expect("read")).expect("parse");
+        let (reloaded, _, _) = kinewright_project::load_document(&project).expect("reopen");
         assert_eq!(reloaded.lut_assets.len(), 2);
         reloaded.validate().expect("the reopened project is valid");
     }
@@ -2047,7 +2038,6 @@ mod tests {
             },
             &SidecarMode::None,
             None,
-            PROJECT_FORMAT_VERSION,
             None,
         )
         .expect("the dirty-test session builds")
@@ -2263,7 +2253,6 @@ mod tests {
                 project_digest: project_digest_of(path),
             },
             None,
-            PROJECT_FORMAT_VERSION,
             None,
         )
         .expect("the sidecar-test session builds")
@@ -2360,9 +2349,8 @@ mod tests {
         records
     }
 
-    /// Item 15: every sidecar arm behaves — missing, corrupt, versionless,
-    /// newer, mismatched, older, second refusal, carried records, torn-read
-    /// window, oversize version, and the carried-only generation rule.
+    /// Current sidecar handling: missing, corrupt, versionless, mismatched,
+    /// repeated refusal, atomic rename window and invalid version values.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn in2b_each_sidecar_arm_behaves() {
@@ -2437,9 +2425,8 @@ mod tests {
             r#"{"project_digest":"aa","previous_digest":"aa","records":[]}"#,
         )
         .expect("the versionless sidecar writes");
-        assert_eq!(
-            load_sidecar(&versionless_sidecar),
-            SidecarLoad::Corrupt("missing format_version".to_owned())
+        assert!(
+            matches!(load_sidecar(&versionless_sidecar), SidecarLoad::Corrupt(reason) if reason.contains("missing field `format_version`"))
         );
         let mut session = sidecar_session(24, &versionless_project);
         {
@@ -2452,46 +2439,14 @@ mod tests {
         assert!(!versionless_sidecar.exists());
         shutdown_test_session(&mut session);
 
-        // Newer → `Newer(999)`: 1 incident, `.bak` keeps the original bytes.
-        let newer_dir = TempDirectory::new("in2b-arm-newer");
-        let newer_project = sidecar_project_file(&newer_dir, "edit.kinewright");
-        let newer_sidecar =
-            sidecar_path_for_project(Some(&newer_project)).expect("a saved project derives");
-        let newer_bytes =
-            r#"{"format_version":999,"project_digest":"aa","previous_digest":"aa","records":[]}"#;
-        fs::write(&newer_sidecar, newer_bytes).expect("the newer sidecar writes");
-        assert_eq!(load_sidecar(&newer_sidecar), SidecarLoad::Newer(999));
-        let mut session = sidecar_session(25, &newer_project);
-        {
-            let log = session
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.open_count(), 1);
-            let only = log.all().next().expect("the refusal noted");
-            assert!(
-                only.observed.contains("newer Kinewright"),
-                "the card names the newer writer: {}",
-                only.observed
-            );
-        }
-        let newer_bak = newer_sidecar.with_extension("kinewright-incidents.bak");
-        assert_eq!(
-            fs::read(&newer_bak).expect("bak reads"),
-            newer_bytes.as_bytes()
-        );
-        assert!(!newer_sidecar.exists(), "the original path is gone");
-        shutdown_test_session(&mut session);
-
         // Both digests swapped → refused with 1 incident + `.bak`.
         let mismatch_dir = TempDirectory::new("in2b-arm-mismatch");
         let mismatch_project = sidecar_project_file(&mismatch_dir, "edit.kinewright");
         let mismatch_sidecar =
             sidecar_path_for_project(Some(&mismatch_project)).expect("a saved project derives");
         let records = two_records();
-        let mismatch_bytes =
-            build_sidecar_bytes(&records, &[], "0000000000000000", "ffffffffffffffff")
-                .expect("the mismatched sidecar builds");
+        let mismatch_bytes = build_sidecar_bytes(&records, "0000000000000000", "ffffffffffffffff")
+            .expect("the mismatched sidecar builds");
         fs::write(&mismatch_sidecar, &mismatch_bytes).expect("the mismatched sidecar writes");
         let mut session = sidecar_session(26, &mismatch_project);
         {
@@ -2515,184 +2470,6 @@ mod tests {
         assert_eq!(fs::read(&mismatch_bak).expect("bak reads"), mismatch_bytes);
         shutdown_test_session(&mut session);
 
-        // Version 0 → `Current`: loads, 0 incidents.
-        let zero_dir = TempDirectory::new("in2b-arm-zero");
-        let zero_project = sidecar_project_file(&zero_dir, "edit.kinewright");
-        let zero_sidecar =
-            sidecar_path_for_project(Some(&zero_project)).expect("a saved project derives");
-        let digest = project_digest_of(&zero_project);
-        let zero_bytes =
-            build_sidecar_bytes(&records, &[], &digest, &digest).expect("the v0 body builds");
-        let zero_text = String::from_utf8(zero_bytes)
-            .expect("sidecars are UTF-8")
-            .replacen("\"format_version\": 1", "\"format_version\": 0", 1);
-        fs::write(&zero_sidecar, &zero_text).expect("the v0 sidecar writes");
-        let mut session = sidecar_session(27, &zero_project);
-        {
-            let log = session
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.open_count(), 2);
-            assert_eq!(log.len(), 2);
-        }
-        let report = session
-            .last_restore_report
-            .as_ref()
-            .expect("a version-0 load reports");
-        assert_eq!(report.restored_open, 2);
-        shutdown_test_session(&mut session);
-
-        // One unparseable record among good ones → `Current`: the good load,
-        // the carried bytes re-emit verbatim, and the floor resumes above the
-        // carried id (F2) — with no aggregate when no code is unknown.
-        let carry_dir = TempDirectory::new("in2b-arm-carry");
-        let carry_project = sidecar_project_file(&carry_dir, "edit.kinewright");
-        let carry_sidecar =
-            sidecar_path_for_project(Some(&carry_project)).expect("a saved project derives");
-        let digest = project_digest_of(&carry_project);
-        let good_text = serde_json::to_string(&records[0]).expect("the good record serialises");
-        let bad_text = r#"{"id": 9000, "bogus": [1, 2, {"nested": true}]}"#;
-        let envelope = format!(
-            "{{\"format_version\": 1, \"project_digest\": \"{digest}\", \
-             \"previous_digest\": \"{digest}\", \"records\": [{good_text}, {bad_text}]}}"
-        );
-        fs::write(&carry_sidecar, &envelope).expect("the carrying sidecar writes");
-        let mut session = sidecar_session(28, &carry_project);
-        {
-            let log = session
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.open_count(), 1, "the good record loads");
-            assert!(
-                log.all().all(|incident| incident.code
-                    != IncidentCode::Label(LabelIncident::SidecarUnknownCodes)),
-                "no unknown code, no aggregate"
-            );
-        }
-        assert_eq!(
-            session.carried_sidecar_records,
-            vec![bad_text.to_owned()],
-            "the unparseable record carries"
-        );
-        // The floor resumes above the carried id: the restored record holds
-        // id 1, so without the floor the fresh id would be 2.
-        let fresh = {
-            let mut log = session
-                .incidents
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            log.observe(IncidentObservation::plain(
-                IncidentCode::Label(LabelIncident::Project),
-                IncidentSubject::Project,
-                "in2b after carried floor",
-                TimelineRevision::default(),
-            ))
-        };
-        assert_eq!(fresh, kinewright_core::Observed::Opened(IncidentId(9001)));
-        // The carried bytes re-emit verbatim on the next write.
-        let outcome = session
-            .flush_incidents(&digest, &digest)
-            .expect("the carrying flush lands");
-        assert!(matches!(outcome, FlushOutcome::Written(_)));
-        let rewritten = fs::read(&carry_sidecar).expect("the rewritten sidecar reads");
-        let rewritten = String::from_utf8(rewritten).expect("sidecars are UTF-8");
-        assert!(
-            rewritten.contains(bad_text),
-            "carried bytes re-emit verbatim"
-        );
-        shutdown_test_session(&mut session);
-
-        // Unknown-code records carry verbatim AND aggregate (N4/F3): the raw
-        // text rides in `carried` while `restore` still counts the aggregate,
-        // so body #5 stays true.
-        let unknown_dir = TempDirectory::new("in2b-arm-unknown");
-        let unknown_project = sidecar_project_file(&unknown_dir, "edit.kinewright");
-        let unknown_sidecar =
-            sidecar_path_for_project(Some(&unknown_project)).expect("a saved project derives");
-        let digest = project_digest_of(&unknown_project);
-        let mut unknown_record = records[1].clone();
-        unknown_record.code = "no_such_code_xyz".to_owned();
-        let unknown_text =
-            serde_json::to_string(&unknown_record).expect("the unknown record serialises");
-        let envelope = format!(
-            "{{\"format_version\": 1, \"project_digest\": \"{digest}\", \
-             \"previous_digest\": \"{digest}\", \"records\": [{unknown_text}]}}"
-        );
-        fs::write(&unknown_sidecar, &envelope).expect("the unknown sidecar writes");
-        let mut session = sidecar_session(29, &unknown_project);
-        {
-            let log = session
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.open_count(), 1);
-            let only = log.all().next().expect("the aggregate noted");
-            assert_eq!(
-                only.code,
-                IncidentCode::Label(LabelIncident::SidecarUnknownCodes)
-            );
-        }
-        assert_eq!(
-            session.carried_sidecar_records,
-            vec![unknown_text.clone()],
-            "the unknown-code raw text carries verbatim"
-        );
-        let report = session
-            .last_restore_report
-            .as_ref()
-            .expect("an unknown-code load reports");
-        assert_eq!(
-            report.unknown_codes,
-            vec![("no_such_code_xyz".to_owned(), 1)]
-        );
-        shutdown_test_session(&mut session);
-
-        // Carried-only restore moves no generation, and the first write-back
-        // of carried bytes does not rely on it: the conditional flush skips
-        // (nothing new), while the joining flush writes the carried bytes.
-        let carried_only_dir = TempDirectory::new("in2b-arm-carried-only");
-        let carried_only_project = sidecar_project_file(&carried_only_dir, "edit.kinewright");
-        let carried_only_sidecar =
-            sidecar_path_for_project(Some(&carried_only_project)).expect("a saved project derives");
-        let digest = project_digest_of(&carried_only_project);
-        let lone_text = r#"{"id": 5, "future": {"shape": true}}"#;
-        let envelope = format!(
-            "{{\"format_version\": 1, \"project_digest\": \"{digest}\", \
-             \"previous_digest\": \"{digest}\", \"records\": [{lone_text}]}}"
-        );
-        fs::write(&carried_only_sidecar, &envelope).expect("the carried-only sidecar writes");
-        let mut session = sidecar_session(30, &carried_only_project);
-        {
-            let log = session
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert!(log.is_empty());
-            assert_eq!(log.generation(), 0, "carried-only restore moves nothing");
-        }
-        assert_eq!(
-            session
-                .flush_incidents_if_changed()
-                .expect("the conditional flush reports"),
-            FlushOutcome::Skipped
-        );
-        assert!(matches!(
-            session
-                .flush_incidents(&digest, &digest)
-                .expect("the joining flush lands"),
-            FlushOutcome::Written(_)
-        ));
-        let rewritten = fs::read(&carried_only_sidecar).expect("the rewritten sidecar reads");
-        assert!(
-            String::from_utf8(rewritten)
-                .expect("sidecars are UTF-8")
-                .contains(lone_text),
-            "the write-back carries without relying on generation"
-        );
-        shutdown_test_session(&mut session);
-
         // S-12 box: a load paused between the temp write and the rename
         // returns the prior `Current`, never torn bytes.
         let torn_dir = TempDirectory::new("in2b-arm-torn");
@@ -2701,7 +2478,7 @@ mod tests {
             sidecar_path_for_project(Some(&torn_project)).expect("a saved project derives");
         let digest = project_digest_of(&torn_project);
         let prior =
-            build_sidecar_bytes(&records, &[], &digest, &digest).expect("the prior sidecar builds");
+            build_sidecar_bytes(&records, &digest, &digest).expect("the prior sidecar builds");
         fs::write(&torn_sidecar, &prior).expect("the prior sidecar writes");
         let writer = SidecarWriter::new();
         let (paused_tx, paused_rx) = std::sync::mpsc::channel::<()>();
@@ -2713,8 +2490,7 @@ mod tests {
                 let _ = slot.recv();
             }
         }));
-        let next =
-            build_sidecar_bytes(&[], &[], &digest, &digest).expect("the next sidecar builds");
+        let next = build_sidecar_bytes(&[], &digest, &digest).expect("the next sidecar builds");
         let writer_thread = {
             let writer = Arc::clone(&writer);
             let torn_sidecar = torn_sidecar.clone();
@@ -2741,12 +2517,11 @@ mod tests {
         );
         assert_eq!(
             fs::read(&torn_sidecar).expect("the landed sidecar reads"),
-            build_sidecar_bytes(&[], &[], &digest, &digest).expect("the next sidecar rebuilds"),
+            build_sidecar_bytes(&[], &digest, &digest).expect("the next sidecar rebuilds"),
             "the release lands the new bytes"
         );
 
-        // BR40 at open: an oversize `format_version` refuses as `Corrupt`
-        // (never `Newer`), with 1 incident and the bytes kept in `.bak`.
+        // An oversize version is corrupt: one incident, with its bytes in `.bak`.
         let oversize_dir = TempDirectory::new("in2b-arm-oversize");
         let oversize_project = sidecar_project_file(&oversize_dir, "edit.kinewright");
         let oversize_sidecar =
@@ -2799,50 +2574,6 @@ mod tests {
             &missing,
             &temporary.path("other.kinewright")
         ));
-    }
-
-    /// `can_overwrite_save` gates on the read version (`IN2B` §4 rule 3):
-    /// current and older overwrite, newer never does.
-    #[test]
-    fn can_overwrite_save_gates_on_the_read_version() {
-        assert!(can_overwrite_save(0));
-        assert!(can_overwrite_save(1));
-        assert!(can_overwrite_save(PROJECT_FORMAT_VERSION));
-        assert!(!can_overwrite_save(PROJECT_FORMAT_VERSION + 1));
-        assert!(!can_overwrite_save(999));
-        assert!(!can_overwrite_save(u32::MAX));
-    }
-
-    /// Item 19: the legacy fixture round-trips to the pinned bytes through
-    /// the envelope — and a v1 write emits no version key at all.
-    #[test]
-    fn in2b_v1_project_bytes_are_identical() {
-        let fixture: &[u8] =
-            include_bytes!("../../kinewright-core/tests/fixtures/pre_m13_project.json");
-        // Through the envelope: legacy bytes parse with the version default.
-        let file: ProjectFile = serde_json::from_slice(fixture).expect("the legacy fixture parses");
-        assert_eq!(file.format_version, 1);
-        assert!(file.document.investigator.is_none());
-        // The pinned round trip (the IN2 §9.1 item 12 shape, now read through
-        // the envelope): compact bytes, pinned length, pinned FNV digest via
-        // the production digest fn.
-        let round_tripped = serde_json::to_vec(&file.document).expect("the document serialises");
-        assert_eq!(round_tripped.len(), 1_215);
-        assert_eq!(
-            digest_bytes(&round_tripped),
-            "c9da3186e131e4fd",
-            "the fixture keeps its pinned digest through the envelope"
-        );
-        // A v1 write is byte-identical to today: the key is skipped.
-        let pretty = serialize_project_document(&file.document).expect("the envelope serialises");
-        assert!(
-            !pretty.contains("format_version"),
-            "v1 writes emit no version key"
-        );
-        let reparsed: ProjectFile =
-            serde_json::from_str(&pretty).expect("the envelope output re-parses");
-        assert_eq!(reparsed.format_version, 1);
-        assert_eq!(reparsed.document, file.document);
     }
 
     /// N6.1/J6: the atomic write resolves symlinks — the temp lands
@@ -2926,7 +2657,6 @@ mod tests {
                 project_digest: digest.clone(),
             },
             None,
-            PROJECT_FORMAT_VERSION,
             Some(&failing),
         )
         .expect("the session builds");
@@ -2967,65 +2697,6 @@ mod tests {
             fs::read(&sidecar).expect("the stem re-reads"),
             corrupt,
             "never overwritten"
-        );
-        shutdown_test_session(&mut session);
-    }
-
-    /// N6/H4: the loaded sets hold restored ids only — the unknown-codes
-    /// aggregate the restore noted is not a restored row.
-    #[test]
-    fn in2b_loaded_sets_exclude_the_unknown_codes_aggregate() {
-        use kinewright_core::{IncidentRecord, IncidentTelemetry};
-
-        let dir = TempDirectory::new("in2b-h4-aggregate");
-        let project = sidecar_project_file(&dir, "edit.kinewright");
-        let digest = project_digest_of(&project);
-        let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
-        let mut records = two_records();
-        records.push(IncidentRecord {
-            id: IncidentId(9),
-            code: "zz_unknown_code".to_owned(),
-            subject: IncidentSubject::Project,
-            observed: "from a newer build".to_owned(),
-            allowed: None,
-            evidence: IncidentEvidence::Plain,
-            revision: TimelineRevision(43),
-            opened_wall_millis: None,
-            opened_offset_nanos: 9_000,
-            count: 1,
-            state: IncidentState::Open,
-            telemetry: IncidentTelemetry::default(),
-            proposal: None,
-            subject_name: None,
-            refused_op: None,
-        });
-        let bytes =
-            build_sidecar_bytes(&records, &[], &digest, &digest).expect("the sidecar builds");
-        fs::write(&sidecar, bytes).expect("the sidecar writes");
-        let mut session = sidecar_session(41, &project);
-        let aggregate = {
-            let log = session
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            log.all()
-                .find(|incident| {
-                    incident.code == IncidentCode::Label(LabelIncident::SidecarUnknownCodes)
-                })
-                .expect("the aggregate noted")
-                .id
-        };
-        assert!(session.loaded_ids.contains(&IncidentId(1)));
-        assert!(session.loaded_ids.contains(&IncidentId(2)));
-        assert_eq!(session.loaded_ids.len(), 2, "two restored rows");
-        assert_eq!(session.loaded_open_ids.len(), 2, "both open");
-        assert!(
-            !session.loaded_ids.contains(&aggregate),
-            "the aggregate is not a restored id"
-        );
-        assert!(
-            !session.loaded_open_ids.contains(&aggregate),
-            "nor a loaded open"
         );
         shutdown_test_session(&mut session);
     }
@@ -3171,7 +2842,7 @@ mod tests {
         let digest = project_digest_of(&project);
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
         let bytes =
-            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+            build_sidecar_bytes(&two_records(), &digest, &digest).expect("the sidecar builds");
         fs::write(&sidecar, bytes).expect("the sidecar writes");
         let mut session = sidecar_session(45, &project);
         assert_eq!(
@@ -3197,7 +2868,7 @@ mod tests {
         let digest = project_digest_of(&project);
         let sidecar = sidecar_path_for_project(Some(&project)).expect("a saved project derives");
         let bytes =
-            build_sidecar_bytes(&two_records(), &[], &digest, &digest).expect("the sidecar builds");
+            build_sidecar_bytes(&two_records(), &digest, &digest).expect("the sidecar builds");
         fs::write(&sidecar, bytes).expect("the sidecar writes");
         let before = fs::read(&sidecar).expect("the sidecar reads");
         let mut session = sidecar_session(46, &project);

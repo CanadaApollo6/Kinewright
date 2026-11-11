@@ -345,6 +345,8 @@ so it is not the portability implementation for this contract.
 
 ## 6. Editable effects and coordinated format
 
+The compatibility and minimum-version requirements in this section were withdrawn on 2026-11-10 by Riel’s decision.
+
 R17. Add optional typed `EffectResource::PersonMatte` on `Effect`, containing a bounded recipe descriptor
 and immutable artifact digest. It is valid only for `person_separation`. Omit the field when absent.
 The current `Effect` and `EffectWire` lack it (`crates/kinewright-core/src/model.rs:187`, `model.rs:215`).

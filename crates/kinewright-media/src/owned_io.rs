@@ -16,6 +16,10 @@ use ffmpeg_next as ffmpeg;
 use kinewright_core::{ColorDescription, MediaKind, Rational, TimeCode};
 use kinewright_hash::Sha256;
 
+pub(crate) use bridge::decoder_colour_numbers;
+#[cfg(test)]
+pub(crate) use bridge::set_decoder_colour_numbers_for_test;
+
 pub const CHUNK_BYTES: usize = 1_048_576;
 pub const CACHE_SLOTS: usize = 4;
 pub const MAX_CERTIFIED_STREAMS: usize = 16;
@@ -1375,6 +1379,66 @@ mod bridge {
         panic::{AssertUnwindSafe, catch_unwind},
         ptr::{self, NonNull},
     };
+
+    /// Read primaries, transfer, matrix and range as native numbers. `FFmpeg`
+    /// accepts metadata values outside bindgen's closed Rust enum variants.
+    pub(crate) fn decoder_colour_numbers(
+        decoder: &ffmpeg::codec::decoder::Video,
+    ) -> (u32, u32, u32, u32) {
+        const {
+            assert!(size_of::<ffmpeg::ffi::AVColorPrimaries>() == size_of::<u32>());
+            assert!(size_of::<ffmpeg::ffi::AVColorTransferCharacteristic>() == size_of::<u32>());
+            assert!(size_of::<ffmpeg::ffi::AVColorSpace>() == size_of::<u32>());
+            assert!(size_of::<ffmpeg::ffi::AVColorRange>() == size_of::<u32>());
+        }
+        // SAFETY: the borrowed decoder owns a live, initialized AVCodecContext.
+        // These repr(u32) fields have the checked width above. Raw address reads
+        // avoid loading a closed enum; every bit pattern is valid as u32. No other
+        // decoder operation runs through this immutable borrow during the reads.
+        unsafe {
+            let context = decoder.as_ptr();
+            (
+                std::ptr::addr_of!((*context).color_primaries)
+                    .cast::<u32>()
+                    .read_unaligned(),
+                std::ptr::addr_of!((*context).color_trc)
+                    .cast::<u32>()
+                    .read_unaligned(),
+                std::ptr::addr_of!((*context).colorspace)
+                    .cast::<u32>()
+                    .read_unaligned(),
+                std::ptr::addr_of!((*context).color_range)
+                    .cast::<u32>()
+                    .read_unaligned(),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_decoder_colour_numbers_for_test(
+        decoder: &mut ffmpeg::codec::decoder::Video,
+        [primaries, transfer, matrix, range]: [u32; 4],
+    ) {
+        // SAFETY: the exclusively borrowed context is initialized and idle.
+        // The field widths are asserted by decoder_colour_numbers above.
+        // Writing numeric representations constructs external metadata without
+        // ever creating an invalid bindgen enum value in Rust.
+        unsafe {
+            let context = decoder.as_mut_ptr();
+            ptr::addr_of_mut!((*context).color_primaries)
+                .cast::<u32>()
+                .write_unaligned(primaries);
+            ptr::addr_of_mut!((*context).color_trc)
+                .cast::<u32>()
+                .write_unaligned(transfer);
+            ptr::addr_of_mut!((*context).colorspace)
+                .cast::<u32>()
+                .write_unaligned(matrix);
+            ptr::addr_of_mut!((*context).color_range)
+                .cast::<u32>()
+                .write_unaligned(range);
+        }
+    }
 
     const SINGLE_OBJECT_DEMUXERS: &CStr = c"avi,mov,matroska,webm,wav,mp3,flac,ogg,aac,nut,mpegts,mpeg,mpegvideo,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe";
 

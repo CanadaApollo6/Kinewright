@@ -13,7 +13,7 @@ use kinewright_core::{
     MediaEvent, ParamValue, Playback, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
 };
 use kinewright_media::FfmpegMediaEngine;
-use kinewright_project::{load_document, min_required_format_version, write_project_document};
+use kinewright_project::{load_document, write_project_document};
 
 // This manual verifier deliberately keeps its complete preview/export scenario together.
 #[allow(clippy::too_many_lines)]
@@ -197,12 +197,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Write a fixture through the shared R7 envelope (MO2 R7, review 2 S6), never
 /// a raw `Document` serialization, and prove the stamp: the file reopens as
-/// the same document at exactly the minimum-required format version, which
+/// the same document at the current format version, which
 /// is returned.
 fn write_fixture(document: &Document, path: &Path) -> Result<u32, Box<dyn Error>> {
     write_project_document(document, path, None)?;
     let (reopened, version, _) = load_document(path)?;
-    let required = min_required_format_version(document);
+    let required = kinewright_core::PROJECT_FORMAT_VERSION;
     if reopened != *document || version != required {
         return Err(format!(
             "{} reopened as v{version}, expected the same document at v{required}",

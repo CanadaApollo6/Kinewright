@@ -1194,10 +1194,7 @@ pub struct EvalResult {
     /// Numeric evidence beside the boolean assertions.
     ///
     /// `EvalResult` derives `Serialize` only and `results.jsonl` is
-    /// write-only, so there is no parse-compatibility claim to make here and
-    /// `#[serde(default)]` would be inert. What is guaranteed instead is that
-    /// a result with no measurements serialises byte-identically to a
-    /// pre-CC7 one, which `skip_serializing_if` is exactly what delivers.
+    /// write-only. The current writer omits this field when it is empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measurements: Vec<EvalMeasurement>,
     pub turns: u32,
@@ -1292,10 +1289,9 @@ pub struct RenderedTranscriptVerification {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HumanReviewFile {
-    /// `1` or `2`. Version 2 adds `blind_id` and `questions`; a version 1
-    /// file loads and scores exactly as it always has, and a version 2 file
-    /// carrying neither new field round-trips byte-identically to one.
+    /// The current human-review schema version.
     pub schema_version: u32,
     pub benchmark_id: String,
     pub run_id: String,
@@ -1303,7 +1299,7 @@ pub struct HumanReviewFile {
     pub tasks: Vec<HumanTaskReview>,
 }
 
-/// The highest `human-review.json` schema this build writes.
+/// The `human-review.json` schema this build writes and reads.
 pub const HUMAN_REVIEW_SCHEMA_VERSION: u32 = 2;
 
 /// Characters of the artefact digest that make a blind identifier.
@@ -1325,22 +1321,21 @@ pub fn blind_id_for_artifact(artifact_sha256: Option<&str>) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HumanTaskReview {
     pub task_id: String,
     /// Twelve lowercase hex characters derived from `artifact_sha256`, or
-    /// `None` for a task with no artefact. Absent in schema version 1.
+    /// `None` for a task with no artefact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blind_id: Option<String>,
     pub artifact_sha256: Option<String>,
     pub accepted: Option<bool>,
     pub ratings: HumanRatings,
     /// Rating dimensions intentionally not applicable to this task, such as
-    /// captions for an instrumental montage. Missing in legacy JSON means an
-    /// empty list.
-    #[serde(default)]
+    /// captions for an instrumental montage.
     pub not_applicable: Vec<HumanRatingDimension>,
-    /// The scenario questions a machine has no business answering. Absent in
-    /// schema version 1, and empty for every suite that poses none.
+    /// The scenario questions a machine has no business answering, empty for
+    /// every suite that poses none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<HumanQuestion>,
     pub notes: Option<String>,
@@ -1363,6 +1358,7 @@ pub enum QuestionKind {
 
 /// One creative question put to a blind reviewer, verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HumanQuestion {
     /// The scenario letter (v6) or the base task id (v7).
     pub id: String,
@@ -1370,11 +1366,7 @@ pub struct HumanQuestion {
     pub answer: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    /// Absent in every `human-review.json` written before IN1, and resolving
-    /// to [`QuestionKind::Judgement`] when it is, because every question asked
-    /// before IN1 was a creative judgement question and none was a recovery
-    /// question (IN1 §8 rule 2).
-    #[serde(default)]
+    /// The question category emitted by the current template.
     pub kind: QuestionKind,
 }
 
@@ -1398,18 +1390,19 @@ pub const BLIND_KEY_FILE_NAME: &str = "blind-key.json";
 /// value. What is deliberately **not** blinded is the scenario identity,
 /// which is inherent in the question being asked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlindReviewForm {
     pub schema_version: u32,
     pub entries: Vec<BlindReviewEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlindReviewEntry {
     pub blind_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<HumanQuestion>,
     pub ratings: HumanRatings,
-    #[serde(default)]
     pub not_applicable: Vec<HumanRatingDimension>,
     pub accepted: Option<bool>,
     pub notes: Option<String>,
@@ -1420,6 +1413,7 @@ pub struct BlindReviewEntry {
 /// It lives in the run root rather than in `blind/`, so the directory handed
 /// to a reviewer can be handed over whole.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlindKeyFile {
     pub schema_version: u32,
     pub benchmark_id: String,
@@ -1428,6 +1422,7 @@ pub struct BlindKeyFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlindKeyEntry {
     pub blind_id: String,
     pub task_id: String,
@@ -3327,7 +3322,7 @@ pub fn blind_review_form(review: &HumanReviewFile) -> BlindReviewForm {
 /// ratings outside the inclusive 1..=5 scale or its half-point increments.
 #[allow(clippy::too_many_lines)]
 pub fn summarize_human_review(review: &HumanReviewFile) -> Result<HumanReviewSummary, EvalError> {
-    if !matches!(review.schema_version, 1 | 2) {
+    if review.schema_version != HUMAN_REVIEW_SCHEMA_VERSION {
         return Err(EvalError::Output(format!(
             "unsupported human-review schema version {}",
             review.schema_version
@@ -10309,7 +10304,7 @@ mod tests {
             enabled: true,
             enabled_curve: None,
             id: kinewright_core::EffectId(4),
-            name: "color_grade".to_owned(),
+            name: "primary_correction".to_owned(),
             parameters: BTreeMap::new(),
             keyframes: BTreeMap::new(),
         });
@@ -12527,7 +12522,7 @@ mod tests {
     #[test]
     fn human_review_rejects_partial_or_out_of_range_scores() {
         let mut review = HumanReviewFile {
-            schema_version: 1,
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
             benchmark_id: "finished-v2".to_owned(),
             run_id: "run-1".to_owned(),
             reviewer: None,
@@ -12563,7 +12558,7 @@ mod tests {
     #[test]
     fn human_review_allows_captions_to_be_not_applicable_without_awarding_a_score() {
         let review = HumanReviewFile {
-            schema_version: 1,
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
             benchmark_id: "finished-v2".to_owned(),
             run_id: "run-1".to_owned(),
             reviewer: Some("human".to_owned()),
@@ -12592,40 +12587,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_human_review_json_defaults_to_all_applicable_dimensions() {
-        let json = r#"
-        {
-          "schema_version": 1,
-          "benchmark_id": "finished-v2",
-          "run_id": "run-1",
-          "reviewer": "human",
-          "tasks": [{
-            "task_id": "g1",
-            "artifact_sha256": null,
-            "accepted": true,
-            "ratings": {
-              "story": 4.0,
-              "pacing": 3.5,
-              "visual_finish": 4.0,
-              "audio_finish": 4.5,
-              "captions": 3.0,
-              "delivery_readiness": 4.0
-            },
-            "notes": null
-          }]
-        }
-        "#;
-        let review = serde_json::from_str::<HumanReviewFile>(json).unwrap();
-        assert!(review.tasks[0].not_applicable.is_empty());
-        let summary = summarize_human_review(&review).unwrap();
-        assert_eq!(summary.tasks_reviewed, 1);
-        assert_eq!(summary.mean_ratings.captions, Some(3.0));
-    }
-
-    #[test]
     fn human_review_rejects_not_applicable_overlap_and_duplicates() {
         let mut review = HumanReviewFile {
-            schema_version: 1,
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
             benchmark_id: "finished-v2".to_owned(),
             run_id: "run-1".to_owned(),
             reviewer: None,
@@ -12662,7 +12626,7 @@ mod tests {
     #[test]
     fn human_review_rejects_partial_not_applicable_decisions() {
         let review = HumanReviewFile {
-            schema_version: 1,
+            schema_version: HUMAN_REVIEW_SCHEMA_VERSION,
             benchmark_id: "finished-v2".to_owned(),
             run_id: "run-1".to_owned(),
             reviewer: None,
@@ -12706,7 +12670,7 @@ mod tests {
             application_send_bytes: vec![],
             observations_incomplete: false,
             name: "g3 mixed footage".to_owned(),
-            rationale: "a pre-CC7 record".to_owned(),
+            rationale: "an unmeasured result".to_owned(),
             passed: true,
             assertions: vec![AssertionResult {
                 assertion: "timeline non-empty".to_owned(),
@@ -12730,16 +12694,12 @@ mod tests {
         }
     }
 
-    /// `EvalResult` derives `Serialize` only and `results.jsonl` is
-    /// write-only, so there is no "a pre-CC7 record still parses" claim to
-    /// make. What is guaranteed is that a record with no measurements still
-    /// serialises byte for byte as it did before the field existed — which is
-    /// what keeps every checked-in baseline JSON and every historic JSONL
-    /// line exactly the shape it was recorded in.
+    /// Current v5-suite results omit empty measurements; adding and clearing
+    /// measurements returns the current writer to its original bytes.
     #[test]
     fn cc7_a_v5_result_serialises_byte_identically_without_measurements() {
         let result = cc7_result_without_measurements();
-        let json = serde_json::to_string(&result).expect("v5-shaped result serialises");
+        let json = serde_json::to_string(&result).expect("unmeasured current result serialises");
         assert!(
             !json.contains("measurements"),
             "an empty measurement list must not reach the wire: {json}"
@@ -13014,43 +12974,6 @@ mod tests {
         }
     }
 
-    /// A schema version 1 file loads and scores exactly as it always has, and
-    /// round-trips byte-identically through the version 2 code.
-    #[test]
-    fn cc7_human_review_v1_files_still_load_and_score() {
-        let v1 = serde_json::json!({
-            "schema_version": 1,
-            "benchmark_id": "kinewright-finished-cut-v2",
-            "run_id": "kinewright-eval-20260101T000000Z-claude-code",
-            "reviewer": "riel",
-            "tasks": [{
-                "task_id": "f1",
-                "artifact_sha256": "b".repeat(64),
-                "accepted": true,
-                "ratings": {
-                    "story": 4.0, "pacing": 4.0, "visual_finish": 4.5,
-                    "audio_finish": 4.0, "captions": 4.0, "delivery_readiness": 4.5
-                },
-                "not_applicable": [],
-                "notes": null
-            }]
-        });
-        let bytes = serde_json::to_vec(&v1).expect("v1 fixture serialises");
-        let review: HumanReviewFile =
-            serde_json::from_slice(&bytes).expect("a v1 review still parses");
-        assert_eq!(review.schema_version, 1);
-        assert_eq!(review.tasks[0].blind_id, None);
-        assert!(review.tasks[0].questions.is_empty());
-
-        let summary = summarize_human_review(&review).expect("a v1 review still scores");
-        assert_eq!(summary.tasks_reviewed, 1);
-        assert_eq!(summary.tasks_accepted, 1);
-
-        // Byte-identical round trip: neither new field reaches the wire.
-        let round_tripped = serde_json::to_value(&review).expect("v1 review re-serialises");
-        assert_eq!(round_tripped, v1);
-    }
-
     /// A schema version 2 file carries `blind_id` and `questions` and round
     /// trips through them.
     #[test]
@@ -13083,6 +13006,7 @@ mod tests {
         assert_eq!(parsed, review);
         assert_eq!(parsed.schema_version, 2);
         assert_eq!(parsed.tasks[0].blind_id.as_deref(), Some("0f3a1c2d4e5b"));
+        assert_eq!(summarize_human_review(&parsed).unwrap().tasks_accepted, 1);
         assert_eq!(parsed.tasks[0].questions[0].answer, Some(true));
 
         let summary = summarize_human_review(&parsed).expect("a v2 review scores");
@@ -13091,43 +13015,44 @@ mod tests {
         assert_eq!(summary.mean_ratings.story, None);
         assert_eq!(summary.mean_ratings.visual_finish, Some(4.5));
 
-        assert!(
-            summarize_human_review(&HumanReviewFile {
-                schema_version: 3,
-                ..review
-            })
-            .is_err()
-        );
+        let mut other = parsed;
+        for version in [
+            HUMAN_REVIEW_SCHEMA_VERSION - 1,
+            HUMAN_REVIEW_SCHEMA_VERSION + 1,
+        ] {
+            other.schema_version = version;
+            assert_eq!(
+                summarize_human_review(&other).unwrap_err().to_string(),
+                format!("result output failed: unsupported human-review schema version {version}")
+            );
+        }
     }
 
-    /// IN1 §8 rules 1-3: the new `kind` is additive. Every `human-review.json`
-    /// written before IN1 loads unchanged, and resolves to `Judgement` --
-    /// because every question asked before IN1 *was* a creative judgement
-    /// question and none was a recovery question.
+    /// Both current question kinds are explicit on the wire and round-trip.
     #[test]
-    fn in1_a_question_without_a_kind_is_a_judgement_question() {
-        let v6_era = serde_json::json!({
-            "id": "a",
-            "prompt": "Does the match preserve natural and intentional differences?",
-            "answer": null
-        });
-        let question: HumanQuestion =
-            serde_json::from_value(v6_era).expect("a v6-era question still loads");
-        assert_eq!(question.kind, QuestionKind::Judgement);
-        assert_eq!(QuestionKind::default(), QuestionKind::Judgement);
-
-        // IN1 asks no recovery question, but the kind round-trips so IN4's
-        // "zero recovery questions asked" gate has something to count.
-        let recovery = HumanQuestion {
-            kind: QuestionKind::Recovery,
-            ..question
-        };
-        let body = serde_json::to_string(&recovery).expect("a question serialises");
-        assert!(body.contains(r#""kind":"recovery""#), "{body}");
-        assert_eq!(
-            serde_json::from_str::<HumanQuestion>(&body).expect("it reads back"),
-            recovery
-        );
+    fn in1_question_kinds_are_explicit_and_round_trip() {
+        for kind in [QuestionKind::default(), QuestionKind::Recovery] {
+            let question = HumanQuestion {
+                id: "a".to_owned(),
+                prompt: "Does the match preserve natural and intentional differences?".to_owned(),
+                answer: None,
+                notes: None,
+                kind,
+            };
+            let bytes = serde_json::to_vec(&question).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<HumanQuestion>(&bytes).unwrap(),
+                question
+            );
+            let mut missing: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            missing.as_object_mut().unwrap().remove("kind");
+            assert!(
+                serde_json::from_value::<HumanQuestion>(missing)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing field `kind`")
+            );
+        }
     }
 
     /// Acceptance requires every question answered, in both directions.

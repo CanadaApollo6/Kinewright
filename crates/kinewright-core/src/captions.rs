@@ -23,6 +23,7 @@ pub struct CaptionCue {
 /// Stable caption motion compositions built from ordinary effect automation.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum CaptionMotion {
     #[default]
     None,
