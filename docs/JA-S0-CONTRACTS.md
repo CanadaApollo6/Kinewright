@@ -79,6 +79,8 @@ because the shared AW2 format contract must stay coherent, although its first wr
 
 ### 3.1 Meaning of v3 and relationship to today's envelope
 
+Compatibility requirements in this section were withdrawn on 2026-11-10 by Riel’s decision; only the current format and strict typed shapes are read.
+
 **V3 is the project-file/envelope format, including its bundle graph and any new Document
 features. It is not a separate `Document.version` or a second graph-format counter.**
 Today `ProjectFile` has `format_version` and a flattened `Document`; v1 omits the version
@@ -157,6 +159,8 @@ an installation or permission. Staging files and OS leases are transient, not ex
 authorities (`docs/JA2-PERSON-SEPARATION.md:139`, `docs/AW2-CODE-GENERATED-CLIPS.md:560`).
 
 ### 3.3 Single minimum-version predicate, legacy preservation and refusal
+
+Compatibility requirements in this section were withdrawn on 2026-11-10 by Riel’s decision; only the current format and strict typed shapes are read.
 
 Retain **one** required-version implementation in `kinewright-project`, extending the function
 currently at `crates/kinewright-project/src/project.rs:380` to inspect the whole saved bundle.

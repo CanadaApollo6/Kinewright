@@ -318,6 +318,8 @@ pub const fn OpError::incident_code(&self) -> IncidentCode {
 
 ### 3.2 `IncidentCode` grows to 67
 
+The opaque-colour-tag requirements, including the unsupported-source-range case, were withdrawn on 2026-11-10 by Riel’s decision; current colour tags are closed types.
+
 10. `IncidentCode` grows from one variant to the shape below. It keeps its hand-written `Serialize` emitting `self.code()` and nothing else (IN1 §2.2 rule 5), keeps `#[non_exhaustive]` off (IN1 §2.2 rule 10), and still has no catch-all, no `Unclassified` and no `Other(String)`:
 
 ```rust

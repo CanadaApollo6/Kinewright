@@ -54,7 +54,7 @@ use kinewright_core::{
         CC7_SOURCE_WIDTH, CC7_TRACK_EXPECTED_LOW_CONFIDENCE_FRAMES,
         CC7_TRACK_SURVIVING_SAMPLE_FRAMES, Cc7Camera, cc7_spec,
     },
-    map_frames_with_rounding, map_source_range_to_project, project_format_version,
+    map_frames_with_rounding, map_source_range_to_project,
 };
 use kinewright_media::{
     SessionMedia,
@@ -839,68 +839,27 @@ fn parse_audio_tail_contract(value: &str) -> Result<EvalAudioTailSpec, EvalError
     })
 }
 
-/// IN2B §4 rule 6: refuse a saved document newer than this build before
-/// parsing it. The eval binary cannot use the app-side envelope, so it reads
-/// the top-level `format_version` through core's reader first. A batch tool
-/// has no incident log to note into; erroring out beats the silent downgrade
-/// `from_slice::<Document>` would otherwise perform.
-#[allow(clippy::items_after_statements)]
-fn check_saved_document_format(bytes: &[u8]) -> Result<(), EvalError> {
-    let read = project_format_version(bytes);
-    if read > PROJECT_FORMAT_VERSION {
-        return Err(EvalError::Output(format!(
-            "newer format_version {read} > {PROJECT_FORMAT_VERSION}"
-        )));
-    }
-    if read >= 3 {
-        return Err(EvalError::Output(
-            "Studio v3 requires bundle-aware rerendering".into(),
-        ));
-    }
-    use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, Visitor};
-    struct Header;
-    impl<'de> DeserializeSeed<'de> for Header {
-        type Value = bool;
-        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
-            d.deserialize_map(self)
-        }
-    }
-    impl<'de> Visitor<'de> for Header {
-        type Value = bool;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("project envelope")
-        }
-        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<bool, M::Error> {
-            let mut keys = std::collections::BTreeSet::new();
-            let mut studio = false;
-            while let Some(key) = map.next_key::<String>()? {
-                if key.len() > 256 || keys.len() >= 10_000 || !keys.insert(key.clone()) {
-                    return Err(M::Error::custom("ambiguous/unbounded envelope"));
-                }
-                studio |= key == "studio";
-                if key == "format_version" {
-                    let _: u32 = map.next_value()?;
-                } else {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-            Ok(studio)
-        }
-    }
+/// Read the current typed plain envelope within the eval input byte cap.
+fn read_saved_document(bytes: &[u8]) -> Result<Document, EvalError> {
     if bytes.len() > 64 * 1024 * 1024 {
         return Err(EvalError::Output("project envelope byte cap".into()));
     }
-    let mut parser = serde_json::Deserializer::from_slice(bytes);
-    let studio = Header
-        .deserialize(&mut parser)
-        .map_err(|e| EvalError::Output(e.to_string()))?;
-    parser.end().map_err(|e| EvalError::Output(e.to_string()))?;
-    if studio {
+    let file: kinewright_project::ProjectFile =
+        serde_json::from_slice(bytes).map_err(|error| EvalError::Output(error.to_string()))?;
+    if file.format_version != PROJECT_FORMAT_VERSION {
+        return Err(EvalError::Output(
+            kinewright_core::PROJECT_FORMAT_MISMATCH.into(),
+        ));
+    }
+    if file.studio.is_some() {
         return Err(EvalError::Output(
             "Studio envelope requires bundle-aware rerendering".into(),
         ));
     }
-    Ok(())
+    file.document
+        .validate()
+        .map_err(|error| EvalError::Output(error.to_string()))?;
+    Ok(file.document)
 }
 
 fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, EvalError> {
@@ -913,13 +872,7 @@ fn rerender_document(document_path: &Path, options: &Options) -> Result<bool, Ev
             document_path.display()
         ))
     })?;
-    check_saved_document_format(&bytes)?;
-    let document: Document = serde_json::from_slice(&bytes).map_err(|error| {
-        EvalError::Output(format!(
-            "could not parse saved document {}: {error}",
-            document_path.display()
-        ))
-    })?;
+    let document = read_saved_document(&bytes)?;
     let engine = eval_engine();
     let result = render_saved_deliverable(
         EvalDeliverableSpec {
@@ -5301,71 +5254,18 @@ mod tests {
     }
 
     #[test]
-    fn in2b_eval_refuses_a_newer_file_and_reads_v1_as_before() {
-        // IN2B §4 rule 6, item 33: the gate passes versionless and v1 bytes
-        // and refuses newer ones naming the version.
-        assert!(check_saved_document_format(br"{}").is_ok());
-        assert!(check_saved_document_format(br#"{"format_version": 1}"#).is_ok());
-        assert!(check_saved_document_format(br#"{"format_version": 2}"#).is_ok());
-        let error = check_saved_document_format(br#"{"format_version": 999}"#).unwrap_err();
-        assert!(
-            format!("{error}").contains("newer format_version 999 > 3"),
-            "unexpected refusal text: {error}"
-        );
-        // N5/G2: the boundary is exact — v3 refuses (MO2 R7: 2 is the
-        // maximum supported), and the u32 ceiling and
-        // past-u32 oversize refuse through N4/F9's saturation, naming the
-        // saturated version.
-        for (bytes, named) in [
-            (&br#"{"format_version": 4294967295}"#[..], "4294967295"),
-            (&br#"{"format_version": 99999999999}"#[..], "4294967295"),
-        ] {
-            let error = check_saved_document_format(bytes).unwrap_err();
-            assert!(
-                format!("{error}").contains(&format!("newer format_version {named} > 3")),
-                "unexpected refusal text for {named}: {error}"
-            );
-        }
-
-        assert!(
-            check_saved_document_format(br#"{"format_version":3}"#)
-                .unwrap_err()
-                .to_string()
-                .contains("bundle-aware")
-        );
-
-        // The gate is wired into the rerender path: a newer file on disk
-        // refuses before parsing, so minimal bytes suffice.
-        let directory = std::env::temp_dir().join(format!(
-            "kinewright-eval-newer-format-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let document_path = directory.join("newer.kinewright");
-        std::fs::write(&document_path, br#"{"format_version": 999}"#).unwrap();
-        let options = Options {
-            artifact_directory: Some(directory.clone()),
-            ..Options::defaults()
-        };
-        let error = rerender_document(&document_path, &options).unwrap_err();
-        assert!(
-            format!("{error}").contains("newer format_version 999 > 3"),
-            "unexpected rerender refusal text: {error}"
-        );
-        std::fs::remove_file(&document_path).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    #[test]
-    fn rerender_refuses_v3_before_projection_or_output() {
+    fn rerender_refuses_the_current_studio_form_before_output() {
         let temp = kinewright_media::test_support::TempDirectory::new("ja-s1-eval-v3");
         let source = temp.path("studio.kinewright");
         let output = temp.path("output");
-        let bytes = include_bytes!("../../tests/fixtures/ja/s1-v3-bundle/studio.kinewright");
-        let file: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(file["format_version"], 3);
-        assert!(serde_json::from_value::<Document>(file).is_ok());
-        fs::write(&source, bytes).unwrap();
+        let mut file: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
+        ))
+        .unwrap();
+        file["format_version"] = serde_json::json!(PROJECT_FORMAT_VERSION);
+        assert!(serde_json::from_value::<Document>(file.clone()).is_err());
+        let bytes = serde_json::to_vec(&file).unwrap();
+        fs::write(&source, &bytes).unwrap();
         let options = Options {
             artifact_directory: Some(output.clone()),
             ..Options::defaults()
@@ -5377,7 +5277,7 @@ mod tests {
     }
 
     #[test]
-    fn rerender_admitted_legacy_reaches_renderer_and_report_writer() {
+    fn rerender_current_plain_project_reaches_renderer_and_report_writer() {
         let temp = kinewright_media::test_support::TempDirectory::new("ja-s1-eval-legacy");
         let source = temp.path("legacy.kinewright");
         let output = temp.path("output");
@@ -5385,9 +5285,12 @@ mod tests {
             artifact_directory: Some(output.clone()),
             ..Options::defaults()
         };
-        let legacy = serde_json::to_vec(&Document::default()).unwrap();
-        check_saved_document_format(&legacy).unwrap();
-        fs::write(&source, legacy).unwrap();
+        let current = kinewright_project::serialize_project_document(&Document::default()).unwrap();
+        assert_eq!(
+            read_saved_document(current.as_bytes()).unwrap(),
+            Document::default()
+        );
+        fs::write(&source, current).unwrap();
         assert!(rerender_document(&source, &options).is_ok());
         assert!(output.join("rerender-report.json").is_file());
     }
@@ -8988,5 +8891,34 @@ mod tests {
         }
         let color = review_questions(COLOR_WORKFLOW_BENCHMARK_ID);
         assert!(color.keys().all(|key| key.starts_with('c')));
+    }
+}
+
+#[cfg(test)]
+mod current_format_tests {
+    use super::*;
+    #[test]
+    fn eval_reads_the_current_typed_envelope_and_refuses_other_versions() {
+        let bytes = kinewright_project::serialize_project_document(&Document::default()).unwrap();
+        assert_eq!(
+            read_saved_document(bytes.as_bytes()).unwrap(),
+            Document::default()
+        );
+        let mut other: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        for version in [
+            0,
+            PROJECT_FORMAT_VERSION - 1,
+            PROJECT_FORMAT_VERSION + 1,
+            u32::MAX,
+        ] {
+            other["format_version"] = serde_json::json!(version);
+            assert!(
+                read_saved_document(&serde_json::to_vec(&other).unwrap())
+                    .unwrap_err()
+                    .to_string()
+                    .contains(kinewright_core::PROJECT_FORMAT_MISMATCH),
+                "version {version}"
+            );
+        }
     }
 }

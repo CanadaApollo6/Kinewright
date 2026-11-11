@@ -89,7 +89,9 @@ mod tests {
         analysis.request_scene_detection(asset.clone());
         assert!(analysis.request_thumbnail(asset.clone(), TimeCode::ZERO, 32, 702));
         hold.wait(3);
-        app.enable_ja1();
+        crate::recovery::with_ja_directory(root.root().into(), || {
+            app.enable_ja1();
+        });
         assert!(app.focused().ja1.is_some(), "{}", app.status);
         std::fs::copy(blue.path(), red.path()).unwrap();
         drop(hold);
@@ -145,7 +147,10 @@ mod tests {
         app.focus_project(0);
         let grant = app.focused().legacy_media().unwrap();
         let running = grant.begin().unwrap();
-        app.enable_ja1();
+        let recovery_root = TempDirectory::new_in(&workspace_target_dir(), "activation-recovery");
+        crate::recovery::with_ja_directory(recovery_root.root().into(), || {
+            app.enable_ja1();
+        });
         assert!(grant.check().is_err());
         assert!(app.focused().ja1.is_none());
         assert!(!app.focused().is_owned());

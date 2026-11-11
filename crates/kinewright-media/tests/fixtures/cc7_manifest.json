@@ -2433,11 +2433,6 @@
       "owner": "agent/eval"
     },
     {
-      "item": "32f",
-      "test": "cc7_human_review_v1_files_still_load_and_score",
-      "owner": "agent/eval"
-    },
-    {
       "item": "32g",
       "test": "cc7_human_review_v2_round_trips_blind_id_and_questions",
       "owner": "agent/eval"
@@ -2560,7 +2555,7 @@
   ],
   "inventory": {
     "asserted_by": "cc7_declared_test_names_exist_in_their_source_files",
-    "declared_test_count": 96,
+    "declared_test_count": 95,
     "arrays": {
       "CC7_MEDIA_TESTS": [
         "cc7_mixed_camera_match_meets_the_neutral_spread_and_luma_budgets",
@@ -2644,7 +2639,6 @@
         "cc7_a_colour_assertion_without_evidence_fails_rather_than_passing",
         "cc7_only_colour_assertions_emit_measurements",
         "cc7_a_colour_request_is_derived_from_the_assertions_only",
-        "cc7_human_review_v1_files_still_load_and_score",
         "cc7_human_review_v2_round_trips_blind_id_and_questions",
         "cc7_accepted_requires_every_question_answered",
         "cc7_blind_ids_are_derived_from_the_artifact_digest",

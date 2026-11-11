@@ -110,8 +110,8 @@ pub(crate) struct VideoScopesV2Args {
     #[serde(default)]
     pub expected_revision: Option<TimelineRevision>,
     /// Named managed-pipeline stage.  Exactly one stage is provable today:
-    /// `monitoring_post_composite` (Core's `monitoring/post-composite` serde
-    /// alias is also accepted).  Anything else fails closed.
+    /// `monitoring_post_composite` (the tool also accepts the spelling
+    /// `monitoring/post-composite`). Anything else fails closed.
     #[serde(default = "default_scope_stage")]
     pub stage: String,
     /// One exact project frame.  Omit this when `range` or `frames` is used.

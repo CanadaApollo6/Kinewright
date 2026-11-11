@@ -539,10 +539,7 @@ mod tests {
                 "{description:?}"
             );
         }
-        for transfer in [
-            ColorTransfer::Unknown,
-            ColorTransfer::Other("pq".to_owned()),
-        ] {
+        for transfer in [ColorTransfer::Unknown, ColorTransfer::Smpte2084] {
             let mut description = rec709(ColorBitDepth::Eight, ColorRange::Full);
             description.transfer = transfer;
             let error = WorkingFrame::from_rgba64_le(256, 256, &bytes, &description, None)

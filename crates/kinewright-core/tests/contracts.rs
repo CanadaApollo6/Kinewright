@@ -784,75 +784,7 @@ fn cc4_lut_assets_and_operations_are_additive_on_the_wire() {
 }
 
 #[test]
-fn pre_m15_project_json_defaults_additive_fields_without_changing_legacy_shape() {
-    let document: Document =
-        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
-    document.validate().unwrap();
-    assert!(document.markers.is_empty());
-    assert!(document.tracks[0].sync_lock);
-    assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
-    assert_eq!(document.clip(ClipId(1)).unwrap().audio_gain_tenth_db, 0);
-    assert_eq!(
-        document.clip(ClipId(1)).unwrap().audio_fade_in_frames,
-        TimeCode::ZERO
-    );
-    assert_eq!(
-        document.clip(ClipId(1)).unwrap().audio_fade_out_frames,
-        TimeCode::ZERO
-    );
-    assert_eq!(
-        document.clip(ClipId(1)).unwrap().content,
-        ClipContent::Media
-    );
-
-    let encoded = serde_json::to_string(&document).unwrap();
-    assert!(!encoded.contains("\"markers\""));
-    assert!(!encoded.contains("\"sync_lock\""));
-    assert!(!encoded.contains("\"link\""));
-    assert!(!encoded.contains("\"content\""));
-    assert!(!encoded.contains("\"audio_gain_tenth_db\""));
-    assert!(!encoded.contains("\"audio_fade_in_frames\""));
-    assert!(!encoded.contains("\"audio_fade_out_frames\""));
-
-    let mut unlocked = document;
-    Operation::SetTrackSyncLock {
-        track: TrackId(1),
-        locked: false,
-    }
-    .apply(&mut unlocked)
-    .unwrap();
-    let unlocked_json = serde_json::to_string(&unlocked).unwrap();
-    assert!(unlocked_json.contains("\"sync_lock\":false"));
-    assert_eq!(
-        serde_json::from_str::<Document>(&unlocked_json).unwrap(),
-        unlocked
-    );
-}
-
-#[test]
-fn media_asset_colour_description_defaults_to_explicit_unknown() {
-    let asset_json = serde_json::json!({
-        "id": 7,
-        "path": "legacy.mp4",
-        "name": "legacy",
-        "duration": 120,
-        "fps": { "numerator": 30, "denominator": 1 },
-        "kind": "Video",
-        "resolution": [1920, 1080]
-    });
-
-    let asset: MediaAsset = serde_json::from_value(asset_json).unwrap();
-    assert_eq!(asset.color_description, ColorDescription::unknown());
-    assert!(asset.color_description.is_unknown());
-    let saved = serde_json::to_value(&asset).unwrap();
-    assert_eq!(
-        saved["color_description"],
-        serde_json::to_value(ColorDescription::unknown()).unwrap()
-    );
-}
-
-#[test]
-fn source_colour_description_round_trips_known_and_future_values() {
+fn source_colour_description_round_trips_current_values() {
     let description = ColorDescription {
         primaries: ColorPrimaries::Bt709,
         transfer: ColorTransfer::Bt1886,
@@ -871,61 +803,16 @@ fn source_colour_description_round_trips_known_and_future_values() {
     assert!(encoded.contains("\"bit_depth\":10"));
     assert!(encoded.contains("\"confidence_basis_points\":9500"));
     assert_eq!(serde_json::from_str::<MediaAsset>(&encoded).unwrap(), asset);
-
-    let mut future_json = serde_json::to_value(&asset).unwrap();
-    future_json["color_description"]["primaries"] = serde_json::json!("future_wide_gamut");
-    future_json["color_description"]["transfer"] = serde_json::json!("future_transfer");
-    let future_asset: MediaAsset = serde_json::from_value(future_json).unwrap();
-    assert_eq!(
-        future_asset.color_description.primaries,
-        ColorPrimaries::Other("future_wide_gamut".to_owned())
-    );
-    assert_eq!(
-        future_asset.color_description.transfer,
-        ColorTransfer::Other("future_transfer".to_owned())
-    );
-}
-
-#[test]
-fn pre_cc0_project_json_loads_with_unknown_source_colour_metadata() {
-    let document: Document =
-        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
-    assert_eq!(document.media_pool.len(), 1);
-    assert!(document.media_pool[0].color_description.is_unknown());
-    assert_eq!(document.color_context, ColorContext::default());
-    document.validate().unwrap();
-
-    let saved = serde_json::to_value(&document).unwrap();
-    assert_eq!(
-        saved["media_pool"][0]["color_description"],
-        serde_json::to_value(ColorDescription::unknown()).unwrap()
-    );
-    assert_eq!(
-        saved["color_context"],
-        serde_json::to_value(ColorContext::default()).unwrap()
-    );
-    for stage in ["working", "monitoring", "delivery"] {
-        assert!(saved["color_context"][stage].is_object());
-    }
-    let reopened: Document = serde_json::from_value(saved).unwrap();
-    assert_eq!(reopened, document);
 }
 
 #[test]
 fn source_fingerprint_defaults_round_trips_and_is_exposed_in_schemas() {
-    let legacy = serde_json::json!({
-        "id": 7,
-        "path": "legacy.mp4",
-        "name": "legacy",
-        "duration": 120,
-        "fps": { "numerator": 30, "denominator": 1 },
-        "kind": "Video",
-        "resolution": [1920, 1080]
-    });
-    let legacy_asset: MediaAsset = serde_json::from_value(legacy).unwrap();
-    assert!(legacy_asset.source_fingerprint.is_unknown());
+    let current_asset = asset(7, Rational::new(30, 1).unwrap(), 120);
+    let current_asset: MediaAsset =
+        serde_json::from_str(&serde_json::to_string(&current_asset).unwrap()).unwrap();
+    assert!(current_asset.source_fingerprint.is_unknown());
     assert!(
-        !serde_json::to_string(&legacy_asset)
+        !serde_json::to_string(&current_asset)
             .unwrap()
             .contains("source_fingerprint")
     );
@@ -1307,24 +1194,6 @@ fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
     assert_eq!(replayed_depth, live_depth);
 }
 
-/// Older journals contain no coalesced records, so they must still parse.
-#[test]
-fn journal_command_json_stays_backward_compatible_with_pre_coalesce_records() {
-    let legacy = r#"{"DoBatch":[{"MoveClip":{"clip":1,"to_track":1,"to":12}}]}"#;
-    let parsed: JournalCommand = serde_json::from_str(legacy).unwrap();
-    assert_eq!(
-        parsed,
-        JournalCommand::DoBatch(vec![Operation::MoveClip {
-            clip: ClipId(1),
-            to_track: TrackId(1),
-            to: TimeCode(12),
-        }])
-    );
-    for legacy in [r#""Undo""#, r#""Redo""#] {
-        serde_json::from_str::<JournalCommand>(legacy).unwrap();
-    }
-}
-
 #[test]
 fn document_defaults_to_distinct_sdr_rec709_colour_contexts() {
     let context = ColorContext::default();
@@ -1371,7 +1240,7 @@ fn non_default_colour_context_round_trips_through_document_json() {
 }
 
 #[test]
-fn colour_wire_schemas_match_forward_compatible_serialization() {
+fn colour_wire_schemas_describe_the_current_closed_tags() {
     let tag_schema = serde_json::to_value(schema_for!(ColorPrimaries)).unwrap();
     assert_eq!(tag_schema["type"], serde_json::json!("string"));
 
@@ -1379,7 +1248,10 @@ fn colour_wire_schemas_match_forward_compatible_serialization() {
     let one_of = bit_depth_schema["oneOf"].as_array().unwrap();
     assert_eq!(one_of.len(), 2);
     assert_eq!(one_of[0]["type"], serde_json::json!("integer"));
-    assert_eq!(one_of[1]["type"], serde_json::json!("string"));
+    assert_eq!(
+        one_of[1]["enum"],
+        serde_json::json!(["unknown", "float16", "float32"])
+    );
 
     let description_schema = serde_json::to_value(schema_for!(ColorDescription)).unwrap();
     assert_eq!(
@@ -1425,7 +1297,6 @@ fn asset_colour_override_is_typed_atomic_and_undoable_data() {
 fn project_colour_context_reset_is_typed_journaled_undoable_and_redoable() {
     let fps = Rational::new(30, 1).unwrap();
     let mut initial = empty_timeline(fps);
-    initial.color_context.pipeline_state = ColorPipelineState::Legacy;
     initial.color_context.working.bit_depth = ColorBitDepth::Eight;
     initial.color_context.monitoring.transfer = ColorTransfer::Bt1886;
     initial.validate().unwrap();
@@ -2656,30 +2527,6 @@ fn primary_correction_descriptor_matches_cc1_contract() {
         descriptor.parameter("saturation_percent").unwrap().uniform,
         EffectUniform::PrimarySaturation
     );
-    assert_eq!(
-        effect_descriptor("color_grade")
-            .unwrap()
-            .parameter("exposure_milli_stops")
-            .unwrap()
-            .uniform,
-        EffectUniform::Exposure
-    );
-    assert_eq!(
-        effect_descriptor("color_grade")
-            .unwrap()
-            .parameter("temperature_percent")
-            .unwrap()
-            .uniform,
-        EffectUniform::Temperature
-    );
-    assert_eq!(
-        effect_descriptor("color_grade")
-            .unwrap()
-            .parameter("tint_percent")
-            .unwrap()
-            .uniform,
-        EffectUniform::Tint
-    );
 }
 
 #[test]
@@ -2733,181 +2580,6 @@ fn compatibility_stage_classification_matches_the_published_effect_name_lists() 
         );
     }
     assert!(effect_compatibility_stage("chroma_key").is_none());
-}
-
-#[test]
-fn legacy_color_grade_add_is_canonical_before_history_journal_and_save() {
-    let initial = document_with_one_clip();
-    let submitted = Operation::AddEffect {
-        clip: ClipId(1),
-        effect: Effect {
-            enabled: true,
-            enabled_curve: None,
-            id: EffectId(7),
-            name: "color_grade".to_owned(),
-            parameters: BTreeMap::from([
-                (
-                    "exposure_milli_stops".to_owned(),
-                    ParamValue::Integer(-1_000),
-                ),
-                ("temperature_percent".to_owned(), ParamValue::Integer(12)),
-                ("tint_percent".to_owned(), ParamValue::Integer(-8)),
-            ]),
-            keyframes: BTreeMap::new(),
-        },
-    };
-    let mut directly_applied = initial.clone();
-    submitted.apply(&mut directly_applied).unwrap();
-    assert_eq!(
-        directly_applied.clip(ClipId(1)).unwrap().effects[0].name,
-        "primary_correction"
-    );
-    let core = Core::spawn(initial.clone()).unwrap();
-
-    let Event::DocumentChanged {
-        doc: canonical,
-        last_op: Some(last_op),
-        journal_command: Some(JournalCommand::Do(journaled)),
-        ..
-    } = core.request(Command::Do(submitted.clone())).unwrap()
-    else {
-        panic!("legacy AddEffect should be accepted through the canonical boundary");
-    };
-    assert!(matches!(
-        &submitted,
-        Operation::AddEffect { effect, .. } if effect.name == "color_grade"
-    ));
-    for operation in [&last_op, &journaled] {
-        assert!(matches!(
-            operation,
-            Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
-        ));
-    }
-    assert_eq!(
-        canonical.clip(ClipId(1)).unwrap().effects[0].name,
-        "primary_correction"
-    );
-
-    let saved = serde_json::to_string(&*canonical).unwrap();
-    assert!(saved.contains("\"name\":\"primary_correction\""));
-    assert!(!saved.contains("\"name\":\"color_grade\""));
-    let reopened: Document = serde_json::from_str(&saved).unwrap();
-    assert_eq!(reopened, *canonical);
-
-    let journal_json = serde_json::to_string(&JournalCommand::Do(journaled.clone())).unwrap();
-    assert!(journal_json.contains("\"name\":\"primary_correction\""));
-    assert!(!journal_json.contains("\"name\":\"color_grade\""));
-    let replayed_command: JournalCommand = serde_json::from_str(&journal_json).unwrap();
-    let replay_core = Core::spawn(initial.clone()).unwrap();
-    let Event::DocumentChanged {
-        doc: replayed,
-        journal_command: Some(JournalCommand::Do(replayed_operation)),
-        ..
-    } = replay_core.request(replayed_command.into()).unwrap()
-    else {
-        panic!("canonical journal command should replay");
-    };
-    assert_eq!(replayed, canonical);
-    assert_eq!(replayed_operation, journaled);
-
-    let Event::DocumentChanged { doc: undone, .. } = core.request(Command::Undo).unwrap() else {
-        panic!("legacy AddEffect should undo");
-    };
-    assert_eq!(&*undone, &initial);
-    let Event::DocumentChanged { doc: redone, .. } = core.request(Command::Redo).unwrap() else {
-        panic!("legacy AddEffect should redo");
-    };
-    assert_eq!(redone, canonical);
-}
-
-#[test]
-fn legacy_color_grade_in_batch_is_canonical_before_plan_history() {
-    let initial = document_with_one_clip();
-    let operations = vec![
-        Operation::AddEffect {
-            clip: ClipId(1),
-            effect: Effect {
-                enabled: true,
-                enabled_curve: None,
-                id: EffectId(7),
-                name: "color_grade".to_owned(),
-                parameters: BTreeMap::new(),
-                keyframes: BTreeMap::new(),
-            },
-        },
-        Operation::SetEffectParam {
-            clip: ClipId(1),
-            effect: EffectId(7),
-            name: "exposure_milli_stops".to_owned(),
-            value: ParamValue::Integer(500),
-        },
-    ];
-    let core = Core::spawn(initial).unwrap();
-
-    let Event::DocumentChanged {
-        doc,
-        journal_command: Some(JournalCommand::DoBatch(journaled)),
-        ..
-    } = core.request(Command::DoBatch(operations)).unwrap()
-    else {
-        panic!("legacy edit plan should apply atomically");
-    };
-
-    assert!(matches!(
-        &journaled[0],
-        Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
-    ));
-    let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
-    assert_eq!(effect.name, "primary_correction");
-    assert_eq!(
-        effect.parameters["exposure_milli_stops"],
-        ParamValue::Integer(500)
-    );
-    let Event::QueryResult(kinewright_core::QueryResult::AppliedOperations(applied)) = core
-        .request(Command::Query(kinewright_core::Query::AppliedOperations))
-        .unwrap()
-    else {
-        panic!("expected canonical applied-operation history");
-    };
-    assert_eq!(&*applied, journaled.as_slice());
-}
-
-#[test]
-fn legacy_serialized_color_grade_journal_replays_to_canonical_state() {
-    let initial = document_with_one_clip();
-    let legacy = JournalCommand::Do(Operation::AddEffect {
-        clip: ClipId(1),
-        effect: Effect {
-            enabled: true,
-            enabled_curve: None,
-            id: EffectId(7),
-            name: "color_grade".to_owned(),
-            parameters: BTreeMap::new(),
-            keyframes: BTreeMap::new(),
-        },
-    });
-    let legacy_json = serde_json::to_string(&legacy).unwrap();
-    assert!(legacy_json.contains("\"name\":\"color_grade\""));
-    let replay: JournalCommand = serde_json::from_str(&legacy_json).unwrap();
-    let core = Core::spawn(initial).unwrap();
-
-    let Event::DocumentChanged {
-        doc,
-        journal_command: Some(JournalCommand::Do(journaled)),
-        ..
-    } = core.request(replay.into()).unwrap()
-    else {
-        panic!("legacy serialized journal should replay");
-    };
-
-    assert_eq!(
-        doc.clip(ClipId(1)).unwrap().effects[0].name,
-        "primary_correction"
-    );
-    assert!(matches!(
-        journaled,
-        Operation::AddEffect { effect, .. } if effect.name == "primary_correction"
-    ));
 }
 
 fn document_with_neutral_primary_correction() -> Document {
@@ -3597,7 +3269,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
 /// AU2 §5.1 to §5.4: every Part B document field is additive on the wire, so a
 /// pre-AU2 project loads and re-serializes byte-identically.
 #[test]
-fn a_pre_au2_document_survives_a_load_and_save_byte_identically() {
+fn current_neutral_audio_mix_omissions_round_trip() {
     let mut doc = document_with_one_clip();
     Operation::UpsertAudioBus {
         bus: AudioBus {
@@ -3622,18 +3294,18 @@ fn a_pre_au2_document_survives_a_load_and_save_byte_identically() {
     }
     .apply(&mut doc)
     .unwrap();
-    let pre_au2 = serde_json::to_string(&doc).unwrap();
-    // The pre-AU2 wire spells none of the three new keys.
-    assert!(!pre_au2.contains("\"master\""));
-    assert!(!pre_au2.contains("\"pan_law\""));
-    assert!(!pre_au2.contains("\"gain_tenth_db\":0"));
+    let current_mix = serde_json::to_string(&doc).unwrap();
+    // The current writer omits neutral mix settings.
+    assert!(!current_mix.contains("\"master\""));
+    assert!(!current_mix.contains("\"pan_law\""));
+    assert!(!current_mix.contains("\"gain_tenth_db\":0"));
 
-    let loaded: Document = serde_json::from_str(&pre_au2).unwrap();
+    let loaded: Document = serde_json::from_str(&current_mix).unwrap();
     assert_eq!(loaded.validate(), Ok(()));
     assert_eq!(loaded.audio_mix.buses[0].gain_tenth_db, 0);
     assert!(loaded.audio_mix.master.is_neutral());
     assert_eq!(loaded.audio_mix.pan_law, PanLaw::Balance);
-    assert_eq!(serde_json::to_string(&loaded).unwrap(), pre_au2);
+    assert_eq!(serde_json::to_string(&loaded).unwrap(), current_mix);
 }
 
 #[test]
@@ -5869,19 +5541,17 @@ fn assert_integer_leaves(value: &serde_json::Value, path: &str) {
     }
 }
 
-/// AU3 §2.1, §2.3, §2.4: every Part A type is additive on the wire. A
-/// pre-AU3 `AudioLoudness` loads unchanged and re-serializes to the same
-/// bytes; the QC types skip every absent `Option`; a serialized report holds
-/// only integers, booleans, strings, and nulls (exit-gate clause 2).
+/// Current loudness and QC reports round-trip omitted optional measurements
+/// and contain integer-valued measurements.
 #[test]
-fn au3_audio_loudness_and_audio_qc_wire_shapes_are_additive() {
-    let pre_au3 = r#"{"integrated_lufs_hundredths":-1600,"sample_peak_dbfs_hundredths":-99,"sample_rate":48000,"channels":2,"sample_frames":4800}"#;
-    let loudness: kinewright_core::AudioLoudness = serde_json::from_str(pre_au3).unwrap();
+fn au3_audio_loudness_and_audio_qc_round_trip_current_omissions() {
+    let current_loudness = r#"{"integrated_lufs_hundredths":-1600,"sample_peak_dbfs_hundredths":-99,"sample_rate":48000,"channels":2,"sample_frames":4800}"#;
+    let loudness: kinewright_core::AudioLoudness = serde_json::from_str(current_loudness).unwrap();
     assert_eq!(loudness.momentary_max_lufs_hundredths, None);
     assert_eq!(loudness.short_term_max_lufs_hundredths, None);
     assert_eq!(loudness.loudness_range_lu_hundredths, None);
     assert_eq!(loudness.true_peak_dbtp_hundredths, None);
-    assert_eq!(serde_json::to_string(&loudness).unwrap(), pre_au3);
+    assert_eq!(serde_json::to_string(&loudness).unwrap(), current_loudness);
 
     let schema = serde_json::to_value(schema_for!(kinewright_core::AudioLoudness)).unwrap();
     let required = schema["required"].as_array().unwrap();
@@ -5939,17 +5609,15 @@ fn au3_audio_loudness_and_audio_qc_wire_shapes_are_additive() {
     assert_integer_leaves(&encoded, "report");
 }
 
-/// AU3 §5.1, §5.2, §5.3: Part B is additive on the wire too. A pre-AU3
-/// `ExportSettings` loads unchanged and re-serializes to the same bytes, an
-/// export that reports nothing is `{}`, and the delivery audio verification
-/// carries only integers, booleans, strings, and nulls (exit-gate clause 2).
+/// Current export settings and reports round-trip writer omissions and
+/// delivery-audio measurements remain integer-valued.
 #[test]
-fn au3_export_settings_and_delivery_audio_wire_shapes_are_additive() {
-    const PRE_AU3_SETTINGS: &str = r#"{"fps":{"numerator":30,"denominator":1},"resolution":[1920,1080],"delivery_color":{"primaries":"bt709","transfer":"bt709","matrix":"bt709","range":"limited","white_point":"d65","bit_depth":8,"confidence_basis_points":10000,"provenance":"application_default"},"video_codec":"libx264","audio_codec":"aac","video_bitrate":8000000,"audio_bitrate":384000}"#;
+fn au3_export_settings_and_delivery_audio_round_trip_current_omissions() {
+    const CURRENT_SETTINGS: &str = r#"{"fps":{"numerator":30,"denominator":1},"resolution":[1920,1080],"delivery_color":{"primaries":"bt709","transfer":"bt709","matrix":"bt709","range":"limited","white_point":"d65","bit_depth":8,"confidence_basis_points":10000,"provenance":"application_default"},"video_codec":"libx264","audio_codec":"aac","video_bitrate":8000000,"audio_bitrate":384000}"#;
 
-    let settings: kinewright_core::ExportSettings = serde_json::from_str(PRE_AU3_SETTINGS).unwrap();
+    let settings: kinewright_core::ExportSettings = serde_json::from_str(CURRENT_SETTINGS).unwrap();
     assert_eq!(settings.loudness_normalization, None);
-    assert_eq!(serde_json::to_string(&settings).unwrap(), PRE_AU3_SETTINGS);
+    assert_eq!(serde_json::to_string(&settings).unwrap(), CURRENT_SETTINGS);
 
     let schema = serde_json::to_value(schema_for!(kinewright_core::ExportSettings)).unwrap();
     assert!(schema["properties"]["loudness_normalization"].is_object());
@@ -6086,17 +5754,12 @@ fn au5_repair_descriptors_are_additive_in_the_registry() {
     }
 }
 
-/// AU5 §2.4, §3.7, §3.8: every new report type is additive and integer-only.
-///
-/// A pre-AU5 bus loads unchanged and re-serializes to the same bytes — AU5 adds
-/// no document field at all, only descriptor rows — and every new wire type
-/// carries only integers, booleans, strings, and nulls (rule 20), which is what
-/// lets all of them derive `Eq`.
+/// Current repair reports and buses round-trip with integer measurements.
 #[test]
-fn au5_repair_report_wire_shapes_are_additive() {
-    const PRE_AU5_BUS: &str = r#"{"id":1,"name":"Dialogue","tracks":[1],"effects":[{"id":1,"name":"audio_compressor","parameters":{"lookahead_milliseconds":5,"threshold_tenth_db":-180}}]}"#;
-    let bus: AudioBus = serde_json::from_str(PRE_AU5_BUS).unwrap();
-    assert_eq!(serde_json::to_string(&bus).unwrap(), PRE_AU5_BUS);
+fn au5_repair_reports_round_trip_current_shapes() {
+    const CURRENT_BUS: &str = r#"{"id":1,"name":"Dialogue","tracks":[1],"effects":[{"id":1,"name":"audio_compressor","parameters":{"lookahead_milliseconds":5,"threshold_tenth_db":-180}}]}"#;
+    let bus: AudioBus = serde_json::from_str(CURRENT_BUS).unwrap();
+    assert_eq!(serde_json::to_string(&bus).unwrap(), CURRENT_BUS);
 
     let request = kinewright_core::MixNoiseProfileRequest {
         range: None,
@@ -6228,8 +5891,6 @@ fn in1_every_other_provenance_is_refused_by_name() {
         (ColorProvenance::Inferred, false),
         (ColorProvenance::ApplicationDefault, false),
         (ColorProvenance::AgentAssumption, true),
-        (ColorProvenance::Other("agent_assumption".to_owned()), false),
-        (ColorProvenance::Other("anything".to_owned()), false),
     ];
     for (provenance, admitted) in &cases {
         // The exhaustive match is what breaks the build when a variant is
@@ -6241,8 +5902,7 @@ fn in1_every_other_provenance_is_refused_by_name() {
             | ColorProvenance::StreamMetadata
             | ColorProvenance::SidecarMetadata
             | ColorProvenance::Inferred
-            | ColorProvenance::ApplicationDefault
-            | ColorProvenance::Other(_) => false,
+            | ColorProvenance::ApplicationDefault => false,
         };
         assert_eq!(*admitted, expected_admitted, "{provenance:?}");
 
@@ -6269,7 +5929,7 @@ fn in1_every_other_provenance_is_refused_by_name() {
             assert_eq!(document, before, "a refusal must change nothing");
         }
     }
-    assert_eq!(cases.len(), 10);
+    assert_eq!(cases.len(), 8);
 }
 
 #[test]
@@ -6626,7 +6286,7 @@ fn in1_validate_asset_refuses_an_out_of_range_assumed_from() {
 }
 
 #[test]
-fn in1_assumed_from_is_omitted_when_absent_and_pre_in1_projects_round_trip_byte_identically() {
+fn in1_assumed_from_omissions_and_values_round_trip_in_current_documents() {
     let document = in1_document_with_probed_asset(2_000);
     let encoded = serde_json::to_string(&document).unwrap();
     assert!(
@@ -6643,36 +6303,6 @@ fn in1_assumed_from_is_omitted_when_absent_and_pre_in1_projects_round_trip_byte_
     let encoded = serde_json::to_string(&assumed).unwrap();
     assert!(encoded.contains("\"assumed_from\""));
     assert_eq!(serde_json::from_str::<Document>(&encoded).unwrap(), assumed);
-
-    let legacy: Document =
-        serde_json::from_str(include_str!("fixtures/pre_m13_project.json")).unwrap();
-    let round_tripped = serde_json::to_vec(&legacy).unwrap();
-    assert!(
-        !round_tripped
-            .windows(13)
-            .any(|window| window == b"assumed_from")
-    );
-    assert_eq!(round_tripped.len(), 1_215);
-    // IN1 §9 clause 10 pins the digest as FNV-1a 64 `ff6c17d72643a88b`. The
-    // *bytes* reproduce exactly — 1 215 compact, 1 891 pretty, both of
-    // probe-2 §T7's figures — but the standard FNV-1a 64 (offset basis
-    // 0xcbf2_9ce4_8422_2325, prime 0x100_0000_01b3) of those bytes is
-    // `c9da3186e131e4fd`, so the contract's digest was produced by a different
-    // spelling of the hash. The value below is the one this tree measures.
-    assert_eq!(
-        format!("{:016x}", fnv1a64(&round_tripped)),
-        "c9da3186e131e4fd"
-    );
-}
-
-/// FNV-1a 64, the digest probe-2 §T7 pinned the legacy round trip with.
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 #[test]
@@ -6922,4 +6552,52 @@ fn clip_enabled_curve_follows_the_nullable_required_wire_pattern() {
         curve_schema.to_string().contains("null"),
         "the curve schema must keep its null branch, got {curve_schema}"
     );
+}
+
+#[test]
+fn current_journal_shape_is_tagged_and_strict() {
+    let command = JournalCommand::DoBatchCoalesced {
+        operations: vec![Operation::MoveClip {
+            clip: ClipId(1),
+            to_track: TrackId(1),
+            to: TimeCode(12),
+        }],
+        coalesce_key: "drag".to_owned(),
+    };
+    let mut wire = serde_json::to_value(&command).unwrap();
+    assert_eq!(wire["command"], "DoBatchCoalesced");
+    assert_eq!(
+        serde_json::from_value::<JournalCommand>(wire.clone()).unwrap(),
+        command
+    );
+    wire["payload"]["extra"] = serde_json::json!(true);
+    assert!(
+        serde_json::from_value::<JournalCommand>(wire)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field")
+    );
+    assert!(serde_json::from_str::<JournalCommand>(r#"{"DoBatch":[]}"#).is_err());
+}
+
+#[test]
+fn effect_alias_is_an_unknown_effect_and_does_not_edit_the_document() {
+    let original = document_with_one_clip();
+    let mut document = original.clone();
+    let operation = Operation::AddEffect {
+        clip: ClipId(1),
+        effect: Effect {
+            enabled: true,
+            enabled_curve: None,
+            id: EffectId(7),
+            name: "color_grade".to_owned(),
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::new(),
+        },
+    };
+    assert_eq!(
+        operation.apply(&mut document),
+        Err(OpError::UnknownEffect("color_grade".to_owned()))
+    );
+    assert_eq!(document, original);
 }

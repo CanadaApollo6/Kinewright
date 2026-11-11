@@ -1088,7 +1088,6 @@ fn effect_domain(name: &str) -> Result<Domain, String> {
     }
     match name {
         "opacity" | "transform" | "crop" | "reframe" | "mask" | "chroma_key" => Ok(Domain::Motion),
-        "color_grade" => Ok(Domain::Colour),
         _ => Err(format!("unclassified effect: {name}")),
     }
 }

@@ -177,15 +177,8 @@ impl MediaInterpretation {
                 "noncanonical source profile assumption".into(),
             ));
         }
-        if video {
-            kinewright_core::classify_source_with_assumption(
-                &self.effective_color,
-                self.source_profile_assumption,
-            )
-            .map_err(|error| {
-                BundleError::Unsupported(format!("unusable video colour interpretation: {error:?}"))
-            })?;
-        }
+        // A valid source may have unknown colour tags. Store its typed metadata;
+        // the renderer checks whether it can execute the colour interpretation.
         Ok(())
     }
     #[must_use]
@@ -978,6 +971,74 @@ mod tests {
         }
     }
     #[test]
+    fn studio_imports_unlisted_colour_tags_and_reopens_the_media() {
+        use crate::{bundle::LoadedBundle, editing_session::Ja1EditingSession};
+        use kinewright_core::{ColorMatrix, ColorPrimaries, ColorTransfer, Core, Document};
+        use kinewright_media::test_support::GeneratedMedia;
+
+        let root = TempDirectory::new_in(&workspace_target_dir(), "unlisted-studio-import");
+        let source = GeneratedMedia::ffmpeg(
+            "unlisted-studio-tags",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=gray:size=32x32:rate=25:duration=0.64",
+                "-frames:v",
+                "16",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-bf",
+                "0",
+                "-bsf:v",
+                "h264_metadata=colour_primaries=99:transfer_characteristics=3:matrix_coefficients=3",
+                "-f",
+                "mp4",
+            ],
+            "mp4",
+        );
+        let core = Core::spawn(Document::default()).unwrap();
+        let mut owner =
+            Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
+        let imported = owner.import_owned_media(source.path());
+        assert!(
+            imported.is_ok(),
+            "UNLISTED_COLOUR_STUDIO_IMPORT: {imported:?}"
+        );
+        let (asset, report) = imported.unwrap();
+        assert!(report.is_none(), "the project is still unsaved");
+        assert_eq!(asset.color_description.primaries, ColorPrimaries::Unknown);
+        assert_eq!(asset.color_description.transfer, ColorTransfer::Unknown);
+        assert_eq!(asset.color_description.matrix, ColorMatrix::Unknown);
+        assert!(
+            matches!(
+                kinewright_core::classify_source(&asset.color_description),
+                Err(kinewright_core::ColorSourceError::UnknownPrimaries)
+            ),
+            "import does not claim renderer support or guess Rec.709"
+        );
+        let expected = core.export_history().unwrap();
+        assert_eq!(expected.document.media_pool, vec![asset]);
+        let path = root.path("imported.kinewright");
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        drop(owner);
+        drop(source);
+        let restored = Core::spawn(Document::default()).unwrap();
+        LoadedBundle::read(&path)
+            .unwrap()
+            .restore_manual(&restored)
+            .unwrap();
+        assert_eq!(restored.export_history().unwrap(), expected);
+    }
+
+    #[test]
     fn s3_fingerprint_digest_length_and_interpretation_admission() {
         let (_root, mut owner) = session("c0-identity-admission");
         let (asset, entry, _pins) = import(&mut owner, 1, 1234);
@@ -1012,14 +1073,6 @@ mod tests {
         assert!(
             owner.admit_inputs(&manifest(&owner, vec![wrong])).is_err(),
             "C0_PROBE_ORIGIN_REFUSED"
-        );
-        let mut video = entry.media_interpretation().unwrap();
-        video.kind = MediaKind::Video;
-        video.video = video.audio.take();
-        video.resolution = Some((32, 24));
-        assert!(
-            video.canonical().is_err(),
-            "C0_UNKNOWN_VIDEO_PROFILE_REFUSED"
         );
         let mut missing = entry;
         missing.dependencies.clear();

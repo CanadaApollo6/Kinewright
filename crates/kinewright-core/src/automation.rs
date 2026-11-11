@@ -25,6 +25,7 @@ pub const MAX_KEY_FRAME_OFFSET: i64 = 1 << 40;
 /// Interpolation applied from a keyframe to the next keyframe.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum KeyframeInterpolation {
     Hold,
     #[default]
@@ -36,13 +37,12 @@ pub enum KeyframeInterpolation {
 
 /// One exact, clip-local parameter value on an automation curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Keyframe {
     /// Exact frame in the owner's time base. Effect operations use clip-local
     /// frames; audio-bus effects use project frames.
     pub at: TimeCode,
     pub value: i64,
-    #[serde(default)]
-    #[schemars(default)]
     pub interpolation: KeyframeInterpolation,
     /// MO1 R6: reserved Bezier incoming tangent, never evaluated here.
     /// Serde-defaulted to 0 and skipped when 0, so existing documents are
@@ -69,6 +69,7 @@ const fn i64_is_zero(value: &i64) -> bool {
 /// Evaluation is entirely integer based so preview, export, undo/redo, and
 /// agent inspection agree at every project frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AutomationCurve {
     pub keyframes: Vec<Keyframe>,
 }
@@ -1026,9 +1027,9 @@ mod tests {
     }
 
     /// MO1 R6: nonzero tangents survive serde; zero tangents serialize
-    /// byte-identically to pre-MO1 documents (fields skipped when 0).
+    /// through the current writer, which omits fields when they are zero.
     #[test]
-    fn tangents_round_trip_and_legacy_docs_stay_byte_identical() {
+    fn tangent_values_and_current_zero_omissions_round_trip() {
         let keyed = Keyframe {
             at: TimeCode(5),
             value: 100,
@@ -1046,7 +1047,7 @@ mod tests {
             "nonzero tangents persist: {json}"
         );
         assert_eq!(serde_json::from_str::<Keyframe>(&json).unwrap(), keyed);
-        // Zero tangents omit both fields: byte-identical to pre-MO1.
+        // The current writer omits both zero tangent fields.
         let plain = Keyframe {
             tangent_in: 0,
             tangent_out: 0,
@@ -1057,7 +1058,7 @@ mod tests {
             plain_json,
             r#"{"at":5,"value":100,"interpolation":"linear"}"#
         );
-        // Legacy documents (no tangent fields) read back with zero tangents.
+        // The reader restores the writer's omitted zero values.
         assert_eq!(
             serde_json::from_str::<Keyframe>(&plain_json).unwrap(),
             plain

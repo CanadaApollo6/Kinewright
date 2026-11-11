@@ -44,11 +44,6 @@
       "path": "crates/kinewright-core/src/model.rs",
       "sha256": "ea00f5c0ee472ed120deb20ae329fe785dabc2554459454cadc5f1256cedafdc",
       "byte_length": 84632
-    },
-    {
-      "path": "crates/kinewright-core/tests/fixtures/pre_m13_project.json",
-      "sha256": "480be4dc59cbfec90acbfd1830fb204c3875bc2b45f5f8c4848a937ef0935de9",
-      "byte_length": 634
     }
   ],
   "songbird_schema_head": "aef7c95f1829754c5bc5b8f3bdbea91e175eeb39",

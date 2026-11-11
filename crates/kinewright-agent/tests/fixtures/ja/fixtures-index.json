@@ -5,26 +5,26 @@
     {
       "fixture_id": "edit-undo-redo",
       "relative_file": "edit-undo-redo.json",
-      "sha256": "ee7deb23a0ff0d5ab61aba7e51e396ed7f6819fdca101f4ec3bb0872dcdd0f30",
-      "byte_length": 3689,
+      "sha256": "136e798db0f3da5b68e93ac788604fb0686db7e63789a287c6a92e379fcecd3e",
+      "byte_length": 3691,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "edit": {
           "relative_file": "command-add-track.json",
-          "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-          "byte_length": 157,
+          "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+          "byte_length": 181,
           "kind": "current-command"
         },
         "undo": {
           "relative_file": "command-undo.json",
-          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-          "byte_length": 7,
+          "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+          "byte_length": 24,
           "kind": "current-command"
         },
         "redo": {
           "relative_file": "command-redo.json",
-          "sha256": "0b1a52518bc6d5e77daa6fd7f3ca404c11cd3a719e1f41e6d27f4f1b2ac98c0c",
-          "byte_length": 7,
+          "sha256": "e3881b26a6532cc07b9a111da953ce716313d5c9a680e0ad553859a87403330b",
+          "byte_length": 24,
           "kind": "current-command"
         }
       },
@@ -46,20 +46,20 @@
     {
       "fixture_id": "branches-current",
       "relative_file": "branches-current.json",
-      "sha256": "3575d6613042364fa6e76f3f62c3cf43147aeacd6bbdd651e59e09a9daee404b",
-      "byte_length": 4158,
+      "sha256": "8d66ec173e90a549b725f4999b8667ceadb2a3f16c4e34d61974f267bce7d1f1",
+      "byte_length": 4159,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "edit": {
           "relative_file": "command-add-track.json",
-          "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-          "byte_length": 157,
+          "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+          "byte_length": 181,
           "kind": "input"
         },
         "undo": {
           "relative_file": "command-undo.json",
-          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-          "byte_length": 7,
+          "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+          "byte_length": 24,
           "kind": "input"
         }
       },
@@ -93,38 +93,38 @@
     {
       "fixture_id": "clip-id-reuse",
       "relative_file": "clip-id-reuse.json",
-      "sha256": "c8422932423c0f30b48e8342dd93ce6d49064a2c139b21a77cfe24dd34e2993c",
-      "byte_length": 3492,
+      "sha256": "1a17ca380bdbb7a763dfafc0f0cfba17743d2e51d18abad9ec1345db53c63ca8",
+      "byte_length": 3494,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "initial": {
           "relative_file": "synthetic-blue-project.kinewright",
-          "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
-          "byte_length": 1491,
+          "sha256": "733bb37ddc7326671d8951637924b204d238f8a54adcce900a4fc07009ce6c07",
+          "byte_length": 1490,
           "kind": "synthetic-control"
         },
         "delete": {
           "relative_file": "command-delete-clip.json",
-          "sha256": "80e828698d1d3236d85ab349ce79a32fec0258bf3593331208c350d2dcbe095e",
-          "byte_length": 60,
+          "sha256": "536fd396af5f2696fb33ba7559257b06df21fb7ddf95fb9142a94ee8af555135",
+          "byte_length": 84,
           "kind": "input"
         },
         "recreate": {
           "relative_file": "command-recreate-clip.json",
-          "sha256": "f69f56884628782f9d2fe23c60c616bbd5ff705abb840e5e1272bff41a74dffc",
-          "byte_length": 187,
+          "sha256": "cee0f4d834c42efd99b0240ded3d14fee2543ca6c7c83a2c47e462b66c3f15b2",
+          "byte_length": 211,
           "kind": "input"
         },
         "undo": {
           "relative_file": "command-undo.json",
-          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-          "byte_length": 7,
+          "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+          "byte_length": 24,
           "kind": "input"
         },
         "redo": {
           "relative_file": "command-redo.json",
-          "sha256": "0b1a52518bc6d5e77daa6fd7f3ca404c11cd3a719e1f41e6d27f4f1b2ac98c0c",
-          "byte_length": 7,
+          "sha256": "e3881b26a6532cc07b9a111da953ce716313d5c9a680e0ad553859a87403330b",
+          "byte_length": 24,
           "kind": "input"
         }
       },
@@ -146,14 +146,14 @@
     {
       "fixture_id": "history-loss",
       "relative_file": "history-loss.json",
-      "sha256": "04a27d0104a44e3d246c73cb899e9fa9fbde8b9763981d2c525cdf3a590b7b81",
+      "sha256": "6edfbdb647b014fda6a237b2674b2953f2809b875cccb0c50c1e43e5b266df8b",
       "byte_length": 2928,
       "expected_baseline_process_exit": 1,
       "inputs": {
         "edit": {
           "relative_file": "command-add-track.json",
-          "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-          "byte_length": 157,
+          "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+          "byte_length": 181,
           "kind": "current-command"
         }
       },
@@ -243,26 +243,26 @@
     {
       "fixture_id": "reply-retry",
       "relative_file": "reply-retry.json",
-      "sha256": "13dedb1ed3fc7a467cff88e865eef6cae4ab9dfe1229c92d60ea6720df837831",
-      "byte_length": 4185,
+      "sha256": "283a580ccb7624aa0c89d99ca687b417e0109c5d4981a490a69af3ef9eea10a7",
+      "byte_length": 4187,
       "expected_baseline_process_exit": 1,
       "inputs": {
         "edit": {
           "relative_file": "command-sync-lock.json",
-          "sha256": "15afc89b3c02e8ff7ce7caf1c3f0efa66e7a4d1a19e1e964e1fb8fb93d53df3e",
-          "byte_length": 91,
+          "sha256": "e39ccaf6e51868051c0a2fb370bd69c17f0d1e0c0fb7bd27b633b68f69fe2faf",
+          "byte_length": 115,
           "kind": "input"
         },
         "undo": {
           "relative_file": "command-undo.json",
-          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-          "byte_length": 7,
+          "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+          "byte_length": 24,
           "kind": "input"
         },
         "initial": {
           "relative_file": "writer-v1-track.kinewright",
-          "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958",
-          "byte_length": 1089,
+          "sha256": "de7101faf0502300fe769a3102fbabe687d377effa48bd5422f82f020ede0fbb",
+          "byte_length": 1112,
           "kind": "project"
         }
       },
@@ -296,8 +296,8 @@
     {
       "fixture_id": "recording-loopback",
       "relative_file": "recording-loopback.json",
-      "sha256": "b71d7fc859ef44dd84794f81f413c4d4bda027c972de608b7d65b8adf725128e",
-      "byte_length": 4885,
+      "sha256": "bc69eb923ed8a76dafdd4dc24d51721eb1d0ccb90375e0a1249017ef902a878e",
+      "byte_length": 4886,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "script": {
@@ -320,8 +320,8 @@
         },
         "undo": {
           "relative_file": "command-undo.json",
-          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-          "byte_length": 7,
+          "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+          "byte_length": 24,
           "kind": "input"
         }
       },
@@ -355,14 +355,14 @@
     {
       "fixture_id": "media-shared-control",
       "relative_file": "media-shared-control.json",
-      "sha256": "95034b017381fb030fe43f679940404cd36b4293d875b54e49fead21e8189720",
+      "sha256": "e1084ef23f134e80a945685c42d4fcae350509baa6645ec6d3c6f77042bf6946",
       "byte_length": 3332,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "initial": {
           "relative_file": "synthetic-red-project.kinewright",
-          "sha256": "b01388e07fb5c11c598a748282daef7b12478fd061f5a7b4a133787f737ec44f",
-          "byte_length": 1491,
+          "sha256": "260fb80c47cac532bca594137032a3d9fc5e5a3c194b7cc98ee9ed8776e2133c",
+          "byte_length": 1490,
           "kind": "synthetic-control"
         }
       },
@@ -396,14 +396,14 @@
     {
       "fixture_id": "media-repeated-control",
       "relative_file": "media-repeated-control.json",
-      "sha256": "8c9912bb62a5887a767fb6dda181cab0b89690fe92641fce4ed5f4c0c24eda00",
+      "sha256": "62031d9ae45e3f81affe344fcc8b9cf0234da086460a92d9ce0a1c05122e3cac",
       "byte_length": 3919,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "initial": {
           "relative_file": "synthetic-red-project.kinewright",
-          "sha256": "b01388e07fb5c11c598a748282daef7b12478fd061f5a7b4a133787f737ec44f",
-          "byte_length": 1491,
+          "sha256": "260fb80c47cac532bca594137032a3d9fc5e5a3c194b7cc98ee9ed8776e2133c",
+          "byte_length": 1490,
           "kind": "synthetic-control"
         }
       },
@@ -437,14 +437,14 @@
     {
       "fixture_id": "app-coalesced-paint",
       "relative_file": "app-coalesced-paint.json",
-      "sha256": "2ca84e79eb66ab3815766f25de3ffc3c2cee9849d9d9d5e748692df9bbd0631f",
+      "sha256": "0a331b77a1b481080ba7ae3762981dca746752538db5c21ddcc3a901e33eae8a",
       "byte_length": 5056,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "initial": {
           "relative_file": "synthetic-blue-project.kinewright",
-          "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
-          "byte_length": 1491,
+          "sha256": "733bb37ddc7326671d8951637924b204d238f8a54adcce900a4fc07009ce6c07",
+          "byte_length": 1490,
           "kind": "synthetic-control"
         },
         "gesture": {
@@ -490,22 +490,22 @@
     {
       "fixture_id": "aw2-capability-gap",
       "relative_file": "aw2-capability-gap.json",
-      "sha256": "c59fed0bd89f60bc9ddd6ec6ed3828f873de910c9318391bff578788e87aec81",
+      "sha256": "6e91e66dec69a8d6292b199cafb96182d343e472f0d55cbb60d49721add157e2",
       "byte_length": 2264,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "unsupported": {
           "relative_file": "unsupported-v3-code.kinewright",
-          "sha256": "e6496b3ef8304e6c3dfb53574e36b4ad9f65fe2482df7eb959e6ddc1ddbb5c32",
-          "byte_length": 1385,
+          "sha256": "4962e3504250b65b384168618e377d078a2445ccfe6a74e9e6f9261fef518ded",
+          "byte_length": 1386,
           "kind": "opaque-future-project"
         }
       },
       "oracles": {
         "empty": {
           "relative_file": "writer-v1-empty.kinewright",
-          "sha256": "59611abbbf40aed579dda09a9f7d4900904dc06af7badd96cd475df200062326",
-          "byte_length": 1017,
+          "sha256": "7013fef89fab919bbc0e04ab698a8acd22cecf512ece9298962e3546c6e9dcf3",
+          "byte_length": 1040,
           "kind": "writer-bytes"
         },
         "false": {
@@ -641,87 +641,87 @@
     {
       "fixture_id": "s1-bundle-migration",
       "relative_file": "s1-bundle-migration.json",
-      "sha256": "3b136e1b3e4ff6afc01aca3effd3f6b4f248ae6ba55dc720cb61b31692612438",
+      "sha256": "380d01899a600e3d78a811759f6bf3f57704b6f11005f26ead3ebd53513cad06",
       "byte_length": 7007,
       "expected_baseline_process_exit": 1,
       "inputs": {
         "legacy": {
           "relative_file": "s1-migration-input.kinewright",
-          "sha256": "f58de3aaad5211ead878b265cceba464363bc142e1661abea91c8f55b61ace77",
-          "byte_length": 107,
+          "sha256": "7013fef89fab919bbc0e04ab698a8acd22cecf512ece9298962e3546c6e9dcf3",
+          "byte_length": 1040,
           "kind": "project"
         },
         "edit": {
           "relative_file": "command-add-track.json",
-          "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-          "byte_length": 157,
+          "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+          "byte_length": 181,
           "kind": "current-command"
         },
         "sample-root": {
           "relative_file": "s1-v3-bundle/studio.kinewright",
-          "sha256": "876e2abb35287567c43a4b62f811fdd377ed9295f7a16709fa88335883960567",
-          "byte_length": 1846,
+          "sha256": "719706514787053c4c274471b3ed0a0849eb1176d91f478a6d5161a2bfcc59a7",
+          "byte_length": 1847,
           "kind": "v3-bundle-root"
         },
+        "portable-crash-model": {
+          "relative_file": "s1-crash-model.json",
+          "sha256": "da61b699682574367244b2c19c577fe39f54e00689d27060f606fcc6ff25d980",
+          "byte_length": 99462,
+          "kind": "portable-dropped-write-model-input"
+        },
+        "sample-object-2": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/0cec888105850eada357ae8dae6cda2ef75482053a7699e89ca42ecc0567c436",
+          "sha256": "0cec888105850eada357ae8dae6cda2ef75482053a7699e89ca42ecc0567c436",
+          "byte_length": 11097,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-3": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/28a05ad3e7c44c07fd2b09fb9515d655f0622c3a236cc0562c3d9dfd473b3e63",
+          "sha256": "28a05ad3e7c44c07fd2b09fb9515d655f0622c3a236cc0562c3d9dfd473b3e63",
+          "byte_length": 114,
+          "kind": "v3-bundle-object"
+        },
         "sample-object-4": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
-          "sha256": "3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
-          "byte_length": 11029,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/48141cfa65af723404ee8bafb0701606cbfbb081fdfeb1ed58a8a4583ba07cf3",
+          "sha256": "48141cfa65af723404ee8bafb0701606cbfbb081fdfeb1ed58a8a4583ba07cf3",
+          "byte_length": 2644,
           "kind": "v3-bundle-object"
         },
         "sample-object-5": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
-          "sha256": "55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/a87820cf88a007fa8d36f361fd3357702e607abc6b1a1968ddfef130568855e9",
+          "sha256": "a87820cf88a007fa8d36f361fd3357702e607abc6b1a1968ddfef130568855e9",
           "byte_length": 121,
           "kind": "v3-bundle-object"
         },
         "sample-object-6": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
-          "sha256": "6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
-          "byte_length": 1377,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/d750b59e3ad6cada6166d4d37a4ba6206dc0a0fcea065d7f15c3f42884b5a89b",
+          "sha256": "d750b59e3ad6cada6166d4d37a4ba6206dc0a0fcea065d7f15c3f42884b5a89b",
+          "byte_length": 1380,
           "kind": "v3-bundle-object"
         },
         "sample-object-7": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
-          "sha256": "892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
-          "byte_length": 167,
-          "kind": "v3-bundle-object"
-        },
-        "sample-object-8": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
-          "sha256": "b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
-          "byte_length": 2624,
-          "kind": "v3-bundle-object"
-        },
-        "sample-object-9": {
           "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
           "sha256": "e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
           "byte_length": 765,
           "kind": "v3-bundle-object"
         },
-        "sample-object-10": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
-          "sha256": "f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
-          "byte_length": 96,
+        "sample-object-8": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e903fabf4cddfb2505e70132ed94ea11169b914a13692985735743e6a9a1e876",
+          "sha256": "e903fabf4cddfb2505e70132ed94ea11169b914a13692985735743e6a9a1e876",
+          "byte_length": 167,
           "kind": "v3-bundle-object"
         },
-        "sample-object-11": {
+        "sample-object-9": {
           "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
           "sha256": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
           "byte_length": 730,
           "kind": "v3-bundle-object"
         },
-        "sample-object-13": {
+        "sample-object-10": {
           "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
-          "sha256": "6840caac33a6b8d900a352e2a4f2a640ba18c9792e071dd0abeb8c40d78dbbc8",
+          "sha256": "e09cb3d4b2decb7d6915040854c2287afe48166dd8d89d2fa7d1108d8dda8e5f",
           "byte_length": 230,
           "kind": "v3-bundle-object"
-        },
-        "portable-crash-model": {
-          "relative_file": "s1-crash-model.json",
-          "sha256": "94dbd68d59d6ff905dd1100271e86b8dbab2cd2949b52688bff91b842ad2b1eb",
-          "byte_length": 92643,
-          "kind": "portable-dropped-write-model-input"
         }
       },
       "oracles": {
@@ -819,26 +819,26 @@
     {
       "fixture_id": "s1-edit-receipt-restart",
       "relative_file": "s1-edit-receipt-restart.json",
-      "sha256": "390f62e8a1983876f33c60fc385b1c6d778e25f704d7295952fab51f45c1aba3",
-      "byte_length": 5389,
+      "sha256": "f3e2c0f36053e3fe454c43390cef7717bf13d555fc4bfd4e6d739bfe58f4277d",
+      "byte_length": 5391,
       "expected_baseline_process_exit": 2,
       "inputs": {
         "edit": {
           "relative_file": "command-sync-lock.json",
-          "sha256": "15afc89b3c02e8ff7ce7caf1c3f0efa66e7a4d1a19e1e964e1fb8fb93d53df3e",
-          "byte_length": 91,
+          "sha256": "e39ccaf6e51868051c0a2fb370bd69c17f0d1e0c0fb7bd27b633b68f69fe2faf",
+          "byte_length": 115,
           "kind": "input"
         },
         "undo": {
           "relative_file": "command-undo.json",
-          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-          "byte_length": 7,
+          "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+          "byte_length": 24,
           "kind": "input"
         },
         "initial": {
           "relative_file": "writer-v1-track.kinewright",
-          "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958",
-          "byte_length": 1089,
+          "sha256": "de7101faf0502300fe769a3102fbabe687d377effa48bd5422f82f020ede0fbb",
+          "byte_length": 1112,
           "kind": "project"
         }
       },
@@ -1092,14 +1092,14 @@
     {
       "fixture_id": "s2-manual-stream",
       "relative_file": "s2-manual-stream.json",
-      "sha256": "7c2353785bd171bfd7eb554f221a4a2cee54adaf6d10dd7a46e5aadb9fc5004e",
+      "sha256": "56f00b93e7850c4f6ebfba2957f20061a17d8ad64f5d346aa636eda24bc44ba9",
       "byte_length": 5472,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "initial": {
           "relative_file": "synthetic-blue-project.kinewright",
-          "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
-          "byte_length": 1491,
+          "sha256": "733bb37ddc7326671d8951637924b204d238f8a54adcce900a4fc07009ce6c07",
+          "byte_length": 1490,
           "kind": "synthetic-control"
         },
         "gesture": {

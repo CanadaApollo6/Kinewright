@@ -2680,7 +2680,7 @@ mod tests {
     fn rejects_unknown_or_non_project_delivery_provenance() {
         for provenance in [
             ColorProvenance::Unknown,
-            ColorProvenance::Other("future_provenance".to_owned()),
+            ColorProvenance::Inferred,
             ColorProvenance::StreamMetadata,
             ColorProvenance::ContainerMetadata,
             ColorProvenance::SidecarMetadata,

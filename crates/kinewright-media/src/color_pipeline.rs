@@ -62,7 +62,6 @@ pub enum ColorPipelineError {
     /// The source omitted its encoded range.
     UnknownRange,
     /// The source range cannot be used by a CC1 profile.
-    UnsupportedRange(ColorRange),
     /// The source omitted its white point and no explicit assumption was
     /// supplied.
     UnknownWhitePoint,
@@ -151,9 +150,7 @@ impl fmt::Display for ColorPipelineError {
                 write!(formatter, "unsupported source colour matrix: {value:?}")
             }
             Self::UnknownRange => formatter.write_str("source colour range is unknown"),
-            Self::UnsupportedRange(value) => {
-                write!(formatter, "unsupported source colour range: {value:?}")
-            }
+
             Self::UnknownWhitePoint => formatter.write_str("source colour white point is unknown"),
             Self::UnsupportedWhitePoint(value) => {
                 write!(
@@ -430,9 +427,6 @@ pub fn expand_native_range(
             let luma_span = 219.0 * scale;
             encoded_rgb.map(|value| (value * max_code - luma_offset) / luma_span)
         }
-        value @ ColorRange::Other(_) => {
-            return Err(ColorPipelineError::UnsupportedRange(value.clone()));
-        }
     };
 
     Ok(expanded)
@@ -478,9 +472,6 @@ pub fn decode_bt709_ycbcr(
             let cb = (encoded_ycbcr[1] * max_code - 128.0 * scale) / (224.0 * scale);
             let cr = (encoded_ycbcr[2] * max_code - 128.0 * scale) / (224.0 * scale);
             (y, cb, cr)
-        }
-        value @ ColorRange::Other(_) => {
-            return Err(ColorPipelineError::UnsupportedRange(value.clone()));
         }
     };
 
@@ -2565,14 +2556,6 @@ mod tests {
             classify_source(&description),
             Err(ColorSourceError::UnknownRange)
         );
-        description.range = ColorRange::Other("extended".to_owned());
-        assert_eq!(
-            classify_source(&description),
-            Err(ColorSourceError::UnsupportedRange(ColorRange::Other(
-                "extended".to_owned()
-            )))
-        );
-
         description.range = ColorRange::Limited;
         description.white_point = ColorWhitePoint::Unknown;
         assert_eq!(

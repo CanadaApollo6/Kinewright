@@ -10,20 +10,20 @@
   "inputs": {
     "edit": {
       "relative_file": "command-sync-lock.json",
-      "sha256": "15afc89b3c02e8ff7ce7caf1c3f0efa66e7a4d1a19e1e964e1fb8fb93d53df3e",
-      "byte_length": 91,
+      "sha256": "e39ccaf6e51868051c0a2fb370bd69c17f0d1e0c0fb7bd27b633b68f69fe2faf",
+      "byte_length": 115,
       "kind": "input"
     },
     "undo": {
       "relative_file": "command-undo.json",
-      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
-      "byte_length": 7,
+      "sha256": "8067b7af6611fecfd1c1375598764416201803c7b62782416f639e9c2837b6c4",
+      "byte_length": 24,
       "kind": "input"
     },
     "initial": {
       "relative_file": "writer-v1-track.kinewright",
-      "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958",
-      "byte_length": 1089,
+      "sha256": "de7101faf0502300fe769a3102fbabe687d377effa48bd5422f82f020ede0fbb",
+      "byte_length": 1112,
       "kind": "project"
     }
   },

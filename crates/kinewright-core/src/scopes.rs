@@ -71,13 +71,11 @@ pub const SCOPE_MAX_TEMPORAL_FRAMES: usize = 64;
 /// alphabet, and [`ScopeStage::measurable_by_scope_engine`] keeps both sides
 /// fail-closed (CC6 §2.1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub enum ScopeStage {
     /// The managed monitor image after compositing, before any delivery codec.
     #[default]
-    #[serde(
-        rename = "monitoring_post_composite",
-        alias = "monitoring/post-composite"
-    )]
+    #[serde(rename = "monitoring_post_composite")]
     MonitoringPostComposite,
     /// The composited scene-linear working surface, before any monitor or
     /// delivery encode.  CC6 §2.
@@ -132,6 +130,7 @@ pub const MATTE_SCOPE_THRESHOLD: &str = "coverage_greater_than_zero";
 /// pipeline boundary, and a new stage value would make stage equality in
 /// [`compare_scope_evidence`] mean two different things at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MatteRegionDescription {
     /// The clip carrying the matte-scoping colour node.
     pub clip: ClipId,
@@ -164,6 +163,7 @@ impl MatteRegionDescription {
 /// values must be in `0..=10_000`, and the right/bottom boundaries must not
 /// exceed `10_000`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedRoi {
     pub x_basis_points: u32,
     pub y_basis_points: u32,
@@ -315,6 +315,7 @@ pub enum NormalizedRoiError {
 
 /// Pixel-space half-open ROI returned by deterministic normalized conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PixelRoi {
     pub x: u32,
     pub y: u32,
@@ -344,6 +345,7 @@ impl PixelRoi {
 
 /// Bounded raster dimensions for each generated scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeResolution {
     pub histogram_bins: u16,
     pub waveform_columns: u16,
@@ -469,6 +471,7 @@ fn checked_grid_len(width: u32, height: u32, name: &'static str) -> Result<usize
 /// A measurement request.  Requests are evidence-only and cannot mutate a
 /// project or infer a correction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeRequest {
     pub stage: ScopeStage,
     pub roi: NormalizedRoi,
@@ -527,6 +530,7 @@ pub type ScopeFrameInput<'a> = ScopeFrame<'a>;
 
 /// Source and sampling metadata attached to every evidence result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeMeasurementMetadata {
     pub stage: ScopeStage,
     pub source_resolution: ScopeRasterResolution,
@@ -553,6 +557,7 @@ pub struct ScopeMeasurementMetadata {
 
 /// A raster resolution recorded in source and measurement metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeRasterResolution {
     pub width: u32,
     pub height: u32,
@@ -564,6 +569,7 @@ pub struct ScopeRasterResolution {
 /// a normalized mean in millionths (`0..=1_000_000`).  Percentile ranks use
 /// nearest rank with `ceil(p * N / 100)`, where the first percentile is `p=1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelStatistics {
     pub mean: u32,
     pub first_percentile: u16,
@@ -593,6 +599,7 @@ impl ChannelStatistics {
 
 /// Channel statistics for RGB plus Rec.709 luma.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeStatistics {
     pub red: ChannelStatistics,
     pub green: ChannelStatistics,
@@ -602,6 +609,7 @@ pub struct ScopeStatistics {
 
 /// Clipping rates for one channel, in basis points of visible samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClippingBasisPoints {
     pub black: u32,
     pub white: u32,
@@ -609,6 +617,7 @@ pub struct ClippingBasisPoints {
 
 /// Clipping rates for RGB plus luma.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeClipping {
     pub red: ClippingBasisPoints,
     pub green: ClippingBasisPoints,
@@ -618,6 +627,7 @@ pub struct ScopeClipping {
 
 /// RGB and luma histogram counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeHistograms {
     pub bins: u16,
     pub red: Vec<u64>,
@@ -629,6 +639,7 @@ pub struct ScopeHistograms {
 /// A luma waveform density grid.  Row zero is the high-code (white) edge;
 /// the final row is the low-code (black) edge.  Values are row-major counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LumaWaveform {
     pub columns: u16,
     pub rows: u16,
@@ -637,6 +648,7 @@ pub struct LumaWaveform {
 
 /// One channel of an RGB parade density grid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ParadeChannel {
     pub density: Vec<u64>,
 }
@@ -644,6 +656,7 @@ pub struct ParadeChannel {
 /// RGB parade density grids.  Each channel uses the same configured width and
 /// height and is kept separate so consumers cannot confuse channel bands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RgbParade {
     pub columns: u16,
     pub rows: u16,
@@ -655,6 +668,7 @@ pub struct RgbParade {
 /// Vectorscope chroma density.  The square's centre is neutral chroma; row
 /// zero is positive green-axis chroma and the final row is negative chroma.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct VectorscopeDensity {
     pub size: u16,
     pub density: Vec<u64>,
@@ -663,6 +677,7 @@ pub struct VectorscopeDensity {
 /// Complete immutable scope evidence for one or more explicitly identified
 /// project frames.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeEvidence {
     pub metadata: ScopeMeasurementMetadata,
     pub statistics: ScopeStatistics,
@@ -1379,6 +1394,7 @@ fn increment_grid(
 
 /// One signed metric with both recorded endpoints retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SignedDelta {
     pub reference: i64,
     pub candidate: i64,
@@ -1387,6 +1403,7 @@ pub struct SignedDelta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelStatisticsDelta {
     pub mean: SignedDelta,
     pub first_percentile: SignedDelta,
@@ -1395,6 +1412,7 @@ pub struct ChannelStatisticsDelta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeStatisticsDelta {
     pub red: ChannelStatisticsDelta,
     pub green: ChannelStatisticsDelta,
@@ -1403,12 +1421,14 @@ pub struct ScopeStatisticsDelta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClippingDelta {
     pub black: SignedDelta,
     pub white: SignedDelta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeClippingDelta {
     pub red: ClippingDelta,
     pub green: ClippingDelta,
@@ -1417,6 +1437,7 @@ pub struct ScopeClippingDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeHistogramDelta {
     pub bins: u16,
     pub red: Vec<i64>,
@@ -1427,6 +1448,7 @@ pub struct ScopeHistogramDelta {
 
 /// Signed row-major density difference for a scope grid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeGridDelta {
     pub width: u16,
     pub height: u16,
@@ -1434,6 +1456,7 @@ pub struct ScopeGridDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RgbParadeDelta {
     pub columns: u16,
     pub rows: u16,
@@ -1444,6 +1467,7 @@ pub struct RgbParadeDelta {
 
 /// Reference-vs-candidate evidence with signed, recorded deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeComparison {
     pub stage: ScopeStage,
     pub reference_frames: Vec<i64>,
@@ -1464,7 +1488,6 @@ pub struct ScopeComparison {
     /// when both sides were measured under a matte region; `None` otherwise.
     /// The count is reported rather than compared because a qualifier matte's
     /// coverage depends on the colour entering the node (CC5 §4.3).
-    #[serde(default)]
     pub matte_covered_pixel_delta: Option<SignedDelta>,
 }
 

@@ -107,9 +107,7 @@ pub(crate) fn managed_sdr_reset_needed(context: &ColorContext) -> bool {
 
 fn color_pipeline_state_label(state: &ColorPipelineState) -> String {
     match state {
-        ColorPipelineState::Legacy => "LEGACY".to_owned(),
         ColorPipelineState::ManagedSdrV1 => "MANAGED SDR V1".to_owned(),
-        ColorPipelineState::Other(value) => format!("FUTURE ({value})"),
     }
 }
 
@@ -144,7 +142,8 @@ fn color_primaries_label(value: &ColorPrimaries) -> String {
         ColorPrimaries::Bt470M => "BT.470M".to_owned(),
         ColorPrimaries::Bt470Bg => "BT.470BG".to_owned(),
         ColorPrimaries::Film => "film".to_owned(),
-        ColorPrimaries::Other(value) => value.clone(),
+        ColorPrimaries::Smpte428 => "smpte428".to_owned(),
+        ColorPrimaries::Ebu3213 => "ebu3213".to_owned(),
     }
 }
 
@@ -163,7 +162,13 @@ fn color_transfer_label(value: &ColorTransfer) -> String {
         ColorTransfer::Log => "log".to_owned(),
         ColorTransfer::LogC => "Log C".to_owned(),
         ColorTransfer::Log3G10 => "Log3G10".to_owned(),
-        ColorTransfer::Other(value) => value.clone(),
+        ColorTransfer::Smpte240M => "smpte240m".to_owned(),
+        ColorTransfer::LogSqrt => "log_sqrt".to_owned(),
+        ColorTransfer::Iec61966TwoFour => "iec61966_2_4".to_owned(),
+        ColorTransfer::Bt1361Ecg => "bt1361_ecg".to_owned(),
+        ColorTransfer::Bt2020Ten => "bt2020_10".to_owned(),
+        ColorTransfer::Bt2020Twelve => "bt2020_12".to_owned(),
+        ColorTransfer::Smpte428 => "smpte428".to_owned(),
     }
 }
 
@@ -181,7 +186,12 @@ fn color_matrix_label(value: &ColorMatrix) -> String {
         ColorMatrix::ChromaDerivedNcl => "chroma-derived NCL".to_owned(),
         ColorMatrix::ChromaDerivedCl => "chroma-derived CL".to_owned(),
         ColorMatrix::Ictcp => "ICtCp".to_owned(),
-        ColorMatrix::Other(value) => value.clone(),
+        ColorMatrix::Bt470Bg => "bt470bg".to_owned(),
+        ColorMatrix::Fcc => "fcc".to_owned(),
+        ColorMatrix::Smpte2085 => "smpte2085".to_owned(),
+        ColorMatrix::IptC2 => "ipt_c2".to_owned(),
+        ColorMatrix::YcgcoRe => "ycgco_re".to_owned(),
+        ColorMatrix::YcgcoRo => "ycgco_ro".to_owned(),
     }
 }
 
@@ -190,7 +200,6 @@ fn color_range_label(value: &ColorRange) -> String {
         ColorRange::Unknown => "unknown".to_owned(),
         ColorRange::Full => "full".to_owned(),
         ColorRange::Limited => "limited".to_owned(),
-        ColorRange::Other(value) => value.clone(),
     }
 }
 
@@ -202,7 +211,6 @@ fn color_white_point_label(value: &ColorWhitePoint) -> String {
         ColorWhitePoint::D60 => "D60".to_owned(),
         ColorWhitePoint::D65 => "D65".to_owned(),
         ColorWhitePoint::Dci => "DCI".to_owned(),
-        ColorWhitePoint::Other(value) => value.clone(),
     }
 }
 
@@ -216,7 +224,6 @@ fn color_bit_depth_label(value: &ColorBitDepth) -> String {
         ColorBitDepth::Float16 => "float16".to_owned(),
         ColorBitDepth::Float32 => "float32".to_owned(),
         ColorBitDepth::Integer(bits) => format!("{bits}-bit"),
-        ColorBitDepth::Other(value) => value.clone(),
     }
 }
 
@@ -230,7 +237,6 @@ fn color_provenance_label(value: &ColorProvenance) -> String {
         ColorProvenance::Inferred => "inferred".to_owned(),
         ColorProvenance::ApplicationDefault => "app default".to_owned(),
         ColorProvenance::AgentAssumption => "agent assumption".to_owned(),
-        ColorProvenance::Other(value) => value.clone(),
     }
 }
 
@@ -518,26 +524,9 @@ mod tests {
         assert!(summaries[2].starts_with("DELIVERY · "));
         assert!(summaries[2].contains("M:BT.709 R:limited"));
         assert_eq!(summaries[3], "PIPELINE · MANAGED SDR V1");
-    }
-
-    #[test]
-    fn pipeline_summary_and_reset_state_distinguish_legacy_and_future_contexts() {
-        let mut legacy = ColorContext::sdr_rec709();
-        legacy.pipeline_state = ColorPipelineState::Legacy;
-        assert_eq!(color_pipeline_summary(&legacy)[3], "PIPELINE · LEGACY");
-        assert!(managed_sdr_reset_needed(&legacy));
-
-        let mut future = ColorContext::sdr_rec709();
-        future.pipeline_state = ColorPipelineState::Other("managed_sdr_v2".to_owned());
-        assert_eq!(
-            color_pipeline_summary(&future)[3],
-            "PIPELINE · FUTURE (managed_sdr_v2)"
-        );
-        assert!(managed_sdr_reset_needed(&future));
         assert!(!managed_sdr_reset_needed(&ColorContext::sdr_rec709()));
-
-        let mut incompatible_delivery = ColorContext::sdr_rec709();
-        incompatible_delivery.delivery.transfer = ColorTransfer::Smpte2084;
-        assert!(managed_sdr_reset_needed(&incompatible_delivery));
+        let mut hdr_delivery = ColorContext::sdr_rec709();
+        hdr_delivery.delivery.transfer = ColorTransfer::Smpte2084;
+        assert!(managed_sdr_reset_needed(&hdr_delivery));
     }
 }

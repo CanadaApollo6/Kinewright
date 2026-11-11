@@ -2754,7 +2754,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 2_002_954, 1_848_392, 129_437),
+        (153, 1_978_409, 1_824_687, 128_597),
         "registry={registry_metrics:?}"
     );
 
@@ -3398,7 +3398,7 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
             "op": "set_track_automation",
             "track": 1,
             "parameter": "loudness",
-            "curve": {"keyframes": [{"at": 0, "value": 0}]}
+            "curve": {"keyframes": [{"at": 0, "value": 0, "interpolation": "linear"}]}
         }]),
     )
     .await;
@@ -10679,7 +10679,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 2_002_954, 1_848_392, 129_437),
+        (153, 1_978_409, 1_824_687, 128_597),
         "registry={registry_metrics:?}"
     );
     let state = registry

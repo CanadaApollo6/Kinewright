@@ -12,81 +12,81 @@
   "inputs": {
     "legacy": {
       "relative_file": "s1-migration-input.kinewright",
-      "sha256": "f58de3aaad5211ead878b265cceba464363bc142e1661abea91c8f55b61ace77",
-      "byte_length": 107,
+      "sha256": "7013fef89fab919bbc0e04ab698a8acd22cecf512ece9298962e3546c6e9dcf3",
+      "byte_length": 1040,
       "kind": "project"
     },
     "edit": {
       "relative_file": "command-add-track.json",
-      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-      "byte_length": 157,
+      "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+      "byte_length": 181,
       "kind": "current-command"
     },
     "sample-root": {
       "relative_file": "s1-v3-bundle/studio.kinewright",
-      "sha256": "876e2abb35287567c43a4b62f811fdd377ed9295f7a16709fa88335883960567",
-      "byte_length": 1846,
+      "sha256": "719706514787053c4c274471b3ed0a0849eb1176d91f478a6d5161a2bfcc59a7",
+      "byte_length": 1847,
       "kind": "v3-bundle-root"
     },
+    "portable-crash-model": {
+      "relative_file": "s1-crash-model.json",
+      "sha256": "da61b699682574367244b2c19c577fe39f54e00689d27060f606fcc6ff25d980",
+      "byte_length": 99462,
+      "kind": "portable-dropped-write-model-input"
+    },
+    "sample-object-2": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/0cec888105850eada357ae8dae6cda2ef75482053a7699e89ca42ecc0567c436",
+      "sha256": "0cec888105850eada357ae8dae6cda2ef75482053a7699e89ca42ecc0567c436",
+      "byte_length": 11097,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-3": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/28a05ad3e7c44c07fd2b09fb9515d655f0622c3a236cc0562c3d9dfd473b3e63",
+      "sha256": "28a05ad3e7c44c07fd2b09fb9515d655f0622c3a236cc0562c3d9dfd473b3e63",
+      "byte_length": 114,
+      "kind": "v3-bundle-object"
+    },
     "sample-object-4": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
-      "sha256": "3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
-      "byte_length": 11029,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/48141cfa65af723404ee8bafb0701606cbfbb081fdfeb1ed58a8a4583ba07cf3",
+      "sha256": "48141cfa65af723404ee8bafb0701606cbfbb081fdfeb1ed58a8a4583ba07cf3",
+      "byte_length": 2644,
       "kind": "v3-bundle-object"
     },
     "sample-object-5": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
-      "sha256": "55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/a87820cf88a007fa8d36f361fd3357702e607abc6b1a1968ddfef130568855e9",
+      "sha256": "a87820cf88a007fa8d36f361fd3357702e607abc6b1a1968ddfef130568855e9",
       "byte_length": 121,
       "kind": "v3-bundle-object"
     },
     "sample-object-6": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
-      "sha256": "6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
-      "byte_length": 1377,
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/d750b59e3ad6cada6166d4d37a4ba6206dc0a0fcea065d7f15c3f42884b5a89b",
+      "sha256": "d750b59e3ad6cada6166d4d37a4ba6206dc0a0fcea065d7f15c3f42884b5a89b",
+      "byte_length": 1380,
       "kind": "v3-bundle-object"
     },
     "sample-object-7": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
-      "sha256": "892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
-      "byte_length": 167,
-      "kind": "v3-bundle-object"
-    },
-    "sample-object-8": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
-      "sha256": "b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
-      "byte_length": 2624,
-      "kind": "v3-bundle-object"
-    },
-    "sample-object-9": {
       "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
       "sha256": "e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
       "byte_length": 765,
       "kind": "v3-bundle-object"
     },
-    "sample-object-10": {
-      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
-      "sha256": "f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
-      "byte_length": 96,
+    "sample-object-8": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e903fabf4cddfb2505e70132ed94ea11169b914a13692985735743e6a9a1e876",
+      "sha256": "e903fabf4cddfb2505e70132ed94ea11169b914a13692985735743e6a9a1e876",
+      "byte_length": 167,
       "kind": "v3-bundle-object"
     },
-    "sample-object-11": {
+    "sample-object-9": {
       "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
       "sha256": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
       "byte_length": 730,
       "kind": "v3-bundle-object"
     },
-    "sample-object-13": {
+    "sample-object-10": {
       "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
-      "sha256": "6840caac33a6b8d900a352e2a4f2a640ba18c9792e071dd0abeb8c40d78dbbc8",
+      "sha256": "e09cb3d4b2decb7d6915040854c2287afe48166dd8d89d2fa7d1108d8dda8e5f",
       "byte_length": 230,
       "kind": "v3-bundle-object"
-    },
-    "portable-crash-model": {
-      "relative_file": "s1-crash-model.json",
-      "sha256": "94dbd68d59d6ff905dd1100271e86b8dbab2cd2949b52688bff91b842ad2b1eb",
-      "byte_length": 92643,
-      "kind": "portable-dropped-write-model-input"
     }
   },
   "initial": {

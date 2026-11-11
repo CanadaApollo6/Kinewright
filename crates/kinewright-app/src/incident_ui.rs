@@ -328,9 +328,9 @@ pub(crate) fn card_action_outcome(incident: &Incident, action: &CardAction) -> I
 /// both containers" a type-level fact rather than a hope. The asset identity
 /// lives in `subject_label` and the probed tuple in `details`.
 ///
-/// The table has **seventy-seven** rows for seventy-four codes because the
+/// The table has **seventy-four** rows for seventy-one codes because the
 /// three `Rec709Compatible` codes are reachable under both `AutoApply` and
-/// `Explain`; the other seventy-one are reachable only as `Explain`
+/// `Explain`; the other sixty-eight are reachable only as `Explain`
 /// (`IN1b` §5.5 rule 30).
 /// The match carries no wildcard arm in either position, so a new code or a new
 /// class breaks the build (IN1 §5.3 rules 25–27).
@@ -406,10 +406,6 @@ pub(crate) fn incident_headline(code: IncidentCode, class: PolicyClass) -> &'sta
             SourceColorIncident::UnsupportedMatrix,
             PolicyClass::AutoApply | PolicyClass::AskFirst | PolicyClass::Explain,
         ) => "This source's colour matrix is not one Kinewright can manage yet.",
-        (
-            SourceColorIncident::UnsupportedRange,
-            PolicyClass::AutoApply | PolicyClass::AskFirst | PolicyClass::Explain,
-        ) => "This source's level range is not one Kinewright can manage yet.",
         (
             SourceColorIncident::UnsupportedWhitePoint,
             PolicyClass::AutoApply | PolicyClass::AskFirst | PolicyClass::Explain,
@@ -611,10 +607,6 @@ const fn label_headline(incident: LabelIncident) -> &'static str {
             "Kinewright found unsaved work or damage from an earlier run."
         }
         LabelIncident::RecoveryUnavailable => "Crash recovery stopped recording in this run.",
-        LabelIncident::ProjectNewerFormat => "This project was written by a newer Kinewright.",
-        LabelIncident::SidecarUnknownCodes => {
-            "Some saved incident history used codes this Kinewright does not know."
-        }
         LabelIncident::SidecarRefused => {
             "The project's saved incident history could not be loaded."
         }
@@ -1314,9 +1306,7 @@ mod tests {
         );
     }
 
-    /// `IN1b` §5.5 rule 30 and §9 clause 18: the headline table is
-    /// **seventy-seven** rows over seventy-four codes, every row distinct,
-    /// and every row is a headline rather than a body.
+    /// Every current headline row is distinct and differs from its body.
     ///
     /// The last clause is what erratum `IN1b`-A-R10 asks for. Stage A left a
     /// shim at `incident_headline` returning `explain_body(code)` for every
@@ -1341,11 +1331,11 @@ mod tests {
                 headlines.push(incident_headline(entry.code, PolicyClass::AutoApply));
             }
         }
-        assert_eq!(POLICY.len(), 74, "seventy-four declared codes");
+        assert_eq!(POLICY.len(), 71, "current declared codes");
         assert_eq!(
             headlines.len(),
-            77,
-            "seventy-seven rows for seventy-four codes"
+            74,
+            "three codes also have an AutoApply row"
         );
         for (incident, headline) in [
             (
@@ -1359,14 +1349,6 @@ mod tests {
             (
                 LabelIncident::RecoveryUnavailable,
                 "Crash recovery stopped recording in this run.",
-            ),
-            (
-                LabelIncident::ProjectNewerFormat,
-                "This project was written by a newer Kinewright.",
-            ),
-            (
-                LabelIncident::SidecarUnknownCodes,
-                "Some saved incident history used codes this Kinewright does not know.",
             ),
             (
                 LabelIncident::SidecarRefused,

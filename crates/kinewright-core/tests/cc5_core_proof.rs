@@ -435,8 +435,8 @@ fn scope_metadata_serializes_the_matte_region_only_when_scoped() {
 }
 
 #[test]
-fn scope_metadata_recorded_before_cc5_still_loads() {
-    let legacy = r#"{
+fn unscoped_metadata_omits_the_optional_matte_region() {
+    let current = r#"{
         "stage": "monitoring_post_composite",
         "source_resolution": { "width": 4, "height": 2 },
         "measurement_resolution": { "width": 4, "height": 2 },
@@ -455,7 +455,7 @@ fn scope_metadata_recorded_before_cc5_still_loads() {
     }"#;
 
     let parsed: ScopeMeasurementMetadata =
-        serde_json::from_str(legacy).expect("legacy evidence still loads");
+        serde_json::from_str(current).expect("current unscoped evidence loads");
     assert_eq!(parsed.matte_region, None);
     assert_eq!(parsed.stage, ScopeStage::MonitoringPostComposite);
     assert_eq!(parsed.visible_pixel_count, 2);
