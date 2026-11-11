@@ -409,6 +409,7 @@ pub fn prepare_orchestration_pair(
         .publication_fence(bundle.admission.raw_bytes())?;
     let result = (|| {
         let mut approval = prepare_orchestration_cut(bundle, &first, evidence, &fence)?;
+        #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::note("consent_approval_prepared", &bundle.store.resolved_root()?);
         let (second, marker) = approval.metadata.with_preview(bundle, |bundle| {
             let segment = bundle
