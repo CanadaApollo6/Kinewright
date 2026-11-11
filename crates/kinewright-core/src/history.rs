@@ -14,7 +14,6 @@ pub const HISTORY_COMMANDS: usize = 65_536;
 pub struct OperationIdentityEffect {
     pub created: Vec<ClipId>,
     pub deleted: Vec<ClipId>,
-    pub retained: Vec<ClipId>,
     /// Exact source range and identity before a split, including intermediate splits.
     pub split_parent: Option<Clip>,
     /// The actual children produced by that operation, before later batch edits.
@@ -47,10 +46,9 @@ pub struct HistoryBatch {
     pub redo_entries: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(with = "crate::HistoryTransport")]
 pub struct HistorySnapshot {
-    #[serde(default, skip_serializing_if = "is_zero")]
     pub floor_offset: u64,
     pub baseline: Arc<Document>,
     pub document: Arc<Document>,
@@ -78,39 +76,36 @@ pub enum HistoryError {
     Disconnected,
 }
 
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde skip predicates borrow their field"
-)]
-fn is_zero(value: &u64) -> bool {
-    *value == 0
-}
 impl HistorySnapshot {
     /// Count encoded bytes without allocating another serialized copy.
     ///
     /// # Errors
     /// Refuses excessive commands, encoded size or serialization failure.
     pub fn encoded_bytes(&self) -> Result<u64, HistoryError> {
-        struct Counter(u64);
-        impl io::Write for Counter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0 = self
-                    .0
-                    .checked_add(bytes.len() as u64)
-                    .filter(|n| *n <= HISTORY_BYTES)
-                    .ok_or_else(|| io::Error::other("history capacity"))?;
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
         if self.batches.len() > HISTORY_COMMANDS {
             return Err(HistoryError::Capacity);
         }
-        let mut counter = Counter(0);
-        serde_json::to_writer(&mut counter, self).map_err(|_| HistoryError::Capacity)?;
-        Ok(counter.0)
+        encoded_size(self)
+    }
+
+    /// Keep ordinary undo admission bounded independently of compact transport.
+    /// Cursor document bytes are counted without storing or sending those bytes.
+    /// # Errors
+    /// Refuses the same 32 MiB admission ceiling as the existing manual stream.
+    pub fn ordinary_admission_bytes(&self) -> Result<u64, HistoryError> {
+        self.cursor.undo.iter().chain(&self.cursor.redo).try_fold(
+            self.encoded_bytes()?,
+            |total, entry| {
+                total
+                    .checked_add(boundary_admission_bytes(
+                        &entry.document,
+                        &entry.operations,
+                        entry.coalesce_key.as_deref(),
+                    )?)
+                    .filter(|bytes| *bytes <= HISTORY_BYTES)
+                    .ok_or(HistoryError::Capacity)
+            },
+        )
     }
 
     #[must_use]
@@ -121,4 +116,32 @@ impl HistorySnapshot {
             .flat_map(|e| e.operations.iter().cloned())
             .collect()
     }
+}
+
+// Size accounting only: the portable writer still emits hashes for these documents.
+pub(crate) fn boundary_admission_bytes(
+    document: &Document,
+    operations: &[Operation],
+    key: Option<&str>,
+) -> Result<u64, HistoryError> {
+    encoded_size(&(document, operations, key))
+}
+pub(crate) fn encoded_size(value: &impl Serialize) -> Result<u64, HistoryError> {
+    struct Counter(u64);
+    impl io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .filter(|n| *n <= HISTORY_BYTES)
+                .ok_or_else(|| io::Error::other("history capacity"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|_| HistoryError::Capacity)?;
+    Ok(counter.0)
 }

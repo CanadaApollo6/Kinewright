@@ -941,7 +941,7 @@ impl Studio {
             )
             .map_err(io_error)?;
         let history = (*store
-            .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+            .resolve_history(&checkpoint.history_ref)
             .map_err(io_error)?)
         .clone();
         let durable = store

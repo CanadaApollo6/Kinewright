@@ -258,7 +258,7 @@ impl Ja1EditingSession {
             || bundle
                 .branches
                 .get(&source.branch)
-                .is_some_and(|checkpoint| checkpoint.history_ref == manual.history_ref);
+                .is_some_and(|checkpoint| checkpoint.history_digest == manual.history_digest);
         let reviewed_on = bundle.root.as_ref().and_then(|root| {
             root.retained_task_reviews
                 .iter()
@@ -415,10 +415,15 @@ mod tests {
         owner
             .first_save(&temp.path("cache.kinewright"), StorageLimits::default())
             .unwrap();
-        let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "candidate",
+                crate::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         let candidate_base_ref = owner.persist_durable_branch(&mut candidate).unwrap();
         let base = owner.candidate_binding(candidate.branch_id()).unwrap();
-        let mut task_branch = owner.fork_durable_branch("task").unwrap();
+        let mut task_branch = owner.fork_registered_from_candidate(&base, "task").unwrap();
         task_branch
             .core()
             .request(kinewright_core::Command::Do(

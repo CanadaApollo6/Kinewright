@@ -102,7 +102,18 @@ impl HostSnapshot {
         Self::from_history(history)
     }
     pub fn from_history(history: HistorySnapshot) -> Result<Self, super::HostError> {
-        let history_sha256 = kinewright_media::sha256_bytes(&serde_json::to_vec(&history)?);
+        let transport = kinewright_core::HistoryTransport::capture(&history)
+            .map_err(|error| super::HostError::Protocol(error.to_string()))?;
+        let live = kinewright_core::history_size::replay_live_bound(
+            &transport.journal,
+            &transport.baseline,
+            &transport.document,
+        )
+        .map_err(|_| BundleError::Capacity("foreground history snapshot"))?;
+        if live > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
+            return Err(BundleError::Capacity("foreground history snapshot").into());
+        }
+        let history_sha256 = kinewright_media::sha256_bytes(&serde_json::to_vec(&transport)?);
         Ok(Self {
             history,
             history_sha256,
@@ -127,6 +138,29 @@ impl HostSnapshot {
             return Err(BundleError::Capacity("foreground history snapshot").into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod snapshot_capacity_tests {
+    #[test]
+    fn host_snapshot_refuses_replay_expansion_before_launch() {
+        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let before = core.export_history().unwrap();
+        let mut oversized = before.clone();
+        oversized.batches.push(kinewright_core::HistoryBatch {
+            order: 0,
+            command: kinewright_core::JournalCommand::Undo,
+            identity_effects: vec![],
+            undo_entries: kinewright_core::HISTORY_COMMANDS,
+            redo_entries: 0,
+        });
+        let error = super::HostSnapshot::from_history(oversized).unwrap_err();
+        assert!(
+            error.to_string().contains("foreground history snapshot"),
+            "{error}"
+        );
+        assert_eq!(core.export_history().unwrap(), before);
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

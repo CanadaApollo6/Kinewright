@@ -157,7 +157,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
             let history = session
                 .store()
                 .unwrap()
-                .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+                .resolve_history(&checkpoint.history_ref)
                 .unwrap();
             assert_eq!(*history, expected);
             let loaded = LoadedBundle::read(&f.temp.path(name)).unwrap();

@@ -662,7 +662,6 @@ fn identity_effect(
     crate::OperationIdentityEffect {
         created: after.difference(before).copied().collect(),
         deleted: before.difference(&after).copied().collect(),
-        retained: before.intersection(&after).copied().collect(),
         split_parent,
         split_results,
     }

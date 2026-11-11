@@ -277,6 +277,21 @@ impl TaskEndpoint {
         ),
         String,
     > {
+        self.with_history_preview(|| self.preview_history_step_serial(core, expected, redo))
+    }
+    fn preview_history_step_serial(
+        &self,
+        core: &Core,
+        expected: kinewright_core::TimelineRevision,
+        redo: bool,
+    ) -> Result<
+        (
+            kinewright_core::HistorySnapshot,
+            kinewright_core::HistorySnapshot,
+            Vec<Operation>,
+        ),
+        String,
+    > {
         self.check_live()?;
         if !self.matches_core(core) {
             return Err("task actor changed".into());
@@ -364,6 +379,25 @@ impl TaskEndpoint {
         .map_err(|error| error.to_string())
     }
     pub(crate) fn check_batch_history(
+        &self,
+        core: &Core,
+        operations: &[Operation],
+    ) -> Result<(), String> {
+        self.with_history_preview(|| self.check_batch_history_serial(core, operations))
+    }
+    fn with_history_preview<T>(
+        &self,
+        work: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        if let Some(admission) = &self.0.history_admission {
+            admission
+                .with_preview(work)
+                .map_err(|error| error.to_string())?
+        } else {
+            work()
+        }
+    }
+    fn check_batch_history_serial(
         &self,
         core: &Core,
         operations: &[Operation],

@@ -191,8 +191,7 @@ impl Ja1EditingSession {
             let saved = self
                 .active_bundle()?
                 .checkpoint(self.active_bundle()?.manual_branch_id())?
-                .history_ref
-                .sha256
+                .history_digest
                 .clone();
             self.association
                 .as_mut()
@@ -309,11 +308,7 @@ impl Ja1EditingSession {
             let digest =
                 Self::cached_history_digest(registered.guard.core(), &registered.digest_cache)?;
             if bundle.unsettled
-                || bundle
-                    .checkpoint(&registered.guard.branch)?
-                    .history_ref
-                    .sha256
-                    != digest
+                || bundle.checkpoint(&registered.guard.branch)?.history_digest != digest
             {
                 disclosure.push(' ');
                 disclosure.push_str(&registered.name);

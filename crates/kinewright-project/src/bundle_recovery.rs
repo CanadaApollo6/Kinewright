@@ -262,7 +262,14 @@ pub(crate) fn decode<T: DeserializeOwned>(
         false,
         u64::MAX,
     )?;
-    let charge = crate::store::preflight_record(bytes, limits)?;
+    let wire_charge = crate::store::preflight_record(bytes, limits)?;
+    let charge = if kind == RecordKind::Lineage {
+        wire_charge
+            .checked_add(crate::lineage_journal::decode_live_bound(bytes)?)
+            .ok_or(BundleError::Capacity("lineage decode overflow"))?
+    } else {
+        wire_charge
+    };
     drop(scratch);
     let (value, shadow) = decoded_reservations(charge, kind, usage, limits)?;
     let raw: serde_json::Value =
@@ -270,7 +277,10 @@ pub(crate) fn decode<T: DeserializeOwned>(
     support_semantics(&raw)?;
     let observed = match kind {
         RecordKind::Document => kinewright_core::document_support_fields(&raw),
-        RecordKind::History => kinewright_core::history_support_fields(&raw),
+        RecordKind::History => kinewright_core::history_journal_support_fields(
+            raw.get("journal")
+                .ok_or_else(|| BundleError::Corrupt("missing history journal".into()))?,
+        ),
         RecordKind::SpecialistBase => {
             if let Some(operations) = raw
                 .get("full_applied_delta")
@@ -359,24 +369,12 @@ fn check_encoded_record(reference: &ObjectRef, limits: &StorageLimits) -> Result
 }
 fn decoded_reservations(
     charge: u64,
-    kind: RecordKind,
+    _kind: RecordKind,
     usage: &Arc<Mutex<StorageUsage>>,
     limits: &StorageLimits,
 ) -> Result<(StorageReservation, StorageReservation), BundleError> {
     let shadow = StorageReservation::reserve(usage, limits, 0, charge, 0, false, u64::MAX)?;
-    let value = StorageReservation::reserve(
-        usage,
-        limits,
-        0,
-        charge,
-        if kind == RecordKind::History {
-            charge
-        } else {
-            0
-        },
-        false,
-        u64::MAX,
-    )?;
+    let value = StorageReservation::reserve(usage, limits, 0, charge, 0, false, u64::MAX)?;
     Ok((value, shadow))
 }
 pub(crate) fn read_bytes(
@@ -395,7 +393,7 @@ pub(crate) fn read_bytes(
     }
     Ok((bytes, charge))
 }
-fn read_record<T: BundleRecord>(
+pub(crate) fn read_record<T: BundleRecord>(
     namespace: &ProjectNamespace,
     reference: &ObjectRef,
     usage: &Arc<Mutex<StorageUsage>>,
@@ -892,7 +890,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                 let _value = admit!(Document);
             }
             RecordKind::History => {
-                let _value = admit!(HistorySnapshot);
+                let _value = admit!(crate::history_record::HistoryRecord);
             }
             RecordKind::BranchCheckpoint => {
                 checkpoints.insert(reference.sha256.clone(), admit!(BranchCheckpoint));
@@ -1002,14 +1000,16 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         let history = if active && let Some(value) = histories.get(&checkpoint.history_ref.sha256) {
             Arc::clone(value)
         } else {
-            Arc::new(read_record::<HistorySnapshot>(
+            Arc::new(crate::history_record::resolve_namespace_history(
                 namespace,
                 &checkpoint.history_ref,
                 usage,
                 &mut fields,
                 limits,
+                active && id == &root.manual_branch_id,
             )?)
         };
+        crate::history_record::HistoryRecord::verify_checkpoint(&checkpoint, &history)?;
         let lineage = if active && let Some(value) = lineages.get(&checkpoint.lineage_ref.sha256) {
             Arc::clone(value)
         } else {
@@ -1080,22 +1080,8 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             &input_manifests[&checkpoint.input_manifest_ref.sha256],
         )?;
         crate::bundle_commit::validate_inputs(&history, &retained_inputs)?;
-        // Private candidate replay; no live Core is changed on a damaged branch.
-        let _replay = StorageReservation::reserve(
-            usage,
-            limits,
-            0,
-            history.decoded_charge(),
-            history.decoded_charge(),
-            false,
-            u64::MAX,
-        )?;
-        let core = kinewright_core::Core::spawn(std::sync::Arc::clone(&history.baseline))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        crate::history_save::ProjectAttachment::new(&core)
-            .map_err(crate::bundle::history_error)?
-            .restore_history((**history).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        // The resolver already executed the ordinary journal and checked every
+        // retained hash. Avoid retaining another replay actor during graph admission.
         if lineage.current.keys().copied().collect::<BTreeSet<_>>()
             != history
                 .document
@@ -1109,11 +1095,24 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             ));
         }
 
-        if active {
+        memo.remember_resolved_history(
+            &checkpoint.history_ref,
+            history.decoded_charge(),
+            checkpoint.history_role,
+            limits,
+        );
+        let retain = active
+            && (id == &root.manual_branch_id
+                || checkpoint.history_role == crate::history_record::HistoryRole::Ordinary);
+        if retain {
             histories.insert(checkpoint.history_ref.sha256.clone(), Arc::clone(&history));
             lineages.insert(checkpoint.lineage_ref.sha256.clone(), Arc::clone(&lineage));
         }
-        Ok((checkpoint, history, lineage))
+        Ok((
+            checkpoint,
+            retain.then_some(history),
+            retain.then_some(lineage),
+        ))
     };
     let branches = inspect_checkpoints(index, checkpoints, inspect_checkpoint)?;
     let candidates: Vec<_> = branches
@@ -1136,7 +1135,14 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
     let manual = branches
         .get(&root.manual_branch_id)
         .ok_or_else(|| BundleError::Corrupt("manual branch omitted".into()))?;
-    if admission.inspection_document() != Some(&manual.1.document)
+    if admission.inspection_document()
+        != Some(
+            &manual
+                .1
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("missing manual history".into()))?
+                .document,
+        )
         || manual.0.input_manifest_ref != root.input_manifest_ref
     {
         return Err(BundleError::Corrupt(
@@ -1330,12 +1336,13 @@ pub fn assess(path: &Path) -> Result<RecoveryAssessment, BundleError> {
         {
             verified_document_bytes.push(checkpoint.document_ref.clone());
         }
-        let history = read_record::<HistorySnapshot>(
+        let history = crate::history_record::resolve_namespace_history(
             &namespace,
             &checkpoint.history_ref,
             usage,
             &mut BTreeSet::new(),
             limits,
+            false,
         );
         let history_error = match history {
             Err(error) => Some(error.to_string()),

@@ -99,6 +99,7 @@ struct MediaAdmission {
 
 struct StoreInner {
     admission_identity: Arc<()>,
+    replay_gate: Arc<crate::history_record::ReplayGate>,
     run_budget: std::sync::atomic::AtomicBool,
     run_limit: std::sync::atomic::AtomicBool,
     read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
@@ -171,6 +172,21 @@ impl Seek for RetainedReadLease {
     }
 }
 impl RetainedReadAdmission {
+    pub(crate) fn reserve_snapshot_history(
+        &self,
+        history: &kinewright_core::HistorySnapshot,
+    ) -> Result<StorageReservation, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+            publication: None,
+            person_publication: None,
+            cleanup_publication: None,
+        };
+        // A dirty foreground capture may need flooring before publication. It
+        // uses the shared ordinary pool, not a published record's single-history cap.
+        let live = crate::history_size::history_live_bytes(history)?;
+        store.reserve_copy_read(0, live, live, false, true)
+    }
     pub(crate) fn reserve_snapshot_growth(
         &self,
         overlap: &StorageReservation,
@@ -390,7 +406,7 @@ impl ProjectStore {
         bytes: &[u8],
     ) -> Result<StorageReservation, BundleError> {
         let decoded = preflight_record(bytes, self.limits())?;
-        self.reserve_copy_read(0, decoded, decoded, false, true)
+        self.reserve_copy_read(0, decoded, 0, false, true)
     }
     pub(crate) fn reserve_capture_scratch(&self) -> Result<StorageReservation, BundleError> {
         self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)
@@ -665,6 +681,7 @@ impl ProjectStore {
         Ok(Self {
             inner: Arc::new(StoreInner {
                 admission_identity: Arc::new(()),
+                replay_gate: Arc::new(crate::history_record::ReplayGate::default()),
                 run_budget: std::sync::atomic::AtomicBool::new(false),
                 run_limit: std::sync::atomic::AtomicBool::new(false),
                 read_authority,
@@ -1732,6 +1749,28 @@ impl ProjectStore {
     pub fn verify(&self, reference: &ObjectRef) -> Result<(), BundleError> {
         self.open_verified(reference).map(drop)
     }
+    pub(crate) fn verify_cached_history(
+        &self,
+        checkpoint: &crate::bundle_records::BranchCheckpoint,
+        cached: &StorageReservation<kinewright_core::HistorySnapshot>,
+    ) -> Result<(), BundleError> {
+        // Recheck the immutable bytes and their exact materialized binding. A
+        // verified cache hit needs no second set of replayed boundary documents.
+        let _record =
+            self.read_record::<crate::history_record::HistoryRecord>(&checkpoint.history_ref)?;
+        crate::history_record::HistoryRecord::verify_checkpoint(checkpoint, cached)?;
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .remember_resolved_history(
+                &checkpoint.history_ref,
+                cached.decoded_charge(),
+                checkpoint.history_role,
+                self.limits(),
+            );
+        Ok(())
+    }
     pub(crate) fn open_verified(&self, reference: &ObjectRef) -> Result<File, BundleError> {
         self.open_copy_source(reference, false)
     }
@@ -2369,6 +2408,9 @@ pub(crate) mod record_sealed {
 /// Only production record types can use the typed-record ingress.
 pub trait BundleRecord: record_sealed::Sealed + Serialize + serde::de::DeserializeOwned {
     const KIND: RecordKind;
+    fn run_history_limit(&self, _store: &ProjectStore) -> Result<Option<u64>, BundleError> {
+        Ok(None)
+    }
     fn dependencies(&self) -> Vec<ObjectRef> {
         vec![]
     }
@@ -2399,22 +2441,6 @@ impl BundleRecord for kinewright_core::Document {
     fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
         self.validate()
             .map_err(|e| BundleError::Corrupt(e.to_string()))
-    }
-}
-impl record_sealed::Sealed for kinewright_core::HistorySnapshot {}
-impl BundleRecord for kinewright_core::HistorySnapshot {
-    const KIND: RecordKind = RecordKind::History;
-    fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
-        let bytes = self.encoded_bytes().map_err(|e| {
-            BundleError::Capacity(match e {
-                kinewright_core::HistoryError::Capacity => "history capacity",
-                _ => "invalid history",
-            })
-        })?;
-        if bytes > limits.branch_history_bytes {
-            return Err(BundleError::Capacity("branch history"));
-        }
-        Ok(())
     }
 }
 impl record_sealed::Sealed for crate::owned_inputs::OwnedInputManifest {}
@@ -2511,6 +2537,9 @@ impl BundleRecord for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {
 impl record_sealed::Sealed for crate::bundle_records::SpecialistBaseRecord {}
 impl BundleRecord for crate::bundle_records::SpecialistBaseRecord {
     const KIND: RecordKind = RecordKind::SpecialistBase;
+    fn run_history_limit(&self, store: &ProjectStore) -> Result<Option<u64>, BundleError> {
+        Ok(Some(self.history_role.persisted_limit(store.limits())))
+    }
     fn dependencies(&self) -> Vec<ObjectRef> {
         vec![
             self.original_baseline_ref.clone(),
@@ -2611,7 +2640,31 @@ impl ProjectStore {
         &mut self,
         history: &kinewright_core::HistorySnapshot,
     ) -> Result<SealedObject, BundleError> {
-        self.admit_record(history)
+        self.admit_run_write()?;
+        let role = crate::history_record::HistoryRole::Ordinary;
+        let record = crate::history_record::HistoryRecord::capture(history, role)?;
+        record
+            .validate(&self.admission_limits())
+            .map_err(|error| self.run_error(error))?;
+        let live = crate::history_size::history_live_bytes(history)?.max(
+            crate::history_size::replay_live_bound(
+                &record.journal,
+                &history.baseline,
+                &history.document,
+            )?,
+        );
+        if live > role.live_limit(self.limits()) || history.ordinary_admission_bytes().is_err() {
+            return Err(self.run_error(BundleError::Capacity("live branch history")));
+        }
+        let _history = self.reserve_role_history_shadow(live, role)?;
+        let baseline = self.admit_document(&history.baseline)?;
+        let current = self.admit_document(&history.document)?;
+        if record.baseline_ref != baseline.reference || record.current_ref != current.reference {
+            return Err(BundleError::Corrupt(
+                "history staged document identities".into(),
+            ));
+        }
+        self.admit_record(&record)
     }
     pub(crate) fn admit_record<T: BundleRecord>(
         &mut self,
@@ -2623,7 +2676,8 @@ impl ProjectStore {
     /// fields that decode observed together with the bytes it observed them in.
     pub(crate) fn check_history_bytes(
         &self,
-        bytes: Vec<u8>,
+        bytes: &[u8],
+        role: crate::history_record::HistoryRole,
     ) -> Result<
         (
             StorageReservation<kinewright_core::HistorySnapshot>,
@@ -2631,21 +2685,51 @@ impl ProjectStore {
         ),
         BundleError,
     > {
-        let mut fields = BTreeSet::new();
-        let checked = crate::bundle_recovery::decode::<kinewright_core::HistorySnapshot>(
-            &bytes,
-            &self.inner.usage,
-            RecordKind::History,
-            &mut fields,
-            self.limits(),
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::note_history_decode();
+        let charge = preflight_record(bytes, self.limits())?;
+        let _wire = self.reserve_copy_read(0, charge, 0, false, true)?;
+        let transport: kinewright_core::HistoryTransport = serde_json::from_slice(bytes)
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let live = crate::history_size::replay_live_bound(
+            &transport.journal,
+            &transport.baseline,
+            &transport.document,
         )?;
-        // The decode charged exactly `preflight_record(&bytes, self.limits())`.
-        let charge = checked.decoded_charge();
+        if live > role.live_limit(self.limits()) {
+            return Err(BundleError::Capacity("role history memory"));
+        }
+        let reserve = self.reserve_copy_read(
+            0,
+            live,
+            if role == crate::history_record::HistoryRole::Ordinary {
+                live
+            } else {
+                0
+            },
+            false,
+            true,
+        )?;
+        let checked = reserve.hold(
+            transport
+                .journal
+                .resolve(transport.baseline, &transport.document)
+                .map_err(crate::bundle::history_error)?,
+        );
+        let record = crate::history_record::HistoryRecord::capture(&checked, role)?;
+        let raw = serde_json::to_value(&record.journal)
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let fields = kinewright_core::history_journal_support_fields(&raw)
+            .map_err(BundleError::Unsupported)?;
+        let bytes =
+            serde_json::to_vec(&record).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let charge = preflight_record(&bytes, self.limits())?;
         Ok((
             checked,
             CheckedHistoryBytes {
                 bytes,
                 charge,
+                live_charge: live,
                 fields,
             },
         ))
@@ -2660,8 +2744,32 @@ impl ProjectStore {
         &mut self,
         record: &kinewright_core::HistorySnapshot,
         checked: Option<CheckedHistoryBytes>,
+        role: crate::history_record::HistoryRole,
     ) -> Result<(SealedObject, Option<SealedSupport>), BundleError> {
-        self.admit_record_offering(record, checked)
+        let verified_cost = checked.as_ref().map(|checked| {
+            (
+                kinewright_media::sha256_bytes(&checked.bytes),
+                checked.bytes.len() as u64,
+                checked.live_charge,
+            )
+        });
+        let admitted = self.admit_record_offering(
+            &crate::history_record::HistoryRecord::capture(record, role)?,
+            checked,
+        )?;
+        if let Some((hash, length, live)) = verified_cost
+            && admitted.0.reference.sha256 == hash
+            && admitted.0.reference.byte_length == length
+        {
+            // The reader reserves this pre-replay bound, not only the smaller
+            // retained heap. Keep memoized publication admission identical to it.
+            self.inner
+                .verified_memo
+                .lock()
+                .map_err(|_| BundleError::Capacity("memo poisoned"))?
+                .remember_resolved_history(&admitted.0.reference, live, role, self.limits());
+        }
+        Ok(admitted)
     }
     fn admit_record_offering<T: BundleRecord>(
         &mut self,
@@ -2716,7 +2824,9 @@ impl ProjectStore {
             && !self.is_project_publication()
             && decoded
                 > if T::KIND == RecordKind::SpecialistBase {
-                    crate::run_admission::HISTORY_BYTES
+                    record
+                        .run_history_limit(self)?
+                        .unwrap_or(crate::history_record::TASK_BYTES)
                 } else {
                     crate::run_admission::DECODED_BYTES
                 }
@@ -2728,16 +2838,7 @@ impl ProjectStore {
         {
             return Err(BundleError::Capacity("live branch history"));
         }
-        let _decoded = self.reserve(
-            0,
-            decoded,
-            if T::KIND == RecordKind::History {
-                decoded
-            } else {
-                0
-            },
-            false,
-        )?;
+        let _decoded = self.reserve(0, decoded, 0, false)?;
         let reference = ObjectRef {
             sha256: kinewright_media::sha256_bytes(&bytes),
             byte_length: counter.bytes,
@@ -2812,21 +2913,18 @@ impl ProjectStore {
             cleanup_only,
         )?;
         let decoded = preflight_record(&bytes, self.limits())?;
+        let decoded = if T::KIND == RecordKind::Lineage {
+            decoded
+                .checked_add(crate::lineage_journal::decode_live_bound(&bytes)?)
+                .ok_or(BundleError::Capacity("lineage decode overflow"))?
+        } else {
+            decoded
+        };
         drop(preflight);
         if T::KIND == RecordKind::History && decoded > self.limits().branch_history_bytes {
             return Err(BundleError::Capacity("live branch history"));
         }
-        let decoded_reservation = self.reserve_copy_read(
-            0,
-            decoded,
-            if T::KIND == RecordKind::History {
-                decoded
-            } else {
-                0
-            },
-            false,
-            cleanup_only,
-        )?;
+        let decoded_reservation = self.reserve_copy_read(0, decoded, 0, false, cleanup_only)?;
         let value: T =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         value.validate(self.limits())?;
@@ -2847,14 +2945,10 @@ impl ProjectStore {
 pub(crate) struct CheckedHistoryBytes {
     bytes: Vec<u8>,
     charge: u64,
+    live_charge: u64,
     fields: BTreeSet<String>,
 }
 impl CheckedHistoryBytes {
-    /// The checked bytes, for the path without reuse.
-    #[cfg(any(test, feature = "test-util"))]
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
     /// `self`, when `sealed` is exactly the checked bytes.
     fn matching(self, sealed: &[u8]) -> Option<Self> {
         #[cfg(any(test, feature = "test-util"))]
@@ -3892,6 +3986,7 @@ impl ProjectStore {
             overlap: Mutex::new(BorrowedSnapshotOverlap {
                 reservation: overlap,
                 snapshot: None,
+                history: None,
             }),
             accepting_reads: std::sync::atomic::AtomicBool::new(true),
             reader: Mutex::new(None),
@@ -3947,7 +4042,7 @@ impl ProjectStore {
     ) -> Result<StorageReservation, BundleError> {
         self.reserve_copy_read(bytes, decoded, history, copy, false)
     }
-    fn reserve_copy_read(
+    pub(crate) fn reserve_copy_read(
         &self,
         bytes: u64,
         decoded: u64,
@@ -4082,6 +4177,20 @@ impl ProjectStore {
         let charge = preflight_record(&bytes, limits)?;
         if reference.record_kind == RecordKind::History && charge > limits.branch_history_bytes {
             return Err(BundleError::Capacity("rescue decoded branch history"));
+        }
+        if reference.record_kind == RecordKind::History {
+            let record: crate::history_record::HistoryRecord = serde_json::from_slice(&bytes)
+                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+            record.validate(limits)?;
+            let baseline =
+                self.read_copy_record::<kinewright_core::Document>(&record.baseline_ref, true)?;
+            let current =
+                self.read_copy_record::<kinewright_core::Document>(&record.current_ref, true)?;
+            let live =
+                crate::history_size::replay_live_bound(&record.journal, &baseline, &current)?;
+            if live > record.role.live_limit(limits) {
+                return Err(BundleError::Capacity("rescue live branch history"));
+            }
         }
         Ok(())
     }
@@ -4569,5 +4678,11 @@ impl ProjectStore {
             .project_id
             .clone()
             .ok_or_else(|| BundleError::Identity("snapshot has no named owner".into()))
+    }
+}
+
+impl ProjectStore {
+    pub(crate) fn replay_gate(&self) -> Arc<crate::history_record::ReplayGate> {
+        Arc::clone(&self.inner.replay_gate)
     }
 }

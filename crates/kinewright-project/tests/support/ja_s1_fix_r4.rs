@@ -11,12 +11,21 @@ use kinewright_project::{
     owned_inputs::OwnedInputManifest,
 };
 use kinewright_project::{
-    bundle_commit::{bound_history_probe, history_cost_probe},
+    bundle_commit::{bound_history_probe, history_cost_probe as live_history_cost_probe},
     storage_budget::StorageLimits,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::time::Instant;
+
+fn history_cost_probe(
+    history: &HistorySnapshot,
+    limits: &StorageLimits,
+) -> Result<u64, kinewright_project::bundle::BundleError> {
+    Ok(live_history_cost_probe(history, limits)?.max(
+        kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(history, limits)?,
+    ))
+}
 
 #[cfg(target_os = "linux")]
 fn temp(label: &str) -> TempDirectory {
@@ -66,8 +75,11 @@ fn limits() -> StorageLimits {
 }
 fn exhaustive(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
     let fits = |h: &HistorySnapshot| {
-        h.encoded_bytes()
-            .is_ok_and(|n| n <= limits.branch_history_bytes)
+        h.ordinary_admission_bytes().is_ok()
+            && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(h, limits)
+                .is_ok_and(|n| n <= limits.branch_history_bytes)
+            && h.encoded_bytes()
+                .is_ok_and(|n| n <= limits.branch_history_bytes)
             && history_cost_probe(h, limits).is_ok_and(|n| n <= limits.branch_history_bytes)
     };
     if fits(history) {
@@ -101,7 +113,10 @@ fn moving_core(specialist: bool) {
     owner.save(&core, &inputs).unwrap();
     let branch = if specialist {
         owner
-            .fork_branch(&owner.manual_branch_id().clone())
+            .fork_branch(
+                &owner.manual_branch_id().clone(),
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
             .unwrap()
     } else {
         owner.manual_branch_id().clone()

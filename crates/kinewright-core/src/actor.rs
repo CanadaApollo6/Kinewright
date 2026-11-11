@@ -725,7 +725,7 @@ impl Core {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq)]
 struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
@@ -738,6 +738,15 @@ struct HistoryEntry {
     /// therefore never resumes across a history boundary, so a later batch
     /// that happens to reuse the key opens a fresh entry.
     coalesce_key: Option<String>,
+}
+
+// Manual admission caches the same compact cursor hashes as portable history.
+impl Serialize for HistoryEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::history_document_hash(&self.document)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
 }
 
 #[derive(Clone)]
@@ -986,6 +995,17 @@ impl CoreState {
         if !candidate.history_matches(snapshot) {
             return Err(HistoryError::Corrupt);
         }
+        // Replay proves the supplied immutable states. Share those same undo documents
+        // with the retained checkpoint instead of keeping a second full replay image.
+        candidate.document = Arc::clone(&snapshot.document);
+        for (entry, boundary) in candidate
+            .undo
+            .iter_mut()
+            .zip(&snapshot.cursor.undo)
+            .chain(candidate.redo.iter_mut().zip(&snapshot.cursor.redo))
+        {
+            entry.document = Arc::clone(&boundary.document);
+        }
         Ok(candidate)
     }
 
@@ -1108,6 +1128,61 @@ impl CoreState {
                 .expect("timeline revision overflowed"),
         );
     }
+}
+
+pub(crate) fn resolve_history_journal(
+    journal: &crate::HistoryJournal,
+    baseline: Arc<Document>,
+    document: &Document,
+) -> Result<HistorySnapshot, HistoryError> {
+    if journal.batches.len() > crate::HISTORY_COMMANDS {
+        return Err(HistoryError::Capacity);
+    }
+    baseline.validate().map_err(|_| HistoryError::Corrupt)?;
+    document.validate().map_err(|_| HistoryError::Corrupt)?;
+    if crate::history_document_hash(&baseline)? != journal.baseline_sha256
+        || crate::history_document_hash(document)? != journal.document_sha256
+    {
+        return Err(HistoryError::Corrupt);
+    }
+    let mut state = CoreState::new(baseline, TimelineRevision(0));
+    for batch in &journal.batches {
+        if !matches!(
+            execute_command(&mut state, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) || state.batches.last().map(crate::JournalBatch::from).as_ref() != Some(batch)
+        {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    let hashes_match = |entries: &[HistoryEntry], hashes: &[String]| {
+        entries.len() == hashes.len()
+            && entries.iter().zip(hashes).all(|(entry, hash)| {
+                crate::history_document_hash(&entry.document).as_ref() == Ok(hash)
+            })
+    };
+    if &*state.document != document
+        || !hashes_match(&state.undo, &journal.cursor.undo)
+        || !hashes_match(&state.redo, &journal.cursor.redo)
+    {
+        return Err(HistoryError::Corrupt);
+    }
+    // Transfer rebuilt boundary documents and payloads; do not duplicate a restored history.
+    let boundary = |entry: HistoryEntry| GestureBoundary {
+        document: entry.document,
+        operations: entry.operations,
+        coalesce_key: entry.coalesce_key,
+    };
+    Ok(HistorySnapshot {
+        floor_offset: journal.floor_offset,
+        baseline: state.baseline,
+        document: state.document,
+        batches: state.batches,
+        cursor: HistoryCursor {
+            undo: state.undo.into_iter().map(boundary).collect(),
+            redo: state.redo.into_iter().map(boundary).collect(),
+        },
+    })
 }
 
 pub(crate) fn floor_history(

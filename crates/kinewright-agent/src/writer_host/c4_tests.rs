@@ -742,7 +742,7 @@ fn s4b_c4_mcp_history_survives_attempt_restart_merge_and_stop() {
         .unwrap()
         .store()
         .unwrap()
-        .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+        .resolve_history(&checkpoint.history_ref)
         .unwrap();
     assert_eq!(*history, expected, "C4_MCP_HISTORY_AFTER_STOP_REOPEN");
     assert_eq!(

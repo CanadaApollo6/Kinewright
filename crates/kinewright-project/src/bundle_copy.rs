@@ -750,10 +750,7 @@ impl ProjectBundle {
         for id in self.branches.keys() {
             let history = self
                 .store
-                .read_copy_record::<kinewright_core::HistorySnapshot>(
-                    &self.branches[id].history_ref,
-                    cleanup_only,
-                )?;
+                .resolve_copy_history(&self.branches[id].history_ref, cleanup_only)?;
             let bounded = crate::bundle_commit::bound_history(&history, &limits)?;
             if bounded != *history {
                 return Err(BundleError::Capacity(
@@ -797,8 +794,7 @@ impl ProjectBundle {
             return Ok(SaveAsOutcome::SameProject(BundleSaveReport {
                 history_sha256: self
                     .checkpoint(&self.manual_branch_id)?
-                    .history_ref
-                    .sha256
+                    .history_digest
                     .clone(),
                 collection: self.store.collection_status()?,
                 path: resolved,
@@ -909,12 +905,10 @@ impl ProjectBundle {
             for reference in target.store.closure(&roots)? {
                 target.store.verify(&reference)?;
             }
-            let history = self
-                .store
-                .read_copy_record::<kinewright_core::HistorySnapshot>(
-                    &self.branches[&self.manual_branch_id].history_ref,
-                    cleanup_only,
-                )?;
+            let history = self.store.resolve_copy_history(
+                &self.branches[&self.manual_branch_id].history_ref,
+                cleanup_only,
+            )?;
             let inputs = target.branches[&target.manual_branch_id]
                 .input_manifest_ref
                 .clone();
@@ -1305,10 +1299,7 @@ pub(crate) fn rescue_copy(
             for (id, prior) in &original.branches {
                 if id == &original.manual_branch_id {
                     branches.insert(id.clone(), prior.clone());
-                    let old = source.read_copy_record::<kinewright_core::HistorySnapshot>(
-                        &prior.history_ref,
-                        true,
-                    )?;
+                    let old = source.resolve_copy_history(&prior.history_ref, true)?;
                     let cut =
                         usize::try_from(history.floor_offset.saturating_sub(old.floor_offset))
                             .map_err(|_| BundleError::Capacity("rescue input cut"))?;

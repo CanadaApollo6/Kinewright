@@ -22,7 +22,7 @@ fn cleanup_history(f: &Fixture, run: &RunId, child: &TaskId) -> kinewright_core:
         .unwrap()
         .store()
         .unwrap()
-        .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+        .resolve_history(&checkpoint.history_ref)
         .unwrap();
     (*stored).clone()
 }
@@ -288,7 +288,10 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 );
                 let owner = owner.owner_mut().unwrap();
                 let mut candidate = owner
-                    .fork_durable_branch("reviewed work candidate")
+                    .fork_durable_branch(
+                        "reviewed work candidate",
+                        kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                    )
                     .unwrap();
                 owner.persist_durable_branch(&mut candidate).unwrap();
                 let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
@@ -325,12 +328,16 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
 }
 
 #[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(
     clippy::too_many_lines,
     reason = "one real-shaped task proves reversible/destructive admission, exact refusal and successful finish"
 )]
 fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
-    let document = kinewright_project::c0_fixtures::save_cost_document();
+    let document = capacity_document(120);
     let mut f = Fixture::with_document(false, document.clone());
     f.host.runtime.stop();
     f.brief.scope =
@@ -351,6 +358,44 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
     let (execution, client, endpoint, core) = c4_reserve_task(&f, &run, &child);
     history_turn(&f, &execution, &client, &endpoint, 1, true);
     let mcp = C4Mcp::new(&f, &run, &child);
+    // Build a fixture at the new role boundary. The former 120-clip seed alone
+    // exhausted document-bearing persistence; compact history must admit it now.
+    let prefix = |edits| {
+        let private = Core::spawn(document.clone()).unwrap();
+        for edit in 0..edits {
+            assert!(matches!(
+                private
+                    .request(kinewright_core::Command::DoBatch(vec![
+                        kinewright_core::Operation::SetTrackSyncLock {
+                            track: kinewright_core::TrackId(1),
+                            locked: edit % 2 == 0,
+                        },
+                    ]))
+                    .unwrap(),
+                kinewright_core::Event::DocumentChanged { .. }
+            ));
+        }
+        private.export_history().unwrap()
+    };
+    let (mut low, mut high) = (0_usize, 1024_usize);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if endpoint.check_history(&prefix(middle)).is_ok() {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    assert!(low > 0 && low < 1024, "C3_ROLE_BOUND_FOUND {low}");
+    let admitted = prefix(low);
+    endpoint.check_history(&admitted).unwrap();
+    for batch in &admitted.batches {
+        assert!(matches!(
+            core.request(batch.command.clone().into()).unwrap(),
+            kinewright_core::Event::DocumentChanged { .. }
+        ));
+    }
+    assert_eq!(core.export_history().unwrap(), admitted);
     let before = core.export_history().unwrap();
     let mut changed_floor = before.clone();
     changed_floor.floor_offset += 1;

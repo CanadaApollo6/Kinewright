@@ -31,10 +31,7 @@ fn c5e_history(f: &Fixture, run: &RunId, task: &TaskId) -> kinewright_core::Hist
     let checkpoint = store
         .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&binding.checkpoint)
         .unwrap();
-    (*store
-        .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
-        .unwrap())
-    .clone()
+    (*store.resolve_history(&checkpoint.history_ref).unwrap()).clone()
 }
 fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
     use kinewright_project::orchestration_accounting::SendConsumption;

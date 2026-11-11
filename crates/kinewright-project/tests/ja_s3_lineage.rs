@@ -225,7 +225,12 @@ fn s3_old_feedback_mapping() {
         .unwrap()
         .to_vec();
     let original_revision = b.read_feedback(&original).unwrap().revision;
-    let branch = b.fork_branch(&manual).unwrap();
+    let branch = b
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let core = Core::spawn((*baseline.document).clone()).unwrap();
     let exact = b
         .resolve_feedback(&request(&b, &original, &branch), None)
@@ -294,7 +299,12 @@ fn s3_old_feedback_mapping() {
             .candidates,
         split.candidates
     );
-    let geometry_branch = b.fork_branch(&manual).unwrap();
+    let geometry_branch = b
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let geometry_core = Core::spawn((*baseline.document).clone()).unwrap();
     let transform: kinewright_core::Effect = serde_json::from_value(serde_json::json!({
         "id": 100, "name": "transform", "parameters": {},
@@ -358,7 +368,12 @@ fn s3_old_feedback_mapping() {
         (TemporalStatus::Exact, SpatialStatus::Unresolved)
     );
 
-    let sibling = b.fork_branch(&manual).unwrap();
+    let sibling = b
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let recreated = Core::spawn((*baseline.document).clone()).unwrap();
     for track in &baseline.document.tracks {
         for old in &track.clips {
@@ -388,7 +403,12 @@ fn s3_old_feedback_mapping() {
     );
     let sibling_key = publish(&mut b, &sibling);
     let sibling_feedback = feedback(&mut b, sibling_key, clip);
-    let other_sibling = b.fork_branch(&manual).unwrap();
+    let other_sibling = b
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     b.save_branch(&other_sibling, &recreated).unwrap();
     let collision = b
         .resolve_feedback(&request(&b, &sibling_feedback, &other_sibling), None)
@@ -544,7 +564,12 @@ fn s3_old_feedback_mapping_take_replacement_and_removal() {
         (meaning.resolution.temporal, meaning.resolution.spatial),
         (TemporalStatus::Mapped, SpatialStatus::Unresolved)
     );
-    let branch = b.fork_branch(&manual).unwrap();
+    let branch = b
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let document = b.branch_history(&manual).unwrap().document.clone();
     let removed = Core::spawn((*document).clone()).unwrap();
     apply(&removed, Operation::DeleteClip { clip });

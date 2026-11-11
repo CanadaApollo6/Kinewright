@@ -217,7 +217,10 @@ mod tests {
         let inputs = bundle.empty_inputs().unwrap().reference.clone();
         bundle.save(&core, &inputs).unwrap();
         let branch = bundle
-            .fork_branch(&bundle.manual_branch_id.clone())
+            .fork_branch(
+                &bundle.manual_branch_id.clone(),
+                crate::history_record::HistoryRole::Ordinary,
+            )
             .unwrap();
         let checkpoint = bundle.checkpoint_reference(&branch).unwrap();
         bundle.copy_publication = Some(CopyPublication::Captured(BTreeMap::from([(

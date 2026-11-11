@@ -52,6 +52,7 @@ impl DurableTimelineBranch {
             ));
         }
         let base = SpecialistBaseRecord {
+            history_role: kinewright_project::history_record::HistoryRole::Candidate,
             target_branch: source.clone(),
             base_head: checkpoint.head_id,
             base_document_hash: checkpoint.document_hash,
@@ -62,7 +63,10 @@ impl DurableTimelineBranch {
         let pin = bundle
             .store()
             .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
-        let branch_id = bundle.fork_branch(&source)?;
+        let branch_id = bundle.fork_branch(
+            &source,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )?;
         let (revision, _) = snapshot(live)?;
         let branch = TimelineBranch::new(name, revision, std::sync::Arc::clone(&frozen.document))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -184,7 +188,10 @@ impl DurableTimelineBranch {
         session: &mut kinewright_project::editing_session::Ja1EditingSession,
         name: &str,
     ) -> Result<Self, BundleError> {
-        let registration = session.fork_durable_branch(name)?;
+        let registration = session.fork_durable_branch(
+            name,
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )?;
         let baseline = session.durable_branch_baseline(&registration)?;
         let branch = TimelineBranch::from_registered(name, baseline, registration.core().clone());
         Ok(Self {
@@ -202,7 +209,12 @@ impl DurableTimelineBranch {
         base_ref: &ObjectRef,
         name: &str,
     ) -> Result<Self, BundleError> {
-        let registration = session.reopen_durable_branch(branch_id.clone(), base_ref, name)?;
+        let registration = session.reopen_durable_branch(
+            branch_id.clone(),
+            base_ref,
+            name,
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )?;
         let core = registration.core().clone();
         let base = registration.base().clone();
         let baseline = session.durable_branch_baseline(&registration)?;

@@ -9,6 +9,8 @@ pub struct StorageLimits {
     pub pending_commands: u64,
     pub command_bytes: u64,
     pub branch_history_bytes: u64,
+    /// Ordinary and manual histories only. Native task and candidate histories
+    /// use their role bounds and still count under metadata plus decoded bytes.
     pub live_history_bytes: u64,
     pub versions: u64,
     pub objects: u64,
@@ -137,6 +139,7 @@ enum ReservationKind {
 
 pub struct StorageReservation<T = ()> {
     value: Option<T>,
+    pin: Option<crate::store::StorePin>,
     usage: Arc<Mutex<StorageUsage>>,
     bytes: u64,
     decoded: u64,
@@ -396,6 +399,7 @@ impl StorageReservation {
         state.peak_decoder_bytes = state.peak_decoder_bytes.max(codec_total);
         Ok(Self {
             value: Some(()),
+            pin: None,
             usage: Arc::clone(usage),
             bytes,
             decoded,
@@ -417,6 +421,7 @@ impl StorageReservation {
     pub(crate) fn hold<T>(mut self, value: T) -> StorageReservation<T> {
         let held = StorageReservation {
             value: Some(value),
+            pin: self.pin.take(),
             usage: Arc::clone(&self.usage),
             bytes: self.bytes,
             decoded: self.decoded,
@@ -478,10 +483,20 @@ impl StorageReservation {
     }
 }
 impl<T> StorageReservation<T> {
+    pub(crate) fn take(mut self) -> T {
+        self.value.take().expect("reservation owns value")
+    }
+
+    pub(crate) fn pin(mut self, pin: crate::store::StorePin) -> Self {
+        self.pin = Some(pin);
+        self
+    }
+
     pub(crate) fn map<U>(mut self, transform: impl FnOnce(T) -> U) -> StorageReservation<U> {
         let value = transform(self.value.take().expect("reservation owns value"));
         let mapped = StorageReservation {
             value: Some(value),
+            pin: self.pin.take(),
             usage: Arc::clone(&self.usage),
             bytes: self.bytes,
             decoded: self.decoded,

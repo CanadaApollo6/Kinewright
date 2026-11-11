@@ -33,6 +33,8 @@ mod delivery;
 mod editorial;
 mod effect;
 mod history;
+mod history_journal;
+pub mod history_size;
 mod history_transition;
 mod incident;
 mod journal;
@@ -209,6 +211,10 @@ pub use history::{
     GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
     OperationIdentityEffect,
 };
+pub use history_journal::{
+    HistoryJournal, HistoryTransport, JournalBatch, JournalCursor, JournalIdentityEffect,
+    history_document_hash,
+};
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
     INVESTIGATOR_EXPLANATION_CEILING_BYTES, INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident,
@@ -266,7 +272,8 @@ pub use model::{
     project_format_version, track_automation_coalesce_key, validate_lut_asset,
 };
 pub use model::{
-    clip_support_fields, document_support_fields, history_support_fields, operation_support_fields,
+    clip_support_fields, document_support_fields, history_journal_support_fields,
+    history_support_fields, operation_support_fields,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

@@ -64,7 +64,12 @@ impl Ja1EditingSession {
             .bundle_mut()?;
         bundle.with_person_publication(|bundle| {
             let branch = bundle.manual_branch_id().clone();
-            if *bundle.branch_history(&branch)? != history {
+            let matches = if let Some(cached) = bundle.verified_cached_history(&branch)? {
+                ***cached == history
+            } else {
+                *bundle.branch_history(&branch)? == history
+            };
+            if !matches {
                 return Err(BundleError::HistoryChanged);
             }
             let issuer = bundle.issue_issuer(&core, &inputs, 1)?;
@@ -96,7 +101,7 @@ impl Ja1EditingSession {
                 issuer,
                 anchor_head: checkpoint.head_id.clone(),
                 predecessor: checkpoint.batch_ids.last().cloned(),
-                history_sha256: checkpoint.history_ref.sha256.clone(),
+                history_sha256: checkpoint.history_digest.clone(),
                 inputs: checkpoint.input_manifest_ref.clone(),
                 lineage: checkpoint.lineage_ref.clone(),
             })
@@ -378,8 +383,12 @@ impl Ja1EditingSession {
                 if history_sha256(&after)? != metadata.after_sha256
                     || after.batches.last() != Some(&metadata.batch)
                     || kinewright_media::sha256_bytes(
-                        &serde_json::to_vec(&after.cursor)
-                            .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                        &serde_json::to_vec(
+                            &kinewright_core::HistoryJournal::capture(&after)
+                                .map_err(crate::bundle::history_error)?
+                                .cursor,
+                        )
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
                     ) != metadata.cursor_sha256
                 {
                     return Err(BundleError::HistoryChanged);
@@ -656,10 +665,7 @@ impl Ja1EditingSession {
             .store
             .read_record::<crate::bundle_records::BranchCheckpoint>(reference)?;
         if checkpoint.branch_id != *bundle.manual_branch_id()
-            || *bundle
-                .store
-                .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)?
-                != *history
+            || *bundle.store.resolve_history(&checkpoint.history_ref)? != *history
         {
             return Err(BundleError::HistoryChanged);
         }

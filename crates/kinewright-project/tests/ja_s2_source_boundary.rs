@@ -176,7 +176,7 @@ mod linux {
             assert_eq!(actual, bytes());
             let loaded = LoadedBundle::read(&target).unwrap();
             assert_eq!(
-                loaded.manual_checkpoint().unwrap().history_ref.sha256,
+                loaded.manual_checkpoint().unwrap().history_digest,
                 digest(&history)
             );
             let rebound = loaded.root().unwrap().input_manifest_ref.clone();
@@ -879,8 +879,7 @@ mod linux {
                 .unwrap()
                 .manual_checkpoint()
                 .unwrap()
-                .history_ref
-                .sha256,
+                .history_digest,
             report.history_sha256
         );
         assert_eq!(
@@ -888,8 +887,7 @@ mod linux {
                 .unwrap()
                 .manual_checkpoint()
                 .unwrap()
-                .history_ref
-                .sha256,
+                .history_digest,
             report.history_sha256
         );
         let alias = temp.path("external/nested/alias.kinewright");

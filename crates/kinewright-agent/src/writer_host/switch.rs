@@ -153,7 +153,7 @@ impl HostCommandOwner {
                     .core()
                     .export_history()
                     .map_err(|e| HostError::Protocol(e.to_string()))?,
-            )? != installed.current.history.sha256
+            )? != installed.current.history_digest
         {
             return Err(HostRefusal::new("switch_changed", "restore the exact current pointer, history, lineage and input context before acquiring authority").into());
         }
@@ -246,7 +246,12 @@ mod tests {
             let left = bundle.manual_branch_id().clone();
             let mut spare = vec![];
             for count in 16..22 {
-                let branch = bundle.fork_branch(&left).unwrap();
+                let branch = bundle
+                    .fork_branch(
+                        &left,
+                        kinewright_project::history_record::HistoryRole::Ordinary,
+                    )
+                    .unwrap();
                 let other =
                     Core::spawn((*core.export_history().unwrap().document).clone()).unwrap();
                 grow(&other, count);
@@ -377,8 +382,10 @@ mod tests {
             );
             assert!(
                 confirmation.error.is_none(),
-                "P1/P2 confirmation: {:?}",
-                confirmation.error
+                "P1/P2 confirmation: {:?}; pool={} usage={:?}",
+                confirmation.error,
+                profile.live_history_bytes,
+                host.owner().unwrap().store().unwrap().usage()
             );
             assert!(
                 host.owner()
@@ -402,7 +409,12 @@ mod tests {
                     },
                 );
                 assert!(preview.error.is_none());
-                assert!(run(&mut host, HostCommand::RemoveBranch).error.is_none());
+                let removed = run(&mut host, HostCommand::RemoveBranch);
+                assert!(
+                    removed.error.is_none(),
+                    "branch retirement: {:?}",
+                    removed.error
+                );
                 assert!(
                     host.owner()
                         .unwrap()

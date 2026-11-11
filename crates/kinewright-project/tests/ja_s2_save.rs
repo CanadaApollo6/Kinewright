@@ -639,7 +639,12 @@ mod linux {
         let (mut owner, inputs) = start(&path, &core);
         let manual = owner.manual_branch_id().clone();
         for n in [12, 16] {
-            let id = owner.fork_branch(&manual).unwrap();
+            let id = owner
+                .fork_branch(
+                    &manual,
+                    kinewright_project::history_record::HistoryRole::Ordinary,
+                )
+                .unwrap();
             let other =
                 Core::spawn((*owner.branch_history(&id).unwrap().document).clone()).unwrap();
             grow(&other, n);
@@ -709,8 +714,18 @@ mod linux {
         grow(&core, 8);
         let (mut source, _inputs) = start(&path, &core);
         let manual = source.manual_branch_id().clone();
-        let first = source.fork_branch(&manual).unwrap();
-        let second = source.fork_branch(&manual).unwrap();
+        let first = source
+            .fork_branch(
+                &manual,
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
+            .unwrap();
+        let second = source
+            .fork_branch(
+                &manual,
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
+            .unwrap();
         assert_eq!(
             source.checkpoint(&first).unwrap().history_ref,
             source.checkpoint(&second).unwrap().history_ref
@@ -787,7 +802,12 @@ mod linux {
         ));
         let mut ids = vec![first, second];
         for n in 0..21 {
-            let id = source.fork_branch(&manual).unwrap();
+            let id = source
+                .fork_branch(
+                    &manual,
+                    kinewright_project::history_record::HistoryRole::Ordinary,
+                )
+                .unwrap();
             let other =
                 Core::spawn((*source.branch_history(&id).unwrap().document).clone()).unwrap();
             grow(&other, 24 + n);
@@ -810,16 +830,14 @@ mod linux {
         let other_residents: u64 = charges.values().sum();
         // A genuinely larger immutable current document makes even the cheapest legal floor
         // exceed the later limit; ordinary trimming cannot hide target-only accounting.
-        let additions: Vec<_> = (100..1900)
-            .map(|id| Operation::AddTrack {
-                track: Track {
-                    id: TrackId(id),
-                    kind: TrackKind::Video,
-                    sync_lock: true,
-                    clips: vec![],
-                },
-            })
-            .collect();
+        let additions = vec![Operation::AddMarker {
+            marker: kinewright_core::Marker {
+                id: kinewright_core::MarkerId(9000),
+                position: kinewright_core::TimeCode(0),
+                label: "m".repeat(1 << 19),
+                color_token: 0,
+            },
+        }];
         let model_path = temp.path("model.kinewright");
         let mut model = copy(&mut source, &model_path, StorageLimits::default());
         let initial_copy_peak = LoadedBundle::read(&model_path)
@@ -848,6 +866,15 @@ mod linux {
             })
             .min()
             .unwrap();
+        // Keep the writer's selected history at the irreducible current-document
+        // cost. Its two transient copies must fit before the independently
+        // reopened graph, including every archived branch, becomes the limiter.
+        model
+            .restrict_limits_probe(StorageLimits {
+                branch_history_bytes: minimum,
+                ..StorageLimits::default()
+            })
+            .unwrap();
         model.save(&core, &model_input).unwrap();
         let peak = LoadedBundle::read(&model_path)
             .unwrap()
@@ -855,6 +882,7 @@ mod linux {
             .unwrap()
             .peak_live_history_bytes;
         let irreducible = other_residents + minimum;
+        let candidate = core.export_history().unwrap();
         let actual_write_overlap = first_write_cost
             + 2 * history_cost_probe(&candidate, &StorageLimits::default()).unwrap();
         assert!(
@@ -875,6 +903,7 @@ mod linux {
             let path = temp.path(&format!("candidate-{index}.kinewright"));
             let profile = StorageLimits {
                 live_history_bytes: limit,
+                branch_history_bytes: minimum,
                 ..StorageLimits::default()
             };
             let writer = copy(&mut source, &path, profile.clone());

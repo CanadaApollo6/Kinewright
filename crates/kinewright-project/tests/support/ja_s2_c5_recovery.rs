@@ -173,7 +173,7 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     let expected_target = (*session
         .store()
         .unwrap()
-        .read_record::<kinewright_core::HistorySnapshot>(&archived_checkpoint.history_ref)
+        .resolve_history(&archived_checkpoint.history_ref)
         .unwrap())
     .clone();
     drop(archived_checkpoint);
@@ -365,7 +365,12 @@ pub(super) fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
 #[test]
 pub(super) fn w13_one_level_retention_and_explicit_retirement() {
     let (_temp, mut session, _, branch) = fixture();
-    let mut guard = session.fork_durable_branch("worker X").unwrap();
+    let mut guard = session
+        .fork_durable_branch(
+            "worker X",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
+        .unwrap();
     let specialist_core = guard.core().clone();
     edit(&specialist_core, false);
     let root = session.root_sha256().unwrap();
@@ -749,7 +754,12 @@ pub(super) fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
                 let cost =
                     kinewright_project::bundle_commit::history_cost_probe(&after, profile).ok()?;
                 (after.encoded_bytes().ok()? <= profile.branch_history_bytes
-                    && cost <= profile.branch_history_bytes)
+                    && cost <= profile.branch_history_bytes
+                    && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+                        &after, profile,
+                    )
+                    .ok()?
+                        <= profile.branch_history_bytes)
                     .then_some(after)
             })
             .expect("ordinary legal earliest floor");

@@ -45,7 +45,12 @@ fn run_case(drop_ack: bool) {
     .unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     assert!(matches!(
         candidate
             .core()
@@ -316,7 +321,12 @@ fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) 
     };
     owner.first_save(&path, limits.clone()).unwrap();
     owner.save_active().unwrap();
-    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     owner.persist_durable_branch(&mut candidate).unwrap();
     let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
     let mut specialist = owner
@@ -417,7 +427,12 @@ fn fu1_definite_candidate_refusal_releases_the_frozen_cut() {
     owner
         .first_save(&temp.path("project.kinewright"), StorageLimits::default())
         .unwrap();
-    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     owner.persist_durable_branch(&mut candidate).unwrap();
     let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
     let mut specialist = owner

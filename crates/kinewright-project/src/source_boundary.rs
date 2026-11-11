@@ -27,6 +27,7 @@ pub(crate) struct RetainedBorrowedSource {
 pub(crate) struct BorrowedSnapshotOverlap {
     pub(crate) reservation: crate::storage_budget::StorageReservation,
     pub(crate) snapshot: Option<BorrowedSnapshotBinding>,
+    pub(crate) history: Option<crate::storage_budget::StorageReservation>,
 }
 
 /// Exact foreground snapshot admitted by the originating source owner.
@@ -79,6 +80,11 @@ impl BorrowedSourceService {
             .reserve_snapshot_growth(&overlap.reservation, encoded_bytes)?;
         let _scratch = retained.reads.reserve_snapshot_scratch(encoded_bytes)?;
         let snapshot = BorrowedSnapshotBinding::from_history(history)?;
+        let history_charge = if overlap.snapshot.as_ref() == Some(&snapshot) {
+            None
+        } else {
+            Some(retained.reads.reserve_snapshot_history(history)?)
+        };
         if snapshot.encoded_bytes != encoded_bytes {
             return Err(BundleError::Identity(
                 "snapshot encoded length changed during admission".into(),
@@ -89,6 +95,9 @@ impl BorrowedSourceService {
         }
         overlap.reservation.absorb_copy_growth(extension)?;
         overlap.snapshot = Some(snapshot.clone());
+        if let Some(charge) = history_charge {
+            overlap.history = Some(charge);
+        }
         Ok(snapshot)
     }
 

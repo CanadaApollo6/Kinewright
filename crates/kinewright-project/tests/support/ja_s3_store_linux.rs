@@ -382,7 +382,12 @@ fn s3_indexes_survive_all_root_producers() {
     snapshot(&mut version_only);
     let expected = version_only.root().unwrap().version_index_ref.clone();
     let branch = version_only.manual_branch_id().clone();
-    version_only.fork_branch(&branch).unwrap();
+    version_only
+        .fork_branch(
+            &branch,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     assert_eq!(
         version_only.root().unwrap().version_index_ref,
         expected,
@@ -404,7 +409,12 @@ fn s3_indexes_survive_all_root_producers() {
         .commit_orchestration(&command, validated)
         .unwrap();
     let expected_run = version_only.root().unwrap().run_index_ref.clone();
-    version_only.fork_branch(&branch).unwrap();
+    version_only
+        .fork_branch(
+            &branch,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     assert_eq!(
         version_only.root().unwrap().run_index_ref,
         expected_run,
@@ -435,7 +445,12 @@ fn s3_indexes_survive_all_root_producers() {
         "S3_SHARED_PUBLISHER_PRESERVES_VERSION"
     );
     let branch = b.manual_branch_id().clone();
-    let candidate = b.fork_branch(&branch).unwrap();
+    let candidate = b
+        .fork_branch(
+            &branch,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let candidate_core =
         Core::spawn((*b.branch_history(&candidate).unwrap().document).clone()).unwrap();
     assert!(matches!(
@@ -561,7 +576,12 @@ fn s3_indexes_survive_all_root_producers() {
     assert_retained(&path, &key, &revision, &batch, &run, &old);
     assert_retained(&copy_path, &key, &revision, &batch, &run, &old);
     let mut session = Ja1EditingSession::open(&path).unwrap();
-    let mut guard = session.fork_durable_branch("candidate witness").unwrap();
+    let mut guard = session
+        .fork_durable_branch(
+            "candidate witness",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     assert!(matches!(
         guard
             .core()

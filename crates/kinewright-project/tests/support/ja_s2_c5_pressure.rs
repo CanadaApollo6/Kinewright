@@ -49,7 +49,12 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
     let left = bundle.manual_branch_id().clone();
     let mut ids = vec![];
     for n in 0..24 {
-        let id = bundle.fork_branch(&left).unwrap();
+        let id = bundle
+            .fork_branch(
+                &left,
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
+            .unwrap();
         let other = Core::spawn((*bundle.branch_history(&id).unwrap().document).clone()).unwrap();
         grow(&other, 24 + n);
         bundle.save_branch(&id, &other).unwrap();
@@ -85,16 +90,15 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
     (temp, session, ids, left)
 }
 fn large_edit(core: &Core) {
-    let ops = (100..1900)
-        .map(|id| Operation::AddTrack {
-            track: Track {
-                id: TrackId(id),
-                kind: TrackKind::Video,
-                sync_lock: true,
-                clips: vec![],
-            },
-        })
-        .collect();
+    // Grow the immutable document, independently of journal representation.
+    let ops = vec![Operation::AddMarker {
+        marker: kinewright_core::Marker {
+            id: kinewright_core::MarkerId(9000),
+            position: kinewright_core::TimeCode(0),
+            label: "m".repeat(1 << 19),
+            color_token: 0,
+        },
+    }];
     assert!(matches!(
         core.request(Command::DoBatch(ops)).unwrap(),
         Event::DocumentChanged { .. }
@@ -122,7 +126,14 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         };
         minimum = minimum.min(history_cost_probe(&history, &StorageLimits::default()).unwrap());
     }
+    model
+        .restrict_limits_probe(StorageLimits {
+            branch_history_bytes: minimum,
+            ..StorageLimits::default()
+        })
+        .unwrap();
     model.save_active().unwrap();
+    let candidate = model.core().export_history().unwrap();
     let loaded = LoadedBundle::read(&model_temp.path("b.kinewright")).unwrap();
     let root = loaded.root().unwrap();
     let index=model.store().unwrap().read_record::<std::collections::BTreeMap<BranchId,kinewright_project::bundle_records::ObjectRef>>(&root.branch_index_ref).unwrap();
@@ -139,7 +150,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         let h = model
             .store()
             .unwrap()
-            .read_record::<kinewright_core::HistorySnapshot>(&cp.history_ref)
+            .resolve_history(&cp.history_ref)
             .unwrap();
         costs
             .entry(cp.history_ref.sha256.clone())
@@ -166,6 +177,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     drop(calibrated);
     let exact_profile = StorageLimits {
         live_history_bytes: exact,
+        branch_history_bytes: minimum,
         ..StorageLimits::default()
     };
     model.restrict_limits_probe(exact_profile.clone()).unwrap();
@@ -203,6 +215,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     for (lane, limit) in [("over", irreducible - 1), ("existing", irreducible - 1)] {
         let profile = StorageLimits {
             live_history_bytes: limit,
+            branch_history_bytes: minimum,
             ..StorageLimits::default()
         };
         let (temp, mut session, ids, left) = source(profile.clone());
@@ -269,7 +282,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         let target_oracle = (*session
             .store()
             .unwrap()
-            .read_record::<kinewright_core::HistorySnapshot>(&cp.history_ref)
+            .resolve_history(&cp.history_ref)
             .unwrap())
         .clone();
         drop(cp);

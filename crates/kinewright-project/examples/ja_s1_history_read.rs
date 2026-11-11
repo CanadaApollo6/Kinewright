@@ -1,7 +1,7 @@
 //! Measure the production durable-history read at the exact default byte cap.
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 fn main() {
-    use kinewright_core::{Core, Document, HistorySnapshot, Marker, MarkerId, TimeCode};
+    use kinewright_core::{Core, Document, Marker, MarkerId, TimeCode};
     use kinewright_project::{bundle_copy::SessionStore, storage_budget::StorageLimits};
     use std::{path::PathBuf, sync::Arc, time::Instant};
     let parent = PathBuf::from(
@@ -60,10 +60,7 @@ fn main() {
     );
     for run in 1..=5 {
         let started = Instant::now();
-        let decoded = session
-            .store()
-            .read_record::<HistorySnapshot>(&sealed.reference)
-            .unwrap();
+        let decoded = session.store().resolve_history(&sealed.reference).unwrap();
         let read = started.elapsed();
         assert_eq!(*decoded, history);
         let drop_started = Instant::now();

@@ -632,8 +632,8 @@ use kinewright_core::{Core, HistorySnapshot};
 /// Fully verified, read-only graph. Claiming is a separate consuming operation.
 pub(crate) type LoadedBranch = (
     StorageReservation<BranchCheckpoint>,
-    Arc<StorageReservation<HistorySnapshot>>,
-    Arc<StorageReservation<LineageRecord>>,
+    Option<Arc<StorageReservation<HistorySnapshot>>>,
+    Option<Arc<StorageReservation<LineageRecord>>>,
 );
 
 pub struct LoadedBundle<N = ProjectNamespace> {
@@ -696,7 +696,7 @@ impl<N> LoadedBundle<N> {
             .ok_or_else(|| BundleError::Corrupt("missing manual branch".into()))?;
         crate::history_save::ProjectAttachment::new(core)
             .map_err(history_error)?
-            .restore_history((**branch.1).clone())
+            .restore_history((**branch.1.as_ref().ok_or(BundleError::Unsettled)?).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))
     }
 }
@@ -736,14 +736,16 @@ impl LoadedBundle {
         let history_cache = self
             .branches
             .iter()
-            .map(|(id, branch)| {
-                (
-                    id.clone(),
-                    CachedHistory {
-                        reference: branch.0.history_ref.clone(),
-                        history: Arc::clone(&branch.1),
-                    },
-                )
+            .filter_map(|(id, branch)| {
+                branch.1.as_ref().map(|history| {
+                    (
+                        id.clone(),
+                        CachedHistory {
+                            reference: branch.0.history_ref.clone(),
+                            history: Arc::clone(history),
+                        },
+                    )
+                })
             })
             .collect();
         let branches = self
@@ -1089,6 +1091,17 @@ impl ProjectBundle {
             .filter(|cached| &cached.reference == current)
             .map(|cached| &cached.history)
     }
+    pub(crate) fn verified_cached_history(
+        &self,
+        branch: &BranchId,
+    ) -> Result<Option<&Arc<StorageReservation<HistorySnapshot>>>, BundleError> {
+        let cached = self.cached_history(branch);
+        if let Some(history) = cached {
+            self.store
+                .verify_cached_history(self.checkpoint(branch)?, history)?;
+        }
+        Ok(cached)
+    }
     #[cfg(any(test, feature = "test-util"))]
     pub fn invalidate_history_cache_binding_probe(&mut self) {
         if let Some(cached) = self.history_cache.get_mut(&self.manual_branch_id) {
@@ -1288,14 +1301,16 @@ impl ProjectBundle {
         self.history_cache = loaded
             .branches
             .iter()
-            .map(|(id, branch)| {
-                (
-                    id.clone(),
-                    CachedHistory {
-                        reference: branch.0.history_ref.clone(),
-                        history: Arc::clone(&branch.1),
-                    },
-                )
+            .filter_map(|(id, branch)| {
+                branch.1.as_ref().map(|history| {
+                    (
+                        id.clone(),
+                        CachedHistory {
+                            reference: branch.0.history_ref.clone(),
+                            history: Arc::clone(history),
+                        },
+                    )
+                })
             })
             .collect();
         self.branches = loaded
@@ -1342,8 +1357,7 @@ impl ProjectBundle {
         Ok(Some(BundleSaveReport {
             history_sha256: self
                 .checkpoint(&self.manual_branch_id)?
-                .history_ref
-                .sha256
+                .history_digest
                 .clone(),
             collection,
             path,
@@ -1515,10 +1529,7 @@ impl ProjectBundle {
             let durable = if let Some(cached) = self.cached_history(branch) {
                 Arc::clone(cached)
             } else {
-                Arc::new(
-                    self.store
-                        .read_record::<HistorySnapshot>(&prior.history_ref)?,
-                )
+                Arc::new(self.store.resolve_history(&prior.history_ref)?)
             };
             if aligned.floor_offset < durable.floor_offset {
                 aligned = kinewright_core::HistoryTransition::floor(

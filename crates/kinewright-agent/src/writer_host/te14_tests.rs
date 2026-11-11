@@ -624,7 +624,12 @@ fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::Path
         owner.import_owned_media(png).unwrap();
         owner.import_owned_media(stereo.path()).unwrap();
         owner.save_active().unwrap();
-        let mut candidate = owner.fork_durable_branch("te14-media").unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "te14-media",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         owner.persist_durable_branch(&mut candidate).unwrap();
         f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
         f.brief.inputs = owner.current_inputs_ref().clone();
@@ -677,7 +682,12 @@ fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::Path
             .request(kinewright_core::Command::DoBatch(operations))
             .unwrap();
         owner.save_active().unwrap();
-        let mut candidate = owner.fork_durable_branch("te14-media-timeline").unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "te14-media-timeline",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         owner.persist_durable_branch(&mut candidate).unwrap();
         f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
     }

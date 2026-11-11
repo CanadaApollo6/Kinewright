@@ -406,7 +406,12 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
     let manual = bundle.manual_branch_id().clone();
     let base_checkpoint = bundle.checkpoint(&manual).unwrap().clone();
     let frozen_checkpoint_ref = bundle.checkpoint_reference(&manual).unwrap();
-    let candidate = bundle.fork_branch(&manual).unwrap();
+    let candidate = bundle
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let candidate_core = Core::spawn(Document::default()).unwrap();
     candidate_core
         .restore_history((*bundle.branch_history(&candidate).unwrap()).clone())
@@ -421,6 +426,7 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
     let candidate_history = candidate_core.export_history().unwrap();
     bundle.save_branch(&candidate, &candidate_core).unwrap();
     let base = SpecialistBaseRecord {
+        history_role: kinewright_project::history_record::HistoryRole::Candidate,
         target_branch: manual,
         base_head: base_checkpoint.head_id,
         base_document_hash: base_checkpoint.document_hash,

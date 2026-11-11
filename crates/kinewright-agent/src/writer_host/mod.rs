@@ -2696,9 +2696,17 @@ impl HostCommandOwner {
         let (core, branch) = if let Some(owner) = &mut self.owner {
             let name = format!("host-session-{id}");
             let guard = if let Some((branch, base)) = reopen {
-                owner.reopen_durable_branch(branch, &base, &name)?
+                owner.reopen_durable_branch(
+                    branch,
+                    &base,
+                    &name,
+                    kinewright_project::editing_session::DurableBranchRole::Session,
+                )?
             } else {
-                owner.fork_durable_branch(&name)?
+                owner.fork_durable_branch(
+                    &name,
+                    kinewright_project::editing_session::DurableBranchRole::Session,
+                )?
             };
             (guard.core().clone(), Some(guard.branch_id().clone()))
         } else {

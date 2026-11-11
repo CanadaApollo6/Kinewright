@@ -216,7 +216,12 @@ fn te1_safety_scale_measurement() {
             ]))
             .unwrap();
         project.save_active().unwrap();
-        let mut branch = project.fork_durable_branch("safety-scale").unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "safety-scale",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();
         f.brief.scope.base = project.candidate_binding(branch.branch_id()).unwrap();
         f.brief.inputs = project.current_inputs_ref().clone();

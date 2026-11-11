@@ -16,3 +16,8 @@ positive graph to open and each negative graph to refuse or quarantine without
 rewriting it. These are recovery regression inputs, not measurement fixtures or
 consent grants. Generation logs and original/restored hashes are recorded in
 `target/te1-5/b2b/cut-generation*` in the implementation evidence.
+
+The history-capacity stage-1 rebuild regenerates these graphs with referenced
+history and compact lineage. Its generator, three expected-red publication logs,
+and restored source hashes are under `target/history-capacity/fixture-generation`.
+Both production successor guards are restored before the normal reader tests run.

@@ -662,7 +662,7 @@ fn product_walk_matches_reference_walk_on_real_records_and_mutations() {
     let (small, _) = au6_history(Au6Scenario::Interview, 3);
     exhaustive(
         &mut mutated,
-        &small["batches"][0],
+        &small["journal"]["batches"][0],
         &history,
         "first batch alone",
     );
@@ -671,7 +671,7 @@ fn product_walk_matches_reference_walk_on_real_records_and_mutations() {
     }
 
     let (long, _) = au6_history(Au6Scenario::Podcast, 300);
-    let batches = long["batches"].as_array().map_or(0, Vec::len);
+    let batches = long["journal"]["batches"].as_array().map_or(0, Vec::len);
     assert!(batches > 300, "the long history has {batches} batches");
     originals.check(&long, &history, "long history");
     sampled(
