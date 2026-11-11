@@ -352,6 +352,8 @@ their results within the tolerances in Section 6.
 
 ## 4. Core representation and migration
 
+Compatibility requirements in this section were withdrawn on 2026-11-10 by Riel’s decision; only the current format and strict typed shapes are read.
+
 CC1 should use the existing typed Core edit path:
 
 - `AddEffect` creates the `primary_correction` node;

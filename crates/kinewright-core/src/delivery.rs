@@ -5,15 +5,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer,
-    ColorWhitePoint, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaKind,
-    OpError, ParamValue, QaIssue, QaSeverity, TrackKind, classify_source,
-    classify_source_with_assumption, qa_document,
+    ClipContent, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
+    ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
+    Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaKind, OpError, ParamValue,
+    QaIssue, QaSeverity, TrackKind, classify_source, classify_source_with_assumption, qa_document,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum DeliveryAspect {
     Widescreen,
     Vertical,
@@ -38,6 +38,7 @@ pub enum DeliveryAspect {
 /// document's, and a delivery tag check compares against the **settings**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum DeliveryEncodeDepth {
     #[default]
     Eight,
@@ -93,6 +94,7 @@ impl DeliveryEncodeDepth {
 /// exact codec, raster, and bitrate contract remains inspectable by agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum DeliveryProfile {
     SourceMaster,
     Youtube1080p,
@@ -206,6 +208,7 @@ impl DeliveryProfile {
 ///
 /// Integers in hundredths so a target and a measurement compare exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LoudnessTarget {
     pub integrated_lufs_hundredths: i32,
     pub tolerance_lu_hundredths: i32,
@@ -244,14 +247,11 @@ pub const STREAMING_PLATFORM_TARGET: LoudnessTarget = LoudnessTarget {
 pub const LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS: i32 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryConformanceReport {
     pub profile: DeliveryProfile,
     /// The delivery lane this report was produced for.
     ///
-    /// Defaulted on read so a report recorded before CC6 deserializes as the
-    /// 8-bit lane, which is what it meant (CC6 §9.3).
-    #[serde(default)]
-    #[schemars(default)]
     pub delivery_bit_depth: DeliveryEncodeDepth,
     pub container: String,
     pub resolution: (u32, u32),
@@ -296,6 +296,7 @@ impl DeliveryAspect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryVariant {
     pub aspect: DeliveryAspect,
     /// Reviewable manual/model-selected focal point. This is deliberately not
@@ -441,24 +442,6 @@ pub fn delivery_conformance(
 }
 
 fn append_managed_pipeline_issues(document: &Document, issues: &mut Vec<QaIssue>) {
-    if !matches!(
-        document.color_context.pipeline_state,
-        ColorPipelineState::ManagedSdrV1
-    ) {
-        issues.push(QaIssue {
-            severity: QaSeverity::Error,
-            code: "unsupported_color_pipeline_state".to_owned(),
-            message: format!(
-                "Managed SDR delivery requires pipeline_state=managed_sdr_v1, observed {:?}. Reset the project colour pipeline before proof or export.",
-                document.color_context.pipeline_state
-            ),
-            asset: None,
-            track: None,
-            clip: None,
-            range: None,
-        });
-    }
-
     if !document.color_context.working_matches_managed_sdr() {
         issues.push(QaIssue {
             severity: QaSeverity::Error,
@@ -570,6 +553,7 @@ fn append_managed_source_issues(document: &Document, issues: &mut Vec<QaIssue>) 
 /// of which this check rejects. [`delivery_tag_check`] is the only function
 /// that may compare a probed description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryColorMismatch {
     /// Stable wire field name, such as `primaries` or `bit_depth`.
     pub field: String,
@@ -1000,6 +984,7 @@ impl DeliveryVerificationError {
 /// Which side of an export a [`DeliveryTagCheck`] was taken from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum DeliveryTagSource {
     /// Pre-export: the expected description was materialized from
     /// [`crate::ExportSettings`] and nothing has been written yet.
@@ -1024,6 +1009,7 @@ impl DeliveryTagSource {
 /// A field that a format has no syntax for is not evidence of a wrong tag, and
 /// reporting it as a mismatch would be a fabricated failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryTagNotRepresentable {
     pub field: String,
     pub expected: String,
@@ -1036,6 +1022,7 @@ but no white-point field; bt709 primaries imply D65";
 
 /// An expected delivery description compared against an observed one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryTagCheck {
     /// [`DeliveryTagSource::as_str`] for the mode this check ran in.
     pub tag_source: String,
@@ -1270,6 +1257,7 @@ they are evidence, not a gate.";
 /// A caller may not invent a looser set: [`DeliveryBudgets::for_depth`] is the
 /// only constructor that names the lane's constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryBudgets {
     /// Luma-plane maximum absolute difference, delivery code units at the lane
     /// depth.
@@ -1306,6 +1294,7 @@ impl DeliveryBudgets {
 
 /// One post-export verification request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryVerificationRequest {
     /// `1..=`[`DELIVERY_VERIFICATION_MAX_FRAMES`]; defaults to
     /// [`DELIVERY_VERIFICATION_FRAME_COUNT`].
@@ -1388,6 +1377,7 @@ impl DeliveryVerificationRequest {
 
 /// Absolute-difference statistics for one compared channel or plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryChannelDifference {
     /// Lane code units (8-bit codes on the 8-bit lane, 10-bit codes on the
     /// 10-bit lane). For the RGB channels this is reported, never gated.
@@ -1403,6 +1393,7 @@ pub struct DeliveryChannelDifference {
 
 /// The decoded-versus-reference comparison of one verified export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryComparison {
     /// Project frame identities, the `i64` identity
     /// `ScopeMeasurementMetadata.project_frames` carries.
@@ -1435,6 +1426,7 @@ pub struct DeliveryComparison {
 /// Produced only by `Analysis::verify_delivery_output`. A verification is a
 /// measurement: it never moves, renames, or deletes the file it read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryVerification {
     pub output_path: std::path::PathBuf,
     pub delivery_bit_depth: DeliveryEncodeDepth,
@@ -1911,7 +1903,7 @@ mod tests {
             ColorProvenance::StreamMetadata,
             ColorProvenance::SidecarMetadata,
             ColorProvenance::Inferred,
-            ColorProvenance::Other("future_project_source".to_owned()),
+            ColorProvenance::Inferred,
         ] {
             document.color_context.delivery.provenance = provenance.clone();
             let report = delivery_conformance(
@@ -1969,7 +1961,6 @@ mod tests {
         let mut document = fixture();
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        document.color_context.pipeline_state = ColorPipelineState::Legacy;
         document.color_context.working.bit_depth = crate::ColorBitDepth::Eight;
         document.color_context.monitoring.transfer = ColorTransfer::Bt1886;
 
@@ -1984,7 +1975,6 @@ mod tests {
 
         assert!(!report.export_ready());
         for code in [
-            "unsupported_color_pipeline_state",
             "unsupported_working_color_context",
             "unsupported_monitoring_color_context",
         ] {

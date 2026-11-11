@@ -1,5 +1,5 @@
 {
-  "format_version": 2,
+  "format_version": 4,
   "tracks": [
     {
       "id": 4,
@@ -13,23 +13,22 @@
             "start": 0,
             "end": 100
           },
-          "timeline_start": 0,
-          "effects": [],
-          "transition_in": null,
           "content": {
             "solid": {
               "r": 0,
               "g": 0,
               "b": 0
             }
-          }
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
         }
       ]
     },
     {
       "id": 1,
       "kind": "Video",
-      "sync_lock": true,
       "clips": [
         {
           "id": 1,
@@ -72,7 +71,6 @@
     {
       "id": 2,
       "kind": "Audio",
-      "sync_lock": true,
       "clips": [
         {
           "id": 4,
@@ -115,7 +113,6 @@
     {
       "id": 3,
       "kind": "Video",
-      "sync_lock": true,
       "clips": [
         {
           "id": 7,
@@ -124,14 +121,20 @@
             "start": 0,
             "end": 50
           },
-          "timeline_start": 0,
-          "effects": [],
-          "transition_in": null,
           "content": {
             "title": {
-              "text": "we chose their design"
+              "text": "we chose their design",
+              "font_size_token": 1,
+              "color_token": 0,
+              "position": "center",
+              "background_scrim": true,
+              "fade_in_frames": 0,
+              "fade_out_frames": 0
             }
-          }
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
         },
         {
           "id": 8,
@@ -140,14 +143,20 @@
             "start": 0,
             "end": 38
           },
-          "timeline_start": 62,
-          "effects": [],
-          "transition_in": null,
           "content": {
             "title": {
-              "text": "because it worked"
+              "text": "because it worked",
+              "font_size_token": 1,
+              "color_token": 0,
+              "position": "center",
+              "background_scrim": true,
+              "fade_in_frames": 0,
+              "fade_out_frames": 0
             }
-          }
+          },
+          "timeline_start": 62,
+          "effects": [],
+          "transition_in": null
         }
       ]
     }
@@ -188,7 +197,31 @@
         "denominator": 1
       },
       "kind": "Audio",
-      "resolution": null
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "markers": [
+    {
+      "id": 1,
+      "position": 5,
+      "label": "note 1",
+      "color_token": 0
+    },
+    {
+      "id": 2,
+      "position": 95,
+      "label": "unchanged except ripple",
+      "color_token": 1
     }
   ],
   "color_context": {
@@ -232,19 +265,5 @@
     160,
     90
   ],
-  "duration": 100,
-  "markers": [
-    {
-      "id": 1,
-      "position": 5,
-      "label": "note 1",
-      "color_token": 0
-    },
-    {
-      "id": 2,
-      "position": 95,
-      "label": "unchanged except ripple",
-      "color_token": 1
-    }
-  ]
+  "duration": 100
 }

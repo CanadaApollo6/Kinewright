@@ -11,6 +11,7 @@ use crate::{Command, Operation};
 /// equalize in-memory variant sizes.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "command", content = "payload", deny_unknown_fields)]
 pub enum JournalCommand {
     Do(Operation),
     DoBatch(Vec<Operation>),
@@ -21,10 +22,6 @@ pub enum JournalCommand {
     /// an N-frame drag as N ordinary batches would turn one gesture into N
     /// undo steps, and a journaled [`JournalCommand::Undo`] recorded after the
     /// gesture would then unwind a single frame instead of the whole gesture.
-    ///
-    /// This variant was added after the original journal format shipped. It is
-    /// purely additive: journals written by older builds contain only the
-    /// other variants and still deserialize unchanged.
     DoBatchCoalesced {
         operations: Vec<Operation>,
         coalesce_key: String,

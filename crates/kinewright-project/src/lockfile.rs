@@ -55,11 +55,9 @@ pub struct ReclaimedOwner {
     pub hostname: String,
     pub endpoint: String,
     /// The owner's claim second, informational only: `release` matches
-    /// on [`Self::claim_id`] alone (N-d). Defaulted so pre-G9 claims parse.
-    #[serde(default)]
+    /// on [`Self::claim_id`] alone (N-d).
     pub started_at_unix: u64,
     /// The owner's claim nonce (N-d): `release` compares it alone.
-    #[serde(default)]
     pub claim_id: String,
 }
 
@@ -80,9 +78,7 @@ pub struct LockfileClaim {
     /// Owner start, unix seconds.
     pub started_at_unix: u64,
     /// A random nonce per claim (N-d): unique even for two claims of one
-    /// process, endpoint and second. Defaulted so older claims still parse
-    /// (and never match a live handle's).
-    #[serde(default)]
+    /// process, endpoint and second.
     pub claim_id: String,
     /// The reclaimed owner, `None` on a fresh acquire.
     pub reclaimed_from: Option<ReclaimedOwner>,
@@ -970,7 +966,7 @@ fn acquire_with_recovery_policy(
         crate::test_hook("after_flock_before_scan"); // RACE-REVIEW
         // Holding the flock: pending recovery (or lookup failure) refuses first.
         if check_recovery {
-            match pending_journal_for_identity(recovery_dir, project_path, &identity) {
+            match pending_journal_for_identity(recovery_dir, &identity) {
                 Ok(Some(journal)) => {
                     return Err(LockfileError::PendingRecovery { journal });
                 }
@@ -1900,9 +1896,9 @@ mod tests {
             "the alias name matches no pattern for the project"
         );
         let header = serde_json::json!({
-            "format_version": 1,
+            "format_version": kinewright_core::PROJECT_FORMAT_VERSION,
             "project_path": project,
-            "writer_format_version": 1,
+
             "initial_document": kinewright_core::Document::default(),
         });
         let mut bytes = crate::recovery::JOURNAL_MAGIC.to_vec();

@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::project::canonical_project_identity;
 
 /// The recovery-journal magic, shared with the app's writer/inspector.
-pub const JOURNAL_MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL 1\n";
+pub const JOURNAL_MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL\n";
 
 pub fn default_recovery_directory() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -224,25 +224,6 @@ pub fn journal_file_name(project_path: &Path) -> String {
     journal_name_for(identity.as_deref().unwrap_or(project_path))
 }
 
-/// The pre-F4 journal name (G5): main hashed the RAW path spelling, so a
-/// legacy journal is found by this name when the project is queried with
-/// the spelling that created it.
-fn legacy_journal_file_name(project_path: &Path) -> String {
-    journal_name_for(project_path)
-}
-
-/// The ordinary spelling of a verbatim Windows path, when it has one:
-/// `\\?\C:\…` → `C:\…`, `\\?\UNC\s\s` → `\\s\s`. Pre-F4 journals hashed the
-/// ordinary spelling while `canonicalize` returns the verbatim one (G5).
-/// Pure, so the unit test runs on every OS.
-#[cfg(any(windows, test))]
-fn ordinary_spelling(verbatim: &str) -> Option<String> {
-    if let Some(rest) = verbatim.strip_prefix(r"\\?\UNC\") {
-        return Some(format!(r"\\{rest}"));
-    }
-    verbatim.strip_prefix(r"\\?\").map(str::to_owned)
-}
-
 /// The journal path for a project, never colliding with a reserved (pending)
 /// file: undecided crash data must not be truncated by a new session. An
 /// unsaved project keeps its current `unsaved-N` file across baselines.
@@ -328,8 +309,15 @@ fn journal_name_matches_for(identity_base: &str, file_name: &str) -> bool {
 
 /// The takeover check reads one header field: the owning project.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JournalIdentityHeader {
-    #[serde(default)]
+    #[serde(
+        rename = "format_version",
+        deserialize_with = "kinewright_core::deserialize_format_version"
+    )]
+    _format_version: u32,
+    #[serde(rename = "initial_document")]
+    _initial_document: serde::de::IgnoredAny,
     project_path: Option<PathBuf>,
 }
 
@@ -423,6 +411,7 @@ fn header_names_from(
     }
     let Some(JournalIdentityHeader {
         project_path: Some(project),
+        ..
     }) = committed
     else {
         return Ok(false);
@@ -433,7 +422,7 @@ fn header_names_from(
     Ok(crate::same_project_file(&project, identity))
 }
 
-/// Pending journal (AW1 §5/S7, F5/G5/G6): canonical and legacy bases,
+/// Pending journal (AW1 §5/S7): canonical names and current headers,
 /// every `-N` allocator suffix of each, and header-matched aliases — first
 /// in name order. Name matches refuse first, whatever the entry type (H4);
 /// only regular non-matched files header-scan (anything else is skipped
@@ -446,26 +435,16 @@ pub fn pending_journal_for_project(
     project_path: &Path,
 ) -> Result<Option<PathBuf>, io::Error> {
     let identity = canonical_project_identity(project_path).map_err(io::Error::other)?;
-    pending_journal_for_identity(recovery_dir, project_path, &identity)
+    pending_journal_for_identity(recovery_dir, &identity)
 }
 
 /// [`pending_journal_for_project`] for an identity the caller resolved
-/// once (J2: the acquire's single resolution); `project_path` only names
-/// the legacy raw-spelling journal.
+/// once (J2: the acquire's single resolution).
 pub(crate) fn pending_journal_for_identity(
     recovery_dir: &Path,
-    project_path: &Path,
     identity: &Path,
 ) -> Result<Option<PathBuf>, io::Error> {
     let base = journal_name_for(identity);
-    let legacy = legacy_journal_file_name(project_path);
-    // Windows only: the ordinary spelling main hashed, recovered from a
-    // verbatim identity (unit-pinned on every OS via `ordinary_spelling`).
-    #[cfg(windows)]
-    let ordinary_base = ordinary_spelling(&identity.to_string_lossy())
-        .map(|ordinary| legacy_journal_file_name(Path::new(&ordinary)));
-    #[cfg(not(windows))]
-    let ordinary_base: Option<String> = None;
     let entries = match fs::read_dir(recovery_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -484,13 +463,7 @@ pub(crate) fn pending_journal_for_identity(
         let named = journal
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                journal_name_matches_for(&base, name)
-                    || journal_name_matches_for(&legacy, name)
-                    || ordinary_base
-                        .as_deref()
-                        .is_some_and(|third| journal_name_matches_for(third, name))
-            });
+            .is_some_and(|name| journal_name_matches_for(&base, name));
         // H4: a name match refuses whatever the entry is (symlink, FIFO,
         // dir) — checked first, without opening it.
         if named {
@@ -517,13 +490,10 @@ pub(crate) fn pending_journal_for_identity(
     for entry in fs::read_dir(recovery_dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name.to_str().is_some_and(|name| {
-            journal_name_matches_for(&base, name)
-                || journal_name_matches_for(&legacy, name)
-                || ordinary_base
-                    .as_deref()
-                    .is_some_and(|base| journal_name_matches_for(base, name))
-        }) {
+        if name
+            .to_str()
+            .is_some_and(|name| journal_name_matches_for(&base, name))
+        {
             match fs::symlink_metadata(entry.path()) {
                 Ok(_) => pending.push(entry.path()),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -533,11 +503,8 @@ pub(crate) fn pending_journal_for_identity(
     }
     // N1: `read_dir` can miss an entry renamed in mid-scan, so the exact
     // names are probed directly too — any type refuses, as in H4.
-    for name in [Some(&base), Some(&legacy), ordinary_base.as_ref()]
-        .into_iter()
-        .flatten()
     {
-        let journal = recovery_dir.join(name);
+        let journal = recovery_dir.join(base);
         match fs::symlink_metadata(&journal) {
             Ok(_) => pending.push(journal),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -579,62 +546,20 @@ mod tests {
         assert!(next.is_ok(), "C6_FEEDBACK_LOCK_HELD_BY_COPY: {next:?}");
     }
 
-    /// G5/RB3: a legacy raw-path-hash journal refuses by NAME even with a
-    /// torn header — and so does its allocator `-N` suffix.
-    #[test]
-    fn g5_legacy_name_torn_header_refuses() {
-        let dir = TempDirectory::new("aw1-g5-legacy-name");
-        let recovery = dir.path("recovery");
-        fs::create_dir(&recovery).expect("the recovery dir creates");
-        // The RB3 repro's spelling: main hashed the raw path, `./` included.
-        let crooked = dir.root().join(".").join("source.kinewright");
-        let legacy = recovery.join(legacy_journal_file_name(&crooked));
-        assert_ne!(
-            legacy.file_name().expect("a file name").to_string_lossy(),
-            journal_file_name(&crooked),
-            "the legacy name differs from the canonical one"
-        );
-        fs::write(&legacy, b"KINEWRIGHT-JOURNAL 1\n{\"project_path\":")
-            .expect("the torn legacy journal writes");
-        assert_eq!(
-            pending_journal_for_project(&recovery, &crooked).expect("the lookup lands"),
-            Some(legacy.clone()),
-            "a legacy-name torn header refuses"
-        );
-        let suffixed = recovery.join(
-            legacy
-                .file_name()
-                .expect("a file name")
-                .to_string_lossy()
-                .trim_end_matches(".journal")
-                .to_owned()
-                + "-2.journal",
-        );
-        fs::write(&suffixed, b"crash").expect("the suffixed legacy journal writes");
-        fs::remove_file(&legacy).expect("only the suffix pends");
-        assert_eq!(
-            pending_journal_for_project(&recovery, &crooked).expect("the lookup lands"),
-            Some(suffixed),
-            "a legacy allocator suffix refuses"
-        );
-    }
-
-    /// G5/RB3: a legacy RELATIVE header is never rebound to the current
-    /// cwd — it claims nothing, so an unrelated same-named project is not
-    /// blocked; the original spelling is still found via the legacy NAME.
+    /// A relative header cannot claim an unrelated same-named project.
     #[test]
     fn g5_relative_header_never_claims() {
         let dir = TempDirectory::new("aw1-g5-relative-header");
         let recovery = dir.path("recovery");
         fs::create_dir(&recovery).expect("the recovery dir creates");
-        let journal = recovery.join(legacy_journal_file_name(Path::new("edit.kinewright")));
+        let journal = recovery.join("unrelated-0123456789abcdef.journal");
         let document = serde_json::to_string(&kinewright_core::Document::default())
             .expect("the document serialises");
         let header = format!(
-            "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
+            "KINEWRIGHT-JOURNAL\n{{\"format_version\":4,\
              \"project_path\":\"edit.kinewright\",\"initial_document\":{document}}}\n"
         );
-        fs::write(&journal, header).expect("the legacy journal writes");
+        fs::write(&journal, header).expect("the malformed journal writes");
         // The same-named path under the CURRENT cwd: resolving the header
         // against the cwd would falsely block it. (No chdir — the cwd is
         // process-global — the test constructs the collision instead.)
@@ -645,12 +570,6 @@ mod tests {
             pending_journal_for_project(&recovery, &same_named).expect("the lookup lands"),
             None,
             "a relative header never blocks an unrelated same-named project"
-        );
-        assert_eq!(
-            pending_journal_for_project(&recovery, Path::new("edit.kinewright"))
-                .expect("the lookup lands"),
-            Some(journal),
-            "the original spelling is found via the legacy name"
         );
     }
 
@@ -667,7 +586,7 @@ mod tests {
         let document = serde_json::to_string(&kinewright_core::Document::default())
             .expect("the document serialises");
         let header = format!(
-            "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
+            "KINEWRIGHT-JOURNAL\n{{\"format_version\":4,\
              \"project_path\":{},\"initial_document\":{document}}}\n",
             serde_json::to_string(&project).expect("the path serialises")
         );
@@ -694,7 +613,7 @@ mod tests {
         fs::write(&project, b"{}").expect("the project writes");
         let big = "x".repeat(2 * 1024 * 1024);
         let header = format!(
-            "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
+            "KINEWRIGHT-JOURNAL\n{{\"format_version\":4,\
              \"initial_document\":{},\"project_path\":{}}}\n",
             serde_json::to_string(&big).expect("the body serialises"),
             serde_json::to_string(&project).expect("the path serialises")
@@ -712,7 +631,7 @@ mod tests {
         assert_eq!(refused.kind(), io::ErrorKind::FileTooLarge);
         fs::remove_file(&alias).expect("the alias goes");
         let matched = recovery.join(journal_file_name(&project));
-        fs::write(&matched, b"KINEWRIGHT-JOURNAL 1\n{ torn").expect("the matched journal writes");
+        fs::write(&matched, b"KINEWRIGHT-JOURNAL\n{ torn").expect("the matched journal writes");
         assert_eq!(
             pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
             Some(matched),
@@ -815,8 +734,8 @@ mod tests {
         fs::create_dir(&recovery).expect("the recovery dir creates");
         let project = dir.path("p.kinewright");
         let value = serde_json::json!({
-            "format_version": 1,
-            "writer_format_version": 1,
+            "format_version": kinewright_core::PROJECT_FORMAT_VERSION,
+
             "project_path": project,
             "initial_document": kinewright_core::Document::default(),
         });
@@ -838,21 +757,6 @@ mod tests {
                 "tail {tail:?}"
             );
         }
-    }
-
-    /// G5: the verbatim→ordinary spelling map is unit-pinned on every OS.
-    #[test]
-    fn g5_ordinary_spelling_maps_verbatim_paths() {
-        assert_eq!(
-            ordinary_spelling(r"\\?\C:\videos\edit.kinewright").as_deref(),
-            Some(r"C:\videos\edit.kinewright")
-        );
-        assert_eq!(
-            ordinary_spelling(r"\\?\UNC\host\share\edit.kinewright").as_deref(),
-            Some(r"\\host\share\edit.kinewright")
-        );
-        assert_eq!(ordinary_spelling(r"C:\videos\edit.kinewright"), None);
-        assert_eq!(ordinary_spelling("/home/u/edit.kinewright"), None);
     }
 
     #[test]

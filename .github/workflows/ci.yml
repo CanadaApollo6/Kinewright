@@ -68,6 +68,7 @@ jobs:
       - run: python scripts/slow_tests.py lint
       - run: python scripts/slow_tests_selftest.py
       - run: python scripts/ci_shards_selftest.py
+      - run: python scripts/ci_linux_deps_selftest.py
 
   checks:
     name: ${{ matrix.os }} clippy and shipping builds
@@ -89,6 +90,7 @@ jobs:
         with:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
+        timeout-minutes: 8
       - if: runner.os == 'Linux'
         shell: bash
         run: |

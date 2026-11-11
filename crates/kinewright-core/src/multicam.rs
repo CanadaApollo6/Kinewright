@@ -12,6 +12,7 @@ use crate::{
 
 /// One explicit mapping from a diarization label to a named sync-group angle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpeakerAngleAssignment {
     pub speaker: String,
     pub angle_name: String,
@@ -23,6 +24,7 @@ pub struct SpeakerAngleAssignment {
 /// onto `record_start`; the source transcript supplies the switch timing, while
 /// each assignment chooses the source angle to place on the target video track.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpeakerMulticamSettings {
     pub sync_group: SyncGroupId,
     pub target_track: TrackId,
@@ -38,6 +40,7 @@ pub struct SpeakerMulticamSettings {
 
 /// One chronological shot selected by a speaker-aware multicam plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpeakerMulticamCut {
     pub speakers: Vec<String>,
     pub angle_name: String,
@@ -51,6 +54,7 @@ pub struct SpeakerMulticamCut {
 
 /// A non-mutating, directly applicable speaker-aware multicam edit plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SpeakerMulticamPlan {
     pub sync_group: SyncGroupId,
     pub target_track: TrackId,
@@ -446,6 +450,7 @@ pub fn plan_speaker_multicam(
 
 /// Inclusive focus bounds for subject-aware reframe automation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReframeFocusBounds {
     pub min_x_percent: i64,
     pub max_x_percent: i64,
@@ -469,6 +474,7 @@ impl Default for ReframeFocusBounds {
 /// The planner consumes these observations; it does not detect or identify a
 /// subject itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectCenterSample {
     pub at: TimeCode,
     pub x_percent: i64,
@@ -482,6 +488,7 @@ pub struct SubjectCenterSample {
 /// outside that range are accepted and clamped to the configured safe region by
 /// [`plan_subject_reframe_basis_points`], matching the legacy percent planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectCenterBasisPointSample {
     pub at: TimeCode,
     pub x_basis_points: i64,
@@ -496,6 +503,7 @@ pub struct SubjectCenterBasisPointSample {
 /// the core planner remains media-backend agnostic while a tracker can account
 /// for its source aspect, crop geometry, and subject bounds exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectFocusBasisPointConstraint {
     pub at: TimeCode,
     pub min_x_basis_points: i64,
@@ -506,6 +514,7 @@ pub struct SubjectFocusBasisPointConstraint {
 
 /// Configuration for converting subject observations into editable reframe curves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectReframeSettings {
     pub clip: ClipId,
     pub effect: EffectId,
@@ -531,6 +540,7 @@ const fn default_maximum_focus_step_percent() -> u8 {
 
 /// A validated, non-mutating reframe automation plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectReframePlan {
     pub clip: ClipId,
     pub effect: EffectId,
@@ -543,6 +553,7 @@ pub struct SubjectReframePlan {
 
 /// A precise, validated reframe plan whose samples and curves use basis points.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubjectReframeBasisPointPlan {
     pub clip: ClipId,
     pub effect: EffectId,

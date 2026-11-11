@@ -5378,9 +5378,10 @@ pub(crate) fn effect_display_name(name: &str) -> &str {
 /// legacy stage. The legacy nodes already in a project stay visible, keep
 /// rendering, and offer **Convert to managed look**.
 pub(crate) fn is_effect_insertable(name: &str) -> bool {
-    !is_audio_effect(name)
+    kinewright_core::effect_descriptor(name).is_some()
+        && !is_audio_effect(name)
         && !is_legacy_display_effect(name)
-        && !matches!(name, "color_grade" | "cube_lut" | "look_lut")
+        && !matches!(name, "cube_lut" | "look_lut")
 }
 
 /// Keep internal, high-precision reframe storage out of the generic inspector

@@ -617,9 +617,7 @@ fn effect_documentation() -> String {
             documentation.push_str(&noise_profile_pattern_documentation(effect.parameters));
         }
         documentation.push(')');
-        if effect.name == "color_grade" {
-            documentation.push_str(" [alias of primary_correction]");
-        } else if kinewright_core::effect_compatibility_stage(effect.name).is_some() {
+        if kinewright_core::effect_compatibility_stage(effect.name).is_some() {
             documentation
                 .push_str(" [legacy - outside CC1 managed conformance; prefer primary_correction]");
         }
@@ -2009,10 +2007,7 @@ audio_true_peak_limiter.",
                 "{name} must be labelled as a compatibility stage"
             );
         }
-        assert!(
-            suffix_after("color_grade").starts_with(" [alias of primary_correction]"),
-            "color_grade is a wire alias Core canonicalises to primary_correction"
-        );
+        assert!(!documentation.contains("color_grade"));
         let primary = suffix_after("primary_correction");
         assert!(!primary.starts_with(LEGACY_LABEL), "{primary}");
     }

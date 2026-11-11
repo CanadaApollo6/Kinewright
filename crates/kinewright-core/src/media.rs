@@ -31,6 +31,7 @@ use crate::{
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MediaAvailabilityKind {
     OnlineVerified,
     OnlineUnverified,
@@ -43,6 +44,7 @@ pub enum MediaAvailabilityKind {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MediaAvailabilityStatus {
     pub kind: MediaAvailabilityKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +63,7 @@ pub struct MediaAvailabilityStatus {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportMediaPreflightIssue {
     pub asset: AssetId,
     pub asset_name: String,
@@ -79,6 +82,7 @@ pub struct ExportMediaPreflightIssue {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportMediaPreflightReport {
     /// Asset ids checked in deterministic media-pool order. Unused media-bin
     /// entries are intentionally absent.
@@ -141,6 +145,7 @@ impl ExportMediaPreflightReport {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum LutAvailabilityKind {
     /// The store file exists, is a regular file, and hashes to `sha256`.
     Verified,
@@ -159,6 +164,7 @@ pub enum LutAvailabilityKind {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct LutAvailabilityStatus {
     pub kind: LutAvailabilityKind,
     /// The hash actually observed, present when a file was read and hashed.
@@ -179,6 +185,7 @@ pub struct LutAvailabilityStatus {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportLutPreflightIssue {
     pub lut_asset: LutAssetId,
     pub title: String,
@@ -207,6 +214,7 @@ pub struct ExportLutPreflightIssue {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportLutPreflightReport {
     /// Asset ids checked, in `Document::lut_assets` order. Assets no
     /// possibly-active node references are intentionally absent.
@@ -320,6 +328,7 @@ fn possibly_active_lut_references(document: &Document, id: LutAssetId) -> Vec<(C
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MediaCacheFamily {
     PreviewMemory,
     VisualAssets,
@@ -332,6 +341,7 @@ pub enum MediaCacheFamily {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MediaCacheFamilyStatus {
     pub family: MediaCacheFamily,
     pub supported: bool,
@@ -352,6 +362,7 @@ pub struct MediaCacheFamilyStatus {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MediaCacheInventory {
     pub families: Vec<MediaCacheFamilyStatus>,
 }
@@ -361,6 +372,7 @@ pub struct MediaCacheInventory {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MediaCacheClearResult {
     pub family: MediaCacheFamily,
     pub supported: bool,
@@ -536,6 +548,7 @@ pub struct RgbaImage {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MonitorProofRenderKind {
     GpuPreview,
     TestDouble,
@@ -545,6 +558,7 @@ pub enum MonitorProofRenderKind {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MonitorProofMetadata {
     pub render_kind: MonitorProofRenderKind,
     /// Stable backend identifier, such as `vulkan` or `dx12`.
@@ -614,6 +628,7 @@ pub const WORKING_PROOF_ENCODING: &str = "scene_linear_bt709_f32";
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct WorkingProofMetadata {
     /// Renderer provenance, reused unchanged from the managed monitor proof.
     pub render: MonitorProofMetadata,
@@ -653,6 +668,7 @@ pub const MATTE_COVERAGE_SCALE: u16 = 255;
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MatteProofMetadata {
     /// Renderer provenance, reused unchanged from the managed monitor proof.
     pub render: MonitorProofMetadata,
@@ -827,6 +843,7 @@ pub const MATTE_COVERAGE_HISTOGRAM_BUCKETS: usize = 16;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MatteCoverageStatistics {
     /// Pixels with `m > 0`: the set the correction touched at all.
     pub covered_pixel_count: u64,
@@ -1097,12 +1114,14 @@ fn weighted_centre(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaveformPeak {
     pub minimum: i16,
     pub maximum: i16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaveformData {
     pub asset: AssetId,
     /// Monotonic request generation supplied by the caller. This is runtime
@@ -1165,6 +1184,7 @@ pub enum VisualAssetResult {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportSettings {
     pub fps: Rational,
     pub resolution: (u32, u32),
@@ -1204,6 +1224,7 @@ pub struct ExportSettings {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct AudioLoudness {
     /// Gated programme loudness. `None` means the decoded signal was silent.
     pub integrated_lufs_hundredths: Option<i32>,
@@ -1239,6 +1260,7 @@ pub struct AudioLoudness {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportAudioReport {
     pub target: LoudnessTarget,
     pub before: AudioLoudness,
@@ -1268,6 +1290,7 @@ pub struct ExportAudioReport {
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct ExportReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
@@ -1281,6 +1304,7 @@ pub struct ExportReport {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryAudioVerification {
     pub output_path: PathBuf,
     pub measured: AudioLoudness,
@@ -1326,6 +1350,7 @@ pub struct LoudnessSnapshot {
 /// added: `IncidentSubject` carries none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum AudioChain {
     Bus(AudioBusId),
     Master,
@@ -1352,6 +1377,7 @@ pub struct MixPeaks {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MixLevelRequest {
     /// Omitted or `null` measures the whole document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1363,6 +1389,7 @@ pub struct MixLevelRequest {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct TrackLevels {
     pub track: TrackId,
     pub kind: TrackKind,
@@ -1376,6 +1403,7 @@ pub struct TrackLevels {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct BusLevels {
     pub bus: AudioBusId,
     pub name: String,
@@ -1386,6 +1414,7 @@ pub struct BusLevels {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MixLevelReport {
     pub range: std::ops::Range<TimeCode>,
     pub any_solo: bool,
@@ -1401,6 +1430,7 @@ pub struct MixLevelReport {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum MixSpectrumPoint {
     /// The summed master, after the master chain.
     Master,
@@ -1415,6 +1445,7 @@ pub enum MixSpectrumPoint {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MixSpectrumRequest {
     /// Omitted or `null` measures the whole document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1427,6 +1458,7 @@ pub struct MixSpectrumRequest {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct SpectrumBand {
     /// ISO nominal centre frequency in tenths of a hertz.
     pub center_hertz_tenths: u32,
@@ -1442,6 +1474,7 @@ pub struct SpectrumBand {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct MixSpectrumReport {
     pub range: std::ops::Range<TimeCode>,
     pub point: MixSpectrumPoint,
@@ -1462,6 +1495,7 @@ pub struct MixSpectrumReport {
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct MixNoiseProfileRequest {
     /// Omitted or `null` measures the whole document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1488,6 +1522,7 @@ pub struct MixNoiseProfileRequest {
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct NoiseProfileReport {
     pub range: std::ops::Range<TimeCode>,
     pub point: MixSpectrumPoint,
@@ -1510,6 +1545,7 @@ pub struct NoiseProfileReport {
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct MixWindowRequest {
     /// Omitted or `null` measures the whole document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1530,6 +1566,7 @@ pub struct MixWindowRequest {
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct MixWindowLevelReport {
     pub range: std::ops::Range<TimeCode>,
     pub point: MixSpectrumPoint,
@@ -1603,6 +1640,7 @@ impl MediaEvent {
 /// One recognized word. Both boundaries are half-open source-frame positions
 /// in the owning asset's exact frame rate.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TranscriptWord {
     pub text: String,
     pub source_start: TimeCode,
@@ -1616,6 +1654,7 @@ pub struct TranscriptWord {
 /// Derived, reproducible speech data for one media asset. This deliberately
 /// does not live in `Document` or the operation journal.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetTranscript {
     pub asset: AssetId,
     pub content_sha256: String,
@@ -1670,6 +1709,7 @@ pub struct TimelineTranscriptWord {
 
 /// A half-open silent range in one asset's exact source-frame time base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SilenceSpan {
     pub source_start: TimeCode,
     pub source_end: TimeCode,
@@ -1677,6 +1717,7 @@ pub struct SilenceSpan {
 
 /// Derived, reproducible audio-energy analysis for one media asset.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetSilences {
     pub asset: AssetId,
     pub content_sha256: String,
@@ -1710,6 +1751,7 @@ impl SilenceStatus {
 /// One candidate scene boundary. Confidence is stored as basis points from
 /// 0.00% through 100.00% so the derived contract remains deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SceneChange {
     pub source_frame: TimeCode,
     pub confidence_basis_points: u16,
@@ -1717,6 +1759,7 @@ pub struct SceneChange {
 
 /// Derived, reproducible scene-difference analysis for one media asset.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetSceneChanges {
     pub asset: AssetId,
     pub content_sha256: String,
@@ -1770,6 +1813,7 @@ pub struct TimelineSceneChange {
 
 /// One locally detected rhythmic onset in an asset's exact source-frame grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BeatMarker {
     pub source_frame: TimeCode,
     /// Relative onset strength from 0.00% through 100.00%.
@@ -1778,6 +1822,7 @@ pub struct BeatMarker {
 
 /// Derived, reproducible rhythmic analysis for one audio-capable asset.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetBeats {
     pub asset: AssetId,
     pub content_sha256: String,
@@ -1809,6 +1854,7 @@ impl BeatStatus {
 
 /// One source beat mapped through a real-time media clip onto project frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimelineBeat {
     pub asset: AssetId,
     pub track: TrackId,
@@ -1823,6 +1869,7 @@ pub struct TimelineBeat {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum AnalysisKind {
     Transcript,
     Silence,
@@ -1838,6 +1885,7 @@ impl AnalysisKind {
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum AnalysisPhase {
     NotRequested,
     Queued,
@@ -1854,6 +1902,7 @@ pub enum AnalysisPhase {
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
 )]
+#[serde(deny_unknown_fields)]
 pub struct AnalysisJobStatus {
     pub asset: AssetId,
     pub kind: AnalysisKind,
@@ -1932,7 +1981,8 @@ pub enum MediaError {
     )]
     UnsupportedDecoderFormat {
         /// The source path involved in the failed managed decode.
-        path: PathBuf,
+        // The error keeps an immutable path, without a platform-specific growable buffer header.
+        path: Box<Path>,
         /// The `FFmpeg` pixel-format name when available.
         format: String,
         /// The declared source integer depth, if it was valid enough to read.
@@ -1991,11 +2041,9 @@ pub enum MediaError {
     /// The same refusal with the asset, the path, the probed description and
     /// the assumption `contextual_managed_decode_error` exists to add.
     ///
-    /// Boxed. The payload is 300-odd bytes of probed description and typed
-    /// refusal; inline it would put every `Result<_, MediaError>` signature in
-    /// the workspace over `clippy::result_large_err`'s 128-byte threshold, and
-    /// `MediaError` is this workspace's universal media return type. The
-    /// rendered sentence is unaffected: `Display` forwards through the box to
+    /// Boxed so the path, probed description and typed refusal stay out of
+    /// every `Result<_, MediaError>` payload. `MediaError` is the workspace's
+    /// shared media return type. `Display` forwards through the box to
     /// [`SourceColorRefusal`], which owns the template.
     #[error("{0}")]
     SourceColorForAsset(Box<SourceColorRefusal>),
@@ -2072,6 +2120,9 @@ pub enum MediaError {
     #[error("{0}")]
     Backend(String),
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<MediaError>() == 80);
 
 impl MediaError {
     /// Return the machine-readable recovery code, when this error has one.
@@ -2960,7 +3011,6 @@ mod tests {
             ColorSourceError::UnknownMatrix,
             ColorSourceError::UnsupportedMatrix(crate::ColorMatrix::Bt2020Ncl),
             ColorSourceError::UnknownRange,
-            ColorSourceError::UnsupportedRange(crate::ColorRange::Other("weird".to_owned())),
             ColorSourceError::UnknownWhitePoint,
             ColorSourceError::UnsupportedWhitePoint(crate::ColorWhitePoint::D50),
             ColorSourceError::UnknownBitDepth,
@@ -2977,7 +3027,7 @@ mod tests {
     #[test]
     fn in1_typed_source_colour_errors_carry_their_recovery_code_through_media_error() {
         let errors = in1_every_source_colour_error();
-        assert_eq!(errors.len(), 13);
+        assert_eq!(errors.len(), 12);
         for error in errors {
             assert_eq!(
                 MediaError::SourceColor(error.clone()).recovery_code(),
@@ -3128,8 +3178,8 @@ mod tests {
 
     #[test]
     fn in1_the_boxed_refusal_keeps_media_error_small_enough_to_return_by_value() {
-        // IN1 §4.1 rule 2's payload is 300-odd bytes. Boxing it is what keeps
-        // every `Result<_, MediaError>` in the workspace under
+        // Structured source refusals stay boxed so the shared error remains small.
+        // Every `Result<_, MediaError>` in the workspace stays under
         // `clippy::result_large_err`'s 128-byte threshold without an allow.
         assert!(
             std::mem::size_of::<MediaError>() <= 128,
@@ -3140,7 +3190,7 @@ mod tests {
         // and the inequality above is the assertion that discharges the rule.
         // It is kept so that a regrowth of the enum is reported as a number
         // rather than as a silent approach to the threshold.
-        assert_eq!(std::mem::size_of::<MediaError>(), 96);
+        assert_eq!(std::mem::size_of::<MediaError>(), 80);
     }
 
     fn asset(id: u64, kind: MediaKind) -> MediaAsset {
@@ -3510,7 +3560,7 @@ mod tests {
             MediaError::NotImplemented,
             MediaError::Cancelled,
             MediaError::UnsupportedDecoderFormat {
-                path: std::path::PathBuf::new(),
+                path: std::path::PathBuf::new().into_boxed_path(),
                 format: String::new(),
                 declared_bit_depth: None,
                 decoder_bit_depth: None,

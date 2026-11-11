@@ -37,9 +37,8 @@ use kinewright_core::{
     ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceProfile,
     ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Command, Core,
     DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, Event, ExportCancellation,
-    ExportSettings, JournalCommand, MediaAsset, MediaError, MediaKind, Operation, ParamValue,
-    Rational, TimeCode, Track, TrackId, TrackKind, delivery_conformance,
-    effect_compatibility_stage, is_legacy_display_effect,
+    ExportSettings, MediaAsset, MediaError, Operation, ParamValue, Rational, TimeCode, Track,
+    TrackId, TrackKind, delivery_conformance,
 };
 use serde_json::{Value, json};
 
@@ -219,19 +218,6 @@ fn srgb_description(depth: u8) -> ColorDescription {
         bit_depth: ColorBitDepth::Integer(u16::from(depth)),
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
-    }
-}
-
-fn cc0_application_description(matrix: ColorMatrix, range: ColorRange) -> ColorDescription {
-    ColorDescription {
-        primaries: ColorPrimaries::Bt709,
-        transfer: ColorTransfer::Bt709,
-        matrix,
-        range,
-        white_point: ColorWhitePoint::D65,
-        bit_depth: ColorBitDepth::Eight,
-        confidence_basis_points: 10_000,
-        provenance: ColorProvenance::ApplicationDefault,
     }
 }
 
@@ -543,7 +529,7 @@ fn generate_ramp_media(directory: &TempDirectory, spec: &RampSpec) -> (PathBuf, 
     let color_range = match &spec.range {
         ColorRange::Full => "pc",
         ColorRange::Limited => "tv",
-        _ => unreachable!("ramp specs use full or limited range"),
+        ColorRange::Unknown => unreachable!("ramp specs use full or limited range"),
     };
     let (color_transfer, color_matrix, color_primaries) = match spec.encoding {
         RampEncoding::Rec709 => ("bt709", "bt709", "bt709"),
@@ -1707,239 +1693,6 @@ fn cc1_manifest_declares_every_required_evidence_fixture() {
             "tolerances_matched_code_constants": true,
             "targets_matched_project_state": true,
         }),
-    );
-}
-
-#[test]
-fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
-    let legacy = Effect {
-        enabled: true,
-        enabled_curve: None,
-        id: EffectId(7),
-        name: "color_grade".to_owned(),
-        parameters: BTreeMap::from([
-            ("exposure_milli_stops".to_owned(), ParamValue::Integer(750)),
-            (
-                "label".to_owned(),
-                ParamValue::Text("preserve me".to_owned()),
-            ),
-        ]),
-        keyframes: BTreeMap::new(),
-    };
-    let mut document = Document::default();
-    document.tracks.push(Track {
-        id: TrackId(1),
-        kind: TrackKind::Video,
-        sync_lock: true,
-        clips: vec![Clip {
-            enabled: true,
-            enabled_curve: None,
-            id: ClipId(1),
-            asset: AssetId(1),
-            source_range: TimeCode::ZERO..TimeCode(10),
-            content: ClipContent::Media,
-            timeline_start: TimeCode::ZERO,
-            effects: vec![
-                Effect {
-                    enabled: true,
-                    enabled_curve: None,
-                    id: EffectId(6),
-                    name: "brightness".to_owned(),
-                    parameters: BTreeMap::new(),
-                    keyframes: BTreeMap::new(),
-                },
-                legacy.clone(),
-                Effect {
-                    enabled: true,
-                    enabled_curve: None,
-                    id: EffectId(8),
-                    name: "saturation".to_owned(),
-                    parameters: BTreeMap::new(),
-                    keyframes: BTreeMap::new(),
-                },
-            ],
-            transition_in: None,
-            link: None,
-            audio_gain_tenth_db: 0,
-            audio_fade_in_frames: TimeCode::ZERO,
-            audio_fade_out_frames: TimeCode::ZERO,
-            speed_percent: 100,
-            audio_gain_curve: None,
-            blend_mode: kinewright_core::BlendMode::Normal,
-        }],
-    });
-    let wire = serde_json::to_value(&document).expect("migration document should serialize");
-    assert_eq!(
-        wire["tracks"][0]["clips"][0]["effects"][1]["name"],
-        "color_grade"
-    );
-    let decoded: Document = serde_json::from_value(wire).expect("legacy document should decode");
-    let effects = &decoded.tracks[0].clips[0].effects;
-    assert_eq!(effects[1].name, "primary_correction");
-    assert_eq!(effects[1].parameters, legacy.parameters);
-    assert_eq!(
-        effects
-            .iter()
-            .map(|effect| effect.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["brightness", "primary_correction", "saturation"]
-    );
-    let mut pre_cc0 = serde_json::to_value(Document::default()).expect("pre-CC0 document");
-    pre_cc0
-        .as_object_mut()
-        .expect("document object")
-        .remove("color_context");
-    let pre_cc0_reopened: Document =
-        serde_json::from_value(pre_cc0).expect("pre-CC0 document should reopen");
-    assert_eq!(pre_cc0_reopened.color_context, ColorContext::sdr_rec709());
-    let cc0_context = serde_json::json!({
-        "working": cc0_application_description(ColorMatrix::Rgb, ColorRange::Full),
-        "monitoring": cc0_application_description(ColorMatrix::Rgb, ColorRange::Full),
-        "delivery": cc0_application_description(ColorMatrix::Bt709, ColorRange::Limited),
-    });
-    let migrated_cc0: ColorContext =
-        serde_json::from_value(cc0_context).expect("CC0 context should migrate");
-    assert_eq!(migrated_cc0, ColorContext::sdr_rec709());
-    assert!(migrated_cc0.is_managed_sdr_compatible());
-    assert!(is_legacy_display_effect("brightness"));
-    assert_eq!(
-        effect_compatibility_stage("brightness"),
-        Some(kinewright_core::EffectCompatibilityStage::LegacyDisplayCoded)
-    );
-    assert_eq!(
-        effect_compatibility_stage("look_lut"),
-        Some(kinewright_core::EffectCompatibilityStage::PostPrimaryLut)
-    );
-    let saved = serde_json::to_vec(&decoded).expect("save migrated document");
-    let reopened: Document = serde_json::from_slice(&saved).expect("reopen migrated document");
-    assert_eq!(reopened, decoded);
-    let migration_asset = MediaAsset {
-        id: AssetId(22),
-        path: PathBuf::from("cc1-migration-fixture.mp4"),
-        name: "migration fixture".to_owned(),
-        duration: TimeCode(30),
-        fps: Rational::new(30, 1).expect("migration fps"),
-        kind: MediaKind::Video,
-        resolution: Some((16, 16)),
-        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
-        color_description: ColorDescription::default(),
-        assumed_from: None,
-    };
-    let add_asset = Operation::AddAsset {
-        asset: migration_asset.clone(),
-    };
-    let core = Core::spawn(Document::default()).expect("migration core");
-    let add_event = core
-        .request(Command::Do(add_asset.clone()))
-        .expect("journal add asset");
-    assert!(matches!(
-        add_event,
-        Event::DocumentChanged {
-            journal_command: Some(JournalCommand::Do(_)),
-            ..
-        }
-    ));
-    let mut replay_legacy_effect = legacy.clone();
-    replay_legacy_effect.parameters.remove("label");
-    let legacy_journal = JournalCommand::Do(Operation::AddEffect {
-        clip: ClipId(1),
-        effect: replay_legacy_effect.clone(),
-    });
-    let replay_wire =
-        serde_json::to_value(legacy_journal).expect("legacy journal should serialize");
-    let replay: JournalCommand =
-        serde_json::from_value(replay_wire).expect("legacy journal should deserialize");
-    let JournalCommand::Do(Operation::AddEffect {
-        clip: replay_clip,
-        effect: replay_effect,
-    }) = &replay
-    else {
-        panic!("legacy journal should retain an AddEffect operation");
-    };
-    assert_eq!(*replay_clip, ClipId(1));
-    assert_eq!(replay_effect.name, "primary_correction");
-    assert_eq!(replay_effect.parameters, replay_legacy_effect.parameters);
-    let mut replay_seed = document.clone();
-    replay_seed.tracks[0].clips[0].effects.truncate(1);
-    let mut replay_asset = migration_asset.clone();
-    replay_asset.id = AssetId(1);
-    replay_seed.media_pool.push(replay_asset);
-    replay_seed.fps = Rational::new(30, 1).expect("replay fps");
-    replay_seed.duration = TimeCode(10);
-    let replay_core = Core::spawn(replay_seed).expect("replay core");
-    let replay_event = replay_core
-        .request(replay.clone().into())
-        .expect("legacy journal replay should apply");
-    let replayed_document = match replay_event {
-        Event::DocumentChanged { doc, .. } => doc,
-        other => panic!("legacy journal replay was not accepted: {other:?}"),
-    };
-    let replayed_effects = &replayed_document.tracks[0].clips[0].effects;
-    assert_eq!(
-        replayed_effects
-            .iter()
-            .map(|effect| effect.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["brightness", "primary_correction"]
-    );
-    assert_eq!(
-        replayed_effects[1].parameters,
-        replay_legacy_effect.parameters
-    );
-    let override_operation = Operation::SetAssetColorDescription {
-        asset: migration_asset.id,
-        color_description: rec709_description(8, ColorRange::Limited, ColorTransfer::Bt709),
-    };
-    let changed = core
-        .request(Command::Do(override_operation))
-        .expect("migration override");
-    assert!(matches!(changed, Event::DocumentChanged { .. }));
-    let undone = core.request(Command::Undo).expect("migration undo");
-    let undone_document = match undone {
-        Event::DocumentChanged {
-            doc,
-            journal_command: Some(JournalCommand::Undo),
-            ..
-        } => doc,
-        other => panic!("migration undo was not an accepted document state: {other:?}"),
-    };
-    assert!(
-        undone_document
-            .asset(migration_asset.id)
-            .expect("undo asset")
-            .color_description
-            .is_unknown()
-    );
-    let redone = core.request(Command::Redo).expect("migration redo");
-    let redone_document = match redone {
-        Event::DocumentChanged {
-            doc,
-            journal_command: Some(JournalCommand::Redo),
-            ..
-        } => doc,
-        other => panic!("migration redo was not an accepted document state: {other:?}"),
-    };
-    assert_eq!(
-        redone_document
-            .asset(migration_asset.id)
-            .expect("redo asset")
-            .color_description,
-        rec709_description(8, ColorRange::Limited, ColorTransfer::Bt709)
-    );
-    emit_evidence(
-        "cc1_migration",
-        "kinewright_core_serde",
-        None,
-        None,
-        json!({"legacy_wire_name": "color_grade", "canonical_name": "primary_correction"}),
-        (0, 0),
-        None,
-        output_hash(
-            serde_json::to_string(&decoded)
-                .expect("migration hash")
-                .as_bytes(),
-        ),
-        json!({"vector_position_preserved": true, "parameters_preserved": true, "pre_cc0_reopen": true, "cc0_context_migrated": true, "legacy_display_effects_classified": true, "save_reopen": true, "journal_replay": true, "undo": true, "redo": true, "core_coverage": ["legacy_effect_migration_preserves_project_vector_position", "exact_old_cc0_context_migrates_to_managed_sdr_v1", "legacy_effect_inside_journal_operation_migrates_on_decode", "color_override_events_journal_and_history_preserve_the_exact_operation"]}),
     );
 }
 

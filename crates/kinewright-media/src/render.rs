@@ -1938,8 +1938,8 @@ mod tests {
 
     use half::f16;
     use kinewright_core::{
-        Analysis, AssetId, Clip, ClipContent, ColorPipelineState, ColorTransfer, EffectId,
-        LutAssetId, MediaAsset, ParamValue, Track, TrackId, TrackKind,
+        Analysis, AssetId, Clip, ClipContent, ColorTransfer, EffectId, LutAssetId, MediaAsset,
+        ParamValue, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -2415,19 +2415,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_renderer_rejects_legacy_and_future_contexts() {
-        let mut legacy = Document::default();
-        legacy.color_context.pipeline_state = ColorPipelineState::Legacy;
-        let error = validate_managed_context(&legacy).expect_err("legacy must be rejected");
-        assert!(error.to_string().contains("pipeline_state=Legacy"));
-
-        let mut future = Document::default();
-        future.color_context.pipeline_state = ColorPipelineState::Other("managed_sdr_v2".into());
-        let error = validate_managed_context(&future).expect_err("future state must be rejected");
-        assert!(error.to_string().contains("managed_sdr_v2"));
-    }
-
-    #[test]
     fn managed_renderer_rejects_incompatible_working_or_monitoring_targets() {
         let mut working = Document::default();
         working.color_context.working.transfer = ColorTransfer::Bt709;
@@ -2744,7 +2731,7 @@ mod tests {
             &unsupported_source(),
             None,
             MediaError::UnsupportedDecoderFormat {
-                path: "/media/ten-bit.mov".into(),
+                path: Path::new("/media/ten-bit.mov").into(),
                 format: "yuv420p10le".to_owned(),
                 declared_bit_depth: Some(10),
                 decoder_bit_depth: Some(8),

@@ -158,6 +158,7 @@ pub const TITLE_PARAMETER_DESCRIPTORS: &[TitleParameterDescriptor] = &[
     Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum TitlePosition {
     LowerThird,
     #[default]
@@ -193,6 +194,7 @@ impl std::str::FromStr for TitlePosition {
 /// ordinary title fields, so preview and export share exactly the same result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum CaptionPreset {
     Clean,
     Social,
@@ -258,7 +260,7 @@ impl std::str::FromStr for CaptionPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct Title {
     pub text: String,
     pub font_size_token: u8,

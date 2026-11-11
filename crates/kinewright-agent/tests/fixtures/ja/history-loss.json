@@ -10,8 +10,8 @@
   "inputs": {
     "edit": {
       "relative_file": "command-add-track.json",
-      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
-      "byte_length": 157,
+      "sha256": "003b88bb9c3da5ec0bdc8bee3b19dad411d697fb872956f0555ca1414730bc10",
+      "byte_length": 181,
       "kind": "current-command"
     }
   },

@@ -1045,6 +1045,7 @@ CI runs **no** eval (`.github/workflows/ci.yml` is fmt/build/test/clippy only). 
 ```rust
 pub struct HumanReviewFile {
     pub schema_version: u32,          // 1 or 2 accepted; 2 is written
+    // Version-1 reading withdrawn on 2026-11-10 by Riel's decision.
     pub benchmark_id: String,
     pub run_id: String,
     pub reviewer: Option<String>,
@@ -1078,6 +1079,8 @@ pub struct HumanQuestion {
 **`blind_id` is derived, never random**: the first **12** lowercase hex characters of the task's `artifact_sha256`. Two identical artefacts therefore share a `blind_id`, which makes mechanical the existing "one viewing may be applied to several rows when the artifact hashes are identical" convention (`docs/EVALS.md:82-84`). `blind_id` is `None` for a task with no artefact.
 
 **Backward compatibility.** `schema_version: 1` files still load: the version check at `eval.rs:1698-1703` accepts `1 | 2`, `blind_id` and `questions` default to `None` / `[]`, and a v1 file validates exactly as it does today. `HumanRatingDimension` is **unchanged** — no colour dimension is added (§13).
+
+Version-1 review compatibility and its test were withdrawn on 2026-11-10 by Riel’s decision.
 
 ### 8.2 The `blind/` directory and the key (R-B8)
 
@@ -1115,6 +1118,8 @@ human-review.json               in the run root; written or updated by --score-r
 ```
 
 **`--score-review PATH` accepts either file.** Given a v1/v2 `human-review.json` it behaves exactly as today. Given a `blind/review-form.json` it reads the sibling `blind-key.json`, resolves every `blind_id` to its `task_id` and sample, **and does so BEFORE calling `verify_review_artifact_bindings`** — a named change to that function's *caller* (`score_review_file`, `kinewright-eval.rs:637-676`), because `verify_review_artifact_bindings` (`:678-743`) derives ids from `machine_report["results"][].name` (`:694-717`) and looks `task.task_id` up at `:719`; a form keyed on `blind_id` fails there for every task unless resolution happens first. After resolution it writes the unblinded `human-review.json` into the run root and validates as before: `artifact_sha256` must equal the machine-reported `deliverable.output_sha256`, and a rated-but-unbound task is an error. A `blind_id` absent from the key is a typed error naming the id.
+
+Version-1 review compatibility and its test were withdrawn on 2026-11-10 by Riel’s decision.
 
 ### 8.3 The template
 
@@ -1170,6 +1175,9 @@ CC7's blind review is satisfied when, for each family (scenario) in the package:
 2. **`EvalResult.measurements` is `skip_serializing_if` only (R-M3).** `EvalResult` derives `Serialize` and nothing else (`eval.rs:557`); nothing in the workspace deserializes it and `results.jsonl` is write-only (`render_jsonl`, `eval.rs:6516-6532`). There is therefore **no** parse-compatibility claim to make and no `#[serde(default)]` to add — it would be inert. What is guaranteed, and asserted by §11.2.32, is that a result with no measurements **serialises byte-identically to today**, so every checked-in `benchmarks/auto-edit/v{1..5}/*baseline*.json` and every historic JSONL line keeps its exact shape.
 3. **`EvalDeliverableSpec` is a compile-time change, not a migration (R-B7).** The struct has **no serde derives** (`eval.rs:94-107`), so `delivery_bit_depth: DeliveryEncodeDepth` is a plain field and **every existing struct literal is edited** to pass `DeliveryEncodeDepth::Eight` — roughly five sites in `kinewright-eval.rs`, named in §12 step 8. No `Default` impl, no `..Default::default()`: a future field must be a deliberate edit at every site rather than a silent zero.
 4. **`human-review.json` v1 → v2.** The version check accepts `1 | 2`. `blind_id` and `questions` are `#[serde(default)]` **and** `skip_serializing_if`, so a v1 file round-trips byte-identically through the v2 code and a v2 file with neither field is indistinguishable from v1. `HumanRatingDimension`'s six variants and their wire strings are untouched.
+
+Version-1 review compatibility and its test were withdrawn on 2026-11-10 by Riel’s decision.
+
 5. **`blind/review-form.json` and `blind-key.json` are new**, both `schema_version: 1`. Neither exists for a pre-CC7 run; `--score-review` on an old run finds no form and no key and takes its existing `human-review.json` path unchanged. A `blind/review-form.json` presented **without** a sibling `blind-key.json` is a typed error naming the missing path, never a silent fallback.
 6. **`EvalOutcome` and `PreparedFixture` are internal (R-B1, R-B2).** Neither is serialized anywhere, so `original_document`, `color: Option<ColorEvalEvidence>` and `project_path: Option<PathBuf>` are ordinary field additions. `PreparedFixture` is constructed only inside the fixture builders, so v1–v5 pass `project_path: None` explicitly and the shared runner's `set_project_path` call is a no-op for them.
 7. **`ExportSettings`, `ExportJobRecord`, `DeliveryConformanceReport` are unchanged.** CC7 reads them; it adds no field and changes no default.
@@ -1268,6 +1276,8 @@ Every entry names its **manifest key** and its **failing direction**. Every test
 **Eval — `crates/kinewright-agent/src/eval.rs` and `src/bin/kinewright-eval.rs` (`CC7_EVAL_TESTS`)**
 
 32. **`published_v6_manifest_tracks_the_color_workflow_suite`** (§7.7, including the generated-vs-checked-in `ground-truth.json` byte equality); **`cc7_color_workflow_suite_is_a_packaged_benchmark`** (the EVALS.md-overwrite guard); **`cc7_a_v5_result_serialises_byte_identically_without_measurements`** (R-M3 — the replacement for draft v3's un-writable "pre-CC7 record parses" test, since `EvalResult` is `Serialize`-only); **`cc7_color_evidence_is_computed_where_the_analysis_is_alive`** (R-B1 — `EvalOutcome.color` is `Some` after a run with a colour fixture and `None` for a v1–v5 fixture, so the plumbing is exercised and the other suites are proved untouched); **`cc7_a_fixture_project_path_reaches_the_server`** (R-B2 — `project_path: Some(_)` makes `import_lut_asset` succeed and `None` still refuses `project_not_saved`, both directions); **`cc7_the_blind_package_discloses_no_machine_provenance`** (§8.5, scanning the listing **and** the form bytes, with both leak directions); **`cc7_human_review_v1_files_still_load_and_score`** (§9.4); **`cc7_accepted_requires_every_question_answered`** (§8.3, both directions); **`cc7_score_review_resolves_a_blind_form_before_binding`** (§8.2 — a `blind/review-form.json` scores through the key, and a `blind_id` absent from the key is a typed error).
+
+Version-1 review compatibility and its test were withdrawn on 2026-11-10 by Riel’s decision.
 
 **Inventory (`CC7_INVENTORY_TESTS`)**
 

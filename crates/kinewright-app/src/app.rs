@@ -1,3 +1,5 @@
+#[cfg(test)]
+use kinewright_core::PROJECT_FORMAT_VERSION;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -16,16 +18,14 @@ use kinewright_core::{
     EffectId, Event, Incident, IncidentCode, IncidentId, IncidentObservation, IncidentOutcome,
     IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident, LiveAudioChange,
     MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
-    NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
-    PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, PreviewFrame,
-    Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
-    recovery_description,
+    NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation, ParamValue,
+    Playback, PlaybackState, PolicyClass, PreviewFrame, Rational, RecoveryKind, SilenceStatus,
+    TimeCode, TimelineRevision, Track, TrackId, TrackKind, recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 use kinewright_project::{
     FlushOutcome, ProjectSaveError, ProjectSaveReport, RefuseRename, SidecarMode, SidecarWriter,
-    can_overwrite_save, derive_lut_store, digest_bytes, min_required_format_version,
-    project_newer_format_observation, refuse_sidecar, rollback_sidecar_write, same_project_file,
+    derive_lut_store, digest_bytes, refuse_sidecar, rollback_sidecar_write, same_project_file,
     serialize_project_document, sidecar_path_for_project, sidecar_write_failed_observation,
     snapshot_sidecar_rollback,
 };
@@ -551,22 +551,13 @@ impl KinewrightApp {
     #[allow(clippy::too_many_lines)]
     fn new(media: Arc<FfmpegMediaEngine>, startup_path: Option<PathBuf>) -> Self {
         let mut load_error = None;
-        let mut newer_note = None;
         let mut source_admission = kinewright_project::bundle::BundleWriteAdmission::new_document();
-        let (name, document, project_path, format_version, project_digest) = match startup_path {
+        let (name, document, project_path, project_digest) = match startup_path {
             Some(path) if path.is_file() => match inspect_project_document(&path) {
-                Ok((document, version, digest, admission)) => {
+                Ok((document, _version, digest, admission)) => {
                     source_admission = admission;
-                    // `IN2B` §4 rule 4, startup arm: a newer file opens; the
-                    // note queues below, beside `load_error`.
-                    if version > PROJECT_FORMAT_VERSION {
-                        newer_note = Some(project_newer_format_observation(
-                            version,
-                            TimelineRevision::default(),
-                        ));
-                    }
                     let name = project_name(Some(&path), "Project 1");
-                    (name, document, Some(path), version, digest)
+                    (name, document, Some(path), digest)
                 }
                 // `IN1b` §5.4 rule 27: the first dynamic site is not dynamic
                 // in substance — both producers wrote the literal `"Project"` —
@@ -581,7 +572,6 @@ impl KinewrightApp {
                         "Project 1".to_owned(),
                         default_project_document(),
                         None,
-                        PROJECT_FORMAT_VERSION,
                         String::new(),
                     )
                 }
@@ -595,7 +585,6 @@ impl KinewrightApp {
                     "Project 1".to_owned(),
                     default_project_document(),
                     None,
-                    PROJECT_FORMAT_VERSION,
                     String::new(),
                 )
             }
@@ -603,7 +592,6 @@ impl KinewrightApp {
                 "Project 1".to_owned(),
                 default_project_document(),
                 None,
-                PROJECT_FORMAT_VERSION,
                 String::new(),
             ),
         };
@@ -635,7 +623,6 @@ impl KinewrightApp {
             crate::media_access::MediaBackend::Engine(Arc::clone(&lut_publisher)),
             &sidecar_mode,
             Some(Arc::clone(&sidecar_writer)),
-            format_version,
             None,
         )
         .expect("startup project session must be valid");
@@ -826,12 +813,6 @@ impl KinewrightApp {
         );
         crate::investigator::apply_settings_load_for_run(&mut app, settings_load, settings_durable);
         let opened_path = app.focused().project_path.clone();
-        // The startup newer-file arm (§4 rule 4): the project opened above,
-        // exactly one incident notes it. Queued ahead of the media check so
-        // a newer file still gets both.
-        if let Some(observation) = newer_note {
-            app.note_observation(observation);
-        }
         if let Some(observation) = load_error {
             app.note_observation(observation);
         } else if let Some(path) =
@@ -964,7 +945,7 @@ impl KinewrightApp {
                     )
                 } else {
                     kinewright_project::editing_session::Ja1EditingSession::new(
-                        &kinewright_project::default_recovery_directory(),
+                        &crate::recovery::directory(),
                         &session.core,
                         kinewright_project::storage_budget::StorageLimits::default(),
                     )
@@ -1305,7 +1286,6 @@ impl KinewrightApp {
         source_admission: kinewright_project::bundle::BundleWriteAdmission,
         project_path: Option<PathBuf>,
         sidecar_mode: &SidecarMode,
-        format_version: u32,
     ) -> Result<ProjectSession, String> {
         let id = self.next_project_id;
         self.next_project_id = self
@@ -1323,7 +1303,6 @@ impl KinewrightApp {
             crate::media_access::MediaBackend::Engine(Arc::clone(&self.lut_publisher)),
             sidecar_mode,
             Some(writer),
-            format_version,
             refuse_rename,
         )?;
         // The investigator settings are app-wide: a new project inherits the
@@ -1420,9 +1399,7 @@ impl KinewrightApp {
     ///
     /// # Errors
     ///
-    /// Returns the typed serialize or write failure, or the newer-format
-    /// refusal (`IN2B` §4 rule 3 — no bytes written at all, and the caller
-    /// re-surfaces the rule-4 card instead of noting). A store-root refusal is
+    /// Returns the typed serialization, write or authority refusal. A store-root refusal is
     /// not fatal: the project is saved and its imported looks report `missing`
     /// until the root is usable.
     #[allow(
@@ -1439,17 +1416,6 @@ impl KinewrightApp {
         {
             let notice = self.focused().ja1.as_ref().and_then(|j| j.destination_change().err()).map_or_else(|| "Use the Studio lifecycle save action; a document-only write cannot replace this project.".into(), |e| e.to_string());
             return Err(ProjectSaveError::UnsupportedBundle { notice });
-        }
-        if !can_overwrite_save(self.focused().format_version)
-            && self
-                .focused()
-                .project_path
-                .as_deref()
-                .is_some_and(|open| same_project_file(open, path))
-        {
-            return Err(ProjectSaveError::NewerFormat {
-                read_version: self.focused().format_version,
-            });
         }
         self.focused()
             .source_admission
@@ -1470,16 +1436,8 @@ impl KinewrightApp {
                 ),
             });
         }
-        // Retained raw admission already protects both Save and Save As.
-        // Preserve the typed newer-version error for same-project saves.
-        if !save_as && !can_overwrite_save(self.focused().format_version) {
-            return Err(ProjectSaveError::NewerFormat {
-                read_version: self.focused().format_version,
-            });
-        }
         // N6/H2: a recovered copy, or a path open in another session,
-        // routes overwrite-save to Save As — checked before any IO, like
-        // the newer-format gate above.
+        // routes overwrite-save to Save As before any IO.
         if !save_as && let Some(notice) = self.overwrite_save_refusal() {
             return Err(ProjectSaveError::SaveAsRequired { notice });
         }
@@ -1537,11 +1495,7 @@ impl KinewrightApp {
         // below is what `write_project_bytes` writes and what the digest
         // covers.
         let json = serialize_project_document(to_write)?;
-        let written_version = min_required_format_version(to_write);
         let new_digest = digest_bytes(json.as_bytes());
-        if save_as {
-            self.drop_newer_format_note_for_save_as();
-        }
         // Same sidecar stem, same previous save; a new stem has no previous.
         let previous_digest = if save_as {
             String::new()
@@ -1662,7 +1616,7 @@ impl KinewrightApp {
             )?,
         );
         report.path = path.to_path_buf();
-        self.adopt_saved_path(path, &new_digest, written_version);
+        self.adopt_saved_path(path, &new_digest);
         if let Some(reason) = &report.lut_store_error {
             // Appendix B row 3: the project **was** saved.
             self.note_label(
@@ -1743,12 +1697,6 @@ impl KinewrightApp {
                 }
                 true
             }
-            // `IN2B` §4 rule 3: a refused overwrite-save re-surfaces the
-            // rule-4 card — no second incident, exactly one per newer file.
-            Err(ProjectSaveError::NewerFormat { .. }) => {
-                self.resurface_newer_format_card();
-                false
-            }
             // N6/H2, H5: a routed or refused save posts its notice — a
             // refusal, not an incident.
             Err(
@@ -1771,10 +1719,8 @@ impl KinewrightApp {
     }
 
     /// The project bytes landed: the session adopts the saved path,
-    /// digest, and store, records the version actually written (the bytes
-    /// on the path are this build's — `IN2B` §4 rule 3, MO2 R7), and
-    /// checkpoints the recovery journal onto the new baseline.
-    fn adopt_saved_path(&mut self, path: &Path, new_digest: &str, written_version: u32) {
+    /// digest and store, then checkpoints recovery onto the new baseline.
+    fn adopt_saved_path(&mut self, path: &Path, new_digest: &str) {
         let name = project_name(Some(path), &self.focused().name);
         let writer = self.focused().sidecar.authority.clone();
         let io_project = writer.as_ref().map_or(path, |w| w.resolved_identity());
@@ -1790,7 +1736,6 @@ impl KinewrightApp {
         if let Some(stem) = sidecar_path_for_project(Some(io_project)) {
             session.established.insert(stem);
         }
-        session.format_version = written_version;
         session.set_lut_store(store, store_error);
         session.saved_document = Some(Arc::clone(&session.document));
         if let Some(investigator) = session.investigator.as_mut() {
@@ -1805,32 +1750,6 @@ impl KinewrightApp {
             session.sidecar.authority.clone(),
         );
         self.lut_publisher.set_lut_library(&library);
-    }
-
-    /// N2/B-4: the newer-format note was about the old path's bytes — a
-    /// live-log removal, not a resolution, before the fresh sidecar is
-    /// written so the new stem carries no false card.
-    fn drop_newer_format_note_for_save_as(&mut self) {
-        let incidents = Arc::clone(&self.focused().incidents);
-        let mut log = incidents
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = log.remove_open_with_code(IncidentCode::Label(LabelIncident::ProjectNewerFormat));
-    }
-
-    /// Re-surface the newer-format card after a refused overwrite-save
-    /// (`IN2B` §4 rule 3): the Incidents panel opens on the rule-4 incident
-    /// — no new incident, no dialog, no toast.
-    ///
-    /// The panel holds no per-card selection state, so opening it *is*
-    /// selecting the card: the newer-format session's card is the one that
-    /// explains the refusal.
-    fn resurface_newer_format_card(&mut self) {
-        self.incidents_open = true;
-        self.status = format!(
-            "Save and Save As disabled — this source is read-only (format_version {})",
-            self.focused().format_version
-        );
     }
 
     fn choose_project(&mut self) {
@@ -1857,7 +1776,6 @@ impl KinewrightApp {
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
             &SidecarMode::None,
-            PROJECT_FORMAT_VERSION,
         ) {
             Ok(session) => session,
             Err(error) => {
@@ -1903,8 +1821,8 @@ impl KinewrightApp {
 
     /// The status notice when the focused session must Save As instead of
     /// overwriting (N6/H2), `None` when overwrite-save is allowed: recovered
-    /// copies and paths open in another session route to Save As, as the
-    /// newer-format gate does. N6.1/J5: an H3 suspension blocks sidecar
+    /// copies and paths open in another session route to Save As.
+    /// N6.1/J5: an H3 suspension blocks sidecar
     /// writes only, never the project save.
     fn overwrite_save_refusal(&self) -> Option<String> {
         self.overwrite_save_refusal_for(self.focused_project)
@@ -1954,19 +1872,18 @@ impl KinewrightApp {
         if self.refocus_if_open(path) {
             return;
         }
-        let (document, format_version, project_digest, admission) =
-            match inspect_project_document(path) {
-                Ok(triple) => triple,
-                // Appendix B row 7.
-                Err(error) => {
-                    self.note_label(
-                        LabelIncident::Project,
-                        IncidentSubject::Project,
-                        format!("Could not open {}: {error}", path.display()),
-                    );
-                    return;
-                }
-            };
+        let (document, _version, project_digest, admission) = match inspect_project_document(path) {
+            Ok(triple) => triple,
+            // Appendix B row 7.
+            Err(error) => {
+                self.note_label(
+                    LabelIncident::Project,
+                    IncidentSubject::Project,
+                    format!("Could not open {}: {error}", path.display()),
+                );
+                return;
+            }
+        };
         let missing: Vec<String> = document
             .media_pool
             .iter()
@@ -1981,7 +1898,6 @@ impl KinewrightApp {
             admission,
             Some(path.to_path_buf()),
             &SidecarMode::Load { project_digest },
-            format_version,
         ) {
             Ok(session) => session,
             // Appendix B row 8.
@@ -2007,12 +1923,6 @@ impl KinewrightApp {
         self.projects.push(session);
         self.focus_project(self.projects.len() - 1);
         self.publish_focused_lut_library();
-        // `IN2B` §4 rule 4: a newer file opens — exactly one incident notes
-        // it, queued after the focus so it attributes to the new session.
-        if format_version > PROJECT_FORMAT_VERSION {
-            let revision = self.focused().revision;
-            self.note_observation(project_newer_format_observation(format_version, revision));
-        }
         if let Some(reason) = store_refusal {
             // Appendix B row 9: the session is pushed and focused *before*
             // this refusal, so the project opened — a degraded result.
@@ -2071,10 +1981,7 @@ impl KinewrightApp {
 
     /// Apply a recovery restore the dialog offered (`IN2B` §4 rule 5).
     ///
-    /// A cross-version journal is refused before its document is trusted: no
-    /// session, the pending entry shelved (the file stays for a newer
-    /// build), and exactly one `project_newer_format` incident. A
-    /// same-version restore loads the saved sidecar digest-less
+    /// A current restore loads the saved sidecar digest-less
     /// (`SidecarMode::RecoveryNoDigest` — the recovered document is
     /// definitionally newer than the last save); when the target path is
     /// already open, the restored session suspends sidecar writes until Save
@@ -2083,21 +1990,6 @@ impl KinewrightApp {
     /// the suspension keeps it from clobbering the open session's history).
     fn apply_restore_request(&mut self, request: RestoreRequest) {
         if !self.ja1_destination_change() {
-            return;
-        }
-        if request.writer_format_version > PROJECT_FORMAT_VERSION {
-            if let Some(first) = self.projects.first_mut() {
-                first.recovery.shelve_pending(&request.journal_path);
-            }
-            let revision = self.focused().revision;
-            self.note_observation(project_newer_format_observation(
-                request.writer_format_version,
-                revision,
-            ));
-            self.status = format!(
-                "Recovery refused: the journal was written by a newer Kinewright (format_version {})",
-                request.writer_format_version
-            );
             return;
         }
         let journal_path = request.journal_path;
@@ -2114,7 +2006,6 @@ impl KinewrightApp {
             .project_path
             .as_deref()
             .is_some_and(|path| self.session_index_for_path(path).is_some());
-        let format_version = request.writer_format_version;
         let result = self
             .create_project_session(
                 name,
@@ -2122,7 +2013,6 @@ impl KinewrightApp {
                 kinewright_project::bundle::BundleWriteAdmission::new_document(),
                 request.project_path,
                 &SidecarMode::RecoveryNoDigest,
-                format_version,
             )
             .map(|mut session| {
                 // N6.1/J1: the restore adds its suspension, never clears
@@ -2325,10 +2215,9 @@ impl KinewrightApp {
         };
         let project_name = self.projects[project_index].name.clone();
         // `IN2B` §4 rule 3: the prompt offers Save As, not overwrite-save,
-        // for a newer-format session — same keybinding, same position.
+        // for a routed session: same keybinding, same position.
         // N6/H2 extends the offer to routed sessions.
-        let can_save = can_overwrite_save(self.projects[project_index].format_version)
-            && self.overwrite_save_refusal_for(project_index).is_none();
+        let can_save = self.overwrite_save_refusal_for(project_index).is_none();
         let mut save = false;
         let mut discard = false;
         let mut cancel = false;
@@ -3784,25 +3673,17 @@ impl KinewrightApp {
             }
             if ui.button("Studio recovery and rescue…").clicked() {
                 ui.close();
-                if let Some(ja1) = &mut self.focused_mut().ja1 { ja1.panel_open = true; }
-                else { self.enable_ja1(); }
-            }
-            // `IN2B` §4 rule 3: Save greys out for a newer-format session,
-            // with a tooltip naming the version; Save As stays enabled.
-            // N6/H2 greys it out for routed sessions too, with the refusal
-            // notice as the tooltip.
-            let can_save = can_overwrite_save(self.focused().format_version)
-                && self.overwrite_save_refusal().is_none();
-            let mut save = ui.add_enabled(can_save, egui::Button::new("Save"));
-            if !can_save {
-                if let Some(notice) = self.overwrite_save_refusal() {
-                    save = save.on_hover_text(notice);
+                if let Some(ja1) = &mut self.focused_mut().ja1 {
+                    ja1.panel_open = true;
                 } else {
-                    save = save.on_hover_text(format!(
-                        "Saving is disabled: this project was written by a newer Kinewright (format_version {}). Use Save As.",
-                        self.focused().format_version
-                    ));
+                    self.enable_ja1();
                 }
+            }
+            // Routed sessions show the refusal notice in the Save tooltip.
+            let can_save = self.overwrite_save_refusal().is_none();
+            let mut save = ui.add_enabled(can_save, egui::Button::new("Save"));
+            if !can_save && let Some(notice) = self.overwrite_save_refusal() {
+                save = save.on_hover_text(notice);
             }
             if save.clicked() {
                 ui.close();
@@ -6587,7 +6468,6 @@ pub(crate) mod in1_tests {
             crate::media_access::MediaBackend::Engine(Arc::clone(&engine)),
             &SidecarMode::None,
             None,
-            PROJECT_FORMAT_VERSION,
             None,
         )
         .expect("the test session builds");
@@ -7602,7 +7482,7 @@ pub(crate) mod in1_tests {
         let revision = second.focused().revision;
         second.note_observation(IncidentObservation::from_media_error(
             &MediaError::UnsupportedDecoderFormat {
-                path: PathBuf::from("clip.mov"),
+                path: PathBuf::from("clip.mov").into_boxed_path(),
                 format: "yuv444p12le".to_owned(),
                 declared_bit_depth: Some(12),
                 decoder_bit_depth: None,
@@ -9833,8 +9713,8 @@ pub(crate) mod in1_tests {
         app.write_project(&path).expect("the muted project saves");
         let (muted, version, _) = load_document(&path).expect("the muted project reopens");
         assert_eq!(
-            version, 1,
-            "the muted fixture is versionless and reads as 1"
+            version, PROJECT_FORMAT_VERSION,
+            "the muted fixture uses the current envelope"
         );
         assert_eq!(
             muted
@@ -9849,8 +9729,8 @@ pub(crate) mod in1_tests {
         app.write_project(&path).expect("the unmuted project saves");
         let (reopened, version, _) = load_document(&path).expect("the unmuted project reopens");
         assert_eq!(
-            version, 1,
-            "the unmuted fixture is versionless and reads as 1"
+            version, PROJECT_FORMAT_VERSION,
+            "the unmuted fixture uses the current envelope"
         );
         assert!(
             reopened.investigator.is_none()
@@ -9900,7 +9780,6 @@ pub(crate) mod in1_tests {
             crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
             &SidecarMode::None,
             None,
-            PROJECT_FORMAT_VERSION,
             None,
         )
         .expect("the second IN2 project builds");
@@ -11432,42 +11311,12 @@ mod in2b_tests {
         FlushOutcome, ProjectFile, SidecarLoad, load_sidecar, sidecar_matches_project,
     };
 
-    fn admission_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
-        fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
-            for entry in fs::read_dir(path).unwrap() {
-                let path = entry.unwrap().path();
-                let metadata = fs::symlink_metadata(&path).unwrap();
-                if metadata.is_dir() {
-                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), vec![]);
-                    visit(root, &path, out);
-                } else {
-                    assert!(metadata.is_file());
-                    // A held lock object denies second-handle reads on
-                    // Windows (`LockFileEx`, lockfile B4); its length stands
-                    // in for its bytes.
-                    let locked = cfg!(windows)
-                        && path
-                            .to_string_lossy()
-                            .ends_with(kinewright_project::LOCKFILE_SUFFIX);
-                    let bytes = if locked {
-                        format!("lock object, {} bytes", metadata.len()).into_bytes()
-                    } else {
-                        fs::read(&path).unwrap()
-                    };
-                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), bytes);
-                }
-            }
-        }
-        let mut out = std::collections::BTreeMap::new();
-        visit(path, path, &mut out);
-        out
-    }
     #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "full app caller refusal matrix and successful control"
     )]
-    fn save_as_unsupported_source_or_destination_has_zero_mutations() {
+    fn current_studio_save_and_plain_save_as_refuse_before_any_mutation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let temp = TempDirectory::new_in(
             &kinewright_media::test_support::workspace_target_dir(),
@@ -11477,23 +11326,16 @@ mod in2b_tests {
         fs::create_dir(&recovery).unwrap();
         crate::recovery::with_ja_directory(recovery.clone(), || {
             let legacy = serialize_project_document(&Document::default()).unwrap();
-            let future = legacy.replacen(
-                '{',
-                &format!("{{\"format_version\":{},", PROJECT_FORMAT_VERSION + 1),
-                1,
-            );
             let studio = include_bytes!(
                 "../../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
             );
             for (case, source_bytes, destination_bytes, same) in [
-                ("future-new", future.as_bytes(), None, false),
                 (
-                    "future-existing",
-                    future.as_bytes(),
-                    Some(legacy.as_bytes()),
+                    "plain-studio",
+                    legacy.as_bytes(),
+                    Some(studio.as_slice()),
                     false,
                 ),
-                ("future-same", future.as_bytes(), None, true),
                 ("studio-new", studio.as_slice(), None, false),
                 (
                     "studio-existing",
@@ -11502,25 +11344,15 @@ mod in2b_tests {
                     false,
                 ),
                 ("studio-same", studio.as_slice(), None, true),
-                (
-                    "legacy-studio",
-                    legacy.as_bytes(),
-                    Some(studio.as_slice()),
-                    false,
-                ),
-                (
-                    "legacy-future",
-                    legacy.as_bytes(),
-                    Some(future.as_bytes()),
-                    false,
-                ),
             ] {
-                let source = temp.path(&format!("{case}-source.kinewright"));
+                let source = temp.path(&format!("{case}/source/studio.kinewright"));
                 let target = if same {
                     source.clone()
                 } else {
-                    temp.path(&format!("{case}-target.kinewright"))
+                    temp.path(&format!("{case}/target/studio.kinewright"))
                 };
+                fs::create_dir_all(source.parent().unwrap()).unwrap();
+                fs::create_dir_all(target.parent().unwrap()).unwrap();
                 fs::write(&source, source_bytes).unwrap();
                 if let Some(bytes) = destination_bytes {
                     fs::write(&target, bytes).unwrap();
@@ -11533,9 +11365,7 @@ mod in2b_tests {
                     app.focused().project_path.as_deref(),
                     Some(source.as_path())
                 );
-                if app.focused().source_admission.refusal().is_some()
-                    || app.focused().source_admission.is_studio()
-                {
+                if app.focused().source_admission.is_studio() {
                     assert_eq!(
                         admission_tree(temp.root()),
                         before_open,
@@ -11574,12 +11404,14 @@ mod in2b_tests {
                     let assets = path.with_extension("kinewright-assets");
                     fs::create_dir_all(&assets).unwrap();
                     let sample=Path::new(env!("CARGO_MANIFEST_DIR")).join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets");
-                    for (relative, bytes) in admission_tree(&sample) {
-                        let destination = assets.join(&relative);
-                        if sample.join(&relative).is_dir() {
-                            fs::create_dir_all(destination).unwrap();
-                        } else {
-                            fs::write(destination, bytes).unwrap();
+                    if fs::read(path).is_ok_and(|bytes| bytes.as_slice() == studio.as_slice()) {
+                        for (relative, bytes) in admission_tree(&sample) {
+                            let destination = assets.join(&relative);
+                            if sample.join(&relative).is_dir() {
+                                fs::create_dir_all(destination).unwrap();
+                            } else {
+                                fs::write(destination, bytes).unwrap();
+                            }
                         }
                     }
                     fs::write(
@@ -11592,22 +11424,9 @@ mod in2b_tests {
                         format!("occupied-{case}-{index}"),
                     )
                     .unwrap();
-                    let base = recovery.join(kinewright_project::journal_file_name(path));
-                    if !base.exists() {
-                        fs::write(&base, format!("base-{case}-{index}")).unwrap();
-                    }
-                    let suffix = kinewright_project::allocate_journal_path(
-                        &recovery,
-                        Some(path),
-                        Path::new(""),
-                        &[],
-                    );
-                    fs::write(suffix, format!("suffix-{case}-{index}")).unwrap();
                 }
                 for session in &app.projects {
-                    if session.source_admission.require_supported().is_ok()
-                        && !session.source_admission.is_studio()
-                    {
+                    if !session.source_admission.is_studio() {
                         session
                             .recovery
                             .ja_observe()
@@ -11626,9 +11445,16 @@ mod in2b_tests {
                 );
                 let (result, trace) =
                     kinewright_project::io_observer::observe(|| app.write_project(&target));
-                assert!(result.is_err(), "{case}");
+                assert!(
+                    matches!(result, Err(ProjectSaveError::UnsupportedBundle { .. })),
+                    "{case}: {result:?}"
+                );
+                assert_eq!(
+                    renames.load(Ordering::SeqCst),
+                    0,
+                    "ADMISSION_PRECEDES_SIDECAR"
+                );
                 assert!(trace.events.is_empty(), "{case}: {:?}", trace.events);
-                assert_eq!(renames.load(Ordering::SeqCst), 0);
                 assert_eq!(admission_tree(temp.root()), before, "{case}");
                 assert_eq!(app.focused().project_path, old_path);
                 assert_eq!(app.focused().source_admission, admission);
@@ -11670,6 +11496,36 @@ mod in2b_tests {
             in2b_quiesce_engine(&engine);
             in2b_shutdown(&mut app);
         });
+    }
+    fn admission_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), vec![]);
+                    visit(root, &path, out);
+                } else {
+                    assert!(metadata.is_file());
+                    // A held lock object denies second-handle reads on
+                    // Windows (`LockFileEx`, lockfile B4); its length stands
+                    // in for its bytes.
+                    let locked = cfg!(windows)
+                        && path
+                            .to_string_lossy()
+                            .ends_with(kinewright_project::LOCKFILE_SUFFIX);
+                    let bytes = if locked {
+                        format!("lock object, {} bytes", metadata.len()).into_bytes()
+                    } else {
+                        fs::read(&path).unwrap()
+                    };
+                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), bytes);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        visit(path, path, &mut out);
+        out
     }
 
     include!("ja_s1_app_tests.rs");
@@ -11751,7 +11607,6 @@ mod in2b_tests {
             crate::media_access::MediaBackend::Engine(Arc::clone(&engine)),
             &mode,
             Some(Arc::clone(&writer)),
-            PROJECT_FORMAT_VERSION,
             None,
         )
         .expect("the test session builds");
@@ -12124,7 +11979,7 @@ mod in2b_tests {
         // Reopen through `ProjectSession::create` with `SidecarMode::Load`.
         let (document, version, digest) =
             load_document(&project_path).expect("the project re-reads");
-        assert_eq!(version, 1);
+        assert_eq!(version, PROJECT_FORMAT_VERSION);
         let writer = Arc::clone(&app.sidecar_writer);
         let mut reopened = ProjectSession::create(
             7,
@@ -12137,7 +11992,6 @@ mod in2b_tests {
                 project_digest: digest,
             },
             Some(writer),
-            version,
             None,
         )
         .expect("the reopen builds");
@@ -12194,13 +12048,9 @@ mod in2b_tests {
 
         // B-5 gate box: a save during an in-flight background write leaves
         // the save's digest pair, never the stale job's bytes.
-        let stale = kinewright_project::build_sidecar_bytes(
-            &[],
-            &[],
-            "aaaaaaaaaaaaaaaa",
-            "aaaaaaaaaaaaaaaa",
-        )
-        .expect("the stale snapshot builds");
+        let stale =
+            kinewright_project::build_sidecar_bytes(&[], "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa")
+                .expect("the stale snapshot builds");
         let owner = app.projects[0]
             .recovery
             .writer_for(Some(&project_path))
@@ -12226,8 +12076,7 @@ mod in2b_tests {
 
     /// Item 16: Save As writes a fresh sidecar at the new stem carrying the
     /// live log with a fresh digest, leaves the old sidecar byte-identical,
-    /// and drops the open `project_newer_format` note (B-4) — so a
-    /// newer-format session's copy reopens with 0 incidents.
+    /// and carries the current incident history to the new path.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn in2b_save_as_carries_the_live_log_and_leaves_the_old_sidecar() {
@@ -12266,82 +12115,6 @@ mod in2b_tests {
             "a new stem has no previous save"
         );
 
-        // The B-4 drop: a session whose only incident is the newer-format
-        // note (stood in by direct observe — C2's gate notes it) saves a
-        // copy that reopens with 0 incidents. A second project on the SAME
-        // engine: one engine per test, because a second `FfmpegMediaEngine`
-        // crashes inside the NVIDIA driver during concurrent GPU init
-        // (coredump 2182070: `Compositor::new` → `create_render_pipeline` →
-        // `libnvidia-glcore` SEGV on the media worker).
-        let c_path = temp.path("c.kinewright");
-        let id = app.next_project_id;
-        app.next_project_id += 1;
-        let writer = Arc::clone(&app.sidecar_writer);
-        let second = ProjectSession::create(
-            id,
-            "second",
-            Document::default(),
-            fixture_source_admission((Some(c_path.clone())).as_deref()),
-            Some(c_path.clone()),
-            crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
-            &SidecarMode::Load {
-                project_digest: String::new(),
-            },
-            Some(writer),
-            PROJECT_FORMAT_VERSION,
-            None,
-        )
-        .expect("the second project builds");
-        app.projects.push(second);
-        app.focused_project = 1;
-        {
-            let mut log = app.projects[1]
-                .incidents
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            log.observe(IncidentObservation::plain(
-                IncidentCode::Label(LabelIncident::ProjectNewerFormat),
-                IncidentSubject::Project,
-                "stood-in newer-format note",
-                TimelineRevision::default(),
-            ));
-        }
-        let d_path = temp.path("d.kinewright");
-        app.write_project(&d_path).expect("Save As succeeds");
-        {
-            let log = app.projects[1]
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.open_count(), 0, "Save As drops the newer-format note");
-            assert_eq!(log.len(), 0, "a removal, not a resolution");
-        }
-        let (document, version, digest) = load_document(&d_path).expect("the copy re-reads");
-        assert_eq!(version, 1, "Save As writes current-version bytes");
-        let writer = Arc::clone(&app.sidecar_writer);
-        let mut reopened = ProjectSession::create(
-            9,
-            "copy",
-            document,
-            fixture_source_admission((Some(d_path.clone())).as_deref()),
-            Some(d_path),
-            crate::media_access::MediaBackend::Engine(Arc::clone(&app.lut_publisher)),
-            &SidecarMode::Load {
-                project_digest: digest,
-            },
-            Some(writer),
-            version,
-            None,
-        )
-        .expect("the copy reopens");
-        {
-            let log = reopened
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.open_count(), 0);
-        }
-        in2b_shutdown_session(&mut reopened);
         in2b_shutdown(&mut app);
     }
 
@@ -12405,132 +12178,11 @@ mod in2b_tests {
             op.apply(&mut document).expect("the fixture op applies");
         }
         let (mut app, _engine) = in2b_harness(document, Some(project_path.clone()));
-        app.focused_mut().format_version = 1;
         app.write_project(&project_path)
             .expect("the overwrite-save lands");
-        assert_eq!(app.focused().format_version, 2, "the session records 2");
         let (_, version, _) = load_document(&project_path).expect("the save reopens");
-        assert_eq!(version, 2, "the file carries 2");
+        assert_eq!(version, PROJECT_FORMAT_VERSION);
         assert!(app.save_project(false), "a v2 session overwrites its file");
-        in2b_shutdown(&mut app);
-    }
-
-    /// Item 18: a newer file opens with exactly one `project_newer_format`
-    /// incident and no overwrite-save; Save As writes current-version bytes
-    /// that reopen clean; versionless files open silently as v1.
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn in2b_a_newer_file_opens_with_one_incident_and_no_overwrite() {
-        let temp = TempDirectory::new("in2b-newer-file");
-        // Box 1: `load_document` reads the version and digests the file
-        // bytes. Item 18 writes its own 999 files (§4 rule 2 — no committed
-        // newer-than-current fixture).
-        let newer_path = temp.path("newer.kinewright");
-        let written = serde_json::to_string_pretty(&ProjectFile {
-            studio: None,
-            format_version: 999,
-            document: Document::default(),
-        })
-        .expect("the 999 file serialises");
-        fs::write(&newer_path, &written).expect("the 999 file writes");
-        let (document, version, digest, _) =
-            inspect_project_document(&newer_path).expect("the 999 file inspects");
-        assert_eq!(version, 999);
-        assert_eq!(
-            digest,
-            digest_bytes(written.as_bytes()),
-            "the digest covers the file bytes"
-        );
-        assert_eq!(document, Document::default());
-
-        // Boxes 2–4: the headless open opens, notes exactly one incident,
-        // and carries the read version.
-        let (mut app, engine) = in2b_harness(Document::default(), None);
-        app.open_project(&newer_path);
-        assert_eq!(app.projects.len(), 2, "the newer file opens");
-        assert_eq!(app.focused().format_version, 999);
-        app.route_incidents();
-        {
-            let log = app
-                .focused()
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.len(), 1, "exactly one incident");
-            let only = log.all().next().expect("the note landed");
-            assert_eq!(
-                only.code,
-                IncidentCode::Label(LabelIncident::ProjectNewerFormat)
-            );
-            assert!(only.transient, "every §5 note is transient");
-        }
-
-        // Box 5: the gate.
-        assert!(!can_overwrite_save(999));
-        assert!(can_overwrite_save(1));
-
-        // Box 6: overwrite-save refuses, re-surfaces the card, writes
-        // nothing, and notes nothing second.
-        assert!(!app.save_project(false), "overwrite-save refuses");
-        assert_eq!(
-            fs::read(&newer_path)
-                .expect("the 999 file re-reads")
-                .as_slice(),
-            written.as_bytes(),
-            "a refused save writes nothing"
-        );
-        assert!(app.incidents_open, "the refusal re-surfaces the card");
-        assert!(
-            app.status.contains("read-only"),
-            "the refusal preserves inspection-only status: {}",
-            app.status
-        );
-        app.route_incidents();
-        {
-            let log = app
-                .focused()
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.len(), 1, "no second incident");
-        }
-
-        // Generic Save As retains the unsupported source admission and refuses.
-        let copy_path = temp.path("copy.kinewright");
-        let old_path = app.focused().project_path.clone();
-        let old_admission = app.focused().source_admission.clone();
-        assert!(matches!(
-            app.write_project(&copy_path),
-            Err(ProjectSaveError::UnsupportedBundle { .. })
-        ));
-        assert!(!copy_path.exists());
-        assert_eq!(app.focused().project_path, old_path);
-        assert_eq!(app.focused().source_admission, old_admission);
-        assert_eq!(
-            fs::read(&newer_path).expect("original bytes"),
-            written.as_bytes()
-        );
-
-        // Box 8: a versionless file reads as 1 and opens silently.
-        let legacy_path = temp.path("legacy.kinewright");
-        fs::write(
-            &legacy_path,
-            serde_json::to_string_pretty(&Document::default()).expect("the legacy file serialises"),
-        )
-        .expect("the legacy file writes");
-        let (_, legacy_version, _) = load_document(&legacy_path).expect("the legacy file loads");
-        assert_eq!(legacy_version, 1);
-        app.open_project(&legacy_path);
-        app.route_incidents();
-        {
-            let log = app
-                .focused()
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.len(), 0, "a versionless file opens silently");
-        }
-        in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
 
@@ -12539,18 +12191,13 @@ mod in2b_tests {
     /// restore deletes it, a refused one shelves it) — the parse halves
     /// live in `recovery.rs` — but the bytes are shaped real so a future
     /// parse-through stays honest.
-    fn journal_fixture_bytes(
-        project_path: &Path,
-        writer_format_version: u32,
-        initial: &Document,
-    ) -> Vec<u8> {
+    fn journal_fixture_bytes(project_path: &Path, initial: &Document) -> Vec<u8> {
         let header = serde_json::json!({
-            "format_version": 1,
+            "format_version": PROJECT_FORMAT_VERSION,
             "project_path": project_path,
-            "writer_format_version": writer_format_version,
             "initial_document": initial,
         });
-        let mut bytes = b"KINEWRIGHT-JOURNAL 1\n".to_vec();
+        let mut bytes = b"KINEWRIGHT-JOURNAL\n".to_vec();
         bytes.extend_from_slice(
             serde_json::to_vec(&header)
                 .expect("the header serialises")
@@ -12560,16 +12207,11 @@ mod in2b_tests {
         bytes
     }
 
-    /// Item 20: a journal newer than the last save restores pairing the
-    /// saved sidecar digest-less, with revisions rebased to the opening; a
-    /// 999-writer journal is refused with exactly one
-    /// `project_newer_format`, its file shelved for a newer build. The
-    /// restore targets the already-open path, so sidecar writes suspend
-    /// until Save As (N2/S-13); the Save As half proves the suspension
-    /// lifts onto the new path.
+    /// Recovery loads the saved sidecar without digest pairing, rebases revisions
+    /// and suspends sidecar writes at an already-open path until Save As.
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn in2b_recovery_restores_without_the_digest_gate_and_refuses_cross_version() {
+    fn in2b_recovery_restores_without_the_digest_gate() {
         let temp = TempDirectory::new("in2b-recovery-gate");
         let project_path = temp.path("edit.kinewright");
         let (mut app, engine) = in2b_harness(Document::default(), Some(project_path.clone()));
@@ -12596,7 +12238,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
 
@@ -12624,7 +12266,6 @@ mod in2b_tests {
             document: recovered,
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         assert_eq!(
             app.projects.len(),
@@ -12639,7 +12280,6 @@ mod in2b_tests {
             app.focused().sidecar_suspended,
             "a restore onto an open path suspends sidecar writes"
         );
-        assert_eq!(app.focused().format_version, PROJECT_FORMAT_VERSION);
         {
             let log = app
                 .focused()
@@ -12684,65 +12324,6 @@ mod in2b_tests {
             "Save As writes the restored history to the new path"
         );
 
-        // The refusal: a 999-writer journal lands no session, shelves its
-        // file, and notes exactly one `project_newer_format`.
-        let cross_path = temp.path("cross.journal");
-        fs::write(
-            &cross_path,
-            journal_fixture_bytes(&project_path, 999, &Document::default()),
-        )
-        .expect("the cross-version journal writes");
-        let projects_before = app.projects.len();
-        let incidents_before = app
-            .focused()
-            .incidents
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len();
-        app.projects[0]
-            .recovery
-            .capture_pending_for_test(&cross_path);
-        app.apply_restore_request(RestoreRequest {
-            document: Document::default(),
-            project_path: Some(project_path.clone()),
-            journal_path: cross_path.clone(),
-            writer_format_version: 999,
-        });
-        assert_eq!(
-            app.projects.len(),
-            projects_before,
-            "a refused restore lands no session"
-        );
-        assert!(
-            cross_path.exists(),
-            "the refused journal is shelved, not deleted"
-        );
-        assert!(
-            app.status.contains("Recovery refused"),
-            "the refusal says so: {}",
-            app.status
-        );
-        app.route_incidents();
-        {
-            let log = app
-                .focused()
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(
-                log.len(),
-                incidents_before + 1,
-                "the refusal notes exactly one incident"
-            );
-            assert_eq!(
-                log.all()
-                    .filter(|incident| incident.code
-                        == IncidentCode::Label(LabelIncident::ProjectNewerFormat))
-                    .count(),
-                1,
-                "and its code is `project_newer_format`"
-            );
-        }
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
     }
@@ -13188,31 +12769,8 @@ mod in2b_tests {
         super::in1_tests::in2_cleanup(&mut app);
     }
 
-    /// Item 32: the re-measurement of `IN1b` §3.2 rule 13 — 74 codes, 74
-    /// producers, 0 exempt (`IN2B` §6 rule 7, E-B9). Three parts:
-    ///
-    /// 1. Every `ColorQcError` variant (6) and every `DeliveryVerificationError`
-    ///    variant (5) is driven through its real §6 seam mapping to its code.
-    ///    A seventh variant breaks `from_media_error`'s totality at compile
-    ///    time; extending this table is then the author's review-level
-    ///    obligation — the ratchet's handle, not its teeth.
-    /// 2. The 7 §5 codes are produced through their real note constructors
-    ///    (§5 rule 4): the seam-7 shared body, the two recovery shapers, the
-    ///    newer-format shaper, `restore` itself (the unknown-code aggregate
-    ///    has no named constructor — the inline note in `restore` is it),
-    ///    and the two sidecar shapers. Each asserts code plus `transient`.
-    /// 3. The remaining 56 cite their existing producers (`IN1b` §3.2's
-    ///    inventory, i.e. Appendix B's rows, cited per code below) and each
-    ///    citation is re-verified by grep with a positive count: the
-    ///    producer-side symbol (the error variant for mapped codes, the
-    ///    `IncidentFamily` arm for families, the note-site label for labels)
-    ///    must appear on a non-comment source line somewhere under `crates/`.
-    ///    The table stores each pattern as two fragments joined at run time,
-    ///    so the table itself never matches its own grep; `Look`/`Media`/
-    ///    `Agent` carry a trailing comma so `LookIncomplete`, `MediaIncomplete`
-    ///    and `AgentBranch` lines do not inflate their counts. Positions are
-    ///    deliberately not pinned (that audit belongs to the §11 suite):
-    ///    existence is what rule 13 claims.
+    /// Every current incident code has a reachable producer and status notes
+    /// have the expected transient flag.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn in2b_every_declared_code_has_a_producer() {
@@ -13224,13 +12782,9 @@ mod in2b_tests {
         };
         use kinewright_core::{
             ClipId, ColorQcError, ColorQcIncident, DeliveryVerificationError,
-            DeliveryVerificationIncident, EffectId, IncidentEvidence, IncidentId, IncidentLog,
-            IncidentRecord, IncidentState, IncidentTelemetry,
+            DeliveryVerificationIncident, EffectId,
         };
-        use kinewright_project::{
-            project_newer_format_observation, sidecar_refused_observation,
-            sidecar_write_failed_observation,
-        };
+        use kinewright_project::{sidecar_refused_observation, sidecar_write_failed_observation};
 
         fn rs_lines(dir: &std::path::Path, out: &mut Vec<String>) {
             let entries = std::fs::read_dir(dir)
@@ -13363,7 +12917,7 @@ mod in2b_tests {
             );
         }
 
-        // Part 2: the seven §5 codes through their real note constructors.
+        // Part 2: the five current persistence-status codes through their real note constructors.
         let collapsed = WorkerError::Untyped("the worker fell over".to_owned());
         let panel =
             worker_error_observation(&collapsed, IncidentSubject::Project, "Scopes: ", revision)
@@ -13386,11 +12940,6 @@ mod in2b_tests {
                 "recovery unavailable",
             ),
             (
-                project_newer_format_observation(999, revision),
-                LabelIncident::ProjectNewerFormat,
-                "newer format",
-            ),
-            (
                 sidecar_refused_observation("the digest mismatched", revision),
                 LabelIncident::SidecarRefused,
                 "sidecar refused",
@@ -13404,41 +12953,7 @@ mod in2b_tests {
             assert_eq!(note.code, IncidentCode::Label(code), "{name} code");
             assert!(note.transient, "{name} is transient");
         }
-        // The aggregate's constructor is `restore` itself: one unknown-code
-        // record in, one transient `sidecar_unknown_codes` note out.
-        let unknown = IncidentRecord {
-            id: IncidentId(1),
-            code: "no_such_code_xyz".to_owned(),
-            subject: IncidentSubject::Project,
-            observed: "observed 1".to_owned(),
-            allowed: None,
-            evidence: IncidentEvidence::Plain,
-            revision: TimelineRevision(7),
-            opened_wall_millis: None,
-            opened_offset_nanos: 1_000,
-            count: 1,
-            state: IncidentState::Open,
-            telemetry: IncidentTelemetry::default(),
-            proposal: None,
-            subject_name: None,
-            refused_op: None,
-        };
-        let mut log = IncidentLog::with_start(std::time::Instant::now(), None);
-        let report = log.restore(vec![unknown], Vec::new(), TimelineRevision(100), None);
-        assert_eq!(
-            report.unknown_codes,
-            vec![("no_such_code_xyz".to_owned(), 1)],
-            "the unknown code reports"
-        );
-        let aggregate = log.open().next().expect("the aggregate noted");
-        assert_eq!(
-            aggregate.code,
-            IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
-            "unknown-code aggregate"
-        );
-        assert!(aggregate.transient, "the aggregate is transient");
-
-        // Part 3: the remaining 56 cite `IN1b` Appendix B; each citation
+        // Part 3: the remaining 55 cite `IN1b` Appendix B; each citation
         // re-verified by grep with a positive count per code.
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
         let mut lines = Vec::new();
@@ -13486,12 +13001,6 @@ mod in2b_tests {
                 "unknown_source_range",
                 "ColorSourceError",
                 "UnknownRange",
-                "B27",
-            ),
-            (
-                "unsupported_source_range",
-                "ColorSourceError",
-                "UnsupportedRange",
                 "B27",
             ),
             (
@@ -13758,7 +13267,7 @@ mod in2b_tests {
             ),
             ("timeline_unclassified", "LabelIncident", "Timeline", "B62"),
         ];
-        assert_eq!(census.len(), 56, "56 cited codes");
+        assert_eq!(census.len(), 55, "55 cited codes");
         for (code, left, right, rows) in census {
             let needle = format!("{left}::{right}");
             let count = lines.iter().filter(|line| line.contains(&needle)).count();
@@ -13802,7 +13311,7 @@ mod in2b_tests {
         );
         let record = |id: u64, code: IncidentCode, observed: &str| IncidentRecord {
             id: IncidentId(id),
-            code: code.code().to_owned(),
+            code,
             subject: IncidentSubject::Project,
             observed: observed.to_owned(),
             allowed: None,
@@ -13828,7 +13337,7 @@ mod in2b_tests {
         .expect("the project file writes");
         let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let envelope = serde_json::json!({
-            "format_version": 1,
+            "format_version": PROJECT_FORMAT_VERSION,
             "project_digest": digest.clone(),
             "previous_digest": digest.clone(),
             "records": [
@@ -14001,7 +13510,7 @@ mod in2b_tests {
         let code_two = IncidentCode::Label(LabelIncident::MediaIncomplete);
         let record = |id: u64, code: IncidentCode, observed: &str| IncidentRecord {
             id: IncidentId(id),
-            code: code.code().to_owned(),
+            code,
             subject: IncidentSubject::Project,
             observed: observed.to_owned(),
             allowed: None,
@@ -14044,7 +13553,7 @@ mod in2b_tests {
         .expect("the project file writes");
         let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let envelope = serde_json::json!({
-            "format_version": 1,
+            "format_version": PROJECT_FORMAT_VERSION,
             "project_digest": digest,
             "previous_digest": digest,
             "records": [
@@ -14147,14 +13656,13 @@ mod in2b_tests {
     /// configured, so the allowlist (not a missing harness) is what
     /// refuses them.
     #[test]
-    fn in2b_the_seven_section_five_codes_start_no_sessions() {
+    fn in2b_current_section_five_codes_start_no_sessions() {
         use super::in1_tests::{in2_cleanup, in2_configure_scripted_at, in2_default_budgets};
         use kinewright_agent::ScriptedDriver;
         use kinewright_core::INVESTIGATOR_ALLOWLIST;
 
         use crate::error_ui::{WorkerError, worker_error_observation};
         use crate::recovery::{recovery_damage_observation, recovery_unavailable_observation};
-        use kinewright_project::project_newer_format_observation;
         use kinewright_project::{sidecar_refused_observation, sidecar_write_failed_observation};
 
         let (mut app, _engine) = in2b_harness(Document::default(), None);
@@ -14171,20 +13679,10 @@ mod in2b_tests {
                 .expect("a collapse notes"),
             recovery_damage_observation("a torn journal", revision),
             recovery_unavailable_observation("the recorder stopped", revision),
-            project_newer_format_observation(999, revision),
-            // The aggregate's real constructor is `restore`; the allowlist
-            // gates the code, so a plain triple with it exercises the same
-            // refusal through the rig.
-            IncidentObservation::plain(
-                IncidentCode::Label(LabelIncident::SidecarUnknownCodes),
-                IncidentSubject::Project,
-                "unknown code 'zzz'",
-                revision,
-            ),
             sidecar_refused_observation("the digest mismatched", revision),
             sidecar_write_failed_observation("the disk is full", revision),
         ];
-        assert_eq!(observations.len(), 7, "all seven §5 codes");
+        assert_eq!(observations.len(), 5, "the current §5 codes");
         for observation in &observations {
             assert!(
                 !INVESTIGATOR_ALLOWLIST.contains(&observation.code),
@@ -14199,7 +13697,7 @@ mod in2b_tests {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .open_count();
-        assert_eq!(open, 7, "7 incidents opened");
+        assert_eq!(open, 5, "5 incidents opened");
         let session = app.projects[0].investigator.as_ref().expect("investigator");
         assert_eq!(session.queued_count(), 0, "no session queued");
         assert!(!session.is_running(), "no session started");
@@ -14239,7 +13737,7 @@ mod in2b_tests {
         let record = |id: u64, code: IncidentCode, subject: IncidentSubject, observed: &str| {
             IncidentRecord {
                 id: IncidentId(id),
-                code: code.code().to_owned(),
+                code,
                 subject,
                 observed: observed.to_owned(),
                 allowed: None,
@@ -14298,9 +13796,7 @@ mod in2b_tests {
         let mut log = IncidentLog::with_start(std::time::Instant::now(), None);
         let report = log.restore(
             vec![row_one, row_two, row_three, row_four],
-            Vec::new(),
             TimelineRevision(100),
-            None,
         );
         assert_eq!(report.restored_open, 3, "three opens restore");
         assert_eq!(report.restored_resolved, 1, "one resolved restores");
@@ -14681,7 +14177,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
         app.projects[0]
@@ -14691,7 +14187,6 @@ mod in2b_tests {
             document: recovered,
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         assert!(
             !app.focused().sidecar_suspended,
@@ -14751,7 +14246,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
         let mut recovered = Document::default();
@@ -14768,7 +14263,6 @@ mod in2b_tests {
             document: recovered,
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         assert!(
             app.focused().sidecar_suspended,
@@ -15105,7 +14599,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
         app.projects[0]
@@ -15115,7 +14609,6 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         assert_eq!(app.projects.len(), 2, "the duplicate lands");
         app.focus_project(0);
@@ -15201,7 +14694,7 @@ mod in2b_tests {
 
         let record = IncidentRecord {
             id: IncidentId(1),
-            code: IncidentCode::Label(LabelIncident::Look).code().to_owned(),
+            code: IncidentCode::Label(LabelIncident::Look),
             subject: IncidentSubject::Asset(AssetId(999)),
             observed: "loaded, subject gone".to_owned(),
             allowed: None,
@@ -15225,7 +14718,7 @@ mod in2b_tests {
         .expect("the project file writes");
         let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let envelope = serde_json::json!({
-            "format_version": 1,
+            "format_version": PROJECT_FORMAT_VERSION,
             "project_digest": digest,
             "previous_digest": digest,
             "records": [serde_json::to_value(record).expect("the record")],
@@ -15303,7 +14796,7 @@ mod in2b_tests {
             &project_path,
             serde_json::to_string_pretty(&ProjectFile {
                 studio: None,
-                format_version: 2,
+                format_version: PROJECT_FORMAT_VERSION,
                 document,
             })
             .expect("the project serialises"),
@@ -15450,7 +14943,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
         app.projects[0]
@@ -15460,7 +14953,6 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         app.refuse_rename = None;
         assert!(
@@ -15654,13 +15146,9 @@ mod in2b_tests {
             TimelineRevision::default(),
         ));
         let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
-        let foreign_bytes = kinewright_project::build_sidecar_bytes(
-            &records,
-            &[],
-            &foreign_digest,
-            &foreign_digest,
-        )
-        .expect("the foreign sidecar builds");
+        let foreign_bytes =
+            kinewright_project::build_sidecar_bytes(&records, &foreign_digest, &foreign_digest)
+                .expect("the foreign sidecar builds");
         let occupied_sidecar = sidecar_path_for_project(Some(&occupied)).expect("derived");
         fs::write(&occupied_sidecar, &foreign_bytes).expect("the foreign stem writes");
         // The source document DIFFERS from the occupied target (RB1 hid
@@ -15801,13 +15289,9 @@ mod in2b_tests {
             TimelineRevision::default(),
         ));
         let (records, _) = foreign.records(None, &std::collections::BTreeMap::new());
-        let foreign_bytes = kinewright_project::build_sidecar_bytes(
-            &records,
-            &[],
-            &foreign_digest,
-            &foreign_digest,
-        )
-        .expect("the foreign sidecar builds");
+        let foreign_bytes =
+            kinewright_project::build_sidecar_bytes(&records, &foreign_digest, &foreign_digest)
+                .expect("the foreign sidecar builds");
         let target_sidecar = sidecar_path_for_project(Some(&target)).expect("derived");
         fs::write(&target_sidecar, &foreign_bytes).expect("the foreign stem writes");
         let mut source = Document::default();
@@ -15857,11 +15341,11 @@ mod in2b_tests {
         // foreign history survives in the `.bak`.
         fs::remove_dir(&target).expect("cleanup");
         fs::rename(&stash, &target).expect("the target file returns");
-        app.focused()
+        *app.focused()
             .incidents
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove_open_with_code(IncidentCode::Label(LabelIncident::Project));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            kinewright_core::IncidentLog::with_start(std::time::Instant::now(), None);
         app.write_project(&target).expect("the retry succeeds");
         let new_digest = digest_bytes(&fs::read(&target).expect("the target re-reads"));
         let SidecarLoad::Current(current) = load_sidecar(&target_sidecar) else {
@@ -16023,7 +15507,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
         app.projects[0]
@@ -16033,7 +15517,6 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         assert_eq!(
             app.focused().saved_digest,
@@ -16134,7 +15617,7 @@ mod in2b_tests {
         let journal_path = temp.path("edit.journal");
         fs::write(
             &journal_path,
-            journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
+            journal_fixture_bytes(&project_path, &Document::default()),
         )
         .expect("the journal writes");
         app.projects[0]
@@ -16144,7 +15627,6 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
-            writer_format_version: PROJECT_FORMAT_VERSION,
         });
         let Err(ProjectSaveError::SaveAsRequired { notice }) = app.write_project(&project_path)
         else {
@@ -16375,7 +15857,7 @@ mod in2b_tests {
             &project_path,
             serde_json::to_string_pretty(&ProjectFile {
                 studio: None,
-                format_version: 2,
+                format_version: PROJECT_FORMAT_VERSION,
                 document,
             })
             .expect("the project serialises"),
@@ -17588,7 +17070,9 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
             app.focused_mut().ja1 = Some(attachment);
             app.focused_mut().install_ja1_view();
         } else {
-            app.enable_ja1();
+            crate::recovery::with_ja_directory(temp.root().into(), || {
+                app.enable_ja1();
+            });
         }
         assert!(
             app.focused().ja1.as_ref().unwrap().host_attached(),

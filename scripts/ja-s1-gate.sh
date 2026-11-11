@@ -101,11 +101,10 @@ fi
 if [[ "$stage" -ge 2 ]]; then
     run_selected L cargo test -p kinewright-project --lib -- --exact lockfile::tests::r19_second_acquire_refuses_while_held lockfile::tests::r19_release_frees_the_lock_for_a_clean_reacquire lockfile::tests::f4_symlink_alias_shares_one_lock lockfile::tests::g9_fd_check_detects_a_swapped_object lockfile::race_tests::guard_missing_discovery_with_held_lock lockfile::race_tests::guard_alias_spellings_race_one_owner lockfile::race_tests::h7_stale_same_endpoint_release_spares_the_successor lockfile::race_tests::j3_link_retargeted_after_acquire_refuses_the_next_save headless::tests::headless_save_preserves_an_unreplayed_journal headless::tests::g3_headless_occupied_save_as_preserves_and_pairs headless::tests::f6_failed_project_write_restores_the_prior_sidecar
 fi
-# Ceiling/format-sensitive controls are mandatory even before the ceiling changes.
-run_selected format-core cargo test -p kinewright-core --lib model::tests::project_format_version_reads_the_top_level_key -- --exact
-run_selected F cargo test -p kinewright-project --lib -- --exact project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover project::tests::v2_stamps_only_when_used project::tests::mo2_inactive_features_still_stamp_v2 project::tests::unknown_blend_field_is_refused_and_the_file_is_untouched project::tests::project_atomic_write_falls_back_when_rename_is_refused project::tests::mo2_old_readers_distinguish_parse_validation_and_advisory
-run_selected format-eval cargo test -p kinewright-agent --bin kinewright-eval tests::in2b_eval_refuses_a_newer_file_and_reads_v1_as_before -- --exact
-run_selected format-app cargo test -p kinewright-app --bin kinewright-app -- --exact project::tests::can_overwrite_save_gates_on_the_read_version project::tests::in2b_v1_project_bytes_are_identical app::in2b_tests::in2b_a_newer_file_opens_with_one_incident_and_no_overwrite app::in2b_tests::in2b_startup_missing_media_aggregate_is_transient app::in2b_tests::in2b_open_time_aggregates_are_all_transient
+# Current format and ordinary save controls.
+run_selected F cargo test -p kinewright-project --lib -- --exact project::tests::unknown_blend_field_is_refused_and_the_file_is_untouched project::tests::project_atomic_write_falls_back_when_rename_is_refused
+run_selected format-eval cargo test -p kinewright-agent --bin kinewright-eval current_format_tests::eval_reads_the_current_typed_envelope_and_refuses_other_versions -- --exact
+run_selected format-app cargo test -p kinewright-app --bin kinewright-app -- --exact app::in2b_tests::in2b_startup_missing_media_aggregate_is_transient app::in2b_tests::in2b_open_time_aggregates_are_all_transient
 if [[ "$stage" -eq 3 || "$stage" -eq 4 || "$stage" -eq 7 || "$stage" -eq 8 ]]; then
     run_selected P-media cargo test -p kinewright-media --lib -- --test-threads=1 --exact engine::tests::i8_media_0 engine::tests::i8_media_1 engine::tests::i8_media_2 engine::tests::i8_media_3 engine::tests::i8_media_real_audio engine::tests::only_a_current_stamped_failure_stops_playback engine::tests::a_request_issued_before_a_new_document_is_superseded_not_relabelled engine::tests::an_idle_engine_holds_no_preview_reader_or_decoder engine::tests::dropping_the_engine_stops_the_preview_thread engine::tests::sync_decoders_counts_open_decoders_until_teardown
     run_selected P-presentation cargo test -p kinewright-app --bin kinewright-app -- --exact presenter::tests::the_marker_marks_what_is_bound_when_it_paints presenter::tests::a_marker_that_never_paints_is_never_acked presenter::tests::the_real_paint_callback_acks_only_painted_images presenter::tests::seeded_interleavings_bind_and_ack_only_current_frames recovery::tests::journal_round_trip_preserves_agent_ops_and_undo_redo_history
@@ -115,10 +114,9 @@ if [[ "$stage" -eq 4 || "$stage" -eq 8 ]]; then
     run_selected I-headless cargo test -p kinewright-project --lib headless::tests
     run_selected I-lock cargo test -p kinewright-project --lib lockfile::race_tests
     run_selected I-app cargo test -p kinewright-app --bin kinewright-app app::tests
-    run_selected I-app-refusal cargo test -p kinewright-app --bin kinewright-app app::in2b_tests::save_as_unsupported_source_or_destination_has_zero_mutations -- --exact
-    run_selected I-eval-refusal cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_refuses_v3_before_projection_or_output -- --exact
+    run_selected I-eval-refusal cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_refuses_the_current_studio_form_before_output -- --exact
     run_selected AU6-inventory cargo test -p kinewright-media --lib au6_fixtures::au6_declared_test_names_exist_in_their_source_files -- --exact
-    run_selected I-eval-legacy cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_admitted_legacy_reaches_renderer_and_report_writer -- --exact
+    run_selected I-eval-plain cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_current_plain_project_reaches_renderer_and_report_writer -- --exact
     run_selected I-project cargo test -p kinewright-app --bin kinewright-app project::tests
 fi
 if [[ "$stage" -ge 5 ]]; then run_selected receipts cargo test -p kinewright-project --features test-util --test ja_s1_receipts; fi

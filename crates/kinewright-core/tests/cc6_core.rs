@@ -1316,14 +1316,12 @@ fn cc6_export_settings_and_job_records_serialize_deterministically() {
     )
     .expect("the fixture conforms");
     assert_eq!(report.delivery_bit_depth, DeliveryEncodeDepth::Ten);
-    let mut value = serde_json::to_value(&report).expect("the report serializes");
-    value
-        .as_object_mut()
-        .expect("the report is an object")
-        .remove("delivery_bit_depth");
-    let legacy: kinewright_core::DeliveryConformanceReport =
-        serde_json::from_value(value).expect("a pre-CC6 report still loads");
-    assert_eq!(legacy.delivery_bit_depth, DeliveryEncodeDepth::Eight);
+    let value = serde_json::to_value(&report).expect("the report serializes");
+    assert_eq!(
+        serde_json::from_value::<kinewright_core::DeliveryConformanceReport>(value)
+            .expect("the current report round-trips"),
+        report
+    );
 
     let named: Vec<&str> = DeliveryProfile::ALL
         .iter()

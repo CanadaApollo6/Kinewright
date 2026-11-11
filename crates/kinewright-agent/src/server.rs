@@ -27515,8 +27515,7 @@ mod tests {
         }
 
         let mut incompatible_document = proof_document.clone();
-        incompatible_document.color_context.pipeline_state =
-            kinewright_core::ColorPipelineState::Legacy;
+        incompatible_document.color_context.working.transfer = ColorTransfer::Bt709;
         let incompatible = KinewrightMcp::new(
             Core::spawn(incompatible_document).unwrap(),
             Arc::new(NoopMedia::default()),
@@ -27571,7 +27570,7 @@ mod tests {
 
         let unsupported_media = Arc::new(NoopMedia {
             proof_error: Some(MediaError::UnsupportedDecoderFormat {
-                path: PathBuf::from("fixture.mp4"),
+                path: PathBuf::from("fixture.mp4").into_boxed_path(),
                 format: "yuv444p10le".to_owned(),
                 declared_bit_depth: Some(8),
                 decoder_bit_depth: Some(10),
@@ -28704,7 +28703,6 @@ mod tests {
             ColorSourceError::UnsupportedPrimaries(ColorPrimaries::Bt2020),
             ColorSourceError::UnsupportedTransfer(ColorTransfer::Smpte2084),
             ColorSourceError::UnsupportedMatrix(ColorMatrix::Bt2020Ncl),
-            ColorSourceError::UnsupportedRange(ColorRange::Other("weird".to_owned())),
             ColorSourceError::UnsupportedWhitePoint(ColorWhitePoint::D50),
             ColorSourceError::UnsupportedBitDepth(ColorBitDepth::Float32),
             ColorSourceError::UnsupportedCombination {
@@ -29152,7 +29150,7 @@ mod tests {
         );
         assert_eq!(
             measured,
-            74 * 8 * 2 * 2 * 4 * 2,
+            71 * 8 * 2 * 2 * 4 * 2,
             "IN2 §4.2 rule 11's shapes, with the probe axis erratum A-R9 adds and the IN2B §10 rule 5 name arm"
         );
         // N5/G1: exactly half the shapes carry a name saturated at the
@@ -29167,7 +29165,7 @@ mod tests {
             named_worst > unnamed_worst,
             "the saturated name must reach the wire: named worst {named_worst} vs unnamed worst {unnamed_worst}"
         );
-        assert_eq!(POLICY.len(), 74);
+        assert_eq!(POLICY.len(), 71);
         // Part A's thirteen classifier variants are thirteen of the 74 rows
         // after erratum `IN1b`-R4, and the loop above measured every one of
         // them: the ceiling did not widen by dropping the colour codes it was
@@ -29249,10 +29247,7 @@ mod tests {
     /// The widest **Rec.709-compatible** probe, so the loop measures the rows
     /// whose recoveries carry a `RecoveryKind::Operation` (erratum A-R9).
     ///
-    /// [`in1b_worst_probe`]'s `ColorRange::Other(_)` is refused by core's
-    /// `rec709_compatible`, which admits `range` only in
-    /// `Unknown | Limited | Full`, so that probe builds no operation at all.
-    /// The same shape core's own loop uses, so the two figures are comparable.
+    /// This compatible probe includes operation-valued recoveries in the size check.
     fn in2_rec709_compatible_worst_probe() -> ColorDescription {
         ColorDescription {
             primaries: kinewright_core::ColorPrimaries::Unknown,
@@ -29262,7 +29257,7 @@ mod tests {
             white_point: kinewright_core::ColorWhitePoint::Unknown,
             bit_depth: kinewright_core::ColorBitDepth::Sixteen,
             confidence_basis_points: u16::MAX,
-            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+            provenance: ColorProvenance::Inferred,
         }
     }
 
@@ -29356,7 +29351,8 @@ mod tests {
         MediaError::UnsupportedDecoderFormat {
             path: PathBuf::from(
                 "/home/editor/Projects/Feature 2026/Media/Day 12/A012C003_260915_R1AB.mov",
-            ),
+            )
+            .into_boxed_path(),
             format: "yuv422p10le".to_owned(),
             declared_bit_depth: Some(10),
             decoder_bit_depth: Some(10),
@@ -29367,14 +29363,14 @@ mod tests {
 
     fn in1b_worst_probe() -> ColorDescription {
         ColorDescription {
-            primaries: ColorPrimaries::Unknown,
+            primaries: ColorPrimaries::DisplayP3,
             transfer: ColorTransfer::Unknown,
             matrix: ColorMatrix::Unknown,
-            range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+            range: ColorRange::Unknown,
             white_point: ColorWhitePoint::Unknown,
             bit_depth: ColorBitDepth::Eight,
             confidence_basis_points: 4_000,
-            provenance: ColorProvenance::Other("stream_metadata_container".to_owned()),
+            provenance: ColorProvenance::Inferred,
         }
     }
 
@@ -29464,10 +29460,10 @@ mod tests {
             // Every colour row's `observed` comes from
             // `ColorSourceError::observed()`; the widest is the formatted tuple.
             Code::SourceColor(_) => ColorSourceError::UnsupportedCombination {
-                primaries: ColorPrimaries::Other("display_p3_container".to_owned()),
-                transfer: ColorTransfer::Other("arri_logc4_wide".to_owned()),
-                matrix: ColorMatrix::Other("ictcp_constant_intensity".to_owned()),
-                range: ColorRange::Other("full_swing_studio_limited".to_owned()),
+                primaries: ColorPrimaries::DisplayP3,
+                transfer: ColorTransfer::Smpte2084,
+                matrix: ColorMatrix::Ictcp,
+                range: ColorRange::Unknown,
             }
             .observed(),
             Code::Media(_)
@@ -29990,15 +29986,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (2_002_954, 5_660),
+            (1_978_409, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_848_392,
+            registry_metrics.input_schema_bytes, 1_824_687,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 129_437,
+            registry_metrics.description_bytes, 128_597,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -36802,27 +36798,7 @@ mod te1_surface_tests {
         );
     }
     #[test]
-    fn te12_role_manifests_and_unrelated_surface_are_frozen() {
-        // The old hashes remain the TE1.5 eval baseline record. Production task
-        // endpoints only reach the versioned role manifests below.
-        let baseline: Vec<String> =
-            serde_json::from_str(include_str!("../tests/fixtures/te1-surface.json")).unwrap();
-        assert_eq!(baseline.len(), 3);
-        assert_eq!(
-            kinewright_media::sha256_bytes(
-                &serde_json::to_vec(&super::compact_tools_cached()).unwrap()
-            ),
-            baseline[0],
-            "TE12_UNRELATED_SERVED_SURFACE"
-        );
-        assert_eq!(
-            kinewright_media::sha256_bytes(
-                &serde_json::to_vec(&super::KinewrightMcp::capability_tools().unwrap()).unwrap()
-            ),
-            baseline[1],
-            "TE12_UNRELATED_REGISTRY"
-        );
-
+    fn te12_current_role_manifests_match_declared_tools_and_schemas() {
         let hashes = [
             crate::orchestration::orchestration_records::Role::Director,
             crate::orchestration::orchestration_records::Role::Editor,

@@ -10,6 +10,7 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum QaSeverity {
     Info,
     Warning,
@@ -17,6 +18,7 @@ pub enum QaSeverity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QaIssue {
     pub severity: QaSeverity,
     pub code: String,
@@ -35,6 +37,7 @@ pub struct QaIssue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QaReport {
     pub document_duration: TimeCode,
     pub issues: Vec<QaIssue>,

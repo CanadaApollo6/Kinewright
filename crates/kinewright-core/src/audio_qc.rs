@@ -15,6 +15,7 @@ use crate::{AudioLoudness, DeliveryProfile, LoudnessTarget, QaSeverity, TimeCode
 /// document) and an optional delivery profile whose loudness target the
 /// report is judged against.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioQcRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
@@ -26,6 +27,7 @@ pub struct AudioQcRequest {
 
 /// Clipping counted on one channel of the pre-clamp master.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioChannelClipping {
     /// Samples of this channel at `|x| >= 1.0` on the pre-clamp master.
     pub over_full_scale_samples: u64,
@@ -39,6 +41,7 @@ pub struct AudioChannelClipping {
 
 /// Per-channel clipping for the stereo master.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioClipping {
     pub left: AudioChannelClipping,
     pub right: AudioChannelClipping,
@@ -47,6 +50,7 @@ pub struct AudioClipping {
 /// One reportable audio QC finding: `ColorQcException`'s shape
 /// (`color_qc.rs`) under its own name, without `clip` and `effect`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioQcException {
     pub code: String,
     pub severity: QaSeverity,
@@ -67,6 +71,7 @@ pub struct AudioQcException {
 /// Fixed strings; a manual `impl Default` (no derive) so the eight values are
 /// one literal each.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioQcProvenance {
     pub engine: String,
     pub measurement_rate: u32,
@@ -104,6 +109,7 @@ impl Default for AudioQcProvenance {
 /// `export_ready`: `QaReport::export_ready` gates an export, and a QC report
 /// must never gate one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AudioQcReport {
     pub range: std::ops::Range<TimeCode>,
     /// The post-clamp master: the signal export encodes.

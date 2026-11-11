@@ -61,10 +61,9 @@ pub use lockfile::{
     lockfile_path_for_project, reclaim_warning_json, reclaim_warning_json_unreadable,
 };
 pub use project::{
-    ProjectFile, ProjectIdentityError, ProjectSaveError, ProjectSaveReport, can_overwrite_save,
-    canonical_project_identity, derive_lut_store, load_document, min_required_format_version,
-    project_newer_format_observation, same_project_file, serialize_project_document,
-    write_file_atomic, write_project_bytes, write_project_document,
+    ProjectFile, ProjectIdentityError, ProjectSaveError, ProjectSaveReport,
+    canonical_project_identity, derive_lut_store, load_document, same_project_file,
+    serialize_project_document, write_file_atomic, write_project_bytes, write_project_document,
 };
 pub use recovery::{
     FeedbackStateLock, FeedbackStateRefusal, JOURNAL_MAGIC, allocate_journal_path,
@@ -77,8 +76,8 @@ pub use session::{
     rollback_sidecar_write, snapshot_sidecar_rollback,
 };
 pub use sidecar::{
-    FlushOutcome, LoadedSidecar, RefuseRename, SIDECAR_FORMAT_VERSION, SIDECAR_SUFFIX, SidecarLoad,
-    SidecarMode, SidecarWriter, build_sidecar_bytes, digest_bytes, load_sidecar, refuse_sidecar,
+    FlushOutcome, LoadedSidecar, RefuseRename, SIDECAR_SUFFIX, SidecarLoad, SidecarMode,
+    SidecarWriter, build_sidecar_bytes, digest_bytes, load_sidecar, refuse_sidecar,
     refuse_sidecar_with, sidecar_matches_project, sidecar_path_for_project,
     sidecar_refused_observation, sidecar_write_failed_observation, write_synced,
 };

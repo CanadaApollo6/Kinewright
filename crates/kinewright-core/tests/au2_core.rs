@@ -469,7 +469,7 @@ fn audio_descriptor_tables_match_the_contract_exactly() {
     assert!(!is_audio_effect("audio_parametric"));
     assert!(!is_audio_effect("brightness"));
 
-    assert_eq!(kinewright_core::EFFECT_DESCRIPTORS.len(), 28);
+    assert_eq!(kinewright_core::EFFECT_DESCRIPTORS.len(), 27);
     let after_limiter: Vec<&str> = kinewright_core::EFFECT_DESCRIPTORS
         .iter()
         .map(|descriptor| descriptor.name)
