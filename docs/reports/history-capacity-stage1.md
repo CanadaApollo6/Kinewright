@@ -233,3 +233,33 @@ At the two merge cuts the store ledger reported metadata 2,812,388 / 5,374,781 b
 The final foreground gate batch and final warm Agent clippy check both exited 0. Full **Core: 831 passed, 0 failed, 2 ignored**; **Project (`test-util`): 455 passed, 0 failed, 3 ignored**; **Agent (`slow-tests`): 1,710 passed, 0 failed, 95 ignored**. Fmt, all-target clippy `-D warnings` for all three changed crates, slow-test lint (129 tests / 150 allowlist entries / 27 equipped-session skip sites), and workspace test compilation **PASS**. The separate release crash/reopen witness also passes. Evidence: `target/history-capacity/capacity-*.log`, `capacity-gates.json`, `native-task-capacity.json`, `native-candidate-capacity.json` and `native-open-release.json`.
 
 `target/` is **36.83 GB (34.30 GiB; 36,832,864,131 bytes)**. Windows and paid/provider runs: **NOT RUN**. This commit closes the admitted-size native lifecycle and non-latching candidate refusal proofs. The requested merge of `e160e419`, final truthful history-replay recovery, and the lead's final resident-memory ruling remain next. No background build or test is left running at this commit boundary.
+
+## Current-format merge
+
+Merged `e160e419d8a952a21d331ce85f197ecd6d8bd16c` in `06569425241e2e98a6304de2187f60be715d799a`. Compact history uses the current tagged journal command. All new persisted and transported records reject unknown fields; the always-written nullable `split_parent` also rejects omission in typed decoding and the compiled support schema. The document-bearing encoding remains test-only. Current writer output replaces the affected bundle and regression archives; all three temporary fixture-generation source changes were independently checked as restored byte for byte. No old-shape reader or migration was added.
+
+These measurements supersede the earlier capacity and heap rows. T, C, D and the role limits have not changed. Admission is the bounded JSON record estimate, not measured heap. The task rows measure history capacity; a real run can meet other count quotas first.
+
+| Clips | Task edits | H1 bytes | H1 admission | Accepted live pair | Next refused live pair | Candidate merges | Operations per merge |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 40 | 295 | 87,778 | 1,107,678 | 10,177,855 | 10,211,685 | 3 | 200 |
+| 120 | 295 | 87,780 | 1,107,682 | 22,020,719 | 22,094,453 | 2 | 200 |
+| 400, including 20 ripple-deletes | 203 | 62,490 | 794,100 | 42,797,667 | 43,001,176 | 1 | 200 |
+| 1,200 | 68 | 20,540 | 258,833 | 42,762,995 | 43,375,427 | 1 | 68 |
+
+The small task rows refuse on T: the next H1 admission charges are 1,111,419 and 1,111,423 bytes. The larger rows refuse on the 41 MiB live bound. At 400/200 with ripple-deletes the typed pair charge is 42,187,677 bytes. Candidate accepted live charges are 2,069,717 / 1,547,956 / 1,266,613 / 1,909,093 bytes; the next charges are 2,742,470 / 2,260,613 / 2,108,518 / 2,736,761 bytes. Every candidate row checks the actionable non-latching refusal, unchanged candidate/result, and continued Finish, Freeze and Stop.
+
+| Required native row | History heap | Lineage heap | Additional actor heap | Resident MiB | Headroom under 41 MiB | Measured serial excess over pair |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 400/200, ripple-deletes | 19,484,776 | 14,818,624 | 257,135 | 32.959 | 19.61% | 18.676 MiB |
+| 1,200/68 | 20,479,584 | 15,595,424 | 106,791 | 34.506 | 15.84% | 19.213 MiB |
+
+The full native 400/200 and 1,200/68 lifecycles pass through Finish/Freeze, merge, Stop, process death, exact fresh reopen and Redo. Current debug opens were 1,858.997 ms and 4,830.439 ms in the initial merged suite; these are after-only debug observations, not new release latency qualification. The earlier release comparison remains scoped to its recorded pre-merge revision.
+
+The aggregate ceiling remains **unqualified**: 328 + 16 + 128 + 64 + 32 = 568 MiB before other metadata and the extra resident holders already audited above. Ordinary/manual and reachable legacy-session histories remain in the unchanged 128 MiB pool. No raw limit or final aggregate policy changed. The proposed retired-actor eviction/rehydration policy remains a recommendation awaiting the lead's ruling.
+
+The first merged Agent gate exposed two test-fixture assumptions: the 40-clip candidate count rose from two to three, and a recovery-close pressure fixture's fixed 512-byte allowance no longer fit the tagged Undo/Redo pair. The count assertion now records three. The pressure fixture derives a narrowed test budget from the current recovery-close encoding while still requiring a floor and a fitting close; product limits and assertions about the published shared floor are unchanged. The corrected pressure witness passes.
+
+Merge gates pass: fmt, workspace build, workspace all-target clippy with Project `test-util` and all slow features, slow-test lint (129 markers / 150 allowlist entries / 27 equipped-session skip sites), and workspace test compilation. Full suites: Core 801 passed / 2 ignored across 22 targets; Media 1,270 / 34 across 6 targets, serial slow; Project 451 / 3 across 23 targets with `test-util`; Agent 1,708 / 95 across 30 targets with slow features; App 1,011 / 5 in its slow-enabled suite. All qualified targets have zero failures. The passing Agent library and binary targets were unchanged by the integration-only pressure-fixture correction; all 23 integration targets and doc tests were rerun after that correction. Failed earlier fixture runs remain in separately named evidence logs and are not counted as passes.
+
+At this boundary `target/` is 29,647,493,489 bytes. The idle cleanup before fixture regeneration reduced it from 36,832,864,131 to 6,380,474,026 bytes; cited logs were preserved. No Cargo run was interrupted. Windows execution, ignored equipped-provider tests and new paid runs were not performed. Replay-failure recovery remains the final, subsequent stage-1 change; this commit does not claim it is implemented.

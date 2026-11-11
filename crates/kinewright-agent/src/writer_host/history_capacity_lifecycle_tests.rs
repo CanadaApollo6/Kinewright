@@ -430,7 +430,7 @@ fn history_capacity_candidate_refusal_does_not_latch() {
     }
     assert_eq!(
         observed,
-        [(40, 2), (120, 2), (400, 1), (1200, 1)],
+        [(40, 3), (120, 2), (400, 1), (1200, 1)],
         "CAPACITY_MERGE_COUNTS"
     );
 }

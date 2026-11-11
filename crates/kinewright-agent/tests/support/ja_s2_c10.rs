@@ -413,17 +413,37 @@ pub(super) fn pressure_floor() {
     assert_eq!(pending.len(), 8);
     original_batches.extend(pending.iter().map(|m| m.batch_id.clone()));
     let accepted = gui.export_history().unwrap();
-    let limits = StorageLimits {
-        branch_history_bytes: history_cost_probe(&prefix, &StorageLimits::default()).unwrap() + 512,
-        ..StorageLimits::default()
-    };
+    let raw_limits = StorageLimits::default();
+    let accepted_cost = history_cost_probe(&accepted, &raw_limits).unwrap();
+    // Pick pressure from this writer's real recovery-close cost. The selected
+    // suffix must need a floor and still leave room for the accepted Undo/Redo pair.
+    let (limits, selected, expected_close) = (1..=prefix.batches.len())
+        .find_map(|discard| {
+            let candidate = HistoryTransition::floor(accepted.clone(), discard)
+                .unwrap()
+                .into_after();
+            let close = HistoryTransition::recovery_close(candidate.clone(), &candidate)
+                .unwrap()
+                .into_after();
+            let cost = history_cost_probe(&close, &raw_limits).unwrap();
+            if cost >= accepted_cost {
+                return None;
+            }
+            let limits = StorageLimits {
+                branch_history_bytes: cost,
+                ..StorageLimits::default()
+            };
+            let selected = bound_history_probe(&accepted, &limits).unwrap();
+            let close = HistoryTransition::recovery_close(selected.clone(), &selected)
+                .unwrap()
+                .into_after();
+            (selected.floor_offset > accepted.floor_offset
+                && history_cost_probe(&close, &limits).unwrap() <= limits.branch_history_bytes)
+                .then_some((limits, selected, close))
+        })
+        .expect("pressure fixture must fit a floored suffix and its recovery-close pair");
     assert!(history_cost_probe(&accepted, &limits).unwrap() > limits.branch_history_bytes);
-    let selected = bound_history_probe(&accepted, &limits).unwrap();
     assert!(selected.floor_offset > accepted.floor_offset);
-    let expected_close = HistoryTransition::recovery_close(selected.clone(), &selected)
-        .unwrap()
-        .after()
-        .clone();
     assert!(history_cost_probe(&expected_close, &limits).unwrap() <= limits.branch_history_bytes);
     let mut cut = source.freeze_host_cut().unwrap();
     drop(host);
