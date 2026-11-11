@@ -14,6 +14,9 @@
 # This is a compile and lint check, not Windows execution.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
+# Cross-clippy does not enumerate MSVC libtest names. Keep the platform-scoped
+# manifest/accounting regression in this per-commit gate as well.
+nice -n 19 python3 -I scripts/ci_shards_selftest.py
 url=$(sed -n "s/^\$FfmpegUrl = '\(.*\)'$/\1/p" scripts/setup-ffmpeg.ps1)
 sha=$(sed -n "s/^\$FfmpegSha256 = '\(.*\)'$/\1/p" scripts/setup-ffmpeg.ps1)
 test -n "$url" && test -n "$sha"
