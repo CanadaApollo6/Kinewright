@@ -1115,3 +1115,25 @@ mod fu2_tests {
         assert_eq!(retry.unwrap(), ReceiptLookup::Committed(retired));
     }
 }
+
+impl Ja1EditingSession {
+    /// Capture the immutable floor prefix once, before endpoint ingress opens.
+    /// Task checkpoints never floor this branch's history.
+    pub fn task_history_admission(
+        &self,
+        guard: &DurableBranchSessionGuard,
+    ) -> Result<crate::task_history_admission::TaskHistoryAdmission, BundleError> {
+        let canonical = &self.durable_sessions[self.registered(guard)?].guard;
+        let prefix = specialist_floor_delta_from_baseline(
+            canonical.base(),
+            &canonical.floor_source,
+            &*self.durable_branch_baseline(canonical)?,
+        )?;
+        Ok(crate::task_history_admission::TaskHistoryAdmission {
+            base: canonical.base().clone(),
+            prefix,
+            floor_offset: canonical.floor_source.floor_offset,
+            limits: self.registered_bundle(canonical)?.store().limits().clone(),
+        })
+    }
+}

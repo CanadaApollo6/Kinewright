@@ -1417,6 +1417,14 @@ impl ProjectBundle {
         core: &Core,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
+        self.with_person_publication(|bundle| bundle.save_current(core, inputs))
+    }
+    /// Shared bookkeeping publishes under its existing admission, without person authority.
+    pub(crate) fn save_current(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+    ) -> Result<BundleSaveReport, BundleError> {
         if !self.unsettled {
             self.publication_state = PublicationState::NeverAttempted;
         }

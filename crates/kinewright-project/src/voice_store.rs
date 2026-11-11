@@ -88,9 +88,11 @@ fn evidence(
         byte_length: bytes.len() as u64,
         record_kind: RecordKind::OwnedEvidence,
     };
-    owner
-        .store_mut()?
-        .admit_blob(&mut &*bytes, &reference, dependencies)
+    owner.with_person_publication(|owner| {
+        owner
+            .store_mut()?
+            .admit_blob(&mut &*bytes, &reference, dependencies)
+    })
 }
 pub fn save_voice(
     owner: &mut ProjectBundle,
@@ -236,7 +238,10 @@ impl VoiceNoteState {
             .map_err(|error| BundleError::Corrupt(error.to_string()))?
             .len() as u64
             + std::mem::size_of::<Self>() as u64;
-        let charge = owner.store().reserve(0, slot_bytes, 0, false)?;
+        let charge = owner
+            .store()
+            .person_publication_store()
+            .reserve(0, slot_bytes, 0, false)?;
         Ok(Self {
             project: owner.project_id().clone(),
             owner_epoch: owner.store().owner_epoch(),

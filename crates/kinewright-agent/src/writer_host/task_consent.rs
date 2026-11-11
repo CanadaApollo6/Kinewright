@@ -385,12 +385,15 @@ impl ConsentEdit<'_> {
         revision: TimelineRevision,
     ) -> Result<EditOutcome, HostError> {
         match self {
-            Self::Batch(ops) => Ok(EditOutcome::Batch(Box::new(core.request(
-                Command::DoBatchIfRevision {
-                    expected: revision,
-                    operations: ops.to_vec(),
-                },
-            )))),
+            Self::Batch(ops) => {
+                endpoint.check_batch_history(core, ops).map_err(policy)?;
+                Ok(EditOutcome::Batch(Box::new(core.request(
+                    Command::DoBatchIfRevision {
+                        expected: revision,
+                        operations: ops.to_vec(),
+                    },
+                ))))
+            }
             Self::History {
                 before,
                 after,
@@ -503,6 +506,9 @@ impl TaskMcp {
         operations: &[Operation],
         description: &str,
     ) -> Result<(), HostError> {
+        self.endpoint
+            .check_batch_history(core, operations)
+            .map_err(policy)?;
         let owner = self.consent_host()?;
         let host = lock_host(&owner, &self.endpoint)?;
         let (binding, state) = self.batch_binding(
@@ -673,6 +679,15 @@ impl TaskMcp {
         edit: &ConsentEdit<'_>,
         _description: Option<&str>,
     ) -> Result<EditOutcome, HostError> {
+        match edit {
+            ConsentEdit::Batch(operations) => self
+                .endpoint
+                .check_batch_history(core, operations)
+                .map_err(policy)?,
+            ConsentEdit::History { after, .. } => {
+                self.endpoint.check_history(after).map_err(policy)?;
+            }
+        }
         let counts = removed(before, &edit.after(before)?);
         let actual_description = (counts.0 > 0 || counts.1 > 0)
             .then(|| format!("Remove {} clips and {} tracks", counts.0, counts.1));

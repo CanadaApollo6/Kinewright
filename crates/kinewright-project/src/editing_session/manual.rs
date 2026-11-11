@@ -62,42 +62,44 @@ impl Ja1EditingSession {
             .as_mut()
             .ok_or(BundleError::HistoryChanged)?
             .bundle_mut()?;
-        let branch = bundle.manual_branch_id().clone();
-        if *bundle.branch_history(&branch)? != history {
-            return Err(BundleError::HistoryChanged);
-        }
-        let issuer = bundle.issue_issuer(&core, &inputs, 1)?;
-        let namespace_name = bundle.store.with_namespace(|n| {
-            n.identity()
-                .resolved_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .map(str::to_owned)
-                .ok_or(BundleError::Unsupported("manual namespace name".into()))
-        })?;
-        let checkpoint = bundle.checkpoint(&branch)?;
-        let parent_identity = bundle
-            .store
-            .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))?;
-        Ok(ManualLease {
-            parent_identity: Some(parent_identity),
-            namespace_name: Some(namespace_name),
-            client,
-            token,
-            project: bundle.project_id().clone(),
-            branch: branch.clone(),
-            switch_generation: bundle
-                .root()
-                .ok_or(BundleError::HistoryChanged)?
-                .manual_switch_generation,
-            owner_epoch: bundle.store.owner_epoch(),
-            generation: 1,
-            issuer,
-            anchor_head: checkpoint.head_id.clone(),
-            predecessor: checkpoint.batch_ids.last().cloned(),
-            history_sha256: checkpoint.history_ref.sha256.clone(),
-            inputs: checkpoint.input_manifest_ref.clone(),
-            lineage: checkpoint.lineage_ref.clone(),
+        bundle.with_person_publication(|bundle| {
+            let branch = bundle.manual_branch_id().clone();
+            if *bundle.branch_history(&branch)? != history {
+                return Err(BundleError::HistoryChanged);
+            }
+            let issuer = bundle.issue_issuer(&core, &inputs, 1)?;
+            let namespace_name = bundle.store.with_namespace(|n| {
+                n.identity()
+                    .resolved_root
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .map(str::to_owned)
+                    .ok_or(BundleError::Unsupported("manual namespace name".into()))
+            })?;
+            let checkpoint = bundle.checkpoint(&branch)?;
+            let parent_identity = bundle
+                .store
+                .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))?;
+            Ok(ManualLease {
+                parent_identity: Some(parent_identity),
+                namespace_name: Some(namespace_name),
+                client,
+                token,
+                project: bundle.project_id().clone(),
+                branch: branch.clone(),
+                switch_generation: bundle
+                    .root()
+                    .ok_or(BundleError::HistoryChanged)?
+                    .manual_switch_generation,
+                owner_epoch: bundle.store.owner_epoch(),
+                generation: 1,
+                issuer,
+                anchor_head: checkpoint.head_id.clone(),
+                predecessor: checkpoint.batch_ids.last().cloned(),
+                history_sha256: checkpoint.history_ref.sha256.clone(),
+                inputs: checkpoint.input_manifest_ref.clone(),
+                lineage: checkpoint.lineage_ref.clone(),
+            })
         })
     }
     pub fn commit_manual_history(
@@ -116,12 +118,14 @@ impl Ja1EditingSession {
             .as_mut()
             .ok_or(BundleError::HistoryChanged)?
             .bundle_mut()?;
-        let result = crate::bundle_commit::BundleCommit::admitted_history(
-            bundle,
-            &envelope,
-            &core,
-            &lease.inputs,
-        )?;
+        let result = bundle.with_person_publication(|bundle| {
+            crate::bundle_commit::BundleCommit::admitted_history(
+                bundle,
+                &envelope,
+                &core,
+                &lease.inputs,
+            )
+        })?;
         self.inputs = bundle
             .checkpoint(bundle.manual_branch_id())?
             .input_manifest_ref

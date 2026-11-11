@@ -806,7 +806,8 @@ impl HostCommandOwner {
             return Ok(());
         }
 
-        self.persist_runtime_task(&mut state, identity, true)?;
+        let mut cleanup = self.cleanup_publication(identity, CleanupEvidence::Completed(proof))?;
+        cleanup.persist_runtime_task(&mut state, identity, true)?;
         let attempt = state
             .attempts
             .iter_mut()
@@ -863,7 +864,7 @@ impl HostCommandOwner {
                     }
                 })
         {
-            let record = self.owner()?.store()?.read_run_record(&reference)?;
+            let record = cleanup.owner()?.store()?.read_run_record(&reference)?;
             if let OrchestrationPayload::Result(result) = &record.payload {
                 use crate::orchestration::orchestration_records::{
                     OutcomeDetail, RunOutcome, RunPhase, RunWait,
@@ -885,7 +886,7 @@ impl HostCommandOwner {
                 state.wait = RunWait::None;
             }
         }
-        self.publish_native(producer, state, identity, vec![])
+        cleanup.publish_native(producer, state, identity, vec![])
     }
 }
 
