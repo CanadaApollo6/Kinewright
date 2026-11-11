@@ -318,7 +318,7 @@
       "stage": 1,
       "package": "kinewright-project",
       "target": "lib",
-      "test": "project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite",
+      "test": "project::tests::unknown_blend_field_is_refused_and_the_file_is_untouched",
       "source": "crates/kinewright-project/src/project.rs",
       "lane": "portable"
     },

@@ -12,7 +12,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "crates/kinewright-agent/tests/fixtures/ja"
 LANES = {
-    "edit-undo-redo": 0, "format-corpus": 0, "branches-current": 0,
+    "edit-undo-redo": 0, "branches-current": 0,
     "clip-id-reuse": 0, "history-loss": 1, "legacy-io": 1,
     "participants-lock": 0, "reply-retry": 1, "recording-loopback": 0,
     "media-shared-control": 0, "media-repeated-control": 0, "app-coalesced-paint": 0,

@@ -14,8 +14,8 @@ C='crates/kinewright-agent/src/writer_host/task_context.rs'
 H='writer_host::hooks_tests::tests::'
 def add(name,before,after,witness,marker):
  h.PAIRS.append((name,C,before,after,'kinewright-agent',H+witness,marker))
-add('phase-tail','| MediaReadPhase::Assembling { cold: true } => MEDIA_PREPARING_RETRY,','| MediaReadPhase::Assembling { cold: true } => MEDIA_DECODE_TIMEOUT,','te15_a_certification_tail_is_retryable','TE15_PHASE_TAIL_RETRY')
-add('finished-deadline','if worker.is_finished() {','if worker.is_finished() && std::time::Instant::now() < deadline {','te15_a_finished_worker_wins_over_deadline','TE15_FINISHED_AT_DEADLINE')
+add('phase-tail','            if !started || std::time::Instant::now() >= self.deadline {\n                return Err(refused(MEDIA_RETRY));\n            }','            if !started || std::time::Instant::now() >= self.deadline {\n                return Err(media_failed());\n            }','te15_a_retained_read_tail_is_retryable','TE15_PHASE_TAIL_RETRY')
+add('finished-deadline','let mut state = self.work.state.lock().map_err(|_| media_failed())?;','if std::time::Instant::now() >= self.deadline { return Err(refused(MEDIA_RETRY)); }\n                let mut state = self.work.state.lock().map_err(|_| media_failed())?;','te15_a_finished_worker_wins_over_deadline','TE15_FINISHED_AT_DEADLINE')
 add('begin-liveness','MediaReadStartError::Unavailable => media_unavailable()','MediaReadStartError::Unavailable => refused(MEDIA_RETRY)','te15_a_begin_media_read_distinguishes_liveness_from_busy','TE15_BEGIN_LIVENESS')
 add('transcript-duplicates','if value.is_object() {','if false && value.is_object() {','te15_a_transcript_duplicate_words_are_refused_on_wire','TE15_TRANSCRIPT_DUPLICATES')
 add('nested-revision','input.deserialize_any(UniqueVisitor).map(Self)','Value::deserialize(input).map(Self)','te15_a_nested_revision_duplicates_are_refused_on_wire','TE15_NESTED_REVISION_DUPLICATES')
@@ -23,7 +23,7 @@ add('empty-record','if bytes.is_empty() {','if false && bytes.is_empty() {','te1
 # Nearby retained guards only. The complete retained collection is a Part B gate.
 spec=importlib.util.spec_from_file_location('te15_nearby',ROOT/'scripts/te14-fix2-mutations.py')
 registry=importlib.util.module_from_spec(spec);spec.loader.exec_module(registry)
-names={'verification-phase','decode-phase','busy-retry','wait-deadline','stop-wait','pause-wait','omitted-partial','omitted-acceptance','reference-bytes','classified-duplicates','proof-classification','preview-classification','near-golden-prefix','near-reference-usage','near-owned-record-bytes','near-cursor-data-binding'}
+names={'verification-phase','busy-retry','wait-deadline','stop-wait','pause-wait','omitted-partial','omitted-acceptance','reference-bytes','classified-duplicates','proof-classification','preview-classification','near-golden-prefix','near-reference-usage','near-owned-record-bytes','near-cursor-data-binding'}
 selected=[row for row in registry.harness.PAIRS if row[0] in names]
 assert len(selected)==len(names)
 h.PAIRS.extend(('retained-'+row[0],*row[1:]) for row in selected)

@@ -35,15 +35,15 @@ add('retired-preflight', S, 'SpecialistStatus::NoLongerOffered(_) => Err(UNAVAIL
 add('replay-preflight', W+'task_mcp.rs', 'let _ = super::provider_readiness::check_run(&owner, &state.run);', 'let _ = &state.run;', T+'replay_keeps_outcome_but_waits_on_broken_choice', 'TE15_FIX_REPLAY_SETUP_WAIT')
 midrun=(ROOT/(W+'task_mcp.rs')).read_text()
 a=midrun.index('            super::provider_readiness::check_run(&owner, &state.run).map_err')
-b=midrun.index('            host = owner',a)
+b=midrun.index('            host = self.lock_owner(&owner)?;',a)
 add('midrun-preflight', W+'task_mcp.rs', midrun[a:b], '            let _ = &state.run;\n', T+'midrun_assignment_waits_without_another_send', 'TE15_FIX_MIDRUN_WAIT')
 add('active-turn-preserved', R, '        if !same {',
     '        for native in self.hooks.native.values().filter(|n| n.identity.run == *run) { native.control.close(); }\n        if !same {',
     T+'bad_setting_keeps_the_live_director', 'TE15_FIX2_LIVE_TURN_PRESERVED')
 h.EQUIPPED_WITNESSES={T+'bad_setting_keeps_the_live_director'}
 add('continue-settings-wait', A+'orchestration/machine.rs',
-    'matches!(state.wait, RunWait::None | RunWait::ProviderSettings(_))',
-    'state.wait == RunWait::None', T+'continue_and_steering_recheck_choices', 'TE15_FIX_CONTINUE_REPAIRED')
+    'matches!(\n                    state.wait,\n                    RunWait::None | RunWait::ProviderSettings(_) | RunWait::Replan(_)\n                )',
+    'matches!(state.wait, RunWait::None | RunWait::Replan(_))', T+'continue_and_steering_recheck_choices', 'TE15_FIX_CONTINUE_REPAIRED')
 add('reopen-preflight', R, 'RunAction::Continue | RunAction::SendMessage { .. }',
     'RunAction::SendMessage { .. }', T+'reopen_continue_checks_the_new_setting', 'TE15_FIX_REOPEN_PREFLIGHT')
 add('pending-original-first', R, 'if self.hooks.pending.is_some() {', 'if false && self.hooks.pending.is_some() {', T+'pending_revise_reconciles_before_new_choices', 'TE15_FIX_PENDING_REVISE_RECONCILES')

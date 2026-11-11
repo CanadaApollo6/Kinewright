@@ -78,8 +78,8 @@ add('planar-audio-channels',C,'let planar = frame.format().is_planar();','let pl
 add('plain-transcript',C,'else if let Some(text) = value.as_str() {','else if let Some(text) = value.as_str().filter(|_|false) {',
     'te14_plain_text_transcript_keeps_neighbours_and_unknown_alignment','TE14_PLAIN_TEXT_TRANSCRIPT_EXPANDS')
 add('media-owner-lock', M,
-    'drop(host);\n                            prepared.render(&self.endpoint, &owner)?',
-    'let _held_host=host;\n                            prepared.render(&self.endpoint, &owner)?',
+    'drop(host);\n                            match prepared.render(&self.endpoint, &owner) {',
+    'let _held_host=host;\n                            match prepared.render(&self.endpoint, &owner) {',
     'te14_real_owned_audio_and_frame_samples_exclude_ambient_paths', 'TE14_DECODE_RELEASES_OWNER')
 add('media-revision-recheck', C, 'if revision != read.revision\n            || binding != rendered.binding',
     'if false && revision != read.revision\n            || false && binding != rendered.binding',

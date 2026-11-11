@@ -81,8 +81,8 @@ add('generic-model-words', W+'task_mcp.rs',
     'if super::provider_readiness::setup_failure(&why) {',
     'if true || super::provider_readiness::setup_failure(&why) {',
     T+'nonsetup_model_refusal_keeps_provider_words', 'TE15_FIX2_NONSETUP_MODEL_WORDS')
-body = section(S, '        let state = self.spending_scope(producer, &identity.run)?;\n        if matches!(', '\n        let replan =')
-add('stream-wait', S, body, '        let state = self.spending_scope(producer, &identity.run)?;',
+body = section(S, '        if matches!(\n            state.wait,\n            RunWait::Files(_) | RunWait::Replan(_) | RunWait::ProviderSettings(_)', '        let replan =')
+add('stream-wait', S, body, '',
     T+'stream_refusal_preserves_setup_wait', 'TE15_FIX2_STREAM_WAIT_PRESERVED')
 add('queued-retry-bound', S, 'if blocked_run == &run && continuation == &current {',
     'if false && blocked_run == &run && continuation == &current {',

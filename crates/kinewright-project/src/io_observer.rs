@@ -69,6 +69,41 @@ pub(crate) fn note_history_decode() {
 pub fn history_decode_count() -> u64 {
     HISTORY_DECODES.with(std::cell::Cell::get)
 }
+thread_local! { static SAVE_REUSE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Run `run` with a save's reuse of its commit check turned off: the replay shadow and
+/// the sealing preflight the checked bytes again instead of taking the check's charge, and
+/// the support inventory decodes the just-sealed history again instead of taking the
+/// check's fields. This is the path before reuse.
+pub fn without_save_reuse<T>(run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SAVE_REUSE_OFF.with(|off| off.set(false));
+        }
+    }
+    SAVE_REUSE_OFF.with(|off| off.set(true));
+    let _reset = Reset;
+    run()
+}
+pub(crate) fn save_reuse_disabled() -> bool {
+    SAVE_REUSE_OFF.with(std::cell::Cell::get)
+}
+thread_local! { static PREFLIGHTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+pub(crate) fn note_preflight() {
+    PREFLIGHTS.with(|count| {
+        count.set(
+            count
+                .get()
+                .checked_add(1)
+                .expect("test preflight counter overflow"),
+        );
+    });
+}
+/// Number of record preflights (`preflight_record` calls) on this thread.
+#[must_use]
+pub fn preflight_count() -> u64 {
+    PREFLIGHTS.with(std::cell::Cell::get)
+}
 thread_local! {static SYNC_PROFILE: RefCell<Option<SyncProfile>>=const{RefCell::new(None)};}
 #[cfg(target_os = "linux")]
 pub(crate) fn measure_sync<T, E>(run: impl FnOnce() -> Result<T, E>) -> Result<T, E> {

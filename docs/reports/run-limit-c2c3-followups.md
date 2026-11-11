@@ -19,3 +19,30 @@ Cleanup publishes exact selected task cuts and reuses committed manual history. 
 - Both crates' all-target clippy with project/test-util and agent/slow-tests: passed. Fmt check: passed. Slow-test lint: 125 tests, 150 allowlist entries, 27 equipped-session skip sites.
 
 Local evidence is under `target/run-limit-followups/`: `cleanup-drop-final.log`, `cleanup-boundary-final.log`, `clippy-focused.log`, `fmt-focused.log` and `slow-lint-focused.log`. All commands source FFmpeg, use the shared heavy lock, four Cargo jobs and nice 10; Python uses nice 19 and isolated mode. The full merged verification and save measurement follow below after the merge.
+
+
+## Merged verification
+
+The follow-up is `4ba98679`; the fetched `te1` head is `d79b9375fd7a5082b23196dd9f5430c2dc514d22`. The merge applied cleanly. Inspection confirms the checked-history byte/charge/support-field reuse remains alongside C2/C3's person/cleanup admission, ordinary run clamps and specialist-base bound. The merge was held uncommitted for the gates.
+
+All eight deleted paths from both sides were checked by full path and basename. There are no current application, CI or maintained-driver dependencies. Ten older report gate recipes had obsolete predecessor preparation removed; two predecessor-only recipes now explain that they are retired and exit. All twelve pass `bash -n`. Literal grep still finds 52 historical mentions in dated reports, immutable source-hash maps/logs or two frozen script captures. Those provenance records were preserved. Details are in `deleted-reference-audit.json` and `retired-recipe-changes.json`.
+
+| Full merged suite | Passed | Failed | Ignored | Filtered | Suites |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| kinewright-project, test-util | 447 | 0 | 3 | 0 | 21 |
+| kinewright-agent, slow-tests | 1,705 | 0 | 95 | 0 | 30 |
+
+Both full commands used `--no-fail-fast`; no retired-test name was skipped. The agent library passed 1,319 tests, with 58 ignored, in 1,197.12 s. The merged cleanup matrix, history bound and Undo/Redo cases all passed. Workspace `cargo test --workspace --no-run`, fmt and both crates' all-target clippy passed. Slow-test lint passed: 125 tests, 150 allowlist entries, 27 equipped-session skip sites. All 1,007 recorded crate/script/Cargo/CI source hashes matched after the gates.
+
+One release `save_cost_measure` run passed. It used the default four points, with three warm saves and twelve measured changed-history saves per point:
+
+| Requested edits | Retained batches | Median ms | Min–max ms | Fsync calls | Fsync ms | Standalone walk median ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 115 | 112.0 | 110.6–113.2 | 14 | 99.0 | 3.1 |
+| 400 | 415 | 137.2 | 135.6–140.8 | 14 | 99.2 | 11.3 |
+| 1,600 | 1,615 | 250.7 | 243.9–258.5 | 14 | 111.3 | 44.1 |
+| 3,000, history cap | 1,690 | **272.8** | 240.4–280.8 | 14 | 107.4 | 46.9 |
+
+The cap result remains consistent with `te1` merge `58eb76e8`'s recorded roughly 280 ms, after its roughly 660 ms baseline. This is one current run, not a new paired before/after campaign. Its start/end load averages and all samples' summary statistics are retained in `save-cost.log` and `save-cost-result.json`.
+
+`target/` allocated **33,113,411,584 bytes (30.84 GiB)** after the gates; free disk was 291.13 GiB. The local command scripts, logs, per-suite count files and frozen source hashes are in `target/run-limit-followups/`. No provider command, paid run, credential access, push or local Windows runtime qualification occurred. Every own build and test finished before the merge commit.

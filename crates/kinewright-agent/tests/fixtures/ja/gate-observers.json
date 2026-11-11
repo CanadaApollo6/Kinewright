@@ -10,8 +10,7 @@
       "observer": "Real changed-Document save/reopen, byte inventory and test-only persistence-call trace/rename-refusal seam",
       "pending": "Trace absence/fallback can yield a runtime assertion after control. Full graph, dropped-unflushed-write model and certified native Windows storage-crash lane remain pending S1; SIGKILL proves only process death.",
       "control_fixtures": [
-        "legacy-io",
-        "format-corpus"
+        "legacy-io"
       ],
       "observed_baseline_assertions": [
         "strict-parent-directory-sync",
@@ -99,7 +98,6 @@
       "observer": "Legacy writer corpus, copy order/fault trace, two participant destination contention and exact asset inventories",
       "pending": "Studio graph migration/backup/unknown-kind publication and \u00a78.3's `first_save_failure_undo_live_reader` remain pending JA-1 S1/AW2 P1a. Existing legacy LUT behavior is observed, not fixed in S0; new bundle writes include LUTs in copy-before-root.",
       "control_fixtures": [
-        "format-corpus",
         "participants-lock"
       ],
       "observed_baseline_assertions": [],
@@ -421,7 +419,6 @@
       "observer": "Opaque Songbird/expected-slot fixtures and real ordinary title/solid render-start control",
       "pending": "Versioned adapter, AW2/MO6 actual-slot validator and pre-render spy seam pending consumer implementation; unsupported Code load alone is not red.",
       "control_fixtures": [
-        "format-corpus",
         "app-coalesced-paint"
       ],
       "observed_baseline_assertions": [],

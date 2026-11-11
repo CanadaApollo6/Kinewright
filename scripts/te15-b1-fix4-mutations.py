@@ -44,8 +44,8 @@ add('kept-revise',U,'        self.revise = Some(request);','        let _ = requ
 add('waiting-revise-slot',U,'        if !matches!(start, RunStart::Unknown(_)) {','        if !matches!(start, RunStart::Unknown(_) | RunStart::Known(ReviseResult::Waiting { .. })) {',UI+'waiting_revise_keeps_valid_request','FIX4_WAITING_NOT_UNCONFIRMED','kinewright-app')
 unknown='format!("{error} The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send.")'
 add('unknown-suffix',R,unknown,'error.to_string()',H+'te15_b1_fix3_postcharge_ambiguity_is_not_resumable','FIX4_FINAL_UNKNOWN_WORDS')
-body=section(S,'            ) || (matches!(','\n        })')
-add('unknown-final-handler',S,body,'            )',H+'te15_b1_fix3_postcharge_ambiguity_is_not_resumable','FIX4_FINAL_UNKNOWN_WORDS')
+body = '        let state = self.spending_scope(producer, run)?;\n        if self.surface_unknown_send(producer, &state)? {\n            return Ok(());\n        }'
+add('unknown-final-handler',S,body,'        let state = self.spending_scope(producer, run)?;',H+'te15_b1_fix3_postcharge_ambiguity_is_not_resumable','FIX4_FINAL_UNKNOWN_WORDS')
 add('claimed-child-words',O,'"A task is still working. Continue when its turn ends."\n                        } else','"The Director is still working. Continue when its turn ends."\n                        } else',T+'live_child_uses_neutral_words','FIX4_RIGHT_TASK_WORDS')
 add('unknown-child-words',O,'recovery_requires_person: a task has an unknown send outcome; Continue cannot replay it.','recovery_requires_person: the Director has an unknown send outcome; Continue cannot replay it.',T+'live_child_uses_neutral_words','FIX4_RIGHT_TASK_WORDS')
 add('ui-pending-control-words',U,'A Continue request is not confirmed.','A Stop request is not confirmed.',UI+'notes_continue_and_exact_reopen_replay','FIX4_UI_PENDING_CONTROL_WORDS','kinewright-app')

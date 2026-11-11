@@ -1806,7 +1806,13 @@ fn walk_serialized_support(
     for key in ["anyOf", "oneOf"] {
         if let Some(alternatives) = schema.get(key).and_then(Value::as_array) {
             for alternative in alternatives {
-                let mut candidate = fields.clone();
+                // The walk only ever inserts into `fields` and never reads it, so an
+                // alternative's outcome does not depend on what was collected before.
+                // Each alternative collects into its own set (no allocation until its
+                // first insert); a failed one is dropped whole, a successful one is
+                // merged. This replaces a copy of the whole accumulated set per
+                // alternative (`support_walk_tests` holds that walk as the oracle).
+                let mut candidate = BTreeSet::new();
                 if walk_serialized_support(
                     value,
                     alternative,
@@ -1817,7 +1823,7 @@ fn walk_serialized_support(
                 )
                 .is_ok()
                 {
-                    *fields = candidate;
+                    fields.extend(candidate);
                     return Ok(());
                 }
             }
@@ -2458,3 +2464,6 @@ mod s1_support_tests {
         assert!(operation_support_fields(&operation).is_err());
     }
 }
+
+#[cfg(test)]
+mod support_walk_tests;

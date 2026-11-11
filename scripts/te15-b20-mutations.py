@@ -33,7 +33,7 @@ def add(name, file, before, after, test, marker):
 
 for name, test in [('motion', 'editor_then_motion'), ('editor', 'editor_then_editor'), ('assigned-early', 'assigned_before_merge_prepared_after')]:
     add('late-base-' + name, O, 'task_record.brief.scope.base = base;', 'let _ = base;', test, 'C4_MCP_ATTEMPT_HISTORY')
-add('record-before-recovery', O, 'if saved.is_none()\n            && !self', 'if true\n            && !self', 'recorded_base_and_assignment_replay_survive_reopen', 'C4_MCP_ATTEMPT_HISTORY')
+add('record-before-recovery', O, 'if saved.is_none()\n            && retained_fork.is_none()\n            && !self', 'if true\n            && retained_fork.is_none()\n            && !self', 'recorded_base_and_assignment_replay_survive_reopen', 'C4_MCP_ATTEMPT_HISTORY')
 add('foreign-base', O, '    child.base == parent.base', '    true', 'foreign_and_widened_assignments_refuse', 'B20_AUTHORITY_REFUSAL')
 add('object-limits', O, '        && child.objects.is_subset(&parent.objects)', '', 'foreign_and_widened_assignments_refuse', 'B20_AUTHORITY_REFUSAL')
 add('run-owned-descent', P, 'if bases.last() != Some(&current) {', 'if false && bases.last() != Some(&current) {', 'unowned_checkpoint_refuses_before_charge', 'B20_NO_PROVIDER_CONSTRUCTION')

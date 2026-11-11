@@ -33,21 +33,17 @@ def section(file, start, end):
     return text[a:text.index(end,a)]
 
 add('unknown-readiness',R,'if crate::orchestration::machine::has_unknown_send(&state) {','if false && crate::orchestration::machine::has_unknown_send(&state) {',T+'unknown_wait_survives_assign_and_stream','FOLLOWUP_UNKNOWN_READINESS_WAIT')
-before = section(S,'        ) || crate::orchestration::machine::has_unknown_send(&state)','        let replan =')
-after = before.replace(' || crate::orchestration::machine::has_unknown_send(&state)','')
+before = '        let state = self.spending_scope(producer, &identity.run)?;\n        if self.surface_unknown_send(producer, &state)? {\n            return Ok(());\n        }'
+after = '        let state = self.spending_scope(producer, &identity.run)?;'
 add('unknown-stream',S,before,after,T+'unknown_wait_survives_assign_and_stream','FOLLOWUP_UNKNOWN_STREAM_WAIT')
-before = section(S,'            ) || (matches!(', '\n        })')
-add('unpublished-unknown-final',S,before,'            ) || crate::orchestration::machine::has_unknown_send(&state)',T+'unknown_wait_survives_assign_and_stream','FOLLOWUP_UNPUBLISHED_UNKNOWN_INTERRUPTS')
+before = '        let state = self.spending_scope(producer, run)?;\n        if self.surface_unknown_send(producer, &state)? {\n            return Ok(());\n        }'
+add('unpublished-unknown-final',S,before,'        let state = self.spending_scope(producer, run)?;',T+'unknown_wait_survives_assign_and_stream','FOLLOWUP_UNPUBLISHED_UNKNOWN_INTERRUPTS')
 add('wait-classification',R,'.pending_provider_wait = Some(reason.to_owned());','.pending_provider_wait = None;',T+'wait_write_recovers_original_effect','FOLLOWUP_RESUMABLE_CLASSIFICATION')
 add('wait-final-handler',S,'        self.retry_pending_provider_wait(run)?;','',T+'wait_write_recovers_original_effect','FOLLOWUP_RESUMABLE_CLASSIFICATION')
 before = section(S,'                owner\n                    .retry_pending_provider_wait(&run)','                return Err(io::Error::other(reason.clone()));')
 add('wait-blocked-recovery',S,before,'',T+'wait_write_recovers_after_final_handler','FOLLOWUP_RESUMABLE_CLASSIFICATION')
-for cold, result, marker in [(False,'MEDIA_PREPARING_RETRY','TE15_FIX_WARM_TERMINAL'),(True,'MEDIA_DECODE_TIMEOUT','TE15_FIX_COLD_RETRY')]:
-    value = str(cold).lower()
-    original = 'MEDIA_PREPARING_RETRY' if cold else 'MEDIA_DECODE_TIMEOUT'
-    before = f'MediaReadPhase::Decoding {{ cold: {value} }}\n                    | MediaReadPhase::Assembling {{ cold: {value} }} => {original},'
-    after = f'MediaReadPhase::Decoding {{ cold: {value} }} => {original},\n                    MediaReadPhase::Assembling {{ cold: {value} }} => {result},'
-    add('assembly-'+('cold' if cold else 'warm'),C,before,after,H+'te15_a_followup_assembly_keeps_cold_provenance',marker)
+# Retired assembly-warm/assembly-cold: pending assembly now retains one job,
+# superseded by te15-a/phase-tail and finished-deadline.
 add('continue-only-waiting',U,'        && matches!(state.phase, RunPhase::Paused | RunPhase::Interrupted)','        && true',UI+'continue_only_when_waiting','FOLLOWUP_CONTINUE_ONLY_WAITING','kinewright-app')
 before = section(U,'            .on_disabled_hover_text(','            .clicked()')
 add('continue-hover',U,before,'',UI+'disabled_continue_shows_host_reason','FOLLOWUP_DISABLED_HOST_REASON','kinewright-app')
@@ -58,7 +54,7 @@ names = {'resend-opening','model-stop-sentence','unknown-suffix','unknown-final-
 selected = [row for row in near.h.PAIRS if row[0] in names]
 assert len(selected) == len(names)
 h.PAIRS.extend(('near-'+row[0],*row[1:]) for row in selected)
-for filename, attr, names in [('te15-a-mutations.py','h',{'phase-tail','finished-deadline'}),('te14-fix2-mutations.py','harness',{'decode-phase'}),('te14-fix1-mutations.py','harness',{'decoder-cancel'})]:
+for filename, attr, names in [('te15-a-mutations.py','h',{'phase-tail','finished-deadline'}),('te14-fix1-mutations.py','harness',{'decoder-cancel'})]:
     registry = load('followup_'+filename.replace('-','_'),filename)
     selected = [row for row in getattr(registry,attr).PAIRS if row[0] in names]
     assert len(selected) == len(names)
@@ -66,6 +62,6 @@ for filename, attr, names in [('te15-a-mutations.py','h',{'phase-tail','finished
 h.FAST_WITNESSES = {row[5] for row in h.PAIRS}
 for name, file, before, *_ in h.PAIRS:
     assert (ROOT/file).read_text().count(before) == 1, name+': anchor drifted'
-assert len(h.PAIRS) == 24
+assert len(h.PAIRS) == 21
 if __name__ == '__main__':
     h.main()

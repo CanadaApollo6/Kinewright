@@ -802,32 +802,31 @@ impl BundleCommit {
         } else {
             bound_history_borrowed(&aligned, bundle.store.limits())?
         };
-        let checked = if old_history.as_ref().is_some_and(|old| ***old == *bounded) {
-            std::sync::Arc::clone(old_history.as_ref().unwrap())
+        // `check_bytes` keeps the checked encoding with the support fields its decode
+        // observed, so sealing that same encoding needs no second decode for the inventory.
+        let (checked, check_bytes) = if old_history.as_ref().is_some_and(|old| ***old == *bounded) {
+            (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
         } else {
             let serialized =
                 serde_json::to_vec(&bounded).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            let mut support = BTreeSet::new();
-            let checked = crate::bundle_recovery::decode::<HistorySnapshot>(
-                &serialized,
-                &bundle.store.usage_arc(),
-                RecordKind::History,
-                &mut support,
-                bundle.store.limits(),
-            )?;
-            let _replay = bundle
-                .store
-                .reserve_history_shadow(crate::store::preflight_record(
-                    &serialized,
-                    bundle.store.limits(),
-                )?)?;
+            let (checked, check_bytes) = bundle.store.check_history_bytes(serialized)?;
+            // The decode preflighted these bytes under these limits and charged exactly
+            // that; the replay shadow takes the same charge without preflighting again.
+            let replay_charge = checked.decoded_charge();
+            #[cfg(any(test, feature = "test-util"))]
+            let replay_charge = if crate::io_observer::save_reuse_disabled() {
+                crate::store::preflight_record(check_bytes.bytes(), bundle.store.limits())?
+            } else {
+                replay_charge
+            };
+            let _replay = bundle.store.reserve_history_shadow(replay_charge)?;
             let core = Core::spawn(std::sync::Arc::clone(&checked.baseline))
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             bundle
                 .attach_core(&core)?
                 .restore_history((*checked).clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            std::sync::Arc::new(checked)
+            (std::sync::Arc::new(checked), Some(check_bytes))
         };
         let manifest = bundle.store.read_input_manifest(inputs)?;
         let historical_input_owner = switch_generation != 0
@@ -1008,6 +1007,9 @@ impl BundleCommit {
                 reference
             }};
         }
+        // The just-sealed history's support fields, from the commit check's decode of the
+        // same bytes, for the support inventory below.
+        let mut sealed_support = None;
         let (document_ref, baseline_ref, history_ref, lineage_ref) = if unchanged {
             let prior = prior.as_ref().unwrap();
             (
@@ -1017,12 +1019,13 @@ impl BundleCommit {
                 prior.lineage_ref.clone(),
             )
         } else {
-            (
-                seal!(&*checked.document),
-                seal!(&*checked.baseline),
-                seal!(&**checked),
-                seal!(&lineage),
-            )
+            let document_ref = seal!(&*checked.document);
+            let baseline_ref = seal!(&*checked.baseline);
+            let (history, support) = bundle.store.admit_checked_history(&checked, check_bytes)?;
+            sealed_support = support;
+            let history_ref = history.reference.clone();
+            seals.push(history);
+            (document_ref, baseline_ref, history_ref, seal!(&lineage))
         };
         if let Some(floor_inputs) = floor_inputs {
             contexts[0] = seal!(&floor_inputs);
@@ -1341,7 +1344,7 @@ impl BundleCommit {
         let mut retained = roots.clone();
         retained.extend(evidence.clone());
         retained.extend(recovery.references());
-        inventory.required_fields = bundle.store.support_fields(&retained)?;
+        inventory.required_fields = bundle.store.support_fields(&retained, sealed_support)?;
         let closure = bundle.store.closure(&retained)?;
         let roles = bundle.store.evidence_roles(&closure)?;
         let requires_switch =

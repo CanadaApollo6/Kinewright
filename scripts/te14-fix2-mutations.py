@@ -15,12 +15,12 @@ I='crates/kinewright-agent/src/writer_host/codex_instructions.rs'
 H='writer_host::hooks_tests::tests::'
 def add(name,before,after,witness,marker,source=C):
  harness.PAIRS.append((name,source,before,after,'kinewright-agent',H+witness,marker))
-add('verification-phase','MediaReadPhase::Verifying => MEDIA_RETRY,','MediaReadPhase::Verifying => MEDIA_DECODE_TIMEOUT,','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WORDS')
-add('decode-phase','| MediaReadPhase::Assembling { cold: false } => MEDIA_DECODE_TIMEOUT,','| MediaReadPhase::Assembling { cold: false } => MEDIA_PREPARING_RETRY,','te14_fix2_decode_overrun_is_not_retryable','TE14_FIX2_MEDIA_WORDS')
+add('verification-phase','            if !started || std::time::Instant::now() >= self.deadline {\n                return Err(refused(MEDIA_RETRY));\n            }','            if !started || std::time::Instant::now() >= self.deadline {\n                return Err(media_failed());\n            }','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WORDS')
+# Retired decode-phase: Pending warm reads are now retryable and continue one retained job; terminal warm-timeout classification was removed. See te14-fix2/verification-phase and te15-a/phase-tail.
 add('busy-retry','MediaReadStartError::Busy => refused(MEDIA_RETRY)','MediaReadStartError::Busy => refused(MEDIA_DECODE_TIMEOUT)','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_BUSY_RETRY')
-add('wait-deadline','if now >= deadline {','if false && now >= deadline {','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WAIT_ENDS')
+add('wait-deadline','if !started || std::time::Instant::now() >= self.deadline {','if !started || (false && std::time::Instant::now() >= self.deadline) {','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WAIT_ENDS')
 for action in ('stop','pause'):
- add(action+'-wait','!endpoint.media_read_live() || !alive.load(Ordering::Acquire)','false && (!endpoint.media_read_live() || !alive.load(Ordering::Acquire))','te14_fix2_'+action+'_ends_wait','TE14_FIX2_MEDIA_WAIT_ENDS')
+ add(action+'-wait','!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire)','false && (!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire))','te14_fix2_'+action+'_ends_wait','TE14_FIX2_MEDIA_WAIT_ENDS')
 s=(ROOT/C).read_text();start=s.index('pub(super) fn read_child_context');a=s.index('        for (kind, references) in [',start);b=s.index('        for (kind, reference) in [',a);end=s.index('        for chunk in bytes_rows(&serde_json::to_vec(&usage)?)',b)
 add('rejection-first',s[a:end],s[b:end]+s[a:b],'te14_fix2_rejection_precedes_bulk_records','TE14_FIX2_PROOF_FIRST')
 a=s.index('            return Ok(vec![',s.index('fn child_record_rows'));b=s.index('\n        }',a)
@@ -35,12 +35,12 @@ add('proof-classification','if value["kind"] != "task_proof_v1"','if false && va
 add('preview-classification','EvidenceKind::Preview { .. } if value["kind"] != "task_preview_v1"','EvidenceKind::Preview { .. } if false && value["kind"] != "task_preview_v1"','te14_fix2_classification_is_host_owned','TE14_CLASSIFICATION_IS_HOST_OWNED')
 add('trim-note-count','json!(result["expected_note_ids"].as_array().map_or(0, Vec::len))','json!(0)','te14_fix2_many_notes_reach_wake_trim','TE14_FIX2_TRIM_NOTE_COUNT')
 add('retry-instructions','verification still running is retryable shortly','verification is never retryable','te14_fix2_retry_and_budget_are_named_in_provider_text','TE14_FIX2_INSTRUCTIONS_RETRY',I)
-add('worker-failure-words', '.join()\n                    .map_err(|_| media_failed())?\n                    .map_err(|_| media_failed());', '.join()\n                    .map_err(|_| media_failed())?\n                    .map_err(|_| media_unavailable());', 'te14_fix2_decode_failure_does_not_claim_task_was_cancelled','TE14_FIX2_WORKER_FAILURE_WORDS')
+add('worker-failure-words', 'worker.join().map_err(|_| media_failed())?;', 'worker.join().map_err(|_| media_unavailable())?;', 'te14_fix2_decode_failure_does_not_claim_task_was_cancelled','TE14_FIX2_WORKER_FAILURE_WORDS')
 add('artifact-budget-coverage', 'json!(value["omitted"] == true || rows.iter().any(|row| row["omitted"] == true))', 'json!(rows.iter().any(|row| row["omitted"] == true))', 'te14_fix2_many_artifacts_remain_unknown_at_budget', 'TE14_FIX2_UNREAD_ARTIFACTS_UNKNOWN')
 # Select nearby retained witnesses; the complete set is reserved for stage close.
 for script,names in [
  ('te14-mutations.py',{'sibling-detail','stale-revision','child-source','page-limit','expansion-limit','durable-expansions','capacity-replan','golden-prefix','media-owner-lock','media-revision-recheck','cursor-data-binding'}),
- ('te14-fix1-mutations.py',{'artifact-contents','evidence-contents','retry-write','retry-at-eight','cursor-audit','durable-page-binding','reference-usage','owned-record-bytes','cold-cert-owner','cold-switch-owner','decode-owner','decode-switch-owner','media-pin-release'})
+ ('te14-fix1-mutations.py',{'artifact-contents','evidence-contents','retry-write','retry-at-eight','cursor-audit','durable-page-binding','reference-usage','owned-record-bytes','cold-cert-owner','decode-owner','decode-switch-owner'})
 ]:
  spec=importlib.util.spec_from_file_location('te14_fix2_nearby_'+script.replace('-','_'),ROOT/'scripts'/script)
  registry=importlib.util.module_from_spec(spec);spec.loader.exec_module(registry)

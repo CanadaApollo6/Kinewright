@@ -43,26 +43,24 @@ add('cursor-audit', C, 'serde_json::to_vec(&(binding,page_id))?', 'serde_json::t
     'te14_fix1_lost_page_reply_retries_without_a_write', 'TE14_FIX1_AUDIT_BINDS_CURSOR')
 add('cursor-page-identity', C, 'format!("{identity}:{offset}")', 'format!("{identity}:0")',
     'te14_fix1_lost_page_reply_retries_without_a_write', 'TE14_FIX1_CURSOR_IDENTITY')
-add('cold-cert-owner', C, 'let lease = store.input_lease_request(&OwnedInputRef {',
-    'let _cold = store.lease_input(&OwnedInputRef { manifest_ref:task.brief.inputs.clone(),entry:entry.clone() })?;\n        let lease = store.input_lease_request(&OwnedInputRef {',
-    'te14_fix1_cold_certification_stop', 'TE14_FIX1_MEDIA_CONTROL_NOT_BLOCKED')
-add('decode-owner', M, 'drop(host);\n                            prepared.render(&self.endpoint, &owner)?',
-    'let _held_host = host;\n                            prepared.render(&self.endpoint, &owner)?',
+add('cold-cert-owner', C, 'let source = lease.certified_source()?;',
+    'let _cold = store.lease_input(&OwnedInputRef { manifest_ref:task.brief.inputs.clone(),entry:entry.clone() })?;\n        let source = lease.certified_source()?;',
+    'te15_a_fix_retained_certificate_survives_memo_eviction', 'assertion failed: !unexpected.load(Ordering::Acquire)')
+add('decode-owner', M, 'drop(host);\n                            match prepared.render(&self.endpoint, &owner) {',
+    'let _held_host = host;\n                            match prepared.render(&self.endpoint, &owner) {',
     'te14_fix1_decode_stop', 'TE14_FIX1_MEDIA_CONTROL_NOT_BLOCKED')
-add('cold-switch-owner', C, 'let lease = store.input_lease_request(&OwnedInputRef {',
-    'let _cold = store.lease_input(&OwnedInputRef { manifest_ref:task.brief.inputs.clone(),entry:entry.clone() })?;\n        let lease = store.input_lease_request(&OwnedInputRef {',
-    'te14_fix1_cold_certification_switch', 'TE14_FIX1_MEDIA_CONTROL_NOT_BLOCKED')
-add('decode-switch-owner', M, 'drop(host);\n                            prepared.render(&self.endpoint, &owner)?',
-    'let _held_host = host;\n                            prepared.render(&self.endpoint, &owner)?',
+# Retired cold-switch-owner: Reads use the pre-certified source; Switch retains its separate decode/cancellation witness. See te14-fix1/cold-cert-owner and decode-switch-owner.
+add('decode-switch-owner', M, 'drop(host);\n                            match prepared.render(&self.endpoint, &owner) {',
+    'let _held_host = host;\n                            match prepared.render(&self.endpoint, &owner) {',
     'te14_fix1_decode_switch', 'TE14_FIX1_MEDIA_CONTROL_NOT_BLOCKED')
-add('media-liveness', C, '!endpoint.media_read_live() || !alive.load(Ordering::Acquire)',
-    'false && (!endpoint.media_read_live() || !alive.load(Ordering::Acquire))',
-    'te14_fix1_cold_certification_stop', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
-add('decoder-cancel', C, 'let signal = Arc::clone(&cancel);',
+add('media-liveness', C, '!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire)',
+    'false && (!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire))',
+    'te14_fix1_decode_stop', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
+add('decoder-cancel', C, 'let signal = Arc::clone(&work.cancel);',
     'let signal = Arc::new(std::sync::atomic::AtomicBool::new(false));',
-    'te14_fix1_decode_stop', 'TE14_FIX1_DECODER_REAL_CANCEL')
-add('media-deadline', C, 'if now >= deadline {',
-    'if false && now >= deadline {',
+    'te14_fix1_decode_stop', 'TE14_FIX1_DECODER_CONTINUES_OR_CANCELS')
+add('media-deadline', C, 'if !started || std::time::Instant::now() >= self.deadline {',
+    'if !started || (false && std::time::Instant::now() >= self.deadline) {',
     'te14_fix1_media_wall_clock_limit', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
 add('child-proof-source', C, '1 => Ok(sources.pop().unwrap()),', '1 => Ok(json!(current)),',
     'te14_fix1_child_proof_uses_durable_source_not_parent_clock', 'TE14_FIX1_CHILD_PROOF_SOURCE')
@@ -77,10 +75,7 @@ add('legacy-limit-words', C,
     'te14_fix1_legacy_limit_names_the_paged_route', 'TE14_FIX1_LEGACY_LIMIT_TRUE')
 add('durable-page-binding', C, 'let binding = json!({"run":state.run,"task":task.id,"source":task.brief.scope.base,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});\n        let rows = match &read.evidence {', 'let binding = json!({"run":state.run,"task":task.id,"revision":revision,"document_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&*document)?),"evidence":read.evidence});\n        let rows = match &read.evidence {',
     'te14_fix1_retry_after_host_restart_is_free', 'TE14_FIX1_RESTART_REPLY_IDENTICAL')
-add('media-pin-release', 'crates/kinewright-project/src/owned_inputs.rs',
-    'self.hold.read_store().lease_input(&self.identity)',
-    'let result=self.hold.read_store().lease_input(&self.identity); std::mem::forget(self.hold); result',
-    'te14_fix1_cold_certification_stop', 'TE14_FIX1_PIN_RELEASED')
+# Retired media-pin-release: The temporary input-lease request whose hold was leaked is no longer opened by this read path. See te14-fix1/cold-cert-owner.
 add('owned-record-bytes', C, 'return Ok(self.owner()?.store()?.read_evidence(reference)?.to_vec());',
     'return Ok(serde_json::to_vec(&self.read_task_reference(reference)?)?);',
     'te14_fix1_child_expansion_preserves_original_owned_bytes', 'TE14_FIX1_RAW_RECORD_EXACT')

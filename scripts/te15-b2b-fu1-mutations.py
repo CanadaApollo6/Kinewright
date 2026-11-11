@@ -14,8 +14,8 @@ OUT = ROOT / 'target/te1-5/b2b-fu1/pairs'
 G = 'crates/kinewright-agent/src/te1_eval/grant.rs'
 C = 'crates/kinewright-agent/src/te1_eval/checks.rs'
 text = (ROOT/C).read_text()
-start = text.index('                            && effective_merges\n')
-end = text.index('                            && calls[', start)
+start = text.index('                        && effective_merges\n')
+end = text.index('                        && calls[', start)
 PAIRS = [
     ('case5-first-merge', C, text[start:end], '', 'te1_eval::checks::tests::te15_b2af1_case5_read_before_merge', 'FU1_FIRST_MERGE_BEFORE_READ_REFUSED'),
     ('expired-grant', G, 'if expires <= now {', 'if false {', 'te1_eval::grant::tests::te15_b2b_fu1_expired', 'FU1_EXPIRED_REFUSED'),
