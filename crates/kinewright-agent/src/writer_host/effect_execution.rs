@@ -12,6 +12,11 @@ impl HostCommandOwner {
     ) -> Result<(), HostError> {
         match self.hooks.pending.clone() {
             None => Ok(()),
+            Some(super::orchestration::PendingPublication::Owner(original))
+                if self.has_pending_edit_publication(&original) =>
+            {
+                self.retry_pending_edit_publications()
+            }
             Some(super::orchestration::PendingPublication::Owner(original)) => self
                 .publish_orchestration_transition(producer, &original, None)
                 .map(|_| ()),

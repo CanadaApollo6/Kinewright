@@ -79,58 +79,76 @@ impl HostCommandOwner {
             self.message = format!("Edit audit publication is still pending: {error}");
             eprintln!("{}", self.message);
         }
-        if matches!(
-            projection.wait,
-            crate::orchestration::orchestration_records::RunWait::Replan(_)
-        ) {
-            crate::orchestration::tasks::refresh_wait(&mut projection);
-        }
-        let mut envelope = OrchestrationEnvelope {
-            id: issued.envelope.id,
-            digest: serde_json::from_value(serde_json::json!("0".repeat(64)))?,
-            project: issued.envelope.project_id,
-            expected_generation: self.owner()?.metadata_generation()?,
-            authority: AuthorityBinding {
-                grant_ref: issued.grant_ref,
-                owner_epoch: issued.envelope.owner_epoch,
-                endpoint: None,
-                attempt: None,
-            },
-            command: OrchestrationCommand::RecordContext {
-                task: identity.task.clone(),
-                feedback: vec![],
-                decisions,
-            },
-        };
-        envelope.digest = envelope.computed_digest().map_err(refused)?;
-        projection.sequence = projection
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| refused("native sequence capacity"))?;
-        projection.control_revision = envelope.identity("control-revision").map_err(refused)?;
-        let segment = EventSegment {
-            run: identity.run.clone(),
-            first_sequence: projection.sequence,
-            previous: self
-                .owner()?
+        let update = native_update(
+            projection,
+            identity,
+            decisions,
+            issued,
+            self.owner()?.metadata_generation()?,
+            self.owner()?
                 .orchestration_cut(&identity.run)?
                 .map(|cut| cut.segment),
-            events: vec![OrchestrationEvent {
-                command: envelope.id.clone(),
-                sequence: projection.sequence,
-                projection: projection.clone(),
-            }],
-        };
-        let update = ValidatedRunUpdate::new(
-            &envelope.project,
-            envelope.expected_generation,
-            &envelope,
-            projection,
-            segment,
-            CommandDecision::Applied,
-        )
-        .map_err(refused)?;
+        )?;
         let (receipt, _) = self.publish_orchestration_transition(producer, &update, None)?;
         Ok((update, receipt))
     }
+}
+
+/// Construct the exact native successor against an explicit publication fence.
+pub(super) fn native_update(
+    mut projection: RunProjection,
+    identity: &ExecutionIdentity,
+    decisions: Vec<ObjectRef>,
+    issued: super::orchestration::MetadataIssuer,
+    generation: u64,
+    previous: Option<ObjectRef>,
+) -> Result<ValidatedRunUpdate, HostError> {
+    if matches!(
+        projection.wait,
+        crate::orchestration::orchestration_records::RunWait::Replan(_)
+    ) {
+        crate::orchestration::tasks::refresh_wait(&mut projection);
+    }
+    let mut envelope = OrchestrationEnvelope {
+        id: issued.envelope.id,
+        digest: serde_json::from_value(serde_json::json!("0".repeat(64)))?,
+        project: issued.envelope.project_id,
+        expected_generation: generation,
+        authority: AuthorityBinding {
+            grant_ref: issued.grant_ref,
+            owner_epoch: issued.envelope.owner_epoch,
+            endpoint: None,
+            attempt: None,
+        },
+        command: OrchestrationCommand::RecordContext {
+            task: identity.task.clone(),
+            feedback: vec![],
+            decisions,
+        },
+    };
+    envelope.digest = envelope.computed_digest().map_err(refused)?;
+    projection.sequence = projection
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| refused("native sequence capacity"))?;
+    projection.control_revision = envelope.identity("control-revision").map_err(refused)?;
+    let segment = EventSegment {
+        run: identity.run.clone(),
+        first_sequence: projection.sequence,
+        previous,
+        events: vec![OrchestrationEvent {
+            command: envelope.id.clone(),
+            sequence: projection.sequence,
+            projection: projection.clone(),
+        }],
+    };
+    ValidatedRunUpdate::new(
+        &envelope.project,
+        envelope.expected_generation,
+        &envelope,
+        projection,
+        segment,
+        CommandDecision::Applied,
+    )
+    .map_err(refused)
 }

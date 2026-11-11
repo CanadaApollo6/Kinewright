@@ -21,7 +21,11 @@ use std::collections::BTreeSet;
 
 #[path = "orchestration_store.rs"]
 mod store;
-pub use store::{PublishedRunCut, RegisteredRunIndex, commit_orchestration};
+pub use store::{
+    PreparedOrchestrationCut, PreparedOrchestrationPublication, PublishedRunCut,
+    RegisteredRunIndex, commit_orchestration, commit_prepared_orchestration,
+    prepare_orchestration_pair,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

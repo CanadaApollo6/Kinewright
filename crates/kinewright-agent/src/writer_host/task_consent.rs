@@ -11,8 +11,7 @@ use crate::{
     },
 };
 use kinewright_core::{
-    Command, Core, Document, Event, HistorySnapshot, Operation, Query, QueryResult,
-    TimelineRevision,
+    Command, Core, Document, Event, HistorySnapshot, Operation, TimelineRevision,
 };
 use kinewright_project::bundle_records::{BranchId, ProjectId};
 use serde::{Deserialize, Serialize};
@@ -71,6 +70,29 @@ struct AppliedRecord {
     kind: String,
     approval: kinewright_project::bundle_records::ObjectRef,
     revision: TimelineRevision,
+}
+pub(in crate::writer_host) struct PendingEditApplication {
+    run: RunId,
+    bytes: Vec<u8>,
+    prepared: kinewright_project::orchestration_commit::PreparedOrchestrationCut,
+}
+fn capacity(error: HostError) -> HostError {
+    if matches!(&error, HostError::Refused(refusal) if matches!(refusal.code.as_str(), "run_limit" | "storage_backpressure"))
+    {
+        problem(
+            "consent_capacity",
+            "This run cannot safely keep both records for another approved edit. This edit was not applied. Tell the Director to finish or Stop the run; start a new run for more edits.",
+        )
+    } else {
+        error
+    }
+}
+fn evidence_reference(bytes: &[u8]) -> kinewright_project::bundle_records::ObjectRef {
+    kinewright_project::bundle_records::ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: kinewright_project::bundle_records::RecordKind::OwnedEvidence,
+    }
 }
 fn problem(code: &str, reason: impl Into<String>) -> HostError {
     HostRefusal::new(code, &reason.into()).into()
@@ -734,11 +756,36 @@ impl TaskMcp {
             removed_clips,
             removed_tracks,
         };
-        let reference = host
-            .owner_mut()?
-            .admit_host_grant(&serde_json::to_vec(&record)?)?;
-        state.edit_approvals.push(reference.clone());
+        if host.hooks.pending_edit_applications.len() >= ITEM_LIMIT {
+            return Err(problem(
+                "consent_capacity",
+                "The host must save the pending edit audit before another edit. Tell the Director to finish or Stop this run.",
+            ));
+        }
         let producer = host.run_producer(&state.run)?;
+        let producer_index = host.resolve_attachment(Some(&producer.bearer()))?;
+        let issued = host
+            .prepare_edit_metadata(producer_index)
+            .map_err(capacity)?;
+        // Authority reconciliation may finish earlier work. Fence the approval to
+        // the resulting current projection and the unchanged live Core revision.
+        let (rechecked, fresh) = self.batch_binding(&host, revision, edit, description)?;
+        if rechecked != record.binding {
+            return Err(stale());
+        }
+        self.validate_consent(&host, &fresh, &rechecked, core, before, edit)?;
+        state = fresh;
+        if state.edit_approvals.len() >= ITEM_LIMIT
+            || !host.hooks.pending_edit_applications.is_empty()
+        {
+            return Err(problem(
+                "consent_capacity",
+                "The host must save the pending edit audit or finish this run before another approval. This edit was not applied. Tell the Director.",
+            ));
+        }
+        let approval_bytes = serde_json::to_vec(&record)?;
+        let reference = evidence_reference(&approval_bytes);
+        state.edit_approvals.push(reference.clone());
         let execution = state
             .attempts
             .iter()
@@ -746,7 +793,61 @@ impl TaskMcp {
             .ok_or_else(|| authority("The task attempt ended"))?
             .identity
             .clone();
-        host.publish_native(&producer, state.clone(), &execution, vec![])?;
+        let marker = serde_json::to_vec(&AppliedRecord {
+            kind: "studio_edit_applied_v1".into(),
+            approval: reference,
+            revision: TimelineRevision(revision.0.checked_add(1).ok_or_else(stale)?),
+        })?;
+        let marker_reference = evidence_reference(&marker);
+        let mut next_issuer = issued.clone();
+        next_issuer.envelope.id.sequence = next_issuer
+            .envelope
+            .id
+            .sequence
+            .checked_add(1)
+            .ok_or_else(stale)?;
+        let first = crate::writer_host::context_publication::native_update(
+            state,
+            &execution,
+            vec![],
+            issued,
+            host.owner()?.metadata_generation()?,
+            host.owner()?
+                .orchestration_cut(&execution.run)?
+                .map(|cut| cut.segment),
+        )?;
+        // Each durable cut owns its full immutable snapshot. Keep the approved
+        // snapshot intact while deriving its application successor.
+        let mut application_state = first.projection().clone();
+        application_state.edit_applications.push(marker_reference);
+        let ((approval_update, mut approval_hold), application, bytes) =
+            kinewright_project::orchestration_commit::prepare_orchestration_pair(
+                host.owner_mut()?,
+                first,
+                &approval_bytes,
+                |generation, previous| {
+                    let update = crate::writer_host::context_publication::native_update(
+                        application_state,
+                        &execution,
+                        vec![],
+                        next_issuer,
+                        generation,
+                        Some(previous),
+                    )
+                    .map_err(|error| {
+                        kinewright_project::bundle::BundleError::Identity(error.to_string())
+                    })?;
+                    Ok((update, marker))
+                },
+            )
+            .map_err(HostError::from)
+            .map_err(capacity)?;
+        #[cfg(test)]
+        if let Some(hook) = host.hooks.consent_prepared_hook.take() {
+            hook()?;
+        }
+        host.publish_prepared_edit(&producer, &approval_update, &mut approval_hold)?;
+        drop(approval_hold);
         self.endpoint
             .check_live()
             .map_err(|reason| problem("consent_liveness", reason))?;
@@ -755,37 +856,18 @@ impl TaskMcp {
         if let Some(hook) = host.hooks.consent_apply_hook.take() {
             hook(core);
         }
-        if host.hooks.pending_edit_applications.len() >= ITEM_LIMIT {
-            return Err(problem(
-                "consent_capacity",
-                "The host must save the pending edit audit before another edit.",
-            ));
-        }
         let outcome = edit.apply(&self.endpoint, core, revision)?;
         if outcome.applied() {
-            // The original successful Core outcome survives an audit-publication failure.
-            if let Err(error) = (|| -> Result<(), HostError> {
-                let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = core
-                    .request(Command::Query(Query::Snapshot))
-                    .map_err(|e| authority(e.to_string()))?
-                else {
-                    return Err(stale());
-                };
-                let marker = AppliedRecord {
-                    kind: "studio_edit_applied_v1".into(),
-                    approval: reference,
-                    revision,
-                };
-                host.hooks
-                    .pending_edit_applications
-                    .push((state.run.clone(), serde_json::to_vec(&marker)?));
-                state = host
-                    .owner()?
-                    .orchestration_projection(&state.run)?
-                    .ok_or_else(|| authority("Run unavailable"))?;
-                host.publish_native(&producer, state, &execution, vec![])?;
-                Ok(())
-            })() {
+            // Both exact records were sealed before approval. The successful Core
+            // outcome survives a non-capacity application-publication failure.
+            let mut pending = PendingEditApplication {
+                run: execution.run.clone(),
+                bytes,
+                prepared: application,
+            };
+            let (update, held) = &mut pending.prepared;
+            if let Err(error) = host.publish_prepared_edit(&producer, update, held) {
+                host.hooks.pending_edit_applications.push(pending);
                 host.message = format!("Edit applied; its audit is pending publication: {error}");
                 eprintln!("{}", host.message);
             }
@@ -795,47 +877,100 @@ impl TaskMcp {
 }
 
 impl HostCommandOwner {
+    pub(in crate::writer_host) fn acknowledge_edit_applications(&mut self, state: &RunProjection) {
+        self.hooks.pending_edit_applications.retain(|pending| {
+            pending.run != state.run
+                || !state
+                    .edit_applications
+                    .contains(&evidence_reference(&pending.bytes))
+        });
+    }
+    pub(in crate::writer_host) fn has_pending_edit_in_run(&self, run: &RunId) -> bool {
+        self.hooks
+            .pending_edit_applications
+            .iter()
+            .any(|entry| &entry.run == run)
+    }
+    pub(in crate::writer_host) fn has_pending_edit_publication(
+        &self,
+        update: &crate::orchestration::orchestration_commit::ValidatedRunUpdate,
+    ) -> bool {
+        self.hooks
+            .pending_edit_applications
+            .iter()
+            .any(|entry| &entry.prepared.0 == update)
+    }
+    fn acknowledge_current_edit_applications(&mut self) -> Result<(), HostError> {
+        let runs = self
+            .hooks
+            .pending_edit_applications
+            .iter()
+            .map(|entry| entry.run.clone())
+            .collect::<BTreeSet<_>>();
+        for run in runs {
+            if let Some(state) = self.owner()?.orchestration_projection(&run)? {
+                self.acknowledge_edit_applications(&state);
+            }
+        }
+        Ok(())
+    }
+    pub(in crate::writer_host) fn retry_pending_edit_publications(
+        &mut self,
+    ) -> Result<(), HostError> {
+        // A fallback may have committed this marker under a newer root/ID
+        // payload. Observe that fact before replaying its superseded plan.
+        if self.hooks.pending.is_none() {
+            self.acknowledge_current_edit_applications()?;
+        }
+        let mut pending = std::mem::take(&mut self.hooks.pending_edit_applications);
+        let result = (|| {
+            for entry in &mut pending {
+                let (update, held) = &mut entry.prepared;
+                let producer = self.run_producer(&entry.run)?;
+                match self.publish_prepared_edit(&producer, update, held) {
+                    Ok(()) => {}
+                    // A later person-owned save can supersede the prepared root.
+                    // Keep its hold until a fresh ordinary/terminal cut includes
+                    // the same marker; never install an old root over that save.
+                    Err(HostError::Refused(refusal)) if refusal.code == "history_changed" => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        })();
+        self.hooks.pending_edit_applications = pending;
+        if result.is_ok() {
+            self.acknowledge_current_edit_applications()?;
+        }
+        result
+    }
     pub(crate) fn append_pending_edit_applications(
         &mut self,
         state: &mut RunProjection,
     ) -> Result<(), HostError> {
-        if !self
-            .hooks
-            .pending_edit_applications
-            .iter()
-            .any(|(run, _)| run == &state.run)
-        {
-            return Ok(());
-        }
-        let current = self.owner()?.orchestration_projection(&state.run)?;
-        self.hooks
-            .pending_edit_applications
-            .retain(|(run, marker)| {
-                if run != &state.run {
-                    return true;
+        if let Some(current) = self.owner()?.orchestration_projection(&state.run)? {
+            self.acknowledge_edit_applications(&current);
+            // Retrying a held application cut can advance this one audit field
+            // while an already-built native successor waits for its issuer.
+            state.sequence = state.sequence.max(current.sequence);
+            for reference in current.edit_applications {
+                if !state.edit_applications.contains(&reference) {
+                    state.edit_applications.push(reference);
                 }
-                let bytes = marker;
-                !current.as_ref().is_some_and(|saved| {
-                    saved
-                        .edit_applications
-                        .iter()
-                        .any(|r| r.sha256 == kinewright_media::sha256_bytes(bytes))
-                })
-            });
-        let pending = self
-            .hooks
-            .pending_edit_applications
-            .iter()
-            .filter(|(run, _)| run == &state.run)
-            .map(|(_, m)| m.clone())
-            .collect::<Vec<_>>();
-        for bytes in pending {
-            let reference = self.owner_mut()?.admit_host_grant(&bytes)?;
-            if !state.edit_applications.contains(&reference) {
-                state.edit_applications.push(reference);
             }
         }
-        Ok(())
+        let pending = std::mem::take(&mut self.hooks.pending_edit_applications);
+        let result = (|| {
+            for entry in pending.iter().filter(|entry| entry.run == state.run) {
+                let reference = self.owner_mut()?.admit_host_grant(&entry.bytes)?;
+                if !state.edit_applications.contains(&reference) {
+                    state.edit_applications.push(reference);
+                }
+            }
+            Ok(())
+        })();
+        self.hooks.pending_edit_applications = pending;
+        result
     }
 }
 
