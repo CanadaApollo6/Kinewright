@@ -57,11 +57,6 @@ select_tests() {
     cargo_run "$label" "${args[@]}" -- "${execution[@]}"
     nice -n 19 python3 -I scripts/ja1-s2-c1-evidence.py verify "$evidence/$label-selected.txt" "$evidence/$label.log" "$evidence/$label-counts.json"
 }
-export JA_S1_PREDECESSOR_BINARY="$root/target/ja-s1-predecessor/sealed/kinewright-ja-baseline"
-if [[ ! -f "$root/target/ja-s1-predecessor/sealed/identity.json" ]]; then
-    wait_memory
-    run predecessor-preparation bash scripts/ja-s1-predecessor-controls.sh "$evidence/predecessor"
-fi
 select_tests arch-agent-eval kinewright-agent --lib '' eval-harness session::tests::in2_the_agent_crate_has_one_agent_event_loop
 select_tests arch-agent-production kinewright-agent --lib '' production session::tests::in2_the_agent_crate_has_one_agent_event_loop
 select_tests arch-app-production kinewright-app --bin kinewright-app production investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call

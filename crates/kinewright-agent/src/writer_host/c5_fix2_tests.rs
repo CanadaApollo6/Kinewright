@@ -46,19 +46,21 @@ fn main() {
     let manifest = kinewright_project::owned_inputs::OwnedInputManifest {project_id,session_id,owner_epoch:bundle.store().owner_epoch(),entries:vec![]};
     refused(bundle.admit_inputs(&manifest), "admit_inputs");
     refused(bundle.empty_inputs(), "empty_inputs");
-    for (kind,bytes) in [(kinewright_project::studio_records::FeedbackEvidenceKind::Text,&b"text"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::Strokes,&b"[]"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::FrameProof,&b"{}"[..])] {
-        refused(bundle.admit_feedback_evidence(kind,bytes),"admit_feedback_evidence");
-    }
     refused(bundle.issue_metadata_issuer(),"issue_metadata_issuer");
     let branch = bundle.manual_branch_id().clone();
     let inputs = bundle.checkpoint(&branch).unwrap().input_manifest_ref.clone();
     refused(bundle.issue_issuer(&manual_core,&inputs,1),"issue_issuer");
     let usage = kinewright_project::studio_records::RunUsageRecord {version:1,run_id:kinewright_project::studio_records::RunId::fresh().unwrap(),event_id:"ordinary".into(),input_tokens:None,output_tokens:None,cache_read_tokens:None,cache_write_tokens:None,cost_microunits:None,coverage:"unavailable".into(),evidence_refs:vec![]};
     refused(bundle.admit_orchestration_record(&usage),"admit_orchestration_record");
-    refused(bundle.save(&manual_core,&inputs),"save");
     refused(bundle.save_branch(&branch,&manual_core),"save_branch");
     refused(bundle.fork_branch(&branch),"fork_branch");
     assert!(bundle.store().usage().unwrap().objects <= used,"C5_FIX2_ORDINARY_WRITES_CONSUMED_RESERVE");
+    // Person publishers may use the raw reserve; ordinary run writes remain refused.
+    for (kind,bytes) in [(kinewright_project::studio_records::FeedbackEvidenceKind::Text,&b"text"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::Strokes,&b"[]"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::FrameProof,&b"{}"[..])] {
+        bundle.admit_feedback_evidence(kind,bytes).unwrap();
+    }
+    bundle.save(&manual_core,&inputs).unwrap();
+    refused(bundle.store_mut().unwrap().admit_document(&doc), "run write after person Save");
     drop(bundle);
     let namespace = ProjectNamespace::acquire(path).unwrap();
     assert!(ProjectStore::new(namespace,Some(kinewright_project::bundle_records::ProjectId::fresh().unwrap()),None,StorageLimits::default()).is_err(),"C5_FIX2_LOW_LEVEL_REOPEN_BYPASS");

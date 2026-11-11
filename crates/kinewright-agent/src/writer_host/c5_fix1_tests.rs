@@ -5,8 +5,14 @@ fn c5_fix1_limited_fixture() -> Fixture {
     })
 }
 fn c5_fix1_fixture_limits(limits: kinewright_project::storage_budget::StorageLimits) -> Fixture {
-    use kinewright_project::bundle::LoadedBundle;
     let f = Fixture::new();
+    c5_fix1_apply_limits(f, limits)
+}
+fn c5_fix1_apply_limits(
+    f: Fixture,
+    limits: kinewright_project::storage_budget::StorageLimits,
+) -> Fixture {
+    use kinewright_project::bundle::LoadedBundle;
     f.host.runtime.stop();
     let host = f.host.owner.upgrade().unwrap();
     let mut host = host.lock().unwrap();

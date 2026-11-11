@@ -60,6 +60,7 @@ impl ProjectBundle {
         &self,
         transition: &ValidatedRunUpdate,
     ) -> Result<Vec<BranchId>, BundleError> {
+        let before = self.orchestration_projection(&transition.projection().run)?;
         let mut matched = BTreeSet::new();
         for task in &transition.projection().tasks {
             for reference in &task.progress.decisions {
@@ -70,6 +71,33 @@ impl ProjectBundle {
                 let OrchestrationPayload::TaskHistory(history) = &record.payload else {
                     continue;
                 };
+                let passive = before.as_ref().is_some_and(|before| {
+                    before.tasks.iter().any(|previous| {
+                        previous.id == task.id && previous.progress.decisions.contains(reference)
+                    })
+                });
+                if passive {
+                    // Control/retirement may keep an already-published history
+                    // while a later checkpoint waits for its paired H1 record.
+                    // Keeping that record must not adopt either staged branch.
+                    if history.project != self.project_id
+                        || history.run != transition.projection().run
+                        || history.task != task.id
+                    {
+                        return Err(BundleError::HistoryChanged);
+                    }
+                    if let Some(staged) = self.task_checkpoints.get(&history.source.branch) {
+                        let current = self.checkpoint(&history.source.branch)?;
+                        if history.source.checkpoint != staged.before
+                            || self.checkpoint_reference(&history.source.branch)? != staged.before
+                            || history.source.head != current.head_id
+                            || history.source.document_hash != current.document_hash
+                        {
+                            return Err(BundleError::HistoryChanged);
+                        }
+                    }
+                    continue;
+                }
                 if let Some(staged) = self.task_checkpoints.get(&history.source.branch) {
                     if history.project != self.project_id
                         || history.run != transition.projection().run

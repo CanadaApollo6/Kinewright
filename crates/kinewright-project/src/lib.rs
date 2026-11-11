@@ -115,3 +115,15 @@ mod candidate_recovery;
 mod orchestration_cumulative;
 
 pub mod run_admission;
+
+#[cfg(all(test, target_os = "linux"))]
+mod person_admission_tests;
+
+#[cfg(all(test, feature = "test-util"))]
+mod cleanup_measurement_tests;
+
+pub mod cleanup_admission;
+pub mod task_history_admission;
+
+#[cfg(all(test, target_os = "linux"))]
+mod cleanup_quota_tests;

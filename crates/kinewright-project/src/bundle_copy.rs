@@ -426,7 +426,9 @@ impl BundleCopy {
             self.status = CopyStatus::DefinitelyUnpublished;
             return Ok(None);
         }
-        let report = match destination.reconcile_destination(live) {
+        let report = match destination
+            .with_person_publication(|destination| destination.reconcile_destination(live))
+        {
             Ok(Some(report)) => report,
             Ok(None) => {
                 return Err(BundleError::Corrupt(
@@ -707,11 +709,16 @@ impl ProjectBundle {
     ) -> Result<SaveAsOutcome, BundleError> {
         self.save_as_with_admission(inspection.path(), limits, Some(inspection))
     }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one frozen graph copied under the same two namespace owners"
-    )]
     fn save_as_with_admission(
+        &mut self,
+        path: &Path,
+        limits: StorageLimits,
+        inspection: Option<&crate::namespace::DestinationInspection>,
+    ) -> Result<SaveAsOutcome, BundleError> {
+        self.with_person_publication(|bundle| bundle.copy_person(path, limits, inspection))
+    }
+    #[allow(clippy::too_many_lines, reason = "one frozen Save As transaction")]
+    fn copy_person(
         &mut self,
         path: &Path,
         limits: StorageLimits,
@@ -826,9 +833,9 @@ impl ProjectBundle {
             ));
         }
         let mut map = BTreeMap::new();
-        let publication = (|| {
+        let publication = target.with_person_publication(|target| {
             origins(
-                &mut target,
+                target,
                 &before,
                 std::iter::once(self.project_id.clone()).chain(self.origin_project_ids.clone()),
                 self.origin_session_ids.clone(),
@@ -869,11 +876,11 @@ impl ProjectBundle {
             for (id, original) in &self.branches {
                 let mut checkpoint = original.clone();
                 checkpoint.input_manifest_ref =
-                    rewrite_inputs(&mut target, &original.input_manifest_ref, &mut map)?;
+                    rewrite_inputs(target, &original.input_manifest_ref, &mut map)?;
                 checkpoint.history_input_manifest_refs = original
                     .history_input_manifest_refs
                     .iter()
-                    .map(|r| rewrite_inputs(&mut target, r, &mut map))
+                    .map(|r| rewrite_inputs(target, r, &mut map))
                     .collect::<Result<_, _>>()?;
                 checkpoint.head_id = HeadId::fresh()?;
                 checkpoint.predecessor = Some(original.head_id.clone());
@@ -911,8 +918,8 @@ impl ProjectBundle {
             let inputs = target.branches[&target.manual_branch_id]
                 .input_manifest_ref
                 .clone();
-            crate::bundle_commit::BundleCommit::publish(&mut target, &history, &inputs)
-        })();
+            crate::bundle_commit::BundleCommit::publish(target, &history, &inputs)
+        });
         let copy = result(target, before, prepared, source, map, publication)?;
         self.pending_copy_source = copy.pending_source();
         Ok(SaveAsOutcome::Copied(Box::new(copy)))

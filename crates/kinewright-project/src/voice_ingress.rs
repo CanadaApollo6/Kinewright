@@ -69,12 +69,15 @@ impl Ja1EditingSession {
         owner.receipt_lookup(&upload.envelope.receipt_envelope(&upload.update())?)
     }
     pub fn reserve_voice_capture(&self) -> Result<StorageReservation, BundleError> {
-        self.active_bundle()?.store().reserve(
-            AUDIO_BYTES + LOG_BYTES,
-            3 * (AUDIO_BYTES + LOG_BYTES),
-            0,
-            true,
-        )
+        self.active_bundle()?
+            .store()
+            .person_publication_store()
+            .reserve(
+                AUDIO_BYTES + LOG_BYTES,
+                3 * (AUDIO_BYTES + LOG_BYTES),
+                0,
+                true,
+            )
     }
     pub fn voice_note(&self, note: &NoteId) -> Result<VoiceNoteHandle, BundleError> {
         self.active_bundle()?.voice_note(note)
@@ -180,46 +183,49 @@ impl Ja1EditingSession {
             serde_json::from_slice(log_bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         log.validate(duration)
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let owner = self.active_bundle_mut()?;
-        if owner.project_id() != &upload.envelope.project_id {
-            return Err(BundleError::HistoryChanged);
-        }
-        let mut dependencies = Vec::new();
-        let mut pins = Vec::new();
-        for sample in &log.samples {
-            let anchor = &sample.displayed;
-            let snapshot = owner.read_snapshot(&anchor.snapshot)?;
-            let document = owner
-                .store()
-                .read_record::<kinewright_core::Document>(&snapshot.descriptor.document_ref)?;
-            if anchor.frame < 0
-                || anchor.frame >= document.duration.0
-                || anchor.fps.numerator != document.fps.numerator()
-                || anchor.fps.denominator != document.fps.denominator()
-            {
+        self.active_bundle_mut()?.with_person_publication(|owner| {
+            if owner.project_id() != &upload.envelope.project_id {
                 return Err(BundleError::HistoryChanged);
             }
-            if !dependencies.contains(&snapshot.descriptor.checkpoint_ref) {
-                dependencies.push(snapshot.descriptor.checkpoint_ref.clone());
+            let mut dependencies = Vec::new();
+            let mut pins = Vec::new();
+            for sample in &log.samples {
+                let anchor = &sample.displayed;
+                let snapshot = owner.read_snapshot(&anchor.snapshot)?;
+                let document = owner
+                    .store()
+                    .read_record::<kinewright_core::Document>(&snapshot.descriptor.document_ref)?;
+                if anchor.frame < 0
+                    || anchor.frame >= document.duration.0
+                    || anchor.fps.numerator != document.fps.numerator()
+                    || anchor.fps.denominator != document.fps.denominator()
+                {
+                    return Err(BundleError::HistoryChanged);
+                }
+                if !dependencies.contains(&snapshot.descriptor.checkpoint_ref) {
+                    dependencies.push(snapshot.descriptor.checkpoint_ref.clone());
+                }
+                pins.push(snapshot);
             }
-            pins.push(snapshot);
-        }
-        if duration != upload.duration_micros {
-            return Err(BundleError::Corrupt("voice duration binding".into()));
-        }
-        let voice = upload.voice();
-        let audio = owner
-            .store_mut()?
-            .admit_blob(&mut &*wav, &upload.audio, &[])?;
-        let log = owner
-            .store_mut()?
-            .admit_blob(&mut &*log_bytes, &upload.log, &dependencies)?;
-        let mut pending = Some(PendingVoiceWrite {
-            envelope: upload.envelope.clone(),
-            update: upload.update(),
-        });
-        let saved = crate::voice_store::save_voice(owner, &upload.envelope, &voice, &mut pending)?;
-        drop((audio, log, pins));
-        Ok(saved)
+            if duration != upload.duration_micros {
+                return Err(BundleError::Corrupt("voice duration binding".into()));
+            }
+            let voice = upload.voice();
+            let audio = owner
+                .store_mut()?
+                .admit_blob(&mut &*wav, &upload.audio, &[])?;
+            let log =
+                owner
+                    .store_mut()?
+                    .admit_blob(&mut &*log_bytes, &upload.log, &dependencies)?;
+            let mut pending = Some(PendingVoiceWrite {
+                envelope: upload.envelope.clone(),
+                update: upload.update(),
+            });
+            let saved =
+                crate::voice_store::save_voice(owner, &upload.envelope, &voice, &mut pending)?;
+            drop((audio, log, pins));
+            Ok(saved)
+        })
     }
 }

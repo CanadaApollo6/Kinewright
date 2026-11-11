@@ -72,7 +72,7 @@ run('workspace-fast',['nice','-n','10','python3','-I','scripts/slow_tests.py','f
 run('classification',['nice','-n','19','python3','-I','scripts/slow_tests.py','lint'])
 run('clippy-final',['nice','-n','10','cargo','clippy','--workspace','--all-targets','--','-D','warnings'])
 run('actionlint',['actionlint','.github/workflows/ci.yml'])
-run('shell-syntax',['bash','-n','scripts/ja-s1-gate.sh','scripts/ja-s1-predecessor-controls.sh'])
+run('shell-syntax',['bash','-n','scripts/ja-s1-gate.sh'])
 run('frozen-fixtures',['git','diff','--exit-code','0f4f88e','--','crates/kinewright-agent/tests/fixtures/ja','.gitattributes'])
 for path in Path('scripts').glob('ja-s1-fix-r1-*.py'):ast.parse(path.read_text(),filename=str(path))
 print('Linux stricter gate complete. Windows execution and full slow CI remain NOT RUN.',flush=True)

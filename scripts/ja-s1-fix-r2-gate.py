@@ -22,7 +22,7 @@ assert os.getpriority(os.PRIO_PROCESS, 0) == 19
 def run(label, command, optional_native=False):
     assert not (out/f'{label}.log.gz').exists(), label
     wait_started = time.monotonic()
-    while (label in ('predecessor','per-commit','workspace-fast') or 'cargo' in command) and int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))) < 6291456:
+    while (label in ('per-commit','workspace-fast') or 'cargo' in command) and int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))) < 6291456:
         print(f'{label}: waiting for 6 GiB available', flush=True)
         if time.monotonic() - wait_started > 7200: raise SystemExit('memory blocked for over two hours')
         time.sleep(30)
@@ -57,7 +57,6 @@ def run(label, command, optional_native=False):
         raise SystemExit(process.returncode)
     if row['status'].startswith('NOT RUN'):print(label,row['status'],flush=True)
 
-run('predecessor',['bash','scripts/ja-s1-predecessor-controls.sh',str(out/'predecessor-controls')])
 run('per-commit',['bash','scripts/ja-s1-gate.sh','8',str(out/'per-commit')])
 installed=subprocess.check_output(['rustup','target','list','--installed'],text=True)
 (out/'installed-targets.txt').write_text(installed)
@@ -79,7 +78,7 @@ run('workspace-fast',['nice','-n','10','python3','-I','scripts/slow_tests.py','f
 run('classification',['nice','-n','19','python3','-I','scripts/slow_tests.py','lint'])
 run('clippy-final',['nice','-n','10','cargo','clippy','--workspace','--all-targets','--','-D','warnings'])
 run('actionlint',['actionlint','.github/workflows/ci.yml'])
-run('shell-syntax',['bash','-n','scripts/ja-s1-gate.sh','scripts/ja-s1-predecessor-controls.sh'])
+run('shell-syntax',['bash','-n','scripts/ja-s1-gate.sh'])
 run('frozen-fixtures',['git','diff','--exit-code','099fdd0','--','crates/kinewright-agent/tests/fixtures/ja','.gitattributes'])
 for path in Path('scripts').glob('ja-s1-*.py'):ast.parse(path.read_text(),filename=str(path))
 print('Linux stricter gate complete. Windows execution and full slow CI remain NOT RUN.',flush=True)

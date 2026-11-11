@@ -169,14 +169,26 @@ impl ProjectBundle {
         base: &SpecialistBaseRecord,
     ) -> Result<ObjectRef, BundleError> {
         self.store_mut()?;
-        if self
-            .evidence
-            .iter()
-            .filter(|r| r.record_kind == RecordKind::SpecialistBase)
-            .count() as u64
-            >= self.store.limits().versions
+        let bytes =
+            serde_json::to_vec(base).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let expected = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::SpecialistBase,
+        };
+        // A matching retry consumes no new version slot, including at the raw
+        // limit after a prior attempt already staged this exact base.
+        if !self.evidence.contains(&expected)
+            && self
+                .evidence
+                .iter()
+                .filter(|reference| reference.record_kind == RecordKind::SpecialistBase)
+                .count() as u64
+                >= self.store.specialist_version_limit()
         {
-            return Err(BundleError::Capacity("retained specialist versions"));
+            return Err(self
+                .store
+                .run_error(BundleError::Capacity("retained specialist versions")));
         }
         let sealed = self.store.admit_record(base)?;
         let reference = sealed.reference.clone();

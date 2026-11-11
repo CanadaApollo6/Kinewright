@@ -83,7 +83,6 @@ kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_
 
 # kinewright_project
 kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # Historical direct filesystem injection bypasses authority; C7 real GUI writer witness covers production exclusion
-kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs any on-demand  # manual pre-land check: scripts/mo2-old-reader-check.sh
 ownership_w2_measure w2_long_session_save_cost crates/kinewright-project/tests/ownership_w2_measure.rs linux on-demand  # on-demand measurement
 save_cost_measure long_session_save_cost crates/kinewright-project/tests/save_cost_measure.rs linux on-demand  # on-demand measurement
 
@@ -220,3 +219,4 @@ kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_zero_approvals_128_dis
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_open_81_approval_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 paired valid-prefix open measurement
 
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_pending_history_capacity_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 pending task history and specialist delta admission charges
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_merged_history_refusal_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5/C3 prospective history admission boundary counter probe

@@ -1071,6 +1071,7 @@ fn s4b_c5e_pending_history_capacity_measure() {
 enum C5ePrefixEvidence {
     Open,
     History,
+    Boundary,
 }
 
 #[allow(
@@ -1223,6 +1224,10 @@ fn c5e_prefix_measure(approvals: usize, evidence: C5ePrefixEvidence) {
     claim.reserve(&unbound_identity(&execution)).unwrap();
     history_turn(&f, &execution, &client, &endpoint, 1, true);
     c5e_approval_edits(&f, &execution, &core, approvals, &mut maximum, &mut storage);
+    if matches!(evidence, C5ePrefixEvidence::Boundary) {
+        c5e_seeded_history_boundary(&f, &execution, &endpoint, &core);
+        return;
+    }
     if matches!(evidence, C5ePrefixEvidence::History) {
         c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core);
         c5e_pending_history(&f, &core, approvals, "final_redo");
@@ -1351,4 +1356,132 @@ fn c5_linear_context_capacity_refuses_before_mutation_and_stop_still_works() {
             "C5_CONTEXT_FULL_STOP",
         );
     }
+}
+
+#[test]
+#[ignore = "on-demand: C3 prospective history boundary after the C5 merge"]
+fn s4b_c5e_merged_history_refusal_measure() {
+    c5e_prefix_measure(1, C5ePrefixEvidence::Boundary);
+}
+
+// Only history transitions are seeded; the first destructive edit and final
+// refusal use MCP. This is a counter probe, not the full H1 publication proof.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded probe measures the prospective charge and verifies the real refusal before mutation"
+)]
+fn c5e_seeded_history_boundary(
+    f: &Fixture,
+    execution: &ExecutionIdentity,
+    endpoint: &crate::orchestration::tasks::TaskEndpoint,
+    core: &Core,
+) {
+    use kinewright_core::{Command, Event, Operation};
+    use kinewright_project::task_history_admission::{
+        LIMIT_REASON, decoded_history_bytes_for_fixture,
+    };
+    let mcp = C4Mcp::new(f, &execution.run, &execution.task);
+    for cycle in 2..=256 {
+        for undo in [false, true] {
+            let before = core.export_history().unwrap();
+            // Both actors read the immutable replay baseline; the owned history
+            // moves into the private actor and the live actor remains untouched.
+            let prospective = Core::spawn(std::sync::Arc::clone(&before.baseline)).unwrap();
+            prospective.restore_history(before).unwrap();
+            let command = || {
+                if undo {
+                    Command::Undo
+                } else {
+                    Command::DoBatch(vec![Operation::DeleteClip {
+                        clip: kinewright_core::ClipId(1),
+                    }])
+                }
+            };
+            assert!(matches!(
+                prospective.request(command()).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            let history = prospective.export_history().unwrap();
+            let encoded = serde_json::to_vec(&history).unwrap().len();
+            let charge = decoded_history_bytes_for_fixture(&history).unwrap();
+            let limit = kinewright_project::run_admission::HISTORY_BYTES;
+            if charge > limit || u64::try_from(encoded).unwrap() > limit {
+                assert!(
+                    endpoint
+                        .check_history(&history)
+                        .unwrap_err()
+                        .contains(LIMIT_REASON)
+                );
+                let before = core.export_history().unwrap();
+                let projection = f.projection(&execution.run);
+                let host = f.host.owner.upgrade().unwrap();
+                let root = host.lock().unwrap().owner().unwrap().root_sha256().unwrap();
+                let refused = if undo {
+                    mcp.invoke(
+                        "undo_task_edit",
+                        serde_json::json!({"expected_revision":grant_test_revision(core)}),
+                    )
+                } else {
+                    mcp.raw(
+                        "prepare_edit_plan",
+                        serde_json::json!({
+                            "expected_revision":grant_test_revision(core),
+                            "operations":[{"op":"delete_clip","clip":1}]
+                        }),
+                    )
+                };
+                assert_eq!(
+                    refused.is_error,
+                    Some(true),
+                    "C5_C3_PRE_MUTATION_REFUSAL {refused:?}"
+                );
+                assert!(
+                    format!("{refused:?}").contains(LIMIT_REASON),
+                    "C5_C3_SPECIFIC_REFUSAL {refused:?}"
+                );
+                assert_eq!(
+                    core.export_history().unwrap(),
+                    before,
+                    "C5_C3_NO_LIVE_MUTATION"
+                );
+                assert_eq!(
+                    f.projection(&execution.run),
+                    projection,
+                    "C5_C3_NO_H1_PUBLICATION"
+                );
+                assert_eq!(
+                    host.lock().unwrap().owner().unwrap().root_sha256().unwrap(),
+                    root
+                );
+                eprintln!(
+                    "C5_C3_BOUNDARY cycle={cycle} phase={} history_encoded={encoded} history_decoded={charge} limit={limit} refusal={refused:?}",
+                    if undo { "undo" } else { "delete" }
+                );
+                return;
+            }
+            endpoint.check_history(&history).unwrap();
+            assert!(matches!(
+                core.request(command()).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            assert_eq!(
+                core.export_history().unwrap(),
+                history,
+                "C5_C3_PROSPECTIVE_EQUALS_APPLIED"
+            );
+            if undo && matches!(cycle, 8 | 16 | 32 | 64) {
+                eprintln!(
+                    "C5_C3_SEEDED_HISTORY cycles={cycle} history_encoded={encoded} history_decoded={charge}"
+                );
+                if cycle == 64 {
+                    assert_eq!(
+                        (encoded, charge),
+                        (22_770, 367_337),
+                        "C5_C3_CALIBRATES_TO_REAL_64_CYCLE_MEASUREMENT"
+                    );
+                }
+            }
+        }
+    }
+    eprintln!("C5_C3_BOUNDARY all_256_fit=true");
 }

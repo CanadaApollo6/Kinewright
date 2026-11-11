@@ -265,6 +265,7 @@ impl Ja1EditingSession {
         report: &BundleSaveReport,
     ) -> Result<kinewright_core::HistorySnapshot, BundleError> {
         let bundle = self.active_bundle()?;
+        let store = bundle.store.person_publication_store();
         if let Some(saved) = &self.preliminary_save
             && report.project_id == saved.report.project_id
             && report.generation == saved.report.generation
@@ -278,21 +279,17 @@ impl Ja1EditingSession {
                 || checkpoint.head_id != report.head_id
                 || checkpoint.history_ref.sha256 != report.history_sha256
                 || checkpoint.checkpoint_generation != report.generation
-                || !crate::same_project_file(&report.path, &bundle.store.resolved_root()?)
+                || !crate::same_project_file(&report.path, &store.resolved_root()?)
             {
                 return Err(BundleError::Identity(
                     "preliminary publisher report differs from surviving L checkpoint".into(),
                 ));
             }
-            bundle
-                .store
-                .with_namespace(|namespace| namespace.verify_read_authority())?;
-            let history = bundle
-                .store
-                .read_copy_record::<kinewright_core::HistorySnapshot>(
-                    &checkpoint.history_ref,
-                    true,
-                )?;
+            store.with_namespace(|namespace| namespace.verify_read_authority())?;
+            let history = store.read_copy_record::<kinewright_core::HistorySnapshot>(
+                &checkpoint.history_ref,
+                true,
+            )?;
             return Ok((*history).clone());
         }
         let root = bundle.root().ok_or(BundleError::HistoryBarrierInvariant)?;
@@ -304,13 +301,13 @@ impl Ja1EditingSession {
             || report.history_sha256 != checkpoint.history_ref.sha256
             || report.root_sha256 != kinewright_media::sha256_bytes(raw)
             || report.byte_length != raw.len() as u64
-            || !crate::same_project_file(&report.path, &bundle.store.resolved_root()?)
+            || !crate::same_project_file(&report.path, &store.resolved_root()?)
         {
             return Err(BundleError::Identity(
                 "publisher report differs from the retained checkpoint".into(),
             ));
         }
-        bundle.store.with_namespace(|namespace| {
+        store.with_namespace(|namespace| {
             namespace.verify_read_authority()?;
             if namespace.read_root()?.as_deref() != Some(raw) {
                 return Err(BundleError::Identity(
@@ -319,8 +316,7 @@ impl Ja1EditingSession {
             }
             Ok(())
         })?;
-        let history = bundle
-            .store
+        let history = store
             .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;
         Ok((*history).clone())
     }

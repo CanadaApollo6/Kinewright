@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build/extract test archives and transfer the sealed predecessor prerequisite."""
+"""Build and extract test archives."""
 import argparse
 import hashlib
 import json
@@ -127,25 +127,9 @@ def extract(index=None):
         ci_display_inputs.prepare(data, units, ROOT / "ci-results")
 
 
-def predecessor(pack):
-    scratch = ROOT / "target" / "ja-s1-predecessor"
-    archive = ROOT / "predecessor.tar"
-    if pack:
-        with tarfile.open(archive, "w") as output:
-            for name in ("sealed", "evidence", "predecessor-format.rs"):
-                output.add(scratch / name, arcname=name)
-    else:
-        scratch.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive) as source:
-            source.extractall(scratch, filter="data")
-        base = "076a96c922b2f05984df4bb839ad7cf0900e6183"
-        run(["git", "fetch", "--no-tags", "origin", base])
-        run(["git", "worktree", "add", "--detach", str(scratch / "source"), base])
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["build", "extract", "pack-predecessor", "restore-predecessor"])
+    parser.add_argument("command", choices=["build", "extract"])
     parser.add_argument("--tier", choices=["fast", "slow"])
     parser.add_argument("--count", type=int)
     parser.add_argument("--index", type=int)
@@ -155,5 +139,3 @@ if __name__ == "__main__":
         build(args.tier, args.count)
     elif args.command == "extract":
         extract(args.index)
-    else:
-        predecessor(args.command == "pack-predecessor")
