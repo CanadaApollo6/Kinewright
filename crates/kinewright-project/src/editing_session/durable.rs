@@ -729,6 +729,30 @@ impl Ja1EditingSession {
     ) -> Result<ObjectRef, BundleError> {
         self.persist_durable_branch_inner(guard, true, true)
     }
+    /// Measure the exact history/base projection without admitting or publishing it.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn pending_task_history_profile(
+        &self,
+        core: &Core,
+    ) -> Result<crate::orchestration_retention::PendingTaskHistoryProfile, BundleError> {
+        let _reading = crate::run_admission::reading(self.store()?);
+        let guard = &self
+            .durable_sessions
+            .iter()
+            .find(|session| session.guard.core.actor_identity() == core.actor_identity())
+            .ok_or(BundleError::HistoryChanged)?
+            .guard;
+        let history = core
+            .export_history()
+            .map_err(crate::bundle::history_error)?;
+        let base =
+            specialist_checkpoint_base(guard, &history, &*self.durable_branch_baseline(guard)?)?;
+        crate::orchestration_retention::measure_pending_task_history(
+            &history,
+            &base,
+            self.store()?.limits(),
+        )
+    }
     #[allow(
         clippy::too_many_lines,
         reason = "one registered Core fence spans checkpoint reuse, publication and resume"
@@ -766,35 +790,11 @@ impl Ja1EditingSession {
                 *guard = canonical.clone();
                 return Ok(staged.base_ref.clone());
             }
-            let discarded = usize::try_from(
-                cut.history()
-                    .floor_offset
-                    .checked_sub(canonical.floor_source.floor_offset)
-                    .ok_or(BundleError::HistoryChanged)?,
-            )
-            .map_err(|_| BundleError::Capacity("specialist floor offset"))?;
-            let original = if discarded == 0 {
-                (**canonical.floor_source).clone()
-            } else {
-                kinewright_core::HistoryTransition::floor(
-                    (**canonical.floor_source).clone(),
-                    discarded,
-                )
-                .map_err(crate::bundle::history_error)?
-                .after()
-                .clone()
-            };
-            if original.baseline != cut.history().baseline {
-                return Err(BundleError::HistoryChanged);
-            }
-            let mut full_delta = specialist_floor_delta_from_baseline(
-                canonical.base(),
-                &original,
+            let base = specialist_checkpoint_base(
+                &canonical,
+                cut.history(),
                 &*self.durable_branch_baseline(&canonical)?,
             )?;
-            full_delta.extend(cut.history().applied_operations());
-            let mut base = canonical.base().clone();
-            base.full_applied_delta = full_delta;
             let base_bytes =
                 serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let same_base = base == *canonical.base();
@@ -949,6 +949,36 @@ impl Ja1EditingSession {
         self.durable_sessions.remove(index);
         Ok(())
     }
+}
+
+fn specialist_checkpoint_base(
+    guard: &DurableBranchSessionGuard,
+    history: &HistorySnapshot,
+    baseline: &Document,
+) -> Result<SpecialistBaseRecord, BundleError> {
+    let discarded = usize::try_from(
+        history
+            .floor_offset
+            .checked_sub(guard.floor_source.floor_offset)
+            .ok_or(BundleError::HistoryChanged)?,
+    )
+    .map_err(|_| BundleError::Capacity("specialist floor offset"))?;
+    let original = if discarded == 0 {
+        (**guard.floor_source).clone()
+    } else {
+        kinewright_core::HistoryTransition::floor((**guard.floor_source).clone(), discarded)
+            .map_err(crate::bundle::history_error)?
+            .after()
+            .clone()
+    };
+    if original.baseline != history.baseline {
+        return Err(BundleError::HistoryChanged);
+    }
+    let mut full_delta = specialist_floor_delta_from_baseline(guard.base(), &original, baseline)?;
+    full_delta.extend(history.applied_operations());
+    let mut base = guard.base().clone();
+    base.full_applied_delta = full_delta;
+    Ok(base)
 }
 
 pub fn specialist_floor_delta_from_baseline(

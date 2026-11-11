@@ -263,10 +263,19 @@ impl HostCommandOwner {
                 // A current caller cannot manufacture that original authority.
                 return Err(refused());
             }
+            state
+                .tasks
+                .iter()
+                .find(|task| &task.id == child)
+                .ok_or_else(refused)?
+                .progress
+                .check_context_capacity(0, 1)
+                .map_err(super::orchestration::scheduler_error)?;
             history.merge_authority = Some(binding);
             let sealed = self
                 .owner_mut()?
-                .admit_scheduler_record(&OrchestrationRecord {
+                .admit_scheduler_record(OrchestrationRecord {
+                    retention: kinewright_project::orchestration_retention::Retention::Complete,
                     version: 1,
                     payload: OrchestrationPayload::TaskHistory(Box::new(history)),
                 })?;

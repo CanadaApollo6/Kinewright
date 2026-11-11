@@ -27,6 +27,7 @@ pub use read_only_inputs::{ReadOnlyInputBinding, ReadOnlyInputFiles, ReadOnlyInp
 pub mod orchestration_accounting;
 pub mod orchestration_commit;
 pub mod orchestration_records;
+pub mod orchestration_retention;
 pub mod receipts;
 pub mod source_boundary;
 pub mod storage_budget;

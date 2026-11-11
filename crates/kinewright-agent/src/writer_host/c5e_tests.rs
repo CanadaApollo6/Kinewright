@@ -69,14 +69,18 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
     }
     let index = owner.resolve_attachment(Some(&producer.bearer())).unwrap();
     let issued = owner.issue_metadata(index, None).unwrap();
-    let payload = state
-        .tasks
-        .iter()
-        .find(|t| t.id == execution.task)
+    // Distinct, unrooted payloads exercise accounting ownership instead of
+    // letting a shared assignment or a host-grant root hide a lost dependency.
+    let payload_bytes = serde_json::to_vec(&("c5e-send-payload", execution, turn)).unwrap();
+    let payload_seal = owner
+        .owner_mut()
         .unwrap()
-        .brief
-        .assignment
-        .clone();
+        .admit_feedback_evidence(
+            kinewright_project::studio_records::FeedbackEvidenceKind::Text,
+            &payload_bytes,
+        )
+        .unwrap();
+    let payload = payload_seal.reference.clone();
     next.task_mut(&execution.task.0)
         .unwrap()
         .consume_send(SendConsumption {
@@ -90,7 +94,8 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
     let record = owner
         .owner_mut()
         .unwrap()
-        .admit_scheduler_record(&OrchestrationRecord {
+        .admit_scheduler_record(OrchestrationRecord {
+            retention: kinewright_project::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::Accounting(Box::new(next)),
         })
@@ -128,38 +133,40 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
 enum C5eSize {
     Maximal,
     Small,
+    SendsOnly,
 }
 impl C5eSize {
     fn clocks(self) -> u64 {
         match self {
             Self::Maximal => 720,
-            Self::Small => 3,
+            Self::Small | Self::SendsOnly => 3,
         }
     }
     fn tasks(self) -> usize {
         match self {
-            Self::Maximal => 8,
+            Self::Maximal | Self::SendsOnly => 8,
             Self::Small => 2,
         }
     }
     fn rounds(self) -> usize {
         match self {
-            Self::Maximal => 3,
+            Self::Maximal | Self::SendsOnly => 3,
             Self::Small => 2,
         }
     }
     fn approvals(self) -> usize {
         match self {
             Self::Maximal => 256,
+            Self::SendsOnly => 0,
             Self::Small => 4,
         }
     }
     fn sends(self, task: usize) -> usize {
         match self {
             Self::Small => 4,
-            Self::Maximal if task == 7 => 80,
-            Self::Maximal if task == 6 => 6,
-            Self::Maximal => 7,
+            Self::Maximal | Self::SendsOnly if task == 7 => 80,
+            Self::Maximal | Self::SendsOnly if task == 6 => 6,
+            Self::Maximal | Self::SendsOnly => 7,
         }
     }
 }
@@ -196,6 +203,24 @@ fn c5e_storage(f: &Fixture, maximum: &mut C5eStorage) {
     assert!(
         !usage.damaged_accounting,
         "C5E_STORAGE_ACCOUNTING {usage:?}"
+    );
+}
+fn c5e_pending_history(f: &Fixture, core: &Core, cycles: usize, phase: &str) {
+    let host = f.host.owner.upgrade().unwrap();
+    let owner = host.lock().unwrap();
+    let profile = owner
+        .owner()
+        .unwrap()
+        .pending_task_history_profile(core)
+        .unwrap();
+    eprintln!(
+        "C5_PENDING_HISTORY cycles={cycles} phase={phase} {}",
+        serde_json::to_string(&profile).unwrap()
+    );
+    eprintln!(
+        "C5_HISTORY_REPLAY_SHADOW_CANDIDATE charge={} limit={}",
+        profile.history_decoded,
+        kinewright_project::run_admission::HISTORY_BYTES
     );
 }
 fn c5e_approval_edits(
@@ -250,7 +275,7 @@ fn c5e_approval_edits(
         let OrchestrationPayload::EventSegment(applied) = &final_record.payload else {
             panic!("C5E_APPLICATION_H1")
         };
-        let approval_ref = applied.previous.as_ref().unwrap();
+        let approval_ref = applied.binding.previous.as_ref().unwrap();
         let approval_record = project
             .store()
             .unwrap()
@@ -260,12 +285,26 @@ fn c5e_approval_edits(
             panic!("C5E_APPROVAL_H1")
         };
         assert_eq!(
-            approved.previous.as_ref(),
+            approved.binding.previous.as_ref(),
             Some(&before),
             "C5E_TWO_H1_PUBLICATIONS {clip}"
         );
-        let approved_state = &approved.events.last().unwrap().projection;
-        let applied_state = &applied.events.last().unwrap().projection;
+        let approved_snapshot = project
+            .store()
+            .unwrap()
+            .read_record::<OrchestrationRecord>(&approved.snapshot)
+            .unwrap();
+        let applied_snapshot = project
+            .store()
+            .unwrap()
+            .read_record::<OrchestrationRecord>(&applied.snapshot)
+            .unwrap();
+        let OrchestrationPayload::Snapshot(approved_state) = &approved_snapshot.payload else {
+            panic!("C5E_APPROVAL_SNAPSHOT")
+        };
+        let OrchestrationPayload::Snapshot(applied_state) = &applied_snapshot.payload else {
+            panic!("C5E_APPLICATION_SNAPSHOT")
+        };
         assert_eq!(
             approved_state.edit_approvals.len(),
             clip,
@@ -321,8 +360,22 @@ fn c5e_approval_edits(
         );
         c5e_depth(f, depth);
         c5e_storage(f, storage);
+        if matches!(clip, 8 | 16 | 32 | 64) {
+            c5e_pending_history(f, core, clip, "undo");
+        }
         if clip % 32 == 0 {
             eprintln!("C5E_APPROVALS {clip} {storage:?} max_depth={depth}");
+            let host = f.host.owner.upgrade().unwrap();
+            let owner = host.lock().unwrap();
+            let profile = owner
+                .owner()
+                .unwrap()
+                .retained_run_profile(&execution.run)
+                .unwrap();
+            eprintln!(
+                "C5_LINEAR_GROWTH approvals={clip} {}",
+                serde_json::to_string(&profile).unwrap()
+            );
         }
     }
 }
@@ -331,6 +384,11 @@ fn c5e_approval_edits(
 #[ignore = "on-demand: maximal six-hour durable run"]
 fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     c5e_run(C5eSize::Maximal);
+}
+#[test]
+#[ignore = "on-demand: retained zero-approval 128-send storage measurement"]
+fn s4b_c5e_zero_approvals_128_distinct_sends() {
+    c5e_run(C5eSize::SendsOnly);
 }
 #[test]
 #[cfg_attr(
@@ -540,6 +598,12 @@ fn c5e_run(size: C5eSize) {
                 } else {
                     core.export_history().unwrap()
                 });
+                c5e_pending_history(
+                    &f,
+                    &core,
+                    if task_index == 0 { size.approvals() } else { 0 },
+                    "checkpoint",
+                );
                 f.host
                     .owner
                     .upgrade()
@@ -604,7 +668,7 @@ fn c5e_run(size: C5eSize) {
         histories.push((task, history.unwrap(), sends));
         eprintln!("C5_FIX1_MAX_TASK {task_index} sends={sends}");
     }
-    if matches!(size, C5eSize::Maximal) {
+    if matches!(size, C5eSize::Maximal | C5eSize::SendsOnly) {
         assert_eq!(histories.len(), run_admission::TASKS);
         assert_eq!(all_attempts.len(), run_admission::ATTEMPTS);
         assert_eq!(
@@ -627,6 +691,16 @@ fn c5e_run(size: C5eSize) {
             (0..size.tasks()).map(|i| size.sends(i)).sum::<usize>()
         );
     }
+    {
+        let host = f.host.owner.upgrade().unwrap();
+        let owner = host.lock().unwrap();
+        let profile = owner.owner().unwrap().retained_run_profile(&run).unwrap();
+        eprintln!(
+            "C5_LINEAR_CAPS approvals={} {}",
+            size.approvals(),
+            serde_json::to_string(&profile).unwrap()
+        );
+    }
     drop(director);
     assert!(
         spending_change(
@@ -641,7 +715,7 @@ fn c5e_run(size: C5eSize) {
     );
     assert_eq!(spending_record(&f, &run).elapsed_ms, RUN_MILLIS);
     let full = spending_record(&f, &run);
-    if matches!(size, C5eSize::Maximal) {
+    if matches!(size, C5eSize::Maximal | C5eSize::SendsOnly) {
         assert!(
             matches!(
                 f.host
@@ -749,7 +823,7 @@ fn c5e_run(size: C5eSize) {
     for (task, history, sends) in &histories {
         let t = record.tasks.iter().find(|t| t.task == task.0).unwrap();
         assert_eq!(t.sends.len(), *sends);
-        if matches!(size, C5eSize::Maximal) {
+        if matches!(size, C5eSize::Maximal | C5eSize::SendsOnly) {
             assert_eq!(t.providers.len(), 3);
         } else {
             assert_eq!(t.providers.len(), size.rounds());
@@ -772,6 +846,16 @@ fn c5e_run(size: C5eSize) {
                 .state,
             AttemptState::Retired(_)
         ));
+    }
+    {
+        let host = f.host.owner.upgrade().unwrap();
+        let mut owner = host.lock().unwrap();
+        let cuts = owner
+            .owner_mut()
+            .unwrap()
+            .verify_retained_run_after_collection(&run)
+            .unwrap();
+        eprintln!("C5_LINEAR_GC_ALL_CUTS {cuts} receipts_and_complete_references=true");
     }
     let f = c4_restart(f, &claim_root);
     assert_eq!(
@@ -826,6 +910,34 @@ fn c5e_run(size: C5eSize) {
         (0..size.tasks()).map(|i| size.sends(i)).sum::<usize>(),
         all_attempts.len()
     );
+    if matches!(size, C5eSize::Maximal | C5eSize::SendsOnly) {
+        {
+            let host = f.host.owner.upgrade().unwrap();
+            let owner = host.lock().unwrap();
+            eprintln!(
+                "C5_LINEAR_FINAL {}",
+                serde_json::to_string(&owner.owner().unwrap().retained_run_profile(&run).unwrap())
+                    .unwrap()
+            );
+        }
+        let Fixture { host, temp, .. } = f;
+        drop(host);
+        for sample in 0..7 {
+            let started = Instant::now();
+            let project = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+            let opened = started.elapsed();
+            assert_eq!(
+                project.orchestration_projection(&run).unwrap().unwrap(),
+                state
+            );
+            eprintln!(
+                "C5_OPEN approvals={} sample={sample} seconds={:.6}",
+                size.approvals(),
+                opened.as_secs_f64()
+            );
+            drop(project);
+        }
+    }
 }
 
 #[test]
@@ -933,4 +1045,310 @@ fn s4b_c5e_cumulative_reopen_prefix_and_lost_ack() {
     assert_eq!(saved, next, "C5E_REOPEN_CURRENT_CUMULATIVE_EXACT");
     drop(reopened);
     drop(temp);
+}
+
+#[test]
+#[ignore = "on-demand: paired 81-approval open measurement"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the matched before/after workload preserves the original maximal setup"
+)]
+fn s4b_c5e_open_81_approval_measure() {
+    let approvals = std::env::var("KINEWRIGHT_C5_OPEN_APPROVALS")
+        .unwrap_or_else(|_| "81".into())
+        .parse::<usize>()
+        .unwrap();
+    c5e_prefix_measure(approvals, C5ePrefixEvidence::Open);
+}
+
+#[test]
+#[ignore = "on-demand: pending checkpoint history at 8/16/32/64 approval cycles"]
+fn s4b_c5e_pending_history_capacity_measure() {
+    c5e_prefix_measure(64, C5ePrefixEvidence::History);
+}
+
+#[derive(Clone, Copy)]
+enum C5ePrefixEvidence {
+    Open,
+    History,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "matched maximal setup for open and pending-history measurements"
+)]
+fn c5e_prefix_measure(approvals: usize, evidence: C5ePrefixEvidence) {
+    use super::super::native_invocation::SpendingChange;
+    let size = C5eSize::Small;
+    let mut document = Document::default();
+    kinewright_core::apply_batch(
+        &mut document,
+        &[kinewright_core::Operation::AddTrack {
+            track: kinewright_core::Track {
+                id: kinewright_core::TrackId(81),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: false,
+                clips: vec![],
+            },
+        }],
+    )
+    .unwrap();
+    for clip in 0..4 {
+        kinewright_core::apply_batch(
+            &mut document,
+            &[kinewright_core::Operation::AddSolidClip {
+                track: kinewright_core::TrackId(81),
+                timeline_start: kinewright_core::TimeCode(i64::from(clip) * 10),
+                duration: kinewright_core::TimeCode(10),
+                color: kinewright_core::SolidColor::default(),
+            }],
+        )
+        .unwrap();
+    }
+    let mut f = Fixture::with_inputs(false, document, "project.kinewright", |bundle| {
+        bundle.empty_inputs().unwrap().reference.clone()
+    });
+    f.host.runtime.stop();
+    let scope_document = f
+        .host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .core()
+        .export_history()
+        .unwrap()
+        .document;
+    f.brief.scope =
+        crate::orchestration::policy::director_scope(&scope_document, f.brief.scope.base.clone())
+            .unwrap();
+    // Reserve the two marker identities used by the existing redo witness.
+    f.brief
+        .scope
+        .objects
+        .extend(["marker:1".into(), "marker:2".into()]);
+    let _manual = {
+        let host = f.host.owner.upgrade().unwrap();
+        let mut owner = host.lock().unwrap();
+        for id in [50, 51] {
+            owner
+                .core()
+                .request(kinewright_core::Command::Do(history_marker(id)))
+                .unwrap();
+        }
+        owner
+            .core()
+            .request(kinewright_core::Command::Undo)
+            .unwrap();
+        owner.owner_mut().unwrap().save_active().unwrap();
+        owner.core().export_history().unwrap()
+    };
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .owner_mut()
+        .unwrap()
+        .admit_host_grant(b"hook plan, script and assignment")
+        .unwrap();
+    let (run, parent, _) = reserve(&f);
+    let run_auth = f.producer(&run);
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .prepare_task_endpoint(
+            &run_auth,
+            &run,
+            &parent.task,
+            &parent.attempt,
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+    let director = C4Mcp::new(&f, &run, &parent.task);
+    let now = native_now(&f, &run);
+    let mut maximum = 0;
+    let mut storage = C5eStorage::default();
+    let sequence = f.projection(&run).sequence;
+    for tick in 1..size.clocks() {
+        assert!(
+            spending_change(
+                &f,
+                &parent,
+                SpendingChange::Clock,
+                now + tick * 30_000,
+                30_000,
+                true
+            )
+            .is_ok(),
+            "C5_FIX1_CLOCK {tick}"
+        );
+        assert_eq!(
+            f.projection(&run).sequence,
+            sequence,
+            "C5_FIX1_CLOCK_REPLACES"
+        );
+        if tick % 120 == 0 {
+            eprintln!("C5_FIX1_CLOCK {tick}");
+            c5e_depth(&f, &mut maximum);
+            c5e_storage(&f, &mut storage);
+        }
+    }
+    let claim_root = f.temp.path("c5-fix1-machine");
+    let mut claim = crate::execution_claim::MachineClaim::acquire_fixture(
+        &claim_root,
+        parent.project.as_str(),
+        run.0.as_str(),
+    )
+    .unwrap();
+
+    let mut brief = f.brief.clone();
+    brief.role = Role::Editor;
+    director.accepted(
+        "assign_task",
+        OrchestrationCommand::AssignTask(Box::new(AssignTask {
+            run: run.clone(),
+            parent: parent.task.clone(),
+            brief,
+        })),
+    );
+    let task = f.projection(&run).tasks.last().unwrap().id.clone();
+    let (execution, client, endpoint, core) =
+        c4_reserve_task_with_ttl(&f, &run, &task, Duration::from_secs(3600));
+    claim.reserve(&unbound_identity(&execution)).unwrap();
+    history_turn(&f, &execution, &client, &endpoint, 1, true);
+    c5e_approval_edits(&f, &execution, &core, approvals, &mut maximum, &mut storage);
+    if matches!(evidence, C5ePrefixEvidence::History) {
+        c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core);
+        c5e_pending_history(&f, &core, approvals, "final_redo");
+        return;
+    }
+    let expected = f.projection(&run);
+    drop(director);
+    drop(client);
+    drop(endpoint);
+    drop(core);
+    drop(claim);
+    let Fixture { host, temp, .. } = f;
+    drop(host);
+    let path = temp.path("project.kinewright");
+    for sample in 0..7 {
+        let started = Instant::now();
+        let project = Ja1EditingSession::open(&path).unwrap();
+        let opened = started.elapsed();
+        assert_eq!(
+            project.orchestration_projection(&run).unwrap().unwrap(),
+            expected
+        );
+        eprintln!(
+            "C5_OPEN approvals={approvals} sample={sample} seconds={:.6}",
+            opened.as_secs_f64()
+        );
+        drop(project);
+    }
+}
+
+#[test]
+fn c5_linear_context_capacity_refuses_before_mutation_and_stop_still_works() {
+    use kinewright_project::orchestration_records::{
+        TASK_DECISION_CAPACITY_WORDS, TASK_DECISION_LIMIT, TASK_FEEDBACK_CAPACITY_WORDS,
+        TASK_FEEDBACK_LIMIT,
+    };
+    for (feedback, limit, code, words) in [
+        (
+            true,
+            TASK_FEEDBACK_LIMIT,
+            "task_feedback_capacity",
+            TASK_FEEDBACK_CAPACITY_WORDS,
+        ),
+        (
+            false,
+            TASK_DECISION_LIMIT,
+            "task_decision_capacity",
+            TASK_DECISION_CAPACITY_WORDS,
+        ),
+    ] {
+        let f = Fixture::new();
+        f.host.runtime.stop();
+        let (run, execution, producer) = reserve(&f);
+        let (actor, endpoint) = task_actor(&f, &run, &execution, &producer);
+        let before = f.projection(&run);
+        let progress = &before
+            .tasks
+            .iter()
+            .find(|t| t.id == execution.task)
+            .unwrap()
+            .progress;
+        let current = if feedback {
+            progress.feedback.len()
+        } else {
+            progress.decisions.len()
+        };
+        let refs = vec![f.brief.plan.clone(); limit - current];
+        let (feedback_refs, decision_refs) = if feedback {
+            (refs, vec![])
+        } else {
+            (vec![], refs)
+        };
+        let command = OrchestrationCommand::RecordContext {
+            task: execution.task.clone(),
+            feedback: feedback_refs,
+            decisions: decision_refs,
+        };
+        let request = task_request(&f, &actor, &endpoint, command);
+        ok(
+            call(
+                &f,
+                &actor,
+                HostCommand::DispatchOrchestration {
+                    request: Box::new(request),
+                },
+                1,
+            ),
+            "C5_CONTEXT_AT_LIMIT",
+        );
+        let command = OrchestrationCommand::RecordContext {
+            task: execution.task.clone(),
+            feedback: if feedback {
+                vec![f.brief.plan.clone()]
+            } else {
+                vec![]
+            },
+            decisions: if feedback {
+                vec![]
+            } else {
+                vec![f.brief.plan.clone()]
+            },
+        };
+        let request = task_request(&f, &actor, &endpoint, command);
+        let original = state(&f);
+        let projection = f.projection(&run);
+        let reply = call(
+            &f,
+            &actor,
+            HostCommand::DispatchOrchestration {
+                request: Box::new(request),
+            },
+            1,
+        );
+        let error = reply.error.expect("the specific context-capacity refusal");
+        assert_eq!(error.code, code);
+        assert_eq!(error.message, words);
+        assert_eq!(state(&f), original, "C5_CONTEXT_REFUSAL_NO_MUTATION {code}");
+        assert_eq!(f.projection(&run), projection);
+        let request = f.control(&f.editor, &run, RunAction::Stop);
+        ok(
+            f.editor
+                .request(HostCommand::DispatchOrchestration {
+                    request: Box::new(request),
+                })
+                .unwrap(),
+            "C5_CONTEXT_FULL_STOP",
+        );
+    }
 }

@@ -26,6 +26,9 @@ impl BundleRecord for OrchestrationRecord {
     fn dependencies(&self) -> Vec<ObjectRef> {
         OrchestrationRecord::dependencies(self).unwrap_or_default()
     }
+    fn validate_admission(&self, store: &crate::store::ProjectStore) -> Result<(), BundleError> {
+        self.validate_retention_admission(store)
+    }
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
         OrchestrationRecord::dependencies(self).map_err(invalid)?;
         crate::studio_records::bounded(self, limits.control_bytes)
@@ -47,6 +50,12 @@ impl BundleRecord for RegisteredRunIndex {
         match self {
             Self::Index(index) => BundleRecord::dependencies(index.as_ref()),
             Self::Record(record) => BundleRecord::dependencies(record.as_ref()),
+        }
+    }
+    fn validate_admission(&self, store: &crate::store::ProjectStore) -> Result<(), BundleError> {
+        match self {
+            Self::Index(index) => index.validate_admission(store),
+            Self::Record(record) => record.validate_admission(store),
         }
     }
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
@@ -93,7 +102,7 @@ impl PublishedRunCut {
             self.receipt.envelope.expected_generation,
             &self.receipt.envelope,
             (**projection).clone(),
-            segment.clone(),
+            segment.restore(projection).map_err(invalid)?,
             self.receipt.decision.clone(),
         )
         .map_err(invalid)?;
@@ -104,7 +113,8 @@ impl PublishedRunCut {
             || self.metadata_envelope.id != self.receipt.envelope.id
             || self.metadata_envelope.project_id != self.receipt.envelope.project
             || self.metadata_envelope.owner_epoch != self.receipt.envelope.authority.owner_epoch
-            || segment.previous.as_ref() != previous.map(|cut| &cut.segment)
+            || segment.binding.previous.as_ref() != previous.map(|cut| &cut.segment)
+            || segment.snapshot != self.snapshot
             || projection.sequence
                 != previous.map_or(1, |cut| cut.receipt.sequence.saturating_add(1))
         {
@@ -197,13 +207,22 @@ impl ProjectBundle {
             }
             submitted.consumed_by = Some(legacy_run);
         }
-        let snapshot = self.store.admit_record(&OrchestrationRecord {
-            version: 1,
-            payload: OrchestrationPayload::Snapshot(Box::new(transition.projection().clone())),
-        })?;
+        let base = self.semantic_snapshot(run)?;
+        let snapshot_record = OrchestrationRecord::retained(
+            OrchestrationPayload::Snapshot(Box::new(transition.projection().clone())),
+            base,
+            &self.store,
+        )?;
+        let snapshot = self.store.admit_record(&snapshot_record)?;
         let segment = self.store.admit_record(&OrchestrationRecord {
+            retention: crate::orchestration_retention::Retention::Complete,
             version: 1,
-            payload: OrchestrationPayload::EventSegment(transition.segment().clone()),
+            payload: OrchestrationPayload::EventSegment(
+                crate::orchestration_records::StoredEventSegment {
+                    binding: transition.segment().binding().map_err(invalid)?,
+                    snapshot: snapshot.reference.clone(),
+                },
+            ),
         })?;
         self.advance_run_budget(&mut index, transition)?;
         index.cumulative.remove(run);
@@ -404,9 +423,10 @@ impl crate::editing_session::Ja1EditingSession {
     }
     pub fn admit_scheduler_record(
         &mut self,
-        record: &OrchestrationRecord,
+        record: OrchestrationRecord,
     ) -> Result<SealedObject, BundleError> {
-        self.active_bundle_mut()?.store_mut()?.admit_record(record)
+        self.active_bundle_mut()?
+            .admit_owned_scheduler_record(record)
     }
     pub fn admit_host_grant(&mut self, bytes: &[u8]) -> Result<ObjectRef, BundleError> {
         let reference = ObjectRef {

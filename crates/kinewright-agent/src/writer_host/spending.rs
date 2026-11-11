@@ -21,6 +21,11 @@ impl HostCommandOwner {
         if !matches!(update.envelope().command, OrchestrationCommand::StartRun(_)) {
             return Ok(update);
         }
+        for task in &update.projection().tasks {
+            task.progress
+                .check_context_capacity(0, 1)
+                .map_err(super::orchestration::scheduler_error)?;
+        }
         let mut state = update.projection().clone();
         self.seed_edit_consent(&mut state)?;
         // The first native attempt can follow a host restart. Retain the
@@ -55,7 +60,8 @@ impl HostCommandOwner {
         }
         let record = self
             .owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(accounting)),
             })?;

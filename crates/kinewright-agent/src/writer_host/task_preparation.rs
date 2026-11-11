@@ -385,6 +385,15 @@ impl HostCommandOwner {
                 RunWait::Provider,
             );
         }
+        for task in state
+            .tasks
+            .iter()
+            .filter(|task| task.id == identity.task || Some(&task.id) == parent.as_ref())
+        {
+            task.progress
+                .check_recovery_decisions(1)
+                .map_err(super::orchestration::scheduler_error)?;
+        }
         if state.effects.len() >= ITEM_LIMIT {
             return Err(HostRefusal::new("task_preparation", "notification capacity").into());
         }

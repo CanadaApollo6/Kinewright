@@ -517,7 +517,8 @@ mod tests {
             frozen_result: None,
         };
         let reference = owner
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: crate::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::TaskHistory(Box::new(history)),
             })

@@ -236,8 +236,19 @@ pub(super) const TASK_RESULT_EXPLANATION: &[u8] = b"task result";
     clippy::needless_pass_by_value,
     reason = "Result::map_err supplies the owned refusal"
 )]
-fn scheduler_error(reason: Refusal) -> HostError {
-    refused(&format!("{reason:?}"))
+pub(super) fn scheduler_error(reason: Refusal) -> HostError {
+    use kinewright_project::orchestration_records::{
+        TASK_DECISION_CAPACITY_WORDS, TASK_FEEDBACK_CAPACITY_WORDS,
+    };
+    match reason {
+        Refusal::TaskFeedbackCapacity => {
+            HostRefusal::new("task_feedback_capacity", TASK_FEEDBACK_CAPACITY_WORDS).into()
+        }
+        Refusal::TaskDecisionCapacity => {
+            HostRefusal::new("task_decision_capacity", TASK_DECISION_CAPACITY_WORDS).into()
+        }
+        _ => refused(&format!("{reason:?}")),
+    }
 }
 pub(super) fn is_hook(command: &HostCommand) -> bool {
     matches!(
@@ -1071,7 +1082,8 @@ impl HostCommandOwner {
                     .admit_host_grant(TASK_RESULT_EXPLANATION)?;
             }
             let record = self.owner_mut()?.admit_scheduler_record(
-                &crate::orchestration::orchestration_records::OrchestrationRecord {
+                crate::orchestration::orchestration_records::OrchestrationRecord {
+                    retention: kinewright_project::orchestration_retention::Retention::Complete,
                     version: 1,
                     payload:
                         crate::orchestration::orchestration_records::OrchestrationPayload::Result(

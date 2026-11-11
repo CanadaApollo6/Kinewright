@@ -216,3 +216,7 @@ kinewright_agent writer_host::hooks_tests::tests::te15_b2b0_guardian_long_input_
 te1_paid te1_one_granted_run crates/kinewright-agent/tests/te1_paid.rs linux on-demand  # Paid TE1 evaluation; lead grant and separate authorization required, never a CI launch
 kinewright_agent writer_host::hooks_tests::tests::te1_safety_scale_measurement crates/kinewright-agent/src/writer_host/te1_safety_tests.rs linux on-demand # generated 6.5 GB owner-lock and media stage timing
 kinewright_agent writer_host::hooks_tests::tests::te1_media_only_profile_non_media_steps crates/kinewright-agent/src/writer_host/te1_media_only_tests.rs linux on-demand # native maximum-size non-media cost inventory
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_zero_approvals_128_distinct_sends crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 linear retained send graph measurement
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_open_81_approval_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 paired valid-prefix open measurement
+
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_pending_history_capacity_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 pending task history and specialist delta admission charges

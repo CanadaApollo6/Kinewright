@@ -129,7 +129,8 @@ fn te12_full_director_wake_moves_only_reply_metadata() {
         let usage = owner
             .owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(accounting.clone())),
             })
@@ -147,7 +148,8 @@ fn te12_full_director_wake_moves_only_reply_metadata() {
         let stored = owner
             .owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Result(Box::new(result.clone())),
             })
@@ -228,7 +230,8 @@ fn te12_full_director_wake_moves_only_reply_metadata() {
             let summary_ref = owner
                 .owner_mut()
                 .unwrap()
-                .admit_scheduler_record(&OrchestrationRecord {
+                .admit_scheduler_record(OrchestrationRecord {
+                    retention: kinewright_project::orchestration_retention::Retention::Complete,
                     version: 1,
                     payload: OrchestrationPayload::Result(Box::new(large)),
                 })

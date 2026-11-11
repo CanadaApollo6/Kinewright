@@ -4,8 +4,8 @@ use super::{AttachmentRole, HostAuth, HostCommandOwner, HostError, HostRefusal};
 use crate::orchestration::{
     ExecutionIdentity,
     orchestration_records::{
-        AttemptId, AttemptState, OrchestrationPayload, OrchestrationRecord, RetiredAttemptArchive,
-        RunId, RunOutcome, RunProjection, TaskHistoryRecord, TaskId,
+        AttemptId, AttemptState, OrchestrationPayload, OrchestrationRecord, Refusal,
+        RetiredAttemptArchive, RunId, RunOutcome, RunProjection, TaskHistoryRecord, TaskId,
     },
 };
 use kinewright_project::{
@@ -164,7 +164,8 @@ impl HostCommandOwner {
         );
         let sealed = self
             .owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::AttemptArchive(Box::new(archive)),
             })?;
@@ -291,6 +292,36 @@ impl HostCommandOwner {
         identity: &ExecutionIdentity,
         fence: bool,
     ) -> Result<(), HostError> {
+        if self
+            .hooks
+            .runs
+            .get(&state.run)
+            .and_then(|run| run.tasks.get(&identity.task))
+            .is_none()
+        {
+            return Ok(());
+        }
+        let mut keep = Vec::new();
+        let task = state
+            .tasks
+            .iter()
+            .find(|task| task.id == identity.task)
+            .ok_or_else(|| refused("task missing"))?;
+        for reference in &task.progress.decisions {
+            let history = reference.record_kind == RecordKind::RunIndex
+                && matches!(
+                    self.owner()?.store()?.read_run_record(reference)?.payload,
+                    OrchestrationPayload::TaskHistory(_)
+                );
+            if !history {
+                keep.push(reference.clone());
+            }
+        }
+        if keep.len() >= kinewright_project::orchestration_records::TASK_RETAINED_DECISION_LIMIT {
+            return Err(super::orchestration::scheduler_error(
+                Refusal::TaskDecisionCapacity,
+            ));
+        }
         let Some(mut runtime) = self
             .hooks
             .runs
@@ -413,29 +444,11 @@ impl HostCommandOwner {
             }
             let sealed = self
                 .owner_mut()?
-                .admit_scheduler_record(&OrchestrationRecord {
+                .admit_scheduler_record(OrchestrationRecord {
+                    retention: kinewright_project::orchestration_retention::Retention::Complete,
                     version: 1,
                     payload: OrchestrationPayload::TaskHistory(Box::new(history)),
                 })?;
-            let decisions = state
-                .tasks
-                .iter_mut()
-                .find(|t| t.id == identity.task)
-                .ok_or_else(|| refused("task missing"))?
-                .progress
-                .decisions
-                .clone();
-            let mut keep = Vec::new();
-            for reference in decisions {
-                let history = reference.record_kind == RecordKind::RunIndex
-                    && matches!(
-                        self.owner()?.store()?.read_run_record(&reference)?.payload,
-                        OrchestrationPayload::TaskHistory(_)
-                    );
-                if !history {
-                    keep.push(reference);
-                }
-            }
             keep.push(sealed.reference);
             state
                 .tasks

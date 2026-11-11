@@ -892,7 +892,8 @@ impl HostCommandOwner {
         };
         let sealed = self
             .owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(accounting)),
             })?;
@@ -956,6 +957,14 @@ impl HostCommandOwner {
         if state.effects.len() >= ITEM_LIMIT {
             return Err(refused("native steering queue capacity"));
         }
+        state
+            .tasks
+            .iter()
+            .find(|task| task.id == identity.task)
+            .ok_or_else(|| refused("native steering task missing"))?
+            .progress
+            .check_context_capacity(0, 1)
+            .map_err(super::orchestration::scheduler_error)?;
         let payload = self.owner_mut()?.admit_host_grant(text.as_bytes())?;
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let issued = self.issue_metadata(index, None)?;

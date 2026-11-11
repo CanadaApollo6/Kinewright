@@ -16,6 +16,11 @@ impl ProviderReference {
         }
     }
 }
+#[derive(serde::Serialize)]
+struct ProviderRecord<'a> {
+    version: u32,
+    payload: &'a OrchestrationPayload,
+}
 pub(super) struct ExpandedResult {
     reference: ProviderReference,
     pub(super) contents: serde_json::Value,
@@ -43,11 +48,17 @@ impl HostCommandOwner {
                 let mut record = (*self.owner()?.store()?.read_run_record(reference)?).clone();
                 if let OrchestrationPayload::Accounting(accounting) = &mut record.payload {
                     **accounting = provider_accounting_view(accounting)?;
-                    let bytes = serde_json::to_vec(&record)?;
-                    descriptor.sha256 = kinewright_media::sha256_bytes(&bytes);
-                    descriptor.byte_length = bytes.len() as u64;
                 }
-                serde_json::to_value(record)?
+                let bytes = serde_json::to_vec(&ProviderRecord {
+                    version: record.version,
+                    payload: &record.payload,
+                })?;
+                descriptor.sha256 = kinewright_media::sha256_bytes(&bytes);
+                descriptor.byte_length = bytes.len() as u64;
+                serde_json::to_value(ProviderRecord {
+                    version: record.version,
+                    payload: &record.payload,
+                })?
             }
             RecordKind::SpecialistBase => serde_json::to_value(
                 &*self

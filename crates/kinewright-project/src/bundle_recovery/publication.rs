@@ -28,6 +28,11 @@ struct RecordCost {
     fields: Option<BTreeSet<String>>,
     dependencies: Vec<ObjectRef>,
     inventory_dependencies: Vec<ObjectRef>,
+    run_ownership: Option<VerifiedRunOwnership>,
+}
+/// Immutable record validation may be reused; membership belongs to this root.
+struct VerifiedRunOwnership {
+    base: Option<ObjectRef>,
 }
 impl VerifiedIdentityMemo {
     pub(super) fn verify_identity(
@@ -60,6 +65,7 @@ impl VerifiedIdentityMemo {
                         fields: Some(BTreeSet::new()),
                         dependencies: vec![],
                         inventory_dependencies: vec![],
+                        run_ownership: None,
                     },
                 );
             }
@@ -97,7 +103,8 @@ impl VerifiedIdentityMemo {
         fields: Option<BTreeSet<String>>,
         limits: &StorageLimits,
     ) {
-        // Traversal controls are interpreted on each admission. Only payload costs are memoized.
+        // Root traversal controls are interpreted on each admission. Immutable
+        // payload facts are memoized; their current-root membership is not.
         if matches!(
             reference.record_kind,
             RecordKind::BranchIndex
@@ -120,19 +127,17 @@ impl VerifiedIdentityMemo {
                 | RecordKind::Lineage
                 | RecordKind::SpecialistBase
         );
+        let mut prior = self.records.remove(reference);
         self.records.insert(
             reference.clone(),
             RecordCost {
                 decoded,
                 fields: fields
-                    .or_else(|| {
-                        self.records
-                            .get(reference)
-                            .and_then(|prior| prior.fields.clone())
-                    })
+                    .or_else(|| prior.as_mut().and_then(|prior| prior.fields.take()))
                     .or_else(|| (!needs_fields).then(BTreeSet::new)),
                 dependencies: record.dependencies(),
                 inventory_dependencies: record.inventory_dependencies(),
+                run_ownership: prior.and_then(|prior| prior.run_ownership),
             },
         );
     }
@@ -147,6 +152,10 @@ impl VerifiedIdentityMemo {
     ) {
         self.bind(limits);
         if self.records.contains_key(reference) || (self.records.len() as u64) < limits.objects {
+            let run_ownership = self
+                .records
+                .remove(reference)
+                .and_then(|prior| prior.run_ownership);
             self.records.insert(
                 reference.clone(),
                 RecordCost {
@@ -154,6 +163,7 @@ impl VerifiedIdentityMemo {
                     fields: Some(fields),
                     dependencies,
                     inventory_dependencies,
+                    run_ownership,
                 },
             );
         }
@@ -390,7 +400,69 @@ pub(super) fn validate(
                 control!(crate::studio_records::FeedbackBatch);
             }
             RecordKind::RunIndex => {
-                control!(crate::orchestration_commit::RegisteredRunIndex);
+                memo.bind(limits);
+                if let Some(ownership) = memo
+                    .records
+                    .get(reference)
+                    .filter(|cost| cost.fields.is_some())
+                    .and_then(|cost| cost.run_ownership.as_ref())
+                {
+                    if ownership
+                        .base
+                        .as_ref()
+                        .is_some_and(|base| !retained.contains(base))
+                    {
+                        return Err(BundleError::Corrupt("unretained run ownership base".into()));
+                    }
+                    // Cost/edges come from the same immutable identity. The flat
+                    // root index and ordered cut/successor checks still run below.
+                    payload!(crate::orchestration_commit::RegisteredRunIndex);
+                    #[cfg(any(test, feature = "test-util"))]
+                    crate::namespace::note(
+                        "run_ownership_memo_hit",
+                        &namespace.identity().resolved_root,
+                    );
+                } else {
+                    let mut observed = BTreeSet::new();
+                    let value = read_record::<crate::orchestration_commit::RegisteredRunIndex>(
+                        namespace,
+                        reference,
+                        usage,
+                        &mut observed,
+                        limits,
+                    )?;
+                    compare_edges(reference, &*value, &manifest)?;
+                    fields.extend(observed.iter().cloned());
+                    super::validate_run_record_ownership(
+                        namespace,
+                        &value,
+                        |base| retained.contains(base),
+                        usage,
+                        limits,
+                    )?;
+                    if let crate::orchestration_commit::RegisteredRunIndex::Record(record) = &*value
+                    {
+                        memo.remember(
+                            reference,
+                            &*value,
+                            value.decoded_charge(),
+                            Some(observed),
+                            limits,
+                        );
+                        if let Some(cost) = memo.records.get_mut(reference) {
+                            cost.run_ownership = Some(VerifiedRunOwnership {
+                                // Keep an identity, never a copy of the projection.
+                                base: match &record.retention {
+                                    crate::orchestration_retention::Retention::Complete => None,
+                                    crate::orchestration_retention::Retention::Introduced {
+                                        base,
+                                        ..
+                                    } => base.clone(),
+                                },
+                            });
+                        }
+                    }
+                }
             }
             RecordKind::RunSnapshot => {
                 control!(crate::studio_records::RunSnapshotRecord);

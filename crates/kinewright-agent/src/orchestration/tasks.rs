@@ -1105,8 +1105,8 @@ pub fn apply_lifecycle(
     envelope: &super::orchestration_records::OrchestrationEnvelope,
 ) -> Result<bool, super::orchestration_records::Refusal> {
     use super::orchestration_records::{
-        AttemptState, BACKGROUND_LIMIT, ITEM_LIMIT, OrchestrationCommand, QuestionStatus, Refusal,
-        RunOutcome, RunPhase, RuntimeRequest, TaskState, validate_reference,
+        AttemptState, BACKGROUND_LIMIT, OrchestrationCommand, QuestionStatus, Refusal, RunOutcome,
+        RunPhase, RuntimeRequest, TaskState, validate_reference,
     };
     match &envelope.command {
         OrchestrationCommand::FinishTask(request) => {
@@ -1281,11 +1281,9 @@ pub fn apply_lifecycle(
                 .iter_mut()
                 .find(|record| &record.id == task)
                 .ok_or(Refusal::ScopeConflict)?;
-            if record.progress.feedback.len() + feedback.len() > ITEM_LIMIT
-                || record.progress.decisions.len() + decisions.len() > ITEM_LIMIT
-            {
-                return Err(Refusal::Capacity);
-            }
+            record
+                .progress
+                .check_context_capacity(feedback.len(), decisions.len())?;
             for reference in feedback.iter().chain(decisions) {
                 validate_reference(reference)?;
             }
