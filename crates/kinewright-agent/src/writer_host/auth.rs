@@ -519,6 +519,13 @@ impl super::HostCommandOwner {
                 };
             }
         };
+        if let Err(error) = self.require_open_command(&request.command) {
+            return super::HostReply {
+                status: self.status(),
+                error: Some(error.refusal()),
+                ..super::HostReply::default()
+            };
+        }
         let detach = matches!(
             request.command,
             super::HostCommand::Detach | super::HostCommand::DetachForContinuation

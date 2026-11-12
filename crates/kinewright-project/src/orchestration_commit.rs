@@ -91,7 +91,6 @@ pub fn checked_receipt(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedRunUpdate {
     envelope: OrchestrationEnvelope,
-    projection: RunProjection,
     segment: EventSegment,
     receipt: OrchestrationReceipt,
     dependencies: Vec<ObjectRef>,
@@ -106,7 +105,7 @@ impl Serialize for ValidatedRunUpdate {
             .map_err(|e| S::Error::custom(format!("{e:?}")))?;
         let mut state = serializer.serialize_struct("ValidatedRunUpdate", 4)?;
         state.serialize_field("envelope", &self.envelope)?;
-        state.serialize_field("projection", &self.projection)?;
+        state.serialize_field("projection", self.projection())?;
         state.serialize_field("segment", &binding)?;
         state.serialize_field("receipt", &self.receipt)?;
         state.end()
@@ -118,7 +117,7 @@ impl ValidatedRunUpdate {
         project: &ProjectId,
         generation: u64,
         envelope: &OrchestrationEnvelope,
-        projection: RunProjection,
+        projection: impl std::borrow::Borrow<RunProjection>,
         segment: EventSegment,
         decision: CommandDecision,
     ) -> Result<Self, Refusal> {
@@ -129,16 +128,17 @@ impl ValidatedRunUpdate {
         if envelope.expected_generation != generation {
             return Err(Refusal::StaleGeneration);
         }
-        validate_projection(&projection)?;
+        let projection = projection.borrow();
+        validate_projection(projection)?;
         let mut dependencies = Vec::new();
-        projection_refs(&projection, &mut dependencies)?;
+        projection_refs(projection, &mut dependencies)?;
         let binding = segment.binding()?;
         dependencies.push(envelope.authority.grant_ref.clone());
         if segment.run != projection.run
             || segment
                 .events
                 .last()
-                .is_none_or(|event| event.projection != projection || event.command != envelope.id)
+                .is_none_or(|event| event.projection != *projection || event.command != envelope.id)
         {
             return Err(Refusal::InvalidState);
         }
@@ -162,7 +162,6 @@ impl ValidatedRunUpdate {
         };
         Ok(Self {
             envelope: envelope.clone(),
-            projection,
             segment,
             receipt,
             dependencies,
@@ -174,7 +173,9 @@ impl ValidatedRunUpdate {
     }
     #[must_use]
     pub fn projection(&self) -> &RunProjection {
-        &self.projection
+        // `new` validates the binding's exactly-one-event invariant. The segment
+        // is private and exposed only by shared reference, so it owns our one state.
+        &self.segment.events[0].projection
     }
     #[must_use]
     pub fn segment(&self) -> &EventSegment {

@@ -22,6 +22,90 @@ fn old_cut_projection(update: &ValidatedRunUpdate) -> RunProjection {
     assert_eq!(segment.events.last().unwrap().projection, snapshot);
     snapshot
 }
+
+#[test]
+fn linear_run_restored_cut_owns_one_projection_without_changing_wire_bytes() {
+    let f = Fixture::new();
+    let cut = f.owner.orchestration_cut(&f.state.run).unwrap().unwrap();
+    let store = f.owner.store().unwrap();
+    let snapshot = store
+        .read_record::<OrchestrationRecord>(&cut.snapshot)
+        .unwrap();
+    let events = store
+        .read_record::<OrchestrationRecord>(&cut.segment)
+        .unwrap();
+    let OrchestrationPayload::EventSegment(binding_record) = &events.payload else {
+        panic!("expected stored event segment");
+    };
+    let restored = cut
+        .validate_cut(&f.state.run, &snapshot, &events, None)
+        .unwrap();
+    assert_eq!(
+        std::ptr::from_ref(restored.projection()),
+        std::ptr::from_ref(&restored.segment().events[0].projection),
+        "C5_ONE_OWNED_RESTORED_PROJECTION"
+    );
+    let expected = format!(
+        "{{\"envelope\":{},\"projection\":{},\"segment\":{},\"receipt\":{}}}",
+        serde_json::to_string(&cut.receipt.envelope).unwrap(),
+        serde_json::to_string(&f.state).unwrap(),
+        serde_json::to_string(&binding_record.binding).unwrap(),
+        serde_json::to_string(&cut.receipt).unwrap(),
+    );
+    assert_eq!(serde_json::to_vec(&restored).unwrap(), expected.as_bytes());
+    assert_eq!(
+        restored.receipt().cut_digest,
+        kinewright_media::sha256_bytes(
+            &encoded(
+                &(
+                    &cut.receipt.envelope,
+                    &f.state,
+                    &binding_record.binding,
+                    &cut.receipt.decision
+                ),
+                CONTROL_BYTES,
+            )
+            .unwrap()
+        )
+    );
+}
+
+#[test]
+fn linear_run_invalid_dependencies_refuse_before_edge_or_object_admission() {
+    let mut f = Fixture::new();
+    let before = f.owner.store().unwrap().usage().unwrap();
+    let root = f.owner.root_sha256().unwrap();
+    let mut invalid = f.grant.clone();
+    invalid.record_kind = crate::bundle_records::RecordKind::RunIndex;
+    invalid.sha256 = "invalid-digest".into();
+    let record = OrchestrationRecord {
+        version: 1,
+        retention: Retention::Complete,
+        payload: OrchestrationPayload::RunIndex(vec![invalid]),
+    };
+    assert_eq!(record.dependencies(), Err(Refusal::InvalidState));
+    let store = &mut f.owner.active_bundle_mut().unwrap().store;
+    for error in [
+        store
+            .admit_record(&record)
+            .err()
+            .expect("invalid record refused"),
+        store
+            .admit_record(&crate::orchestration_commit::RegisteredRunIndex::Record(
+                Box::new(record),
+            ))
+            .err()
+            .expect("invalid tagged record refused"),
+    ] {
+        assert!(
+            matches!(error, BundleError::Identity(ref text) if text == "orchestration: InvalidState"),
+            "C5_TYPED_DEPENDENCY_REFUSAL {error}"
+        );
+    }
+    assert_eq!(store.usage().unwrap(), before);
+    assert_eq!(f.owner.root_sha256().unwrap(), root);
+}
+
 struct Fixture {
     temp: TempDirectory,
     owner: Ja1EditingSession,

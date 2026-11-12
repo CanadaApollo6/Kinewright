@@ -899,7 +899,7 @@ impl FeedbackPort for HostFeedback<'_> {
         if let Some(error) = reply.error {
             return if matches!(
                 error.code.as_str(),
-                "durability_unknown" | "unsettled" | "recovery_frozen"
+                "durability_unknown" | "unsettled" | "recovery_frozen" | "host_stopping"
             ) {
                 RunStart::Unknown(error.message)
             } else {

@@ -56,15 +56,21 @@ pub(super) fn project(name: &str) -> Project {
 /// The App's owner for `path` with its real writer host, reading this test's
 /// scheduler folder.
 pub(super) fn launch(project: &Project) -> Ja1Attachment {
+    let fixture = kinewright_agent::writer_host::ProtocolFixture::new(
+        project.temp.root(),
+        kinewright_agent::writer_host::ProtocolFixtureMode::Dormant,
+    );
+    launch_with_fixture(project, &fixture)
+}
+fn launch_with_fixture(
+    project: &Project,
+    fixture: &kinewright_agent::writer_host::ProtocolFixture,
+) -> Ja1Attachment {
     let owner =
         kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
     let mut attachment = Ja1Attachment::new(owner).unwrap();
     crate::ja1_attachment::SCHEDULER_SETTINGS
         .with(|folder| *folder.borrow_mut() = Some(project.temp.path("scheduler")));
-    let fixture = kinewright_agent::writer_host::ProtocolFixture::new(
-        project.temp.root(),
-        kinewright_agent::writer_host::ProtocolFixtureMode::Dormant,
-    );
     let writer = attachment
         .launch_protocol_fixture(
             SessionRoots {
@@ -72,7 +78,7 @@ pub(super) fn launch(project: &Project) -> Ja1Attachment {
                 write: vec![project.temp.root().into()],
             },
             project.temp.path("scheduler"),
-            &fixture,
+            fixture,
         )
         .unwrap();
     attachment.fixture_host = Some(writer);
@@ -486,4 +492,300 @@ fn s3_c10_settings_choose_director_then_revise_uses_it() {
     drop(app);
     let (_, count) = linked(&project.path);
     assert_eq!(count, 1, "C10_APP_ONE_RUN");
+}
+
+#[test]
+fn s3_c7_startup_recovery_queues_exact_revise_and_keeps_reads_live() {
+    use kinewright_agent::writer_host::{
+        HostCommand, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase,
+    };
+    let mut project = project("c7-recovery-order");
+    let first = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::Dormant);
+    let mut attachment = launch_with_fixture(&project, &first);
+    assert!(first.wait_recovery(RecoveryPhase::Completed, std::time::Duration::from_secs(5)));
+    project.feedback.issuer = None;
+    let proxy = attachment.drop_host_reply("revise_cut", false);
+    assert!(matches!(
+        with_host(&attachment, |port| project.feedback.submit(port)),
+        Outcome::Submitted(_)
+    ));
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    let kept = project.feedback.revise.take().unwrap();
+    drop(proxy);
+    drop(attachment);
+    let held = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::RecoveryHeld);
+    let attachment = launch_with_fixture(&project, &held);
+    assert!(held.wait_recovery(RecoveryPhase::Entered, std::time::Duration::from_secs(5)));
+    let client = attachment.host_client().unwrap();
+    let retry = kept.clone(); // The retry must carry the same durable request.
+    let reply = std::thread::scope(|scope| {
+        let pending = scope.spawn(|| client.request(HostCommand::ReviseCut { request: retry }));
+        let queued = held.wait_recovery(RecoveryPhase::Queued, std::time::Duration::from_secs(5));
+        let still_waiting = !pending.is_finished();
+        let read = client.request(HostCommand::Status);
+        // Release even if an observation above failed, before joining or asserting.
+        held.release();
+        let reply = pending.join().unwrap().unwrap();
+        assert!(queued && still_waiting, "C7_RECOVERY_REQUEST_QUEUED");
+        assert!(read.unwrap().error.is_none(), "C7_RECOVERY_READ_STAYS_LIVE");
+        reply
+    });
+    assert!(reply.error.is_none(), "C7_RECOVERY_ACCEPTED {reply:?}");
+    assert!(
+        matches!(&reply.revise_result, Some(ReviseResult::Accepted { batch_id, .. }) if batch_id == &kept.batch_id)
+    );
+    assert!(held.wait_recovery(RecoveryPhase::Completed, std::time::Duration::from_secs(5)));
+    let ready_result = client
+        .request(HostCommand::ReviseCut { request: kept })
+        .unwrap();
+    assert!(ready_result.error.is_none());
+    assert_eq!(
+        serde_json::to_value(reply.revise_result).unwrap(),
+        serde_json::to_value(ready_result.revise_result).unwrap(),
+        "C7_RECOVERY_FIRST_AND_READY_ORDERINGS_MATCH"
+    );
+    drop(attachment);
+    let (batches, runs) = linked(&project.path);
+    assert_eq!(runs, 1);
+    assert_eq!(batches.len(), 1);
+    assert!(batches[0].is_some());
+}
+
+fn c7_unconsumed_batch(project: &mut Project) -> ReviseRequest {
+    let mut owner =
+        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    project.feedback.issuer = None;
+    assert!(matches!(
+        project.feedback.submit_inner(&mut owner),
+        Outcome::Submitted(_)
+    ));
+    let request = project
+        .feedback
+        .revise
+        .clone()
+        .expect("kept submitted request");
+    assert!(
+        owner
+            .read_submitted_batch(&request.batch_id)
+            .unwrap()
+            .consumed_by
+            .is_none()
+    );
+    request
+}
+
+fn c7_shutdown_queue(before_ingress: bool) {
+    use kinewright_agent::writer_host::{
+        HostCommand, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase,
+    };
+    let mut project = project("c7-shutdown-queue");
+    let request = c7_unconsumed_batch(&mut project);
+    let held = ProtocolFixture::new(
+        project.temp.root(),
+        ProtocolFixtureMode::RecoveryHeldRunning,
+    );
+    if before_ingress {
+        held.hold_startup_ingress();
+    }
+    let attachment = launch_with_fixture(&project, &held);
+    assert!(held.wait_recovery(RecoveryPhase::Entered, std::time::Duration::from_secs(5)));
+    let project_id = attachment.studio_project_id().unwrap();
+    let client = attachment.host_client().unwrap();
+    let completion = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+    let (queued, ingress, shutdown, prompt) = std::thread::scope(|scope| {
+        let held = &held;
+        let client = &client;
+        let completion = &completion;
+        let controller = scope.spawn(move || {
+            let queued = held
+                .wait_recovery(RecoveryPhase::Queued, std::time::Duration::from_secs(5))
+                && held.wait_recovery(RecoveryPhase::Waiting, std::time::Duration::from_secs(5));
+            let ingress = if before_ingress {
+                held.release_recovery();
+                held.wait_recovery(
+                    RecoveryPhase::BeforeIngress,
+                    std::time::Duration::from_secs(5),
+                )
+            } else {
+                true
+            };
+            let shutdown = client.request(HostCommand::Shutdown);
+            if before_ingress {
+                held.release();
+            }
+            let prompt = {
+                let (done, _) = completion
+                    .1
+                    .wait_timeout_while(
+                        completion.0.lock().unwrap(),
+                        std::time::Duration::from_secs(2),
+                        |done| !*done,
+                    )
+                    .unwrap();
+                *done
+            };
+            // Also release on a red run before any assertion or join can unwind.
+            held.release();
+            (queued, ingress, shutdown, prompt)
+        });
+        assert!(matches!(
+            with_host(&attachment, |port| project.feedback.submit(port)),
+            Outcome::Submitted(_)
+        ));
+        *completion.0.lock().unwrap() = true;
+        completion.1.notify_one();
+        controller.join().unwrap()
+    });
+    assert!(queued && ingress, "C7_SHUTDOWN_ORDERING_HELD");
+    let shutdown = shutdown.unwrap();
+    assert!(
+        shutdown.error.is_none(),
+        "C7_SHUTDOWN_ACCEPTED {shutdown:?}"
+    );
+    assert_eq!(shutdown.status.continuation_runs, 0);
+    assert!(prompt, "C7_SHUTDOWN_REFUSES_WITH_RECOVERY_HELD");
+    assert_eq!(
+        project.feedback.revise.as_ref(),
+        Some(&request),
+        "C7_SHUTDOWN_REQUEST_KEPT"
+    );
+    assert!(
+        !held.wait_recovery(RecoveryPhase::Dispatch, std::time::Duration::ZERO),
+        "C7_SHUTDOWN_BEFORE_DISPATCH"
+    );
+    assert!(
+        project
+            .feedback
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("attachment_refused"),
+        "C7_SHUTDOWN_TRANSPORT_FENCE"
+    );
+    let kept: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .temp
+                .path("state")
+                .join(format!("{}.json", project_id.as_str())),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept["revise"], serde_json::to_value(&request).unwrap());
+    drop(attachment);
+    assert!(
+        held.observations().is_empty(),
+        "C7_SHUTDOWN_NO_NATIVE_LAUNCH"
+    );
+    let owner =
+        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    assert!(
+        owner.orchestration_runs().unwrap().is_empty(),
+        "C7_SHUTDOWN_NO_NEW_RUN"
+    );
+    assert!(
+        owner
+            .read_submitted_batch(&request.batch_id)
+            .unwrap()
+            .consumed_by
+            .is_none(),
+        "C7_SHUTDOWN_BATCH_UNCONSUMED"
+    );
+}
+
+#[test]
+fn s3_c7_fix1_shutdown_cancels_waiting_revise() {
+    c7_shutdown_queue(false);
+}
+
+#[test]
+fn s3_c7_fix1_shutdown_fences_ingress_ready_revise() {
+    c7_shutdown_queue(true);
+}
+
+#[test]
+fn s3_c7_fix1_refused_shutdown_keeps_queue_open() {
+    use kinewright_agent::writer_host::{
+        HostCommand, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase,
+    };
+    let mut project = project("c7-refused-shutdown");
+    let request = c7_unconsumed_batch(&mut project);
+    let mut attachment = launch(&project);
+    let proxy = attachment.drop_host_reply("revise_cut", false);
+    assert!(matches!(
+        with_host(&attachment, |port| project.feedback.submit(port)),
+        Outcome::Submitted(_)
+    ));
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(project.feedback.revise.as_ref(), Some(&request));
+    drop(proxy);
+    drop(attachment);
+    let held = ProtocolFixture::new(
+        project.temp.root(),
+        ProtocolFixtureMode::RecoveryRestoredHeld,
+    );
+    let attachment = launch_with_fixture(&project, &held);
+    assert!(held.wait_recovery(RecoveryPhase::Restored, std::time::Duration::from_secs(5)));
+    let client = attachment.host_client().unwrap();
+    assert!(
+        client
+            .request(HostCommand::Status)
+            .unwrap()
+            .status
+            .continuation_runs
+            > 0,
+        "C7_CONTINUABLE_RUN_RESTORED"
+    );
+    let (queued, shutdown, still_open) = std::thread::scope(|scope| {
+        let controller = scope.spawn(|| {
+            let queued =
+                held.wait_recovery(RecoveryPhase::Queued, std::time::Duration::from_secs(5));
+            let shutdown = client.request(HostCommand::Shutdown);
+            let status = client.request(HostCommand::Status);
+            held.release();
+            (
+                queued,
+                shutdown,
+                status.is_ok_and(|reply| reply.error.is_none()),
+            )
+        });
+        assert!(matches!(
+            with_host(&attachment, |port| project.feedback.submit(port)),
+            Outcome::Submitted(_)
+        ));
+        controller.join().unwrap()
+    });
+    assert!(queued && still_open, "C7_REFUSED_SHUTDOWN_KEEPS_QUEUE_OPEN");
+    let shutdown = shutdown.unwrap();
+    assert_eq!(
+        shutdown.error.as_ref().map(|error| error.code.as_str()),
+        Some("continuation_required")
+    );
+    assert!(
+        project.feedback.revise.is_none(),
+        "C7_REFUSED_SHUTDOWN_REVISE_SETTLED {:?}",
+        project.feedback.message
+    );
+    let result = with_host(&attachment, |port| port.revise(&request));
+    let RunStart::Known(ReviseResult::Accepted { run_id, batch_id }) = result else {
+        panic!("C7_REFUSED_SHUTDOWN_ACCEPTED {result:?}");
+    };
+    assert_eq!(batch_id, request.batch_id);
+    drop(attachment);
+    let owner =
+        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    assert_eq!(
+        owner.orchestration_runs().unwrap().len(),
+        1,
+        "C7_REFUSED_SHUTDOWN_ONCE"
+    );
+    assert_eq!(
+        owner
+            .read_submitted_batch(&request.batch_id)
+            .unwrap()
+            .consumed_by
+            .as_ref(),
+        Some(&run_id)
+    );
 }
