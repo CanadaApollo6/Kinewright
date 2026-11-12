@@ -108,6 +108,3 @@ opt-level = 3
 
 [profile.test.package.kinewright-project]
 opt-level = 3
-
-[profile.test.package.kinewright-agent]
-opt-level = 3
