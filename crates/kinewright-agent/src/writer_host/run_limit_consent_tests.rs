@@ -31,11 +31,21 @@ mod tests {
     fn cut(
         b: &B21,
     ) -> Result<Result<kinewright_core::Event, kinewright_core::CoreDisconnected>, HostError> {
-        cut_named(b, "Remove the first two clips")
+        cut_operations(
+            b,
+            &[
+                kinewright_core::Operation::DeleteClip {
+                    clip: kinewright_core::ClipId(1),
+                },
+                kinewright_core::Operation::RippleDeleteClip {
+                    clip: kinewright_core::ClipId(2),
+                },
+            ],
+        )
     }
-    fn cut_named(
+    fn cut_operations(
         b: &B21,
-        description: &str,
+        operations: &[kinewright_core::Operation],
     ) -> Result<Result<kinewright_core::Event, kinewright_core::CoreDisconnected>, HostError> {
         let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
             revision,
@@ -54,15 +64,8 @@ mod tests {
             &b.core,
             revision,
             &document,
-            &[
-                kinewright_core::Operation::DeleteClip {
-                    clip: kinewright_core::ClipId(1),
-                },
-                kinewright_core::Operation::RippleDeleteClip {
-                    clip: kinewright_core::ClipId(2),
-                },
-            ],
-            Some(description),
+            operations,
+            Some("Remove the owned clips"),
         )
     }
     fn occupy_reader_memory(
@@ -145,9 +148,19 @@ mod tests {
             (usage.metadata_bytes, usage.objects, usage.physical_bytes)
         };
         let baseline = counters();
-        for index in 0..4 {
-            let error = cut_named(&b, &format!("Remove the first two clips; proposal {index}"))
-                .unwrap_err();
+        let mut names = std::collections::BTreeSet::new();
+        for (first, second) in [(2, 1), (1, 3), (3, 1), (2, 3)] {
+            let operations = [
+                kinewright_core::Operation::DeleteClip {
+                    clip: kinewright_core::ClipId(first),
+                },
+                kinewright_core::Operation::RippleDeleteClip {
+                    clip: kinewright_core::ClipId(second),
+                },
+            ];
+            let (result, trace) =
+                kinewright_project::io_observer::observe(|| cut_operations(&b, &operations));
+            let error = result.unwrap_err();
             assert!(
                 matches!(&error, HostError::Refused(r) if r.code == "consent_capacity"),
                 "C4_FOLLOWUPS_SPECIFIC_PREPARATION_REFUSAL {error}"
@@ -155,12 +168,76 @@ mod tests {
             assert_eq!(
                 counters(),
                 baseline,
-                "C4_FOLLOWUPS_REFUSED_NAMES_UNCHARGED proposal={index}"
+                "C4_FOLLOWUPS_REFUSED_NAMES_UNCHARGED proposal={first},{second}"
+            );
+            let approval = trace
+                .events
+                .into_iter()
+                .find(|event| event.operation == "consent_approval_prepared")
+                .expect("C4_MEASURED_FIRST_CUT_FITS");
+            assert!(
+                names.insert(approval.attempted_sha256.unwrap()),
+                "C4F_FIX1_DISTINCT_APPROVAL_NAMES"
             );
         }
+        assert_eq!(names.len(), 4);
         eprintln!(
-            "C4_STAGING_BOUNDARY_REFUSALS count=4 metadata={} objects={} physical={}",
-            baseline.0, baseline.1, baseline.2
+            "C4_STAGING_BOUNDARY_REFUSALS count=4 names={names:?} metadata={} objects={} physical={}",
+            baseline.0, baseline.1, baseline.2,
+        );
+        let operations = [
+            kinewright_core::Operation::DeleteClip {
+                clip: kinewright_core::ClipId(3),
+            },
+            kinewright_core::Operation::RippleDeleteClip {
+                clip: kinewright_core::ClipId(2),
+            },
+        ];
+        let (result, trace) =
+            kinewright_project::io_observer::fail_once("gc_before_unlink", || {
+                kinewright_project::io_observer::observe(|| cut_operations(&b, &operations))
+            });
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|event| event.operation == "consent_approval_prepared")
+        );
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, HostError::Refused(refusal)
+            if refusal.code == "consent_capacity" && refusal.message.contains("not applied")),
+            "C4F_FIX1_ORIGINAL_REFUSAL_SURVIVES_COLLECTION_FAILURE {error}"
+        );
+        {
+            let host = owner.lock().unwrap();
+            let status = host
+                .owner()
+                .unwrap()
+                .store()
+                .unwrap()
+                .collection_status()
+                .unwrap();
+            assert!(
+                status.failed_files > 0,
+                "C4F_FIX1_COLLECTION_FAILURE_RECORDED"
+            );
+            assert!(
+                status
+                    .failures
+                    .iter()
+                    .any(|failure| failure.error.contains("injected gc_before_unlink"))
+            );
+        }
+        // The next ordinary preparation retries maintenance after the fault is gone.
+        let error = cut_operations(&b, &operations).unwrap_err();
+        assert!(
+            matches!(&error, HostError::Refused(refusal) if refusal.code == "consent_capacity")
+        );
+        assert_eq!(
+            counters(),
+            baseline,
+            "C4F_FIX1_FAILED_COLLECTION_RETRIES_WITHOUT_LEAK"
         );
         let history = b.core.export_history().unwrap();
         let projection = b.f.projection(&b.run);

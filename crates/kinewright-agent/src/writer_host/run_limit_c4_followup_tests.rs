@@ -231,6 +231,22 @@ mod followups {
                 ));
             };
             remove();
+            {
+                let owner = b.f.host.owner.upgrade().unwrap();
+                let host = owner.lock().unwrap();
+                assert!(host.hooks.pending_edit_applications.is_empty());
+                assert_eq!(
+                    host.owner()
+                        .unwrap()
+                        .store()
+                        .unwrap()
+                        .usage()
+                        .unwrap()
+                        .reserved_bytes,
+                    0,
+                    "C4F_FIX1_PLAIN_SUCCESS_RELEASES_HOLD track={track}"
+                );
+            }
             assert!(matches!(
                 b.core.request(CoreCommand::Undo).unwrap(),
                 Event::DocumentChanged { .. }
@@ -267,6 +283,94 @@ mod followups {
                 .unwrap();
             assert!(kept.approvals.iter().all(|edit| edit.applied));
             assert!(kept.missing.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        all(target_os = "linux", not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
+    fn c4f_fix1_reused_ids_do_not_claim_missing() {
+        if !te15_fix_counting_child(
+            "tests::storage_admission::tests::followups::c4f_fix1_reused_ids_do_not_claim_missing",
+        ) {
+            return;
+        }
+        for track in [false, true] {
+            let b = b21_start();
+            let (remove, recreate) = if track {
+                (
+                    Operation::RemoveTrack {
+                        track: kinewright_core::TrackId(81),
+                    },
+                    Operation::AddTrack {
+                        track: kinewright_core::Track {
+                            id: kinewright_core::TrackId(81),
+                            kind: kinewright_core::TrackKind::Audio,
+                            sync_lock: true,
+                            clips: vec![],
+                        },
+                    },
+                )
+            } else {
+                (
+                    Operation::DeleteClip {
+                        clip: kinewright_core::ClipId(3),
+                    },
+                    Operation::SplitClip {
+                        clip: kinewright_core::ClipId(2),
+                        at: kinewright_core::TimeCode(15),
+                    },
+                )
+            };
+            for operation in [remove, recreate] {
+                assert!(matches!(
+                    cut_operations(&b, &[operation]).unwrap().unwrap(),
+                    Event::DocumentChanged { .. }
+                ));
+            }
+            let history = b.core.export_history().unwrap();
+            let kept_track = &history.document.tracks[0];
+            if track {
+                assert_eq!(kept_track.id, kinewright_core::TrackId(81));
+                assert_eq!(kept_track.kind, kinewright_core::TrackKind::Audio);
+                assert!(kept_track.clips.is_empty());
+            } else {
+                let reused = kept_track
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == kinewright_core::ClipId(3))
+                    .unwrap();
+                assert_eq!(reused.timeline_start, kinewright_core::TimeCode(15));
+                assert_eq!(
+                    reused.source_range,
+                    kinewright_core::TimeCode(5)..kinewright_core::TimeCode(10)
+                );
+            }
+            checkpoint(&b);
+            let page = b201_page(&b.f, &b.run);
+            assert_eq!(page.edit_approvals.len(), 1);
+            assert!(
+                page.edit_approvals[0].applied,
+                "C4F_FIX1_REUSED_ID_IS_NOT_UNDONE track={track} {:?}",
+                page.edit_approvals
+            );
+            assert!(page.missing_approved_edits.is_empty());
+            assert!(page.uncertain_approved_edits.is_empty());
+            let owner = b.f.host.owner.upgrade().unwrap();
+            let host = owner.lock().unwrap();
+            let audit = host
+                .owner()
+                .unwrap()
+                .edit_audit_summary(&page.projection, &[])
+                .unwrap();
+            assert!(
+                audit.approvals[0].applied,
+                "C4F_FIX1_RETAINED_REUSED_ID_IS_NOT_UNDONE track={track}"
+            );
+            assert!(audit.missing.is_empty());
+            assert!(audit.uncertain.is_empty());
         }
     }
 

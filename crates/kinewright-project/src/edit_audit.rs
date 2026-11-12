@@ -1,7 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 //! Approval audits are compared with exact kept history, never a reopened actor's revision.
 use crate::{
-    bundle_records::{ObjectRef, ProjectId},
+    bundle_records::{BranchId, ObjectRef, ProjectId},
     orchestration_records::{AttemptId, EndpointId, RunId, TaskId, TaskTurn},
 };
 use kinewright_core::{ClipId, TimelineRevision, TrackId};
@@ -40,6 +40,26 @@ pub enum RemovedObject {
     Track { track: TrackId },
 }
 impl RemovedObject {
+    fn created_by(&self, batch: &kinewright_core::HistoryBatch) -> bool {
+        use kinewright_core::{JournalCommand, Operation};
+        match self {
+            Self::Clip { clip, .. } => batch.identity_effects.iter().any(|effect| {
+                effect.created.contains(clip)
+                    || effect.split_results.iter().any(|child| child.id == *clip)
+            }),
+            Self::Track { track } => {
+                let creates = |operation: &Operation| matches!(operation, Operation::AddTrack { track: added } if added.id == *track);
+                match &batch.command {
+                    JournalCommand::Do(operation) => creates(operation),
+                    JournalCommand::DoBatch(operations)
+                    | JournalCommand::DoBatchCoalesced { operations, .. } => {
+                        operations.iter().any(creates)
+                    }
+                    JournalCommand::Undo | JournalCommand::Redo => false,
+                }
+            }
+        }
+    }
     fn present_in(&self, document: &kinewright_core::Document) -> bool {
         match self {
             Self::Clip { clip, .. } => document
@@ -245,6 +265,150 @@ pub struct LiveEditCut {
 struct KeptTaskAudit {
     coverage: KeptEditCoverage,
     document: Option<crate::storage_budget::StorageReservation<kinewright_core::Document>>,
+    branch: Option<BranchId>,
+    history: Option<crate::storage_budget::StorageReservation<kinewright_core::HistorySnapshot>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RemovalProof {
+    Kept,
+    Missing,
+    Uncertain,
+}
+
+#[derive(PartialEq, Eq)]
+enum BatchLocation {
+    Undo(usize),
+    Redo(usize),
+    Discarded,
+}
+
+/// Inspect borrowed, already verified stack metadata. No history replay or document copy.
+fn retained_batch_proof(
+    history: &kinewright_core::HistorySnapshot,
+    record: &ApprovalRecord,
+) -> RemovalProof {
+    use kinewright_core::JournalCommand;
+    let proof = (|| {
+        let index = usize::try_from(
+            record
+                .binding
+                .history_position
+                .checked_sub(history.floor_offset)?,
+        )
+        .ok()?;
+        let (approved, later) = history.batches.get(index..)?.split_first()?;
+        let JournalCommand::DoBatch(operations) = &approved.command else {
+            // History-step approvals bind before/after snapshots, not just an operation list.
+            return None;
+        };
+        let bytes = serde_json::to_vec(&serde_json::json!({"Batch": operations})).ok()?;
+        if kinewright_media::sha256_bytes(&bytes) != record.binding.batch_sha256
+            || approved.order != index as u64
+            || approved.redo_entries != 0
+        {
+            return None;
+        }
+        let mut undo = approved.undo_entries;
+        let mut redo = 0_usize;
+        let mut location = BatchLocation::Undo(undo.checked_sub(1)?);
+        let mut recreated = false;
+        for batch in later {
+            let (next_undo, next_redo) = match &batch.command {
+                JournalCommand::Undo if undo > 0 => {
+                    if location == BatchLocation::Undo(undo - 1) {
+                        location = BatchLocation::Redo(redo);
+                    }
+                    (undo - 1, redo.checked_add(1)?)
+                }
+                JournalCommand::Redo if redo > 0 => {
+                    if location == BatchLocation::Redo(redo - 1) {
+                        location = BatchLocation::Undo(undo);
+                    }
+                    (undo.checked_add(1)?, redo - 1)
+                }
+                JournalCommand::Undo | JournalCommand::Redo => (undo, redo),
+                _ => {
+                    recreated |= record.targets.iter().any(|target| target.created_by(batch));
+                    if matches!(location, BatchLocation::Redo(_)) {
+                        location = BatchLocation::Discarded;
+                    }
+                    let pushed = undo.checked_add(1)?;
+                    if batch.undo_entries != pushed
+                        && !(matches!(batch.command, JournalCommand::DoBatchCoalesced { .. })
+                            && batch.undo_entries == undo)
+                    {
+                        return None;
+                    }
+                    (batch.undo_entries, 0)
+                }
+            };
+            if (batch.undo_entries, batch.redo_entries) != (next_undo, next_redo) {
+                return None;
+            }
+            (undo, redo) = (next_undo, next_redo);
+        }
+        if (undo, redo) != (history.cursor.undo.len(), history.cursor.redo.len()) {
+            return None;
+        }
+        Some(match location {
+            BatchLocation::Undo(_) => RemovalProof::Kept,
+            BatchLocation::Redo(_) | BatchLocation::Discarded if !recreated => {
+                RemovalProof::Missing
+            }
+            BatchLocation::Redo(_) | BatchLocation::Discarded => RemovalProof::Uncertain,
+        })
+    })();
+    proof.unwrap_or(RemovalProof::Uncertain)
+}
+
+impl KeptTaskAudit {
+    fn removal_proof(
+        &mut self,
+        record: &ApprovalRecord,
+        revision: TimelineRevision,
+        bundle: &crate::bundle::ProjectBundle,
+    ) -> RemovalProof {
+        if !self.coverage.covers(&record.binding, revision) {
+            return if self.coverage.incomplete {
+                RemovalProof::Uncertain
+            } else {
+                // The authenticated complete coverage has no kept cut for this application.
+                RemovalProof::Missing
+            };
+        }
+        let Some(document) = &self.document else {
+            return RemovalProof::Uncertain;
+        };
+        if !record
+            .targets
+            .iter()
+            .any(|target| target.present_in(document))
+        {
+            return RemovalProof::Kept;
+        }
+        let Some(branch) = self.branch.as_ref() else {
+            return RemovalProof::Uncertain;
+        };
+        let history: &kinewright_core::HistorySnapshot =
+            if let Some(history) = bundle.cached_history(branch) {
+                history
+            } else {
+                // Paired task publications evict this cache. Decode the authenticated
+                // kept reference once per task, only when id presence needs proof.
+                if self.history.is_none() {
+                    self.history = bundle.branch_history(branch).ok();
+                }
+                let Some(history) = self.history.as_deref() else {
+                    return RemovalProof::Uncertain;
+                };
+                history
+            };
+        if history.document.as_ref() != &**document {
+            return RemovalProof::Uncertain;
+        }
+        retained_batch_proof(history, record)
+    }
 }
 impl Ja1EditingSession {
     #[allow(
@@ -266,6 +430,7 @@ impl Ja1EditingSession {
         for task in &state.tasks {
             let mut coverage = KeptEditCoverage::default();
             let mut document = None;
+            let mut branch = None;
             let inspected = (|| -> Result<(), BundleError> {
                 for reference in task
                     .progress
@@ -295,6 +460,7 @@ impl Ja1EditingSession {
                                         &bundle.checkpoint(&history.source.branch)?.document_ref,
                                     )?);
                             }
+                            branch = Some(history.source.branch);
                         } else {
                             coverage.incomplete = true;
                         }
@@ -307,7 +473,15 @@ impl Ja1EditingSession {
                 coverage.incomplete = true;
                 integrity = true;
             }
-            kept.insert(task.id.clone(), KeptTaskAudit { coverage, document });
+            kept.insert(
+                task.id.clone(),
+                KeptTaskAudit {
+                    coverage,
+                    document,
+                    branch,
+                    history: None,
+                },
+            );
         }
         let mut applications = BTreeMap::<_, Option<TimelineRevision>>::new();
         for reference in &state.edit_applications {
@@ -382,42 +556,44 @@ impl Ja1EditingSession {
                 integrity = true;
                 continue;
             }
-            let durable = application.is_some_and(|revision| {
-                let kept = &kept[&record.binding.task];
-                kept.coverage.covers(&record.binding, revision)
-                    && kept.document.as_ref().is_some_and(|document| {
-                        !record
-                            .targets
-                            .iter()
-                            .any(|target| target.present_in(document))
-                    })
-            });
-            let in_live = application.is_some_and(|revision| {
-                live.iter().any(|cut| {
-                    cut.task == record.binding.task
-                        && cut.cut.epoch == record.binding.history_epoch
-                        && cut.cut.revision >= revision
-                        && !record
+            let kept = kept
+                .get_mut(&record.binding.task)
+                .ok_or_else(|| BundleError::Corrupt("edit audit task binding".into()))?;
+            let proof = application
+                .map(|revision| {
+                    let mut proof = kept.removal_proof(&record, revision, self.active_bundle()?);
+                    for cut in live.iter().filter(|cut| {
+                        cut.task == record.binding.task
+                            && cut.cut.epoch == record.binding.history_epoch
+                            && cut.cut.revision >= revision
+                            && record
+                                .binding
+                                .history_position
+                                .checked_add(1)
+                                .is_some_and(|position| cut.cut.position >= position)
+                    }) {
+                        if !record
                             .targets
                             .iter()
                             .any(|target| target.present_in(&cut.document))
-                        && record
-                            .binding
-                            .history_position
-                            .checked_add(1)
-                            .is_some_and(|position| cut.cut.position >= position)
+                        {
+                            proof = RemovalProof::Kept;
+                            break;
+                        }
+                        if !kept.coverage.cuts.iter().any(|saved| {
+                            saved.epoch == cut.cut.epoch
+                                && saved.position >= cut.cut.position
+                                && saved.revision >= cut.cut.revision
+                        }) {
+                            // A newer live snapshot can reuse ids; without its history do not claim Undo.
+                            proof = RemovalProof::Uncertain;
+                        }
+                    }
+                    Ok::<_, BundleError>(proof)
                 })
-            });
-            let unkept = application.is_some() && !durable && !in_live;
-            let kept = &kept[&record.binding.task];
-            let uncertain = unkept
-                && kept.coverage.incomplete
-                && !kept.document.as_ref().is_some_and(|document| {
-                    record
-                        .targets
-                        .iter()
-                        .any(|target| target.present_in(document))
-                });
+                .transpose()?;
+            let unkept = application.is_some() && proof != Some(RemovalProof::Kept);
+            let uncertain = proof == Some(RemovalProof::Uncertain);
             let issue = if unkept {
                 let targets = record
                     .targets
@@ -462,7 +638,7 @@ impl Ja1EditingSession {
                 task: record.binding.task,
                 removed_clips: record.removed_clips,
                 removed_tracks: record.removed_tracks,
-                applied: application.is_some() && (durable || in_live),
+                applied: proof == Some(RemovalProof::Kept),
                 issue,
                 digest: record.digest,
             });
