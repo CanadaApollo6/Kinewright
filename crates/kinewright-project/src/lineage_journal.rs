@@ -99,6 +99,39 @@ struct LineageJournal {
     split_ancestry: Vec<(OccurrenceId, OccurrenceId, Clip)>,
 }
 
+/// Recovery keeps the independently stored current occurrences without replaying
+/// the unavailable Undo maps. The ordinary reader still rebuilds every map.
+pub(crate) fn restore_current(
+    bytes: &[u8],
+    reserve: impl FnOnce(u64) -> Result<crate::storage_budget::StorageReservation, BundleError>,
+) -> Result<crate::storage_budget::StorageReservation<LineageRecord>, BundleError> {
+    let record: LineageJournal =
+        serde_json::from_slice(bytes).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+    if record
+        .undo
+        .len()
+        .checked_add(record.redo.len())
+        .is_none_or(|count| count > kinewright_core::HISTORY_COMMANDS)
+    {
+        return Err(BundleError::Capacity("lineage cursor capacity"));
+    }
+    let ancestry = crate::history_size::payload(&record.split_ancestry)?;
+    let live = map_live_bound(record.current.len())?
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(2048))
+        .and_then(|bytes| bytes.checked_add(ancestry))
+        .ok_or(BundleError::Capacity("current lineage heap"))?;
+    let reservation = reserve(live)?;
+    Ok(reservation.hold(LineageRecord {
+        branch_origin: record.branch_origin,
+        baseline: record.current.clone(),
+        current: record.current,
+        undo: vec![],
+        redo: vec![],
+        split_ancestry: record.split_ancestry,
+    }))
+}
+
 fn steps(
     baseline: &BTreeMap<ClipId, OccurrenceId>,
     entries: &[BTreeMap<ClipId, OccurrenceId>],

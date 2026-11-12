@@ -67,6 +67,7 @@ fn inspect_project_document(
     let digest = digest_bytes(admission.raw_bytes());
     Ok((document, admission.read_version(), digest, admission))
 }
+const CHECKPOINT_RECOVERY_NOTICE: &str = "Undo history could not be restored. The verified checkpoint is read-only. Save a recovered copy to continue editing. The original project and failed history will be kept.";
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
 const STUDIO_SOURCE_COLOUR_REFUSAL: &str = "Studio keeps source colour with the project's media, so this colour fix was not applied. Use Assume SDR Rec.709 metadata in the Media Bin.";
 
@@ -901,6 +902,10 @@ impl KinewrightApp {
         reason = "one activation boundary stages the local owner and authenticated host together"
     )]
     pub(crate) fn enable_ja1(&mut self) {
+        if self.focused().checkpoint_recovery.is_some() {
+            self.status = CHECKPOINT_RECOVERY_NOTICE.into();
+            return;
+        }
         if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             return;
         }
@@ -965,22 +970,7 @@ impl KinewrightApp {
                 self.playing = false;
                 let session = self.focused_mut();
                 // Retire local execution before granting the host named write authority.
-                for thread in &mut session.threads {
-                    if let Some(local) = &mut thread.session {
-                        local.interrupt();
-                    }
-                    thread.session = None;
-                    thread.events = None;
-                    thread.running = false;
-                    if let Some(confirmations) = &thread.confirmations {
-                        confirmations.reject_all("Studio host attachment");
-                    }
-                    thread.pending_confirmations.clear();
-                    thread.confirmations = None;
-                    if let Some(server) = thread.mcp_server.take() {
-                        server.shutdown();
-                    }
-                }
+                session.retire_legacy_agent_threads("Studio host attachment");
                 if let Some(grant) = grant.filter(|grant| !grant.is_quiescent()) {
                     self.focused_mut().ja1_activation = Some((grant, attachment));
                     self.status = "Studio is waiting for legacy media work to stop.".into();
@@ -997,6 +987,25 @@ impl KinewrightApp {
                     session.sidecar.authority = session.recovery.writer();
                     session.sidecar.sidecar_suspended |=
                         session.project_path.is_some() && session.sidecar.authority.is_none();
+                }
+                if !was_legacy && self.focused().ja1.is_none() {
+                    let prepared =
+                        self.focused().project_path.as_deref().map(
+                            kinewright_project::bundle_recovery::VerifiedCheckpointRecovery::open,
+                        );
+                    if let Some(Ok(Some(recovery))) = prepared {
+                        let current = self.focused().core.export_history();
+                        if current
+                            .as_ref()
+                            .is_ok_and(|history| &*history.document == recovery.document())
+                        {
+                            let session = self.focused_mut();
+                            session.retire_legacy_agent_threads("Checkpoint recovery");
+                            session.checkpoint_recovery = Some(recovery);
+                            self.status = CHECKPOINT_RECOVERY_NOTICE.into();
+                            return;
+                        }
+                    }
                 }
                 self.status = error;
             }
@@ -1213,6 +1222,19 @@ impl KinewrightApp {
         }
     }
     fn show_ja1(&mut self, ctx: &egui::Context) {
+        if self.focused().checkpoint_recovery.is_some() {
+            let mut recover = false;
+            egui::Window::new("Undo history unavailable")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(CHECKPOINT_RECOVERY_NOTICE);
+                    recover = ui.button("Save a recovered copy…").clicked();
+                });
+            if recover {
+                self.save_project(true);
+            }
+            return;
+        }
         if self.focused().ja1_job.is_some() {
             egui::Modal::new(egui::Id::new("ja1-busy")).show(ctx, |ui| { ui.label("Editing is read-only while your current work is saved and the selection or rescue is checked."); ui.spinner(); });
             return;
@@ -1631,7 +1653,53 @@ impl KinewrightApp {
         Ok(report)
     }
 
+    fn save_checkpoint_recovery(&mut self, path: &Path) -> bool {
+        if self.session_index_for_path(path).is_some() {
+            self.status = "Save the recovered checkpoint to a new project path.".into();
+            return false;
+        }
+        let result = (|| {
+            let session = self.focused();
+            let recovery = session
+                .checkpoint_recovery
+                .as_ref()
+                .ok_or_else(|| "No verified checkpoint recovery is available.".to_owned())?;
+            let current = session.core.export_history().map_err(|e| e.to_string())?;
+            if &*current.document != recovery.document() {
+                return Err("The inspection has local edits. Keep it open; checkpoint recovery cannot discard them.".into());
+            }
+            recovery.save_copy(path).map_err(|e| e.to_string())
+        })();
+        match result {
+            Ok(report) => {
+                self.open_project(&report.path);
+                self.status = format!(
+                    "Recovered the verified checkpoint at {}. Its Undo history is empty; the original project and failed history were kept.",
+                    report.path.display()
+                );
+                true
+            }
+            Err(error) => {
+                self.status = error;
+                false
+            }
+        }
+    }
+
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
+        if self.focused().checkpoint_recovery.is_some() {
+            let Some(mut path) = rfd::FileDialog::new()
+                .add_filter("Kinewright project", &["kinewright"])
+                .set_file_name("recovered.kinewright")
+                .save_file()
+            else {
+                return false;
+            };
+            if path.extension().is_none() {
+                path.set_extension("kinewright");
+            }
+            return self.save_checkpoint_recovery(&path);
+        }
         if self.focused().studio.selection.is_some() {
             self.status =
                 "Choose Current edit or Edit a copy before saving a working branch.".into();
@@ -1993,6 +2061,7 @@ impl KinewrightApp {
             return;
         }
         let journal_path = request.journal_path;
+        let damage = request.damage;
         let retirement_owner = request.project_path.as_deref().and_then(|path| {
             self.projects.iter().position(|session| {
                 session
@@ -2042,7 +2111,18 @@ impl KinewrightApp {
         // `project_unclassified` incident whose written body tells the
         // person the last saved version is still intact.
         match kinewright_project::restore_status(result) {
-            Ok(status) => self.status = status,
+            Ok(status) => {
+                if let Some(damage) = damage {
+                    let notice = crate::recovery::partial_restore_notice(&damage, &journal_path);
+                    self.note_observation(recovery_damage_observation(
+                        &notice,
+                        self.focused().revision,
+                    ));
+                    self.status = notice;
+                } else {
+                    self.status = status;
+                }
+            }
             Err(observation) => self.note_observation(*observation),
         }
     }
@@ -12266,6 +12346,7 @@ mod in2b_tests {
             document: recovered,
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         assert_eq!(
             app.projects.len(),
@@ -14187,6 +14268,7 @@ mod in2b_tests {
             document: recovered,
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         assert!(
             !app.focused().sidecar_suspended,
@@ -14263,6 +14345,7 @@ mod in2b_tests {
             document: recovered,
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         assert!(
             app.focused().sidecar_suspended,
@@ -14609,6 +14692,7 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         assert_eq!(app.projects.len(), 2, "the duplicate lands");
         app.focus_project(0);
@@ -14953,6 +15037,7 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         app.refuse_rename = None;
         assert!(
@@ -15517,6 +15602,7 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         assert_eq!(
             app.focused().saved_digest,
@@ -15627,6 +15713,7 @@ mod in2b_tests {
             document: Document::default(),
             project_path: Some(project_path.clone()),
             journal_path: journal_path.clone(),
+            damage: None,
         });
         let Err(ProjectSaveError::SaveAsRequired { notice }) = app.write_project(&project_path)
         else {
@@ -17484,3 +17571,7 @@ mod c2_fix3_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "app/c2_fix4_tests.rs"]
 mod c2_fix4_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "app/checkpoint_recovery_tests.rs"]
+mod checkpoint_recovery_tests;

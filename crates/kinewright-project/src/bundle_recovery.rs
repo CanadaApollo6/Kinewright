@@ -17,8 +17,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod checkpoint;
 mod publication;
 mod restore;
+pub use checkpoint::{UndoHistoryUnavailable, VerifiedCheckpointRecovery};
 pub(crate) use publication::VerifiedIdentityMemo;
 pub use restore::{PreparedCheckpointRestore, RecoverySelection, verify_projection_payloads};
 
@@ -463,9 +465,9 @@ fn compare_declared_edges(
     clippy::too_many_arguments,
     reason = "bounded graph traversal retains independent cycle and reachability sets"
 )]
-fn walk(
+fn walk<K: Borrow<str> + Ord, V: Borrow<ObjectRef>>(
     reference: &ObjectRef,
-    objects: &BTreeMap<String, ObjectRef>,
+    objects: &BTreeMap<K, V>,
     manifest: &StoreManifest,
     visited: &mut BTreeSet<(String, bool)>,
     active: &mut BTreeSet<String>,
@@ -477,7 +479,7 @@ fn walk(
     if depth > limits.graph_depth {
         return Err(BundleError::Capacity("graph depth"));
     }
-    if objects.get(&reference.sha256) != Some(reference) {
+    if objects.get(reference.sha256.as_str()).map(Borrow::borrow) != Some(reference) {
         return Err(BundleError::Corrupt(
             "missing/conflicting object declaration".into(),
         ));
