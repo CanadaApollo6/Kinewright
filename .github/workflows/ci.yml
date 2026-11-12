@@ -57,8 +57,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: '1.99.1'
           components: rustfmt
       - uses: actions/setup-python@v5
         with:
@@ -80,8 +81,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: '1.99.1'
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
