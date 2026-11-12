@@ -93,7 +93,10 @@ opt-level = 3
 opt-level = 3
 
 # The native history lifecycle exercises real checkpoint codecs on every edit.
-# Optimize this test-only path while retaining debug assertions and overflow checks.
+# Optimize the small JSON codec crates in test builds; debug assertions and
+# overflow checks stay on. The Linux slow CI archive also optimizes core and
+# project through .cargo/ci-test-linux-slow.toml; pass that file with --config
+# to run the lifecycle test at CI speed locally.
 [profile.test.package.serde_json]
 opt-level = 3
 
@@ -101,10 +104,4 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.zmij]
-opt-level = 3
-
-[profile.test.package.kinewright-core]
-opt-level = 3
-
-[profile.test.package.kinewright-project]
 opt-level = 3

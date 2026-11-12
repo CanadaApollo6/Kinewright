@@ -18,6 +18,12 @@ import slow_tests as st
 
 ROOT = Path(__file__).resolve().parent.parent
 CARGO_CONFIG = ["--config", str(ROOT / ".cargo" / "ci-test.toml")]
+LINUX_SLOW_CONFIG = ["--config", str(ROOT / ".cargo" / "ci-test-linux-slow.toml")]
+
+
+def archive_config(tier):
+    """Archive creation and listing must share one profile, or listing rebuilds."""
+    return CARGO_CONFIG + (LINUX_SLOW_CONFIG if tier == "slow" and st.host_os() == "linux" else [])
 
 
 def run(args, output=None):
@@ -50,12 +56,13 @@ def build(tier, count):
     archive = directory / "tests.tar.zst"
     features = ["--features", st.feature_list(st.read_manifest())] if tier == "slow" else []
     fetch_locked(features)
-    run(["cargo", "nextest", "archive", *CARGO_CONFIG, "--timings", "--frozen", "--workspace", *features,
+    config = archive_config(tier)
+    run(["cargo", "nextest", "archive", *config, "--timings", "--frozen", "--workspace", *features,
          "--archive-file", str(archive)])
     with archive.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     (directory / "tests.sha256").write_text(digest + "\n")
-    listing = subprocess.check_output(["cargo", "nextest", "list", *CARGO_CONFIG, "--frozen", "--workspace",
+    listing = subprocess.check_output(["cargo", "nextest", "list", *config, "--frozen", "--workspace",
                                        *features, "--message-format", "json"], cwd=ROOT, text=True)
     compiled = json.loads(listing)
     ci_shards.save(directory / "compiled-list.json", compiled)
