@@ -28,7 +28,9 @@ run, or `[slow-tier]` in the head commit message); the slow tests are listed in
 
 The project needs Rust **>= 1.92** (edition 2024, `rust-version = "1.92"`). The VM's
 default rustup toolchain can be older (1.83); the environment update script installs
-and defaults to `stable` (currently 1.97), which satisfies this. There is no
+and defaults to `stable`, which satisfies this. CI pins Rust 1.99.1 in
+`.github/workflows/ci.yml` and `ci-tests.yml` (1.100 changed Cargo's build layout and
+added lints; move the pin on purpose, with a local `rustup update`). There is no
 `rust-toolchain.toml`, so `stable` is used.
 
 ### Commands (run from repo root)
