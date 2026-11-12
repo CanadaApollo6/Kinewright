@@ -215,7 +215,8 @@ fn s4b_c3_all_budgets_survive_restart_and_downtime() {
         let reference = host
             .owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(record)),
             })

@@ -44,6 +44,7 @@ pub struct MetadataIssuer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunViewPage {
+    pub missing_approved_edits: Vec<kinewright_project::edit_audit::MissingApprovedEdit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edit_approvals: Vec<super::EditApproval>,
     pub projection: RunProjection,
@@ -159,13 +160,15 @@ pub(super) struct HostRun {
 pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
-    pub pending_edit_applications: Vec<(RunId, Vec<u8>)>,
+    pub pending_edit_applications: Vec<super::task_mcp::consent::PendingEditApplication>,
     pub prepared_run_inputs: Option<super::HostOwnedInputClosure>,
     // A fixture can present an old/corrupt grant at the read boundary without rewriting a fixed grant.
     #[cfg(all(test, target_os = "linux"))]
     pub consent_fixture: Option<super::task_mcp::consent::ConsentFixture>,
     #[cfg(test)]
     pub consent_apply_hook: Option<ConsentApplyHook>,
+    #[cfg(test)]
+    pub consent_prepared_hook: Option<Box<dyn FnOnce() -> Result<(), HostError> + Send>>,
     pub completion_failure: Option<(CommandId, String)>,
     #[cfg(test)]
     pub completion_cut: Option<crate::orchestration::orchestration_records::CompletionStep>,
@@ -236,8 +239,19 @@ pub(super) const TASK_RESULT_EXPLANATION: &[u8] = b"task result";
     clippy::needless_pass_by_value,
     reason = "Result::map_err supplies the owned refusal"
 )]
-fn scheduler_error(reason: Refusal) -> HostError {
-    refused(&format!("{reason:?}"))
+pub(super) fn scheduler_error(reason: Refusal) -> HostError {
+    use kinewright_project::orchestration_records::{
+        TASK_DECISION_CAPACITY_WORDS, TASK_FEEDBACK_CAPACITY_WORDS,
+    };
+    match reason {
+        Refusal::TaskFeedbackCapacity => {
+            HostRefusal::new("task_feedback_capacity", TASK_FEEDBACK_CAPACITY_WORDS).into()
+        }
+        Refusal::TaskDecisionCapacity => {
+            HostRefusal::new("task_decision_capacity", TASK_DECISION_CAPACITY_WORDS).into()
+        }
+        _ => refused(&format!("{reason:?}")),
+    }
 }
 pub(super) fn is_hook(command: &HostCommand) -> bool {
     matches!(
@@ -400,6 +414,29 @@ impl HostCommandOwner {
         index: usize,
         issuer: Option<&IssuerId>,
     ) -> Result<MetadataIssuer, HostError> {
+        self.issue_metadata_mode(index, issuer, false)
+    }
+    pub(super) fn prepare_edit_metadata(
+        &mut self,
+        index: usize,
+    ) -> Result<MetadataIssuer, HostError> {
+        self.issue_metadata_mode(index, None, true)
+    }
+    fn issue_metadata_mode(
+        &mut self,
+        index: usize,
+        issuer: Option<&IssuerId>,
+        preparing_edit: bool,
+    ) -> Result<MetadataIssuer, HostError> {
+        let uncertain_edit = matches!(&self.hooks.pending,
+            Some(PendingPublication::Owner(update)) if self.has_pending_edit_publication(update));
+        let same_run = self.attachments[index]
+            .producer_scope
+            .as_ref()
+            .is_some_and(|scope| self.has_pending_edit_in_run(&scope.run));
+        if uncertain_edit || same_run {
+            self.retry_pending_edit_publications()?;
+        }
         self.prove_completion_for_owner(index)?;
         if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
@@ -419,13 +456,17 @@ impl HostCommandOwner {
         // closed ordinary admission leaves them as an unpublished description,
         // which the first validated publication commits under its own admission.
         let owner = self.owner_mut()?;
-        let published = owner.issue_metadata_authority(&subject, issuer, &grant);
-        let (issuer, grant_ref) = match published {
-            Ok(published) => published,
-            Err(BundleError::RunLimit) => {
-                owner.prepare_metadata_authority(&subject, issuer, &grant)?
+        let (issuer, grant_ref) = if preparing_edit {
+            owner.prepare_ordinary_metadata_authority(&subject, issuer, grant)?
+        } else {
+            let published = owner.issue_metadata_authority(&subject, issuer, &grant);
+            match published {
+                Ok(published) => published,
+                Err(BundleError::RunLimit) => {
+                    owner.prepare_metadata_authority(&subject, issuer, &grant)?
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
         };
         let sequence = self.owner()?.metadata_issuer_sequence(&issuer)?;
         let envelope = self
@@ -918,6 +959,7 @@ impl HostCommandOwner {
                 None => receipt.envelope.identity("run").map_err(scheduler_error)?,
             };
             if let Some(current) = self.owner()?.orchestration_projection(&run)? {
+                self.acknowledge_edit_applications(&current);
                 self.sync_runtime_grants(&current);
                 if let Some(runtime) = self.hooks.runs.get_mut(&run) {
                     runtime.continuable = current.outcome == RunOutcome::Pending
@@ -1071,7 +1113,8 @@ impl HostCommandOwner {
                     .admit_host_grant(TASK_RESULT_EXPLANATION)?;
             }
             let record = self.owner_mut()?.admit_scheduler_record(
-                &crate::orchestration::orchestration_records::OrchestrationRecord {
+                crate::orchestration::orchestration_records::OrchestrationRecord {
+                    retention: kinewright_project::orchestration_retention::Retention::Complete,
                     version: 1,
                     payload:
                         crate::orchestration::orchestration_records::OrchestrationPayload::Result(
@@ -1303,8 +1346,10 @@ impl HostCommandOwner {
                 "This run cannot continue. Check Run details for the host's reason.".into()
             }
         });
+        let edits = self.edit_approval_summary(&projection);
         Ok(RunViewPage {
-            edit_approvals: self.edit_approval_details(&projection),
+            edit_approvals: edits.approvals,
+            missing_approved_edits: edits.missing,
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,
@@ -1331,6 +1376,38 @@ impl HostCommandOwner {
         producer: &HostAuth,
         transition: &ValidatedRunUpdate,
         reservation: Option<&ExecutionIdentity>,
+    ) -> Result<
+        (
+            OrchestrationReceipt,
+            Option<crate::orchestration::AdmittedAttempt>,
+        ),
+        HostError,
+    > {
+        self.publish_orchestration_using(producer, transition, reservation, |owner| {
+            orchestration_commit::commit_orchestration(owner, transition.clone(), None)
+        })
+    }
+    pub(super) fn publish_prepared_edit(
+        &mut self,
+        producer: &HostAuth,
+        transition: &ValidatedRunUpdate,
+        prepared: &mut kinewright_project::orchestration_commit::PreparedOrchestrationPublication,
+    ) -> Result<(), HostError> {
+        self.publish_orchestration_using(producer, transition, None, |owner| {
+            kinewright_project::orchestration_commit::commit_prepared_orchestration(
+                owner, transition, prepared,
+            )
+        })?;
+        Ok(())
+    }
+    fn publish_orchestration_using(
+        &mut self,
+        producer: &HostAuth,
+        transition: &ValidatedRunUpdate,
+        reservation: Option<&ExecutionIdentity>,
+        commit: impl FnOnce(
+            &mut kinewright_project::editing_session::Ja1EditingSession,
+        ) -> Result<OrchestrationReceipt, BundleError>,
     ) -> Result<
         (
             OrchestrationReceipt,
@@ -1365,8 +1442,7 @@ impl HostCommandOwner {
             self.owner_mut()?.reconcile_metadata()?;
         }
         self.hooks.pending = Some(PendingPublication::Owner(Box::new(transition.clone())));
-        let result =
-            orchestration_commit::commit_orchestration(self.owner_mut()?, transition.clone(), None);
+        let result = commit(self.owner_mut()?);
         let receipt = match result {
             Ok(receipt) => {
                 self.hooks.pending = None;
@@ -1386,6 +1462,7 @@ impl HostCommandOwner {
             .owner()?
             .orchestration_projection(&transition.projection().run)?
             .ok_or_else(|| refused("committed run disappeared"))?;
+        self.acknowledge_edit_applications(&current);
         self.sync_runtime_grants(&current);
         if let Some(run) = self.hooks.runs.get_mut(&current.run) {
             run.continuable =
@@ -1686,6 +1763,8 @@ impl HostCommandOwner {
                         branch: branch.clone(),
                     },
                 )?)?;
+                // A first fork and history cut are part of whole-launch
+                // decision admission, before this attempt's evidence was sealed.
                 state
                     .tasks
                     .iter_mut()

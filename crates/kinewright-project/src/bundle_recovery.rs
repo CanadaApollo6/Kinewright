@@ -411,6 +411,37 @@ pub(crate) fn read_record<T: BundleRecord>(
     record.validate(limits)?;
     Ok(record)
 }
+/// Shared by cold open and publication fit. Never follows a chain of bases.
+fn validate_run_record_ownership(
+    namespace: &ProjectNamespace,
+    value: &crate::orchestration_commit::RegisteredRunIndex,
+    contains: impl FnOnce(&ObjectRef) -> bool,
+    usage: &Arc<Mutex<StorageUsage>>,
+    limits: &StorageLimits,
+) -> Result<(), BundleError> {
+    if let crate::orchestration_commit::RegisteredRunIndex::Record(record) = value {
+        record.validate_stored_retention_kind()?;
+    }
+    if let crate::orchestration_commit::RegisteredRunIndex::Record(record) = value
+        && let crate::orchestration_retention::Retention::Introduced { base, .. } =
+            &record.retention
+    {
+        let before = if let Some(base) = base {
+            if !contains(base) {
+                return Err(BundleError::Corrupt("unretained run ownership base".into()));
+            }
+            Some(read_record::<
+                crate::orchestration_records::OrchestrationRecord,
+            >(
+                namespace, base, usage, &mut BTreeSet::new(), limits
+            )?)
+        } else {
+            None
+        };
+        record.validate_introductions(base.as_ref(), before.as_deref())?;
+    }
+    Ok(())
+}
 fn compare_edges<T: BundleRecord>(
     reference: &ObjectRef,
     record: &T,
@@ -865,7 +896,14 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                 admit!(crate::studio_records::FeedbackBatch);
             }
             RecordKind::RunIndex => {
-                admit!(crate::orchestration_commit::RegisteredRunIndex);
+                let value = admit!(crate::orchestration_commit::RegisteredRunIndex);
+                validate_run_record_ownership(
+                    namespace,
+                    &value,
+                    |base| objects.get(&base.sha256) == Some(base),
+                    usage,
+                    limits,
+                )?;
             }
             RecordKind::RunSnapshot => {
                 admit!(crate::studio_records::RunSnapshotRecord);
@@ -1479,6 +1517,10 @@ pub(super) fn validate_studio_records(
                     crate::orchestration_records::OrchestrationRecord,
                     &cut.segment
                 );
+                snapshot.validate_retained_base(
+                    previous
+                        .map(|cut: &crate::orchestration_commit::PublishedRunCut| &cut.snapshot),
+                )?;
                 let update = cut.validate_cut(id, &snapshot, &segment, previous)?;
                 if let Some(previous) = previous_snapshot.as_ref() {
                     let crate::orchestration_records::OrchestrationPayload::Snapshot(before) =
@@ -1556,6 +1598,7 @@ pub(super) fn validate_studio_records(
                     );
                     let current =
                         load!(crate::orchestration_records::OrchestrationRecord, reference);
+                    current.validate_retained_base(Some(&last.snapshot))?;
                     let (
                         crate::orchestration_records::OrchestrationPayload::Snapshot(base),
                         crate::orchestration_records::OrchestrationPayload::Snapshot(current),

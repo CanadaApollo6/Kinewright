@@ -481,6 +481,51 @@ impl StorageReservation {
         self.active = false;
         Ok(())
     }
+
+    /// Convert a held control write into its physical and metadata charge in
+    /// one ledger operation. Readers cannot consume its metadata headroom
+    /// between releasing the reservation and installing the control file.
+    pub(crate) fn seal_control(mut self, measured: u64, previous: u64) -> Result<(), BundleError> {
+        if self.copy
+            || self.history != 0
+            || self.decoder != 0
+            || self.decoded != self.bytes
+            || measured > self.bytes
+        {
+            return Err(BundleError::Capacity("invalid control reservation"));
+        }
+        let mut state = self
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
+        let overlap = state
+            .physical_bytes
+            .checked_add(measured)
+            .ok_or(BundleError::Capacity("control physical overflow"))?;
+        let physical = overlap
+            .checked_sub(previous)
+            .ok_or(BundleError::Capacity("control retirement underflow"))?;
+        let metadata = state
+            .metadata_bytes
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(measured))
+            .ok_or(BundleError::Capacity("control metadata overflow"))?;
+        let reserved = state
+            .reserved_bytes
+            .checked_sub(self.bytes)
+            .ok_or(BundleError::Capacity("control reservation underflow"))?;
+        let decoded = state
+            .decoded_bytes
+            .checked_sub(self.decoded)
+            .ok_or(BundleError::Capacity("control decode underflow"))?;
+        state.physical_bytes = physical;
+        state.metadata_bytes = metadata;
+        state.reserved_bytes = reserved;
+        state.decoded_bytes = decoded;
+        state.peak_physical_bytes = state.peak_physical_bytes.max(overlap);
+        self.active = false;
+        Ok(())
+    }
 }
 impl<T> StorageReservation<T> {
     pub(crate) fn take(mut self) -> T {
@@ -640,5 +685,55 @@ mod tests {
         drop(disk);
         assert_eq!(usage.lock().unwrap().decoded_bytes, 0);
         assert!(!usage.lock().unwrap().damaged_accounting);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn c4_prepared_controls_consume_physical_and_metadata_holds_together() {
+        let limits = StorageLimits {
+            metadata_bytes: 270,
+            ..StorageLimits::default()
+        };
+        let usage = Arc::new(Mutex::new(StorageUsage {
+            physical_bytes: 70,
+            metadata_bytes: 70,
+            ..StorageUsage::default()
+        }));
+        let first =
+            StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).unwrap();
+        let second =
+            StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).unwrap();
+        first.seal_control(100, 20).unwrap();
+        {
+            let state = usage.lock().unwrap();
+            assert_eq!((state.physical_bytes, state.metadata_bytes), (150, 150));
+            assert_eq!((state.reserved_bytes, state.decoded_bytes), (100, 100));
+        }
+        second.seal_control(100, 100).unwrap();
+        let state = usage.lock().unwrap();
+        assert_eq!((state.physical_bytes, state.metadata_bytes), (150, 150));
+        assert_eq!((state.reserved_bytes, state.decoded_bytes), (0, 0));
+        assert_eq!(state.peak_physical_bytes, 250);
+        assert!(!state.unsettled && !state.damaged_accounting);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn c4_abandoned_control_hold_leaves_the_original_accounting_unchanged() {
+        let limits = StorageLimits {
+            metadata_bytes: 200,
+            ..StorageLimits::default()
+        };
+        let usage = Arc::new(Mutex::new(StorageUsage {
+            physical_bytes: 70,
+            metadata_bytes: 70,
+            ..StorageUsage::default()
+        }));
+        let first =
+            StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).unwrap();
+        assert!(StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).is_err());
+        drop(first);
+        let state = usage.lock().unwrap();
+        assert_eq!((state.physical_bytes, state.metadata_bytes), (70, 70));
+        assert_eq!((state.reserved_bytes, state.decoded_bytes), (0, 0));
+        assert!(!state.unsettled && !state.damaged_accounting);
     }
 }

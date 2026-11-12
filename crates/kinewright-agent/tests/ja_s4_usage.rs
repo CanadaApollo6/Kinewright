@@ -314,6 +314,7 @@ fn s4_usage_two_attempts_and_restart() {
     assert_eq!(task.providers, vec![provider(4), provider(5)]);
     reopened.validate().unwrap();
     let payload = OrchestrationRecord {
+        retention: kinewright_project::orchestration_retention::Retention::Complete,
         version: 1,
         payload: OrchestrationPayload::Accounting(Box::new(reopened)),
     };
@@ -343,6 +344,7 @@ fn s4_raw_usage_preserves_unavailable_and_subset_categories() {
 fn s4_registered_accounting_bytes_and_replacement_contract() {
     let current = accounting(None);
     let wrapped = OrchestrationRecord {
+        retention: kinewright_project::orchestration_retention::Retention::Complete,
         version: 1,
         payload: OrchestrationPayload::Accounting(Box::new(current.clone())),
     };

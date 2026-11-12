@@ -288,7 +288,16 @@ fn pending_floor_blocks_undo_and_commits_current_suffix() {
         _ => panic!("snapshot response"),
     };
     let prior = revision();
+    let history_id = core.history_change_id().unwrap();
+    let absolute = history_id.position().unwrap();
     barrier.commit(&TestProof).unwrap();
+    let after_floor = core.history_change_id().unwrap();
+    assert_eq!(
+        after_floor.position(),
+        Some(absolute),
+        "C4B_FLOOR_RETAINS_ABSOLUTE_AUDIT_POSITION"
+    );
+    assert!(after_floor.revision() > history_id.revision());
     assert_eq!(
         revision().0,
         prior.0 + 1,

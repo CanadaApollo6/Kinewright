@@ -560,6 +560,7 @@ fn task_assignment_result_cuts() -> [RunProjection; 3] {
     };
     let bytes = encoded(
         &OrchestrationRecord {
+            retention: kinewright_project::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::Result(Box::new(task_result.clone())),
         },

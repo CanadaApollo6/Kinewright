@@ -25,6 +25,39 @@ pub const OWNED: u64 = 8 << 20;
 pub const GRAPH_LEVELS: u64 = 8;
 pub const REASON: &str = "Run limit reached. Stop this run to finish cleanup.";
 thread_local! { static READ_HEADROOM: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
+// Preparation is an ordinary admission probe, never a grant of terminal headroom.
+thread_local! { static CONSENT_PREPARATION: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
+pub(crate) struct ConsentPreparation {
+    key: usize,
+    // Keep this store birth alive while its thread-local key is installed.
+    _lifetime: std::sync::Arc<()>,
+    _thread: PhantomData<Rc<()>>,
+}
+impl Drop for ConsentPreparation {
+    fn drop(&mut self) {
+        CONSENT_PREPARATION.with_borrow_mut(|entries| {
+            let depth = entries
+                .get_mut(&self.key)
+                .expect("consent preparation scope");
+            *depth -= 1;
+            if *depth == 0 {
+                entries.remove(&self.key);
+            }
+        });
+    }
+}
+pub(crate) fn preparing_consent(store: &ProjectStore) -> ConsentPreparation {
+    let key = store.admission_key();
+    CONSENT_PREPARATION.with_borrow_mut(|entries| *entries.entry(key).or_default() += 1);
+    ConsentPreparation {
+        key,
+        _lifetime: store.admission_lifetime(),
+        _thread: PhantomData,
+    }
+}
+pub(crate) fn is_preparing_consent(key: usize) -> bool {
+    CONSENT_PREPARATION.with_borrow(|entries| entries.contains_key(&key))
+}
 #[derive(Clone)]
 pub(crate) struct TerminalAdmission {
     key: usize,

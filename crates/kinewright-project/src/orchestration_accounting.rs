@@ -561,7 +561,8 @@ impl AccountingRecord {
         Ok(bytes)
     }
 
-    /// Canonical bytes of `OrchestrationRecord::Accounting`, including its tag.
+    /// Unanchored accounting contract bytes, including the tag. H1 derives the
+    /// retained ownership header at admission; these bytes are not a stored cut.
     pub fn record_bytes(&self) -> Result<Vec<u8>, AccountingRefusal> {
         #[derive(Serialize)]
         struct Payload<'a> {
@@ -570,11 +571,13 @@ impl AccountingRecord {
         }
         #[derive(Serialize)]
         struct Record<'a> {
+            retention: crate::orchestration_retention::Retention,
             version: u32,
             payload: Payload<'a>,
         }
         encode(
             &Record {
+                retention: crate::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: Payload {
                     kind: "accounting",

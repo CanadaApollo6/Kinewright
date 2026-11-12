@@ -499,5 +499,32 @@ fn s4b_c4_notes_close_readiness_and_stale_stop_preserve_work() {
         feedback.stop_run(port, &run).unwrap();
     })
     .unwrap();
+    let mut recorded = original;
+    recorded.accounting = Some(kinewright_agent::writer_host::DurableRunAccounting {
+        stop_reason: None,
+        start_unix_ms: 0,
+        deadline_unix_ms: 0,
+        last_unix_ms: 0,
+        elapsed_ms: 0,
+        clock_uncertain: false,
+        tasks: vec![kinewright_agent::writer_host::DurableTaskAccounting {
+            task: recorded.projection.tasks[0].id.clone(),
+            sends: 0,
+            provider: None,
+            totals: kinewright_project::orchestration_accounting::UsageTotals::default(),
+            wait_reason: Some(
+                kinewright_project::orchestration_records::TASK_DECISION_CAPACITY_WORDS.into(),
+            ),
+            pause: None,
+            refusals: vec![],
+        }],
+    });
+    assert_eq!(
+        crate::studio_run_view::RunView::of(&recorded).tasks[0]
+            .wait_reason
+            .as_deref(),
+        Some(kinewright_project::orchestration_records::TASK_DECISION_CAPACITY_WORDS),
+        "C5_CAPACITY_STUDIO_TASK_WAIT"
+    );
     in1_shutdown(&mut app);
 }

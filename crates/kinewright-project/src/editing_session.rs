@@ -35,7 +35,7 @@ mod rescue;
 mod rescue_selection;
 pub use durable::{
     BranchBinding, DurableBranchRole, DurableBranchSessionGuard, FrozenTaskResult,
-    specialist_floor_delta_from_baseline,
+    PersistedTaskCheckpoint, specialist_floor_delta_from_baseline,
 };
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
 type HistoryDigestCache = Option<(

@@ -38,6 +38,25 @@ def log(binary, names):
 
 
 class Sharding(unittest.TestCase):
+    def test_linux_only_host_hooks_match_windows_slow_and_fast_accounting(self):
+        # The parent module is absent on Windows, independently of cfg_attr's
+        # choice to ignore a compiled test in the fast tier.
+        hooks = st.ROOT / "crates/kinewright-agent/src/writer_host/hooks_tests.rs"
+        self.assertIn('#![cfg(target_os = "linux")]', hooks.read_text(encoding="utf-8"))
+        entries = [e for e in st.read_manifest()
+                   if e[0] == "kinewright_agent" and e[1].startswith("writer_host::hooks_tests::")]
+        self.assertTrue(entries)
+        with mock.patch.object(st, "read_manifest",
+                               return_value=[("mcp_server", "mcp1", "source", "any"), *entries]):
+            observed = cs.inventory(listing(), "slow", "windows")
+            self.assertEqual([(s["label"], s["tests"]) for s in observed],
+                             [("mcp_server", ["mcp1"])])
+        with mock.patch.object(st, "read_manifest", return_value=entries), \
+             mock.patch.object(st, "read_allowlist", return_value=[]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(st.verify_fast(log("mcp_server", ["mcp1"]), "windows"), 0)
+        self.assertTrue(all(e[3] == "linux-only" for e in entries))
+
     def test_partition_preserves_all_tests_and_sensitive_batches(self):
         for count in (1, 3, 12):
             data = cs.plan(listing(), "fast", count)

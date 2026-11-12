@@ -453,6 +453,8 @@ impl TaskEndpoint {
 }
 
 pub struct EditorTask {
+    history_epoch: super::orchestration_records::EndpointId,
+    had_approved_edit: bool,
     endpoint: TaskEndpoint,
     registration: DurableBranchSessionGuard,
     frozen: Option<FrozenTaskResult>,
@@ -500,6 +502,8 @@ impl EditorTask {
             Some(owner.task_history_admission(&registration)?),
         );
         Ok(Self {
+            history_epoch: endpoint.authority().endpoint.clone(),
+            had_approved_edit: false,
             endpoint,
             registration,
             frozen: None,
@@ -563,6 +567,8 @@ impl EditorTask {
             Some(owner.task_history_admission(&registration)?),
         );
         Ok(Self {
+            history_epoch: endpoint.authority().endpoint.clone(),
+            had_approved_edit: false,
             endpoint,
             registration,
             frozen: None,
@@ -620,11 +626,17 @@ impl EditorTask {
             super::orchestration_records::BranchBinding,
             super::bundle_records::ObjectRef,
             bool,
+            kinewright_project::edit_audit::CapturedHistory,
         ),
         BundleError,
     > {
         if let Some(frozen) = &self.frozen {
-            return Ok((frozen.source().clone(), frozen.base_ref().clone(), true));
+            return Ok((
+                frozen.source().clone(),
+                frozen.base_ref().clone(),
+                true,
+                frozen.captured_history(),
+            ));
         }
         if fence {
             drop(
@@ -642,8 +654,9 @@ impl EditorTask {
         let base_ref = owner.persist_registered_task_checkpoint(&mut self.registration)?;
         Ok((
             owner.task_checkpoint_binding(self.registration.branch_id())?,
-            base_ref,
+            base_ref.base_ref,
             false,
+            base_ref.captured_history,
         ))
     }
     pub(crate) fn admit_merge(
@@ -662,6 +675,15 @@ impl EditorTask {
         let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
         let envelope = owner.candidate_merge_envelope(frozen, id)?;
         owner.admit_candidate_merge(frozen, &envelope)
+    }
+    pub(crate) const fn had_approved_edit(&self) -> bool {
+        self.had_approved_edit
+    }
+    pub(crate) const fn history_epoch(&self) -> &super::orchestration_records::EndpointId {
+        &self.history_epoch
+    }
+    pub(crate) fn record_approved_edit(&mut self) {
+        self.had_approved_edit = true;
     }
     pub(crate) fn prepare_merge(
         &mut self,
@@ -1212,8 +1234,8 @@ pub fn apply_lifecycle(
     envelope: &super::orchestration_records::OrchestrationEnvelope,
 ) -> Result<bool, super::orchestration_records::Refusal> {
     use super::orchestration_records::{
-        AttemptState, BACKGROUND_LIMIT, ITEM_LIMIT, OrchestrationCommand, QuestionStatus, Refusal,
-        RunOutcome, RunPhase, RuntimeRequest, TaskState, validate_reference,
+        AttemptState, BACKGROUND_LIMIT, OrchestrationCommand, QuestionStatus, Refusal, RunOutcome,
+        RunPhase, RuntimeRequest, TaskState, validate_reference,
     };
     match &envelope.command {
         OrchestrationCommand::FinishTask(request) => {
@@ -1383,16 +1405,12 @@ pub fn apply_lifecycle(
             feedback,
             decisions,
         } => {
+            state.check_task_context_capacity(task, feedback.len(), decisions.len())?;
             let record = state
                 .tasks
                 .iter_mut()
                 .find(|record| &record.id == task)
                 .ok_or(Refusal::ScopeConflict)?;
-            if record.progress.feedback.len() + feedback.len() > ITEM_LIMIT
-                || record.progress.decisions.len() + decisions.len() > ITEM_LIMIT
-            {
-                return Err(Refusal::Capacity);
-            }
             for reference in feedback.iter().chain(decisions) {
                 validate_reference(reference)?;
             }

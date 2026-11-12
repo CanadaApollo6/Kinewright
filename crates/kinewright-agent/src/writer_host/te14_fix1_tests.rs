@@ -703,7 +703,8 @@ fn te14_fix1_usage_reads_hide_host_observers() {
         record.tasks[0].measurements = Some(Measurements::default());
         host.owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(record)),
             })

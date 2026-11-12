@@ -210,9 +210,7 @@ pub(crate) fn apply_authorized(
                 return Err(Refusal::ScopeConflict);
             }
             let director_id = director.id.clone();
-            if director.progress.decisions.len() >= ITEM_LIMIT {
-                return Err(Refusal::Capacity);
-            }
+            state.check_task_context_capacity(&director_id, 0, 1)?;
             state
                 .tasks
                 .iter_mut()

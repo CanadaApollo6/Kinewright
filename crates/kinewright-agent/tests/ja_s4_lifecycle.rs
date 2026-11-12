@@ -233,6 +233,7 @@ impl ContractOwner {
         };
         let bytes = encoded(
             &OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Result(Box::new(result.clone())),
             },
@@ -776,7 +777,7 @@ fn s4_pause_stop_and_restart_brief() {
                     feedback: vec![reference(201, RecordKind::OwnedData); ITEM_LIMIT + 1],
                     decisions: vec![]
                 }),
-                Err(Refusal::Capacity)
+                Err(Refusal::TaskFeedbackCapacity)
             );
             let mut injection = NativeInjection::Fresh;
             injection.begin().unwrap();

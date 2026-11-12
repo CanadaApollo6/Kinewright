@@ -49,6 +49,7 @@ pub fn result_and_delivery(
         return Err(Refusal::InvalidState);
     }
     let record = OrchestrationRecord {
+        retention: kinewright_project::orchestration_retention::Retention::Complete,
         version: 1,
         payload: OrchestrationPayload::Result(Box::new(publish.result.clone())),
     };

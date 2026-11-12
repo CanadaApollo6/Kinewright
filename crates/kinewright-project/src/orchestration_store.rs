@@ -26,6 +26,9 @@ impl BundleRecord for OrchestrationRecord {
     fn dependencies(&self) -> Vec<ObjectRef> {
         OrchestrationRecord::dependencies(self).unwrap_or_default()
     }
+    fn validate_admission(&self, store: &crate::store::ProjectStore) -> Result<(), BundleError> {
+        self.validate_retention_admission(store)
+    }
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
         OrchestrationRecord::dependencies(self).map_err(invalid)?;
         crate::studio_records::bounded(self, limits.control_bytes)
@@ -47,6 +50,12 @@ impl BundleRecord for RegisteredRunIndex {
         match self {
             Self::Index(index) => BundleRecord::dependencies(index.as_ref()),
             Self::Record(record) => BundleRecord::dependencies(record.as_ref()),
+        }
+    }
+    fn validate_admission(&self, store: &crate::store::ProjectStore) -> Result<(), BundleError> {
+        match self {
+            Self::Index(index) => index.validate_admission(store),
+            Self::Record(record) => record.validate_admission(store),
         }
     }
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
@@ -93,7 +102,7 @@ impl PublishedRunCut {
             self.receipt.envelope.expected_generation,
             &self.receipt.envelope,
             (**projection).clone(),
-            segment.clone(),
+            segment.restore(projection).map_err(invalid)?,
             self.receipt.decision.clone(),
         )
         .map_err(invalid)?;
@@ -104,7 +113,8 @@ impl PublishedRunCut {
             || self.metadata_envelope.id != self.receipt.envelope.id
             || self.metadata_envelope.project_id != self.receipt.envelope.project
             || self.metadata_envelope.owner_epoch != self.receipt.envelope.authority.owner_epoch
-            || segment.previous.as_ref() != previous.map(|cut| &cut.segment)
+            || segment.binding.previous.as_ref() != previous.map(|cut| &cut.segment)
+            || segment.snapshot != self.snapshot
             || projection.sequence
                 != previous.map_or(1, |cut| cut.receipt.sequence.saturating_add(1))
         {
@@ -197,13 +207,22 @@ impl ProjectBundle {
             }
             submitted.consumed_by = Some(legacy_run);
         }
-        let snapshot = self.store.admit_record(&OrchestrationRecord {
-            version: 1,
-            payload: OrchestrationPayload::Snapshot(Box::new(transition.projection().clone())),
-        })?;
+        let base = self.semantic_snapshot(run)?;
+        let snapshot_record = OrchestrationRecord::retained(
+            OrchestrationPayload::Snapshot(Box::new(transition.projection().clone())),
+            base,
+            &self.store,
+        )?;
+        let snapshot = self.store.admit_record(&snapshot_record)?;
         let segment = self.store.admit_record(&OrchestrationRecord {
+            retention: crate::orchestration_retention::Retention::Complete,
             version: 1,
-            payload: OrchestrationPayload::EventSegment(transition.segment().clone()),
+            payload: OrchestrationPayload::EventSegment(
+                crate::orchestration_records::StoredEventSegment {
+                    binding: transition.segment().binding().map_err(invalid)?,
+                    snapshot: snapshot.reference.clone(),
+                },
+            ),
         })?;
         self.advance_run_budget(&mut index, transition)?;
         index.cumulative.remove(run);
@@ -361,6 +380,141 @@ pub fn commit_orchestration(
     Ok(expected)
 }
 
+/// Capacity owned by one exact, fenced orchestration publication. Dropping it
+/// abandons the unpublished cut; it grants no authority to change its contents.
+pub struct PreparedOrchestrationPublication {
+    metadata: crate::studio_store::PreparedMetadataPublication,
+    receipt_digest: crate::receipts::CommandDigest,
+    expected: OrchestrationReceipt,
+}
+pub type PreparedOrchestrationCut = (ValidatedRunUpdate, PreparedOrchestrationPublication);
+
+/// Stage both real publishers without replacing either root. Their record seals,
+/// decoded projections, root writes and inventories remain charged together.
+pub fn prepare_orchestration_pair(
+    owner: &mut crate::editing_session::Ja1EditingSession,
+    first: ValidatedRunUpdate,
+    evidence: &[u8],
+    next: impl FnOnce(u64, ObjectRef) -> Result<(ValidatedRunUpdate, Vec<u8>), BundleError>,
+) -> Result<(PreparedOrchestrationCut, PreparedOrchestrationCut, Vec<u8>), BundleError> {
+    let bundle = owner.active_bundle_mut()?;
+    bundle.store.admit_run_write()?;
+    let _preparing = crate::run_admission::preparing_consent(&bundle.store);
+    if bundle.unsettled || bundle.pending_command.is_some() || bundle.pending_metadata.is_some() {
+        return Err(BundleError::Unsettled);
+    }
+    bundle.collect_after_ack()?;
+    let fence = bundle
+        .store
+        .publication_fence(bundle.admission.raw_bytes())?;
+    let result = (|| {
+        let mut approval = prepare_orchestration_cut(bundle, &first, evidence, &fence)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::note("consent_approval_prepared", &bundle.store.resolved_root()?);
+        let (second, marker) = approval.metadata.with_preview(bundle, |bundle| {
+            let segment = bundle
+                .orchestration_cut(&first.projection().run)?
+                .ok_or_else(|| invalid("prepared approval disappeared"))?
+                .segment;
+            next(bundle.generation, segment)
+        })?;
+        let application = approval.metadata.with_preview(bundle, |bundle| {
+            prepare_orchestration_cut(bundle, &second, &marker, &fence)
+        })?;
+        Ok(((first, approval), (second, application), marker))
+    })();
+    if result.is_err() {
+        // No root was replaced. Retire only this attempt's unreferenced objects;
+        // the durable-root pin and unrelated evidence remain live.
+        bundle
+            .store
+            .with_namespace(crate::namespace::ProjectNamespace::finish_object_batch)?;
+        bundle.store.allow_collection()?;
+        bundle.store.collect_unpublished()?;
+    }
+    result
+}
+fn prepare_orchestration_cut(
+    bundle: &mut ProjectBundle,
+    transition: &ValidatedRunUpdate,
+    evidence: &[u8],
+    fence: &crate::store::PublicationFence,
+) -> Result<PreparedOrchestrationPublication, BundleError> {
+    struct Evidence<'a> {
+        bundle: &'a mut ProjectBundle,
+        references: usize,
+        pins: usize,
+    }
+    impl Drop for Evidence<'_> {
+        fn drop(&mut self) {
+            self.bundle.evidence.truncate(self.references);
+            self.bundle.pending_evidence.truncate(self.pins);
+        }
+    }
+    let references = bundle.evidence.len();
+    let pins = bundle.pending_evidence.len();
+    let guard = Evidence {
+        bundle,
+        references,
+        pins,
+    };
+    let reference = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(evidence),
+        byte_length: evidence.len() as u64,
+        record_kind: RecordKind::OwnedEvidence,
+    };
+    let seal = guard
+        .bundle
+        .store
+        .admit_blob(&mut &evidence[..], &reference, &[])?;
+    guard.bundle.retain_evidence(&reference)?;
+    let envelope = guard
+        .bundle
+        .metadata_envelope(transition.envelope().id.clone());
+    let update = MetadataUpdate {
+        expected_root_generation: transition.envelope().expected_generation,
+        change: MetadataChange::OrchestrationUpdate {
+            transition: Box::new(transition.clone()),
+            consume_batch: None,
+        },
+    };
+    let receipt_digest = envelope.receipt_envelope(&update)?.digest()?;
+    let metadata = guard
+        .bundle
+        .prepare_metadata_command(&envelope, &update, fence)?;
+    drop(seal);
+    Ok(PreparedOrchestrationPublication {
+        metadata,
+        receipt_digest,
+        expected: transition.receipt().clone(),
+    })
+}
+
+/// Consume the original held capacity, without rebuilding or re-admitting the cut.
+pub fn commit_prepared_orchestration(
+    owner: &mut crate::editing_session::Ja1EditingSession,
+    transition: &ValidatedRunUpdate,
+    prepared: &mut PreparedOrchestrationPublication,
+) -> Result<OrchestrationReceipt, BundleError> {
+    transition
+        .validate_returned_receipt(&prepared.expected)
+        .map_err(invalid)?;
+    if let Some(receipt) = owner.orchestration_replay(transition.envelope(), None)? {
+        return Ok(receipt);
+    }
+    let result = prepared.metadata.publish(owner.active_bundle_mut()?)?;
+    let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) = result else {
+        return Err(BundleError::Unsettled);
+    };
+    if receipt.generation != transition.receipt().generation
+        || receipt.id != transition.envelope().id
+        || receipt.digest != prepared.receipt_digest
+    {
+        return Err(invalid("prepared durable returned receipt"));
+    }
+    Ok(transition.receipt().clone())
+}
+
 impl crate::editing_session::Ja1EditingSession {
     pub fn orchestration_cut(&self, run: &RunId) -> Result<Option<PublishedRunCut>, BundleError> {
         self.active_bundle()?.orchestration_cut(run)
@@ -404,9 +558,10 @@ impl crate::editing_session::Ja1EditingSession {
     }
     pub fn admit_scheduler_record(
         &mut self,
-        record: &OrchestrationRecord,
+        record: OrchestrationRecord,
     ) -> Result<SealedObject, BundleError> {
-        self.active_bundle_mut()?.store_mut()?.admit_record(record)
+        self.active_bundle_mut()?
+            .admit_owned_scheduler_record(record)
     }
     pub fn admit_host_grant(&mut self, bytes: &[u8]) -> Result<ObjectRef, BundleError> {
         let reference = ObjectRef {

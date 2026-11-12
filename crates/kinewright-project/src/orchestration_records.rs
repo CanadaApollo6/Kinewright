@@ -20,6 +20,16 @@ pub const COMMAND_BYTES: usize = 256 * 1024;
 pub const CONTROL_BYTES: usize = 64 * 1024 * 1024;
 pub const TASK_LIMIT: usize = crate::run_admission::TASKS;
 pub const ITEM_LIMIT: usize = 256;
+pub const TASK_FEEDBACK_LIMIT: usize = 256;
+pub const TASK_DECISION_LIMIT: usize = 240;
+/// First retained fork, history checkpoint, manifest, dispatch and containment intents.
+/// Reserved attempts hold this room against every other ordinary context writer.
+pub const NATIVE_ATTEMPT_DECISIONS: usize = 5;
+pub const TASK_RETAINED_DECISION_LIMIT: usize = 256;
+pub const TASK_FEEDBACK_CAPACITY_WORDS: &str =
+    "Task feedback context is full. Stop this run and start a new run to supply more feedback.";
+pub const TASK_DECISION_CAPACITY_WORDS: &str =
+    "Task decision context is full. Stop this run; start a new run for additional context.";
 pub const ATTEMPT_LIMIT: usize = 3;
 pub const BACKGROUND_LIMIT: u32 = 256;
 
@@ -532,6 +542,42 @@ pub struct TaskProgress {
     pub completion: Option<Box<CompletionIntent>>,
 }
 
+impl TaskProgress {
+    pub fn check_context_capacity(&self, feedback: usize, decisions: usize) -> Result<(), Refusal> {
+        if self.feedback.len() > TASK_FEEDBACK_LIMIT
+            || feedback > TASK_FEEDBACK_LIMIT.saturating_sub(self.feedback.len())
+        {
+            return Err(Refusal::TaskFeedbackCapacity);
+        }
+        if self.decisions.len() > TASK_DECISION_LIMIT
+            || decisions > TASK_DECISION_LIMIT.saturating_sub(self.decisions.len())
+        {
+            return Err(Refusal::TaskDecisionCapacity);
+        }
+        Ok(())
+    }
+    pub fn check_retained_context(&self) -> Result<(), Refusal> {
+        if self.feedback.len() > TASK_FEEDBACK_LIMIT {
+            return Err(Refusal::TaskFeedbackCapacity);
+        }
+        if self.decisions.len() > TASK_RETAINED_DECISION_LIMIT {
+            return Err(Refusal::TaskDecisionCapacity);
+        }
+        Ok(())
+    }
+    /// Sixteen decision slots are held back from new work for terminal bookkeeping.
+    pub fn check_recovery_decisions(&self, additions: usize) -> Result<(), Refusal> {
+        self.check_retained_context()?;
+        // A new recovery reason must leave room for a first terminal history cut.
+        if additions > 0
+            && additions > (TASK_RETAINED_DECISION_LIMIT - 1).saturating_sub(self.decisions.len())
+        {
+            return Err(Refusal::TaskDecisionCapacity);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttentionReference {
@@ -662,6 +708,37 @@ pub struct RunProjection {
     pub usage: Vec<ObjectRef>,
 }
 
+impl RunProjection {
+    /// Conservatively protect the whole lifecycle allowance until containment.
+    /// This is derived from the durable attempt state, not a second reservation ledger.
+    pub fn check_task_context_capacity(
+        &self,
+        task: &TaskId,
+        feedback: usize,
+        decisions: usize,
+    ) -> Result<(), Refusal> {
+        let record = self
+            .tasks
+            .iter()
+            .find(|record| &record.id == task)
+            .ok_or(Refusal::ScopeConflict)?;
+        let held = if decisions > 0
+            && self.attempts.iter().any(|attempt| {
+                &attempt.identity.task == task && attempt.state == AttemptState::Reserved
+            }) {
+            NATIVE_ATTEMPT_DECISIONS
+        } else {
+            0
+        };
+        record.progress.check_context_capacity(
+            feedback,
+            decisions
+                .checked_add(held)
+                .ok_or(Refusal::TaskDecisionCapacity)?,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrchestrationEvent {
@@ -679,6 +756,82 @@ pub struct EventSegment {
     pub events: Vec<OrchestrationEvent>,
 }
 
+/// The wire event binds the full state once; it does not embed another projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventBinding {
+    pub command: CommandId,
+    pub sequence: u64,
+    pub projection_digest: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SegmentBinding {
+    pub run: RunId,
+    pub first_sequence: u64,
+    pub previous: Option<ObjectRef>,
+    pub event: EventBinding,
+}
+impl EventSegment {
+    pub(crate) fn binding(&self) -> Result<SegmentBinding, Refusal> {
+        let [event] = self.events.as_slice() else {
+            return Err(Refusal::InvalidState);
+        };
+        if self.first_sequence == 0
+            || self.first_sequence != event.sequence
+            || event.projection.sequence != event.sequence
+            || event.projection.run != self.run
+            || (self.first_sequence > 1 && self.previous.is_none())
+        {
+            return Err(Refusal::InvalidState);
+        }
+        if let Some(previous) = &self.previous {
+            validate_reference(previous)?;
+            if previous.record_kind != RecordKind::RunIndex {
+                return Err(Refusal::InvalidState);
+            }
+        }
+        Ok(SegmentBinding {
+            run: self.run.clone(),
+            first_sequence: self.first_sequence,
+            previous: self.previous.clone(),
+            event: EventBinding {
+                command: event.command.clone(),
+                sequence: event.sequence,
+                projection_digest: kinewright_media::sha256_bytes(&encoded(
+                    &event.projection,
+                    CONTROL_BYTES,
+                )?),
+            },
+        })
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredEventSegment {
+    pub binding: SegmentBinding,
+    pub snapshot: ObjectRef,
+}
+impl StoredEventSegment {
+    pub fn restore(&self, projection: &RunProjection) -> Result<EventSegment, Refusal> {
+        // A recovered command owns this immutable state independently of the loaded record.
+        let segment = EventSegment {
+            run: self.binding.run.clone(),
+            first_sequence: self.binding.first_sequence,
+            previous: self.binding.previous.clone(),
+            events: vec![OrchestrationEvent {
+                command: self.binding.event.command.clone(),
+                sequence: self.binding.event.sequence,
+                projection: projection.clone(),
+            }],
+        };
+        if segment.binding()? != self.binding {
+            return Err(Refusal::InvalidState);
+        }
+        Ok(segment)
+    }
+}
+
 /// Durable identity of one task's registered actor, independent of an attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -693,6 +846,7 @@ pub struct TaskHistoryRecord {
     /// Legacy lineage hint. Current recovery resolves the checkpoint-bound shared
     /// candidate record from `StudioRoot`, independently of task restore order.
     pub candidate_base_ref: ObjectRef,
+    pub edit_coverage: crate::edit_audit::KeptEditCoverage,
     pub frozen: bool,
     pub merge_envelope: Option<crate::receipts::CommandEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,7 +885,7 @@ pub enum OrchestrationPayload {
     AttemptArchive(Box<RetiredAttemptArchive>),
     RunIndex(Vec<ObjectRef>),
     Snapshot(Box<RunProjection>),
-    EventSegment(EventSegment),
+    EventSegment(StoredEventSegment),
     Effect(EffectRecord),
     Request(RuntimeRequest),
     Delivery(DeliveryRecord),
@@ -744,12 +898,15 @@ pub enum OrchestrationPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrchestrationRecord {
+    pub retention: crate::orchestration_retention::Retention,
     pub version: u32,
     pub payload: OrchestrationPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
+    TaskFeedbackCapacity,
+    TaskDecisionCapacity,
     Unsupported,
     Capacity,
     ScopeConflict,

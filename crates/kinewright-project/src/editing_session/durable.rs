@@ -36,6 +36,13 @@ pub struct FrozenTaskResult {
     source: BranchBinding,
     base_ref: ObjectRef,
     delta: Vec<kinewright_core::Operation>,
+    captured_history: crate::edit_audit::CapturedHistory,
+}
+
+/// Exact checkpoint and accepted cut captured under the same Core freeze.
+pub struct PersistedTaskCheckpoint {
+    pub base_ref: ObjectRef,
+    pub captured_history: crate::edit_audit::CapturedHistory,
 }
 impl FrozenTaskResult {
     #[must_use]
@@ -53,6 +60,10 @@ impl FrozenTaskResult {
     #[must_use]
     pub fn delta(&self) -> &[kinewright_core::Operation] {
         &self.delta
+    }
+    #[must_use]
+    pub const fn captured_history(&self) -> crate::edit_audit::CapturedHistory {
+        self.captured_history
     }
 }
 
@@ -378,7 +389,8 @@ impl Ja1EditingSession {
         guard: &mut DurableBranchSessionGuard,
         retain_checkpoint: bool,
     ) -> Result<FrozenTaskResult, BundleError> {
-        let base_ref = self.persist_durable_branch_inner(guard, false, retain_checkpoint)?;
+        let persisted = self.persist_durable_branch_inner(guard, false, retain_checkpoint)?;
+        let base_ref = persisted.base_ref;
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("candidate_frozen_persisted");
         let base = guard.base();
@@ -396,6 +408,7 @@ impl Ja1EditingSession {
             },
             base_ref,
             delta: base.full_applied_delta.clone(),
+            captured_history: persisted.captured_history,
         })
     }
     pub fn candidate_merge_envelope(
@@ -817,14 +830,38 @@ impl Ja1EditingSession {
         guard: &mut DurableBranchSessionGuard,
     ) -> Result<ObjectRef, BundleError> {
         self.persist_durable_branch_inner(guard, true, false)
+            .map(|saved| saved.base_ref)
     }
     /// Stage a task checkpoint for the matching H1 root transaction.
     /// Unchanged checkpoints retain their exact identity.
     pub fn persist_registered_task_checkpoint(
         &mut self,
         guard: &mut DurableBranchSessionGuard,
-    ) -> Result<ObjectRef, BundleError> {
+    ) -> Result<PersistedTaskCheckpoint, BundleError> {
         self.persist_durable_branch_inner(guard, true, true)
+    }
+    /// Measure the exact history/base projection without admitting or publishing it.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn pending_task_history_profile(
+        &self,
+        core: &Core,
+    ) -> Result<crate::orchestration_retention::PendingTaskHistoryProfile, BundleError> {
+        let _reading = crate::run_admission::reading(self.store()?);
+        let guard = &self
+            .durable_sessions
+            .iter()
+            .find(|session| session.guard.core.actor_identity() == core.actor_identity())
+            .ok_or(BundleError::HistoryChanged)?
+            .guard;
+        let history = core
+            .export_history()
+            .map_err(crate::bundle::history_error)?;
+        let base = self.specialist_checkpoint_base(guard, &history)?;
+        crate::orchestration_retention::measure_pending_task_history(
+            &history,
+            &base,
+            self.store()?.limits(),
+        )
     }
     #[allow(
         clippy::too_many_lines,
@@ -835,7 +872,7 @@ impl Ja1EditingSession {
         guard: &mut DurableBranchSessionGuard,
         resume: bool,
         retain_checkpoint: bool,
-    ) -> Result<ObjectRef, BundleError> {
+    ) -> Result<PersistedTaskCheckpoint, BundleError> {
         let _reading = crate::run_admission::reading(self.store()?);
         let index = self.registered(guard)?;
         let canonical = self.durable_sessions[index].guard.clone();
@@ -852,6 +889,7 @@ impl Ja1EditingSession {
             .registered_bundle(&canonical)?
             .attach_core(&canonical.core)?;
         let cut = owner.freeze().map_err(crate::bundle::history_error)?;
+        let captured_history = crate::edit_audit::CapturedHistory::from_cut(&cut);
         let result = (|| {
             if retain_checkpoint
                 && let Some(staged) = self
@@ -863,14 +901,7 @@ impl Ja1EditingSession {
                 *guard = canonical.clone();
                 return Ok(staged.base_ref.clone());
             }
-            let mut full_delta = self.verified_floor_prefix(
-                &canonical,
-                cut.history().floor_offset,
-                &cut.history().baseline,
-            )?;
-            full_delta.extend(cut.history().applied_operations());
-            let mut base = canonical.base().clone();
-            base.full_applied_delta = full_delta;
+            let base = self.specialist_checkpoint_base(&canonical, cut.history())?;
             let base_bytes =
                 serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let same_base = base == *canonical.base();
@@ -967,7 +998,10 @@ impl Ja1EditingSession {
                 .resume(&current)
                 .map_err(crate::bundle::history_error)?;
         }
-        result
+        result.map(|base_ref| PersistedTaskCheckpoint {
+            base_ref,
+            captured_history,
+        })
     }
     /// Fence a persisted session. The agent close route persists its full proposal first.
     pub fn close_durable_branch(
@@ -1326,6 +1360,18 @@ mod fu2_tests {
 }
 
 impl Ja1EditingSession {
+    fn specialist_checkpoint_base(
+        &self,
+        guard: &DurableBranchSessionGuard,
+        history: &HistorySnapshot,
+    ) -> Result<SpecialistBaseRecord, BundleError> {
+        let mut full_delta =
+            self.verified_floor_prefix(guard, history.floor_offset, &history.baseline)?;
+        full_delta.extend(history.applied_operations());
+        let mut base = guard.base().clone();
+        base.full_applied_delta = full_delta;
+        Ok(base)
+    }
     // Keep the reconstructed anchor within the serial replay window and drop
     // its boundary documents before checkpoint publication materializes another history.
     fn verified_floor_prefix(

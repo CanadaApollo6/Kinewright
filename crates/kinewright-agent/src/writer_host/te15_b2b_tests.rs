@@ -254,7 +254,8 @@ fn b2b_permanent_pump(kind: &str) {
         let record = host
             .owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::TaskHistory(Box::new(history)),
             })

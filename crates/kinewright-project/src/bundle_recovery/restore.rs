@@ -274,7 +274,9 @@ impl ProjectBundle {
             .inspection_document()
             .ok_or(BundleError::Unsettled)?;
         let (bytes, _charge) = crate::bundle_commit::serialize_root(&self.store, document, &root)?;
-        let sealed = self.admit_root_checkpoint(&bytes, &root.references())?;
+        let sealed = self
+            .store
+            .admit_root_checkpoint(&bytes, &root.references())?;
         let reference = sealed.reference.clone();
         // Carry the new root's complete closure until the caller attaches its rescue record.
         self.pending_evidence.push(sealed.into_pin());

@@ -52,21 +52,20 @@ fn native_admitted(
     let OrchestrationPayload::EventSegment(segment) = &record.payload else {
         panic!("native event segment");
     };
+    let snapshot = owner
+        .store()
+        .unwrap()
+        .read_record::<OrchestrationRecord>(&cut.snapshot)
+        .unwrap();
+    let OrchestrationPayload::Snapshot(state) = &snapshot.payload else {
+        panic!("native reservation snapshot")
+    };
     let update = ValidatedRunUpdate::new(
         &cut.receipt.envelope.project,
         cut.receipt.envelope.expected_generation,
         &cut.receipt.envelope,
-        match &owner
-            .store()
-            .unwrap()
-            .read_record::<OrchestrationRecord>(&cut.snapshot)
-            .unwrap()
-            .payload
-        {
-            OrchestrationPayload::Snapshot(state) => (**state).clone(),
-            _ => panic!("native reservation snapshot"),
-        },
-        segment.clone(),
+        (**state).clone(),
+        segment.restore(state).unwrap(),
         cut.receipt.decision.clone(),
     )
     .unwrap();
@@ -596,7 +595,9 @@ fn s4b_c2_specialist_steering_and_coalesced_wakes_are_charged() {
                         .unwrap();
                     host.owner_mut()
                         .unwrap()
-                        .admit_scheduler_record(&OrchestrationRecord {
+                        .admit_scheduler_record(OrchestrationRecord {
+                            retention:
+                                kinewright_project::orchestration_retention::Retention::Complete,
                             version: 1,
                             payload: OrchestrationPayload::Result(Box::new(TaskResult {
                                 outcome: AttemptOutcome::Completed,
