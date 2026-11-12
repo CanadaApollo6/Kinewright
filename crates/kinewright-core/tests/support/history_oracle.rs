@@ -110,12 +110,9 @@ impl ApplyHistoryOracle for Operation {
             assert_compact_roundtrip(&history);
             let mut seen = SEEN.get_or_init(Default::default).lock().unwrap();
             if !seen.contains(&name) {
-                // One write keeps the evidence marker intact beside libtest output.
-                std::io::Write::write_all(
-                    &mut std::io::stderr().lock(),
-                    format!("HISTORY_OPERATION_ORACLE={name};\n").as_bytes(),
-                )
-                .unwrap();
+                // Captured by libtest, so it cannot split a result line. Read the
+                // markers with `-- --show-output`.
+                println!("HISTORY_OPERATION_ORACLE={name};");
                 seen.insert(name);
             }
         }
