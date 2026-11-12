@@ -5,6 +5,50 @@ use kinewright_core::{Clip, ClipId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub(crate) fn verify_history_boundaries(
+    lineage: &LineageRecord,
+    history: &kinewright_core::HistorySnapshot,
+) -> Result<(), BundleError> {
+    let clip_keys = |document: &kinewright_core::Document| {
+        document
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter().map(|clip| clip.id))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    if lineage
+        .baseline
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        != clip_keys(&history.baseline)
+        || lineage
+            .current
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != clip_keys(&history.document)
+        || lineage.undo.len() != history.cursor.undo.len()
+        || lineage.redo.len() != history.cursor.redo.len()
+        || lineage
+            .undo
+            .iter()
+            .chain(&lineage.redo)
+            .zip(history.cursor.undo.iter().chain(&history.cursor.redo))
+            .any(|(keys, entry)| {
+                keys.keys()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != clip_keys(&entry.document)
+            })
+    {
+        return Err(BundleError::Corrupt(
+            "lineage boundary differs from history".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn map_live_bound(entries: usize) -> Result<u64, BundleError> {
     // BTree nodes have at most eleven entries and at least five, apart from
     // their root. Include edges, node headers and both fixed-width identity strings.

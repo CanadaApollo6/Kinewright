@@ -32,6 +32,7 @@ mod completion_fixture;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use completion_fixture::CompletionFixture;
 mod provider_usage;
+mod settled_release;
 mod task_completion;
 pub(crate) mod task_context;
 mod task_history;
@@ -1512,6 +1513,7 @@ impl HostCommandOwner {
         reason = "The same owned request boundary serves HTTP ingress and scoped observer callers"
     )]
     fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+        self.sweep_settled_run_actors();
         let previous_snapshot_owner = self.snapshot_read_owner();
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {

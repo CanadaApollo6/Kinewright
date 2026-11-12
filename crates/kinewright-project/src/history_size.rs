@@ -70,6 +70,23 @@ pub(crate) fn check_retained_history(
     Ok(retained)
 }
 
+pub(crate) fn verify_history_lineage(
+    history: &kinewright_core::HistorySnapshot,
+    lineage: &crate::bundle_records::LineageRecord,
+    role: crate::history_record::HistoryRole,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<(), BundleError> {
+    if role != crate::history_record::HistoryRole::Ordinary {
+        let live = native_history_live_bytes(history)?
+            .checked_add(crate::lineage_journal::live_bytes(lineage)?)
+            .ok_or(BundleError::Capacity("role history memory"))?;
+        if live > role.live_limit(limits) {
+            return Err(BundleError::Capacity("role history memory"));
+        }
+    }
+    crate::lineage_journal::verify_history_boundaries(lineage, history)
+}
+
 /// Native admission includes capacities retained by a fresh decode and replay.
 pub(crate) fn native_history_live_bytes(
     history: &kinewright_core::HistorySnapshot,

@@ -298,6 +298,9 @@ impl StudioRuntime {
             }
         }
 
+        host.lock()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .sweep_settled_run_actors();
         if let Some((run, claim)) = runtime.claim.take() {
             let terminal = host
                 .lock()

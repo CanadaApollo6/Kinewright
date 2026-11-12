@@ -726,6 +726,22 @@ impl EditorTask {
     pub fn core(&self) -> &Core {
         self.registration.core()
     }
+    pub(crate) fn release_checkpointed(
+        &self,
+        owner: &mut Ja1EditingSession,
+    ) -> Result<bool, BundleError> {
+        if Arc::strong_count(&self.endpoint.0) != 1
+            || self.endpoint.0.media_read_busy.load(Ordering::SeqCst)
+            || (!self.endpoint.0.revoked.load(Ordering::SeqCst)
+                && self.endpoint.0.phase.load(Ordering::SeqCst) != INGRESS_SEALED)
+        {
+            return Ok(false);
+        }
+        let Ok(_gate) = self.endpoint.0.gate.try_lock() else {
+            return Ok(false);
+        };
+        owner.release_checkpointed_native_branch(&self.registration)
+    }
     #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
     pub fn freeze_fixture(
         &mut self,

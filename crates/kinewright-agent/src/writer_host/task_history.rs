@@ -183,6 +183,14 @@ impl HostCommandOwner {
         state: &RunProjection,
         task: &TaskId,
     ) -> Result<(), HostError> {
+        self.restore_frozen_task_inner(state, task)
+            .map_err(|error| self.task_reopen_error(&state.run, task, error))
+    }
+    fn restore_frozen_task_inner(
+        &mut self,
+        state: &RunProjection,
+        task: &TaskId,
+    ) -> Result<(), HostError> {
         if self
             .hooks
             .runs
@@ -273,18 +281,16 @@ impl HostCommandOwner {
         &mut self,
         history: &TaskHistoryRecord,
     ) -> Result<(), HostError> {
-        if !self
-            .owner()?
-            .durable_sessions()
-            .iter()
-            .any(|(_, g)| g.branch_id() == &history.base.branch)
-        {
-            self.owner_mut()?.reopen_registered_candidate(
+        let result = self
+            .owner_mut()?
+            .reopen_native_task_pair(
+                history.source.branch.clone(),
+                &history.base_ref,
                 history.base.branch.clone(),
                 &history.candidate_base_ref,
-            )?;
-        }
-        Ok(())
+            )
+            .map_err(HostError::from);
+        result.map_err(|error| self.task_reopen_error(&history.run, &history.task, error))
     }
     pub(super) fn persist_runtime_task(
         &mut self,

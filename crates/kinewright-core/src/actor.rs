@@ -287,6 +287,7 @@ pub struct HistoryEntryObservation {
 pub struct Core {
     sender: Sender<CoreMessage>,
     identity: ActorIdentity,
+    handles: Arc<()>,
 }
 
 impl Core {
@@ -309,6 +310,13 @@ impl Core {
     #[must_use]
     pub const fn actor_identity(&self) -> ActorIdentity {
         self.identity
+    }
+
+    /// Count client handles, including attachment and in-flight tool owners.
+    /// A caller using this to release an actor must serialize all of its own owners.
+    #[must_use]
+    pub fn handle_count(&self) -> usize {
+        Arc::strong_count(&self.handles)
     }
 
     /// Inspect attachment state without granting mutation authority.
@@ -636,7 +644,11 @@ impl Core {
                 );
             })
             .expect("failed to spawn Core actor");
-        Ok(Self { sender, identity })
+        Ok(Self {
+            sender,
+            identity,
+            handles: Arc::new(()),
+        })
     }
 
     pub(crate) fn bind_manual<P: 'static>(
@@ -2426,6 +2438,20 @@ mod tests {
             Err(HistoryError::StaleExpectation)
         );
         assert_eq!(core.export_history().unwrap(), live);
+    }
+
+    #[test]
+    fn core_handle_count_includes_clones_and_attachment_owners() {
+        let core = Core::spawn(Document::default()).unwrap();
+        assert_eq!(core.handle_count(), 1);
+        let reader = core.clone();
+        assert_eq!(core.handle_count(), 2);
+        let attachment = core.history_save_owner(&()).unwrap();
+        assert_eq!(core.handle_count(), 3);
+        drop(reader);
+        assert_eq!(core.handle_count(), 2);
+        drop(attachment);
+        assert_eq!(core.handle_count(), 1);
     }
 
     #[test]

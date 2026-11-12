@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 mod durable;
 mod manual;
 mod owned_media;
+mod release;
 pub use manual::ManualRecoveryEndpoint;
 mod recovery;
 mod retained_work;

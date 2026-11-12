@@ -79,6 +79,13 @@ impl HostCommandOwner {
             .owner()?
             .orchestration_projection(run)?
             .map_or(0, |state| state.sequence);
+        let mut settled_candidates = std::collections::BTreeSet::new();
+        if self
+            .owner()?
+            .is_registered_run_candidate(&brief.scope.base.branch)
+        {
+            settled_candidates.insert(brief.scope.base.branch.clone());
+        }
         self.hooks.runs.insert(
             run.clone(),
             HostRun {
@@ -88,6 +95,8 @@ impl HostCommandOwner {
                 producer,
                 inputs: HostOwnedInputClosure { context, inputs },
                 tasks: BTreeMap::new(),
+                settled_candidates,
+                release_notice: None,
                 media_reads: BTreeMap::new(),
                 continuable: true,
                 last_continue: Some(continue_floor),

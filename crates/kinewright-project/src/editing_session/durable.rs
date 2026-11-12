@@ -720,6 +720,58 @@ impl Ja1EditingSession {
         name: &str,
         role: crate::history_record::HistoryRole,
     ) -> Result<DurableBranchSessionGuard, BundleError> {
+        let session = self.prepare_reopened_branch(branch, base_ref, name, role)?;
+        let guard = session.guard.clone();
+        self.durable_sessions.push(session);
+        Ok(guard)
+    }
+    /// Register a native task and its candidate only after both journals replay.
+    pub fn reopen_native_task_pair(
+        &mut self,
+        task: BranchId,
+        task_base: &ObjectRef,
+        candidate: BranchId,
+        candidate_base: &ObjectRef,
+    ) -> Result<(), BundleError> {
+        if task == candidate {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.durable_sessions
+            .try_reserve(2)
+            .map_err(|_| BundleError::Capacity("durable session registrations"))?;
+        let mut prepared = Vec::new();
+        for (branch, base, role) in [
+            (task, task_base, crate::history_record::HistoryRole::Task),
+            (
+                candidate,
+                candidate_base,
+                crate::history_record::HistoryRole::Candidate,
+            ),
+        ] {
+            if !self
+                .durable_sessions
+                .iter()
+                .any(|session| session.guard.branch == branch)
+            {
+                if u64::try_from(self.durable_sessions.len() + prepared.len())
+                    .map_err(|_| BundleError::Capacity("durable session registrations"))?
+                    >= self.store()?.limits().objects
+                {
+                    return Err(BundleError::Capacity("durable session registrations"));
+                }
+                prepared.push(self.prepare_reopened_branch(branch, base, "native branch", role)?);
+            }
+        }
+        self.durable_sessions.extend(prepared);
+        Ok(())
+    }
+    fn prepare_reopened_branch(
+        &mut self,
+        branch: BranchId,
+        base_ref: &ObjectRef,
+        name: &str,
+        role: crate::history_record::HistoryRole,
+    ) -> Result<RegisteredSession, BundleError> {
         if self
             .core
             .attachment_state()
@@ -760,6 +812,14 @@ impl Ja1EditingSession {
             return Err(BundleError::HistoryChanged);
         }
         let history = bundle.branch_history(&branch)?;
+        let lineage = bundle.branch_lineage(&branch)?;
+        crate::history_size::verify_history_lineage(
+            &history,
+            &lineage,
+            role,
+            bundle.store().limits(),
+        )?;
+        drop(lineage);
         let core =
             Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         bundle
@@ -781,19 +841,22 @@ impl Ja1EditingSession {
             core: core.clone(),
             epoch: bundle.store.owner_epoch(),
         };
-        self.durable_sessions.push(RegisteredSession {
+        let session = RegisteredSession {
             digest_cache: std::cell::RefCell::new(None),
-            guard: guard.clone(),
+            guard,
             name: name.into(),
             pin,
             _charge: charge,
-        });
+        };
         attachment
             .resume(&candidate_cut)
             .map_err(crate::bundle::history_error)?;
-        Ok(guard)
+        Ok(session)
     }
-    fn registered(&self, guard: &DurableBranchSessionGuard) -> Result<usize, BundleError> {
+    pub(super) fn registered(
+        &self,
+        guard: &DurableBranchSessionGuard,
+    ) -> Result<usize, BundleError> {
         self.durable_sessions
             .iter()
             .position(|r| {

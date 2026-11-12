@@ -64,6 +64,7 @@ mod tests {
     include!("run_limit_cleanup_tests.rs");
     include!("history_capacity_tests.rs");
     include!("history_capacity_lifecycle_tests.rs");
+    include!("settled_release_tests.rs");
     include!("c5_fix2_tests.rs");
     include!("c5_fix3_tests.rs");
     include!("c5_fix7_tests.rs");

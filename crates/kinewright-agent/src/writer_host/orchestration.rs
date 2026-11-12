@@ -150,6 +150,9 @@ pub(super) struct HostRun {
     pub producer: HostAuth,
     pub inputs: super::continuation::HostOwnedInputClosure,
     pub tasks: BTreeMap<TaskId, EditorTask>,
+    pub settled_candidates:
+        std::collections::BTreeSet<kinewright_project::bundle_records::BranchId>,
+    pub release_notice: Option<String>,
     pub media_reads: BTreeMap<TaskId, Arc<super::task_context::MediaReadWork>>,
     pub continuable: bool,
     pub last_continue: Option<u64>,
@@ -1238,10 +1241,6 @@ impl HostCommandOwner {
         run: &RunId,
         after_sequence: u64,
     ) -> Result<RunViewPage, HostError> {
-        let projection = self
-            .owner()?
-            .orchestration_projection(run)?
-            .ok_or_else(|| refused("unknown run"))?;
         if let Some(scope) = &self.attachments[index].producer_scope {
             if &scope.run != run || scope.expired() {
                 return Err(refused("Producer observation scope or expiry"));
@@ -1249,6 +1248,24 @@ impl HostCommandOwner {
         } else if self.attachments[index].role == AttachmentRole::Producer {
             return Err(refused("Producer has no observation scope"));
         }
+        let projection = self
+            .owner()?
+            .orchestration_projection(run)
+            .map_err(|error| {
+                match (
+                    error,
+                    self.hooks
+                        .runs
+                        .get(run)
+                        .and_then(|runtime| runtime.release_notice.as_ref()),
+                ) {
+                    (BundleError::Corrupt(details), Some(notice)) => {
+                        BundleError::Corrupt(format!("{notice} {details}"))
+                    }
+                    (error, _) => error,
+                }
+            })?
+            .ok_or_else(|| refused("unknown run"))?;
         #[cfg(target_os = "linux")]
         let runtime_status = self.native_recovery_status.clone();
         #[cfg(not(target_os = "linux"))]
@@ -1300,6 +1317,17 @@ impl HostCommandOwner {
             .or_else(|| {
                 machine::silently_stalled(&projection).then(|| machine::SILENT_STALL.into())
             });
+        let runtime_status = match (
+            runtime_status,
+            self.hooks
+                .runs
+                .get(run)
+                .and_then(|runtime| runtime.release_notice.as_ref()),
+        ) {
+            (Some(status), Some(notice)) => Some(format!("{status} {notice}")),
+            (None, Some(notice)) => Some(notice.clone()),
+            (status, None) => status,
+        };
         let accounting = self.durable_run_accounting(&projection)?;
         let wait_reason = match &projection.wait {
             crate::orchestration::orchestration_records::RunWait::Provider(detail)

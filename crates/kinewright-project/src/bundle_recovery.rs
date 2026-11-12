@@ -1120,39 +1120,14 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             &input_manifests[&checkpoint.input_manifest_ref.sha256],
         )?;
         crate::bundle_commit::validate_inputs(&history, &retained_inputs)?;
-        if checkpoint.history_role != crate::history_record::HistoryRole::Ordinary {
-            let live = crate::history_size::native_history_live_bytes(&history)?
-                .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
-                .ok_or(BundleError::Capacity("role history memory"))?;
-            if live > checkpoint.history_role.live_limit(limits) {
-                return Err(BundleError::Capacity("role history memory"));
-            }
-        }
         // The resolver already executed the ordinary journal and checked every
         // retained hash. Avoid retaining another replay actor during graph admission.
-        let clip_keys = |document: &Document| -> BTreeSet<_> {
-            document
-                .tracks
-                .iter()
-                .flat_map(|track| track.clips.iter().map(|clip| clip.id))
-                .collect()
-        };
-        if lineage.current.keys().copied().collect::<BTreeSet<_>>() != clip_keys(&history.document)
-            || lineage.undo.len() != history.cursor.undo.len()
-            || lineage.redo.len() != history.cursor.redo.len()
-            || lineage
-                .undo
-                .iter()
-                .chain(&lineage.redo)
-                .zip(history.cursor.undo.iter().chain(&history.cursor.redo))
-                .any(|(keys, entry)| {
-                    keys.keys().copied().collect::<BTreeSet<_>>() != clip_keys(&entry.document)
-                })
-        {
-            return Err(BundleError::Corrupt(
-                "lineage boundary differs from history".into(),
-            ));
-        }
+        crate::history_size::verify_history_lineage(
+            &history,
+            &lineage,
+            checkpoint.history_role,
+            limits,
+        )?;
 
         memo.remember_resolved_history(
             &checkpoint.history_ref,
