@@ -91,3 +91,23 @@ opt-level = 3
 
 [profile.test.package.kinewright-hash]
 opt-level = 3
+
+# The native history lifecycle exercises real checkpoint codecs on every edit.
+# Optimize this test-only path while retaining debug assertions and overflow checks.
+[profile.test.package.serde_json]
+opt-level = 3
+
+[profile.test.package.itoa]
+opt-level = 3
+
+[profile.test.package.zmij]
+opt-level = 3
+
+[profile.test.package.kinewright-core]
+opt-level = 3
+
+[profile.test.package.kinewright-project]
+opt-level = 3
+
+[profile.test.package.kinewright-agent]
+opt-level = 3

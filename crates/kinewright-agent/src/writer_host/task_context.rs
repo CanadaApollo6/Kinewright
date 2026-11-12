@@ -510,23 +510,14 @@ impl MediaReadWork {
         if std::thread::Builder::new()
             .name("task-media-watch".into())
             .spawn(move || {
+                // Release admission only after the finished result is installed.
+                let _permit = permit;
                 let signal = Arc::clone(&work.cancel);
+                #[cfg(test)]
+                let outcome = input.outcome.clone();
                 let result = std::thread::Builder::new()
                     .name("task-media-read".into())
-                    .spawn(move || {
-                        let _permit = permit;
-                        #[cfg(test)]
-                        let outcome = input.outcome.clone();
-                        let result = input.decode(&signal);
-                        #[cfg(test)]
-                        if let Some(outcome) = outcome {
-                            outcome.store(
-                                if result.is_ok() { 1 } else { 2 },
-                                std::sync::atomic::Ordering::Release,
-                            );
-                        }
-                        result
-                    })
+                    .spawn(move || input.decode(&signal))
                     .map_err(|_| media_failed())
                     .and_then(|worker| {
                         loop {
@@ -545,6 +536,13 @@ impl MediaReadWork {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                         }
                     });
+                #[cfg(test)]
+                if let Some(outcome) = outcome {
+                    outcome.store(
+                        if result.is_ok() { 1 } else { 2 },
+                        std::sync::atomic::Ordering::Release,
+                    );
+                }
                 *work
                     .state
                     .lock()

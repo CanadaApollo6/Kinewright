@@ -1193,7 +1193,7 @@ impl Recovery {
             .expect("the real startup scan recognizes the fixture journal");
         self.pending.push(entry);
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn pending_restore_for_test(&self, journal_path: &Path) -> RestoreRequest {
         self.pending
             .iter()

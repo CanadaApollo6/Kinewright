@@ -14,6 +14,7 @@
 # This is a compile and lint check, not Windows execution.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
+printf 'Windows cross-clippy gate, HEAD %s\n' "$(git rev-parse HEAD)"
 # Match CI's three feature-disabled builds on this Linux host before linting
 # MSVC. This helper owns its lock; never wrap this script in another flock.
 bash scripts/ci-shipping-builds.sh
@@ -47,6 +48,8 @@ run() {
 }
 run --workspace --all-targets
 run -p kinewright-agent --all-targets --features slow-tests
+run -p kinewright-app --all-targets
+run -p kinewright-app --all-targets --features slow-tests
 # Also compile the MSVC shipping feature graph, without linking/running it.
 shipping() {
     flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 19 \

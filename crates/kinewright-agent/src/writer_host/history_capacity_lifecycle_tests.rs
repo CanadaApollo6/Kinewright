@@ -73,6 +73,7 @@ fn history_capacity_crash_child() {
         .parse()
         .unwrap();
     let r = capacity_run(clips);
+    let edits_started = Instant::now();
     let edits = if clips == 1200 { 68 } else { 200 };
     for edit in 0..edits {
         let reply = capacity_edit(&r.editor, &r.core, clips, edit);
@@ -81,6 +82,13 @@ fn history_capacity_crash_child() {
             Some(false),
             "CAPACITY_ACCEPTED {clips}/{edit}: {reply:?}"
         );
+        if (edit + 1).is_multiple_of(25) {
+            println!(
+                "CAPACITY_EDIT_PROGRESS clips={clips} accepted={} seconds={:.3}",
+                edit + 1,
+                edits_started.elapsed().as_secs_f64()
+            );
+        }
     }
     assert_eq!(r.core.export_history().unwrap().batches.len(), edits);
     if clips == 1200 {
@@ -144,54 +152,89 @@ fn capacity_edit(
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn history_capacity_full_lifecycle_crash_reopen() {
+    capacity_lifecycle_crash_reopen_row(400);
+}
+
+#[test]
+#[ignore = "local measurement: 1200 clips/68 edits through real tools, crash and exact reopen; timed separately from the required 400/200 CI witness"]
+fn history_capacity_1200_lifecycle_crash_reopen() {
+    capacity_lifecycle_crash_reopen_row(1200);
+}
+
+fn capacity_lifecycle_crash_reopen_row(clips: usize) {
     let temp = kinewright_media::test_support::TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
         "capacity-crash-parent",
     );
-    for clips in [400, 1200] {
-        let handoff = temp.path(&format!("handoff-{clips}.json"));
-        let log = temp.path(&format!("child-{clips}.log"));
-        let started = Instant::now();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "writer_host::hooks_tests::tests::history_capacity_crash_child",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env("KINEWRIGHT_CAPACITY_HANDOFF", &handoff)
-            .env("KINEWRIGHT_CAPACITY_CLIPS", clips.to_string())
-            .stdout(std::fs::File::create(&log).unwrap())
-            .stderr(std::fs::File::options().append(true).open(&log).unwrap())
-            .status()
-            .unwrap();
-        assert_eq!(
-            status.code(),
-            Some(86),
-            "CAPACITY_REAL_CRASH clips={clips}: {}",
-            std::fs::read_to_string(&log).unwrap()
-        );
-        println!(
-            "CAPACITY_CHILD_LOG clips={clips} {}",
-            std::fs::read_to_string(log).unwrap()
-        );
-        let data: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(handoff).unwrap()).unwrap();
-        let root = std::path::PathBuf::from(data["root"].as_str().unwrap());
-        assert!(root.starts_with(kinewright_media::test_support::workspace_target_dir()));
-        let samples: usize = std::env::var("KINEWRIGHT_CAPACITY_OPEN_SAMPLES")
-            .map_or(1, |value| value.parse().unwrap());
-        assert!((1..=6).contains(&samples));
-        for _ in 0..samples {
-            capacity_check_reopen(&data);
+    let handoff = temp.path(&format!("handoff-{clips}.json"));
+    let log = temp.path(&format!("child-{clips}.log"));
+    let started = Instant::now();
+    let executable = std::env::current_exe().unwrap();
+    let directory = std::env::current_dir().unwrap();
+    let mut child = std::process::Command::new(&executable)
+        .current_dir(&directory)
+        .args([
+            "--exact",
+            "writer_host::hooks_tests::tests::history_capacity_crash_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("KINEWRIGHT_CAPACITY_HANDOFF", &handoff)
+        .env("KINEWRIGHT_CAPACITY_CLIPS", clips.to_string())
+        .stdout(std::fs::File::create(&log).unwrap())
+        .stderr(std::fs::File::options().append(true).open(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
         }
-        std::fs::remove_dir_all(root).unwrap();
-        println!(
-            "CAPACITY_LIFECYCLE clips={clips} edits={} seconds={:.3}",
-            if clips == 400 { 200 } else { 68 },
-            started.elapsed().as_secs_f64()
-        );
+        if started.elapsed() > Duration::from_secs(500) {
+            let proc = std::path::PathBuf::from(format!("/proc/{}", child.id()));
+            assert_eq!(std::fs::read_link(proc.join("cwd")).unwrap(), directory);
+            let argv = std::fs::read(proc.join("cmdline")).unwrap();
+            assert_eq!(
+                argv.split(|byte| *byte == 0).next().unwrap(),
+                executable.as_os_str().as_encoded_bytes()
+            );
+            assert!(
+                argv.windows(b"history_capacity_crash_child".len())
+                    .any(|part| part == b"history_capacity_crash_child")
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!(
+                "CAPACITY_CHILD_TIMEOUT clips={clips}; owned child terminated and reaped: {}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(
+        status.code(),
+        Some(86),
+        "CAPACITY_REAL_CRASH clips={clips}: {}",
+        std::fs::read_to_string(&log).unwrap()
+    );
+    println!(
+        "CAPACITY_CHILD_LOG clips={clips} {}",
+        std::fs::read_to_string(log).unwrap()
+    );
+    let data: serde_json::Value = serde_json::from_slice(&std::fs::read(handoff).unwrap()).unwrap();
+    let root = std::path::PathBuf::from(data["root"].as_str().unwrap());
+    assert!(root.starts_with(kinewright_media::test_support::workspace_target_dir()));
+    let samples: usize =
+        std::env::var("KINEWRIGHT_CAPACITY_OPEN_SAMPLES").map_or(1, |value| value.parse().unwrap());
+    assert!((1..=6).contains(&samples));
+    for _ in 0..samples {
+        capacity_check_reopen(&data);
     }
+    std::fs::remove_dir_all(root).unwrap();
+    println!(
+        "CAPACITY_LIFECYCLE clips={clips} edits={} seconds={:.3}",
+        if clips == 400 { 200 } else { 68 },
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn capacity_next_editor(r: &C5Fix10Run) -> (TaskId, C4Mcp, Core) {
