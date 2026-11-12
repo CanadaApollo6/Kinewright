@@ -1,6 +1,6 @@
 //! Independently verified checkpoint rescue. Failed history grants no writer authority.
 #![allow(clippy::missing_errors_doc)]
-use super::{RecoveryAssessment, assess, compare_edges, read_bytes, read_record, walk};
+use super::{RecoveryAssessment, compare_edges, read_bytes, read_record, walk};
 use crate::{
     bundle::{BundleError, BundleSaveReport, BundleWriteAdmission, ProjectBundle},
     bundle_commit::{BranchSeed, BundleCommit},
@@ -63,17 +63,20 @@ impl VerifiedCheckpointRecovery {
 
     /// Ordinary/native open stays strict. This capability offers a checkpoint cut,
     /// never a resolved value under the failed history reference.
+    pub fn open(path: &Path) -> Result<Option<Self>, BundleError> {
+        Self::open_with_limits(path, &StorageLimits::default())
+    }
     #[allow(
         clippy::too_many_lines,
         reason = "one independently verified source cut before granting a rescue capability"
     )]
-    pub fn open(path: &Path) -> Result<Option<Self>, BundleError> {
+    fn open_with_limits(path: &Path, limits: &StorageLimits) -> Result<Option<Self>, BundleError> {
         let RecoveryAssessment::Quarantined {
             admission,
             branches,
             verified_document_bytes,
             ..
-        } = assess(path)?
+        } = super::assess_with_limits(path, limits)?
         else {
             return Ok(None);
         };
@@ -112,7 +115,7 @@ impl VerifiedCheckpointRecovery {
             &checkpoint.history_ref,
             &admission.data.usage,
             &mut BTreeSet::new(),
-            &StorageLimits::default(),
+            limits,
             false,
         ) {
             Err(BundleError::Corrupt(reason)) => reason,

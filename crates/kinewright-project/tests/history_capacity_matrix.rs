@@ -149,7 +149,7 @@ fn native_task_history_capacity_table() {
                 "record_encoded":serde_json::to_vec(&record).unwrap().len(),
                 "record_decoded":kinewright_project::task_history_admission::decoded_history_bytes_for_fixture(history).unwrap(),
                 "lineage_encoded":serde_json::to_vec(&lineage).unwrap().len(),
-                "replay_bound":kinewright_core::history_size::replay_live_bound(&record.journal, &history.baseline, &history.document).unwrap(),
+                "replay_bound":kinewright_core::history_size::measure_replay_peak(&record.journal, &history.baseline, &history.document).unwrap(),
             })
         };
         println!(

@@ -751,7 +751,11 @@ impl ProjectBundle {
             let history = self
                 .store
                 .resolve_copy_history(&self.branches[id].history_ref, cleanup_only)?;
-            let bounded = crate::bundle_commit::bound_history(&history, &limits)?;
+            let bounded = self.store.with_history_admission(
+                crate::history_record::HistoryRole::Ordinary,
+                &limits,
+                || crate::bundle_commit::bound_history(&history, &limits),
+            )?;
             if bounded != *history {
                 return Err(BundleError::Capacity(
                     "copy history exceeds destination allowance",

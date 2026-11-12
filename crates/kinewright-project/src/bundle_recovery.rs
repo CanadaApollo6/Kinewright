@@ -1121,7 +1121,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         )?;
         crate::bundle_commit::validate_inputs(&history, &retained_inputs)?;
         if checkpoint.history_role != crate::history_record::HistoryRole::Ordinary {
-            let live = crate::history_size::history_live_bytes(&history)?
+            let live = crate::history_size::native_history_live_bytes(&history)?
                 .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
                 .ok_or(BundleError::Capacity("role history memory"))?;
             if live > checkpoint.history_role.live_limit(limits) {
@@ -1130,16 +1130,27 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         }
         // The resolver already executed the ordinary journal and checked every
         // retained hash. Avoid retaining another replay actor during graph admission.
-        if lineage.current.keys().copied().collect::<BTreeSet<_>>()
-            != history
-                .document
+        let clip_keys = |document: &Document| -> BTreeSet<_> {
+            document
                 .tracks
                 .iter()
-                .flat_map(|t| t.clips.iter().map(|c| c.id))
+                .flat_map(|track| track.clips.iter().map(|clip| clip.id))
                 .collect()
+        };
+        if lineage.current.keys().copied().collect::<BTreeSet<_>>() != clip_keys(&history.document)
+            || lineage.undo.len() != history.cursor.undo.len()
+            || lineage.redo.len() != history.cursor.redo.len()
+            || lineage
+                .undo
+                .iter()
+                .chain(&lineage.redo)
+                .zip(history.cursor.undo.iter().chain(&history.cursor.redo))
+                .any(|(keys, entry)| {
+                    keys.keys().copied().collect::<BTreeSet<_>>() != clip_keys(&entry.document)
+                })
         {
             return Err(BundleError::Corrupt(
-                "lineage head differs from history".into(),
+                "lineage boundary differs from history".into(),
             ));
         }
 
@@ -1334,8 +1345,13 @@ pub struct QuarantinedBranch {
 /// # Errors
 /// Refuses unreadable or unsupported envelopes and bounded inspection failures.
 pub fn assess(path: &Path) -> Result<RecoveryAssessment, BundleError> {
-    let limits = &StorageLimits::default();
-    let error = match read(path) {
+    assess_with_limits(path, &StorageLimits::default())
+}
+pub(crate) fn assess_with_limits(
+    path: &Path,
+    limits: &StorageLimits,
+) -> Result<RecoveryAssessment, BundleError> {
+    let error = match read_with_limits(path, limits.clone()) {
         Ok(loaded) => return Ok(RecoveryAssessment::Verified(Box::new(loaded))),
         Err(error) => error,
     };

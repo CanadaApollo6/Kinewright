@@ -414,6 +414,39 @@ impl StorageReservation {
     pub(crate) const fn reserved_bytes_probe(&self) -> u64 {
         self.bytes
     }
+    /// Release unused replay overlap without an uncharged gap for its result.
+    pub(crate) fn finish_history_replay(mut self, retained: u64) -> Result<Self, BundleError> {
+        if !self.active
+            || self.bytes != 0
+            || self.decoder != 0
+            || retained > self.decoded
+            || (self.history != 0 && self.history != self.decoded)
+        {
+            return Err(BundleError::Capacity("history replay accounting"));
+        }
+        let release = self.decoded - retained;
+        let mut state = self
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
+        let decoded = state
+            .decoded_bytes
+            .checked_sub(release)
+            .ok_or(BundleError::Capacity("history replay accounting"))?;
+        let history = state
+            .live_history_bytes
+            .checked_sub(if self.history == 0 { 0 } else { release })
+            .ok_or(BundleError::Capacity("history replay accounting"))?;
+        state.decoded_bytes = decoded;
+        state.live_history_bytes = history;
+        self.decoded = retained;
+        if self.history != 0 {
+            self.history = retained;
+        }
+        drop(state);
+        Ok(self)
+    }
+
     /// An uncertain on-disk stage stays charged after authority teardown.
     pub(crate) fn retain_charge(mut self) {
         self.active = false;

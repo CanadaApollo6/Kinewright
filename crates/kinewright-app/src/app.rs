@@ -1228,6 +1228,9 @@ impl KinewrightApp {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label(CHECKPOINT_RECOVERY_NOTICE);
+                    if let Some(recovery) = &self.focused().checkpoint_recovery {
+                        ui.label(&recovery.disclosure().reason);
+                    }
                     recover = ui.button("Save a recovered copy…").clicked();
                 });
             if recover {

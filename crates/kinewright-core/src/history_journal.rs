@@ -94,13 +94,6 @@ impl HistoryTransport {
     /// # Errors
     /// Refuses any command or retained hash mismatch.
     pub fn resolve(&self) -> Result<HistorySnapshot, HistoryError> {
-        // Transports have no store ledger beside them. Refuse amplification
-        // before replay; project callers also reserve their stricter role budget.
-        if crate::history_size::replay_live_bound(&self.journal, &self.baseline, &self.document)?
-            > crate::history_size::TRANSPORT_LIVE_BYTES
-        {
-            return Err(HistoryError::Capacity);
-        }
         self.journal
             .resolve(Arc::clone(&self.baseline), &self.document)
     }
@@ -109,7 +102,7 @@ impl HistoryTransport {
 /// Hash the canonical document encoding without retaining another encoded copy.
 ///
 /// # Errors
-/// Returns corruption when document serialization fails.
+/// Returns an internal failure when the canonical document cannot be encoded.
 pub fn history_document_hash(document: &Document) -> Result<String, HistoryError> {
     struct Writer(kinewright_hash::Sha256);
     impl std::io::Write for Writer {
@@ -122,10 +115,10 @@ pub fn history_document_hash(document: &Document) -> Result<String, HistoryError
         }
     }
     let mut writer = Writer(kinewright_hash::Sha256::new());
-    serde_json::to_writer(&mut writer, document).map_err(|_| HistoryError::Corrupt)?;
+    serde_json::to_writer(&mut writer, document).map_err(|_| HistoryError::Encoding)?;
     let mut hash = String::with_capacity(64);
     for byte in writer.0.finalize() {
-        write!(&mut hash, "{byte:02x}").map_err(|_| HistoryError::Corrupt)?;
+        write!(&mut hash, "{byte:02x}").map_err(|_| HistoryError::CommitInvariant)?;
     }
     Ok(hash)
 }
@@ -166,7 +159,25 @@ impl HistoryJournal {
         baseline: Arc<Document>,
         document: &Document,
     ) -> Result<HistorySnapshot, HistoryError> {
-        crate::actor::resolve_history_journal(self, baseline, document)
+        self.resolve_with_budget(
+            baseline,
+            document,
+            crate::history_size::TRANSPORT_LIVE_BYTES,
+        )
+        .map(|(history, _)| history)
+    }
+
+    /// Replay inside an already reserved window. Every operation checks its
+    /// temporary allocations before applying, including intermediate batch states.
+    /// # Errors
+    /// Capacity is distinct from invalid command, identity or boundary bytes.
+    pub fn resolve_with_budget(
+        &self,
+        baseline: Arc<Document>,
+        document: &Document,
+        limit: u64,
+    ) -> Result<(HistorySnapshot, u64), HistoryError> {
+        crate::actor::resolve_history_journal(self, baseline, document, limit)
     }
 }
 

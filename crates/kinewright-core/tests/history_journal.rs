@@ -4,6 +4,17 @@ use kinewright_core::{Command, Core, Document, Event, HistorySnapshot, Operation
 mod history_oracle;
 use history_oracle::document_oracle as oracle;
 
+fn history_effect(keys: i64) -> kinewright_core::Effect {
+    serde_json::from_value(serde_json::json!({
+        "id":1,"name":"primary_correction","enabled":true,"enabled_curve":null,
+        "parameters":{"exposure_milli_stops":0},
+        "keyframes":{"exposure_milli_stops":{"keyframes":(0..keys).map(|at| serde_json::json!({
+            "at":at,"value":0,"interpolation":"linear","tangent_in":0,"tangent_out":0,
+        })).collect::<Vec<_>>()}}
+    }))
+    .unwrap()
+}
+
 fn fixture(clips: usize) -> Document {
     let mut document = Document::default();
     for track in 1..=clips / 10 {
@@ -125,7 +136,7 @@ fn history_compact_gestures_empty_steps_and_abandoned_redo_match_oracle() {
 }
 
 #[test]
-fn history_transport_refuses_replay_amplification_before_execution() {
+fn history_transport_refuses_before_exceeding_replay_window() {
     let document = std::sync::Arc::new(fixture(1200));
     let hash = kinewright_core::history_document_hash(&document).unwrap();
     let batches = (0..4096)
@@ -135,7 +146,12 @@ fn history_transport_refuses_replay_amplification_before_execution() {
                 track: TrackId(1),
                 locked: order % 2 == 0,
             }]),
-            identity_effects: vec![],
+            identity_effects: vec![kinewright_core::JournalIdentityEffect {
+                created: vec![],
+                deleted: vec![],
+                split_parent: None,
+                split_results: vec![],
+            }],
             undo_entries: usize::try_from(order + 1).unwrap(),
             redo_entries: 0,
         })
@@ -154,7 +170,9 @@ fn history_transport_refuses_replay_amplification_before_execution() {
             },
         },
     };
-    // Invalid effects would be Corrupt if replay began; capacity wins first.
+    // Identities are valid so replay reaches real document amplification.
+    // It must stop within the reserved window, before reaching the intentionally
+    // incomplete final cursor. Declared counts alone cannot authorize allocation.
     assert_eq!(
         transport.resolve(),
         Err(kinewright_core::HistoryError::Capacity)
@@ -206,7 +224,7 @@ fn replay_reservation_covers_reallocating_clip_arrays() {
     let history = core.export_history().unwrap();
     let bytes = serde_json::to_vec(&history).unwrap();
     let transport: kinewright_core::HistoryTransport = serde_json::from_slice(&bytes).unwrap();
-    let bound = kinewright_core::history_size::replay_live_bound(
+    let bound = kinewright_core::history_size::measure_replay_peak(
         &transport.journal,
         &transport.baseline,
         &transport.document,
@@ -250,13 +268,13 @@ fn small_vector_transport_growth_is_reserved_before_replay() {
         serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
     assert!(wire.baseline.tracks.capacity() > original.baseline.tracks.capacity());
     assert!(wire.baseline.markers.capacity() > original.baseline.markers.capacity());
-    let charge = kinewright_core::history_size::replay_live_bound(
+    let charge = kinewright_core::history_size::measure_replay_peak(
         &wire.journal,
         &original.baseline,
         &original.document,
     )
     .unwrap();
-    let decoded_charge = kinewright_core::history_size::replay_live_bound(
+    let decoded_charge = kinewright_core::history_size::measure_replay_peak(
         &wire.journal,
         &wire.baseline,
         &wire.document,
@@ -274,16 +292,17 @@ fn generated_command_prefixes_equal_document_bearing_oracle() {
     const SEED: u64 = 0x71e1_8a5e_f32a_b0ac;
     let mut random = SEED;
     for case in 0..32 {
-        let source = Core::spawn(Document {
-            tracks: vec![kinewright_core::Track {
-                id: TrackId(1),
-                kind: kinewright_core::TrackKind::Video,
-                sync_lock: true,
-                clips: vec![],
-            }],
-            ..Document::default()
-        })
-        .unwrap();
+        let source = Core::spawn(fixture(10)).unwrap();
+        let effect = history_effect(10);
+        assert!(matches!(
+            source
+                .request(Command::Do(Operation::AddEffect {
+                    clip: kinewright_core::ClipId(101),
+                    effect,
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
         let mut resumed = Core::spawn(Document::default()).unwrap();
         resumed
             .restore_history(source.export_history().unwrap())
@@ -299,6 +318,31 @@ fn generated_command_prefixes_equal_document_bearing_oracle() {
             let command = if step == 0 {
                 Command::Undo
             } else if step == 1 {
+                Command::Redo
+            } else if step == 2 {
+                Command::Do(Operation::CopyClipAttributes {
+                    from_clip: kinewright_core::ClipId(101),
+                    to_clip: kinewright_core::ClipId(102),
+                    names: None,
+                    include_keyframes: true,
+                })
+            } else if step == 3 {
+                Command::Do(Operation::RemoveEffect {
+                    clip: kinewright_core::ClipId(102),
+                    effect: kinewright_core::EffectId(1),
+                })
+            } else if step == 4 {
+                Command::Do(Operation::SplitClip {
+                    clip: kinewright_core::ClipId(101),
+                    at: kinewright_core::TimeCode(45),
+                })
+            } else if step == 5 {
+                Command::Do(Operation::DeleteClip {
+                    clip: kinewright_core::ClipId(111),
+                })
+            } else if step == 6 {
+                Command::Undo
+            } else if step == 7 {
                 Command::Redo
             } else {
                 match random % 6 {
@@ -530,5 +574,327 @@ fn history_transport_requires_its_current_typed_fields() {
     assert!(
         serde_json::from_value::<HistorySnapshot>(missing).is_err(),
         "NULLABLE_IDENTITY_FIELD_IS_REQUIRED"
+    );
+}
+
+#[test]
+fn history_replay_reservation_covers_implicit_splits_and_removals() {
+    use kinewright_core::{AssetId, ClipId, MediaAsset, MediaKind, TimeCode};
+    for patched in [false, true] {
+        let mut document = fixture(10);
+        document.tracks[0].clips.truncate(1);
+        document.duration = TimeCode(90);
+        document.media_pool.push(MediaAsset {
+            id: AssetId(1),
+            path: "replay-only.mp4".into(),
+            name: "replay-only".into(),
+            duration: TimeCode(10000),
+            fps: document.fps,
+            kind: MediaKind::Video,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+            color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
+        });
+        let core = Core::spawn(document).unwrap();
+        assert!(matches!(
+            core.request(Command::Do(Operation::AddEffect {
+                clip: ClipId(101),
+                effect: history_effect(10),
+            }))
+            .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        for cut in 0..60 {
+            let command = if patched {
+                Operation::PatchedThreePointEdit {
+                    asset: AssetId(1),
+                    source_in: Some(TimeCode(0)),
+                    source_out: Some(TimeCode(1)),
+                    timeline_in: Some(TimeCode(cut * 2 + 1)),
+                    timeline_out: None,
+                    mode: kinewright_core::ThreePointMode::Insert,
+                    video_track: Some(TrackId(1)),
+                    audio_track: None,
+                }
+            } else {
+                Operation::ThreePointEdit {
+                    track: TrackId(1),
+                    asset: AssetId(1),
+                    source_in: Some(TimeCode(0)),
+                    source_out: Some(TimeCode(1)),
+                    timeline_in: Some(TimeCode(cut * 2 + 1)),
+                    timeline_out: None,
+                    mode: kinewright_core::ThreePointMode::Insert,
+                }
+            };
+            let event = core.request(Command::Do(command)).unwrap();
+            assert!(matches!(event, Event::DocumentChanged { .. }), "{event:?}");
+        }
+        let deletes = core.export_history().unwrap().document.tracks[0]
+            .clips
+            .iter()
+            .filter(|clip| clip.id != ClipId(101))
+            .map(|clip| Operation::DeleteClip { clip: clip.id })
+            .collect();
+        assert!(matches!(
+            core.request(Command::DoBatch(deletes)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let history = core.export_history().unwrap();
+        let journal = kinewright_core::HistoryJournal::capture(&history).unwrap();
+        let reserved = kinewright_core::history_size::measure_replay_peak(
+            &journal,
+            &history.baseline,
+            &history.document,
+        )
+        .unwrap();
+        let retained =
+            kinewright_core::history_size::restored_history_live_bytes(&history).unwrap();
+        println!("IMPLICIT_SPLIT_REPLAY patched={patched} retained={retained} peak={reserved}");
+        assert!(retained <= reserved, "PRIOR_STATE_COPY_IS_RESERVED");
+        history_oracle::assert_compact_roundtrip(&history);
+    }
+}
+
+fn oracle_operation_kind(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::AddAsset { .. } => "AddAsset",
+        Operation::RelinkAsset { .. } => "RelinkAsset",
+        Operation::SetAssetColorDescription { .. } => "SetAssetColorDescription",
+        Operation::SetColorContext { .. } => "SetColorContext",
+        Operation::UpsertBin { .. } => "UpsertBin",
+        Operation::RemoveBin { .. } => "RemoveBin",
+        Operation::SetAssetBin { .. } => "SetAssetBin",
+        Operation::UpsertStringOut { .. } => "UpsertStringOut",
+        Operation::RemoveStringOut { .. } => "RemoveStringOut",
+        Operation::UpsertSyncGroup { .. } => "UpsertSyncGroup",
+        Operation::RemoveSyncGroup { .. } => "RemoveSyncGroup",
+        Operation::UpsertAudioBus { .. } => "UpsertAudioBus",
+        Operation::RemoveAudioBus { .. } => "RemoveAudioBus",
+        Operation::SetAudioMaster { .. } => "SetAudioMaster",
+        Operation::SetPanLaw { .. } => "SetPanLaw",
+        Operation::AddTrack { .. } => "AddTrack",
+        Operation::RemoveTrack { .. } => "RemoveTrack",
+        Operation::SetTrackSyncLock { .. } => "SetTrackSyncLock",
+        Operation::SetTrackMix { .. } => "SetTrackMix",
+        Operation::SetTrackAutomation { .. } => "SetTrackAutomation",
+        Operation::AddClip { .. } => "AddClip",
+        Operation::AddTitle { .. } => "AddTitle",
+        Operation::SplitClip { .. } => "SplitClip",
+        Operation::TrimClip { .. } => "TrimClip",
+        Operation::MoveClip { .. } => "MoveClip",
+        Operation::ThreePointEdit { .. } => "ThreePointEdit",
+        Operation::PatchedThreePointEdit { .. } => "PatchedThreePointEdit",
+        Operation::SlipClip { .. } => "SlipClip",
+        Operation::RollEdit { .. } => "RollEdit",
+        Operation::SlideClip { .. } => "SlideClip",
+        Operation::ReplaceClip { .. } => "ReplaceClip",
+        Operation::FitToFill { .. } => "FitToFill",
+        Operation::DeleteClip { .. } => "DeleteClip",
+        Operation::RippleDeleteClip { .. } => "RippleDeleteClip",
+        Operation::RippleInsertGap { .. } => "RippleInsertGap",
+        Operation::LinkClips { .. } => "LinkClips",
+        Operation::UnlinkClips { .. } => "UnlinkClips",
+        Operation::AddMarker { .. } => "AddMarker",
+        Operation::RemoveMarker { .. } => "RemoveMarker",
+        Operation::MoveMarker { .. } => "MoveMarker",
+        Operation::AddEffect { .. } => "AddEffect",
+        Operation::InsertEffect { .. } => "InsertEffect",
+        Operation::RemoveEffect { .. } => "RemoveEffect",
+        Operation::SetEffectParam { .. } => "SetEffectParam",
+        Operation::SetEffectKeyframes { .. } => "SetEffectKeyframes",
+        Operation::ClearEffectKeyframes { .. } => "ClearEffectKeyframes",
+        Operation::UpsertEffectKeyframe { .. } => "UpsertEffectKeyframe",
+        Operation::RemoveEffectKeyframe { .. } => "RemoveEffectKeyframe",
+        Operation::SetEffectEnabled { .. } => "SetEffectEnabled",
+        Operation::SetClipEnabled { .. } => "SetClipEnabled",
+        Operation::SetClipEnabledCurve { .. } => "SetClipEnabledCurve",
+        Operation::CopyClipAttributes { .. } => "CopyClipAttributes",
+        Operation::ConvertLegacyLook { .. } => "ConvertLegacyLook",
+        Operation::AddLutAsset { .. } => "AddLutAsset",
+        Operation::RemoveLutAsset { .. } => "RemoveLutAsset",
+        Operation::SetTitleParam { .. } => "SetTitleParam",
+        Operation::SetClipAudio { .. } => "SetClipAudio",
+        Operation::SetClipGainEnvelope { .. } => "SetClipGainEnvelope",
+        Operation::AddTransition { .. } => "AddTransition",
+        Operation::RemoveTransition { .. } => "RemoveTransition",
+        Operation::SetMarkerParam { .. } => "SetMarkerParam",
+        Operation::AddFreezeFrame { .. } => "AddFreezeFrame",
+        Operation::SetClipSpeed { .. } => "SetClipSpeed",
+        Operation::SetClipBlendMode { .. } => "SetClipBlendMode",
+        Operation::AddAdjustmentClip { .. } => "AddAdjustmentClip",
+        Operation::AddSolidClip { .. } => "AddSolidClip",
+        Operation::SetSolidColor { .. } => "SetSolidColor",
+    }
+}
+
+#[test]
+fn every_operation_kind_has_a_complete_history_oracle_case() {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Case {
+        document: Document,
+        operation: Operation,
+    }
+    let cases: std::collections::BTreeMap<String, Case> =
+        serde_json::from_str(include_str!("support/history_operation_cases.json")).unwrap();
+    let schema = serde_json::to_value(schemars::schema_for!(Operation)).unwrap();
+    let expected: std::collections::BTreeSet<_> = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|variant| variant["properties"].as_object().unwrap().keys().cloned())
+        .collect();
+    let mut hits = std::collections::BTreeSet::new();
+    for (kind, mut case) in cases {
+        assert_eq!(oracle_operation_kind(&case.operation), kind);
+        history_oracle::ApplyHistoryOracle::apply_with_history_oracle(
+            &case.operation,
+            &mut case.document,
+        )
+        .unwrap();
+        assert!(hits.insert(kind));
+    }
+    assert_eq!(hits, expected, "EVERY_OPERATION_REQUIRES_AN_ORACLE_HIT");
+}
+
+#[test]
+fn history_replay_same_window_covers_cold_nested_vector_capacity() {
+    let mut document = fixture(10);
+    document.tracks[0].clips.truncate(1);
+    document.duration = kinewright_core::TimeCode(90);
+    document.tracks[0].clips[0].effects = (1..=129)
+        .map(|id| kinewright_core::Effect {
+            id: kinewright_core::EffectId(id),
+            name: "opacity".into(),
+            enabled: true,
+            enabled_curve: None,
+            parameters: std::collections::BTreeMap::from([(
+                "percent".into(),
+                kinewright_core::ParamValue::Integer(100),
+            )]),
+            keyframes: std::collections::BTreeMap::new(),
+        })
+        .collect();
+    let core = Core::spawn(document).unwrap();
+    core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let original = core.export_history().unwrap();
+    let wire: kinewright_core::HistoryTransport =
+        serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+    assert!(
+        wire.baseline.tracks[0].clips[0].effects.capacity()
+            > original.baseline.tracks[0].clips[0].effects.capacity()
+    );
+    let charge = kinewright_core::history_size::measure_replay_peak(
+        &wire.journal,
+        &original.baseline,
+        &original.document,
+    )
+    .unwrap();
+    let (cold, cold_peak) = wire
+        .journal
+        .resolve_with_budget(
+            std::sync::Arc::clone(&wire.baseline),
+            &wire.document,
+            charge,
+        )
+        .expect("THE_SAME_ADMISSION_WINDOW_MUST_OPEN_A_COLD_DECODE");
+    assert_eq!(cold, original);
+    assert!(cold_peak <= charge);
+}
+
+#[test]
+fn history_replay_bounds_large_intermediate_copy_removed_in_the_same_batch() {
+    use kinewright_core::{ClipId, EffectId, HistoryError};
+    let mut document = fixture(10);
+    document.tracks[0].clips[0].effects = vec![history_effect(1000)];
+    let core = Core::spawn(document).unwrap();
+    let mut operations: Vec<_> = (102..=110)
+        .map(|id| Operation::CopyClipAttributes {
+            from_clip: ClipId(101),
+            to_clip: ClipId(id),
+            names: None,
+            include_keyframes: true,
+        })
+        .collect();
+    operations.extend((102..=110).map(|id| Operation::RemoveEffect {
+        clip: ClipId(id),
+        effect: EffectId(1),
+    }));
+    assert!(matches!(
+        core.request(Command::DoBatch(operations)).unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let original = core.export_history().unwrap();
+    assert_eq!(
+        original.document, original.baseline,
+        "THE_FINAL_DOCUMENT_HIDES_THE_TEMPORARY_COPIES"
+    );
+    let wire: kinewright_core::HistoryTransport =
+        serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+    let window = kinewright_core::history_size::document_live_bytes(&wire.baseline).unwrap() * 8;
+    assert!(
+        kinewright_core::history_size::restored_history_live_bytes(&original).unwrap() < window
+    );
+    assert_eq!(
+        wire.journal.resolve_with_budget(
+            std::sync::Arc::clone(&wire.baseline),
+            &wire.document,
+            window
+        ),
+        Err(HistoryError::Capacity),
+        "CHECK_THE_INTERMEDIATE_STATE_BEFORE_COPYING_AGAIN"
+    );
+    assert_eq!(wire.resolve().unwrap(), original);
+    assert_eq!(core.export_history().unwrap(), original);
+}
+
+#[test]
+fn history_replay_releases_discarded_coalesced_documents_inside_the_window() {
+    let core = Core::spawn(fixture(400)).unwrap();
+    for edit in 0..1000 {
+        assert!(matches!(
+            core.request(Command::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: edit % 2 == 0
+                }],
+                coalesce_key: "one-gesture".into(),
+            })
+            .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+    }
+    let original = core.export_history().unwrap();
+    assert_eq!(original.cursor.undo.len(), 1);
+    let window = 32 << 20;
+    assert!(
+        kinewright_core::history_size::restored_history_live_bytes(&original).unwrap() < window
+    );
+    let journal = kinewright_core::HistoryJournal::capture(&original).unwrap();
+    let (restored, _) = journal
+        .resolve_with_budget(
+            std::sync::Arc::clone(&original.baseline),
+            &original.document,
+            window,
+        )
+        .expect("A_FINISHED_GESTURE_DOES_NOT_RETAIN_ONE_DOCUMENT_PER_MOUSE_EVENT");
+    assert_eq!(restored, original);
+    let reopened = Core::spawn(Document::default()).unwrap();
+    reopened.restore_history(restored).unwrap();
+    reopened.request(Command::Undo).unwrap();
+    assert_eq!(
+        reopened.export_history().unwrap().document,
+        original.baseline
+    );
+    reopened.request(Command::Redo).unwrap();
+    assert_eq!(
+        reopened.export_history().unwrap().document,
+        original.document
     );
 }

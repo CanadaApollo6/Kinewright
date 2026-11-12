@@ -893,31 +893,35 @@ impl BundleCommit {
         } else if role_matches && old_history.as_ref().is_some_and(|old| ***old == *aligned) {
             Cow::Borrowed(&*aligned)
         } else {
-            bound_history_borrowed(&aligned, bundle.store.limits())?
+            bundle
+                .store
+                .with_history_admission(history_role, bundle.store.limits(), || {
+                    bound_history_borrowed(&aligned, bundle.store.limits())
+                })?
         };
         // `check_bytes` keeps the checked encoding with the support fields its decode
         // observed, so sealing that same encoding needs no second decode for the inventory.
-        let (checked, check_bytes) =
-            if role_matches && old_history.as_ref().is_some_and(|old| ***old == *bounded) {
-                (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
-            } else {
-                let serialized = serde_json::to_vec(&bounded)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-                let (checked, check_bytes) = bundle
-                    .store
-                    .check_history_bytes(&serialized, history_role)?;
-                if *checked != *bounded {
-                    return Err(BundleError::Corrupt(
-                        "history transport differs from capture".into(),
-                    ));
-                }
-                // The checked replay proves this exact capture. Keep its immutable document
-                // allocations shared with the live actor and floor capture.
-                let checked = checked.map(|_| (*bounded).clone());
-                // Compact decode already replayed every accepted command and checked
-                // every boundary. A second private actor would duplicate that proof.
-                (std::sync::Arc::new(checked), Some(check_bytes))
-            };
+        let (checked, check_bytes) = if role_matches
+            && old_history.as_ref().is_some_and(|old| ***old == *bounded)
+        {
+            (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
+        } else {
+            let serialized = serde_json::to_vec(&bounded).map_err(crate::bundle::encoding_error)?;
+            let (checked, check_bytes) = bundle
+                .store
+                .check_history_bytes(&serialized, history_role)?;
+            if *checked != *bounded {
+                return Err(BundleError::Corrupt(
+                    "history transport differs from capture".into(),
+                ));
+            }
+            // The checked replay proves this exact capture. Keep its immutable document
+            // allocations shared with the live actor and floor capture.
+            let checked = checked.map(|_| (*bounded).clone());
+            // Compact decode already replayed every accepted command and checked
+            // every boundary. A second private actor would duplicate that proof.
+            (std::sync::Arc::new(checked), Some(check_bytes))
+        };
         // Adopting native work as the manual branch transfers this retained
         // capture to the ordinary pool before publication. The immutable document
         // images remain shared with the source capture.
@@ -1174,7 +1178,7 @@ impl BundleCommit {
                 batch_ids,
                 applied_operations_digest: kinewright_media::sha256_bytes(
                     &serde_json::to_vec(&checked.applied_operations())
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                        .map_err(crate::bundle::encoding_error)?,
                 ),
                 checkpoint_generation: generation,
                 floor_generation: if floor_discard.is_some() {
@@ -1806,6 +1810,9 @@ impl PreparedBranchPublication {
                     branch_id.clone(),
                     crate::bundle::CachedHistory {
                         reference: bundle.branches[branch_id].history_ref.clone(),
+                        profile: bundle.branches[branch_id]
+                            .history_role
+                            .admission_profile(bundle.store.limits()),
                         history: std::sync::Arc::clone(&checked),
                     },
                 );
@@ -2036,29 +2043,13 @@ fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<Option<BoundedHistory>, BundleError> {
-    let fits = |h: &HistorySnapshot| -> bool {
-        let Ok(record) = crate::history_record::HistoryRecord::capture(
+    let fits = |h: &HistorySnapshot| {
+        crate::history_size::verify_history_admission(
             h,
             crate::history_record::HistoryRole::Ordinary,
-        ) else {
-            return false;
-        };
-        let Ok(bytes) = serde_json::to_vec(&record) else {
-            return false;
-        };
-        h.ordinary_admission_bytes().is_ok()
-            && ordinary_history_admission_cost(h, limits)
-                .is_ok_and(|bytes| bytes <= limits.branch_history_bytes)
-            && crate::history_size::replay_live_bound(&record.journal, &h.baseline, &h.document)
-                .is_ok_and(|bytes| {
-                    bytes <= crate::history_record::HistoryRole::Ordinary.live_limit(limits)
-                })
-            && bytes.len() as u64 <= limits.branch_history_bytes
-            && crate::store::preflight_record(&bytes, limits)
-                .is_ok_and(|bytes| bytes <= limits.branch_history_bytes)
-            && crate::history_size::history_live_bytes(h).is_ok_and(|bytes| {
-                bytes <= crate::history_record::HistoryRole::Ordinary.live_limit(limits)
-            })
+            limits,
+        )
+        .is_ok()
     };
     if fits(history) {
         return Ok(None);
@@ -2178,14 +2169,14 @@ fn record_cost(
     value: &impl serde::Serialize,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
-    let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let bytes = serde_json::to_vec(value).map_err(crate::bundle::encoding_error)?;
     crate::store::preflight_record(&bytes, limits)
 }
 
 // Ordinary Save keeps its document-bearing decoded admission budget. Count
 // one boundary at a time; the persisted/transport form stays compact and this
 // check never builds a second complete document-bearing JSON history.
-fn ordinary_history_admission_cost(
+pub(crate) fn ordinary_history_admission_cost(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
@@ -2583,7 +2574,8 @@ pub fn bound_history_probe(
 }
 
 #[cfg(feature = "test-util")]
-/// Charge an actual encoded history using the production record admission.
+/// Minimum single-history allowance, including its measured replay peak.
+/// This is not retained residency; use `restored_history_live_bytes` for that.
 /// # Errors
 /// Refuses an invalid or excessive record.
 pub fn history_cost_probe(
@@ -2594,13 +2586,22 @@ pub fn history_cost_probe(
         history,
         crate::history_record::HistoryRole::Ordinary,
     )?;
-    Ok(record_cost(&record, limits)?
-        .max(crate::history_size::history_live_bytes(history)?)
-        .max(crate::history_size::replay_live_bound(
-            &record.journal,
-            &history.baseline,
-            &history.document,
-        )?))
+    let retained = crate::history_size::native_history_live_bytes(history)?;
+    let charge = record_cost(&record, limits)?
+        .max(retained)
+        .max(ordinary_history_admission_cost(history, limits)?);
+    // This sizing witness intentionally measures cuts which admission rejects.
+    // An already excessive retained cut needs no further materialization.
+    if retained > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
+        return Ok(charge);
+    }
+    let peak = kinewright_core::history_size::measure_replay_peak(
+        &record.journal,
+        &history.baseline,
+        &history.document,
+    )
+    .map_err(crate::bundle::history_error)?;
+    Ok(charge.max(peak))
 }
 
 pub(crate) fn validate_manifest_extension(

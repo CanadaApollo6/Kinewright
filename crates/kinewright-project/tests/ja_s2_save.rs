@@ -739,14 +739,12 @@ mod linux {
         let shared_model = copy(&mut source, &shared_model_path, StorageLimits::default());
         let shared_loaded = LoadedBundle::read(&shared_model_path).unwrap();
         let shared_usage = shared_loaded.usage_probe().unwrap();
-        let expected_residents = history_cost_probe(
+        let expected_residents = kinewright_core::history_size::restored_history_live_bytes(
             &source.branch_history(&manual).unwrap(),
-            &StorageLimits::default(),
         )
         .unwrap()
-            + history_cost_probe(
+            + kinewright_core::history_size::restored_history_live_bytes(
                 &source.branch_history(&first).unwrap(),
-                &StorageLimits::default(),
             )
             .unwrap();
         assert_eq!(
@@ -820,9 +818,8 @@ mod linux {
             charges
                 .entry(checkpoint.history_ref.sha256.clone())
                 .or_insert_with(|| {
-                    history_cost_probe(
+                    kinewright_core::history_size::restored_history_live_bytes(
                         &source.branch_history(id).unwrap(),
-                        &StorageLimits::default(),
                     )
                     .unwrap()
                 });
@@ -840,19 +837,12 @@ mod linux {
         }];
         let model_path = temp.path("model.kinewright");
         let mut model = copy(&mut source, &model_path, StorageLimits::default());
-        let initial_copy_peak = LoadedBundle::read(&model_path)
-            .unwrap()
-            .usage_probe()
-            .unwrap()
-            .peak_live_history_bytes;
         let model_input = model.root().unwrap().input_manifest_ref.clone();
         grow(&core, 20);
         model.save(&core, &model_input).unwrap();
-        let first_write_cost =
-            history_cost_probe(&core.export_history().unwrap(), &StorageLimits::default()).unwrap();
         apply(&core, Command::DoBatch(additions.clone()));
         let candidate = core.export_history().unwrap();
-        let minimum = (0..=candidate.batches.len())
+        let (minimum, minimum_retained) = (0..=candidate.batches.len())
             .filter_map(|cut| {
                 let history = if cut == 0 {
                     candidate.clone()
@@ -862,29 +852,57 @@ mod linux {
                         .after()
                         .clone()
                 };
-                Some(history_cost_probe(&history, &StorageLimits::default()).unwrap())
+                Some(history)
             })
-            .min()
-            .unwrap();
-        // Keep the writer's selected history at the irreducible current-document
-        // cost. Its two transient copies must fit before the independently
-        // reopened graph, including every archived branch, becomes the limiter.
-        model
-            .restrict_limits_probe(StorageLimits {
-                branch_history_bytes: minimum,
-                ..StorageLimits::default()
-            })
-            .unwrap();
-        model.save(&core, &model_input).unwrap();
-        let peak = LoadedBundle::read(&model_path)
+            .fold((u64::MAX, u64::MAX), |(fit, retained), history| {
+                (
+                    fit.min(history_cost_probe(&history, &StorageLimits::default()).unwrap()),
+                    retained.min(
+                        kinewright_core::history_size::restored_history_live_bytes(&history)
+                            .unwrap(),
+                    ),
+                )
+            });
+        let profile = StorageLimits {
+            branch_history_bytes: minimum,
+            ..StorageLimits::default()
+        };
+        let initial_copy_peak = LoadedBundle::read_with_limits_probe(&path, profile.clone())
             .unwrap()
             .usage_probe()
             .unwrap()
             .peak_live_history_bytes;
-        let irreducible = other_residents + minimum;
-        let candidate = core.export_history().unwrap();
-        let actual_write_overlap = first_write_cost
-            + 2 * history_cost_probe(&candidate, &StorageLimits::default()).unwrap();
+        // Keep the writer's selected history at the irreducible current-document
+        // cost. Its two transient copies must fit before the independently
+        // reopened graph, including every archived branch, becomes the limiter.
+        model.restrict_limits_probe(profile.clone()).unwrap();
+        model.store().reset_decode_peaks_probe().unwrap();
+        model.save(&core, &model_input).unwrap();
+        let actual_write_overlap = model.store().usage().unwrap().peak_live_history_bytes;
+        let peak = LoadedBundle::read_with_limits_probe(&model_path, profile)
+            .unwrap()
+            .usage_probe()
+            .unwrap()
+            .peak_live_history_bytes;
+        let manifest = model
+            .store()
+            .read_record::<kinewright_project::store::StoreManifest>(
+                &model.root().unwrap().store_manifest_ref,
+            )
+            .unwrap();
+        assert!(!manifest.recovery.predecessors.is_empty());
+        assert!(
+            manifest
+                .objects
+                .iter()
+                .filter(|object| { object.record_kind == RecordKind::BranchCheckpoint })
+                .count()
+                > model.branches_probe().len()
+        );
+        drop(manifest);
+        // The archived replay follows all current resident histories. Its one
+        // window is separate from the retained costs, including the target.
+        let irreducible = other_residents + minimum_retained + minimum;
         assert!(
             irreducible > actual_write_overlap,
             "the real sparse writer must fit before the independent reader binds"

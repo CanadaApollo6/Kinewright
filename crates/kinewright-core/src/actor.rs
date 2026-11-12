@@ -774,6 +774,7 @@ struct PendingFloor {
 
 #[derive(Clone)]
 struct CoreState {
+    replay_budget: Option<crate::history_size::ReplayBudget>,
     // Changes to the baseline or installed history invalidate manual JSON caches.
     history_epoch: u64,
     next_floor_id: u64,
@@ -802,6 +803,7 @@ impl CoreState {
     fn new(document: impl Into<Arc<Document>>, revision: TimelineRevision) -> Self {
         let document = document.into();
         Self {
+            replay_budget: None,
             history_epoch: 0,
             next_floor_id: 0,
             pending_floor: None,
@@ -817,17 +819,33 @@ impl CoreState {
         }
     }
 
+    fn apply_replay_batch(
+        &mut self,
+        candidate: &mut Document,
+        operations: &[Operation],
+    ) -> Result<Vec<OperationIdentityEffect>, BatchError> {
+        match &mut self.replay_budget {
+            Some(budget) => {
+                crate::operation::apply_batch_observed_replay(candidate, operations, budget)
+            }
+            None => crate::operation::apply_batch_observed_in_place(candidate, operations),
+        }
+    }
+
     fn do_operation(&mut self, operation: Operation) -> Result<Arc<Document>, OpError> {
         let before = Arc::clone(&self.document);
+        if let Some(budget) = &mut self.replay_budget {
+            budget
+                .check_clone(&before)
+                .map_err(|_| OpError::HistoryReplayCapacity)?;
+        }
         let mut after = (*before).clone();
-        let effects = crate::operation::apply_batch_observed_in_place(
-            &mut after,
-            std::slice::from_ref(&operation),
-        )
-        .map_err(|error| match error {
-            BatchError::OperationFailed { error, .. } => error,
-            BatchError::Empty => unreachable!(),
-        })?;
+        let effects = self
+            .apply_replay_batch(&mut after, std::slice::from_ref(&operation))
+            .map_err(|error| match error {
+                BatchError::OperationFailed { error, .. } => error,
+                BatchError::Empty => unreachable!(),
+            })?;
         self.identity_effects = effects;
         self.undo.push(HistoryEntry {
             document: before,
@@ -843,9 +861,16 @@ impl CoreState {
 
     fn do_batch(&mut self, operations: Vec<Operation>) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
+        if let Some(budget) = &mut self.replay_budget {
+            budget
+                .check_clone(&before)
+                .map_err(|_| BatchError::OperationFailed {
+                    op_number: 1,
+                    error: OpError::HistoryReplayCapacity,
+                })?;
+        }
         let mut after = (*before).clone();
-        self.identity_effects =
-            crate::operation::apply_batch_observed_in_place(&mut after, &operations)?;
+        self.identity_effects = self.apply_replay_batch(&mut after, &operations)?;
         self.undo.push(HistoryEntry {
             document: before,
             operations: operations.clone(),
@@ -870,9 +895,16 @@ impl CoreState {
         coalesce_key: &str,
     ) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
+        if let Some(budget) = &mut self.replay_budget {
+            budget
+                .check_clone(&before)
+                .map_err(|_| BatchError::OperationFailed {
+                    op_number: 1,
+                    error: OpError::HistoryReplayCapacity,
+                })?;
+        }
         let mut after = (*before).clone();
-        self.identity_effects =
-            crate::operation::apply_batch_observed_in_place(&mut after, &operations)?;
+        self.identity_effects = self.apply_replay_batch(&mut after, &operations)?;
         match self.undo.last_mut() {
             Some(entry) if entry.coalesce_key.as_deref() == Some(coalesce_key) => {
                 entry.operations.extend(operations.iter().cloned());
@@ -1145,11 +1177,62 @@ impl CoreState {
     }
 }
 
+/// Costs of the immutable documents resident in one replay. Addresses are used
+/// only as keys: this cache owns no documents and is pruned after every command.
+struct ReplayDocumentCharges {
+    baseline_address: usize,
+    baseline_charge: u64,
+    by_address: std::collections::BTreeMap<usize, u64>,
+}
+impl ReplayDocumentCharges {
+    fn new(baseline: &Arc<Document>, charge: u64) -> Self {
+        let address = Arc::as_ptr(baseline) as usize;
+        Self {
+            baseline_address: address,
+            baseline_charge: charge,
+            by_address: std::collections::BTreeMap::from([(address, charge)]),
+        }
+    }
+    fn refresh(&mut self, state: &CoreState, new_document: bool) -> Result<u64, HistoryError> {
+        let current_address = Arc::as_ptr(&state.document) as usize;
+        let mut next = std::collections::BTreeMap::new();
+        let mut bytes = 0_u64;
+        for document in [&state.baseline, &state.document].into_iter().chain(
+            state
+                .undo
+                .iter()
+                .chain(&state.redo)
+                .map(|entry| &entry.document),
+        ) {
+            let address = Arc::as_ptr(document) as usize;
+            let std::collections::btree_map::Entry::Vacant(entry) = next.entry(address) else {
+                continue;
+            };
+            let charge = if address == self.baseline_address {
+                self.baseline_charge
+            } else if new_document && address == current_address {
+                // A new current Arc can reuse a just-cleared Redo allocation's
+                // address. Always measure it, even if that address was cached.
+                crate::history_size::document_live_bytes(document)?
+            } else if let Some(charge) = self.by_address.get(&address) {
+                *charge
+            } else {
+                crate::history_size::document_live_bytes(document)?
+            };
+            bytes = bytes.checked_add(charge).ok_or(HistoryError::Capacity)?;
+            entry.insert(charge);
+        }
+        self.by_address = next;
+        Ok(bytes)
+    }
+}
+
 pub(crate) fn resolve_history_journal(
     journal: &crate::HistoryJournal,
     baseline: Arc<Document>,
     document: &Document,
-) -> Result<HistorySnapshot, HistoryError> {
+    limit: u64,
+) -> Result<(HistorySnapshot, u64), HistoryError> {
     if journal.batches.len() > crate::HISTORY_COMMANDS {
         return Err(HistoryError::Capacity);
     }
@@ -1160,15 +1243,41 @@ pub(crate) fn resolve_history_journal(
     {
         return Err(HistoryError::Corrupt);
     }
+    let budget = crate::history_size::ReplayBudget::new(journal, &baseline, document, limit)?;
+    let mut documents = ReplayDocumentCharges::new(&baseline, budget.document_charge());
     let mut state = CoreState::new(baseline, TimelineRevision(0));
+    state.replay_budget = Some(budget);
     for batch in &journal.batches {
-        if !matches!(
-            execute_command(&mut state, batch.command.clone().into()),
-            Event::DocumentChanged { .. }
-        ) || state.batches.last().map(crate::JournalBatch::from).as_ref() != Some(batch)
+        let event = execute_command(&mut state, batch.command.clone().into());
+        if matches!(
+            &event,
+            Event::OpRejected {
+                error: OpError::HistoryReplayCapacity,
+                ..
+            } | Event::BatchRejected {
+                error: BatchError::OperationFailed {
+                    error: OpError::HistoryReplayCapacity,
+                    ..
+                },
+                ..
+            }
+        ) {
+            return Err(HistoryError::Capacity);
+        }
+        if !matches!(event, Event::DocumentChanged { .. })
+            || state.batches.last().map(crate::JournalBatch::from).as_ref() != Some(batch)
         {
             return Err(HistoryError::Corrupt);
         }
+        let resident = documents.refresh(
+            &state,
+            !matches!(batch.command, JournalCommand::Undo | JournalCommand::Redo),
+        )?;
+        state
+            .replay_budget
+            .as_mut()
+            .ok_or(HistoryError::CommitInvariant)?
+            .set_document_charge(resident)?;
     }
     let hashes_match = |entries: &[HistoryEntry], hashes: &[String]| {
         entries.len() == hashes.len()
@@ -1188,7 +1297,11 @@ pub(crate) fn resolve_history_journal(
         operations: entry.operations,
         coalesce_key: entry.coalesce_key,
     };
-    Ok(HistorySnapshot {
+    let budget = state
+        .replay_budget
+        .take()
+        .ok_or(HistoryError::CommitInvariant)?;
+    let history = HistorySnapshot {
         floor_offset: journal.floor_offset,
         baseline: state.baseline,
         document: state.document,
@@ -1197,7 +1310,9 @@ pub(crate) fn resolve_history_journal(
             undo: state.undo.into_iter().map(boundary).collect(),
             redo: state.redo.into_iter().map(boundary).collect(),
         },
-    })
+    };
+    let peak = budget.finish(&history)?;
+    Ok((history, peak))
 }
 
 pub(crate) fn floor_history(

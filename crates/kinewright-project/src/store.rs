@@ -1415,8 +1415,7 @@ impl ProjectStore {
         let table =
             self.read_copy_record::<crate::owned_inputs::InputChunkTable>(reference, true)?;
         let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, true)?;
-        let canonical =
-            serde_json::to_vec(&*table).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let canonical = serde_json::to_vec(&*table).map_err(crate::bundle::encoding_error)?;
         if canonical.len() as u64 != reference.byte_length
             || kinewright_media::sha256_bytes(&canonical) != reference.sha256
         {
@@ -1782,9 +1781,21 @@ impl ProjectStore {
     ) -> Result<(), BundleError> {
         // Recheck the immutable bytes and their exact materialized binding. A
         // verified cache hit needs no second set of replayed boundary documents.
-        let _record =
-            self.read_record::<crate::history_record::HistoryRecord>(&checkpoint.history_ref)?;
+        self.with_namespace(|namespace| {
+            Self::verify_in_namespace(
+                namespace,
+                &checkpoint.history_ref,
+                &self.inner.usage,
+                self.limits(),
+            )
+            .map(drop)
+        })?;
         crate::history_record::HistoryRecord::verify_checkpoint(checkpoint, cached)?;
+        crate::history_size::check_retained_history(
+            cached,
+            checkpoint.history_role,
+            self.limits(),
+        )?;
         self.inner
             .verified_memo
             .lock()
@@ -2672,14 +2683,10 @@ impl ProjectStore {
         record
             .validate(&self.admission_limits())
             .map_err(|error| self.run_error(error))?;
-        let live = crate::history_size::history_live_bytes(history)?.max(
-            crate::history_size::replay_live_bound(
-                &record.journal,
-                &history.baseline,
-                &history.document,
-            )?,
-        );
-        if live > role.live_limit(self.limits()) || history.ordinary_admission_bytes().is_err() {
+        let live = self.with_history_admission(role, self.limits(), || {
+            crate::history_size::verify_history_admission(history, role, self.limits())
+        })?;
+        if history.ordinary_admission_bytes().is_err() {
             return Err(self.run_error(BundleError::Capacity("live branch history")));
         }
         let _history = self.reserve_role_history_shadow(live, role)?;
@@ -2711,34 +2718,42 @@ impl ProjectStore {
         ),
         BundleError,
     > {
+        self.replay_gate()
+            .with(|| self.check_history_bytes_serial(bytes, role))?
+    }
+    fn check_history_bytes_serial(
+        &self,
+        bytes: &[u8],
+        role: crate::history_record::HistoryRole,
+    ) -> Result<
+        (
+            StorageReservation<kinewright_core::HistorySnapshot>,
+            CheckedHistoryBytes,
+        ),
+        BundleError,
+    > {
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::note_history_decode();
         let charge = preflight_record(bytes, self.limits())?;
         let _wire = self.reserve_copy_read(0, charge, 0, false, true)?;
         let transport: kinewright_core::HistoryTransport = serde_json::from_slice(bytes)
             .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-        let live = crate::history_size::replay_live_bound(
-            &transport.journal,
-            &transport.baseline,
-            &transport.document,
-        )?;
-        let reserve = self.reserve_history_replay(live, role)?;
-        let checked = reserve.hold(
-            transport
-                .journal
-                .resolve(transport.baseline, &transport.document)
-                .map_err(crate::bundle::history_error)?,
-        );
-        if crate::history_size::history_live_bytes(&checked)? > role.live_limit(self.limits()) {
-            return Err(BundleError::Capacity("role history memory"));
-        }
+        let reserve = self.reserve_history_replay(role.replay_limit(self.limits()), role)?;
+        let (history, _) = transport
+            .journal
+            .resolve_with_budget(
+                transport.baseline,
+                &transport.document,
+                role.replay_limit(self.limits()),
+            )
+            .map_err(crate::bundle::history_error)?;
+        let live = crate::history_size::check_retained_history(&history, role, self.limits())?;
+        let checked = reserve.finish_history_replay(live)?.hold(history);
         let record = crate::history_record::HistoryRecord::capture(&checked, role)?;
-        let raw = serde_json::to_value(&record.journal)
-            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let raw = serde_json::to_value(&record.journal).map_err(crate::bundle::encoding_error)?;
         let fields = kinewright_core::history_journal_support_fields(&raw)
             .map_err(BundleError::Unsupported)?;
-        let bytes =
-            serde_json::to_vec(&record).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let bytes = serde_json::to_vec(&record).map_err(crate::bundle::encoding_error)?;
         let charge = preflight_record(&bytes, self.limits())?;
         Ok((
             checked,
@@ -2777,8 +2792,8 @@ impl ProjectStore {
             && admitted.0.reference.sha256 == hash
             && admitted.0.reference.byte_length == length
         {
-            // The reader reserves this pre-replay bound, not only the smaller
-            // retained heap. Keep memoized publication admission identical to it.
+            // Only the complete bounded replay can certify this retained
+            // charge. Publication separately models the reader's replay window.
             self.inner
                 .verified_memo
                 .lock()
@@ -2818,8 +2833,7 @@ impl ProjectStore {
         let capacity =
             usize::try_from(counter.bytes).map_err(|_| BundleError::Capacity("record size"))?;
         let mut bytes = Vec::with_capacity(capacity);
-        serde_json::to_writer(&mut bytes, record)
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        serde_json::to_writer(&mut bytes, record).map_err(crate::bundle::encoding_error)?;
         if bytes.len() != capacity {
             return Err(BundleError::Corrupt("unstable record serialization".into()));
         }
@@ -3564,8 +3578,7 @@ impl ProjectStore {
         serde_json::to_writer(&mut count, inventory)
             .map_err(|_| BundleError::Capacity("recovery inventory"))?;
         let encoded = self.reserve(0, count.bytes, 0, false)?;
-        let bytes =
-            serde_json::to_vec(inventory).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let bytes = serde_json::to_vec(inventory).map_err(crate::bundle::encoding_error)?;
         let control = self.prepare_control_write(&bytes, false)?;
         Ok(PreparedInventoryWrite {
             bytes,
@@ -4382,18 +4395,40 @@ impl ProjectStore {
             return Err(BundleError::Capacity("rescue decoded branch history"));
         }
         if reference.record_kind == RecordKind::History {
-            let record: crate::history_record::HistoryRecord = serde_json::from_slice(&bytes)
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-            record.validate(limits)?;
-            let baseline =
-                self.read_copy_record::<kinewright_core::Document>(&record.baseline_ref, true)?;
-            let current =
-                self.read_copy_record::<kinewright_core::Document>(&record.current_ref, true)?;
-            let live =
-                crate::history_size::replay_live_bound(&record.journal, &baseline, &current)?;
-            if live > record.role.replay_limit(limits) {
-                return Err(BundleError::Capacity("rescue live branch history"));
-            }
+            self.replay_gate().with(|| -> Result<(), BundleError> {
+                let record: crate::history_record::HistoryRecord =
+                    serde_json::from_slice(&bytes)
+                        .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                record.validate(limits)?;
+                let baseline =
+                    self.read_copy_record::<kinewright_core::Document>(&record.baseline_ref, true)?;
+                let current =
+                    self.read_copy_record::<kinewright_core::Document>(&record.current_ref, true)?;
+                let window = record
+                    .role
+                    .replay_limit(limits)
+                    .min(self.limits().decoded_record_bytes);
+                // This proves the destination's profile through the retained
+                // source's physical read ledger. The source's edit cap must not
+                // replace the explicitly selected destination admission policy.
+                let _replay = self.reserve_copy_read(
+                    0,
+                    window,
+                    if record.role == crate::history_record::HistoryRole::Ordinary {
+                        window
+                    } else {
+                        0
+                    },
+                    false,
+                    true,
+                )?;
+                let (history, _) = record
+                    .journal
+                    .resolve_with_budget(Arc::new(baseline.take()), &current, window)
+                    .map_err(crate::bundle::history_error)?;
+                crate::history_size::check_retained_history(&history, record.role, limits)?;
+                Ok(())
+            })??;
         }
         Ok(())
     }

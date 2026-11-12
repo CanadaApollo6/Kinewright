@@ -701,7 +701,7 @@ impl crate::bundle::ProjectBundle {
                     > crate::task_history_admission::DOCUMENT_BYTES
             {
                 return Err(BundleError::RunAdmission(
-                    "Task history is too large to start this run safely.",
+                    "Task history is too large to start this run safely. Save your work, then reduce the document size before trying again.",
                 ));
             }
             if arm {

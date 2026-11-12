@@ -562,6 +562,14 @@ pub(crate) fn apply_batch_observed_in_place(
     apply_batch_unpublished(candidate, operations, true)
 }
 
+pub(crate) fn apply_batch_observed_replay(
+    candidate: &mut Document,
+    operations: &[Operation],
+    budget: &mut crate::history_size::ReplayBudget,
+) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
+    apply_batch_checked(candidate, operations, true, Some(budget))
+}
+
 fn apply_batch_inner(
     doc: &mut Document,
     operations: &[Operation],
@@ -584,6 +592,15 @@ fn apply_batch_unpublished(
     operations: &[Operation],
     capture_identities: bool,
 ) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
+    apply_batch_checked(candidate, operations, capture_identities, None)
+}
+
+fn apply_batch_checked(
+    candidate: &mut Document,
+    operations: &[Operation],
+    capture_identities: bool,
+    mut budget: Option<&mut crate::history_size::ReplayBudget>,
+) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
     if operations.is_empty() {
         return Err(BatchError::Empty);
     }
@@ -597,6 +614,14 @@ fn apply_batch_unpublished(
         Vec::new()
     };
     for (index, operation) in operations.iter().enumerate() {
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.check_operation(candidate, operation).map_err(|_| {
+                BatchError::OperationFailed {
+                    op_number: index + 1,
+                    error: OpError::HistoryReplayCapacity,
+                }
+            })?;
+        }
         let before = capture_identities.then(|| clip_identities(candidate));
         let split_parent =
             if let (true, Operation::SplitClip { clip, .. }) = (capture_identities, operation) {
@@ -617,7 +642,16 @@ fn apply_batch_unpublished(
             error,
         })?;
         if let Some(before) = before {
-            effects.push(identity_effect(&before, candidate, split_parent));
+            let effect = identity_effect(&before, candidate, split_parent);
+            if let Some(budget) = budget.as_deref_mut() {
+                budget
+                    .retain_identity(&effect)
+                    .map_err(|_| BatchError::OperationFailed {
+                        op_number: index + 1,
+                        error: OpError::HistoryReplayCapacity,
+                    })?;
+            }
+            effects.push(effect);
         }
     }
     Ok(effects)
@@ -667,6 +701,8 @@ impl ApplyOp for Operation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OpError {
+    #[error("history replay memory capacity reached")]
+    HistoryReplayCapacity,
     #[error("asset {0} already exists")]
     DuplicateAsset(AssetId),
     #[error("bin {0} occurs more than once")]
@@ -5982,6 +6018,7 @@ impl OpError {
             | Self::UnknownTransition { .. }
             | Self::UnknownTrackAutomationParameter { .. } => IncidentFamily::UnknownName,
             Self::ClipIdExhausted { .. }
+            | Self::HistoryReplayCapacity
             | Self::LinkIdExhausted { .. }
             | Self::LutAssetIdExhausted { .. }
             | Self::TimeOverflow { .. } => IncidentFamily::Internal,
@@ -6250,7 +6287,7 @@ mod tests {
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 162] = [
+    const APPENDIX_A: [(&str, &str); 163] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -6402,6 +6439,7 @@ mod tests {
         ("LinkIdExhausted", "Internal"),
         ("LutAssetIdExhausted", "Internal"),
         ("TimeOverflow", "Internal"),
+        ("HistoryReplayCapacity", "Internal"),
         ("TimeMapping", "Internal"),
         ("ZeroConfidenceColorOverride", "ColorPolicy"),
         ("InvalidColorOverrideProvenance", "ColorPolicy"),
@@ -6492,7 +6530,7 @@ mod tests {
         ("SetSolidColor", "Clip"),
     ];
 
-    /// `IN1b` §9 clause 1: the match is exhaustive over all **162** `OpError`
+    /// `IN1b` §9 clause 1: the match is exhaustive over all **163** `OpError`
     /// variants with no wildcard, every family is non-empty, and **every
     /// variant** is in the family Appendix A gives it.
     #[test]
@@ -6518,10 +6556,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            162,
-            "Appendix A names 162 distinct variants"
+            163,
+            "Appendix A names 163 distinct variants"
         );
-        assert_eq!(implemented.len(), 162, "the accessor names 162 variants");
+        assert_eq!(implemented.len(), 163, "the accessor names 163 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),

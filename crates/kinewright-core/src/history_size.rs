@@ -18,7 +18,7 @@ fn allocation<T>(capacity: usize) -> Result<u64, HistoryError> {
         .ok_or(HistoryError::Capacity)
 }
 fn payload(value: &impl Serialize) -> Result<u64, HistoryError> {
-    let bytes = serde_json::to_vec(value).map_err(|_| HistoryError::Corrupt)?;
+    let bytes = serde_json::to_vec(value).map_err(|_| HistoryError::Encoding)?;
     payload_memory_bound(&bytes)
 }
 
@@ -94,13 +94,19 @@ fn payload_memory_bound(bytes: &[u8]) -> Result<u64, HistoryError> {
     Scan(&charge, 0)
         .deserialize(&mut parser)
         .map_err(|_| HistoryError::Capacity)?;
-    parser.end().map_err(|_| HistoryError::Corrupt)?;
+    parser.end().map_err(|_| HistoryError::CommitInvariant)?;
     Ok(charge.get())
 }
 
-fn clip_payload(clip: &Clip) -> Result<u64, HistoryError> {
+fn clip_payload(clip: &Clip, cloned: bool) -> Result<u64, HistoryError> {
     let title = match &clip.content {
-        ClipContent::Title(title) => title.text.capacity() as u64,
+        ClipContent::Title(title) => {
+            (if cloned {
+                title.text.len()
+            } else {
+                title.text.capacity()
+            }) as u64
+        }
         ClipContent::Media
         | ClipContent::Freeze(_)
         | ClipContent::Adjustment
@@ -108,17 +114,29 @@ fn clip_payload(clip: &Clip) -> Result<u64, HistoryError> {
     };
     sum([
         title,
-        allocation::<crate::Effect>(clip.effects.capacity())?,
+        allocation::<crate::Effect>(if cloned {
+            clip.effects.len()
+        } else {
+            clip.effects.capacity()
+        })?,
         if clip.effects.is_empty() {
             0
         } else {
             payload(&clip.effects)?
         },
         clip.audio_gain_curve.as_ref().map_or(Ok(0), |curve| {
-            allocation::<crate::Keyframe>(curve.keyframes.capacity())
+            allocation::<crate::Keyframe>(if cloned {
+                curve.keyframes.len()
+            } else {
+                curve.keyframes.capacity()
+            })
         })?,
         clip.enabled_curve.as_ref().map_or(Ok(0), |curve| {
-            allocation::<crate::Keyframe>(curve.keyframes.capacity())
+            allocation::<crate::Keyframe>(if cloned {
+                curve.keyframes.len()
+            } else {
+                curve.keyframes.capacity()
+            })
         })?,
     ])
 }
@@ -233,7 +251,7 @@ fn document_bytes(document: &Document, cloned: bool) -> Result<u64, HistoryError
             })?,
         ])?;
         for clip in &track.clips {
-            bytes = sum([bytes, clip_payload(clip)?])?;
+            bytes = sum([bytes, clip_payload(clip, cloned)?])?;
         }
     }
     Ok(bytes)
@@ -283,10 +301,13 @@ pub fn history_live_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError
                 allocation::<crate::ClipId>(effect.created.capacity())?,
                 allocation::<crate::ClipId>(effect.deleted.capacity())?,
                 allocation::<Clip>(effect.split_results.capacity())?,
-                effect.split_parent.as_ref().map_or(Ok(0), clip_payload)?,
+                effect
+                    .split_parent
+                    .as_ref()
+                    .map_or(Ok(0), |clip| clip_payload(clip, false))?,
             ])?;
             for clip in &effect.split_results {
-                bytes = sum([bytes, clip_payload(clip)?])?;
+                bytes = sum([bytes, clip_payload(clip, false)?])?;
             }
         }
     }
@@ -362,102 +383,172 @@ pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, His
     sum([history_live_bytes(history)?, padding, padding.div_ceil(10)])
 }
 
-/// Reserve materialized states before replay starts. Growing commands contribute
-/// their complete admitted payload to every possible later boundary.
-/// Bound the document and command allocations before a replay starts.
+/// Measure the peak of a bounded replay. Store callers reserve their role's
+/// replay window before invoking the bounded resolver, rather than treating a
+/// command-payload estimate as a reservation.
 /// # Errors
-/// Refuses arithmetic overflow or an excessive nested payload.
-pub fn replay_live_bound(
+/// Refuses an invalid journal or replay exceeding the portable window.
+pub fn measure_replay_peak(
     journal: &crate::HistoryJournal,
     baseline: &Document,
     current: &Document,
 ) -> Result<u64, HistoryError> {
-    use crate::{JournalCommand, Operation};
-    let mut growth = 0_u64;
-    let mut arrays_may_grow = false;
-    let mut operations = 0_u64;
-    let mut boundary_count = 0_u64;
-    for batch in &journal.batches {
-        boundary_count =
-            boundary_count.max(sum([batch.undo_entries as u64, batch.redo_entries as u64])?);
-        let ops: &[Operation] = match &batch.command {
-            JournalCommand::Do(op) => std::slice::from_ref(op),
-            JournalCommand::DoBatch(ops)
-            | JournalCommand::DoBatchCoalesced {
-                operations: ops, ..
-            } => ops,
-            JournalCommand::Undo | JournalCommand::Redo => &[],
-        };
-        operations = sum([operations, ops.len() as u64])?;
-        for op in ops {
-            if !matches!(
-                op,
-                Operation::SetTrackSyncLock { .. }
-                    | Operation::RippleDeleteClip { .. }
-                    | Operation::DeleteClip { .. }
-            ) {
-                arrays_may_grow |= grows_timeline_arrays(op);
-                growth = sum([growth, payload(op)?])?;
-            }
-        }
-    }
-    let per_document = sum([
-        document_bytes(baseline, true)?.max(document_bytes(current, true)?),
-        growth,
-    ])?;
-    // Moving into a full track, or inserting a clip, can double a Vec's
-    // capacity even when the final document has almost the same length.
-    // Metadata edits, flag changes and whole-clip deletion do not grow them.
-    let per_document = if arrays_may_grow {
-        per_document.checked_mul(2).ok_or(HistoryError::Capacity)?
-    } else {
-        per_document
-    };
-    let documents = per_document
-        .checked_mul(boundary_count + 1)
-        .ok_or(HistoryError::Capacity)?;
-    let identities = operations
-        .checked_mul(std::mem::size_of::<crate::OperationIdentityEffect>() as u64)
-        .ok_or(HistoryError::Capacity)?;
-    let bytes = sum([
-        documents,
-        transport_document_bytes(baseline)?,
-        transport_document_bytes(current)?,
-        identities,
-        payload(journal)?
-            .checked_mul(3)
-            .ok_or(HistoryError::Capacity)?,
-        8192,
-    ])?;
-    bytes
-        .checked_add(bytes.div_ceil(10))
-        .ok_or(HistoryError::Capacity)
+    journal
+        .resolve_with_budget(Arc::new(baseline.clone()), current, TRANSPORT_LIVE_BYTES)
+        .map(|(_, peak)| peak)
 }
 
-// Keep this exhaustive: a new operation must declare whether replay can grow
-// the typed track/clip arrays. Nested metadata has its separate payload bound.
-fn grows_timeline_arrays(operation: &crate::Operation) -> bool {
+/// The caller reserves `limit` before replay. Resident boundary documents and
+/// temporary operation copies share that window; discarded states release their
+/// charge while the peak still records the whole replay's high-water mark.
+#[derive(Clone)]
+pub(crate) struct ReplayBudget {
+    limit: u64,
+    documents: u64,
+    overhead: u64,
+    peak: u64,
+}
+impl ReplayBudget {
+    pub(crate) fn new(
+        journal: &crate::HistoryJournal,
+        baseline: &Document,
+        current: &Document,
+        limit: u64,
+    ) -> Result<Self, HistoryError> {
+        let overhead = sum([
+            transport_document_bytes(baseline)?,
+            transport_document_bytes(current)?,
+            payload(journal)?
+                .checked_mul(3)
+                .ok_or(HistoryError::Capacity)?,
+            8192,
+        ])?;
+        let mut budget = Self {
+            limit,
+            documents: 0,
+            overhead,
+            peak: 0,
+        };
+        budget.documents = transport_document_bytes(baseline)?;
+        budget.check(0)?;
+        Ok(budget)
+    }
+    fn check(&mut self, additional: u64) -> Result<(), HistoryError> {
+        let bytes = sum([self.documents, self.overhead, additional])?;
+        let bytes = sum([bytes, bytes.div_ceil(10)])?;
+        if bytes > self.limit {
+            return Err(HistoryError::Capacity);
+        }
+        self.peak = self.peak.max(bytes);
+        Ok(())
+    }
+    pub(crate) fn check_clone(&mut self, document: &Document) -> Result<(), HistoryError> {
+        self.check(document_bytes(document, true)?)
+    }
+    pub(crate) fn check_operation(
+        &mut self,
+        document: &Document,
+        operation: &crate::Operation,
+    ) -> Result<(), HistoryError> {
+        // This runs before EACH operation, including intermediate batch states.
+        // Charge the candidate once; copying operations additionally reserve the
+        // actual retained source payload, rather than their small ID-only command.
+        let copied = operation_copy_bytes(document, operation)?;
+        let arrays = sum([
+            allocation::<crate::Track>(document.tracks.len().max(4))?,
+            document.tracks.iter().try_fold(0, |total, track| {
+                sum([total, allocation::<Clip>(track.clips.len().max(4))?])
+            })?,
+            allocation::<crate::MediaAsset>(document.media_pool.len().max(4))?,
+            allocation::<crate::Marker>(document.markers.len().max(4))?,
+            allocation::<crate::LutAsset>(document.lut_assets.len().max(4))?,
+        ])?
+        .checked_mul(2)
+        .ok_or(HistoryError::Capacity)?;
+        self.check(sum([
+            document_live_bytes(document)?,
+            arrays,
+            copied,
+            payload(operation)?
+                .checked_mul(4)
+                .ok_or(HistoryError::Capacity)?,
+        ])?)
+    }
+
+    pub(crate) fn retain_identity(
+        &mut self,
+        identity: &crate::OperationIdentityEffect,
+    ) -> Result<(), HistoryError> {
+        // Charge actual observations, even if the untrusted journal lied about
+        // the identity payload. Later operations in the same batch cannot hide
+        // a large observation by deleting its source clip.
+        self.overhead = sum([self.overhead, payload(identity)?])?;
+        self.check(0)
+    }
+    pub(crate) const fn document_charge(&self) -> u64 {
+        self.documents
+    }
+    pub(crate) fn set_document_charge(&mut self, bytes: u64) -> Result<(), HistoryError> {
+        self.documents = bytes;
+        self.check(0)
+    }
+    pub(crate) fn finish(mut self, history: &HistorySnapshot) -> Result<u64, HistoryError> {
+        let retained = restored_history_live_bytes(history)?;
+        if retained > self.limit {
+            return Err(HistoryError::Capacity);
+        }
+        self.peak = self.peak.max(retained);
+        Ok(self.peak)
+    }
+}
+
+// Keep exhaustive: every new operation must declare its prior-state copies.
+fn operation_copy_bytes(
+    document: &Document,
+    operation: &crate::Operation,
+) -> Result<u64, HistoryError> {
     use crate::Operation;
+    let clip = |id| {
+        document.clip(id).map_or(Ok(0), |c| {
+            sum([size_of::<Clip>() as u64, clip_payload(c, true)?])
+        })
+    };
     match operation {
-        Operation::AddTrack { .. }
-        | Operation::AddClip { .. }
-        | Operation::AddTitle { .. }
-        | Operation::SplitClip { .. }
-        | Operation::MoveClip { .. }
-        | Operation::ThreePointEdit { .. }
+        Operation::CopyClipAttributes {
+            from_clip, to_clip, ..
+        } => sum([
+            clip(*from_clip)?
+                .checked_mul(3)
+                .ok_or(HistoryError::Capacity)?,
+            clip(*to_clip)?
+                .checked_mul(2)
+                .ok_or(HistoryError::Capacity)?,
+        ]),
+        Operation::SplitClip { clip: id, .. }
+        | Operation::TrimClip { clip: id, .. }
+        | Operation::SlipClip { clip: id, .. }
+        | Operation::ReplaceClip { clip: id, .. }
+        | Operation::FitToFill { clip: id, .. }
+        | Operation::SetClipSpeed { clip: id, .. }
+        | Operation::ConvertLegacyLook { clip: id, .. }
+        | Operation::SetTitleParam { clip: id, .. }
+        | Operation::SetEffectParam { clip: id, .. }
+        | Operation::SetEffectKeyframes { clip: id, .. }
+        | Operation::UpsertEffectKeyframe { clip: id, .. }
+        | Operation::RemoveEffectKeyframe { clip: id, .. } => {
+            clip(*id)?.checked_mul(4).ok_or(HistoryError::Capacity)
+        }
+        Operation::ThreePointEdit { .. }
         | Operation::PatchedThreePointEdit { .. }
         | Operation::RollEdit { .. }
         | Operation::SlideClip { .. }
-        | Operation::ReplaceClip { .. }
-        | Operation::FitToFill { .. }
         | Operation::RippleInsertGap { .. }
-        | Operation::AddFreezeFrame { .. }
-        | Operation::SetClipSpeed { .. }
-        | Operation::AddAdjustmentClip { .. }
-        | Operation::AddSolidClip { .. } => true,
+        | Operation::RippleDeleteClip { .. }
+        | Operation::SetAssetColorDescription { .. } => document_live_bytes(document)?
+            .checked_mul(4)
+            .ok_or(HistoryError::Capacity),
         Operation::AddAsset { .. }
         | Operation::RelinkAsset { .. }
-        | Operation::SetAssetColorDescription { .. }
         | Operation::SetColorContext { .. }
         | Operation::UpsertBin { .. }
         | Operation::RemoveBin { .. }
@@ -470,14 +561,15 @@ fn grows_timeline_arrays(operation: &crate::Operation) -> bool {
         | Operation::RemoveAudioBus { .. }
         | Operation::SetAudioMaster { .. }
         | Operation::SetPanLaw { .. }
+        | Operation::AddTrack { .. }
         | Operation::RemoveTrack { .. }
         | Operation::SetTrackSyncLock { .. }
         | Operation::SetTrackMix { .. }
         | Operation::SetTrackAutomation { .. }
-        | Operation::TrimClip { .. }
-        | Operation::SlipClip { .. }
+        | Operation::AddClip { .. }
+        | Operation::AddTitle { .. }
+        | Operation::MoveClip { .. }
         | Operation::DeleteClip { .. }
-        | Operation::RippleDeleteClip { .. }
         | Operation::LinkClips { .. }
         | Operation::UnlinkClips { .. }
         | Operation::AddMarker { .. }
@@ -486,25 +578,21 @@ fn grows_timeline_arrays(operation: &crate::Operation) -> bool {
         | Operation::AddEffect { .. }
         | Operation::InsertEffect { .. }
         | Operation::RemoveEffect { .. }
-        | Operation::SetEffectParam { .. }
-        | Operation::SetEffectKeyframes { .. }
         | Operation::ClearEffectKeyframes { .. }
-        | Operation::UpsertEffectKeyframe { .. }
-        | Operation::RemoveEffectKeyframe { .. }
         | Operation::SetEffectEnabled { .. }
         | Operation::SetClipEnabled { .. }
         | Operation::SetClipEnabledCurve { .. }
-        | Operation::CopyClipAttributes { .. }
-        | Operation::ConvertLegacyLook { .. }
         | Operation::AddLutAsset { .. }
         | Operation::RemoveLutAsset { .. }
-        | Operation::SetTitleParam { .. }
         | Operation::SetClipAudio { .. }
         | Operation::SetClipGainEnvelope { .. }
         | Operation::AddTransition { .. }
         | Operation::RemoveTransition { .. }
         | Operation::SetMarkerParam { .. }
+        | Operation::AddFreezeFrame { .. }
         | Operation::SetClipBlendMode { .. }
-        | Operation::SetSolidColor { .. } => false,
+        | Operation::AddAdjustmentClip { .. }
+        | Operation::AddSolidClip { .. }
+        | Operation::SetSolidColor { .. } => Ok(0),
     }
 }

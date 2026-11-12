@@ -9,6 +9,7 @@ pub const LIMIT_REASON: &str =
     "Task history limit reached. Finish or freeze this task before making more edits.";
 
 pub struct TaskHistoryAdmission {
+    pub(crate) usage: std::sync::Arc<std::sync::Mutex<crate::storage_budget::StorageUsage>>,
     pub(crate) replay_gate: std::sync::Arc<crate::history_record::ReplayGate>,
     pub(crate) base: SpecialistBaseRecord,
     pub(crate) prefix: Vec<Operation>,
@@ -33,9 +34,31 @@ impl TaskHistoryAdmission {
         history: &HistorySnapshot,
         role: crate::history_record::HistoryRole,
     ) -> Result<(), BundleError> {
+        self.replay_gate
+            .with(|| self.check_role_serial(history, role))?
+    }
+    fn check_role_serial(
+        &self,
+        history: &HistorySnapshot,
+        role: crate::history_record::HistoryRole,
+    ) -> Result<(), BundleError> {
         if history.floor_offset != self.floor_offset {
             return Err(BundleError::HistoryChanged);
         }
+        let _replay = crate::storage_budget::StorageReservation::reserve_for_retained_read(
+            &self.usage,
+            &self.limits,
+            0,
+            role.replay_limit(&self.limits),
+            if role == crate::history_record::HistoryRole::Ordinary {
+                role.replay_limit(&self.limits)
+            } else {
+                0
+            },
+            false,
+            u64::MAX,
+            true,
+        )?;
         check_role_history(history, &self.limits, role, &self.lineage_seed)?;
         let mut base = SpecialistBaseRecord {
             history_role: role,
@@ -50,7 +73,7 @@ impl TaskHistoryAdmission {
         if base.full_applied_delta.len() > kinewright_core::HISTORY_COMMANDS {
             return Err(BundleError::RunAdmission(LIMIT_REASON));
         }
-        let bytes = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let bytes = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
         if bytes.len() as u64
             > role
                 .persisted_limit(&self.limits)
@@ -68,7 +91,7 @@ pub fn check_history(history: &HistorySnapshot, limits: &StorageLimits) -> Resul
         history,
         crate::history_record::HistoryRole::Task,
     )?)
-    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    .map_err(crate::bundle::encoding_error)?;
     let bound = crate::history_record::TASK_BYTES.min(limits.branch_history_bytes);
     if bytes.len() as u64 > bound
         || crate::store::preflight_record(&bytes, limits).map_err(task_capacity_error)? > bound
@@ -86,8 +109,7 @@ pub(crate) fn check_role_history(
     seed: &crate::bundle_records::LineageRecord,
 ) -> Result<(), BundleError> {
     let record = crate::history_record::HistoryRecord::capture(history, role)?;
-    let bytes =
-        serde_json::to_vec(&record).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+    let bytes = serde_json::to_vec(&record).map_err(crate::bundle::encoding_error)?;
     let bound = role
         .persisted_limit(limits)
         .min(limits.branch_history_bytes);
@@ -104,23 +126,17 @@ pub(crate) fn check_role_history(
     let ids: Vec<crate::bundle_records::BatchId> = (0..history.batches.len())
         .map(|index| {
             serde_json::from_value(serde_json::Value::String(format!("{:032x}", index + 1)))
-                .map_err(|error| BundleError::Corrupt(error.to_string()))
+                .map_err(|_| BundleError::HistoryCommitInvariant)
         })
         .collect::<Result<_, _>>()?;
     let lineage =
         crate::bundle_commit::lineage(&seed.branch_origin, history, &ids, Some(seed), Some(seed))?;
-    let encoded =
-        serde_json::to_vec(&lineage).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+    let encoded = serde_json::to_vec(&lineage).map_err(crate::bundle::encoding_error)?;
     let live = crate::history_size::native_history_live_bytes(history)?
         .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
         .ok_or(BundleError::RunAdmission(LIMIT_REASON))?;
-    let replay = crate::history_size::replay_live_bound(
-        &record.journal,
-        &history.baseline,
-        &history.document,
-    )?;
+    crate::history_size::verify_history_admission(history, role, limits)?;
     if live > role.live_limit(limits)
-        || replay > role.replay_limit(limits)
         || encoded.len() as u64 > crate::run_admission::RECORD_BYTES
         || crate::store::preflight_record(&encoded, limits)? > crate::run_admission::DECODED_BYTES
     {
@@ -135,7 +151,7 @@ pub fn decoded_history_bytes_for_fixture(history: &HistorySnapshot) -> Result<u6
         history,
         crate::history_record::HistoryRole::Task,
     )?;
-    let bytes = serde_json::to_vec(&record).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let bytes = serde_json::to_vec(&record).map_err(crate::bundle::encoding_error)?;
     crate::store::preflight_record(&bytes, &StorageLimits::default())
 }
 

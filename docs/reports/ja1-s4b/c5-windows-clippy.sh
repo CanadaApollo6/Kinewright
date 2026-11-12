@@ -17,7 +17,7 @@ cd "$(dirname "$0")/../../.."
 printf 'Windows cross-clippy gate, HEAD %s\n' "$(git rev-parse HEAD)"
 # Match CI's three feature-disabled builds on this Linux host before linting
 # MSVC. This helper owns its lock; never wrap this script in another flock.
-bash scripts/ci-shipping-builds.sh
+CARGO_TARGET_DIR="$PWD/target/shipping" bash scripts/ci-shipping-builds.sh
 # Cross-clippy does not enumerate MSVC libtest names. Keep the platform-scoped
 # manifest/accounting regression in this per-commit gate as well.
 nice -n 19 python3 -I scripts/ci_shards_selftest.py

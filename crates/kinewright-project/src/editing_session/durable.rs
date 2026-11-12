@@ -321,8 +321,7 @@ impl Ja1EditingSession {
             full_applied_delta: vec![],
         };
         let pin = bundle.store.pin(std::slice::from_ref(&base.checkpoint))?;
-        let encoded =
-            serde_json::to_vec(&specialist).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let encoded = serde_json::to_vec(&specialist).map_err(crate::bundle::encoding_error)?;
         let specialist = Arc::new(
             bundle
                 .store
@@ -477,7 +476,7 @@ impl Ja1EditingSession {
                 .map_err(crate::bundle::history_error)?;
             let event = preview
                 .request(Command::DoBatch(frozen.delta.clone()))
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                .map_err(|error| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)))?;
             if !matches!(event, Event::DocumentChanged { .. }) {
                 return Err(BundleError::HistoryChanged);
             }
@@ -491,9 +490,12 @@ impl Ja1EditingSession {
                 .ok_or(BundleError::HistoryChanged)?
                 .guard;
             self.task_history_admission(registered)?.check_role(&proposed, crate::history_record::HistoryRole::Candidate)
-                .map_err(|_| BundleError::RunAdmission("Candidate history limit reached. Keep this result frozen and use publish_result to report the limit."))?;
+                .map_err(|error| match error {
+                    BundleError::Capacity(_) | BundleError::RunAdmission(_) => BundleError::RunAdmission("Candidate history limit reached. Keep this result frozen and use publish_result to report the limit."),
+                    other => other,
+                })?;
             let encoded = serde_json::to_vec(envelope)
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                .map_err(crate::bundle::encoding_error)?;
             if encoded.len() as u64 > self.store()?.limits().command_bytes {
                 return Err(BundleError::RunAdmission(
                     "Candidate history limit reached. Keep this result frozen and use publish_result to report the limit.",
@@ -661,7 +663,7 @@ impl Ja1EditingSession {
         let pin = bundle
             .store
             .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
-        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let encoded = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
         let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));
         let attachment = bundle.attach_core(&core)?;
         let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
@@ -902,8 +904,7 @@ impl Ja1EditingSession {
                 return Ok(staged.base_ref.clone());
             }
             let base = self.specialist_checkpoint_base(&canonical, cut.history())?;
-            let base_bytes =
-                serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let base_bytes = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
             let same_base = base == *canonical.base();
             let reference = ObjectRef {
                 sha256: kinewright_media::sha256_bytes(&base_bytes),
@@ -1383,22 +1384,41 @@ impl Ja1EditingSession {
         let store = self.registered_bundle(guard)?.store();
         store.replay_gate().with(|| {
             let source = &guard.floor_source;
-            let live = crate::history_size::replay_live_bound(
-                &source.journal,
-                &source.baseline,
-                &source.document,
-            )?;
-            let reservation =
-                if guard.base.history_role == crate::history_record::HistoryRole::Ordinary {
-                    // A session's pre-save anchor can exceed its selected saved-history
-                    // bound: this replay proves the prefix that ordinary Save floors.
-                    // It still reserves the full transient cost in the ordinary pool.
-                    store.reserve_copy_read(0, live, live, false, true)?
-                } else {
-                    store.reserve_history_replay(live, guard.base.history_role)?
-                };
-            let materialized =
-                reservation.hold(source.resolve().map_err(crate::bundle::history_error)?);
+            let role = guard.base.history_role;
+            let limit = if role == crate::history_record::HistoryRole::Ordinary {
+                let usage = store.usage()?;
+                let ordinary = store
+                    .limits()
+                    .live_history_bytes
+                    .saturating_sub(usage.live_history_bytes);
+                let decoded = usage.decoded_bytes.saturating_sub(usage.decoder_bytes);
+                let raw = store
+                    .limits()
+                    .metadata_bytes
+                    .saturating_sub(usage.metadata_bytes)
+                    .saturating_sub(decoded);
+                // A session anchor may exceed its selected ordinary cut. Its
+                // serial proof uses the remaining ordinary pool, with a real
+                // reservation before replay, rather than reserving the whole
+                // pool alongside the already retained saved cut.
+                kinewright_core::history_size::TRANSPORT_LIVE_BYTES
+                    .min(ordinary)
+                    .min(raw)
+                    .min(store.limits().decoded_record_bytes)
+            } else {
+                role.replay_limit(store.limits())
+            };
+            let reservation = if role == crate::history_record::HistoryRole::Ordinary {
+                store.reserve_copy_read(0, limit, limit, false, true)?
+            } else {
+                store.reserve_history_replay(limit, role)?
+            };
+            let (history, _) = source
+                .journal
+                .resolve_with_budget(Arc::clone(&source.baseline), &source.document, limit)
+                .map_err(crate::bundle::history_error)?;
+            let retained = crate::history_size::native_history_live_bytes(&history)?;
+            let materialized = reservation.finish_history_replay(retained)?.hold(history);
             let discarded = usize::try_from(
                 floor_offset
                     .checked_sub(source.journal.floor_offset)
@@ -1446,6 +1466,7 @@ impl Ja1EditingSession {
             &canonical.floor_source.baseline,
         )?;
         Ok(crate::task_history_admission::TaskHistoryAdmission {
+            usage: self.registered_bundle(canonical)?.store().usage_arc(),
             replay_gate: self.registered_bundle(canonical)?.store().replay_gate(),
             base: canonical.base().clone(),
             prefix,

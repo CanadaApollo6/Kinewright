@@ -161,7 +161,7 @@ impl Ja1EditingSession {
     ) -> Result<(), BundleError> {
         if pending.len() > kinewright_core::MANUAL_COMMANDS
             || serde_json::to_vec(pending)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?
+                .map_err(crate::bundle::encoding_error)?
                 .len()
                 > kinewright_core::MANUAL_BYTES + 128
             || (expected.is_none() && !pending.is_empty())
@@ -399,7 +399,17 @@ impl Ja1EditingSession {
                 .core
                 .export_history()
                 .map_err(crate::bundle::history_error)?;
-            let selected = crate::bundle_commit::bound_history(&after, &limits)?;
+            let selected = self
+                .destination
+                .as_ref()
+                .ok_or(BundleError::Unsettled)?
+                .bundle()?
+                .store()
+                .with_history_admission(
+                    crate::history_record::HistoryRole::Ordinary,
+                    &limits,
+                    || crate::bundle_commit::bound_history(&after, &limits),
+                )?;
             let bundle = self
                 .destination
                 .as_mut()

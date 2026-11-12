@@ -1,5 +1,12 @@
 fn capacity_run(clips: usize) -> C5Fix10Run {
-    let document = capacity_document(clips);
+    capacity_run_document(&capacity_document(clips), Role::Editor)
+}
+fn capacity_run_document(document: &Document, role: Role) -> C5Fix10Run {
+    let clips = document
+        .tracks
+        .iter()
+        .map(|track| track.clips.len())
+        .sum::<usize>();
     let mut f = Fixture::with_document(false, document.clone());
     let mut scope = crate::orchestration::policy::director_scope(
         &Document::default(),
@@ -14,6 +21,18 @@ fn capacity_run(clips: usize) -> C5Fix10Run {
     }
     for track in 1..=20.min(clips / 10) {
         scope.objects.insert(format!("clip:{}", track * 100 + 10));
+    }
+    if role == Role::Colour {
+        for clip in document.tracks.iter().flat_map(|track| &track.clips) {
+            scope.objects.insert(format!("clip:{}", clip.id));
+            scope.objects.insert(format!("effect:{}:1", clip.id));
+        }
+        scope
+            .fields
+            .insert("effect.parameters.exposure_milli_stops".into());
+        scope
+            .fields
+            .insert("effect.keyframes.exposure_milli_stops".into());
     }
     f.brief.scope = scope;
     let (run, parent, producer) = reserve(&f);
@@ -36,7 +55,7 @@ fn capacity_run(clips: usize) -> C5Fix10Run {
         HostClient::connect(f.host.endpoint.clone(), auth, f.host.roots.clone()).unwrap();
     let director = C4Mcp::new(&f, &run, &parent.task);
     let mut brief = f.brief.clone();
-    brief.role = Role::Editor;
+    brief.role = role;
     director.accepted(
         "assign_task",
         OrchestrationCommand::AssignTask(Box::new(AssignTask {
@@ -61,6 +80,81 @@ fn capacity_run(clips: usize) -> C5Fix10Run {
         core,
     }
 }
+fn history_admission_native_copy_run() -> C5Fix10Run {
+    use kinewright_core::{
+        AutomationCurve, ClipId, Effect, EffectId, Keyframe, KeyframeInterpolation, ParamValue,
+        TimeCode,
+    };
+    let mut document = capacity_document(10);
+    document.tracks[0].clips[0].effects.push(Effect {
+        id: EffectId(1),
+        name: "primary_correction".into(),
+        enabled: true,
+        enabled_curve: None,
+        parameters: std::collections::BTreeMap::from([(
+            "exposure_milli_stops".into(),
+            ParamValue::Integer(0),
+        )]),
+        keyframes: std::collections::BTreeMap::from([(
+            "exposure_milli_stops".into(),
+            AutomationCurve {
+                keyframes: (0..1000)
+                    .map(|at| Keyframe {
+                        at: TimeCode(at),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    })
+                    .collect::<Vec<_>>(),
+            },
+        )]),
+    });
+    let r = capacity_run_document(&document, Role::Colour);
+    for operations in [
+        (102..=110)
+            .map(|id| kinewright_core::Operation::CopyClipAttributes {
+                from_clip: ClipId(101),
+                to_clip: ClipId(id),
+                names: None,
+                include_keyframes: true,
+            })
+            .collect::<Vec<_>>(),
+        (102..=110)
+            .map(|id| kinewright_core::Operation::RemoveEffect {
+                clip: ClipId(id),
+                effect: EffectId(1),
+            })
+            .collect::<Vec<_>>(),
+    ] {
+        crate::orchestration::policy::TaskPolicy {
+            role: Role::Colour,
+            scope: r.f.brief.scope.clone(),
+        }
+        .validate_batch(&r.core.export_history().unwrap().document, &operations)
+        .expect("COPY_WITNESS_HAS_THE_REAL_COLOUR_ROLE_AND_EFFECT_GRANTS");
+        let event = r
+            .core
+            .request(kinewright_core::Command::DoBatch(operations))
+            .unwrap();
+        assert!(
+            matches!(event, kinewright_core::Event::DocumentChanged { .. }),
+            "{event:?}"
+        );
+    }
+    capacity_check_task(&r.f, &r.core);
+    r
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn history_admission_native_copy_remove_finish_crash_reopen() {
+    capacity_lifecycle_crash_reopen_row(10);
+}
+
 // This helper is invoked by the slow parent in a separate process. With no
 // handoff path it does no work in ordinary libtest runs.
 #[test]
@@ -72,6 +166,13 @@ fn history_capacity_crash_child() {
         .unwrap()
         .parse()
         .unwrap();
+    if clips == 10 {
+        capacity_finish_merge_stop(
+            history_admission_native_copy_run(),
+            Some(std::path::Path::new(&handoff)),
+        );
+        return;
+    }
     let r = capacity_run(clips);
     let edits_started = Instant::now();
     let edits = if clips == 1200 { 68 } else { 200 };
@@ -232,7 +333,13 @@ fn capacity_lifecycle_crash_reopen_row(clips: usize) {
     std::fs::remove_dir_all(root).unwrap();
     println!(
         "CAPACITY_LIFECYCLE clips={clips} edits={} seconds={:.3}",
-        if clips == 400 { 200 } else { 68 },
+        if clips == 400 {
+            200
+        } else if clips == 10 {
+            2
+        } else {
+            68
+        },
         started.elapsed().as_secs_f64()
     );
 }
@@ -514,7 +621,7 @@ fn capacity_candidate_metrics(
             live_history_bytes_for_fixture(history, &lineage).unwrap();
         let record = HistoryRecord::capture(history, HistoryRole::Candidate).unwrap();
         serde_json::json!({"history_live":history_live,"lineage_live":lineage_live,"role_live":history_live + lineage_live,
-            "replay_peak":kinewright_core::history_size::replay_live_bound(&record.journal,&history.baseline,&history.document).unwrap(),
+            "replay_peak":kinewright_core::history_size::measure_replay_peak(&record.journal,&history.baseline,&history.document).unwrap(),
             "record_encoded":serde_json::to_vec(&record).unwrap().len()})
     };
     println!(

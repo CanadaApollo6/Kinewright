@@ -70,6 +70,8 @@ pub enum HistoryError {
     CommitInvariant,
     #[error("history exceeds its bounded admission")]
     Capacity,
+    #[error("history could not be encoded")]
+    Encoding,
     #[error("history replay differs from the retained checkpoint")]
     Corrupt,
     #[error("the Core actor has stopped")]

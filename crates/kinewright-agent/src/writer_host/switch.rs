@@ -319,9 +319,10 @@ mod tests {
                     + if reply_only {
                         0
                     } else {
-                        kinewright_project::bundle_commit::history_cost_probe(
+                        // Retirement needs retained-history headroom, not
+                        // another complete replay peak in the shared pool.
+                        kinewright_core::history_size::restored_history_live_bytes(
                             &host.core().export_history().unwrap(),
-                            &StorageLimits::default(),
                         )
                         .unwrap()
                             / 2
@@ -362,7 +363,8 @@ mod tests {
             assert_eq!(
                 refused.error.as_ref().map(|e| e.code.as_str()),
                 Some("storage_backpressure"),
-                "{:?}",
+                "target={target_index} reply_only={reply_only} peak={peak} limit={} error={:?}",
+                profile.live_history_bytes,
                 refused.error
             );
             assert!(
@@ -408,7 +410,11 @@ mod tests {
                         branch: branch.clone(),
                     },
                 );
-                assert!(preview.error.is_none());
+                assert!(
+                    preview.error.is_none(),
+                    "retirement preview: {:?}",
+                    preview.error
+                );
                 let removed = run(&mut host, HostCommand::RemoveBranch);
                 assert!(
                     removed.error.is_none(),

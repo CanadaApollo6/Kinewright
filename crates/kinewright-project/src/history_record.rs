@@ -40,17 +40,25 @@ impl HistoryRole {
             Self::Candidate => CANDIDATE_LIVE,
         }
     }
+    /// Retain the policy that a completed replay proved. The shared pool's
+    /// total is checked by each reservation and by cold-root admission; the
+    /// history proof depends on its effective role limit.
+    pub(crate) fn admission_profile(self, limits: &StorageLimits) -> StorageLimits {
+        let mut profile = limits.clone();
+        profile.live_history_bytes = self.live_limit(limits);
+        profile
+    }
     pub(crate) fn replay_limit(self, limits: &StorageLimits) -> u64 {
         match self {
-            Self::Ordinary => self.live_limit(limits),
+            Self::Ordinary => self.live_limit(limits).min(limits.decoded_record_bytes),
             // Native retained state uses its role budget. Its one serial
             // replay uses the existing decoded window and raw total ledger.
             Self::Task | Self::Candidate => limits.decoded_record_bytes,
         }
     }
 }
-// Provisional vertical-witness bounds. The full resident-envelope table accompanies
-// the first commit; final simultaneous-cap constants remain subject to the lead ruling.
+// Final stage-one role caps. The 568 MiB resident envelope remains unqualified;
+// resident native actors are not yet charged to the shared raw ledger.
 pub const TASK_BYTES: u64 = 1_111_040;
 pub const CANDIDATE_BYTES: u64 = 8 * TASK_BYTES;
 pub const TASK_LIVE: u64 = 41 << 20;
@@ -71,8 +79,7 @@ impl HistoryRecord {
         history: &HistorySnapshot,
     ) -> Result<(), BundleError> {
         let record = Self::capture(history, checkpoint.history_role)?;
-        let bytes =
-            serde_json::to_vec(&record).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let bytes = serde_json::to_vec(&record).map_err(crate::bundle::encoding_error)?;
         if bytes.len() as u64 != checkpoint.history_ref.byte_length
             || kinewright_media::sha256_bytes(&bytes) != checkpoint.history_ref.sha256
             || crate::manual_history::history_sha256(history)? != checkpoint.history_digest
@@ -83,8 +90,7 @@ impl HistoryRecord {
     }
     pub fn capture(history: &HistorySnapshot, role: HistoryRole) -> Result<Self, BundleError> {
         let reference = |document: &Document| -> Result<ObjectRef, BundleError> {
-            let bytes = serde_json::to_vec(document)
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+            let bytes = serde_json::to_vec(document).map_err(crate::bundle::encoding_error)?;
             Ok(ObjectRef {
                 sha256: kinewright_media::sha256_bytes(&bytes),
                 byte_length: bytes.len() as u64,
@@ -109,24 +115,18 @@ impl HistoryRecord {
     ) -> Result<StorageReservation<HistorySnapshot>, BundleError> {
         let baseline = read_document(&self.baseline_ref)?;
         let document = read_document(&self.current_ref)?;
-        let live = super::history_size::replay_live_bound(&self.journal, &baseline, &document)?;
-        let reservation = reserve(live, self.role)?;
-        // These two immutable snapshots are the durable reference closure; replay builds
-        // ordinary in-memory boundaries, whose ownership is transferred into the result.
+        let reservation = reserve(self.role.replay_limit(limits), self.role)?;
         let document = document.take();
-        let history = self
+        let (history, _) = self
             .journal
-            .resolve(Arc::new(baseline.take()), &document)
+            .resolve_with_budget(
+                Arc::new(baseline.take()),
+                &document,
+                self.role.replay_limit(limits),
+            )
             .map_err(crate::bundle::history_error)?;
-        let retained = super::history_size::history_live_bytes(&history)?;
-        if retained > live {
-            return Err(BundleError::Corrupt(
-                "history replay exceeded its live reservation".into(),
-            ));
-        }
-        if retained > self.role.live_limit(limits) {
-            return Err(BundleError::Capacity("role history memory"));
-        }
+        let retained = crate::history_size::check_retained_history(&history, self.role, limits)?;
+        let reservation = reservation.finish_history_replay(retained)?;
         Ok(reservation.hold(history))
     }
 }
@@ -138,18 +138,19 @@ impl BundleRecord for HistoryRecord {
         vec![self.baseline_ref.clone(), self.current_ref.clone()]
     }
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
+        if self.journal.batches.len() > kinewright_core::HISTORY_COMMANDS {
+            return Err(BundleError::Capacity("branch history commands"));
+        }
         if self.baseline_ref.record_kind != RecordKind::Document
             || self.current_ref.record_kind != RecordKind::Document
             || self.baseline_ref.sha256 != self.journal.baseline_sha256
             || self.current_ref.sha256 != self.journal.document_sha256
-            || self.journal.batches.len() > kinewright_core::HISTORY_COMMANDS
         {
             return Err(BundleError::Corrupt(
                 "history document reference agreement".into(),
             ));
         }
-        let bytes =
-            serde_json::to_vec(self).map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let bytes = serde_json::to_vec(self).map_err(crate::bundle::encoding_error)?;
         if bytes.len() as u64 > self.role.persisted_limit(limits)
             || crate::store::preflight_record(&bytes, limits)? > self.role.persisted_limit(limits)
         {
@@ -160,6 +161,29 @@ impl BundleRecord for HistoryRecord {
 }
 
 impl ProjectStore {
+    pub(crate) fn with_history_admission<T>(
+        &self,
+        role: HistoryRole,
+        limits: &StorageLimits,
+        work: impl FnOnce() -> Result<T, BundleError>,
+    ) -> Result<T, BundleError> {
+        self.replay_gate().with(|| {
+            let window = role.replay_limit(limits);
+            let _replay = self.reserve_copy_read(
+                0,
+                window,
+                if role == HistoryRole::Ordinary {
+                    window
+                } else {
+                    0
+                },
+                false,
+                true,
+            )?;
+            work()
+        })?
+    }
+
     pub(crate) fn reserve_history_anchor(
         &self,
         anchor: &kinewright_core::HistoryTransport,
@@ -369,12 +393,12 @@ impl ReplayGate {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| BundleError::Corrupt("replay gate poisoned".into()))?;
+            .map_err(|_| BundleError::Capacity("history replay gate unavailable"))?;
         while state.as_ref().is_some_and(|(owner, _)| *owner != thread) {
             state = self
                 .ready
                 .wait(state)
-                .map_err(|_| BundleError::Corrupt("replay gate poisoned".into()))?;
+                .map_err(|_| BundleError::Capacity("history replay gate unavailable"))?;
         }
         match &mut *state {
             Some((_, depth)) => *depth += 1,
