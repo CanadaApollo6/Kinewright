@@ -462,7 +462,11 @@ pub fn prepare_orchestration_pair(
     let result = (|| {
         let mut approval = prepare_orchestration_cut(bundle, &first, evidence, &fence)?;
         #[cfg(any(test, feature = "test-util"))]
-        crate::io_observer::note("consent_approval_prepared", &bundle.store.resolved_root()?);
+        crate::io_observer::note_bytes(
+            "consent_approval_prepared",
+            &bundle.store.resolved_root()?,
+            Some(evidence),
+        );
         let (second, marker) = approval.metadata.with_preview(bundle, |bundle| {
             let segment = bundle
                 .orchestration_cut(&first.projection().run)?
@@ -475,19 +479,30 @@ pub fn prepare_orchestration_pair(
         })?;
         Ok(((first, approval), (second, application), marker))
     })();
-    objects.finish()?;
     match result {
-        Ok((approval, application, marker)) => Ok(PreparedOrchestrationPair {
-            approval: Some(approval),
-            application,
-            marker,
-            objects,
-        }),
+        Ok((approval, application, marker)) => {
+            objects.finish()?;
+            Ok(PreparedOrchestrationPair {
+                approval: Some(approval),
+                application,
+                marker,
+                objects,
+            })
+        }
         Err(error) => {
             // No root or control was replaced. Other preparations' pinned names
             // and the durable root remain protected by the normal collector.
-            let settled = !bundle.store.usage()?.unsettled;
-            bundle.store.collect_prepared(objects, settled)?;
+            let collection = (|| {
+                objects.finish()?;
+                let settled = !bundle.store.usage()?.unsettled;
+                bundle.store.collect_prepared(objects, settled)
+            })();
+            if let Err(collection) = collection {
+                let message =
+                    format!("Unused edit preparation awaits storage cleanup: {collection}");
+                eprintln!("{message}");
+                bundle.last_collection_error = Some(message);
+            }
             Err(error)
         }
     }
