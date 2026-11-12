@@ -139,6 +139,10 @@ fn s3b_maintenance_engine_before_session_drains_pending_maps() {
     let temp = TempDirectory::new("s3b-map-engine");
     let faults = Arc::new(crate::engine::Faults::default());
     let (tx, rx) = bounded(1);
+    let (shutdown, shutting_down) = bounded(1);
+    *faults.on_worker_shutdown.lock().unwrap() = Some(Box::new(move || {
+        shutdown.send(()).unwrap();
+    }));
     *faults.on_agent.lock().unwrap() = Some(Box::new(move || {
         tx.send(crate::compositor::s3b_tests::delay_next_map())
             .unwrap();
@@ -164,12 +168,18 @@ fn s3b_maintenance_engine_before_session_drains_pending_maps() {
         .recv_timeout(Duration::from_secs(5))
         .expect("registered real map outstanding");
     let finished = engine.finished();
-    drop(engine);
-    drop(session); // engine went first, its consumer hands back its bound lease
+    let dropping = thread::spawn(move || drop(engine));
+    let started = shutting_down.recv_timeout(Duration::from_secs(5));
+    drop(session); // shutdown can wait for this consumer's bound lease
     let premature = finished.recv_timeout(Duration::from_millis(100));
     let held = ledger.live_bytes();
     delivery(); // rescue before assertions, also on a regression
     let done = finished.recv_timeout(Duration::from_secs(5));
+    dropping.join().unwrap();
+    assert!(
+        started.is_ok(),
+        "engine shutdown entered before session release"
+    );
     assert_eq!(
         premature,
         Err(crossbeam_channel::RecvTimeoutError::Timeout),

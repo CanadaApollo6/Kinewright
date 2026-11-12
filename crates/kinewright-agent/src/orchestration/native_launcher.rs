@@ -1130,7 +1130,7 @@ impl NativeGuardianLauncher {
         let worker_stopped = Arc::clone(&stopped);
         let first_progress = self.first_progress;
         let dialect = StreamDialect::of(invocation.profile().specification().provider());
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("kinewright-contained-codex".into())
             .spawn(move || {
                 let crate::provider_pipes::ProviderReader {
@@ -1236,6 +1236,7 @@ impl NativeGuardianLauncher {
                 identity: attempt.identity().clone(),
                 first: Some(prompt),
                 stopped,
+                worker: Some(worker),
             },
         )))
     }
@@ -1337,6 +1338,7 @@ pub(crate) fn launch_failure(
 }
 
 struct RestrictedSession {
+    worker: Option<thread::JoinHandle<()>>,
     control: Arc<Mutex<ContainedSession>>,
     events: crossbeam_channel::Receiver<AgentEvent>,
     owner: Arc<dyn InvocationOwner>,
@@ -1382,6 +1384,11 @@ impl AgentSession for RestrictedSession {
 impl Drop for RestrictedSession {
     fn drop(&mut self) {
         self.interrupt();
+        // No control/owner mutex is held across this join. Completion can
+        // upgrade the host Weak and must finish before its runtime retires.
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 

@@ -658,7 +658,7 @@ struct QueuedMeasurement {
 
 struct ActiveWorker {
     cancelled: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+    handle: crate::joined_thread::JoinedThread<()>,
 }
 
 impl ActiveWorker {
@@ -960,7 +960,10 @@ impl ColorQcState {
         {
             self.spawned_workers += 1;
         }
-        self.active = Some(ActiveWorker { cancelled, handle });
+        self.active = Some(ActiveWorker {
+            cancelled,
+            handle: crate::joined_thread::JoinedThread::new(handle),
+        });
     }
 
     fn reap_finished_worker(&mut self) {

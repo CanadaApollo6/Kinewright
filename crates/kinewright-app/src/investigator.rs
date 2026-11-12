@@ -627,6 +627,7 @@ pub(crate) struct InvestigatorSession {
     pub(crate) settings_durable: bool,
     queue: VecDeque<QueuedIncident>,
     running: Option<RunningSession>,
+    retired: Vec<crate::joined_thread::JoinedThread<()>>,
     pending_refused: Vec<PendingRefused>,
     /// The live per-project mutes (§2.4). The `Document.investigator` snapshot
     /// is the opened file's fossil — core never changes it, and a core event
@@ -838,7 +839,8 @@ impl InvestigatorSession {
         let turns = running.counters.snapshot().turns;
         let resolver = session_resolver(&running.harness, running.model.as_deref(), reason);
         return_investigation_to_open(incidents, running.id, resolver, turns, None);
-        detach_running_session(running);
+        self.retired.retain(|worker| !worker.is_finished());
+        self.retired.push(retire_running_session(running));
     }
 }
 
@@ -1039,37 +1041,37 @@ fn run_investigator_session(
 /// confirmations, but before writing the incident end.  That ordering closes
 /// the late-tool window while keeping the frame thread non-blocking (H3).
 fn signal_running_server(running: &mut RunningSession) {
-    if let Some(server) = running.server.take() {
-        drop(server);
+    if let Some(server) = running.server.as_mut() {
+        server.request_shutdown();
     }
 }
 
-/// Move the remaining session-owned resources to a detached reaper. The
-/// frame thread never joins: the reaper joins only the harness thread, drains
-/// its result channel, and drops the broker/branch (review fix G3).
-fn detach_running_session(mut running: RunningSession) {
-    // Normal completion has already written its end.  Signalling here also
-    // covers the completion and unexpected-disconnect paths; cancellation
-    // paths signal earlier, before their end write.
+/// Keep the reaper owned by the project: cancellation stays off the frame path,
+/// but dropping the project waits for all native backend owners to finish.
+fn retire_running_session(mut running: RunningSession) -> crate::joined_thread::JoinedThread<()> {
     signal_running_server(&mut running);
-    let RunningSession {
-        thread,
-        branch,
-        broker,
-        result,
-        ..
-    } = running;
-    std::thread::Builder::new()
-        .name("kinewright-investigator-reaper".to_owned())
-        .spawn(move || {
-            if let Some(thread) = thread {
-                let _ = thread.join();
-            }
-            for _ in result.try_iter() {}
-            drop(broker);
-            drop(branch);
-        })
-        .expect("investigator reaper thread must spawn");
+    crate::joined_thread::JoinedThread::new(
+        std::thread::Builder::new()
+            .name("kinewright-investigator-reaper".to_owned())
+            .spawn(move || drop(running))
+            .expect("investigator reaper thread must spawn"),
+    )
+}
+
+impl Drop for RunningSession {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.broker
+            .reject_all("the investigator session is closing");
+        signal_running_server(self);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        for _ in self.result.try_iter() {}
+        if let Some(server) = self.server.take() {
+            server.shutdown();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,7 +1347,12 @@ impl KinewrightApp {
                 self.write_investigator_unexpected_end(project_index, &running);
             }
         }
-        detach_running_session(running);
+        let session = self.projects[project_index]
+            .investigator
+            .as_mut()
+            .expect("session state");
+        session.retired.retain(|worker| !worker.is_finished());
+        session.retired.push(retire_running_session(running));
     }
 
     /// Start the next queued session on one project, if one may start (§3.2).
@@ -1734,7 +1741,7 @@ impl KinewrightApp {
     }
 
     /// Cancel the running session for the off switch: set the flag, answer
-    /// every confirmation, write the end, and hand ownership to a detached
+    /// every confirmation, write the end, and hand ownership to an owned
     /// reaper (§3.7 rule 37, review fix F3).
     fn cancel_investigator_for_off_switch(&mut self, project_index: usize) {
         let Some(mut running) = self.projects[project_index]
@@ -1755,7 +1762,12 @@ impl KinewrightApp {
             running.counters.snapshot().turns,
             None,
         );
-        detach_running_session(running);
+        let session = self.projects[project_index]
+            .investigator
+            .as_mut()
+            .expect("session state");
+        session.retired.retain(|worker| !worker.is_finished());
+        session.retired.push(retire_running_session(running));
     }
 
     /// Cancel the running session without changing a person-owned outcome;

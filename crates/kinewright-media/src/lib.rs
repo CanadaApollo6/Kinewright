@@ -46,6 +46,7 @@ mod transcript;
 // JA-1 S3 C5
 mod verify;
 pub mod voice_note;
+mod worker;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;

@@ -429,6 +429,7 @@ impl Drop for ServerThread {
     }
 }
 pub struct WriterHost {
+    lifecycle: Arc<HostLifecycle>,
     #[cfg(target_os = "linux")]
     runtime: Arc<studio_runtime::StudioRuntime>,
     endpoint: HostEndpoint,
@@ -490,7 +491,7 @@ impl WriterHost {
         };
         let stop = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(HttpState {
-            lifecycle,
+            lifecycle: Arc::clone(&lifecycle),
             #[cfg(target_os = "linux")]
             runtime: runtime.clone(),
             issuer,
@@ -513,6 +514,7 @@ impl WriterHost {
             .with_state(state);
         let server = serve(listener, router, "kinewright-writer-host", stop)?;
         Ok(Self {
+            lifecycle,
             endpoint,
             auth,
             roots,
@@ -598,6 +600,7 @@ impl Drop for WriterHost {
         }
         #[cfg(target_os = "linux")]
         self.runtime.stop();
+        self.lifecycle.join_media_workers();
         self.server.stop.notify_one();
         if let Some(thread) = self.server.thread.take() {
             let _ = thread.join();
@@ -646,6 +649,7 @@ fn serve(
 struct HostLifecycle {
     stopping: AtomicBool,
     changed: tokio::sync::Notify,
+    media_workers: Mutex<Vec<JoinHandle<()>>>,
 }
 impl HostLifecycle {
     fn stopping(&self) -> bool {
@@ -654,6 +658,41 @@ impl HostLifecycle {
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
         self.changed.notify_waiters();
+    }
+    fn spawn_media(&self, work: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+        let mut workers = self
+            .media_workers
+            .lock()
+            .map_err(|_| std::io::Error::other("media owner unavailable"))?;
+        if self.stopping() {
+            return Err(std::io::Error::other("host is stopping"));
+        }
+        let mut index = 0;
+        while index < workers.len() {
+            if workers[index].is_finished() {
+                let worker = workers.swap_remove(index);
+                let _ = worker.join();
+            } else {
+                index += 1;
+            }
+        }
+        workers.push(
+            thread::Builder::new()
+                .name("task-media-watch".into())
+                .spawn(work)?,
+        );
+        Ok(())
+    }
+    fn join_media_workers(&self) {
+        let workers = std::mem::take(
+            &mut *self
+                .media_workers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for worker in workers {
+            let _ = worker.join();
+        }
     }
     #[cfg(target_os = "linux")]
     async fn stopped(&self) {

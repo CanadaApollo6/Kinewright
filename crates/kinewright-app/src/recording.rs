@@ -1129,13 +1129,11 @@ impl KinewrightApp {
         let session_id = self.focused().id;
         let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.probe_tx.clone();
-        std::thread::Builder::new()
-            .name("kinewright-recording-probe".to_owned())
-            .spawn(move || {
-                let result = media.probe(&path);
-                let _ = result_tx.send((session_id, path, result));
-            })
-            .expect("failed to spawn the recording probe worker");
+        self.spawn_media_worker("kinewright-recording-probe", move || {
+            let result = media.probe(&path);
+            let _ = result_tx.send((session_id, path, result));
+        })
+        .expect("failed to spawn the recording probe worker");
     }
 
     /// Watch a live capture: tick the REC clock and catch `FFmpeg` dying on
@@ -1278,6 +1276,7 @@ pub(crate) mod feedback_capture {
         note_id: NoteId,
         log: Option<PlayheadLog<FeedbackAnchor>>,
         stop: CaptureStop,
+        _worker: crate::joined_thread::JoinedThread<()>,
         result: Receiver<CaptureWorkerResult>,
     }
     struct CaptureWorkerResult {
@@ -1416,7 +1415,7 @@ pub(crate) mod feedback_capture {
             let stop = Arc::new(AtomicBool::new(false));
             let stopping = stop.clone();
             let (tx, result) = std::sync::mpsc::sync_channel(1);
-            std::thread::Builder::new()
+            let worker = std::thread::Builder::new()
                 .name("feedback-capture".into())
                 .spawn(move || {
                     let _permit = permit;
@@ -1447,6 +1446,7 @@ pub(crate) mod feedback_capture {
                 anchor,
                 note_id,
                 stop: CaptureStop(stop),
+                _worker: crate::joined_thread::JoinedThread::new(worker),
                 result,
             })
         }

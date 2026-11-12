@@ -343,7 +343,7 @@ fn premultiply_table() -> Box<[u8; 65536]> {
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
-    /// Return display leases before any media-engine arcs are dropped.
+    /// Release display leases before joining workers or dropping engine Arcs.
     pub(crate) native_display: Option<NativeDisplay>,
     pub(crate) projects: Vec<ProjectSession>,
     pub(crate) focused_project: usize,
@@ -460,6 +460,7 @@ pub(crate) struct KinewrightApp {
     /// Review B (UI blocking): replies of agent-lane requests made off the
     /// UI thread, applied on it by `poll_background`.
     pub(crate) ui_replies: (mpsc::Sender<UiReply>, mpsc::Receiver<UiReply>),
+    pub(crate) media_workers: Vec<crate::joined_thread::JoinedThread<()>>,
     /// Re-review B D2: the newest cache-inventory refresh and branch-frame
     /// review; an off-UI reply of an older one is discarded.
     pub(crate) cache_inventory_generation: u64,
@@ -716,6 +717,7 @@ impl KinewrightApp {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            media_workers: Vec::new(),
             cache_inventory_generation: 0,
             branch_review_generation: 0,
             media_cache_clear_pending: None,
@@ -3503,21 +3505,31 @@ impl KinewrightApp {
     /// wait behind a render) off the UI thread; `apply` runs on the UI
     /// thread with its result at the next pass.
     pub(crate) fn off_ui<T: Send + 'static>(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         work: impl FnOnce() -> T + Send + 'static,
         apply: impl FnOnce(&mut Self, &egui::Context, T) + Send + 'static,
     ) {
         let (replies, ctx) = (self.ui_replies.0.clone(), ctx.clone());
-        thread::Builder::new()
-            .name("kinewright-ui-request".to_owned())
-            .spawn(move || {
-                let value = work();
-                let reply: UiReply = Box::new(move |app, ctx| apply(app, ctx, value));
-                let _ = replies.send(reply);
-                ctx.request_repaint();
-            })
-            .expect("failed to spawn a UI request worker");
+        self.spawn_media_worker("kinewright-ui-request", move || {
+            let value = work();
+            let reply: UiReply = Box::new(move |app, ctx| apply(app, ctx, value));
+            let _ = replies.send(reply);
+            ctx.request_repaint();
+        })
+        .expect("failed to spawn a UI request worker");
+    }
+
+    pub(crate) fn spawn_media_worker(
+        &mut self,
+        name: &str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let worker = thread::Builder::new().name(name.to_owned()).spawn(work)?;
+        self.media_workers.retain(|worker| !worker.is_finished());
+        self.media_workers
+            .push(crate::joined_thread::JoinedThread::new(worker));
+        Ok(())
     }
 
     /// PF1 R-5 at root epoch `epoch`: ack the bound image painted in an
@@ -4720,7 +4732,7 @@ struct NoiseProfileJob {
 /// The running worker and the flag that retires it.
 struct LearnWorker {
     cancelled: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+    handle: crate::joined_thread::JoinedThread<()>,
 }
 
 impl LearnWorker {
@@ -4864,7 +4876,10 @@ impl NoiseLearnState {
         {
             self.spawned_workers += 1;
         }
-        self.active = Some(LearnWorker { cancelled, handle });
+        self.active = Some(LearnWorker {
+            cancelled,
+            handle: crate::joined_thread::JoinedThread::new(handle),
+        });
     }
 
     /// Whether this spawn is refused before it is attempted.
@@ -6531,6 +6546,7 @@ pub(crate) mod in1_tests {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            media_workers: Vec::new(),
             cache_inventory_generation: 0,
             branch_review_generation: 0,
             media_cache_clear_pending: None,
@@ -11670,6 +11686,7 @@ mod in2b_tests {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            media_workers: Vec::new(),
             cache_inventory_generation: 0,
             branch_review_generation: 0,
             media_cache_clear_pending: None,

@@ -219,3 +219,4 @@ kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_zero_approvals_128_dis
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_open_81_approval_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 paired valid-prefix open measurement
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_pending_history_capacity_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 pending task history and specialist delta admission charges
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_merged_history_refusal_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5/C3 prospective history admission boundary counter probe
+kinewright_media engine::process_exit_tests::process_exit_native_driver crates/kinewright-media/src/process_exit_tests.rs any hardware  # on-demand: physical GPU process-exit ordering

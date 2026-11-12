@@ -8,7 +8,9 @@ use std::{
     thread,
 };
 
-use crossbeam_channel::{Sender, unbounded};
+#[cfg(any(test, feature = "test-util"))]
+use crossbeam_channel::Sender;
+use crossbeam_channel::unbounded;
 use kinewright_core::{
     AssetId, AssetTranscript, Document, ExportCancellation, FrameRounding, MediaAsset, MediaError,
     MediaKind, Rational, TimeCode, TimelineTranscriptWord, TranscriptStatus, TranscriptWord,
@@ -59,7 +61,7 @@ impl TranscriptInferenceHold {
 }
 
 pub(crate) struct TranscriptService {
-    jobs: Sender<crate::locator::LocatorJob<TranscriptJob>>,
+    jobs: crate::worker::OwnedWorker<crate::locator::LocatorJob<TranscriptJob>>,
     states: StatusReporter<TranscriptStatus>,
     cancellations: CancellationRegistry,
     root: PathBuf,
@@ -73,6 +75,12 @@ struct TranscriptJob {
     cancellation: ExportCancellation,
 }
 
+impl Drop for TranscriptService {
+    fn drop(&mut self) {
+        self.cancellations.shutdown();
+    }
+}
+
 impl TranscriptService {
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
         let (jobs, jobs_rx) = unbounded();
@@ -82,10 +90,10 @@ impl TranscriptService {
         let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
         #[cfg(any(test, feature = "test-util"))]
         let inference_gate = Arc::clone(&worker.inference_gate);
-        spawn_worker(
+        let jobs = spawn_worker(
             "kinewright-transcript",
             "transcript",
-            jobs_rx,
+            (jobs, jobs_rx),
             move |job: crate::locator::LocatorJob<TranscriptJob>| {
                 job.run(
                     &mut worker,

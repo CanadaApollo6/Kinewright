@@ -60,11 +60,12 @@ impl KinewrightApp {
             full_res: dialog.full_res,
         };
         let (sender, pending) = crossbeam_channel::bounded(1);
-        std::thread::spawn(move || {
+        (dialog.pending, dialog.outcome) = (pending, None);
+        self.spawn_media_worker("kinewright-solo", move || {
             let strip = kinewright_agent::preview_solo(&*analysis, revision, &document, &args);
             let _ = sender.send(strip);
-        });
-        (dialog.pending, dialog.outcome) = (pending, None);
+        })
+        .expect("solo worker must spawn");
     }
 
     pub(crate) fn show_solo_dialog(&mut self, ctx: &egui::Context) {

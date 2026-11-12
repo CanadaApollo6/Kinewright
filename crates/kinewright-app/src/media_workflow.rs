@@ -9,7 +9,6 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -988,19 +987,17 @@ impl KinewrightApp {
         let result_tx = self.relink_probe_tx.clone();
         self.relink_probe_pending = self.relink_probe_pending.saturating_add(1);
         self.status = format!("Checking replacement {}…", path.display());
-        thread::Builder::new()
-            .name("kinewright-relink-probe".to_owned())
-            .spawn(move || {
-                let result = media.probe(&path);
-                let _ = result_tx.send(RelinkProbeResponse {
-                    session_id,
-                    asset_id,
-                    expected_revision,
-                    path,
-                    result,
-                });
-            })
-            .expect("failed to spawn media relink probe worker");
+        self.spawn_media_worker("kinewright-relink-probe", move || {
+            let result = media.probe(&path);
+            let _ = result_tx.send(RelinkProbeResponse {
+                session_id,
+                asset_id,
+                expected_revision,
+                path,
+                result,
+            });
+        })
+        .expect("failed to spawn media relink probe worker");
     }
 
     fn spawn_media_status_request(
@@ -1022,9 +1019,8 @@ impl KinewrightApp {
         let fingerprint = asset.source_fingerprint.clone();
         let asset_id = asset.id;
         let asset_snapshot = asset.clone();
-        if thread::Builder::new()
-            .name("kinewright-media-status".to_owned())
-            .spawn(move || {
+        if self
+            .spawn_media_worker("kinewright-media-status", move || {
                 let status = media.media_availability(&asset_snapshot);
                 let _ = status_tx.send(MediaStatusResponse {
                     session_id,
@@ -1634,13 +1630,11 @@ impl KinewrightApp {
         let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.cache_clear_tx.clone();
         self.media_cache_clear_pending = Some(family);
-        thread::Builder::new()
-            .name("kinewright-cache-clear".to_owned())
-            .spawn(move || {
-                let result = media.clear_cache(family);
-                let _ = result_tx.send((family, result));
-            })
-            .expect("failed to spawn cache clear worker");
+        self.spawn_media_worker("kinewright-cache-clear", move || {
+            let result = media.clear_cache(family);
+            let _ = result_tx.send((family, result));
+        })
+        .expect("failed to spawn cache clear worker");
     }
 
     pub(crate) fn show_media_cache_dialog(&mut self, ctx: &egui::Context) {
@@ -2114,18 +2108,16 @@ impl KinewrightApp {
         let result_tx = self.lut_import_tx.clone();
         self.lut_worker_pending = self.lut_worker_pending.saturating_add(1);
         self.status = format!("Importing look {}…", path.display());
-        let spawn = thread::Builder::new()
-            .name("kinewright-lut-import".to_owned())
-            .spawn(move || {
-                let result = store.import_lut_asset(&path);
-                let _ = result_tx.send(LutImportResponse {
-                    session_id,
-                    path,
-                    intent,
-                    store,
-                    result,
-                });
+        let spawn = self.spawn_media_worker("kinewright-lut-import", move || {
+            let result = store.import_lut_asset(&path);
+            let _ = result_tx.send(LutImportResponse {
+                session_id,
+                path,
+                intent,
+                store,
+                result,
             });
+        });
         if let Err(error) = spawn {
             self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
             // Appendix B row 95.
@@ -2178,18 +2170,16 @@ impl KinewrightApp {
         let result_tx = self.lut_restore_tx.clone();
         self.lut_worker_pending = self.lut_worker_pending.saturating_add(1);
         self.status = format!("Locating look {title}…");
-        let spawn = thread::Builder::new()
-            .name("kinewright-lut-restore".to_owned())
-            .spawn(move || {
-                let result = store.restore(&asset, &candidate);
-                let _ = result_tx.send(LutRestoreResponse {
-                    session_id,
-                    lut_asset,
-                    title,
-                    candidate,
-                    result,
-                });
+        let spawn = self.spawn_media_worker("kinewright-lut-restore", move || {
+            let result = store.restore(&asset, &candidate);
+            let _ = result_tx.send(LutRestoreResponse {
+                session_id,
+                lut_asset,
+                title,
+                candidate,
+                result,
             });
+        });
         if let Err(error) = spawn {
             self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);
             // Appendix B row 98.

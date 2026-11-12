@@ -203,7 +203,7 @@ struct PendingScope {
 #[derive(Debug)]
 struct ActiveWorker {
     cancelled: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+    handle: crate::joined_thread::JoinedThread<()>,
 }
 
 impl ActiveWorker {
@@ -646,7 +646,10 @@ impl ColorScopesState {
         {
             self.spawned_workers += 1;
         }
-        self.active = Some(ActiveWorker { cancelled, handle });
+        self.active = Some(ActiveWorker {
+            cancelled,
+            handle: crate::joined_thread::JoinedThread::new(handle),
+        });
     }
 
     fn worker_is_running(&self) -> bool {
@@ -1388,7 +1391,7 @@ mod tests {
         }
         ActiveWorker {
             cancelled: Arc::clone(cancelled),
-            handle,
+            handle: crate::joined_thread::JoinedThread::new(handle),
         }
     }
 

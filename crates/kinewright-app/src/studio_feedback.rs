@@ -175,7 +175,7 @@ pub(crate) struct FrameProof {
 
 /// An asynchronous digest of the bound pixels. It owns the image it started on,
 /// so it cannot complete with later pixels under this label.
-pub(crate) struct Readback(std::thread::JoinHandle<PixelDigest>);
+pub(crate) struct Readback(crate::joined_thread::JoinedThread<PixelDigest>);
 impl Readback {
     fn start(texture: &FrameTexture) -> Result<Self, String> {
         let (width, height, rgba) = (texture.width, texture.height, Arc::clone(&texture.rgba));
@@ -186,7 +186,7 @@ impl Readback {
                 height,
                 sha256: kinewright_media::sha256_bytes(&rgba),
             })
-            .map(Self)
+            .map(|worker| Self(crate::joined_thread::JoinedThread::new(worker)))
             .map_err(|error| error.to_string())
     }
     fn finish(self) -> Result<PixelDigest, String> {

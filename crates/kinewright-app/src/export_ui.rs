@@ -158,6 +158,13 @@ pub(crate) struct ExportJob {
     pub(crate) progress_rx: crossbeam_channel::Receiver<ExportProgress>,
     pub(crate) result_rx: mpsc::Receiver<ExportOutcome>,
     pub(crate) progress: ExportProgress,
+    _worker: crate::joined_thread::JoinedThread<()>,
+}
+
+impl Drop for ExportJob {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1832,15 +1839,19 @@ impl KinewrightApp {
                     audio_verification,
                 });
             });
-        if let Err(error) = spawn {
-            self.note_export_refusal(format!("Could not start export: {error}"));
-            return;
-        }
+        let worker = match spawn {
+            Ok(worker) => crate::joined_thread::JoinedThread::new(worker),
+            Err(error) => {
+                self.note_export_refusal(format!("Could not start export: {error}"));
+                return;
+            }
+        };
         self.status = format!("Exporting {}…", output.display());
         self.export_dialog.verification = None;
         self.export_dialog.audio_verification = None;
         self.export_dialog.audio_report = None;
         self.export_job = Some(ExportJob {
+            _worker: worker,
             cancellation,
             progress_rx,
             result_rx,

@@ -346,6 +346,7 @@ pub(super) struct RenderedMediaRead {
     switch_generation: Option<u64>,
 }
 pub(super) struct MediaReadWork {
+    lifecycle: std::sync::Weak<super::HostLifecycle>,
     key: Value,
     state: std::sync::Mutex<MediaReadState>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -461,7 +462,10 @@ impl MediaReadWork {
         endpoint: &crate::orchestration::tasks::TaskEndpoint,
         owner: &std::sync::Weak<std::sync::Mutex<HostCommandOwner>>,
     ) -> bool {
-        if !endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire) {
+        if self.lifecycle.upgrade().is_none_or(|host| host.stopping())
+            || !endpoint.media_read_live()
+            || !self.alive.load(std::sync::atomic::Ordering::Acquire)
+        {
             return true;
         }
         let Some(owner) = owner.upgrade() else {
@@ -492,6 +496,7 @@ impl MediaReadWork {
         endpoint: &crate::orchestration::tasks::TaskEndpoint,
         owner: &std::sync::Weak<std::sync::Mutex<HostCommandOwner>>,
     ) -> Result<bool, HostError> {
+        let lifecycle = self.lifecycle.upgrade().ok_or_else(media_unavailable)?;
         let mut state = self.state.lock().map_err(|_| media_failed())?;
         if !matches!(*state, MediaReadState::Queued(_)) {
             return Ok(false);
@@ -507,9 +512,8 @@ impl MediaReadWork {
         let work = Arc::clone(self);
         let owner = owner.clone();
         let endpoint = endpoint.clone();
-        if std::thread::Builder::new()
-            .name("task-media-watch".into())
-            .spawn(move || {
+        if lifecycle
+            .spawn_media(move || {
                 let signal = Arc::clone(&work.cancel);
                 let result = std::thread::Builder::new()
                     .name("task-media-read".into())
@@ -1216,6 +1220,7 @@ impl HostCommandOwner {
             outcome: self.hooks.context_media_outcome.take(),
         };
         let work = Arc::new(MediaReadWork {
+            lifecycle: Arc::downgrade(&self.lifecycle),
             key,
             state: std::sync::Mutex::new(MediaReadState::Queued(Box::new(input))),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),

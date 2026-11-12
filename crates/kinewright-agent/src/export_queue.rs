@@ -276,8 +276,29 @@ pub enum ExportQueueError {
 #[derive(Clone)]
 pub struct ExportQueue {
     state: Arc<QueueState>,
-    work_tx: Sender<WorkItem>,
+    runtime: Arc<QueueRuntime>,
     capacity: usize,
+}
+
+/// Queue clones share one sender and join their worker when the last owner closes.
+struct QueueRuntime {
+    work_tx: Option<Sender<WorkItem>>,
+    worker: Option<thread::JoinHandle<()>>,
+    state: std::sync::Weak<QueueState>,
+}
+
+impl Drop for QueueRuntime {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            for job in lock_jobs(&state).values() {
+                job.cancellation.cancel();
+            }
+        }
+        self.work_tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 struct QueueState {
@@ -601,13 +622,18 @@ impl ExportQueue {
             next_id: AtomicU64::new(1),
         });
         let worker_state = Arc::clone(&state);
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("kinewright-export-queue".to_owned())
             .spawn(move || worker_loop(&worker_state, &work_rx))
             .map_err(ExportQueueError::WorkerThread)?;
+        let runtime = Arc::new(QueueRuntime {
+            work_tx: Some(work_tx),
+            worker: Some(worker),
+            state: Arc::downgrade(&state),
+        });
         Ok(Self {
             state,
-            work_tx,
+            runtime,
             capacity,
         })
     }
@@ -742,7 +768,11 @@ impl ExportQueue {
             cancellation,
             verified_sources,
         };
-        if let Err(error) = self.work_tx.try_send(work) {
+        let sent = match &self.runtime.work_tx {
+            Some(sender) => sender.try_send(work),
+            None => Err(crossbeam_channel::TrySendError::Disconnected(work)),
+        };
+        if let Err(error) = sent {
             lock_jobs(&self.state).remove(&id);
             return Err(match error {
                 crossbeam_channel::TrySendError::Full(_) => ExportQueueError::QueueFull {
@@ -1834,6 +1864,46 @@ mod tests {
             ExportJobState::Cancelled
         );
         assert_eq!(exporter.calls.load(Ordering::SeqCst), 1);
+        cleanup_directory(&directory);
+    }
+
+    #[test]
+    fn last_queue_owner_cancels_and_joins_the_exporter() {
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let (finished_tx, finished_rx) = crossbeam_channel::bounded(1);
+        let queue = queue(Arc::new(CancellableExporter {
+            started_tx,
+            finished_tx,
+        }));
+        let another_owner = queue.clone();
+        let directory = test_directory("owner-exit");
+        let job = queue
+            .enqueue(
+                &renderable_document(10),
+                request(directory.join("cancel.mp4"), false),
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let cancel = lock_jobs(&queue.state)
+            .get(&job.id)
+            .unwrap()
+            .cancellation
+            .clone();
+        let state = Arc::downgrade(&queue.state);
+        drop(queue);
+        assert!(
+            finished_rx.try_recv().is_err(),
+            "another queue owner is still live"
+        );
+        drop(another_owner);
+        let finished = finished_rx.try_recv().is_ok();
+        // Release a broken implementation too, before asserting the ordering.
+        cancel.cancel();
+        assert!(finished, "last queue owner waits for backend cancellation");
+        assert!(
+            state.upgrade().is_none(),
+            "the OS worker and backend state have retired"
+        );
         cleanup_directory(&directory);
     }
 

@@ -644,7 +644,7 @@ impl SessionMedia {
 }
 
 pub struct FfmpegMediaEngine {
-    control_tx: Sender<Control>,
+    control_tx: crate::worker::OwnedWorker<Control>,
     frames_rx: Receiver<PreviewFrame>,
     events_rx: Receiver<MediaEvent>,
     coalesced: Arc<Mutex<Coalesced>>,
@@ -1005,11 +1005,13 @@ impl FfmpegMediaEngine {
                     drop(finished_tx);
                 }
             });
-        if let Err(error) = spawned {
-            // The worker never started: stop the preview it would have joined.
-            drop(lane.shut_down());
-            return Err(MediaError::Backend(error.to_string()));
-        }
+        let control_tx = match spawned {
+            Ok(thread) => crate::worker::OwnedWorker::new(control_tx, thread),
+            Err(error) => {
+                drop(lane.shut_down());
+                return Err(MediaError::Backend(error.to_string()));
+            }
+        };
 
         let visual_assets = VisualAssetService::new(&data_dir)?;
         let derived_analysis = DerivedAnalysisService::new(&data_dir, analysis_config)?;
@@ -1497,7 +1499,14 @@ fn spawn_preview(
         ));
     }
     spawned
-        .spawn(move || make().run())
+        .spawn(move || {
+            let preview = make();
+            #[cfg(test)]
+            let faults = Arc::clone(&preview.faults);
+            preview.run();
+            #[cfg(test)]
+            Faults::run_once(&faults.on_preview_exit);
+        })
         .map_err(|error| MediaError::Backend(format!("preview-thread: spawn failed: {error}")))
 }
 
@@ -2827,6 +2836,9 @@ struct Worker {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Faults {
+    pub(crate) on_preview_drop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    on_preview_exit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub(crate) on_worker_shutdown: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Slowdown: added to every preview render.
     pub(crate) render_delay_ms: AtomicU64,
     /// Freeze: renders finishing before this instant are not published.
@@ -2937,7 +2949,12 @@ impl Worker {
         }
     }
 
-    fn run(mut self) {
+    fn run(self) {
+        let mut running = RunningWorker(self);
+        running.0.run_loop();
+    }
+
+    fn run_loop(&mut self) {
         loop {
             match self.control_rx.recv_timeout(WORKER_TICK) {
                 Ok(control) => {
@@ -2955,11 +2972,12 @@ impl Worker {
             self.handle_preview_failures();
             self.tick();
         }
-        self.shut_down();
     }
 
     /// PF1 H-6: the control channel disconnected.
     fn shut_down(&mut self) {
+        #[cfg(test)]
+        Faults::run_once(&self.faults.on_worker_shutdown);
         let (moved, transport) = self.lane.shut_down();
         drop(transport);
         for job in moved {
@@ -3788,6 +3806,19 @@ impl Worker {
         }
     }
 }
+
+/// Only `run` owns the live runtime. Step-driven callers may borrow a lane
+/// whose owner is elsewhere; dropping their raw Worker must not close it.
+struct RunningWorker(Worker);
+impl Drop for RunningWorker {
+    fn drop(&mut self) {
+        self.0.shut_down();
+    }
+}
+
+#[cfg(test)]
+#[path = "process_exit_tests.rs"]
+mod process_exit_tests;
 
 /// PF1 P-1: the monitor caps the long edge at `PREVIEW_MAX_WIDTH` too, so a
 /// 9:16 document previews at 720×1280 and 4:5 at 1024×1280. Only the
@@ -6057,7 +6088,7 @@ mod tests {
         assert_eq!(engine.stats().sync_decoders, 1, "the live engine gauge");
         let finished = engine.finished();
         let lane = Arc::clone(&engine.lane);
-        drop(engine);
+        let dropping = thread::spawn(move || drop(engine));
         crate::preview::tests::wait_until(&lane, |state| state.shutdown);
         assert_eq!(gauge.open(), 1, "still open at shutdown entry");
         drop(release);
@@ -6066,6 +6097,7 @@ mod tests {
             Err(crossbeam_channel::RecvTimeoutError::Disconnected),
             "the worker joined the preview and finished teardown",
         );
+        dropping.join().unwrap();
         assert_eq!(gauge.open(), 0, "teardown closed every decoder");
         // What outlives it is whole tables the registry keeps (process
         // wide), never a count driven below zero by the teardown.
