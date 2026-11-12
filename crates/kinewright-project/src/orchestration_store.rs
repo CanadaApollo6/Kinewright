@@ -24,7 +24,10 @@ impl record_sealed::Sealed for OrchestrationRecord {}
 impl BundleRecord for OrchestrationRecord {
     const KIND: RecordKind = RecordKind::RunIndex;
     fn dependencies(&self) -> Vec<ObjectRef> {
-        OrchestrationRecord::dependencies(self).unwrap_or_default()
+        // Record admission and cold graph readers call `validate` first, which
+        // runs this same pure extractor on the immutable record and refuses errors.
+        OrchestrationRecord::dependencies(self)
+            .expect("run record dependencies were validated before edge extraction")
     }
     fn validate_admission(&self, store: &crate::store::ProjectStore) -> Result<(), BundleError> {
         self.validate_retention_admission(store)
@@ -101,7 +104,7 @@ impl PublishedRunCut {
             &self.receipt.envelope.project,
             self.receipt.envelope.expected_generation,
             &self.receipt.envelope,
-            (**projection).clone(),
+            projection.as_ref(),
             segment.restore(projection).map_err(invalid)?,
             self.receipt.decision.clone(),
         )
