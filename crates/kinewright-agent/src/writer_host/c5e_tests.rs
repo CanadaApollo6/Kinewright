@@ -884,19 +884,35 @@ fn c5e_run(size: C5eSize) {
     c5e_storage(&f, &mut storage);
     let host = f.host.owner.upgrade().unwrap();
     let owner = host.lock().unwrap();
-    let approvals = owner.edit_approval_summary(&state).approvals;
+    let summary = owner.edit_approval_summary(&state);
+    let approvals = &summary.approvals;
     assert_eq!(
         approvals.len(),
         size.approvals(),
         "C5E_REOPEN_APPROVAL_COUNT"
     );
     assert!(
-        approvals.iter().all(|row| row.applied
+        // Every deletion was undone before the marker edits replaced its redo
+        // tail. The application audits are retained, but no removal is kept.
+        approvals.iter().all(|row| !row.applied
             && row.removed_clips == 1
             && row.removed_tracks == 0
-            && row.issue.is_none()),
-        "C5E_REOPEN_APPLICATION_MARKERS {approvals:?}"
+            && row
+                .issue
+                .as_deref()
+                .is_some_and(|words| words.contains("undone or not kept"))),
+        "C5E_REOPEN_UNDONE_APPROVALS {approvals:?}"
     );
+    assert_eq!(
+        summary
+            .missing
+            .iter()
+            .map(|edit| &edit.approval)
+            .collect::<BTreeSet<_>>(),
+        state.edit_approvals.iter().collect::<BTreeSet<_>>(),
+        "C5E_REOPEN_EVERY_UNDONE_APPROVAL_IS_NAMED"
+    );
+    assert!(summary.uncertain.is_empty(), "C5E_REOPEN_COVERAGE_KNOWN");
     drop(owner);
     eprintln!(
         "C5E_RETAINED_MAXIMA {storage:?} max_depth={maximum} approvals={} h1_edit_publications={}",

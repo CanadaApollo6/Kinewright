@@ -31,6 +31,12 @@ mod tests {
     fn cut(
         b: &B21,
     ) -> Result<Result<kinewright_core::Event, kinewright_core::CoreDisconnected>, HostError> {
+        cut_named(b, "Remove the first two clips")
+    }
+    fn cut_named(
+        b: &B21,
+        description: &str,
+    ) -> Result<Result<kinewright_core::Event, kinewright_core::CoreDisconnected>, HostError> {
         let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
             revision,
             document,
@@ -56,44 +62,8 @@ mod tests {
                     clip: kinewright_core::ClipId(2),
                 },
             ],
-            Some("Remove the first two clips"),
+            Some(description),
         )
-    }
-    #[test]
-    fn c4_run_limit_both_audit_cuts_fit_and_release_their_holds() {
-        if !te15_fix_counting_child(
-            "tests::storage_admission::tests::c4_run_limit_both_audit_cuts_fit_and_release_their_holds",
-        ) {
-            return;
-        }
-        let b = b21_start();
-        assert!(matches!(
-            cut(&b).unwrap().unwrap(),
-            kinewright_core::Event::DocumentChanged { .. }
-        ));
-        let state = b.f.projection(&b.run);
-        assert_eq!(state.edit_approvals.len(), 1);
-        assert_eq!(state.edit_applications.len(), 1);
-        assert_eq!(
-            b.core.export_history().unwrap().document.tracks[0]
-                .clips
-                .len(),
-            1
-        );
-        let owner = b.f.host.owner.upgrade().unwrap();
-        let host = owner.lock().unwrap();
-        let store = host.owner().unwrap().store().unwrap();
-        let usage = store.usage().unwrap();
-        assert!(
-            host.hooks.pending_edit_applications.is_empty(),
-            "C4_SUCCESS_RELEASES_PLAN"
-        );
-        assert_eq!(
-            usage.reserved_bytes, 0,
-            "C4_SUCCESS_RELEASES_CONTROL_RESERVATIONS"
-        );
-        assert!(!store.run_limit_reached(), "C4_HEALTHY_RUN_REMAINS_OPEN");
-        assert!(!usage.damaged_accounting && !usage.unsettled);
     }
     fn occupy_reader_memory(
         b: &B21,
@@ -169,6 +139,29 @@ mod tests {
         owner.lock().unwrap().hooks.consent_prepared_hook = None;
         let remaining = selected.expect("C4_REAL_ONE_CUT_TWO_CUT_BOUNDARY");
         let readers = occupy_reader_memory(&b, remaining);
+        let counters = || {
+            let host = owner.lock().unwrap();
+            let usage = host.owner().unwrap().store().unwrap().usage().unwrap();
+            (usage.metadata_bytes, usage.objects, usage.physical_bytes)
+        };
+        let baseline = counters();
+        for index in 0..4 {
+            let error = cut_named(&b, &format!("Remove the first two clips; proposal {index}"))
+                .unwrap_err();
+            assert!(
+                matches!(&error, HostError::Refused(r) if r.code == "consent_capacity"),
+                "C4_FOLLOWUPS_SPECIFIC_PREPARATION_REFUSAL {error}"
+            );
+            assert_eq!(
+                counters(),
+                baseline,
+                "C4_FOLLOWUPS_REFUSED_NAMES_UNCHARGED proposal={index}"
+            );
+        }
+        eprintln!(
+            "C4_STAGING_BOUNDARY_REFUSALS count=4 metadata={} objects={} physical={}",
+            baseline.0, baseline.1, baseline.2
+        );
         let history = b.core.export_history().unwrap();
         let projection = b.f.projection(&b.run);
         let root = std::fs::read(b.f.temp.path("project.kinewright")).unwrap();
@@ -540,4 +533,5 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     include!("run_limit_audit_tests.rs");
+    include!("run_limit_c4_followup_tests.rs");
 }

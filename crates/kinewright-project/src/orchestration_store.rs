@@ -389,6 +389,57 @@ pub struct PreparedOrchestrationPublication {
 }
 pub type PreparedOrchestrationCut = (ValidatedRunUpdate, PreparedOrchestrationPublication);
 
+/// One owner keeps both cuts and all newly sealed names through application or abandonment.
+pub struct PreparedOrchestrationPair {
+    approval: Option<PreparedOrchestrationCut>,
+    application: PreparedOrchestrationCut,
+    marker: Vec<u8>,
+    objects: crate::store::PreparedObjects,
+}
+impl PreparedOrchestrationPair {
+    pub fn approval_mut(&mut self) -> Result<&mut PreparedOrchestrationCut, BundleError> {
+        self.approval
+            .as_mut()
+            .ok_or(BundleError::HistoryBarrierInvariant)
+    }
+    pub fn release_approval(&mut self) {
+        self.approval = None;
+    }
+    pub fn application_mut(&mut self) -> &mut PreparedOrchestrationCut {
+        &mut self.application
+    }
+    #[must_use]
+    pub fn application_update(&self) -> &ValidatedRunUpdate {
+        &self.application.0
+    }
+    #[must_use]
+    pub fn marker(&self) -> &[u8] {
+        &self.marker
+    }
+}
+
+/// Release pins/holds first; restore the current inventory before retiring only this pair's names.
+pub fn discard_prepared_orchestration(
+    owner: &mut crate::editing_session::Ja1EditingSession,
+    prepared: PreparedOrchestrationPair,
+) -> Result<(), BundleError> {
+    let PreparedOrchestrationPair {
+        approval,
+        application,
+        marker: _,
+        objects,
+    } = prepared;
+    drop(approval);
+    drop(application);
+    let bundle = owner.active_bundle_mut()?;
+    let settled =
+        !bundle.unsettled && bundle.pending_command.is_none() && bundle.pending_metadata.is_none();
+    if settled {
+        bundle.store.publish_inventory(&bundle.recovery)?;
+    }
+    bundle.store.collect_prepared(objects, settled)
+}
+
 /// Stage both real publishers without replacing either root. Their record seals,
 /// decoded projections, root writes and inventories remain charged together.
 pub fn prepare_orchestration_pair(
@@ -396,7 +447,7 @@ pub fn prepare_orchestration_pair(
     first: ValidatedRunUpdate,
     evidence: &[u8],
     next: impl FnOnce(u64, ObjectRef) -> Result<(ValidatedRunUpdate, Vec<u8>), BundleError>,
-) -> Result<(PreparedOrchestrationCut, PreparedOrchestrationCut, Vec<u8>), BundleError> {
+) -> Result<PreparedOrchestrationPair, BundleError> {
     let bundle = owner.active_bundle_mut()?;
     bundle.store.admit_run_write()?;
     let _preparing = crate::run_admission::preparing_consent(&bundle.store);
@@ -407,6 +458,7 @@ pub fn prepare_orchestration_pair(
     let fence = bundle
         .store
         .publication_fence(bundle.admission.raw_bytes())?;
+    let mut objects = bundle.store.prepare_objects()?;
     let result = (|| {
         let mut approval = prepare_orchestration_cut(bundle, &first, evidence, &fence)?;
         #[cfg(any(test, feature = "test-util"))]
@@ -423,16 +475,22 @@ pub fn prepare_orchestration_pair(
         })?;
         Ok(((first, approval), (second, application), marker))
     })();
-    if result.is_err() {
-        // No root was replaced. Retire only this attempt's unreferenced objects;
-        // the durable-root pin and unrelated evidence remain live.
-        bundle
-            .store
-            .with_namespace(crate::namespace::ProjectNamespace::finish_object_batch)?;
-        bundle.store.allow_collection()?;
-        bundle.store.collect_unpublished()?;
+    objects.finish()?;
+    match result {
+        Ok((approval, application, marker)) => Ok(PreparedOrchestrationPair {
+            approval: Some(approval),
+            application,
+            marker,
+            objects,
+        }),
+        Err(error) => {
+            // No root or control was replaced. Other preparations' pinned names
+            // and the durable root remain protected by the normal collector.
+            let settled = !bundle.store.usage()?.unsettled;
+            bundle.store.collect_prepared(objects, settled)?;
+            Err(error)
+        }
     }
-    result
 }
 fn prepare_orchestration_cut(
     bundle: &mut ProjectBundle,

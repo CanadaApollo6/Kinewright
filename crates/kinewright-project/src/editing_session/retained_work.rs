@@ -26,6 +26,7 @@ pub enum RetainedWorkKind {
 )]
 pub struct RetainedTaskWork {
     pub missing_approved_edits: Vec<crate::edit_audit::MissingApprovedEdit>,
+    pub uncertain_approved_edits: Vec<crate::edit_audit::UncertainApprovedEdit>,
     pub run: RunId,
     pub task: TaskId,
     pub kind: RetainedWorkKind,
@@ -140,8 +141,13 @@ impl Ja1EditingSession {
                 }
             };
             let mut missing = std::collections::BTreeMap::<_, Vec<_>>::new();
-            for edit in self.edit_audit_summary(&state, &[])?.missing {
+            let mut uncertain = std::collections::BTreeMap::<_, Vec<_>>::new();
+            let summary = self.edit_audit_summary(&state, &[])?;
+            for edit in summary.missing {
                 missing.entry(edit.task.clone()).or_default().push(edit);
+            }
+            for edit in summary.uncertain {
+                uncertain.entry(edit.task.clone()).or_default().push(edit);
             }
             for task in &state.tasks {
                 let mut source = None;
@@ -150,6 +156,7 @@ impl Ja1EditingSession {
                     task,
                     &mut source,
                     missing.remove(&task.id).unwrap_or_default(),
+                    uncertain.remove(&task.id).unwrap_or_default(),
                 ) {
                     Ok(Some(work)) => {
                         discovery.task_branches.push(work.source.branch.clone());
@@ -181,6 +188,7 @@ impl Ja1EditingSession {
         task: &crate::orchestration_records::TaskRecord,
         source_branch: &mut Option<BranchId>,
         missing_approved_edits: Vec<crate::edit_audit::MissingApprovedEdit>,
+        uncertain_approved_edits: Vec<crate::edit_audit::UncertainApprovedEdit>,
     ) -> Result<Option<RetainedTaskWork>, BundleError> {
         let bundle = self.active_bundle()?;
         let run = &state.run;
@@ -319,8 +327,14 @@ impl Ja1EditingSession {
         if !missing_words.is_empty() {
             disclosure.insert_str(0, &format!("{missing_words} "));
         }
+        let uncertain_words =
+            crate::edit_audit::uncertain_edits_disclosure(&uncertain_approved_edits);
+        if !uncertain_words.is_empty() {
+            disclosure.insert_str(0, &format!("{uncertain_words} "));
+        }
         Ok(Some(RetainedTaskWork {
             missing_approved_edits,
+            uncertain_approved_edits,
             run: run.clone(),
             task: task.id.clone(),
             kind,

@@ -45,6 +45,7 @@ pub struct MetadataIssuer {
 #[serde(deny_unknown_fields)]
 pub struct RunViewPage {
     pub missing_approved_edits: Vec<kinewright_project::edit_audit::MissingApprovedEdit>,
+    pub uncertain_approved_edits: Vec<kinewright_project::edit_audit::UncertainApprovedEdit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edit_approvals: Vec<super::EditApproval>,
     pub projection: RunProjection,
@@ -169,6 +170,8 @@ pub(super) struct Hooks {
     pub consent_apply_hook: Option<ConsentApplyHook>,
     #[cfg(test)]
     pub consent_prepared_hook: Option<Box<dyn FnOnce() -> Result<(), HostError> + Send>>,
+    #[cfg(test)]
+    pub consent_marker_hook: Option<Box<dyn FnMut() -> Result<(), HostError> + Send>>,
     pub completion_failure: Option<(CommandId, String)>,
     #[cfg(test)]
     pub completion_cut: Option<crate::orchestration::orchestration_records::CompletionStep>,
@@ -435,7 +438,13 @@ impl HostCommandOwner {
             .as_ref()
             .is_some_and(|scope| self.has_pending_edit_in_run(&scope.run));
         if uncertain_edit || same_run {
-            self.retry_pending_edit_publications()?;
+            self.retry_pending_edit_publications().map_err(|error| {
+                if preparing_edit {
+                    super::task_mcp::consent::pending_retry_error(error)
+                } else {
+                    error
+                }
+            })?;
         }
         self.prove_completion_for_owner(index)?;
         if self.hooks.pending.is_some() {
@@ -1350,6 +1359,7 @@ impl HostCommandOwner {
         Ok(RunViewPage {
             edit_approvals: edits.approvals,
             missing_approved_edits: edits.missing,
+            uncertain_approved_edits: edits.uncertain,
             completions: self.completion_statuses(&projection)?,
             accounting,
             runtime_status,
