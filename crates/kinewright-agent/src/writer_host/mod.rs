@@ -1,5 +1,6 @@
 //! Product-owned, serialized named-project IO and authenticated UI-free sessions.
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
+const HOST_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 mod attention;
 #[cfg(test)]
 mod hooks_tests;
@@ -25,6 +26,8 @@ pub(crate) mod run_inputs;
 pub(crate) mod spending;
 #[cfg(target_os = "linux")]
 pub(crate) mod studio_runtime;
+#[cfg(all(target_os = "linux", feature = "test-util"))]
+pub use studio_runtime::RecoveryPhase;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use studio_runtime::fixture::{ProtocolFixture, ProtocolFixtureMode, ProtocolObservation};
 #[cfg(all(target_os = "linux", feature = "test-util"))]
@@ -241,7 +244,7 @@ impl HostClient {
     fn post(&self, route: &str, body: &[u8]) -> Result<Vec<u8>, HostError> {
         let roots = self.bootstrap.roots.wire_header()?;
         let response = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(HOST_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
@@ -708,6 +711,26 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
     {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
+    #[cfg(target_os = "linux")]
+    let permit = if matches!(request.command, HostCommand::ReviseCut { .. })
+        && state.runtime.startup_pending()
+    {
+        // Recovery owns no command slot while this exact request waits. Reads,
+        // Stop and Shutdown must remain available, and only one waiter is admitted.
+        drop(permit);
+        let queued = async {
+            if !state.runtime.wait_for_startup().await {
+                return None;
+            }
+            Arc::clone(&state.ingress).acquire_owned().await.ok()
+        };
+        match tokio::time::timeout(HOST_REQUEST_TIMEOUT, queued).await {
+            Ok(Some(permit)) => permit,
+            Ok(None) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        permit
+    };
     let reply = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let shutting_down = matches!(request.command, HostCommand::Shutdown);

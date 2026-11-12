@@ -29,6 +29,13 @@ pub(crate) const REPLAN_PAUSE: &str =
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) mod fixture;
 #[cfg(any(test, feature = "test-util"))]
+#[derive(Clone, Copy)]
+pub enum RecoveryPhase {
+    Entered,
+    Queued,
+    Completed,
+}
+#[cfg(any(test, feature = "test-util"))]
 pub(super) struct RuntimeWitness {
     pub on_event: Arc<dyn Fn(&AgentEvent) + Send + Sync>,
     pub on_native_events: Arc<dyn Fn(crossbeam_channel::Receiver<AgentEvent>) + Send + Sync>,
@@ -36,6 +43,8 @@ pub(super) struct RuntimeWitness {
     pub raw_type: super::native_invocation::RawTypeWitness,
 }
 pub(super) struct RuntimePorts {
+    #[cfg(any(test, feature = "test-util"))]
+    pub recovery_witness: Option<Arc<dyn Fn(RecoveryPhase) + Send + Sync>>,
     pub profiles: Option<Arc<dyn ProfileFactory>>,
     #[cfg(feature = "te1-eval")]
     pub evaluation: Option<Arc<super::te1_eval::ScriptedLauncher>>,
@@ -67,6 +76,8 @@ impl Default for RuntimePorts {
             .unwrap_or_default()
             .with_file_name("kinewright-job-guardian");
         Self {
+            #[cfg(any(test, feature = "test-util"))]
+            recovery_witness: None,
             profiles: None,
             #[cfg(feature = "te1-eval")]
             evaluation: None,
@@ -113,6 +124,8 @@ struct State {
     worker: Option<Worker>,
 }
 pub(super) struct StudioRuntime {
+    recovery_changed: tokio::sync::Notify,
+    recovery_waiter: tokio::sync::Semaphore,
     me: Weak<Self>,
     host: Weak<Mutex<HostCommandOwner>>,
     ports: RuntimePorts,
@@ -158,12 +171,52 @@ impl StudioRuntime {
             owner.native_recovery_pending = true;
         }
         Arc::new_cyclic(|me| Self {
+            recovery_changed: tokio::sync::Notify::new(),
+            recovery_waiter: tokio::sync::Semaphore::new(1),
             me: me.clone(),
             host: Arc::downgrade(host),
             ports,
             state: Arc::default(),
             images: Arc::default(),
         })
+    }
+    pub(super) fn startup_pending(&self) -> bool {
+        self.state.lock().is_ok_and(|state| !state.recovered)
+    }
+    /// Await this recovery attempt, not a person resolving a persistent block.
+    /// No owner lock or ordinary request permit is held across the wait.
+    pub(super) async fn wait_for_startup(&self) -> bool {
+        let Ok(_waiter) = self.recovery_waiter.try_acquire() else {
+            return false;
+        };
+        if self.begin_recovery().is_err() {
+            return false;
+        }
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(witness) = &self.ports.recovery_witness {
+            witness(RecoveryPhase::Queued);
+        }
+        let wait = async {
+            loop {
+                let changed = self.recovery_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                {
+                    let Ok(state) = self.state.lock() else {
+                        return false;
+                    };
+                    if state.stopping {
+                        return false;
+                    }
+                    if state.recovered || !state.recovering {
+                        return true;
+                    }
+                }
+                changed.await;
+            }
+        };
+        // The ingress bounds recovery plus command-slot acquisition together.
+        wait.await
     }
     #[cfg(test)]
     pub(super) fn bind_profile_for_test(
@@ -205,6 +258,8 @@ impl StudioRuntime {
         let recovery_state = self.state.clone();
         let runtime = self.me.clone();
         #[cfg(any(test, feature = "test-util"))]
+        let witness = self.ports.recovery_witness.clone();
+        #[cfg(any(test, feature = "test-util"))]
         let fixture_root = self.ports.fixture_claim.clone();
         #[cfg(not(any(test, feature = "test-util")))]
         let fixture_root: Option<PathBuf> = None;
@@ -212,6 +267,10 @@ impl StudioRuntime {
             std::thread::Builder::new()
                 .name("kinewright-studio-recovery".into())
                 .spawn(move || {
+                    #[cfg(any(test, feature = "test-util"))]
+                    if let Some(witness) = &witness {
+                        witness(RecoveryPhase::Entered);
+                    }
                     let result = recover_on_open(&host, fixture_root.as_deref());
                     let status = result
                         .as_ref()
@@ -228,10 +287,15 @@ impl StudioRuntime {
                             .is_err()
                             .then(|| std::time::Instant::now() + Duration::from_millis(250));
                     }
-                    if result.is_ok()
-                        && let Some(runtime) = runtime.upgrade()
-                    {
-                        runtime.update();
+                    if let Some(runtime) = runtime.upgrade() {
+                        runtime.recovery_changed.notify_waiters();
+                        #[cfg(any(test, feature = "test-util"))]
+                        if let Some(witness) = &witness {
+                            witness(RecoveryPhase::Completed);
+                        }
+                        if result.is_ok() {
+                            runtime.update();
+                        }
                     }
                 })?,
         );
@@ -560,6 +624,7 @@ impl StudioRuntime {
             state.stopping = true;
             state.recovery_worker.take()
         });
+        self.recovery_changed.notify_waiters();
         if let Some(recovery) = recovery {
             let _ = recovery.join();
         }

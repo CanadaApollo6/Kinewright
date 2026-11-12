@@ -56,15 +56,21 @@ pub(super) fn project(name: &str) -> Project {
 /// The App's owner for `path` with its real writer host, reading this test's
 /// scheduler folder.
 pub(super) fn launch(project: &Project) -> Ja1Attachment {
+    let fixture = kinewright_agent::writer_host::ProtocolFixture::new(
+        project.temp.root(),
+        kinewright_agent::writer_host::ProtocolFixtureMode::Dormant,
+    );
+    launch_with_fixture(project, &fixture)
+}
+fn launch_with_fixture(
+    project: &Project,
+    fixture: &kinewright_agent::writer_host::ProtocolFixture,
+) -> Ja1Attachment {
     let owner =
         kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
     let mut attachment = Ja1Attachment::new(owner).unwrap();
     crate::ja1_attachment::SCHEDULER_SETTINGS
         .with(|folder| *folder.borrow_mut() = Some(project.temp.path("scheduler")));
-    let fixture = kinewright_agent::writer_host::ProtocolFixture::new(
-        project.temp.root(),
-        kinewright_agent::writer_host::ProtocolFixtureMode::Dormant,
-    );
     let writer = attachment
         .launch_protocol_fixture(
             SessionRoots {
@@ -72,7 +78,7 @@ pub(super) fn launch(project: &Project) -> Ja1Attachment {
                 write: vec![project.temp.root().into()],
             },
             project.temp.path("scheduler"),
-            &fixture,
+            fixture,
         )
         .unwrap();
     attachment.fixture_host = Some(writer);
@@ -486,4 +492,61 @@ fn s3_c10_settings_choose_director_then_revise_uses_it() {
     drop(app);
     let (_, count) = linked(&project.path);
     assert_eq!(count, 1, "C10_APP_ONE_RUN");
+}
+
+#[test]
+fn s3_c7_startup_recovery_queues_exact_revise_and_keeps_reads_live() {
+    use kinewright_agent::writer_host::{
+        HostCommand, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase,
+    };
+    let mut project = project("c7-recovery-order");
+    let first = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::Dormant);
+    let mut attachment = launch_with_fixture(&project, &first);
+    assert!(first.wait_recovery(RecoveryPhase::Completed, std::time::Duration::from_secs(5)));
+    project.feedback.issuer = None;
+    let proxy = attachment.drop_host_reply("revise_cut", false);
+    assert!(matches!(
+        with_host(&attachment, |port| project.feedback.submit(port)),
+        Outcome::Submitted(_)
+    ));
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    let kept = project.feedback.revise.take().unwrap();
+    drop(proxy);
+    drop(attachment);
+    let held = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::RecoveryHeld);
+    let attachment = launch_with_fixture(&project, &held);
+    assert!(held.wait_recovery(RecoveryPhase::Entered, std::time::Duration::from_secs(5)));
+    let client = attachment.host_client().unwrap();
+    let retry = kept.clone(); // The retry must carry the same durable request.
+    let reply = std::thread::scope(|scope| {
+        let pending = scope.spawn(|| client.request(HostCommand::ReviseCut { request: retry }));
+        let queued = held.wait_recovery(RecoveryPhase::Queued, std::time::Duration::from_secs(5));
+        let still_waiting = !pending.is_finished();
+        let read = client.request(HostCommand::Status);
+        // Release even if an observation above failed, before joining or asserting.
+        held.release();
+        let reply = pending.join().unwrap().unwrap();
+        assert!(queued && still_waiting, "C7_RECOVERY_REQUEST_QUEUED");
+        assert!(read.unwrap().error.is_none(), "C7_RECOVERY_READ_STAYS_LIVE");
+        reply
+    });
+    assert!(reply.error.is_none(), "C7_RECOVERY_ACCEPTED {reply:?}");
+    assert!(
+        matches!(&reply.revise_result, Some(ReviseResult::Accepted { batch_id, .. }) if batch_id == &kept.batch_id)
+    );
+    assert!(held.wait_recovery(RecoveryPhase::Completed, std::time::Duration::from_secs(5)));
+    let ready_result = client
+        .request(HostCommand::ReviseCut { request: kept })
+        .unwrap();
+    assert!(ready_result.error.is_none());
+    assert_eq!(
+        serde_json::to_value(reply.revise_result).unwrap(),
+        serde_json::to_value(ready_result.revise_result).unwrap(),
+        "C7_RECOVERY_FIRST_AND_READY_ORDERINGS_MATCH"
+    );
+    drop(attachment);
+    let (batches, runs) = linked(&project.path);
+    assert_eq!(runs, 1);
+    assert_eq!(batches.len(), 1);
+    assert!(batches[0].is_some());
 }

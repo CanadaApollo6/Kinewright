@@ -23,6 +23,8 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolFixtureMode {
     Dormant,
+    /// Hold initial recovery until release, without delaying the request server.
+    RecoveryHeld,
     Normal,
     Startup,
     FullQueue,
@@ -68,6 +70,8 @@ pub struct ProtocolObservation {
     pub identity: crate::orchestration::ExecutionIdentity,
 }
 struct State {
+    recovery: Mutex<(u8, bool)>,
+    recovery_changed: std::sync::Condvar,
     root: PathBuf,
     mode: ProtocolFixtureMode,
     /// C6: `scripted` speaks Codex's dialect, `scripted-claude` Claude's.
@@ -100,6 +104,8 @@ impl ProtocolFixture {
         event: Option<&'static str>,
     ) -> Self {
         Self(Arc::new(State {
+            recovery: Mutex::new((0, false)),
+            recovery_changed: std::sync::Condvar::new(),
             root: root.into(),
             mode,
             connector,
@@ -114,6 +120,28 @@ impl ProtocolFixture {
     }
     pub fn release(&self) {
         self.0.released.store(true, Ordering::Release);
+        self.0
+            .recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1 = true;
+        self.0.recovery_changed.notify_all();
+    }
+    pub fn wait_recovery(&self, phase: super::RecoveryPhase, timeout: Duration) -> bool {
+        let bit = recovery_bit(phase);
+        let (state, _) = self
+            .0
+            .recovery_changed
+            .wait_timeout_while(
+                self.0
+                    .recovery
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                timeout,
+                |state| state.0 & bit == 0,
+            )
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.0 & bit != 0
     }
     #[must_use]
     pub fn startup_entered(&self) -> bool {
@@ -159,7 +187,25 @@ impl ProtocolFixture {
     pub(in crate::writer_host) fn ports(&self) -> RuntimePorts {
         let events = self.0.clone();
         let queues = self.0.clone();
+        let recovery = Arc::clone(&self.0);
         RuntimePorts {
+            recovery_witness: Some(Arc::new(move |phase| {
+                let mut state = recovery.recovery.lock().unwrap();
+                state.0 |= recovery_bit(phase);
+                recovery.recovery_changed.notify_all();
+                if matches!(phase, super::RecoveryPhase::Entered)
+                    && recovery.mode == ProtocolFixtureMode::RecoveryHeld
+                {
+                    let (state, timeout) = recovery
+                        .recovery_changed
+                        .wait_timeout_while(state, Duration::from_secs(5), |state| !state.1)
+                        .unwrap();
+                    assert!(
+                        !timeout.timed_out() || state.1,
+                        "C7_RECOVERY_RELEASE_BOUNDED"
+                    );
+                }
+            })),
             profiles: Some(Arc::new(Factory(self.0.clone()))),
             #[cfg(feature = "te1-eval")]
             evaluation: None,
@@ -172,7 +218,10 @@ impl ProtocolFixture {
             ceiling: None,
             first_progress: self.0.mode.first_progress(),
             fixture_claim: Some(self.claim_root()),
-            fixture_autostart: self.0.mode != ProtocolFixtureMode::Dormant,
+            fixture_autostart: !matches!(
+                self.0.mode,
+                ProtocolFixtureMode::Dormant | ProtocolFixtureMode::RecoveryHeld
+            ),
             qualification: None,
             stop_gate: None,
             witness: Some(Arc::new(super::RuntimeWitness {
@@ -200,6 +249,13 @@ impl ProtocolFixture {
                 }),
             })),
         }
+    }
+}
+fn recovery_bit(phase: super::RecoveryPhase) -> u8 {
+    match phase {
+        super::RecoveryPhase::Entered => 1,
+        super::RecoveryPhase::Queued => 2,
+        super::RecoveryPhase::Completed => 4,
     }
 }
 impl Drop for ProtocolFixture {
