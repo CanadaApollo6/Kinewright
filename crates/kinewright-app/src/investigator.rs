@@ -627,6 +627,7 @@ pub(crate) struct InvestigatorSession {
     pub(crate) settings_durable: bool,
     queue: VecDeque<QueuedIncident>,
     running: Option<RunningSession>,
+    retired: Vec<crate::joined_thread::JoinedThread<()>>,
     pending_refused: Vec<PendingRefused>,
     /// The live per-project mutes (§2.4). The `Document.investigator` snapshot
     /// is the opened file's fossil — core never changes it, and a core event
@@ -826,6 +827,16 @@ impl InvestigatorSession {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn hold_retired_for_test(&mut self, worker: std::thread::JoinHandle<()>) {
+        self.retired
+            .push(crate::joined_thread::JoinedThread::new(worker));
+    }
+
+    pub(crate) fn take_retired(&mut self) -> Vec<crate::joined_thread::JoinedThread<()>> {
+        std::mem::take(&mut self.retired)
+    }
+
     /// Shut the running session down and return its incident to `Open`: the
     /// hand-resolve path (§3.7 rule 41) and project close share it.
     pub(crate) fn shutdown_for_close(&mut self, reason: &str, incidents: &IncidentLogHandle) {
@@ -838,7 +849,8 @@ impl InvestigatorSession {
         let turns = running.counters.snapshot().turns;
         let resolver = session_resolver(&running.harness, running.model.as_deref(), reason);
         return_investigation_to_open(incidents, running.id, resolver, turns, None);
-        detach_running_session(running);
+        self.retired.retain(|worker| !worker.is_finished());
+        self.retired.push(retire_running_session(running));
     }
 }
 
@@ -1039,37 +1051,37 @@ fn run_investigator_session(
 /// confirmations, but before writing the incident end.  That ordering closes
 /// the late-tool window while keeping the frame thread non-blocking (H3).
 fn signal_running_server(running: &mut RunningSession) {
-    if let Some(server) = running.server.take() {
-        drop(server);
+    if let Some(server) = running.server.as_mut() {
+        server.request_shutdown();
     }
 }
 
-/// Move the remaining session-owned resources to a detached reaper. The
-/// frame thread never joins: the reaper joins only the harness thread, drains
-/// its result channel, and drops the broker/branch (review fix G3).
-fn detach_running_session(mut running: RunningSession) {
-    // Normal completion has already written its end.  Signalling here also
-    // covers the completion and unexpected-disconnect paths; cancellation
-    // paths signal earlier, before their end write.
+/// Keep the reaper owned by the project: cancellation stays off the frame path,
+/// but dropping the project waits for all native backend owners to finish.
+fn retire_running_session(mut running: RunningSession) -> crate::joined_thread::JoinedThread<()> {
     signal_running_server(&mut running);
-    let RunningSession {
-        thread,
-        branch,
-        broker,
-        result,
-        ..
-    } = running;
-    std::thread::Builder::new()
-        .name("kinewright-investigator-reaper".to_owned())
-        .spawn(move || {
-            if let Some(thread) = thread {
-                let _ = thread.join();
-            }
-            for _ in result.try_iter() {}
-            drop(broker);
-            drop(branch);
-        })
-        .expect("investigator reaper thread must spawn");
+    crate::joined_thread::JoinedThread::new(
+        std::thread::Builder::new()
+            .name("kinewright-investigator-reaper".to_owned())
+            .spawn(move || drop(running))
+            .expect("investigator reaper thread must spawn"),
+    )
+}
+
+impl Drop for RunningSession {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.broker
+            .reject_all("the investigator session is closing");
+        signal_running_server(self);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        for _ in self.result.try_iter() {}
+        if let Some(server) = self.server.take() {
+            server.shutdown();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,7 +1357,12 @@ impl KinewrightApp {
                 self.write_investigator_unexpected_end(project_index, &running);
             }
         }
-        detach_running_session(running);
+        let session = self.projects[project_index]
+            .investigator
+            .as_mut()
+            .expect("session state");
+        session.retired.retain(|worker| !worker.is_finished());
+        session.retired.push(retire_running_session(running));
     }
 
     /// Start the next queued session on one project, if one may start (§3.2).
@@ -1734,7 +1751,7 @@ impl KinewrightApp {
     }
 
     /// Cancel the running session for the off switch: set the flag, answer
-    /// every confirmation, write the end, and hand ownership to a detached
+    /// every confirmation, write the end, and hand ownership to an owned
     /// reaper (§3.7 rule 37, review fix F3).
     fn cancel_investigator_for_off_switch(&mut self, project_index: usize) {
         let Some(mut running) = self.projects[project_index]
@@ -1755,7 +1772,12 @@ impl KinewrightApp {
             running.counters.snapshot().turns,
             None,
         );
-        detach_running_session(running);
+        let session = self.projects[project_index]
+            .investigator
+            .as_mut()
+            .expect("session state");
+        session.retired.retain(|worker| !worker.is_finished());
+        session.retired.push(retire_running_session(running));
     }
 
     /// Cancel the running session without changing a person-owned outcome;
@@ -2659,9 +2681,11 @@ mod tests {
     fn in2b_every_stop_site_argument_is_in_stops_or_categorical() {
         use kinewright_core::STOPS;
         /// The stop shapes and the 0-based index of the stop argument.
-        const SHAPES: [(&str, usize); 5] = [
+        const SHAPES: [(&str, usize); 7] = [
             ("shutdown_for_close(", 0),
             ("stop_threads(", 0),
+            ("prepare_close(", 0),
+            ("request_close(", 0),
             ("session_resolver(", 2),
             ("resolver(", 0),
             ("return_proposal_open_with_stale(", 2),
@@ -2779,8 +2803,8 @@ mod tests {
         }
         assert_eq!(truncated, 3, "every file keeps its tests below `mod tests`");
         assert_eq!(
-            defs, 4,
-            "the four shape definitions are skipped, not classified"
+            defs, 6,
+            "the six shape definitions are skipped, not classified"
         );
         assert_eq!(
             prefixed, 2,
@@ -2799,9 +2823,11 @@ mod tests {
                 "investigator.rs::shutdown_for_close::reason",
                 "investigator.rs::write_investigator_end::stop",
                 "investigator.rs::write_investigator_end::stop",
+                "project.rs::prepare_close::reason",
+                "project.rs::request_close::reason",
                 "project.rs::stop_threads::reason",
             ],
-            "the six stop/reason passthroughs are exactly the named set"
+            "the eight stop/reason passthroughs are exactly the named set"
         );
         assert!(
             covered.len() >= 17,

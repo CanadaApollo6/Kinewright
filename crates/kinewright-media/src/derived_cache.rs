@@ -8,7 +8,7 @@ use std::{
     time::SystemTime,
 };
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use kinewright_core::{ExportCancellation, MediaError};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -21,13 +21,14 @@ pub(crate) fn cache_root(data_dir: &Path, family: &str, version: u32) -> PathBuf
 pub(crate) fn spawn_worker<J, F>(
     thread_name: &str,
     worker_label: &str,
-    jobs: Receiver<J>,
+    jobs: (Sender<J>, Receiver<J>),
     mut process: F,
-) -> Result<(), MediaError>
+) -> Result<crate::worker::OwnedWorker<J>, MediaError>
 where
     J: Send + 'static,
     F: FnMut(J) -> bool + Send + 'static,
 {
+    let (sender, jobs) = jobs;
     thread::Builder::new()
         .name(thread_name.to_owned())
         .spawn(move || {
@@ -37,7 +38,7 @@ where
                 }
             }
         })
-        .map(|_| ())
+        .map(|thread| crate::worker::OwnedWorker::new(sender, thread))
         .map_err(|error| {
             MediaError::Backend(format!("could not start {worker_label} worker: {error}"))
         })
@@ -156,6 +157,16 @@ impl CancellationRegistry {
                     cancellation.cancel();
                 }
             }
+        }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cancellation in active.values() {
+            cancellation.cancel();
         }
     }
 

@@ -18,6 +18,7 @@ mod ja1_attachment;
 mod ja1_chat;
 #[cfg(test)]
 mod ja_harness;
+mod joined_thread;
 mod keys;
 mod look_browser_ui;
 mod matte_overlay_ui;
@@ -32,6 +33,7 @@ mod preview_ui;
 mod project;
 mod recording;
 mod recovery;
+mod retirement;
 mod screenshot;
 mod settings_ui;
 mod slash;

@@ -94,6 +94,8 @@ struct JournalHeader {
 }
 
 struct JournalWriter {
+    #[cfg(all(test, target_os = "linux"))]
+    append_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     authority: Option<kinewright_project::LockfileHandle>,
     _directory: kinewright_project::legacy_io::PinnedDirectory,
     file: LockedJournal,
@@ -229,6 +231,8 @@ impl JournalWriter {
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("could not initialize recovery journal: {error}"))?;
         Ok(Self {
+            #[cfg(all(test, target_os = "linux"))]
+            append_hook: None,
             authority,
             _directory: directory,
             file,
@@ -237,6 +241,10 @@ impl JournalWriter {
     }
 
     fn append(&mut self, command: &JournalCommand) -> Result<(), String> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(hook) = &self.append_hook {
+            hook();
+        }
         if let Some(writer) = &self.authority {
             writer.verify().map_err(|e| e.to_string())?;
         }
@@ -481,6 +489,8 @@ fn replay(parsed: ParsedJournal) -> Inspection {
 }
 
 enum RecorderControl {
+    #[cfg(all(test, target_os = "linux"))]
+    AppendHook(Arc<dyn Fn() + Send + Sync>, Sender<()>),
     #[cfg(test)]
     Flush(Sender<()>),
     Stop(Sender<()>),
@@ -602,6 +612,11 @@ fn recorder_loop(
     loop {
         select! {
             recv(controls) -> message => match message {
+                #[cfg(all(test, target_os = "linux"))]
+                Ok(RecorderControl::AppendHook(hook, acknowledged)) => {
+                    writer.append_hook = Some(hook);
+                    let _ = acknowledged.send(());
+                }
                 #[cfg(test)]
                 Ok(RecorderControl::Flush(acknowledge)) => {
                     if !drain_events(events, &mut writer, runtime_error) {
@@ -744,6 +759,30 @@ pub(crate) struct Recovery {
     recorder: Option<Recorder>,
     pending: Vec<PendingJournal>,
     runtime_error: Arc<Mutex<Option<String>>>,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+type CloseHook = (PathBuf, Box<dyn FnOnce()>);
+#[cfg(all(test, target_os = "linux"))]
+thread_local! { static CLOSE_HOOK: std::cell::RefCell<Option<CloseHook>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn at_close<T>(
+    path: PathBuf,
+    hook: impl FnOnce() + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CLOSE_HOOK.with_borrow_mut(|hook| *hook = None);
+        }
+    }
+    CLOSE_HOOK.with_borrow_mut(|slot| {
+        assert!(slot.is_none());
+        *slot = Some((path, Box::new(hook)));
+    });
+    let _reset = Reset;
+    run()
 }
 
 impl Recovery {
@@ -1179,8 +1218,34 @@ impl Recovery {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn journal_path(&self) -> &Path {
+        &self.path
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn set_append_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        let (acknowledge, acknowledged) = unbounded();
+        self.recorder
+            .as_ref()
+            .expect("fixture recorder is live")
+            .control
+            .send(RecorderControl::AppendHook(hook, acknowledge))
+            .unwrap();
+        acknowledged.recv_timeout(CORE_RESPONSE_TIMEOUT).unwrap();
+    }
+
     /// Close finishes journal IO before relinquishing the project's writer capability.
     pub(crate) fn close(&mut self) {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some((_, hook)) = CLOSE_HOOK.with_borrow_mut(|slot| {
+            if slot.as_ref().is_some_and(|(path, _)| path == &self.path) {
+                slot.take()
+            } else {
+                None
+            }
+        }) {
+            hook();
+        }
         self.stop_active();
         self.remove_journal();
         if let Some(writer) = self.authority.take() {

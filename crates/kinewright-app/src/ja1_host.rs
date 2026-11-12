@@ -49,6 +49,7 @@ pub(super) struct HostAttachment {
     hook_inflight: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
     hook_reply: Option<HostReply>,
     continuation_detached: bool,
+    shutdown_accepted: bool,
     installed_switch: Option<(
         kinewright_project::bundle_switch::SwitchAttachment,
         super::PreparedView,
@@ -373,6 +374,7 @@ impl HostAttachment {
             hook_inflight: None,
             hook_reply: None,
             continuation_detached: false,
+            shutdown_accepted: false,
             unknown_operation: unknown,
             switch_state: SwitchState::Complete,
             next_operation: if unknown { 2 } else { 1 },
@@ -438,6 +440,7 @@ impl HostAttachment {
             hook_inflight: None,
             hook_reply: None,
             continuation_detached: false,
+            shutdown_accepted: false,
             switch_state: SwitchState::Complete,
             next_operation: 1,
             pending_operation: None,
@@ -1068,15 +1071,11 @@ impl HostAttachment {
             .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
     }
 
-    pub fn close(&mut self) -> bool {
+    pub fn request_close(&mut self) -> bool {
         if self.continuation_detached {
-            self.source_server = None;
-            if let Some(mut child) = self.child.take() {
-                // The retained host outlives this view; reap its eventual exit.
-                drop(std::thread::spawn(move || {
-                    let _ = child.wait();
-                }));
-            }
+            return true;
+        }
+        if self.shutdown_accepted {
             return true;
         }
         if self.status.continuation_runs > 0 {
@@ -1090,7 +1089,6 @@ impl HostAttachment {
             }
             return false;
         }
-        // Explicit originating Close, as distinct from closing/dropping a chat client.
         if !self
             .child
             .as_mut()
@@ -1105,6 +1103,24 @@ impl HostAttachment {
                 }
                 Err(_) => return false,
             }
+        }
+        self.shutdown_accepted = true;
+        true
+    }
+
+    pub fn close(&mut self) -> bool {
+        if !self.request_close() {
+            return false;
+        }
+        if self.continuation_detached {
+            self.source_server = None;
+            if let Some(mut child) = self.child.take() {
+                // The retained host outlives this view; reap its eventual exit.
+                drop(std::thread::spawn(move || {
+                    let _ = child.wait();
+                }));
+            }
+            return true;
         }
         self.source_server = None;
         if let Some(child) = &mut self.child {

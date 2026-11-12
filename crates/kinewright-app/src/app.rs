@@ -343,9 +343,10 @@ fn premultiply_table() -> Box<[u8; 65536]> {
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
-    /// Return display leases before any media-engine arcs are dropped.
+    /// Release display leases before joining workers or dropping engine Arcs.
     pub(crate) native_display: Option<NativeDisplay>,
     pub(crate) projects: Vec<ProjectSession>,
+    pub(crate) retirement: crate::retirement::RetirementGroup,
     pub(crate) focused_project: usize,
     next_project_id: u64,
     /// The counter every router `Command::DoIfRevision` allocates its
@@ -460,6 +461,7 @@ pub(crate) struct KinewrightApp {
     /// Review B (UI blocking): replies of agent-lane requests made off the
     /// UI thread, applied on it by `poll_background`.
     pub(crate) ui_replies: (mpsc::Sender<UiReply>, mpsc::Receiver<UiReply>),
+    pub(crate) media_workers: Vec<crate::joined_thread::JoinedThread<()>>,
     /// Re-review B D2: the newest cache-inventory refresh and branch-frame
     /// review; an off-UI reply of an older one is discarded.
     pub(crate) cache_inventory_generation: u64,
@@ -515,6 +517,7 @@ pub(crate) struct KinewrightApp {
     pub(crate) show_material_strip: bool,
     pub(crate) show_media_rail: bool,
     pending_project_action: Option<ProjectAction>,
+    pending_export_close: Option<ProjectAction>,
     exit_discarded_projects: Vec<u64>,
     allow_close: bool,
     last_window_title: String,
@@ -716,6 +719,8 @@ impl KinewrightApp {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            retirement: crate::retirement::RetirementGroup::default(),
+            media_workers: Vec::new(),
             cache_inventory_generation: 0,
             branch_review_generation: 0,
             media_cache_clear_pending: None,
@@ -754,6 +759,7 @@ impl KinewrightApp {
             ),
             show_media_rail: false,
             pending_project_action: None,
+            pending_export_close: None,
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
@@ -904,6 +910,11 @@ impl KinewrightApp {
         if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             return;
         }
+        if self.project_has_exports(self.focused_project) {
+            self.status =
+                "Wait for the export to finish, or cancel it, before turning on Studio".into();
+            return;
+        }
         let was_legacy = !self.focused().source_admission.is_studio();
         if was_legacy && self.focused().project_path.is_some() {
             self.status = "Studio cannot attach this legacy project yet. Your edits remain here; local editing and Save are available.".into();
@@ -963,7 +974,8 @@ impl KinewrightApp {
                 self.presenter.suspend();
                 self.playback.pause();
                 self.playing = false;
-                let session = self.focused_mut();
+                let retirement = &mut self.retirement;
+                let session = &mut self.projects[self.focused_project];
                 // Retire local execution before granting the host named write authority.
                 for thread in &mut session.threads {
                     if let Some(local) = &mut thread.session {
@@ -978,7 +990,7 @@ impl KinewrightApp {
                     thread.pending_confirmations.clear();
                     thread.confirmations = None;
                     if let Some(server) = thread.mcp_server.take() {
-                        server.shutdown();
+                        retirement.server(server);
                     }
                 }
                 if let Some(grant) = grant.filter(|grant| !grant.is_quiescent()) {
@@ -2096,23 +2108,37 @@ impl KinewrightApp {
         if self.refuse_unkept_voice(index) {
             return;
         }
-        let closing_focused = index == self.focused_project;
-        let next_focus = index_after_close(self.focused_project, index, self.projects.len());
-        if !self.projects[index].stop_threads("the project was closed") {
+        if self.project_has_exports(index) {
+            self.pending_export_close = Some(ProjectAction::CloseProject(id));
+            return;
+        }
+        if !self.projects[index].prepare_close("the project was closed") {
             self.status = self.projects[index].ja1.as_ref().map_or_else(
                 || "Source cleanup is pending. Retry Close.".into(),
                 |attachment| attachment.message.clone(),
             );
             return;
         }
+        self.remove_closed_project(index);
+    }
+
+    fn remove_closed_project(&mut self, index: usize) {
+        let closing_focused = index == self.focused_project;
+        let next_focus = if self.projects.len() > 1 {
+            index_after_close(self.focused_project, index, self.projects.len())
+        } else {
+            0
+        };
+        let id = self.projects[index].id;
         let name = self.projects[index].name.clone();
-        if index == 0 {
+        if index == 0 && self.projects.len() > 1 {
             let (first, remaining) = self.projects.split_at_mut(1);
             first[0]
                 .recovery
                 .move_pending_to(&mut remaining[0].recovery);
         }
-        self.projects.remove(index);
+        let project = self.projects.remove(index);
+        self.retirement.project(project);
         // Preview cleanup during rebind reads the focused project's Studio state.
         self.focused_project = next_focus;
         self.media_statuses.remove_session(id);
@@ -2130,8 +2156,102 @@ impl KinewrightApp {
         {
             self.pending_legacy_relink = None;
         }
-        self.focus_project_with_rebind(next_focus, closing_focused);
+        if !self.projects.is_empty() {
+            self.focus_project_with_rebind(next_focus, closing_focused);
+        }
+        self.exit_discarded_projects.retain(|closed| *closed != id);
         self.status = format!("Closed {name}");
+    }
+
+    fn project_has_exports(&self, index: usize) -> bool {
+        let project = &self.projects[index];
+        project
+            .exports
+            .as_ref()
+            .is_some_and(|queue| queue.list().iter().any(|job| !job.state.is_terminal()))
+            || self.export_job.as_ref().is_some_and(|job| {
+                job.project == project.id && !job.cancellation.is_cancelled() && !job.is_finished()
+            })
+    }
+
+    fn export_close_choice(&mut self, ctx: &egui::Context, cancel: bool) {
+        let Some(action) = self.pending_export_close.take() else {
+            return;
+        };
+        if !cancel {
+            if matches!(action, ProjectAction::Exit(_)) {
+                self.exit_discarded_projects.clear();
+            }
+            return;
+        }
+        for project in &self.projects {
+            if matches!(action, ProjectAction::Exit(_))
+                || matches!(action, ProjectAction::CloseProject(id) if id == project.id)
+            {
+                if let Some(queue) = &project.exports {
+                    queue.close_admission();
+                    queue.cancel_all();
+                }
+                if let Some(job) = &self.export_job
+                    && job.project == project.id
+                {
+                    job.cancellation.cancel();
+                }
+            }
+        }
+        match action {
+            ProjectAction::Exit(_) => self.request_exit(ctx),
+            ProjectAction::CloseProject(id) => self.close_project(id),
+        }
+    }
+
+    fn show_export_close_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_export_close else {
+            return;
+        };
+        let mut choice = None;
+        egui::Window::new("Export in progress")
+            .collapsible(false).resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(if matches!(action, ProjectAction::Exit(_)) {
+                    "Exports are running or queued. Quitting cancels them and removes their partial output."
+                } else {
+                    "This project's exports are running or queued. Closing it cancels them and removes their partial output."
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Keep working").clicked() { choice = Some(false); }
+                    let words = if matches!(action, ProjectAction::Exit(_)) {
+                        "Cancel export and quit"
+                    } else { "Cancel export and close" };
+                    if ui.button(words).clicked() { choice = Some(true); }
+                });
+            });
+        if let Some(cancel) = choice {
+            self.export_close_choice(ctx, cancel);
+        }
+    }
+
+    fn join_native_owners(&mut self) {
+        // Also covers owner destruction without the GUI's ordinary Quit callback.
+        for project in &mut self.projects {
+            project.keep_close_feedback();
+        }
+        let prepared = self
+            .projects
+            .iter_mut()
+            .map(|project| project.request_close("Kinewright is closing"))
+            .collect::<Vec<_>>();
+        for (project, prepared) in self.projects.iter_mut().zip(prepared) {
+            let _ = project.finish_close(prepared);
+        }
+        if let Some(display) = &mut self.native_display {
+            display.terminal();
+        }
+        for project in &mut self.projects {
+            project.join_closed();
+        }
+        self.retirement.join();
     }
 
     /// Whether an exit waits for the person's choice about unsaved work.
@@ -2174,15 +2294,34 @@ impl KinewrightApp {
             self.pending_project_action = Some(ProjectAction::Exit(self.projects[index].id));
             return;
         }
-        let mut pending_close = None;
-        for (index, project) in self.projects.iter_mut().enumerate() {
-            if !project.stop_threads("Kinewright is closing") && pending_close.is_none() {
-                pending_close = Some(index);
+        if let Some(index) = (0..self.projects.len()).find(|&index| self.project_has_exports(index))
+        {
+            self.pending_export_close = Some(ProjectAction::Exit(self.projects[index].id));
+            return;
+        }
+        for project in &mut self.projects {
+            project.keep_close_feedback();
+        }
+        let prepared = self
+            .projects
+            .iter_mut()
+            .map(|project| project.request_close("Kinewright is closing"))
+            .collect::<Vec<_>>();
+        let closed = self
+            .projects
+            .iter_mut()
+            .zip(prepared)
+            .map(|(project, prepared)| project.finish_close(prepared))
+            .collect::<Vec<_>>();
+        // No retirement reaper starts its joins before every acknowledgement wait finishes.
+        for (index, closed) in closed.into_iter().enumerate().rev() {
+            if closed {
+                self.remove_closed_project(index);
             }
         }
-        if let Some(index) = pending_close {
-            self.focus_project(index);
-            self.status = self.projects[index].ja1.as_ref().map_or_else(
+        if !self.projects.is_empty() {
+            self.focus_project(0);
+            self.status = self.projects[0].ja1.as_ref().map_or_else(
                 || "Source cleanup is pending. Retry Close.".into(),
                 |attachment| attachment.message.clone(),
             );
@@ -3111,6 +3250,10 @@ impl KinewrightApp {
     // Polling coordinates six independent channels and preserves their visible event ordering.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn poll_background(&mut self, ctx: &egui::Context) {
+        self.retirement.prune();
+        if self.projects.is_empty() {
+            return;
+        }
         self.poll_ja1(ctx);
         while let Ok(reply) = self.ui_replies.1.try_recv() {
             reply(self, ctx);
@@ -3503,21 +3646,31 @@ impl KinewrightApp {
     /// wait behind a render) off the UI thread; `apply` runs on the UI
     /// thread with its result at the next pass.
     pub(crate) fn off_ui<T: Send + 'static>(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         work: impl FnOnce() -> T + Send + 'static,
         apply: impl FnOnce(&mut Self, &egui::Context, T) + Send + 'static,
     ) {
         let (replies, ctx) = (self.ui_replies.0.clone(), ctx.clone());
-        thread::Builder::new()
-            .name("kinewright-ui-request".to_owned())
-            .spawn(move || {
-                let value = work();
-                let reply: UiReply = Box::new(move |app, ctx| apply(app, ctx, value));
-                let _ = replies.send(reply);
-                ctx.request_repaint();
-            })
-            .expect("failed to spawn a UI request worker");
+        self.spawn_media_worker("kinewright-ui-request", move || {
+            let value = work();
+            let reply: UiReply = Box::new(move |app, ctx| apply(app, ctx, value));
+            let _ = replies.send(reply);
+            ctx.request_repaint();
+        })
+        .expect("failed to spawn a UI request worker");
+    }
+
+    pub(crate) fn spawn_media_worker(
+        &mut self,
+        name: &str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let worker = thread::Builder::new().name(name.to_owned()).spawn(work)?;
+        self.media_workers.retain(|worker| !worker.is_finished());
+        self.media_workers
+            .push(crate::joined_thread::JoinedThread::new(worker));
+        Ok(())
     }
 
     /// PF1 R-5 at root epoch `epoch`: ack the bound image painted in an
@@ -3806,11 +3959,15 @@ impl KinewrightApp {
     }
 }
 
+impl Drop for KinewrightApp {
+    fn drop(&mut self) {
+        self.join_native_owners();
+    }
+}
+
 impl eframe::App for KinewrightApp {
     fn on_exit(&mut self) {
-        if let Some(display) = &mut self.native_display {
-            display.terminal();
-        }
+        self.join_native_owners();
     }
     /// PF1 R-5 (R17): a paint mark from an earlier root epoch is acked once
     /// per bound image.
@@ -3824,9 +3981,15 @@ impl eframe::App for KinewrightApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.projects.is_empty() {
+            return;
+        }
         let measured_frame = self.performance.as_ref().map(|_| std::time::Instant::now());
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
+        if self.projects.is_empty() {
+            return;
+        }
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
@@ -3886,6 +4049,10 @@ impl eframe::App for KinewrightApp {
         // window it is no longer a count of.
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
+        self.show_export_close_confirmation(ui.ctx());
+        if self.projects.is_empty() {
+            return;
+        }
         self.show_ja1(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
@@ -4720,7 +4887,7 @@ struct NoiseProfileJob {
 /// The running worker and the flag that retires it.
 struct LearnWorker {
     cancelled: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+    handle: crate::joined_thread::JoinedThread<()>,
 }
 
 impl LearnWorker {
@@ -4864,7 +5031,10 @@ impl NoiseLearnState {
         {
             self.spawned_workers += 1;
         }
-        self.active = Some(LearnWorker { cancelled, handle });
+        self.active = Some(LearnWorker {
+            cancelled,
+            handle: crate::joined_thread::JoinedThread::new(handle),
+        });
     }
 
     /// Whether this spawn is refused before it is attempted.
@@ -6531,6 +6701,8 @@ pub(crate) mod in1_tests {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            retirement: crate::retirement::RetirementGroup::default(),
+            media_workers: Vec::new(),
             cache_inventory_generation: 0,
             branch_review_generation: 0,
             media_cache_clear_pending: None,
@@ -6559,6 +6731,7 @@ pub(crate) mod in1_tests {
             show_material_strip: false,
             show_media_rail: false,
             pending_project_action: None,
+            pending_export_close: None,
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
@@ -11670,6 +11843,8 @@ mod in2b_tests {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            retirement: crate::retirement::RetirementGroup::default(),
+            media_workers: Vec::new(),
             cache_inventory_generation: 0,
             branch_review_generation: 0,
             media_cache_clear_pending: None,
@@ -11698,6 +11873,7 @@ mod in2b_tests {
             show_material_strip: false,
             show_media_rail: false,
             pending_project_action: None,
+            pending_export_close: None,
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
@@ -17484,3 +17660,7 @@ mod c2_fix3_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "app/c2_fix4_tests.rs"]
 mod c2_fix4_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "process_exit_fix1_tests.rs"]
+mod process_exit_fix1_tests;

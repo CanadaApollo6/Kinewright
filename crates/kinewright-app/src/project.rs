@@ -107,6 +107,13 @@ struct DirtyCacheEntry {
     dirty: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClosePreparation {
+    WaitingForContinuation,
+    WaitingForSource,
+    Ready,
+}
+
 /// One independently editable project and all UI/agent state that must follow it.
 pub(crate) struct ProjectSession {
     pub(crate) id: u64,
@@ -182,6 +189,7 @@ pub(crate) struct ProjectSession {
     /// the exact structural-equality semantics of the uncached comparison.
     dirty_cache: RefCell<Option<DirtyCacheEntry>>,
     pub(crate) recovery: Recovery,
+    pub(crate) exports: Option<kinewright_agent::export_queue::ExportQueue>,
     pub(crate) threads: Vec<AgentThread>,
     pub(crate) active_thread: usize,
     pub(crate) next_thread_number: usize,
@@ -448,6 +456,7 @@ impl ProjectSession {
             saved_document: None,
             dirty_cache: RefCell::new(None),
             recovery,
+            exports: None,
             threads: Vec::new(),
             active_thread: 0,
             next_thread_number: 2,
@@ -492,6 +501,10 @@ impl ProjectSession {
             &agent_project_path,
             &incidents,
         )?);
+        session.exports = session.threads[0]
+            .mcp_server
+            .as_ref()
+            .and_then(kinewright_agent::McpServer::export_queue);
         session.publish_project_path_to_agents();
         Ok(session)
     }
@@ -843,22 +856,29 @@ impl ProjectSession {
         self.publish_project_path_to_agents();
     }
 
-    pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
+    pub(crate) fn keep_close_feedback(&mut self) {
         // S3 C3 fix 1: what the person typed or drew is kept before closing.
         if self.studio.feedback.changed {
             let _ = self.studio.feedback.persist();
         }
+    }
+
+    /// Every project's feedback is saved before any host close request at Quit.
+    pub(crate) fn request_close(&mut self, reason: &str) -> ClosePreparation {
         let source_closed = self
             .ja1
             .as_mut()
-            .is_none_or(crate::ja1_attachment::Ja1Attachment::close);
+            .is_none_or(crate::ja1_attachment::Ja1Attachment::request_close);
         if !source_closed
             && self
                 .ja1
                 .as_ref()
                 .is_some_and(crate::ja1_attachment::Ja1Attachment::continuation_pending)
         {
-            return false;
+            return ClosePreparation::WaitingForContinuation;
+        }
+        if let Some(queue) = &self.exports {
+            queue.close_admission();
         }
         self.retire_media();
         // Cloned before the investigator borrow: `incidents` now resolves
@@ -866,6 +886,33 @@ impl ProjectSession {
         let incidents = std::sync::Arc::clone(&self.incidents);
         if let Some(investigator) = self.investigator.as_mut() {
             investigator.shutdown_for_close(reason, &incidents);
+        }
+        for thread in &mut self.threads {
+            thread.host_chat = None;
+            if let Some(session) = &mut thread.session {
+                session.interrupt();
+            }
+            thread.events = None;
+            thread.running = false;
+            if let Some(confirmations) = &thread.confirmations {
+                confirmations.reject_all(reason);
+            }
+            thread.pending_confirmations.clear();
+            if let Some(server) = &mut thread.mcp_server {
+                server.request_shutdown();
+            }
+        }
+        if source_closed {
+            ClosePreparation::Ready
+        } else {
+            ClosePreparation::WaitingForSource
+        }
+    }
+
+    /// Waits retain both journal and sidecar authority until their IO has completed.
+    pub(crate) fn finish_close(&mut self, prepared: ClosePreparation) -> bool {
+        if prepared == ClosePreparation::WaitingForContinuation {
+            return false;
         }
         // `IN2B` §2 rule 4 (N2/B-5): the sidecar flushes after
         // `shutdown_for_close` — close-time records already carry the real
@@ -883,25 +930,41 @@ impl ProjectSession {
                 revision,
             ));
         }
+        self.recovery.close();
+        self.sidecar.authority = None;
+        prepared == ClosePreparation::Ready
+    }
+
+    pub(crate) fn prepare_close(&mut self, reason: &str) -> bool {
+        self.keep_close_feedback();
+        let prepared = self.request_close(reason);
+        self.finish_close(prepared)
+    }
+
+    /// Terminal phase only: persistence and every project's stop signal precede this.
+    pub(crate) fn join_closed(&mut self) {
         for thread in &mut self.threads {
-            thread.host_chat = None;
-            if let Some(session) = &mut thread.session {
-                session.interrupt();
-            }
             thread.session = None;
-            thread.events = None;
-            thread.running = false;
-            if let Some(confirmations) = &thread.confirmations {
-                confirmations.reject_all(reason);
-            }
-            thread.pending_confirmations.clear();
             if let Some(server) = thread.mcp_server.take() {
                 server.shutdown();
             }
         }
-        self.recovery.close();
-        self.sidecar.authority = None;
-        source_closed
+        if let Some(queue) = &self.exports {
+            queue.join();
+        }
+        self.investigator = None;
+        if let Some(ja1) = &mut self.ja1 {
+            let _ = ja1.close();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
+        let prepared = self.prepare_close(reason);
+        if prepared {
+            self.join_closed();
+        }
+        prepared
     }
 }
 

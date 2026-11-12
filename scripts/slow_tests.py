@@ -117,12 +117,41 @@ def strip_ffmpeg_log(line: str) -> str:
     return head + sep + rest
 
 
+# libasound's default error handler writes location, message and newline separately.
+ALSA_LOCATION = r"ALSA lib [A-Za-z0-9_]+\.c:[0-9]+:\([A-Za-z_][A-Za-z0-9_]*\) "
+ALSA_PREFIX = re.compile(r"^" + ALSA_LOCATION)
+ALSA_LINE = re.compile(r"^" + ALSA_LOCATION + r".+$")
+ALSA_SUFFIX = re.compile(ALSA_LOCATION + r".*$")
+ALSA_GLUED_MESSAGE = re.compile(r"[A-Z]|cannot find card |function |error evaluating ")
+
+
+def strip_alsa_log(line: str) -> str:
+    """Strip only a native ALSA fragment adjoining a libtest outcome."""
+    leading = ALSA_PREFIX.match(line)
+    if leading and line[leading.end():].startswith("test "):
+        line = line[leading.end():]
+    head, sep, rest = line.partition(" ... ")
+    if not sep or not head.startswith("test "):
+        return line
+    prefix = ALSA_PREFIX.match(rest)
+    if prefix:
+        rest = rest[prefix.end():]
+    outcome = OUTCOME.match(rest)
+    if outcome:
+        tail = rest[outcome.end():]
+        if (prefix or leading) and outcome.group() != "ignored" and ALSA_GLUED_MESSAGE.match(tail):
+            rest = outcome.group()
+        else:
+            rest = outcome.group() + ALSA_SUFFIX.sub("", tail)
+    return head + sep + rest
+
+
 OUTCOME_LINE = re.compile(r"^(?:ok|FAILED|ignored(?:, .*)?)$")
 
 
 def result_lines(log: str):
-    """(line number, line) of `log` with FFmpeg fragments stripped (strip_ffmpeg_log), and a
-    result split by a whole FFmpeg message rejoined.
+    """(line number, line) with exact FFmpeg/ALSA fragments stripped, and a
+    result split by a whole native message rejoined.
 
     A complete message, newline included, can land after `test name ... `, which pushes the
     outcome to a line of its own (pf1 R43 gate log: `test x ... [swscaler @ 0x..] No accelerated
@@ -153,13 +182,14 @@ def result_lines(log: str):
                 continue
         probe_advice = probe_advice_pending and FFMPEG_PROBE_ADVICE.fullmatch(raw)
         probe_advice_pending = bool(FFMPEG_PROBE_MESSAGE.search(raw))
-        line = strip_ffmpeg_log(raw)
+        line = strip_alsa_log(strip_ffmpeg_log(raw))
         if pending is not None:
+            line = strip_alsa_log("test pending ... " + line).partition(" ... ")[2]
             # The outcome line can carry its own FFmpeg tail, as a same-line result can.
             outcome = OUTCOME.match(line)
             if outcome:
-                line = line[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", line[outcome.end():])
-            if probe_advice or raw == FFMPEG_HLS_ADVICE or (re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line)):
+                line = line[: outcome.end()] + ALSA_SUFFIX.sub("", FFMPEG_LOG_SUFFIX.sub("", line[outcome.end():]))
+            if probe_advice or raw == FFMPEG_HLS_ADVICE or (ALSA_LINE.fullmatch(raw) and not OUTCOME_LINE.match(line)) or (re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line)):
                 continue
             if OUTCOME_LINE.match(line):
                 yield pending[0], pending[1] + line
@@ -173,6 +203,9 @@ def result_lines(log: str):
         # elsewhere on the line is not recognised, and the line keeps its non-outcome.
         head, sep, rest = FFMPEG_LOG_PREFIX.sub("", raw).partition(" ... ")
         if sep and head.startswith("test ") and not rest:
+            pending = (number, head + sep)
+            continue
+        if sep and head.startswith("test ") and ALSA_PREFIX.match(rest) and not OUTCOME_LINE.match(line.partition(" ... ")[2]):
             pending = (number, head + sep)
             continue
         if sep and head.startswith("test ") and rest == FFMPEG_HLS_ADVICE:

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, thread};
+use std::{collections::BTreeMap, sync::Arc};
 
 use eframe::egui;
 use kinewright_core::{
@@ -55,13 +55,11 @@ impl KinewrightApp {
         let session_id = self.focused().id;
         let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.probe_tx.clone();
-        thread::Builder::new()
-            .name("kinewright-probe".to_owned())
-            .spawn(move || {
-                let result = media.probe(&path);
-                let _ = result_tx.send((session_id, path, result));
-            })
-            .expect("failed to spawn media probe worker");
+        self.spawn_media_worker("kinewright-probe", move || {
+            let result = media.probe(&path);
+            let _ = result_tx.send((session_id, path, result));
+        })
+        .expect("failed to spawn media probe worker");
     }
 
     /// Files dropped anywhere on the window import into the focused project -

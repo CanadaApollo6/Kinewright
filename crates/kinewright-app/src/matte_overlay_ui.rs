@@ -748,7 +748,7 @@ struct MatteViewRequest {
 
 struct MatteViewWorker {
     cancelled: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+    handle: crate::joined_thread::JoinedThread<()>,
 }
 
 /// Every piece of ephemeral matte-overlay state.
@@ -1082,7 +1082,10 @@ impl MatteOverlayState {
         {
             self.spawned_workers += 1;
         }
-        self.active = Some(MatteViewWorker { cancelled, handle });
+        self.active = Some(MatteViewWorker {
+            cancelled,
+            handle: crate::joined_thread::JoinedThread::new(handle),
+        });
     }
 
     fn reap_finished_worker(&mut self) {

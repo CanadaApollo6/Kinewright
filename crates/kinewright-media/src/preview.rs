@@ -946,32 +946,12 @@ impl ReaderThread {
         self.work.take();
     }
 }
-struct JoinBeforeRelease(ReaderThread);
-impl Drop for JoinBeforeRelease {
-    fn drop(&mut self) {
-        if let Some(thread) = self.0.thread.take() {
-            let _ = thread.join();
-        }
-        self.0.work.take();
-    }
-}
 impl Drop for ReaderThread {
     fn drop(&mut self) {
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
-        if thread.is_finished() {
+        if let Some(thread) = self.thread.take() {
             let _ = thread.join();
-        } else {
-            // A detached reader still fences activation until its thread is joined.
-            let joined = JoinBeforeRelease(Self {
-                thread: Some(thread),
-                work: self.work.take(),
-            });
-            let _ = thread::Builder::new()
-                .name("kinewright-reader-retire".into())
-                .spawn(move || drop(joined));
         }
+        self.work.take();
     }
 }
 
@@ -1426,13 +1406,13 @@ pub(crate) struct Preview {
 }
 
 impl Drop for Preview {
-    /// H-6 (3)/(5): every reader retires, closes its decoder and exits
-    /// before the preview does (the worker joins the preview). Amendment
-    /// R47: the wait ends at `RETIRE_DEADLINE`, like a retirement's; a
-    /// reader still alive then (stuck in IO the interrupt cannot end) is
-    /// detached, its thread left to exit on its own (it owns its `Lane`),
-    /// and counted in `shutdown_detached_readers`.
+    /// Terminal cleanup joins every reader before releasing the native renderer.
+    /// Interactive retirement keeps its separate admission deadline.
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(hook) = self.faults.on_preview_drop.lock().unwrap().take() {
+            hook();
+        }
         self.held = None;
         let frames = {
             let mut state = self.lane.lock();
@@ -1448,27 +1428,8 @@ impl Drop for Preview {
         self.lane.work.notify_all();
         drop(frames);
         self.titles = None;
-        let deadline = Instant::now() + RETIRE_DEADLINE;
-        let mut state = self.lane.lock();
-        let alive = |state: &LaneState, id: u64| state.readers.slots.iter().any(|s| s.id == id);
-        let ids: Vec<u64> = self.readers.iter().map(|(id, _)| *id).collect();
-        while ids.iter().any(|id| alive(&state, *id)) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            state = state.wait_timeout(&self.lane.ready, left);
-        }
-        // A reader whose slot is gone has run its `Exit`: it returns now.
-        let (stuck, exited): (Vec<_>, Vec<_>) =
-            (self.readers.drain(..)).partition(|(id, _)| alive(&state, *id));
-        drop(state);
-        for (_, reader) in exited {
+        for (_, reader) in self.readers.drain(..) {
             reader.join();
-        }
-        if !stuck.is_empty() {
-            let detached = stuck.len() as u64;
-            self.lane.counters().stats.shutdown_detached_readers += detached;
         }
     }
 }
@@ -6050,11 +6011,9 @@ pub(crate) mod tests {
         retirement_escape(|lane| drop(lane.shut_down()));
     }
 
-    /// Amendment R47 (item 4): shutdown with a reader stuck in its open's
-    /// IO returns within the deadline and a margin; the reader, detached
-    /// and counted, keeps its permits until it exits.
+    /// Terminal shutdown retains and joins a reader even after interactive admission times out.
     #[test]
-    fn shutdown_detaches_a_reader_stuck_past_the_deadline() {
+    fn shutdown_joins_a_reader_stuck_past_the_deadline() {
         use crate::decode::interrupt_seam::{Mode, arm, disarm, exits, release, wait_entered};
         let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture(2);
         let document = Arc::new(document);
@@ -6070,15 +6029,25 @@ pub(crate) mod tests {
             "held in its open"
         );
         let id = reader_at(&lane, 0);
-        let started = Instant::now();
         drop(lane.shut_down());
-        join_within(thread);
-        let took = started.elapsed();
-        assert!(took < RETIRE_DEADLINE + Duration::from_secs(10), "{took:?}");
-        assert!(alive(&lane, id), "detached, still stuck");
-        assert_eq!(lane.counters().stats.shutdown_detached_readers, 1);
-        assert_eq!(lane.book().held(id), 2, "it keeps its permits");
+        let (closed, closing) = bounded(1);
+        let joiner = thread::spawn(move || {
+            thread.join().unwrap();
+            let _ = closed.send(());
+        });
+        let returned = closing
+            .recv_timeout(RETIRE_DEADLINE + Duration::from_secs(1))
+            .is_ok();
+        let reader_alive = alive(&lane, id);
+        let detached = lane.counters().stats.shutdown_detached_readers;
+        let held = lane.book().held(id);
+        // Release native IO even when the terminal join has regressed.
         release(&path);
+        join_within(joiner);
+        assert!(!returned, "native IO remains held until terminal release");
+        assert!(reader_alive, "the owner keeps its reader until joined");
+        assert_eq!(detached, 0);
+        assert_eq!(held, 2, "it keeps its permits");
         wait_until(&lane, |state| state.readers.slots.is_empty());
         assert_eq!(lane.permits_in_use(), 0, "its permits return at its exit");
         assert!(exits(&path) >= 1, "the open failed with AVERROR_EXIT");

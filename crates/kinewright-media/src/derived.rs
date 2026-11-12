@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::unbounded;
 use kinewright_core::{
     AssetBeats, AssetSceneChanges, AssetSilences, BeatMarker, BeatStatus, Document,
     ExportCancellation, FrameRounding, FrameTexture, MediaAsset, MediaError, MediaKind, Rational,
@@ -89,7 +89,7 @@ pub struct DerivedAnalysisConfig {
 }
 
 pub(crate) struct DerivedAnalysisService {
-    jobs: Sender<crate::locator::LocatorJob<Job>>,
+    jobs: crate::worker::OwnedWorker<crate::locator::LocatorJob<Job>>,
     silence_states: StatusReporter<SilenceStatus>,
     scene_states: StatusReporter<SceneStatus>,
     beat_states: StatusReporter<BeatStatus>,
@@ -98,6 +98,14 @@ pub(crate) struct DerivedAnalysisService {
     beat_cancellations: CancellationRegistry,
     config: DerivedAnalysisConfig,
     root: PathBuf,
+}
+
+impl Drop for DerivedAnalysisService {
+    fn drop(&mut self) {
+        self.silence_cancellations.shutdown();
+        self.scene_cancellations.shutdown();
+        self.beat_cancellations.shutdown();
+    }
 }
 
 impl DerivedAnalysisService {
@@ -119,10 +127,10 @@ impl DerivedAnalysisService {
             scene_cancellations.clone(),
             beat_cancellations.clone(),
         );
-        spawn_worker(
+        let jobs = spawn_worker(
             "kinewright-derived-analysis",
             "derived analysis",
-            jobs_rx,
+            (jobs, jobs_rx),
             move |job| worker.handle_scoped(job),
         )?;
         Ok(Self {

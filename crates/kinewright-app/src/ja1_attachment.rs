@@ -1122,7 +1122,8 @@ impl Ja1Attachment {
         }
     }
 
-    pub fn close(&mut self) -> bool {
+    /// Finish source persistence and request Shutdown without joining native owners.
+    pub(crate) fn request_close(&mut self) -> bool {
         if let Some(host) = &mut self.host {
             if host.recovery_running() {
                 let _ = host.poll(&mut self.owner);
@@ -1131,7 +1132,7 @@ impl Ja1Attachment {
                     return false;
                 }
             }
-            if !host.close() {
+            if !host.request_close() {
                 self.message = "The host is checking continuation readiness. This attachment and its source stay here until detach is confirmed.".into();
                 return false;
             }
@@ -1155,6 +1156,13 @@ impl Ja1Attachment {
                 false
             }
         }
+    }
+
+    pub fn close(&mut self) -> bool {
+        if !self.request_close() {
+            return false;
+        }
+        self.host.as_mut().is_none_or(host::HostAttachment::close)
     }
     pub(crate) fn continuation_pending(&self) -> bool {
         self.host

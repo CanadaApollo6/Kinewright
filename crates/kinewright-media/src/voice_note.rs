@@ -699,6 +699,7 @@ pub struct VoiceTask<K> {
     result: std::sync::mpsc::Receiver<VoiceCompletion<K>>,
     cancellation: ExportCancellation,
     completed: bool,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 impl<K> VoiceTask<K> {
     pub fn try_complete(&mut self) -> Result<Option<VoiceCompletion<K>>, MediaError> {
@@ -718,6 +719,9 @@ impl<K> Drop for VoiceTask<K> {
     fn drop(&mut self) {
         if !self.completed {
             self.cancellation.cancel();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -741,7 +745,7 @@ where
     let native_charge = budget(2 << 30).map_err(MediaError::Backend)?;
     let (tx, result) = std::sync::mpsc::sync_channel(1);
     let inference_cancel = cancellation.clone();
-    std::thread::Builder::new()
+    let worker = std::thread::Builder::new()
         .name("voice-note-whisper".into())
         .spawn(move || {
             let _native_charge = native_charge;
@@ -756,6 +760,7 @@ where
         result,
         cancellation,
         completed: false,
+        worker: Some(worker),
     })
 }
 #[cfg(test)]

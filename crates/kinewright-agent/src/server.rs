@@ -551,6 +551,7 @@ pub struct McpServer {
     /// project session (IN1 §6.5 rule 22).
     incidents: IncidentLogHandle,
     tool_surface_metrics: ToolSurfaceMetrics,
+    export_queue: Option<ExportQueue>,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -651,6 +652,7 @@ impl McpServer {
             project_path,
             incidents,
             tool_surface_metrics,
+            export_queue: None,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
@@ -887,6 +889,7 @@ impl McpServer {
             capability_denylist,
             Some(worker_threads),
             Some(investigator),
+            None,
         )
     }
 
@@ -942,6 +945,7 @@ impl McpServer {
             capability_denylist,
             worker_threads,
             None,
+            None,
         )
     }
 
@@ -967,6 +971,7 @@ impl McpServer {
         capability_denylist: &'static [&'static str],
         worker_threads: Option<usize>,
         investigator: Option<InvestigatorSessionContext>,
+        shared_exports: Option<ExportQueue>,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -976,7 +981,7 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let export_queue = exporter
+        let export_queue = shared_exports.or(exporter
             .map(|exporter| {
                 ExportQueue::with_lut_project_path(
                     exporter,
@@ -984,7 +989,7 @@ impl McpServer {
                     Arc::clone(&project_path),
                 )
             })
-            .transpose()?;
+            .transpose()?);
         let tool_surface_metrics = ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools()?);
         let served_tool_allowlist = if investigator.is_some() {
             Some(&crate::runtime::INVESTIGATOR_TOOL_NAMES as &'static [&'static str])
@@ -995,7 +1000,7 @@ impl McpServer {
             core,
             playback,
             analysis,
-            export_queue,
+            export_queue.clone(),
             confirmations.clone(),
             publish_to_playback,
             Arc::clone(&project_path),
@@ -1020,6 +1025,7 @@ impl McpServer {
             project_path,
             incidents,
             tool_surface_metrics,
+            export_queue,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
@@ -1092,6 +1098,46 @@ impl McpServer {
         self.tool_surface_metrics
     }
 
+    /// Use the project's queue so endpoint retirement cannot cancel accepted exports.
+    ///
+    /// # Errors
+    /// Returns an MCP server error if the listener or server thread cannot start.
+    pub fn start_isolated_with_export_queue(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        queue: ExportQueue,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured_for_investigator(
+            core,
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::default(),
+            false,
+            project_path,
+            incidents,
+            &[],
+            None,
+            None,
+            Some(queue),
+        )
+    }
+
+    #[must_use]
+    pub fn export_queue(&self) -> Option<ExportQueue> {
+        self.export_queue.clone()
+    }
+
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
+    }
+
     /// Stop the server and join its thread.
     ///
     /// **Close every client of this endpoint first** (erratum D-R67). `axum`'s
@@ -1099,27 +1145,30 @@ impl McpServer {
     /// client holds one open for as long as it is connected — measured at
     /// **300 s** against an un-closed [`crate::ScriptedSession`] before this
     /// slice bounded it. The wait is now capped at
-    /// [`GRACEFUL_SHUTDOWN_TIMEOUT`], so the worst case is two seconds and one
-    /// connection abandoned mid-flight rather than a five-minute freeze on the
-    /// thread that called this.
+    /// [`GRACEFUL_SHUTDOWN_TIMEOUT`], so the network grace period is two seconds and one
+    /// connection may be abandoned mid-flight. Owned blocking native calls
+    /// still have to finish before their runtime is released.
     ///
     /// The designed order, which the application must keep (IN2 §3.7 rule 37):
     /// `pump_session` returns → it has already called
     /// `AgentSession::interrupt`, which closes the scripted session's own MCP
     /// client → the session is dropped → **then** the branch's `McpServer` is
-    /// shut down. [`Drop`] only signals and does not join, so a server dropped
-    /// out of order leaks its thread rather than blocking the dropper.
+    /// shut down. [`Drop`] follows the same ordering. The network grace period
+    /// is bounded, but owned native calls must finish before their runtime exits.
     pub fn shutdown(mut self) {
-        self.signal_shutdown();
+        self.request_shutdown();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 
-    fn signal_shutdown(&mut self) {
+    /// Reject confirmations and signal shutdown without joining. The owner must
+    /// retain this server until `shutdown` or Drop can join it off the UI path.
+    pub fn request_shutdown(&mut self) {
         self.confirmations
             .reject_all("the Kinewright agent session was interrupted");
         if let Some(shutdown) = self.shutdown.take() {
+            crate::writer_host::unregister_mcp(&self.endpoint);
             let _ = shutdown.send(());
         }
     }
@@ -1127,8 +1176,10 @@ impl McpServer {
 
 impl Drop for McpServer {
     fn drop(&mut self) {
-        crate::writer_host::unregister_mcp(&self.endpoint);
-        self.signal_shutdown();
+        self.request_shutdown();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -19112,6 +19163,7 @@ mod tests {
 
     #[derive(Default)]
     struct NoopMedia {
+        _exit_drop: ExitDrop,
         probe_asset: Option<MediaAsset>,
         probe_paths: Mutex<Vec<PathBuf>>,
         cache_inventory: Option<MediaCacheInventory>,
@@ -19166,6 +19218,65 @@ mod tests {
         /// `get_audio_repair`'s refusal texts and its envelope are pinned
         /// without a decoder.
         audio_repair: Option<AudioRepairDouble>,
+    }
+
+    #[derive(Default)]
+    struct ExitDrop(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+    impl Drop for ExitDrop {
+        fn drop(&mut self) {
+            if let Some(hook) = self.0.get_mut().unwrap().take() {
+                hook();
+            }
+        }
+    }
+
+    #[test]
+    fn process_exit_server_drop_joins_its_backend() {
+        use std::sync::{Condvar, atomic::AtomicBool};
+        let gate = Arc::new((Mutex::new((false, false, false)), Condvar::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (backend_gate, backend_closed) = (Arc::clone(&gate), Arc::clone(&closed));
+        let media = Arc::new(NoopMedia {
+            _exit_drop: ExitDrop(Mutex::new(Some(Box::new(move || {
+                let mut state = backend_gate.0.lock().unwrap();
+                state.0 = true;
+                backend_gate.1.notify_all();
+                let (state, _) = backend_gate
+                    .1
+                    .wait_timeout_while(state, Duration::from_secs(10), |s| !s.1)
+                    .unwrap();
+                assert!(state.1, "EXIT_SERVER_BACKEND_RELEASE");
+                backend_closed.store(true, AtomicOrdering::Release);
+                backend_gate.1.notify_all();
+            })))),
+            ..Default::default()
+        });
+        let core = Core::spawn(Document::default()).unwrap();
+        let mut server = McpServer::start_isolated(core, media.clone(), media).unwrap();
+        server.request_shutdown();
+        let (state, _) = gate
+            .1
+            .wait_timeout_while(gate.0.lock().unwrap(), Duration::from_secs(10), |s| !s.0)
+            .unwrap();
+        assert!(state.0, "EXIT_SERVER_BACKEND_ENTERED");
+        drop(state);
+        let before_return = std::thread::scope(|scope| {
+            let controller = scope.spawn(|| {
+                let (mut state, _) = gate
+                    .1
+                    .wait_timeout_while(gate.0.lock().unwrap(), Duration::from_secs(1), |s| !s.2)
+                    .unwrap();
+                state.1 = true;
+                gate.1.notify_all();
+            });
+            drop(server);
+            let complete = closed.load(AtomicOrdering::Acquire);
+            gate.0.lock().unwrap().2 = true;
+            gate.1.notify_all();
+            controller.join().unwrap();
+            complete
+        });
+        assert!(before_return, "EXIT_SERVER_BACKEND_BEFORE_OWNER_RETURN");
     }
 
     /// AU3 §4.1: a scripted `Analysis::audio_qc`, so the agent's refusal

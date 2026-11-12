@@ -195,6 +195,52 @@ class PartialParse(unittest.TestCase):
     def index_of(self, lines, fragment):
         return next(i for i, line in enumerate(lines) if fragment in line)
 
+    def test_a_result_split_by_whole_alsa_messages_is_rejoined(self):
+        for windows in (False, True):
+            lines = self.lines(windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at: at + 1] = [
+                lines[at][:-2] + "ALSA lib confmisc.c:855:(parse_card) cannot find card '0'",
+                "ALSA lib conf.c:5208:(_snd_config_evaluate) function snd_func_card_inum returned error: No such file or directory",
+                "ALSA lib pcm.c:2721:(snd_pcm_open_noupdate) Unknown PCM default",
+                "ok",
+            ]
+            code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
+            self.assertEqual(code, 0, out)
+
+    def test_native_alsa_fragments_adjoining_the_outcome(self):
+        # error.c calls fprintf(location), vfprintf(message), then putc(newline).
+        prefix = "ALSA lib pcm.c:2721:(snd_pcm_open_noupdate) "
+        for form in [
+            "test a::b ... ok" + prefix + "Unknown PCM default",
+            "test a::b ... " + prefix + "okUnknown PCM default",
+            prefix + "test a::b ... okUnknown PCM default",
+            "test a::b ... " + prefix + "okcannot find card '0'",
+        ]:
+            self.assertEqual(st.strip_alsa_log(form), "test a::b ... ok")
+        self.assertEqual(st.strip_alsa_log("test a::b ... FAILED" + prefix + "Unknown PCM default"), "test a::b ... FAILED")
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at: at + 1] = [lines[at][:-2] + prefix + "Unknown PCM default", "ok" + prefix + "Unknown PCM default"]
+        code, out = check(st.verify_fast, "\n".join(lines) + "\n", "linux")
+        self.assertEqual(code, 0, out)
+
+    def test_alsa_prefix_before_a_pending_outcome_is_rejoined(self):
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        prefix = "ALSA lib pcm.c:2721:(snd_pcm_open_noupdate) "
+        lines[at:at + 1] = [lines[at][:-2] + prefix + "Unknown PCM default", prefix + "okUnknown PCM default"]
+        code, out = check(st.verify_fast, "\n".join(lines) + "\n", "linux")
+        self.assertEqual(code, 0, out)
+
+    def test_near_miss_alsa_text_still_fails(self):
+        for foreign in ["ALSA library said ok", "ALSA lib pcm.c:no:(snd_pcm_open) bad", "ALSA lib pcm.c:1:(not-a-function) bad"]:
+            lines = self.lines()
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at: at + 1] = [lines[at][:-2] + foreign, "ok"]
+            self.assert_unparsable(lines)
+        self.assertEqual(st.strip_alsa_log("test a::b ... ALSA lib pcm.c:1:(open) okay"), "test a::b ... okay")
+
     def test_native_ffmpeg_log_prefixes_on_result_lines_still_parse(self):
         # CI run 36536620605: FFmpeg's av_log writes `[swscaler @ 0x...] ` to stderr without
         # a newline, and libtest's next result line landed after it on the same line.

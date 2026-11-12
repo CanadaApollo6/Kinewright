@@ -423,7 +423,7 @@ struct QcMaskRequest {
 
 struct QcMaskWorker {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-    handle: std::thread::JoinHandle<()>,
+    handle: crate::joined_thread::JoinedThread<()>,
 }
 
 /// Makes every live mask worker resolve the view exactly once: with its mask,
@@ -739,7 +739,10 @@ impl QcMaskState {
         {
             self.spawned_workers += 1;
         }
-        self.active = Some(QcMaskWorker { cancelled, handle });
+        self.active = Some(QcMaskWorker {
+            cancelled,
+            handle: crate::joined_thread::JoinedThread::new(handle),
+        });
     }
 
     fn reap_finished_worker(&mut self) {

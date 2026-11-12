@@ -159,8 +159,14 @@ fn display_race_probe_m_engine_shutdown_then_defer() {
     };
     let shared = Arc::clone(&session.shared);
     let finished = engine.finished();
-    drop(engine);
-    thread::sleep(Duration::from_millis(300));
+    let (reached, reaching) = std::sync::mpsc::channel();
+    let at_wait = Arc::new(std::sync::Barrier::new(2));
+    *shared.before_wait.lock().unwrap() = Some((reached, Arc::clone(&at_wait)));
+    let dropping = thread::spawn(move || drop(engine));
+    reaching
+        .recv_timeout(Duration::from_secs(10))
+        .expect("preview terminal wait reached");
+    at_wait.wait();
     session.defer(held); // the same-epoch deferral, after the shutdown began
     session.terminal();
     drop(session);
@@ -179,6 +185,7 @@ fn display_race_probe_m_engine_shutdown_then_defer() {
             ledger.live_bytes()
         );
     }
+    dropping.join().unwrap();
     assert_eq!(
         fin,
         Err(crossbeam_channel::RecvTimeoutError::Disconnected),

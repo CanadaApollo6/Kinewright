@@ -4345,9 +4345,8 @@ impl KinewrightApp {
         let analysis = Arc::clone(&self.focused().analysis());
         let result_tx = self.room_tone_tx.clone();
         let capped = capped_capture_range(&source, asset.fps);
-        let spawned = std::thread::Builder::new()
-            .name("kinewright-room-tone".to_owned())
-            .spawn(move || {
+        let spawned = self
+            .spawn_media_worker("kinewright-room-tone", move || {
                 let cancellation = kinewright_core::ExportCancellation::default();
                 let result = store
                     .capture_room_tone(&asset, capped, &cancellation)

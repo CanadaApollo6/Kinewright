@@ -40,7 +40,7 @@ type VisualAuthorities =
     HashMap<kinewright_core::LegacyMediaIdentity, (kinewright_core::LegacyMediaGrant, VisualReply)>;
 
 pub(crate) struct VisualAssetService {
-    jobs: Sender<VisualJob>,
+    jobs: crate::worker::OwnedWorker<VisualJob>,
     results: Mutex<VisualAuthorities>,
     in_flight: VisualInFlight,
     root: PathBuf,
@@ -53,10 +53,10 @@ impl VisualAssetService {
         let worker_in_flight = Arc::clone(&in_flight);
         let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
         let mut worker = VisualAssetWorker::new(root.clone(), worker_in_flight);
-        spawn_worker(
+        let jobs = spawn_worker(
             "kinewright-visual-assets",
             "visual asset",
-            jobs_rx,
+            (jobs, jobs_rx),
             move |job| worker.handle_scoped(job),
         )?;
         Ok(Self {
@@ -637,7 +637,7 @@ mod tests {
         let directory = TempDirectory::new("c6a-visual-retire");
         let (jobs, receiver) = bounded(JOB_CAPACITY);
         let service = VisualAssetService {
-            jobs,
+            jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::default(),
             root: directory.root().into(),
@@ -683,7 +683,7 @@ mod tests {
         let directory = TempDirectory::new("c6b-visual-backpressure");
         let (jobs, receiver) = bounded(JOB_CAPACITY);
         let service = VisualAssetService {
-            jobs,
+            jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::default(),
             root: directory.root().into(),
@@ -731,7 +731,7 @@ mod tests {
     fn c2_r4_equal_visual_jobs_and_results_are_partitioned_by_authority() {
         let (jobs, jobs_rx) = bounded(4);
         let service = VisualAssetService {
-            jobs,
+            jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::default(),
             root: PathBuf::new(),
@@ -799,7 +799,7 @@ mod tests {
         let (jobs, _jobs_rx) = bounded(1);
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let service = VisualAssetService {
-            jobs,
+            jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::clone(&in_flight),
             root: PathBuf::from("visual-assets/v1"),
