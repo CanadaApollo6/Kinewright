@@ -335,7 +335,8 @@ fn c4_result(f: &Fixture, run: &RunId, state: &RunProjection) -> RunProjection {
         .unwrap()
         .owner_mut()
         .unwrap()
-        .admit_scheduler_record(&OrchestrationRecord {
+        .admit_scheduler_record(OrchestrationRecord {
+            retention: kinewright_project::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::Result(Box::new(result)),
         })

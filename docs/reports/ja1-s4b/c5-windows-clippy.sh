@@ -14,6 +14,12 @@
 # This is a compile and lint check, not Windows execution.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
+# Match CI's three feature-disabled builds on this Linux host before linting
+# MSVC. This helper owns its lock; never wrap this script in another flock.
+bash scripts/ci-shipping-builds.sh
+# Cross-clippy does not enumerate MSVC libtest names. Keep the platform-scoped
+# manifest/accounting regression in this per-commit gate as well.
+nice -n 19 python3 -I scripts/ci_shards_selftest.py
 url=$(sed -n "s/^\$FfmpegUrl = '\(.*\)'$/\1/p" scripts/setup-ffmpeg.ps1)
 sha=$(sed -n "s/^\$FfmpegSha256 = '\(.*\)'$/\1/p" scripts/setup-ffmpeg.ps1)
 test -n "$url" && test -n "$sha"
@@ -41,4 +47,12 @@ run() {
 }
 run --workspace --all-targets
 run -p kinewright-agent --all-targets --features slow-tests
+# Also compile the MSVC shipping feature graph, without linking/running it.
+shipping() {
+    flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 19 \
+        cargo xwin check "$@" --target x86_64-pc-windows-msvc --target-dir target/win-xwin
+}
+shipping -p kinewright-agent --no-default-features --lib
+shipping -p kinewright-app --no-default-features --bin kinewright-app
+shipping -p kinewright-agent --no-default-features --bin kinewright
 rm -rf "$TMPDIR"

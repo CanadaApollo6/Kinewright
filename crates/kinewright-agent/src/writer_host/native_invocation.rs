@@ -335,6 +335,9 @@ impl InvocationOwner for HostInvocationOwner {
         if intent.boot_id != crate::guardian::boot_id()? {
             return Err(transport("launch boot changed"));
         }
+        if intent.native.is_some() {
+            return Err(transport("launch is already contained"));
+        }
         intent.dispatched = true;
         let reference = host
             .owner_mut()
@@ -348,7 +351,7 @@ impl InvocationOwner for HostInvocationOwner {
             .ok_or_else(|| transport("launch reservation missing"))?
             .recovery_ref = reference.clone();
         crate::orchestration::tasks::refresh_cleanup(&mut projection);
-        host.publish_native(&self.producer, projection, identity, vec![reference])
+        host.publish_native_attempt_decision(&self.producer, projection, identity, reference)
             .map_err(transport)
     }
     fn release(
@@ -422,7 +425,7 @@ impl InvocationOwner for HostInvocationOwner {
         reservation.state = AttemptState::Contained;
         reservation.recovery_ref = recovery_ref.clone();
         crate::orchestration::tasks::refresh_cleanup(&mut projection);
-        host.publish_native(&self.producer, projection, identity, vec![recovery_ref])
+        host.publish_native_attempt_decision(&self.producer, projection, identity, recovery_ref)
             .map_err(transport)?;
         Ok(())
     }
@@ -892,7 +895,8 @@ impl HostCommandOwner {
         };
         let sealed = self
             .owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(accounting)),
             })?;
@@ -904,6 +908,8 @@ impl HostCommandOwner {
             .ok_or_else(|| refused("native effect disappeared"))?;
         claimed.safety = EffectSafety::ProcessBound;
         claimed.state = EffectState::Claimed(identity.attempt.clone());
+        // The whole attempt (including this manifest and both launch intents)
+        // was admitted before reserve_native_effect sealed any evidence.
         state
             .tasks
             .iter_mut()
@@ -956,6 +962,9 @@ impl HostCommandOwner {
         if state.effects.len() >= ITEM_LIMIT {
             return Err(refused("native steering queue capacity"));
         }
+        state
+            .check_task_context_capacity(&identity.task, 0, 1)
+            .map_err(super::orchestration::scheduler_error)?;
         let payload = self.owner_mut()?.admit_host_grant(text.as_bytes())?;
         let index = self.resolve_attachment(Some(&producer.bearer()))?;
         let issued = self.issue_metadata(index, None)?;

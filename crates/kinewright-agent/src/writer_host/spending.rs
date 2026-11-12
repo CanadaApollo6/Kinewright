@@ -21,6 +21,11 @@ impl HostCommandOwner {
         if !matches!(update.envelope().command, OrchestrationCommand::StartRun(_)) {
             return Ok(update);
         }
+        for task in &update.projection().tasks {
+            task.progress
+                .check_context_capacity(0, 1)
+                .map_err(super::orchestration::scheduler_error)?;
+        }
         let mut state = update.projection().clone();
         self.seed_edit_consent(&mut state)?;
         // The first native attempt can follow a host restart. Retain the
@@ -55,7 +60,8 @@ impl HostCommandOwner {
         }
         let record = self
             .owner_mut()?
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(accounting)),
             })?;
@@ -79,6 +85,49 @@ impl HostCommandOwner {
 }
 
 impl HostCommandOwner {
+    pub(crate) fn native_task_can_launch(
+        state: &crate::orchestration::orchestration_records::RunProjection,
+        task: &crate::orchestration::orchestration_records::TaskId,
+    ) -> bool {
+        use crate::orchestration::orchestration_records::{AttemptState, TaskState};
+        state.tasks.iter().any(|record| {
+            &record.id == task
+                && !record.progress.expired
+                && !matches!(
+                    record.state,
+                    TaskState::Terminal(_)
+                        | TaskState::Cancelled
+                        | TaskState::Cancelling
+                        | TaskState::CleanupBlocked(_)
+                )
+        }) && !state.attempts.iter().any(|attempt| {
+            &attempt.identity.task == task && !matches!(attempt.state, AttemptState::Retired(_))
+        })
+    }
+
+    /// A view of the next launch's admission, never a stored accounting wait.
+    pub(crate) fn native_launch_context_full(
+        state: &crate::orchestration::orchestration_records::RunProjection,
+        task: &crate::orchestration::orchestration_records::TaskId,
+    ) -> bool {
+        use crate::orchestration::orchestration_records::{
+            EffectSafety, EffectState, NATIVE_ATTEMPT_DECISIONS, Refusal,
+        };
+        Self::native_task_can_launch(state, task)
+            && state.effects.iter().any(|effect| {
+                &effect.task == task
+                    && effect.safety == EffectSafety::ProcessBound
+                    && effect.state == EffectState::Pending
+            })
+            && state.tasks.iter().any(|record| {
+                &record.id == task
+                    && record
+                        .progress
+                        .check_context_capacity(0, NATIVE_ATTEMPT_DECISIONS)
+                        == Err(Refusal::TaskDecisionCapacity)
+            })
+    }
+
     pub(super) fn durable_run_accounting(
         &self,
         state: &crate::orchestration::orchestration_records::RunProjection,
@@ -120,6 +169,41 @@ impl HostCommandOwner {
                             .find_map(|task| task.pause.map(|reason| format!("{reason:?}"))),
                     },
                 };
+                let mut tasks: Vec<_> = accounting
+                    .tasks
+                    .iter()
+                    .map(|task| super::orchestration::DurableTaskAccounting {
+                        task: crate::orchestration::orchestration_records::TaskId(
+                            task.task.clone(),
+                        ),
+                        sends: task.sends.len(),
+                        provider: task.providers.last().cloned(),
+                        totals: task.totals.clone(),
+                        wait_reason: task.wait_reason.clone(),
+                        pause: task.pause,
+                        refusals: task.refusals.clone(),
+                    })
+                    .collect();
+                for task in &state.tasks {
+                    if !Self::native_launch_context_full(state, &task.id) {
+                        continue;
+                    }
+                    let words =
+                        crate::orchestration::orchestration_records::TASK_DECISION_CAPACITY_WORDS;
+                    if let Some(row) = tasks.iter_mut().find(|row| row.task == task.id) {
+                        row.wait_reason.get_or_insert_with(|| words.to_owned());
+                    } else {
+                        tasks.push(super::orchestration::DurableTaskAccounting {
+                            task: task.id.clone(),
+                            sends: 0,
+                            provider: None,
+                            totals: kinewright_project::orchestration_accounting::UsageTotals::default(),
+                            wait_reason: Some(words.to_owned()),
+                            pause: None,
+                            refusals: vec![],
+                        });
+                    }
+                }
                 return Ok(Some(super::orchestration::DurableRunAccounting {
                     stop_reason,
                     start_unix_ms: accounting.start_unix_ms,
@@ -127,21 +211,7 @@ impl HostCommandOwner {
                     last_unix_ms: accounting.last_unix_ms,
                     elapsed_ms: accounting.elapsed_ms,
                     clock_uncertain: accounting.clock_uncertain,
-                    tasks: accounting
-                        .tasks
-                        .iter()
-                        .map(|task| super::orchestration::DurableTaskAccounting {
-                            task: crate::orchestration::orchestration_records::TaskId(
-                                task.task.clone(),
-                            ),
-                            sends: task.sends.len(),
-                            provider: task.providers.last().cloned(),
-                            totals: task.totals.clone(),
-                            wait_reason: task.wait_reason.clone(),
-                            pause: task.pause,
-                            refusals: task.refusals.clone(),
-                        })
-                        .collect(),
+                    tasks,
                 }));
             }
         }

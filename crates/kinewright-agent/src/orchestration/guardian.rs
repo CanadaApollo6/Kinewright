@@ -112,6 +112,10 @@ pub trait DurableAttemptOwner {
 #[derive(Clone)]
 pub struct StartupControl(Arc<Mutex<Option<ChildStdin>>>);
 impl StartupControl {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn closed_fixture() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
     pub fn close(&self) {
         self.0
             .lock()

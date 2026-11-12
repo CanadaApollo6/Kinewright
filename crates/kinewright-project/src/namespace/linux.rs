@@ -794,6 +794,7 @@ fn directory(
     Ok(dir)
 }
 
+#[cfg(any(test, feature = "test-util"))]
 pub(super) fn publish(
     namespace: &mut ProjectNamespace,
     path: &PortablePath,

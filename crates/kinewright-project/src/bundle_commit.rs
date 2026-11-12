@@ -37,12 +37,13 @@ pub enum CommitOutcome {
 enum BranchPublication {
     Published(BundleSaveReport),
     Staged(Box<crate::task_checkpoint::StagedTaskCheckpoint>),
+    Prepared(Box<PreparedMaintenancePublication>),
 }
 impl BranchPublication {
     fn published(self) -> Result<BundleSaveReport, BundleError> {
         match self {
             Self::Published(report) => Ok(report),
-            Self::Staged(_) => Err(BundleError::HistoryBarrierInvariant),
+            Self::Staged(_) | Self::Prepared(_) => Err(BundleError::HistoryBarrierInvariant),
         }
     }
 }
@@ -524,6 +525,7 @@ impl BundleCommit {
             None,
             &[],
             None,
+            None,
         )
         .and_then(BranchPublication::published)
     }
@@ -547,6 +549,7 @@ impl BundleCommit {
             None,
             envelopes,
             None,
+            None,
         )
         .and_then(BranchPublication::published)
     }
@@ -567,6 +570,7 @@ impl BundleCommit {
             false,
             None,
             &[],
+            None,
             None,
         )
         .and_then(BranchPublication::published);
@@ -594,8 +598,34 @@ impl BundleCommit {
             None,
             &[],
             None,
+            None,
         )
         .and_then(BranchPublication::published)
+    }
+    pub(crate) fn prepare_maintenance(
+        bundle: &mut ProjectBundle,
+        fence: &crate::store::PublicationFence,
+    ) -> Result<PreparedMaintenancePublication, BundleError> {
+        let branch = bundle.manual_branch_id.clone();
+        let history = bundle.branch_history(&branch)?;
+        let inputs = bundle.checkpoint(&branch)?.input_manifest_ref.clone();
+        match Self::publish_branch_impl(
+            bundle,
+            &history,
+            &inputs,
+            &branch,
+            None,
+            Some(&history),
+            None,
+            true,
+            None,
+            &[],
+            None,
+            Some(fence),
+        )? {
+            BranchPublication::Prepared(prepared) => Ok(*prepared),
+            _ => Err(BundleError::HistoryBarrierInvariant),
+        }
     }
     pub(crate) fn publish_rescue(
         bundle: &mut ProjectBundle,
@@ -616,6 +646,7 @@ impl BundleCommit {
             false,
             Some((source, contexts)),
             &[],
+            None,
             None,
         )
         .and_then(BranchPublication::published)
@@ -639,6 +670,7 @@ impl BundleCommit {
             None,
             &[],
             Some(base),
+            None,
         )?;
         let BranchPublication::Staged(staged) = result else {
             return Err(BundleError::HistoryBarrierInvariant);
@@ -661,6 +693,7 @@ impl BundleCommit {
         rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
         manual_batch: &[CommandEnvelope],
         stage_base: Option<&ObjectRef>,
+        preparation: Option<&crate::store::PublicationFence>,
     ) -> Result<BranchPublication, BundleError> {
         let copy_branch = bundle.prepare_plain_copy(branch_id)?;
         let branch_id = copy_branch.as_ref().unwrap_or(branch_id);
@@ -691,7 +724,9 @@ impl BundleCommit {
             bundle.refuse_unpaired_task_checkpoint(branch_id)?;
         }
         bundle.store.with_namespace(|n| n.verify())?;
-        if bundle.store.with_namespace(|n| n.read_root())?.as_deref()
+        if let Some(fence) = preparation {
+            bundle.store.check_publication_fence(fence)?;
+        } else if bundle.store.with_namespace(|n| n.read_root())?.as_deref()
             != bundle
                 .admission
                 .source()
@@ -701,9 +736,10 @@ impl BundleCommit {
                 "root changed since bundle admission".into(),
             ));
         }
-        if !bundle
-            .store
-            .with_namespace(|n| Ok(n.object_batch_active()))?
+        if preparation.is_none()
+            && !bundle
+                .store
+                .with_namespace(|n| Ok(n.object_batch_active()))?
             && let Err(error) = bundle.collect_after_ack()
         {
             // Namespace uncertainty still fences publication; ordinary unlink failures retry.
@@ -1215,7 +1251,8 @@ impl BundleCommit {
                 .and_then(|f| f.studio.as_ref())
                 .map_or_else(Vec::new, super::bundle::StudioRoot::references);
             let previous = bundle
-                .admit_root_checkpoint(bundle.admission.raw_bytes().to_vec().as_slice(), &deps)?;
+                .store
+                .admit_root_checkpoint(bundle.admission.raw_bytes(), &deps)?;
             let reference = previous.reference.clone();
             seals.push(previous);
             let mut staged = recovery.clone();
@@ -1423,99 +1460,229 @@ impl BundleCommit {
         bundle
             .store
             .with_namespace(crate::namespace::ProjectNamespace::finish_object_batch)?;
+        let publication = PreparedBranchPublication {
+            branch_id: branch_id.clone(),
+            manual_branch_id,
+            generation,
+            head_id,
+            root: Some(root),
+            branches,
+            evidence,
+            receipts,
+            issuers,
+            inventory,
+            recovery,
+            checked,
+            seals,
+            staged_inventory,
+        };
+        if preparation.is_some() {
+            publication
+                .prepare(bundle)
+                .map(|ready| BranchPublication::Prepared(Box::new(ready)))
+        } else {
+            publication.publish(bundle)
+        }
+    }
+}
+/// Owns both the exact future root and every resource its publication consumes.
+pub(crate) struct PreparedMaintenancePublication {
+    before: String,
+    root_write: crate::store::PreparedControlWrite,
+    staging: Option<crate::store::PreparedInventoryWrite>,
+    resources: Option<PreparedMaintenanceResources>,
+}
+struct PreparedMaintenanceResources {
+    body: PreparedBranchPublication,
+    admission: BundleWriteAdmission,
+    _encoded_root: crate::storage_budget::StorageReservation,
+    pin: crate::store::StorePin,
+}
+impl PreparedMaintenanceResources {
+    fn swap_metadata(&mut self, bundle: &mut ProjectBundle) {
+        std::mem::swap(&mut self.body.generation, &mut bundle.generation);
+        std::mem::swap(&mut self.body.root, &mut bundle.root);
+        std::mem::swap(&mut self.admission, &mut bundle.admission);
+        std::mem::swap(&mut self.body.branches, &mut bundle.branches);
+        std::mem::swap(&mut self.body.evidence, &mut bundle.evidence);
+        std::mem::swap(&mut self.body.receipts, &mut bundle.receipts);
+        std::mem::swap(&mut self.body.issuers, &mut bundle.issuers);
+        std::mem::swap(&mut self.body.inventory, &mut bundle.inventory);
+        std::mem::swap(&mut self.body.recovery, &mut bundle.recovery);
+    }
+}
+impl PreparedMaintenancePublication {
+    fn check_current(&self, bundle: &ProjectBundle) -> Result<(), BundleError> {
+        if self.resources.is_none() {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        if kinewright_media::sha256_bytes(bundle.admission.raw_bytes()) != self.before {
+            return Err(BundleError::HistoryChanged);
+        }
+        bundle
+            .store
+            .check_prepared_predecessor(&self.root_write, &self.before)
+    }
+    /// Lend cut1's metadata to the same publisher while the physical root stays put.
+    /// The original durable pin and the prepared graph pins remain held throughout.
+    pub(crate) fn with_preview<T>(
+        &mut self,
+        bundle: &mut ProjectBundle,
+        prepare: impl FnOnce(&mut ProjectBundle) -> Result<T, BundleError>,
+    ) -> Result<T, BundleError> {
+        struct Preview<'a> {
+            resources: &'a mut PreparedMaintenanceResources,
+            bundle: &'a mut ProjectBundle,
+        }
+        impl Drop for Preview<'_> {
+            fn drop(&mut self) {
+                self.resources.swap_metadata(self.bundle);
+            }
+        }
+        self.check_current(bundle)?;
+        let resources = self
+            .resources
+            .as_mut()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        if resources.body.manual_branch_id != bundle.manual_branch_id {
+            return Err(BundleError::HistoryChanged);
+        }
+        resources.swap_metadata(bundle);
+        let preview = Preview { resources, bundle };
+        prepare(preview.bundle)
+    }
+    pub(crate) fn publish(
+        &mut self,
+        bundle: &mut ProjectBundle,
+    ) -> Result<BundleSaveReport, BundleError> {
+        self.check_current(bundle)?;
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
         barrier(bundle, CommitBarrier::B2)?;
-        if let Some(staged) = staged_inventory {
+        if let Some(staging) = &mut self.staging {
+            bundle.store.publish_prepared_inventory(staging)?;
+        }
+        barrier(bundle, CommitBarrier::B3)?;
+        let published =
+            publish_root_from_admission(bundle, &resources.admission, Some(&mut self.root_write))?;
+        let PreparedMaintenanceResources {
+            body,
+            admission,
+            pin,
+            _encoded_root,
+        } = self
+            .resources
+            .take()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        body.adopt(bundle, admission, published, Some(pin))?
+            .published()
+    }
+}
+
+struct PreparedBranchPublication {
+    branch_id: crate::bundle_records::BranchId,
+    manual_branch_id: crate::bundle_records::BranchId,
+    generation: u64,
+    head_id: HeadId,
+    root: Option<StudioRoot>,
+    branches: BTreeMap<crate::bundle_records::BranchId, BranchCheckpoint>,
+    evidence: Vec<ObjectRef>,
+    receipts: crate::receipts::ReceiptLedger,
+    issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
+    inventory: SupportInventory,
+    recovery: crate::store::RecoveryInventory,
+    checked: std::sync::Arc<crate::storage_budget::StorageReservation<HistorySnapshot>>,
+    seals: Vec<SealedObject>,
+    staged_inventory: Option<crate::store::RecoveryInventory>,
+}
+impl PreparedBranchPublication {
+    fn prepare(
+        self,
+        bundle: &ProjectBundle,
+    ) -> Result<PreparedMaintenancePublication, BundleError> {
+        let (admission, encoded_root) = self.encode_root(bundle)?;
+        let root_write = bundle.store.prepare_root_write(admission.raw_bytes())?;
+        let staging = self
+            .staged_inventory
+            .as_ref()
+            .map(|inventory| bundle.store.prepare_inventory(inventory))
+            .transpose()?;
+        let pin = bundle.store.pin(
+            &self
+                .root
+                .as_ref()
+                .ok_or(BundleError::HistoryBarrierInvariant)?
+                .references(),
+        )?;
+        Ok(PreparedMaintenancePublication {
+            before: kinewright_media::sha256_bytes(bundle.admission.raw_bytes()),
+            root_write,
+            staging,
+            resources: Some(PreparedMaintenanceResources {
+                body: self,
+                admission,
+                _encoded_root: encoded_root,
+                pin,
+            }),
+        })
+    }
+    fn encode_root(
+        &self,
+        bundle: &ProjectBundle,
+    ) -> Result<
+        (
+            BundleWriteAdmission,
+            crate::storage_budget::StorageReservation,
+        ),
+        BundleError,
+    > {
+        encode_publication_root(
+            bundle,
+            &self.branch_id,
+            &self.manual_branch_id,
+            &self.branches,
+            &self.checked,
+            self.root
+                .as_ref()
+                .ok_or(BundleError::HistoryBarrierInvariant)?,
+        )
+    }
+    fn publish(mut self, bundle: &mut ProjectBundle) -> Result<BranchPublication, BundleError> {
+        barrier(bundle, CommitBarrier::B2)?;
+        if let Some(staged) = self.staged_inventory.take() {
             bundle.store.publish_inventory(&staged)?;
         }
         barrier(bundle, CommitBarrier::B3)?;
-        let manual_history = if *branch_id == manual_branch_id {
-            None
-        } else {
-            Some(
-                bundle
-                    .store
-                    .read_record::<HistorySnapshot>(&branches[&manual_branch_id].history_ref)?,
-            )
-        };
-        let manual_document = manual_history
-            .as_ref()
-            .map_or(&checked.document, |h| &h.document);
-        let (bytes, _encoded_root) = serialize_root(&bundle.store, manual_document, &root)?;
-        let next_admission = BundleWriteAdmission::from_bytes_with_limits(
-            Some(bundle.store.resolved_root()?),
-            bytes,
-            bundle.store.usage_arc(),
-            bundle.store.limits(),
-        )?;
-        next_admission.require_supported()?;
-        bundle.store.closure(&root.references())?;
-        #[cfg(any(test, feature = "test-util"))]
-        crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
-        let saved_path = bundle.store.resolved_root()?;
-        let collection = bundle.store.collection_status()?;
-        let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
-        let tag = kinewright_core::HistorySaveTag {
-            destination: identity.resolved_root,
-            parent_device: identity.parent_device,
-            parent_inode: identity.parent_inode,
-            root_sha256: kinewright_media::sha256_bytes(next_admission.raw_bytes()),
-            previous_root_sha256: if bundle.admission.raw_bytes().is_empty() {
-                None
-            } else {
-                Some(kinewright_media::sha256_bytes(bundle.admission.raw_bytes()))
-            },
-        };
-        #[cfg(any(test, feature = "test-util"))]
-        crate::io_observer::check_failure("floor_tag_prepare", &saved_path)?;
-        if let Some(pending) = &mut bundle.pending_save
-            && let Some(barrier) = &mut pending.barrier
-        {
-            barrier
-                .tag_publication(tag.clone())
-                .map_err(crate::bundle::history_error)?;
-        }
-        #[cfg(any(test, feature = "test-util"))]
-        crate::io_observer::check_failure("floor_tag_complete", &saved_path)?;
-        // Publish the owner tag only after every fallible preparation step succeeds.
-        bundle.publication_tag = Some(tag.clone());
-        if let Some(pending) = &mut bundle.pending_save {
-            pending.root_sha256 = Some(tag.root_sha256);
-        }
-        #[cfg(any(test, feature = "test-util"))]
-        if bundle
-            .pending_metadata
-            .as_ref()
-            .is_some_and(|p| !p.task_checkpoints.is_empty())
-        {
-            crate::test_hook("task_checkpoint_before_publish");
-        }
-        if let Err(failure) = bundle.store.publish_root(next_admission.raw_bytes()) {
-            if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {
-                bundle.publication_state = crate::bundle::PublicationState::Unknown;
-                bundle.unsettled = true;
-                return Err(BundleError::DurabilityUnknown);
-            }
-            bundle.publication_state =
-                if failure.boundary == crate::namespace::RootReplaceBoundary::DefinitelyRefused {
-                    crate::bundle::PublicationState::DefinitelyRefused
-                } else {
-                    crate::bundle::PublicationState::NeverAttempted
-                };
-            // Cleanup may still be uncertain, but it cannot have published this root.
-            bundle.publication_tag = None;
-            if let Some(pending) = &mut bundle.pending_save {
-                pending.root_sha256 = None;
-            }
-            return Err(failure.error);
-        }
-        #[cfg(any(test, feature = "test-util"))]
-        if bundle
-            .pending_metadata
-            .as_ref()
-            .is_some_and(|p| !p.task_checkpoints.is_empty())
-        {
-            crate::test_hook("task_checkpoint_after_publish");
-        }
+        let (next_admission, _encoded_root) = self.encode_root(bundle)?;
+        let published = publish_root_from_admission(bundle, &next_admission, None)?;
+        self.adopt(bundle, next_admission, published, None)
+    }
+    fn adopt(
+        self,
+        bundle: &mut ProjectBundle,
+        next_admission: BundleWriteAdmission,
+        published: PublishedRoot,
+        prepared_pin: Option<crate::store::StorePin>,
+    ) -> Result<BranchPublication, BundleError> {
+        let Self {
+            branch_id,
+            manual_branch_id,
+            generation,
+            head_id,
+            root,
+            branches,
+            evidence,
+            receipts,
+            issuers,
+            inventory,
+            recovery,
+            checked,
+            seals,
+            staged_inventory: _,
+        } = self;
+        let branch_id = &branch_id;
         bundle.publication_state = crate::bundle::PublicationState::Committed;
         // Publication is monotonic: any fallible tail is unsettled, never a definite rollback.
         bundle.unsettled = true;
@@ -1524,7 +1691,7 @@ impl BundleCommit {
             bundle.receipts = receipts;
             bundle.issuers = issuers;
             bundle.manual_branch_id = manual_branch_id.clone();
-            bundle.root = Some(root);
+            bundle.root = root;
             bundle.branches = branches;
             bundle.copy_publication = None;
             if let Some(pending) = &bundle.pending_metadata {
@@ -1544,7 +1711,11 @@ impl BundleCommit {
             bundle.inventory = inventory;
             bundle.recovery = recovery;
             bundle.admission = next_admission;
-            bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
+            let roots = bundle.root_references()?;
+            bundle.durable = Some(match prepared_pin {
+                Some(pin) => bundle.store.mark_prepared_committed(roots, pin)?,
+                None => bundle.store.mark_committed(&roots)?,
+            });
             bundle.refresh_run_budget()?;
             barrier(bundle, CommitBarrier::B5)?;
             bundle.pending_evidence.clear();
@@ -1557,8 +1728,8 @@ impl BundleCommit {
         drop(seals);
         Ok(BranchPublication::Published(BundleSaveReport {
             history_sha256: bundle.checkpoint(branch_id)?.history_ref.sha256.clone(),
-            collection,
-            path: saved_path,
+            collection: published.collection,
+            path: published.saved_path,
             project_id: bundle.project_id.clone(),
             generation,
             head_id,
@@ -1567,6 +1738,139 @@ impl BundleCommit {
         }))
     }
 }
+
+struct PublishedRoot {
+    saved_path: std::path::PathBuf,
+    collection: crate::store::CollectionStatus,
+}
+#[allow(
+    clippy::too_many_lines,
+    reason = "the original tagged root publication and failure classification stay together"
+)]
+fn publish_root_from_admission(
+    bundle: &mut ProjectBundle,
+    next_admission: &BundleWriteAdmission,
+    prepared: Option<&mut crate::store::PreparedControlWrite>,
+) -> Result<PublishedRoot, BundleError> {
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
+    let saved_path = bundle.store.resolved_root()?;
+    let collection = bundle.store.collection_status()?;
+    let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
+    let tag = kinewright_core::HistorySaveTag {
+        destination: identity.resolved_root,
+        parent_device: identity.parent_device,
+        parent_inode: identity.parent_inode,
+        root_sha256: kinewright_media::sha256_bytes(next_admission.raw_bytes()),
+        previous_root_sha256: if bundle.admission.raw_bytes().is_empty() {
+            None
+        } else {
+            Some(kinewright_media::sha256_bytes(bundle.admission.raw_bytes()))
+        },
+    };
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::check_failure("floor_tag_prepare", &saved_path)?;
+    if let Some(pending) = &mut bundle.pending_save
+        && let Some(barrier) = &mut pending.barrier
+    {
+        barrier
+            .tag_publication(tag.clone())
+            .map_err(crate::bundle::history_error)?;
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::check_failure("floor_tag_complete", &saved_path)?;
+    // Publish the owner tag only after every fallible preparation step succeeds.
+    bundle.publication_tag = Some(tag.clone());
+    if let Some(pending) = &mut bundle.pending_save {
+        pending.root_sha256 = Some(tag.root_sha256);
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    if bundle
+        .pending_metadata
+        .as_ref()
+        .is_some_and(|p| !p.task_checkpoints.is_empty())
+    {
+        crate::test_hook("task_checkpoint_before_publish");
+    }
+    let publication = match prepared {
+        Some(prepared) => bundle
+            .store
+            .publish_prepared_root(prepared, next_admission.raw_bytes()),
+        None => bundle.store.publish_root(next_admission.raw_bytes()),
+    };
+    if let Err(failure) = publication {
+        if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {
+            bundle.publication_state = crate::bundle::PublicationState::Unknown;
+            bundle.unsettled = true;
+            return Err(BundleError::DurabilityUnknown);
+        }
+        bundle.publication_state =
+            if failure.boundary == crate::namespace::RootReplaceBoundary::DefinitelyRefused {
+                crate::bundle::PublicationState::DefinitelyRefused
+            } else {
+                crate::bundle::PublicationState::NeverAttempted
+            };
+        // Cleanup may still be uncertain, but it cannot have published this root.
+        bundle.publication_tag = None;
+        if let Some(pending) = &mut bundle.pending_save {
+            pending.root_sha256 = None;
+        }
+        return Err(failure.error);
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    if bundle
+        .pending_metadata
+        .as_ref()
+        .is_some_and(|p| !p.task_checkpoints.is_empty())
+    {
+        crate::test_hook("task_checkpoint_after_publish");
+    }
+    bundle.publication_state = crate::bundle::PublicationState::Committed;
+    Ok(PublishedRoot {
+        saved_path,
+        collection,
+    })
+}
+
+/// The production root encoding/admission used by immediate and prepared cuts.
+fn encode_publication_root(
+    bundle: &ProjectBundle,
+    branch_id: &crate::bundle_records::BranchId,
+    manual_branch_id: &crate::bundle_records::BranchId,
+    branches: &BTreeMap<crate::bundle_records::BranchId, BranchCheckpoint>,
+    checked: &std::sync::Arc<crate::storage_budget::StorageReservation<HistorySnapshot>>,
+    root: &StudioRoot,
+) -> Result<
+    (
+        BundleWriteAdmission,
+        crate::storage_budget::StorageReservation,
+    ),
+    BundleError,
+> {
+    let manual_history = if branch_id == manual_branch_id {
+        None
+    } else {
+        Some(
+            bundle
+                .store
+                .read_record::<HistorySnapshot>(&branches[manual_branch_id].history_ref)?,
+        )
+    };
+    let manual_document = manual_history
+        .as_ref()
+        .map_or(&checked.document, |h| &h.document);
+    let (bytes, encoded_root) = serialize_root(&bundle.store, manual_document, root)?;
+    let next_admission = BundleWriteAdmission::from_bytes_with_limits(
+        Some(bundle.store.resolved_root()?),
+        bytes,
+        bundle.store.usage_arc(),
+        bundle.store.limits(),
+    )?;
+    next_admission.require_supported()?;
+    bundle.store.closure(&root.references())?;
+    Ok((next_admission, encoded_root))
+}
+
 pub(crate) struct BoundedHistory {
     pub history: HistorySnapshot,
     pub floor: Option<kinewright_core::HistoryTransition>,

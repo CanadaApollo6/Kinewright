@@ -16,3 +16,19 @@ positive graph to open and each negative graph to refuse or quarantine without
 rewriting it. These are recovery regression inputs, not measurement fixtures or
 consent grants. Generation logs and original/restored hashes are recorded in
 `target/te1-5/b2b/cut-generation*` in the implementation evidence.
+
+C5 regenerates all four archives through that same publisher with the mandatory
+retention header, introduced-reference ownership and compact event segments.
+The three negative captures still fail their original publication-refusal
+assertions while the guards are removed. Both source files are then restored
+byte-for-byte. Current generation logs, source hashes and uncompressed archives
+are in `target/te1-linear/cut-generation/`; the fresh-open test assertions are
+unchanged. There is no old-shape reader or fixture conversion in the product.
+
+C4b regenerates the same four graphs through this publisher route with mandatory
+checkpoint coverage and the current typed edit binding/removal targets. Each
+negative capture still fails its original publication-refusal assertion; both
+mutated source files are restored byte-for-byte before fresh-open verification.
+The recovery test's positive-open, specific negative-error and no-rewrite
+assertions are unchanged. Evidence is in `target/run-limit-c4b/cut-generation/`.
+No compatibility decoder or manual graph/receipt rewrite was introduced.

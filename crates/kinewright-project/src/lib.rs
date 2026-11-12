@@ -10,6 +10,7 @@ pub mod bundle_records;
 pub mod bundle_recovery;
 pub mod bundle_rescue;
 pub mod bundle_switch;
+pub mod edit_audit;
 pub mod editing_session;
 // JA-1 S3 C4
 pub mod feedback_mapping;
@@ -27,6 +28,7 @@ pub use read_only_inputs::{ReadOnlyInputBinding, ReadOnlyInputFiles, ReadOnlyInp
 pub mod orchestration_accounting;
 pub mod orchestration_commit;
 pub mod orchestration_records;
+pub mod orchestration_retention;
 pub mod receipts;
 pub mod source_boundary;
 pub mod storage_budget;

@@ -34,7 +34,7 @@ pub use switch::PreparedGuiSwitch;
 mod rescue;
 mod rescue_selection;
 pub use durable::{
-    BranchBinding, DurableBranchSessionGuard, FrozenTaskResult,
+    BranchBinding, DurableBranchSessionGuard, FrozenTaskResult, PersistedTaskCheckpoint,
     specialist_floor_delta_from_baseline,
 };
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);

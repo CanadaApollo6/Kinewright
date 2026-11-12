@@ -86,15 +86,20 @@ impl ProjectBundle {
         crate::orchestration_accounting::encode(next, crate::run_admission::ACCOUNTING_BYTES)
             .map_err(|_| BundleError::RunLimit)?;
         cumulative_progress(&previous, next)?;
-        let record = self.store.admit_record(&OrchestrationRecord {
+        // The caller retains its live state; the cut owns an immutable snapshot.
+        let record = self.admit_owned_scheduler_record(OrchestrationRecord {
+            retention: crate::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::Accounting(Box::new(next.clone())),
         })?;
         let projection = replace_accounting(state, &previous_ref, &record.reference, next);
-        let snapshot = self.store.admit_record(&OrchestrationRecord {
-            version: 1,
-            payload: OrchestrationPayload::Snapshot(Box::new(projection)),
-        })?;
+        let base = self.semantic_snapshot(run)?;
+        let snapshot_record = OrchestrationRecord::retained(
+            OrchestrationPayload::Snapshot(Box::new(projection)),
+            base,
+            &self.store,
+        )?;
+        let snapshot = self.store.admit_record(&snapshot_record)?;
         let mut index = (*self.run_index()?).clone();
         index
             .cumulative

@@ -845,7 +845,9 @@ impl ProjectBundle {
                 .copy_graph_from_source(&self.store, &roots, cleanup_only)?;
             #[cfg(any(test, feature = "test-util"))]
             crate::io_observer::check_failure("copy_backup", &prepared.path)?;
-            let snapshot = target.admit_root_checkpoint(self.admission.raw_bytes(), &roots)?;
+            let snapshot = target
+                .store
+                .admit_root_checkpoint(self.admission.raw_bytes(), &roots)?;
             target.recovery.predecessors = std::iter::once(snapshot.reference.clone())
                 .chain(self.recovery.predecessors.iter().cloned())
                 .take(2)
@@ -1353,7 +1355,7 @@ pub(crate) fn rescue_copy(
                 record.acknowledged_absence =
                     Some("unavailable acknowledged root omitted by explicit consent".into());
             } else {
-                let ack = target.admit_root_checkpoint(
+                let ack = target.store.admit_root_checkpoint(
                     original.admission.raw_bytes(),
                     &original.root_references()?,
                 )?;

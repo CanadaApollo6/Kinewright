@@ -25,6 +25,7 @@ pub enum RetainedWorkKind {
     reason = "independent retained-record, cleanup and timeline facts"
 )]
 pub struct RetainedTaskWork {
+    pub missing_approved_edits: Vec<crate::edit_audit::MissingApprovedEdit>,
     pub run: RunId,
     pub task: TaskId,
     pub kind: RetainedWorkKind,
@@ -138,9 +139,18 @@ impl Ja1EditingSession {
                     continue;
                 }
             };
+            let mut missing = std::collections::BTreeMap::<_, Vec<_>>::new();
+            for edit in self.edit_audit_summary(&state, &[])?.missing {
+                missing.entry(edit.task.clone()).or_default().push(edit);
+            }
             for task in &state.tasks {
                 let mut source = None;
-                match self.inspect_retained_task(&state, task, &mut source) {
+                match self.inspect_retained_task(
+                    &state,
+                    task,
+                    &mut source,
+                    missing.remove(&task.id).unwrap_or_default(),
+                ) {
                     Ok(Some(work)) => {
                         discovery.task_branches.push(work.source.branch.clone());
                         discovery.work.push(work);
@@ -170,6 +180,7 @@ impl Ja1EditingSession {
         state: &crate::orchestration_records::RunProjection,
         task: &crate::orchestration_records::TaskRecord,
         source_branch: &mut Option<BranchId>,
+        missing_approved_edits: Vec<crate::edit_audit::MissingApprovedEdit>,
     ) -> Result<Option<RetainedTaskWork>, BundleError> {
         let bundle = self.active_bundle()?;
         let run = &state.run;
@@ -304,7 +315,12 @@ impl Ja1EditingSession {
         if merge_unresolved {
             disclosure.insert_str(0, "The earlier merge outcome could not be confirmed. ");
         }
+        let missing_words = crate::edit_audit::missing_edits_disclosure(&missing_approved_edits);
+        if !missing_words.is_empty() {
+            disclosure.insert_str(0, &format!("{missing_words} "));
+        }
         Ok(Some(RetainedTaskWork {
+            missing_approved_edits,
             run: run.clone(),
             task: task.id.clone(),
             kind,
@@ -503,6 +519,7 @@ mod tests {
             transition: None,
         };
         let history = TaskHistoryRecord {
+            edit_coverage: crate::edit_audit::KeptEditCoverage::default(),
             project: envelope.project.clone(),
             run: run.clone(),
             task: task.clone(),
@@ -517,7 +534,8 @@ mod tests {
             frozen_result: None,
         };
         let reference = owner
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: crate::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::TaskHistory(Box::new(history)),
             })

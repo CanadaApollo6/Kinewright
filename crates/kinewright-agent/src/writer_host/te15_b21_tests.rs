@@ -767,6 +767,9 @@ mod tests {
         );
         assert_eq!(b.f.projection(&b.run).edit_approvals.len(), ITEM_LIMIT);
     }
+    mod storage_admission {
+        include!("run_limit_consent_tests.rs");
+    }
     mod consent_followups {
         include!("te15_b21_followup_tests.rs");
     }

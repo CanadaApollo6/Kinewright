@@ -320,10 +320,9 @@ fn te15_fix_counting_child(name: &str) -> bool {
                 .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
         "TE15_FIX_COUNTING_CHILD {name}: {output}"
     );
-    for line in output
-        .lines()
-        .filter(|line| line.starts_with("TE15_FIX2_PROBE_COUNTS"))
-    {
+    for line in output.lines().filter(|line| {
+        line.starts_with("TE15_FIX2_PROBE_COUNTS") || line.starts_with("C4_STAGING_BOUNDARY")
+    }) {
         println!("{line}");
     }
     false

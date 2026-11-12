@@ -28,6 +28,52 @@ struct RecordCost {
     fields: Option<BTreeSet<String>>,
     dependencies: Vec<ObjectRef>,
     inventory_dependencies: Vec<ObjectRef>,
+    run_ownership: Option<VerifiedRunOwnership>,
+}
+impl RecordCost {
+    fn read<T: BundleRecord>(
+        &self,
+        reference: &ObjectRef,
+        usage: &Arc<Mutex<StorageUsage>>,
+        fields: &mut BTreeSet<String>,
+        manifest: &StoreManifest,
+        limits: &StorageLimits,
+    ) -> Result<StorageReservation, BundleError> {
+        if reference.record_kind != T::KIND {
+            return Err(BundleError::Corrupt("memo record kind".into()));
+        }
+        compare_declared_edges(
+            reference,
+            &self.dependencies,
+            &self.inventory_dependencies,
+            manifest,
+        )?;
+        fields.extend(self.fields.iter().flatten().cloned());
+        model_record_read(reference, self.decoded, usage, limits)
+    }
+    fn read_run(
+        &self,
+        reference: &ObjectRef,
+        usage: &Arc<Mutex<StorageUsage>>,
+        fields: &mut BTreeSet<String>,
+        manifest: &StoreManifest,
+        limits: &StorageLimits,
+        base: Option<(&ObjectRef, &Self)>,
+    ) -> Result<(), BundleError> {
+        let _current = self.read::<crate::orchestration_commit::RegisteredRunIndex>(
+            reference, usage, fields, manifest, limits,
+        )?;
+        if let Some((reference, cost)) = base {
+            // Cold ownership validation holds the current record while reading
+            // its base. Both decoded reservations must overlap on a memo hit too.
+            drop(model_record_read(reference, cost.decoded, usage, limits)?);
+        }
+        Ok(())
+    }
+}
+/// Immutable record validation may be reused; membership belongs to this root.
+struct VerifiedRunOwnership {
+    base: Option<ObjectRef>,
 }
 impl VerifiedIdentityMemo {
     pub(super) fn verify_identity(
@@ -60,6 +106,7 @@ impl VerifiedIdentityMemo {
                         fields: Some(BTreeSet::new()),
                         dependencies: vec![],
                         inventory_dependencies: vec![],
+                        run_ownership: None,
                     },
                 );
             }
@@ -97,7 +144,8 @@ impl VerifiedIdentityMemo {
         fields: Option<BTreeSet<String>>,
         limits: &StorageLimits,
     ) {
-        // Traversal controls are interpreted on each admission. Only payload costs are memoized.
+        // Root traversal controls are interpreted on each admission. Immutable
+        // payload facts are memoized; their current-root membership is not.
         if matches!(
             reference.record_kind,
             RecordKind::BranchIndex
@@ -120,19 +168,17 @@ impl VerifiedIdentityMemo {
                 | RecordKind::Lineage
                 | RecordKind::SpecialistBase
         );
+        let mut prior = self.records.remove(reference);
         self.records.insert(
             reference.clone(),
             RecordCost {
                 decoded,
                 fields: fields
-                    .or_else(|| {
-                        self.records
-                            .get(reference)
-                            .and_then(|prior| prior.fields.clone())
-                    })
+                    .or_else(|| prior.as_mut().and_then(|prior| prior.fields.take()))
                     .or_else(|| (!needs_fields).then(BTreeSet::new)),
                 dependencies: record.dependencies(),
                 inventory_dependencies: record.inventory_dependencies(),
+                run_ownership: prior.and_then(|prior| prior.run_ownership),
             },
         );
     }
@@ -147,6 +193,10 @@ impl VerifiedIdentityMemo {
     ) {
         self.bind(limits);
         if self.records.contains_key(reference) || (self.records.len() as u64) < limits.objects {
+            let run_ownership = self
+                .records
+                .remove(reference)
+                .and_then(|prior| prior.run_ownership);
             self.records.insert(
                 reference.clone(),
                 RecordCost {
@@ -154,6 +204,7 @@ impl VerifiedIdentityMemo {
                     fields: Some(fields),
                     dependencies,
                     inventory_dependencies,
+                    run_ownership,
                 },
             );
         }
@@ -190,22 +241,12 @@ impl VerifiedIdentityMemo {
     ) -> Result<StorageReservation, BundleError> {
         self.bind(limits);
         if let Some(cost) = self.records.get(reference)
-            && let Some(observed) = &cost.fields
+            && cost.fields.is_some()
         {
-            if reference.record_kind != T::KIND {
-                return Err(BundleError::Corrupt("memo record kind".into()));
-            }
-            compare_declared_edges(
-                reference,
-                &cost.dependencies,
-                &cost.inventory_dependencies,
-                manifest,
-            )?;
-            fields.extend(observed.iter().cloned());
+            let value = cost.read::<T>(reference, usage, fields, manifest, limits)?;
             #[cfg(any(test, feature = "test-util"))]
             crate::namespace::note("publication_memo_hit", &namespace.identity().resolved_root);
-            let decoded = cost.decoded;
-            return model_record_read(reference, decoded, usage, limits);
+            return Ok(value);
         }
         #[cfg(any(test, feature = "test-util"))]
         crate::namespace::note("publication_memo_miss", &namespace.identity().resolved_root);
@@ -390,7 +431,82 @@ pub(super) fn validate(
                 control!(crate::studio_records::FeedbackBatch);
             }
             RecordKind::RunIndex => {
-                control!(crate::orchestration_commit::RegisteredRunIndex);
+                memo.bind(limits);
+                if let Some(cost) = memo.records.get(reference)
+                    && cost.fields.is_some()
+                    && let Some(ownership) = &cost.run_ownership
+                    && ownership.base.as_ref().is_none_or(|base| {
+                        memo.records
+                            .get(base)
+                            .is_some_and(|cost| cost.fields.is_some())
+                    })
+                {
+                    if ownership
+                        .base
+                        .as_ref()
+                        .is_some_and(|base| !retained.contains(base))
+                    {
+                        return Err(BundleError::Corrupt("unretained run ownership base".into()));
+                    }
+                    // Cost/edges come from the same immutable identity. The flat
+                    // root index and ordered cut/successor checks still run below.
+                    cost.read_run(
+                        reference,
+                        usage,
+                        &mut fields,
+                        &manifest,
+                        limits,
+                        ownership
+                            .base
+                            .as_ref()
+                            .map(|base| (base, &memo.records[base])),
+                    )?;
+                    #[cfg(any(test, feature = "test-util"))]
+                    crate::namespace::note(
+                        "run_ownership_memo_hit",
+                        &namespace.identity().resolved_root,
+                    );
+                } else {
+                    let mut observed = BTreeSet::new();
+                    let value = read_record::<crate::orchestration_commit::RegisteredRunIndex>(
+                        namespace,
+                        reference,
+                        usage,
+                        &mut observed,
+                        limits,
+                    )?;
+                    compare_edges(reference, &*value, &manifest)?;
+                    fields.extend(observed.iter().cloned());
+                    super::validate_run_record_ownership(
+                        namespace,
+                        &value,
+                        |base| retained.contains(base),
+                        usage,
+                        limits,
+                    )?;
+                    if let crate::orchestration_commit::RegisteredRunIndex::Record(record) = &*value
+                    {
+                        memo.remember(
+                            reference,
+                            &*value,
+                            value.decoded_charge(),
+                            Some(observed),
+                            limits,
+                        );
+                        if let Some(cost) = memo.records.get_mut(reference) {
+                            cost.run_ownership = Some(VerifiedRunOwnership {
+                                // Keep an identity, never a copy of the projection.
+                                base: match &record.retention {
+                                    crate::orchestration_retention::Retention::Complete => None,
+                                    crate::orchestration_retention::Retention::Introduced {
+                                        base,
+                                        ..
+                                    } => base.clone(),
+                                },
+                            });
+                        }
+                    }
+                }
             }
             RecordKind::RunSnapshot => {
                 control!(crate::studio_records::RunSnapshotRecord);
@@ -626,4 +742,146 @@ pub(super) fn validate(
             .map_err(|_| BundleError::Capacity("usage poisoned"))?,
     );
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::{
+        bundle_copy::SessionStore,
+        orchestration_accounting::AccountingRecord,
+        orchestration_commit::RegisteredRunIndex,
+        orchestration_records::{OrchestrationPayload, OrchestrationRecord},
+    };
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "real cold and warm reads under one profile, with and without baseline pressure"
+    )]
+    fn linear_run_warm_ownership_keeps_the_cold_base_overlap() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c5-warm-overlap",
+        );
+        let limits = StorageLimits::default();
+        let mut session = SessionStore::create(temp.root(), limits.clone()).unwrap();
+        let mut accounting = AccountingRecord::new(
+            crate::bundle_records::ProjectId::fresh().unwrap(),
+            crate::bundle_records::SessionId::fresh().unwrap(),
+            1,
+        )
+        .unwrap();
+        for _ in 0..8 {
+            accounting
+                .add_task(crate::bundle_records::SessionId::fresh().unwrap(), None)
+                .unwrap();
+        }
+        let mut next = accounting.successor().unwrap();
+        next.observe_clock(2, 1, true).unwrap();
+        let base = OrchestrationRecord::retained(
+            OrchestrationPayload::Accounting(Box::new(accounting)),
+            None,
+            session.store(),
+        )
+        .unwrap();
+        let base = session.store_mut().admit_record(&base).unwrap();
+        let current = OrchestrationRecord::retained(
+            OrchestrationPayload::Accounting(Box::new(next)),
+            Some(base.reference.clone()),
+            session.store(),
+        )
+        .unwrap();
+        let current = session.store_mut().admit_record(&current).unwrap();
+        let manifest = session.store().manifest().unwrap();
+        session
+            .store()
+            .with_namespace(|namespace| {
+                let mut fields = BTreeSet::new();
+                let cold = |limits: &StorageLimits, usage: &Arc<Mutex<StorageUsage>>| {
+                    let value = read_record::<RegisteredRunIndex>(
+                        namespace,
+                        &current.reference,
+                        usage,
+                        &mut BTreeSet::new(),
+                        limits,
+                    )?;
+                    super::super::validate_run_record_ownership(
+                        namespace,
+                        &value,
+                        |reference| reference == &base.reference,
+                        usage,
+                        limits,
+                    )
+                };
+                let usage = Arc::new(Mutex::new(StorageUsage::default()));
+                cold(&limits, &usage)?;
+                let tight = StorageLimits {
+                    metadata_bytes: usage.lock().unwrap().peak_decoded_bytes + 4096,
+                    ..limits
+                };
+                // Warm facts are established under this exact limits profile.
+                let mut memo = VerifiedIdentityMemo::default();
+                let usage = Arc::new(Mutex::new(StorageUsage::default()));
+                cold(&tight, &usage)?;
+                for reference in [&base.reference, &current.reference] {
+                    drop(memo.read::<RegisteredRunIndex>(
+                        namespace,
+                        reference,
+                        &usage,
+                        &mut fields,
+                        &manifest,
+                        &tight,
+                    )?);
+                }
+                // Earlier records in a larger candidate retain metadata. Leave
+                // one byte less than the overlapping ownership read needs.
+                let pressure =
+                    StorageReservation::reserve(&usage, &tight, 0, 4097, 0, false, u64::MAX)?;
+                // Each individual record fits: it is the ownership overlap that refuses.
+                drop(read_record::<RegisteredRunIndex>(
+                    namespace,
+                    &current.reference,
+                    &usage,
+                    &mut fields,
+                    &tight,
+                )?);
+                let refusal = cold(&tight, &usage).unwrap_err();
+                assert!(matches!(
+                    refusal,
+                    BundleError::Capacity("metadata and decoded bytes")
+                ));
+                drop(pressure);
+                assert_eq!(usage.lock().unwrap().decoded_bytes, 0);
+                let cost = &memo.records[&current.reference];
+                let usage = Arc::new(Mutex::new(StorageUsage::default()));
+                let pressure =
+                    StorageReservation::reserve(&usage, &tight, 0, 4097, 0, false, u64::MAX)?;
+                drop(model_record_read(
+                    &base.reference,
+                    memo.records[&base.reference].decoded,
+                    &usage,
+                    &tight,
+                )?);
+                let refusal = cost
+                    .read_run(
+                        &current.reference,
+                        &usage,
+                        &mut fields,
+                        &manifest,
+                        &tight,
+                        Some((&base.reference, &memo.records[&base.reference])),
+                    )
+                    .unwrap_err();
+                assert!(matches!(
+                    refusal,
+                    BundleError::Capacity("metadata and decoded bytes")
+                ));
+                drop(pressure);
+                assert_eq!(usage.lock().unwrap().decoded_bytes, 0);
+                eprintln!("C5_WARM_COLD metadata_limit={} baseline=4097 cold_and_warm=metadata_and_decoded_bytes outstanding=0", tight.metadata_bytes);
+                Ok(())
+            })
+            .unwrap();
+    }
 }

@@ -509,7 +509,9 @@ mod tests {
         let b = b21_start();
         let prepared = b21_prepare(&b);
         let owner = b.f.host.owner.upgrade().unwrap();
-        let objects = owner
+        // Both audit graphs are sealed before apply. Fail the actual root
+        // replacement rather than the former late object seal.
+        let destination_directory = owner
             .lock()
             .unwrap()
             .owner()
@@ -518,15 +520,18 @@ mod tests {
             .unwrap()
             .resolved_root()
             .unwrap()
-            .with_extension("kinewright-assets")
-            .join("studio/objects");
-        let permissions = std::fs::metadata(&objects).unwrap().permissions();
-        let held = objects.clone();
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let permissions = std::fs::metadata(&destination_directory)
+            .unwrap()
+            .permissions();
+        let held = destination_directory.clone();
         owner.lock().unwrap().hooks.consent_apply_hook = Some(Arc::new(move |_| {
             std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o500)).unwrap();
         }));
         let result = b21_commit(&b, &prepared);
-        std::fs::set_permissions(&objects, permissions).unwrap();
+        std::fs::set_permissions(&destination_directory, permissions).unwrap();
         assert_eq!(
             result.is_error,
             Some(false),

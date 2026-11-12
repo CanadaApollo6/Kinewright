@@ -12,6 +12,11 @@ impl HostCommandOwner {
     ) -> Result<(), HostError> {
         match self.hooks.pending.clone() {
             None => Ok(()),
+            Some(super::orchestration::PendingPublication::Owner(original))
+                if self.has_pending_edit_publication(&original) =>
+            {
+                self.retry_pending_edit_publications()
+            }
             Some(super::orchestration::PendingPublication::Owner(original)) => self
                 .publish_orchestration_transition(producer, &original, None)
                 .map(|_| ()),
@@ -40,7 +45,6 @@ impl HostCommandOwner {
         if !self.run_recovery_blocks(&state)?.is_empty() {
             return Ok(None);
         }
-        self.archive_retired_attempts(&mut state)?;
         if state
             .attempts
             .iter()
@@ -51,23 +55,32 @@ impl HostCommandOwner {
             return Ok(None);
         }
         let accounting = self.native_accounting(&state)?;
+        let mut decision_capacity_refused = false;
         let effect = state
             .effects
             .iter()
             .filter(|e| e.safety == EffectSafety::ProcessBound)
             .find(|e| {
-                !accounting.as_ref().is_some_and(|a| {
+                let ready = !accounting.as_ref().is_some_and(|a| {
                     a.tasks
                         .iter()
                         .any(|t| t.task == e.task.0 && t.wait_reason.is_some())
                 }) && crate::orchestration::outbox::next_effect(&state, &e.lane)
                     .is_some_and(|next| next.id == e.id)
-                    && !state.attempts.iter().any(|a| {
-                        a.identity.task == e.task && !matches!(a.state, AttemptState::Retired(_))
-                    })
+                    && Self::native_task_can_launch(&state, &e.task);
+                if ready && Self::native_launch_context_full(&state, &e.task) {
+                    decision_capacity_refused = true;
+                    return false;
+                }
+                ready
             })
             .cloned();
         let Some(effect) = effect else {
+            if decision_capacity_refused {
+                return Err(super::orchestration::scheduler_error(
+                    crate::orchestration::orchestration_records::Refusal::TaskDecisionCapacity,
+                ));
+            }
             return Ok(None);
         };
         let task = state
@@ -102,6 +115,15 @@ impl HostCommandOwner {
         } else {
             SendKind::QueuedSteering
         };
+        // Admit the whole attempt before even archiving an old reservation: both
+        // actions can seal evidence. The terminal reserve never backs new work.
+        task.progress
+            .check_context_capacity(
+                0,
+                kinewright_project::orchestration_records::NATIVE_ATTEMPT_DECISIONS,
+            )
+            .map_err(super::orchestration::scheduler_error)?;
+        self.archive_retired_attempts(&mut state)?;
         let identity = ExecutionIdentity {
             version: 1,
             project: self.owner()?.project_id()?,

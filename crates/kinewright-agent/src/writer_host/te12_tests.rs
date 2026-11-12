@@ -751,7 +751,11 @@ fn te12_evidence_cannot_supply_a_receipt() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|row| row["chunk"]["text"].as_str().expect("TE12_EVIDENCE_UNMODIFIED"))
+        .map(|row| {
+            row["chunk"]["text"]
+                .as_str()
+                .expect("TE12_EVIDENCE_UNMODIFIED")
+        })
         .collect::<String>();
     assert_eq!(
         bytes.as_bytes(),
@@ -759,7 +763,8 @@ fn te12_evidence_cannot_supply_a_receipt() {
         "TE12_EVIDENCE_UNMODIFIED"
     );
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&bytes).unwrap(), data,
+        serde_json::from_str::<serde_json::Value>(&bytes).unwrap(),
+        data,
         "TE12_EVIDENCE_UNMODIFIED"
     );
     assert!(
@@ -969,7 +974,8 @@ fn te12_legacy_history(r: &C5Fix10Run) -> TaskHistoryRecord {
     let reference = owner
         .owner_mut()
         .unwrap()
-        .admit_scheduler_record(&OrchestrationRecord {
+        .admit_scheduler_record(OrchestrationRecord {
+            retention: kinewright_project::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::TaskHistory(Box::new(history.clone())),
         })

@@ -21,7 +21,8 @@ fn s4b_c3_fix1_release_after_six_hour_deadline() {
         let reference = owner
             .owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Accounting(Box::new(record)),
             })
@@ -114,7 +115,8 @@ fn s4b_c3_fix1_commit_rechecks_monotonic_and_usage() {
                 let reference = owner
                     .owner_mut()
                     .unwrap()
-                    .admit_scheduler_record(&OrchestrationRecord {
+                    .admit_scheduler_record(OrchestrationRecord {
+                        retention: kinewright_project::orchestration_retention::Retention::Complete,
                         version: 1,
                         payload: OrchestrationPayload::Accounting(Box::new(next)),
                     })

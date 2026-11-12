@@ -948,6 +948,9 @@ impl HostCommandOwner {
         if self.expansion_count(task)? >= EXPANSIONS {
             return Err(capacity());
         }
+        state
+            .check_task_context_capacity(&task.id, 0, 1)
+            .map_err(super::orchestration::scheduler_error)?;
         let reference = self.owner_mut()?.admit_host_grant(&serde_json::to_vec(&json!({"kind":"task_evidence_expansion_v1","page_id":page_id,"request_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&(binding,page_id))?)}))?)?;
         let issued = self.issue_metadata(index, None)?;
         let scope = self.attachments[index]

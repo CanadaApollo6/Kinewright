@@ -3427,6 +3427,7 @@ fn te13_fix3_retained_app(
         })
     });
     let history = TaskHistoryRecord {
+        edit_coverage: kinewright_project::edit_audit::KeptEditCoverage::default(),
         project: envelope.project.clone(),
         run: state.run.clone(),
         task,
@@ -3441,7 +3442,8 @@ fn te13_fix3_retained_app(
         frozen_result: None,
     };
     let reference = owner
-        .admit_scheduler_record(&OrchestrationRecord {
+        .admit_scheduler_record(OrchestrationRecord {
+            retention: kinewright_project::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::TaskHistory(Box::new(history.clone())),
         })
@@ -3463,7 +3465,8 @@ fn te13_fix3_retained_app(
             mismatched.base_ref = other_base_ref.unwrap();
         }
         let reference = owner
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::TaskHistory(Box::new(mismatched)),
             })
@@ -3484,7 +3487,8 @@ fn te13_fix3_retained_app(
             explanation: history.base_ref.clone(),
         };
         let result_ref = owner
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Result(Box::new(result)),
             })

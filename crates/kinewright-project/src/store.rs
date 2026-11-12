@@ -149,6 +149,29 @@ pub struct SealedObject {
     pin: StorePin,
 }
 
+pub(crate) struct PreparedInventoryWrite {
+    bytes: Vec<u8>,
+    _encoded: StorageReservation,
+    control: PreparedControlWrite,
+}
+
+/// Proof that preparation began against the owner's admitted physical root.
+/// Previewing a successor may lend metadata, never change this physical fence.
+pub(crate) struct PublicationFence {
+    store: Arc<()>,
+    root_sha256: String,
+}
+
+/// Capacity for one exact control replacement, owned until publication or drop.
+pub(crate) struct PreparedControlWrite {
+    // This is the store birth itself, held across close/reopen; no reusable pointer key.
+    store: Arc<()>,
+    root: bool,
+    digest: String,
+    length: u64,
+    reservation: Option<StorageReservation>,
+}
+
 /// Unforgeable access to a verified, pinned closure under its original store owner.
 /// No caller locator or external hint is accepted by reads.
 pub struct RetainedReadAdmission {
@@ -776,6 +799,9 @@ impl ProjectStore {
         self.note_run_limit();
     }
     pub(crate) fn note_run_limit(&self) {
+        if crate::run_admission::is_preparing_consent(self.admission_key()) {
+            return;
+        }
         self.inner
             .run_limit
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3301,6 +3327,18 @@ impl ProjectStore {
                 .collect(),
         })
     }
+    pub(crate) fn admit_root_checkpoint(
+        &mut self,
+        mut bytes: &[u8],
+        deps: &[ObjectRef],
+    ) -> Result<SealedObject, BundleError> {
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::RootCheckpoint,
+        };
+        self.admit_blob(&mut bytes, &reference, deps)
+    }
     pub(crate) fn begin_publication(&mut self) -> Result<(), BundleError> {
         self.with_namespace(crate::namespace::ProjectNamespace::begin_object_batch)?;
         self.inner
@@ -3312,12 +3350,30 @@ impl ProjectStore {
     }
     pub(crate) fn mark_committed(&mut self, roots: &[ObjectRef]) -> Result<StorePin, BundleError> {
         let pin = self.pin(roots)?;
+        self.mark_prepared_committed(roots.to_vec(), pin)
+    }
+    pub(crate) fn mark_prepared_committed(
+        &mut self,
+        roots: Vec<ObjectRef>,
+        pin: StorePin,
+    ) -> Result<StorePin, BundleError> {
+        // pin() builds keys from the SHA-ordered closure. Transfer that exact
+        // held graph, rather than allocating another pin after Core applied.
+        if !Arc::ptr_eq(&pin.inner, &self.inner)
+            || roots
+                .iter()
+                .any(|root| pin.objects.binary_search(&root.sha256).is_err())
+        {
+            return Err(BundleError::Identity(
+                "prepared committed graph changed".into(),
+            ));
+        }
         let mut ledger = self
             .inner
             .ledger
             .lock()
             .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
-        ledger.committed = roots.to_vec();
+        ledger.committed = roots;
         ledger.acknowledged_objects = ledger
             .objects
             .keys()
@@ -3366,10 +3422,56 @@ impl ProjectStore {
     pub(crate) fn usage_arc(&self) -> Arc<Mutex<StorageUsage>> {
         Arc::clone(&self.inner.usage)
     }
+    pub(crate) fn publication_fence(
+        &self,
+        admitted: &[u8],
+    ) -> Result<PublicationFence, BundleError> {
+        self.with_namespace(|namespace| {
+            namespace.verify()?;
+            if namespace.read_root()?.as_deref() != Some(admitted) {
+                return Err(BundleError::HistoryChanged);
+            }
+            Ok(PublicationFence {
+                store: self.admission_lifetime(),
+                root_sha256: kinewright_media::sha256_bytes(admitted),
+            })
+        })
+    }
+    pub(crate) fn check_publication_fence(
+        &self,
+        fence: &PublicationFence,
+    ) -> Result<(), BundleError> {
+        if !Arc::ptr_eq(&fence.store, &self.inner.admission_identity) {
+            return Err(BundleError::Identity(
+                "publication fence owner changed".into(),
+            ));
+        }
+        self.with_namespace(|namespace| {
+            namespace.verify()?;
+            if namespace
+                .read_root()?
+                .is_none_or(|bytes| kinewright_media::sha256_bytes(&bytes) != fence.root_sha256)
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            Ok(())
+        })
+    }
     pub(crate) fn publish_inventory(
         &mut self,
         inventory: &RecoveryInventory,
     ) -> Result<(), BundleError> {
+        let mut prepared = self.prepare_inventory(inventory)?;
+        let result = self.publish_prepared_inventory(&mut prepared);
+        if result.is_err() {
+            self.defer_uncertain_control(&mut prepared.control)?;
+        }
+        result
+    }
+    pub(crate) fn prepare_inventory(
+        &self,
+        inventory: &RecoveryInventory,
+    ) -> Result<PreparedInventoryWrite, BundleError> {
         inventory.validate()?;
         let mut count = BoundedCounter {
             bytes: 0,
@@ -3377,12 +3479,51 @@ impl ProjectStore {
         };
         serde_json::to_writer(&mut count, inventory)
             .map_err(|_| BundleError::Capacity("recovery inventory"))?;
-        let _encoded = self.reserve(0, count.bytes, 0, false)?;
+        let encoded = self.reserve(0, count.bytes, 0, false)?;
         let bytes =
             serde_json::to_vec(inventory).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        self.publish_control(
-            &bytes,
-            false,
+        let control = self.prepare_control_write(&bytes, false)?;
+        Ok(PreparedInventoryWrite {
+            bytes,
+            _encoded: encoded,
+            control,
+        })
+    }
+    pub(crate) fn publish_prepared_inventory(
+        &mut self,
+        prepared: &mut PreparedInventoryWrite,
+    ) -> Result<(), BundleError> {
+        if prepared.control.reservation.is_none() {
+            // A definite root refusal can leave its staging inventory already
+            // published. Reuse it only while those exact bytes remain current.
+            let same = self.with_namespace(|namespace| {
+                namespace.verify()?;
+                let Some(mut file) =
+                    namespace.open_owned(&crate::bundle_recovery::inventory_path()?)?
+                else {
+                    return Ok(false);
+                };
+                let mut offset = 0;
+                let mut chunk = [0_u8; 4096];
+                while offset < prepared.bytes.len() {
+                    let wanted = chunk.len().min(prepared.bytes.len() - offset);
+                    let count = file.read(&mut chunk[..wanted])?;
+                    if count == 0 || chunk[..count] != prepared.bytes[offset..offset + count] {
+                        return Ok(false);
+                    }
+                    offset += count;
+                }
+                Ok(file.read(&mut chunk[..1])? == 0)
+            })?;
+            return if same {
+                Ok(())
+            } else {
+                Err(BundleError::HistoryChanged)
+            };
+        }
+        self.publish_prepared_control(
+            &mut prepared.control,
+            &prepared.bytes,
             &mut crate::namespace::RootReplaceBoundary::NeverAttempted,
         )
     }
@@ -3391,7 +3532,48 @@ impl ProjectStore {
         bytes: &[u8],
     ) -> Result<(), crate::namespace::RootReplaceFailure> {
         let mut boundary = crate::namespace::RootReplaceBoundary::NeverAttempted;
-        let result = self.with_namespace(|n| {
+        let result = (|| {
+            let mut prepared = self.prepare_root_write(bytes)?;
+            let result = self.publish_prepared_control(&mut prepared, bytes, &mut boundary);
+            if result.is_err() {
+                self.defer_uncertain_control(&mut prepared)?;
+            }
+            result
+        })();
+        result.map_err(|error| crate::namespace::RootReplaceFailure { boundary, error })
+    }
+    /// The exact ordinary root admission, reusable before an approved edit.
+    pub(crate) fn prepare_root_write(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PreparedControlWrite, BundleError> {
+        self.validate_root_bytes(bytes)?;
+        self.prepare_control_write(bytes, true)
+    }
+    pub(crate) fn check_prepared_predecessor(
+        &self,
+        prepared: &PreparedControlWrite,
+        before: &str,
+    ) -> Result<(), BundleError> {
+        if !Arc::ptr_eq(&prepared.store, &self.inner.admission_identity)
+            || !prepared.root
+            || prepared.reservation.is_none()
+        {
+            return Err(BundleError::Identity("prepared root owner changed".into()));
+        }
+        self.with_namespace(|namespace| {
+            namespace.verify()?;
+            if namespace
+                .read_root()?
+                .is_none_or(|bytes| kinewright_media::sha256_bytes(&bytes) != before)
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            Ok(())
+        })
+    }
+    fn validate_root_bytes(&self, bytes: &[u8]) -> Result<(), BundleError> {
+        self.with_namespace(|n| {
             crate::namespace::note("publication_reopen_fit", &n.identity().resolved_root);
             n.verify()?;
             crate::bundle_recovery::validate_publication_reopen_fit(
@@ -3404,17 +3586,24 @@ impl ProjectStore {
                     .lock()
                     .map_err(|_| BundleError::Capacity("memo poisoned"))?,
             )
-        });
-        result
-            .and_then(|()| self.publish_control(bytes, true, &mut boundary))
+        })?;
+        Ok(())
+    }
+    pub(crate) fn publish_prepared_root(
+        &mut self,
+        prepared: &mut PreparedControlWrite,
+        bytes: &[u8],
+    ) -> Result<(), crate::namespace::RootReplaceFailure> {
+        let mut boundary = crate::namespace::RootReplaceBoundary::NeverAttempted;
+        self.validate_root_bytes(bytes)
+            .and_then(|()| self.publish_prepared_control(prepared, bytes, &mut boundary))
             .map_err(|error| crate::namespace::RootReplaceFailure { boundary, error })
     }
-    fn publish_control(
-        &mut self,
+    fn prepare_control_write(
+        &self,
         bytes: &[u8],
         root: bool,
-        boundary: &mut crate::namespace::RootReplaceBoundary,
-    ) -> Result<(), BundleError> {
+    ) -> Result<PreparedControlWrite, BundleError> {
         let length = bytes.len() as u64;
         if length > self.admission_limits().control_bytes
             || self
@@ -3425,11 +3614,51 @@ impl ProjectStore {
         {
             return Err(self.run_error(BundleError::Capacity("control publication")));
         }
-        let reservation = self.reserve(length, 0, 0, false)?;
-        let result = if root {
+        // The future control's metadata and its temporary physical file are
+        // admitted together, so another reader cannot spend this headroom.
+        let reservation = self.reserve(length, length, 0, false)?;
+        Ok(PreparedControlWrite {
+            store: self.admission_lifetime(),
+            root,
+            digest: kinewright_media::sha256_bytes(bytes),
+            length,
+            reservation: Some(reservation),
+        })
+    }
+    fn defer_uncertain_control(
+        &self,
+        prepared: &mut PreparedControlWrite,
+    ) -> Result<(), BundleError> {
+        if self.with_namespace(|namespace| Ok(namespace.is_uncertain()))? {
+            let mut ledger = self
+                .inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+            if let Some(reservation) = prepared.reservation.take() {
+                ledger.pending_controls.push(reservation);
+            }
+        }
+        Ok(())
+    }
+    fn publish_prepared_control(
+        &mut self,
+        prepared: &mut PreparedControlWrite,
+        bytes: &[u8],
+        boundary: &mut crate::namespace::RootReplaceBoundary,
+    ) -> Result<(), BundleError> {
+        if !Arc::ptr_eq(&prepared.store, &self.inner.admission_identity)
+            || prepared.length != bytes.len() as u64
+            || prepared.digest != kinewright_media::sha256_bytes(bytes)
+            || prepared.reservation.is_none()
+        {
+            return Err(BundleError::Identity(
+                "prepared control write changed".into(),
+            ));
+        }
+        let result = if prepared.root {
             self.with_namespace(|n| match n.replace_root(bytes) {
                 Ok(()) => {
-                    // Any later accounting failure follows a completed root replacement.
                     *boundary = crate::namespace::RootReplaceBoundary::Unknown;
                     Ok(())
                 }
@@ -3446,12 +3675,6 @@ impl ProjectStore {
         if let Err(error) = result {
             if self.with_namespace(|n| Ok(n.is_uncertain()))? {
                 self.inner
-                    .ledger
-                    .lock()
-                    .map_err(|_| BundleError::Capacity("ledger poisoned"))?
-                    .pending_controls
-                    .push(reservation);
-                self.inner
                     .usage
                     .lock()
                     .map_err(|_| BundleError::Capacity("usage poisoned"))?
@@ -3459,28 +3682,18 @@ impl ProjectStore {
             }
             return Err(error);
         }
-        reservation.seal(length)?;
-        let mut prior = if root {
+        let mut prior = if prepared.root {
             self.inner.root_bytes.lock()
         } else {
             self.inner.inventory_bytes.lock()
         }
         .map_err(|_| BundleError::Capacity("control accounting"))?;
-        let mut usage = self
-            .inner
-            .usage
-            .lock()
-            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
-        usage.physical_bytes = usage
-            .physical_bytes
-            .checked_sub(*prior)
-            .ok_or(BundleError::Capacity("control retirement underflow"))?;
-        usage.metadata_bytes = usage
-            .metadata_bytes
-            .checked_sub(*prior)
-            .and_then(|n| n.checked_add(length))
-            .ok_or(BundleError::Capacity("control metadata overflow"))?;
-        *prior = length;
+        prepared
+            .reservation
+            .take()
+            .ok_or(BundleError::HistoryBarrierInvariant)?
+            .seal_control(prepared.length, *prior)?;
+        *prior = prepared.length;
         Ok(())
     }
     fn memoize_support_decode(

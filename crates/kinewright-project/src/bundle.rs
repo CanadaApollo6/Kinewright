@@ -1649,19 +1649,6 @@ impl ProjectBundle {
         self.pending_save = None;
         Ok(())
     }
-
-    pub(crate) fn admit_root_checkpoint(
-        &mut self,
-        bytes: &[u8],
-        deps: &[ObjectRef],
-    ) -> Result<SealedObject, BundleError> {
-        let reference = ObjectRef {
-            sha256: kinewright_media::sha256_bytes(bytes),
-            byte_length: bytes.len() as u64,
-            record_kind: RecordKind::RootCheckpoint,
-        };
-        self.store.admit_blob(&mut &*bytes, &reference, deps)
-    }
 }
 
 /// Install the revocable barrier before destination IO starts.

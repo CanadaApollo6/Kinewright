@@ -358,6 +358,120 @@ fn validate_voice(v: &VoiceRef, l: &StorageLimits) -> Result<(), BundleError> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum MetadataPublicationMode<'a> {
+    Commit,
+    Prepare(&'a crate::store::PublicationFence),
+}
+impl MetadataPublicationMode<'_> {
+    fn preparing(self) -> bool {
+        matches!(self, Self::Prepare(_))
+    }
+}
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Immediate receipts stay inline; only held prepared state needs allocation"
+)]
+enum MetadataPublicationOutcome {
+    Committed(ReceiptLookup),
+    Prepared(Box<PreparedMetadataPublication>),
+}
+impl MetadataPublicationOutcome {
+    fn committed(self) -> Result<ReceiptLookup, BundleError> {
+        match self {
+            Self::Committed(receipt) => Ok(receipt),
+            Self::Prepared(_) => Err(BundleError::HistoryBarrierInvariant),
+        }
+    }
+}
+pub(crate) struct PreparedMetadataPublication {
+    maintenance: crate::bundle_commit::PreparedMaintenancePublication,
+    pending: Option<PreparedMetadataInputs>,
+}
+struct PreparedMetadataInputs {
+    command: StorageReservation<CommandEnvelope>,
+    result: ReceiptResult,
+    update: ValidatedMetadataUpdate,
+}
+impl PreparedMetadataInputs {
+    fn take(bundle: &mut ProjectBundle) -> Result<Self, BundleError> {
+        if let (Some(command), Some(result), Some(update)) = (
+            bundle.pending_command.take(),
+            bundle.pending_result.take(),
+            bundle.pending_metadata.take(),
+        ) {
+            Ok(Self {
+                command,
+                result,
+                update,
+            })
+        } else {
+            bundle.unsettled = true;
+            Err(BundleError::HistoryBarrierInvariant)
+        }
+    }
+    fn install(self, bundle: &mut ProjectBundle) {
+        bundle.pending_command = Some(self.command);
+        bundle.pending_result = Some(self.result);
+        bundle.pending_metadata = Some(self.update);
+    }
+}
+impl PreparedMetadataPublication {
+    pub(crate) fn with_preview<T>(
+        &mut self,
+        bundle: &mut ProjectBundle,
+        prepare: impl FnOnce(&mut ProjectBundle) -> Result<T, BundleError>,
+    ) -> Result<T, BundleError> {
+        self.maintenance.with_preview(bundle, prepare)
+    }
+    pub(crate) fn publish(
+        &mut self,
+        bundle: &mut ProjectBundle,
+    ) -> Result<ReceiptLookup, BundleError> {
+        if bundle.unsettled || bundle.pending_command.is_some() || bundle.pending_metadata.is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        let replay = bundle.receipt_lookup(&pending.command)?;
+        if replay != ReceiptLookup::Absent {
+            return Ok(replay);
+        }
+        let issuer = bundle.issuers.get(&pending.command.id.issuer).or_else(|| {
+            bundle
+                .prepared_metadata_authorities
+                .get(&pending.command.id.issuer)
+                .map(|prepared| &prepared.issuer)
+        });
+        if issuer.is_none_or(|issuer| {
+            issuer.retired || issuer.next_sequence != pending.command.id.sequence
+        }) {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.pending
+            .take()
+            .ok_or(BundleError::HistoryBarrierInvariant)?
+            .install(bundle);
+        let result = self.maintenance.publish(bundle);
+        // The prepared plan keeps all pending inputs on a refused or uncertain
+        // write. Reconciliation decides the physical root using its publication
+        // tag; a second attempt must not lose its held capacity at that point.
+        self.pending = Some(PreparedMetadataInputs::take(bundle)?);
+        result?;
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        bundle
+            .prepared_metadata_authorities
+            .remove(&pending.command.id.issuer);
+        bundle.receipt_lookup(&pending.command)
+    }
+}
+
 pub(crate) struct ValidatedMetadataUpdate {
     pub(crate) versions: Option<ObjectRef>,
     pub(crate) feedback: Option<ObjectRef>,
@@ -699,6 +813,80 @@ impl ProjectBundle {
         update: &MetadataUpdate,
         admitted: Option<(ValidatedMetadataUpdate, MetadataResult)>,
     ) -> Result<ReceiptLookup, BundleError> {
+        self.metadata_publication(
+            envelope,
+            scope,
+            update,
+            admitted,
+            MetadataPublicationMode::Commit,
+        )?
+        .committed()
+    }
+    pub(crate) fn prepare_metadata_command(
+        &mut self,
+        envelope: &MetadataEnvelope,
+        update: &MetadataUpdate,
+        fence: &crate::store::PublicationFence,
+    ) -> Result<PreparedMetadataPublication, BundleError> {
+        struct Header<'a> {
+            bundle: &'a mut ProjectBundle,
+            state: crate::bundle::PublicationState,
+            tag: Option<kinewright_core::HistorySaveTag>,
+        }
+        impl Drop for Header<'_> {
+            fn drop(&mut self) {
+                self.bundle.publication_state = self.state;
+                self.bundle.publication_tag = self.tag.take();
+            }
+        }
+        if self.unsettled
+            || self.pending_command.is_some()
+            || self.pending_metadata.is_some()
+            || self.pending_result.is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        if !crate::run_admission::is_preparing_consent(self.store.admission_key()) {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        let state = self.publication_state;
+        let tag = self.publication_tag.take();
+        let header = Header {
+            bundle: self,
+            state,
+            tag,
+        };
+        let outcome = header.bundle.metadata_publication(
+            envelope,
+            MetadataScope::Orchestration,
+            update,
+            None,
+            MetadataPublicationMode::Prepare(fence),
+        );
+        if outcome.is_err() {
+            // Preparation never publishes a root. Abandon its pending inputs,
+            // while retaining any namespace/usage uncertainty until reconciliation.
+            header.bundle.pending_command = None;
+            header.bundle.pending_result = None;
+            header.bundle.pending_metadata = None;
+        }
+        match outcome? {
+            MetadataPublicationOutcome::Prepared(prepared) => Ok(*prepared),
+            MetadataPublicationOutcome::Committed(_) => Err(BundleError::HistoryChanged),
+        }
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one metadata cut validates, stages and rolls back its issuer and inputs"
+    )]
+    fn metadata_publication(
+        &mut self,
+        envelope: &MetadataEnvelope,
+        scope: MetadataScope,
+        update: &MetadataUpdate,
+        admitted: Option<(ValidatedMetadataUpdate, MetadataResult)>,
+        mode: MetadataPublicationMode<'_>,
+    ) -> Result<MetadataPublicationOutcome, BundleError> {
         let allowed = matches!(
             (scope, &update.change),
             (
@@ -728,7 +916,7 @@ impl ProjectBundle {
             self.receipt_lookup(&command)?
         };
         if lookup != ReceiptLookup::Absent {
-            return Ok(lookup);
+            return Ok(MetadataPublicationOutcome::Committed(lookup));
         }
         if self.unsettled || self.pending_command.is_some() || self.pending_metadata.is_some() {
             return Err(BundleError::Unsettled);
@@ -763,28 +951,35 @@ impl ProjectBundle {
         {
             return Err(BundleError::HistoryBarrierInvariant);
         }
+        if mode.preparing() && admission.is_some() {
+            // A new edit cannot consume the cleanup allowance.
+            return Err(BundleError::RunLimit);
+        }
         let terminal = admission.is_some();
         self.pending_terminal_publication.clone_from(&admission);
         let result = self.with_publication_admission(admission, |bundle| {
             let fresh = !bundle.issuers.contains_key(&envelope.id.issuer);
             let evidence = bundle.evidence.len();
             let pending_evidence = bundle.pending_evidence.len();
-            let result = (|| {
-                if fresh {
-                    if bundle.issuers.len() as u64 >= bundle.store.admission_limits().issuers {
-                        return Err(bundle
-                            .store
-                            .run_error(BundleError::Capacity("metadata issuers")));
-                    }
-                    bundle
-                        .issuers
-                        .insert(envelope.id.issuer.clone(), issuer.clone());
+            let original_issuer = if fresh {
+                if bundle.issuers.len() as u64 >= bundle.store.admission_limits().issuers {
+                    return Err(bundle
+                        .store
+                        .run_error(BundleError::Capacity("metadata issuers")));
                 }
+                bundle.issuers.insert(envelope.id.issuer.clone(), issuer);
+                None
+            } else {
+                Some(issuer)
+            };
+            // Move the bounded authority out while its grant is admitted; no
+            // grant-payload clone is needed to borrow the store and retain it.
+            let authority = bundle
+                .prepared_metadata_authorities
+                .remove_entry(&envelope.id.issuer);
+            let grant = (|| {
                 if let MetadataChange::OrchestrationUpdate { transition, .. } = &update.change
-                    && let Some(prepared) = bundle
-                        .prepared_metadata_authorities
-                        .get(&envelope.id.issuer)
-                        .cloned()
+                    && let Some((_, prepared)) = &authority
                 {
                     if transition.envelope().authority.grant_ref != prepared.reference {
                         return Err(BundleError::HistoryChanged);
@@ -797,19 +992,42 @@ impl ProjectBundle {
                     bundle.retain_evidence(&prepared.reference)?;
                     drop(seal);
                 }
-                bundle.finish_metadata_publication(envelope, update, &command, issuer, admitted)
+                Ok(())
             })();
-            if result.is_ok() {
+            // Validation must still see the original prepared-authority entry.
+            if let Some((id, authority)) = authority {
+                bundle.prepared_metadata_authorities.insert(id, authority);
+            }
+            let result = grant.and_then(|()| {
+                bundle.finish_metadata_publication(envelope, update, &command, admitted, mode)
+            });
+            let preparing = mode.preparing();
+            if !preparing && result.is_ok() {
                 bundle
                     .prepared_metadata_authorities
                     .remove(&envelope.id.issuer);
-            } else if !bundle.unsettled {
-                if fresh {
+            }
+            let known_error = result.as_ref().is_err_and(|error| {
+                !matches!(
+                    error,
+                    BundleError::DurabilityUnknown | BundleError::Unsettled
+                )
+            }) && !bundle.unsettled;
+            if preparing || known_error || (fresh && result.is_err() && !bundle.unsettled) {
+                if let Some(original) = original_issuer {
+                    let current = bundle
+                        .issuers
+                        .get_mut(&envelope.id.issuer)
+                        .ok_or(BundleError::HistoryBarrierInvariant)?;
+                    *current = original;
+                } else {
                     bundle.issuers.remove(&envelope.id.issuer);
                 }
+            }
+            if preparing || (result.is_err() && !bundle.unsettled) {
                 bundle.evidence.truncate(evidence);
                 bundle.pending_evidence.truncate(pending_evidence);
-                if terminal && bundle.collect_after_ack().is_err() {
+                if !preparing && terminal && bundle.collect_after_ack().is_err() {
                     bundle.unsettled = true;
                     return Err(BundleError::Unsettled);
                 }
@@ -826,9 +1044,9 @@ impl ProjectBundle {
         envelope: &MetadataEnvelope,
         update: &MetadataUpdate,
         command: &CommandEnvelope,
-        issuer: crate::receipts::IssuerState,
         admitted: Option<(ValidatedMetadataUpdate, MetadataResult)>,
-    ) -> Result<ReceiptLookup, BundleError> {
+        mode: MetadataPublicationMode<'_>,
+    ) -> Result<MetadataPublicationOutcome, BundleError> {
         let limits = self.store.admission_limits();
         if limits.pending_commands == 0
             || self.receipts.detailed.len() as u64 + self.receipts.retired.len() as u64
@@ -841,6 +1059,9 @@ impl ProjectBundle {
             Some(admitted) => admitted,
             None => self.validate_metadata(envelope, update)?,
         };
+        if mode.preparing() && !validated.task_checkpoints.is_empty() {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
         self.pending_metadata = Some(validated);
         self.pending_command = Some(reservation.hold(command.clone()));
         self.pending_result = Some(ReceiptResult::Metadata { result });
@@ -852,24 +1073,43 @@ impl ProjectBundle {
             .sequence
             .checked_add(1)
             .ok_or(BundleError::Capacity("metadata sequence overflow"))?;
-        let publication = BundleCommit::publish_maintenance(self);
-        if let Err(error) = publication {
-            if !matches!(
-                error,
-                BundleError::DurabilityUnknown | BundleError::Unsettled
-            ) && !self.unsettled
-            {
-                self.issuers.insert(envelope.id.issuer.clone(), issuer);
-                self.pending_command = None;
-                self.pending_result = None;
-                self.pending_metadata = None;
+        let publication = match mode {
+            MetadataPublicationMode::Commit => {
+                BundleCommit::publish_maintenance(self).map(|_| None)
             }
-            return Err(error);
+            MetadataPublicationMode::Prepare(fence) => {
+                BundleCommit::prepare_maintenance(self, fence).map(Some)
+            }
+        };
+        let prepared = match publication {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if !matches!(
+                    error,
+                    BundleError::DurabilityUnknown | BundleError::Unsettled
+                ) && !self.unsettled
+                {
+                    self.pending_command = None;
+                    self.pending_result = None;
+                    self.pending_metadata = None;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(maintenance) = prepared {
+            let pending = PreparedMetadataInputs::take(self)?;
+            return Ok(MetadataPublicationOutcome::Prepared(Box::new(
+                PreparedMetadataPublication {
+                    maintenance,
+                    pending: Some(pending),
+                },
+            )));
         }
         self.pending_command = None;
         self.pending_result = None;
         self.pending_metadata = None;
         self.receipt_lookup(command)
+            .map(MetadataPublicationOutcome::Committed)
     }
     #[allow(clippy::too_many_lines)]
     fn validate_metadata(
@@ -1250,10 +1490,40 @@ impl crate::editing_session::Ja1EditingSession {
         requested: Option<&crate::receipts::IssuerId>,
         grant: &[u8],
     ) -> Result<(crate::receipts::IssuerId, ObjectRef), BundleError> {
-        if subject.is_empty()
-            || subject.len() > 512
-            || grant.len() > crate::run_admission::TERMINAL_RECEIPT_BYTES
-        {
+        self.prepare_metadata_authority_bounded(
+            subject,
+            requested,
+            std::borrow::Cow::Borrowed(grant),
+            crate::run_admission::TERMINAL_RECEIPT_BYTES,
+        )
+    }
+    /// Ordinary preflight keeps the ordinary payload bound; it cannot borrow
+    /// the smaller terminal allowance or publish an issuer before admission.
+    pub fn prepare_ordinary_metadata_authority(
+        &mut self,
+        subject: &str,
+        requested: Option<&crate::receipts::IssuerId>,
+        grant: Vec<u8>,
+    ) -> Result<(crate::receipts::IssuerId, ObjectRef), BundleError> {
+        let store = self.store()?;
+        store.admit_run_write()?;
+        let limit = usize::try_from(store.admission_limits().command_bytes)
+            .map_err(|_| BundleError::Capacity("ordinary metadata authority"))?;
+        self.prepare_metadata_authority_bounded(
+            subject,
+            requested,
+            std::borrow::Cow::Owned(grant),
+            limit,
+        )
+    }
+    fn prepare_metadata_authority_bounded(
+        &mut self,
+        subject: &str,
+        requested: Option<&crate::receipts::IssuerId>,
+        grant: std::borrow::Cow<'_, [u8]>,
+        limit: usize,
+    ) -> Result<(crate::receipts::IssuerId, ObjectRef), BundleError> {
+        if subject.is_empty() || subject.len() > 512 || grant.len() > limit {
             return Err(BundleError::Capacity("prepared metadata authority"));
         }
         let bundle = self.active_bundle_mut()?;
@@ -1301,7 +1571,7 @@ impl crate::editing_session::Ja1EditingSession {
             bundle.prepared_metadata_authorities.pop_first();
         }
         let reference = ObjectRef {
-            sha256: kinewright_media::sha256_bytes(grant),
+            sha256: kinewright_media::sha256_bytes(&grant),
             byte_length: grant.len() as u64,
             record_kind: RecordKind::OwnedEvidence,
         };
@@ -1310,7 +1580,7 @@ impl crate::editing_session::Ja1EditingSession {
             PreparedMetadataAuthority {
                 issuer,
                 reference: reference.clone(),
-                bytes: grant.to_vec(),
+                bytes: grant.into_owned(),
             },
         );
         Ok((id, reference))

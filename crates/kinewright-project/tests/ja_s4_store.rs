@@ -290,6 +290,7 @@ fn s4_support_and_original_envelope_contract() {
     wrong.authority.owner_epoch += 1;
     assert_eq!(wrong.validate(), Err(Refusal::ScopeConflict));
     let mut record = OrchestrationRecord {
+        retention: kinewright_project::orchestration_retention::Retention::Complete,
         version: 2,
         payload: OrchestrationPayload::Snapshot(Box::new(projection(&envelope))),
     };
@@ -365,23 +366,29 @@ fn s4_event_predecessor_identity_without_recursive_edge_contract() {
     let mut state = projection(&envelope);
     state.sequence = 2;
     let mut record = OrchestrationRecord {
+        retention: kinewright_project::orchestration_retention::Retention::Complete,
         version: 1,
-        payload: OrchestrationPayload::EventSegment(EventSegment {
-            run: state.run.clone(),
-            first_sequence: 2,
-            previous: None,
-            events: vec![OrchestrationEvent {
-                command: envelope.id.clone(),
-                sequence: 2,
-                projection: state,
-            }],
+        payload: OrchestrationPayload::EventSegment(StoredEventSegment {
+            snapshot: reference(61, RecordKind::RunIndex),
+            binding: SegmentBinding {
+                run: state.run.clone(),
+                first_sequence: 2,
+                previous: None,
+                event: EventBinding {
+                    command: envelope.id.clone(),
+                    sequence: 2,
+                    projection_digest: kinewright_media::sha256_bytes(
+                        &serde_json::to_vec(&state).unwrap(),
+                    ),
+                },
+            },
         }),
     };
     assert_eq!(record.dependencies(), Err(Refusal::InvalidState));
     let OrchestrationPayload::EventSegment(segment) = &mut record.payload else {
         unreachable!()
     };
-    segment.previous = Some(reference(60, RecordKind::RunIndex));
+    segment.binding.previous = Some(reference(60, RecordKind::RunIndex));
     assert!(
         !record
             .dependencies()
@@ -392,15 +399,14 @@ fn s4_event_predecessor_identity_without_recursive_edge_contract() {
     let OrchestrationPayload::EventSegment(segment) = &mut record.payload else {
         unreachable!()
     };
-    segment.previous.as_mut().unwrap().sha256.clear();
+    segment.binding.previous.as_mut().unwrap().sha256.clear();
     assert_eq!(record.dependencies(), Err(Refusal::InvalidState));
     let OrchestrationPayload::EventSegment(segment) = &mut record.payload else {
         unreachable!()
     };
-    segment.previous = Some(reference(60, RecordKind::RunIndex));
-    segment.first_sequence = 0;
-    segment.events[0].sequence = 0;
-    segment.events[0].projection.sequence = 0;
+    segment.binding.previous = Some(reference(60, RecordKind::RunIndex));
+    segment.binding.first_sequence = 0;
+    segment.binding.event.sequence = 0;
     assert_eq!(record.dependencies(), Err(Refusal::InvalidState));
 }
 

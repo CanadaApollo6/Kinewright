@@ -424,7 +424,8 @@ fn te14_merge_uses_durable_delta_and_history_after_a_small_wake() {
         let mut host = host.lock().unwrap();
         host.owner_mut()
             .unwrap()
-            .admit_scheduler_record(&OrchestrationRecord {
+            .admit_scheduler_record(OrchestrationRecord {
+                retention: kinewright_project::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Result(Box::new(plausible_summary)),
             })

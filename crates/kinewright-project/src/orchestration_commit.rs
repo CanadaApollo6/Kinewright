@@ -21,7 +21,11 @@ use std::collections::BTreeSet;
 
 #[path = "orchestration_store.rs"]
 mod store;
-pub use store::{PublishedRunCut, RegisteredRunIndex, commit_orchestration};
+pub use store::{
+    PreparedOrchestrationCut, PreparedOrchestrationPublication, PublishedRunCut,
+    RegisteredRunIndex, commit_orchestration, commit_prepared_orchestration,
+    prepare_orchestration_pair,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,13 +88,29 @@ pub fn checked_receipt(
     Ok(status)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedRunUpdate {
     envelope: OrchestrationEnvelope,
     projection: RunProjection,
     segment: EventSegment,
     receipt: OrchestrationReceipt,
     dependencies: Vec<ObjectRef>,
+}
+
+impl Serialize for ValidatedRunUpdate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+        let binding = self
+            .segment
+            .binding()
+            .map_err(|e| S::Error::custom(format!("{e:?}")))?;
+        let mut state = serializer.serialize_struct("ValidatedRunUpdate", 4)?;
+        state.serialize_field("envelope", &self.envelope)?;
+        state.serialize_field("projection", &self.projection)?;
+        state.serialize_field("segment", &binding)?;
+        state.serialize_field("receipt", &self.receipt)?;
+        state.end()
+    }
 }
 
 impl ValidatedRunUpdate {
@@ -110,16 +130,9 @@ impl ValidatedRunUpdate {
             return Err(Refusal::StaleGeneration);
         }
         validate_projection(&projection)?;
-        let snapshot = OrchestrationRecord {
-            version: 1,
-            payload: OrchestrationPayload::Snapshot(Box::new(projection.clone())),
-        };
-        let mut dependencies = snapshot.dependencies()?;
-        let event_record = OrchestrationRecord {
-            version: 1,
-            payload: OrchestrationPayload::EventSegment(segment.clone()),
-        };
-        dependencies.extend(event_record.dependencies()?);
+        let mut dependencies = Vec::new();
+        projection_refs(&projection, &mut dependencies)?;
+        let binding = segment.binding()?;
         dependencies.push(envelope.authority.grant_ref.clone());
         if segment.run != projection.run
             || segment
@@ -134,8 +147,10 @@ impl ValidatedRunUpdate {
         for reference in &dependencies {
             validate_reference(reference)?;
         }
+        // Every dependency is derived from the full projection and authority;
+        // the digest binds those inputs once, including the indexed predecessor.
         let cut_digest = kinewright_media::sha256_bytes(&encoded(
-            &(envelope, &projection, &segment, &decision, &dependencies),
+            &(envelope, &projection, &binding, &decision),
             CONTROL_BYTES,
         )?);
         let receipt = OrchestrationReceipt {
@@ -188,6 +203,9 @@ impl ValidatedRunUpdate {
 impl OrchestrationRecord {
     /// Exact dependency edges for H1's sealed registry, including cold/pending state.
     pub fn dependencies(&self) -> Result<Vec<ObjectRef>, Refusal> {
+        self.retained_dependencies(self.full_dependencies()?)
+    }
+    pub(crate) fn full_dependencies(&self) -> Result<Vec<ObjectRef>, Refusal> {
         if self.version != 1 {
             return Err(Refusal::Unsupported);
         }
@@ -213,30 +231,22 @@ impl OrchestrationRecord {
             }
             OrchestrationPayload::Snapshot(state) => projection_refs(state, &mut refs)?,
             OrchestrationPayload::EventSegment(segment) => {
-                if segment.first_sequence == 0
-                    || (segment.first_sequence > 1 && segment.previous.is_none())
+                validate_reference(&segment.snapshot)?;
+                if segment.snapshot.record_kind != RecordKind::RunIndex
+                    || segment.binding.first_sequence == 0
+                    || segment.binding.event.sequence != segment.binding.first_sequence
+                    || segment.binding.event.projection_digest.len() != 64
+                    || (segment.binding.first_sequence > 1 && segment.binding.previous.is_none())
                 {
                     return Err(Refusal::InvalidState);
                 }
-                if segment.events.is_empty() || segment.events.len() > TASK_LIMIT {
-                    return Err(Refusal::Capacity);
-                }
-                if let Some(previous) = &segment.previous {
+                if let Some(previous) = &segment.binding.previous {
+                    validate_reference(previous)?;
                     if previous.record_kind != RecordKind::RunIndex {
                         return Err(Refusal::InvalidState);
                     }
-                    validate_reference(previous)?;
-                    // H1 owns all segments in a flat index and validates this identity there.
                 }
-                for (offset, event) in segment.events.iter().enumerate() {
-                    if segment.first_sequence.checked_add(offset as u64) != Some(event.sequence)
-                        || event.sequence != event.projection.sequence
-                        || event.projection.run != segment.run
-                    {
-                        return Err(Refusal::InvalidState);
-                    }
-                    projection_refs(&event.projection, &mut refs)?;
-                }
+                refs.push(segment.snapshot.clone());
             }
             OrchestrationPayload::Effect(effect) => refs.push(effect.payload.clone()),
             OrchestrationPayload::Request(request) => request_refs(request, &mut refs),
@@ -498,6 +508,9 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
     {
         return Err(Refusal::Capacity);
     }
+    for task in &state.tasks {
+        task.progress.check_retained_context()?;
+    }
     let native_slots = state
         .attempts
         .iter()
@@ -657,7 +670,8 @@ fn task_history_refs(
     history: &crate::orchestration_records::TaskHistoryRecord,
     refs: &mut Vec<ObjectRef>,
 ) -> Result<(), Refusal> {
-    if history.base.branch == history.source.branch
+    if !history.edit_coverage.valid()
+        || history.base.branch == history.source.branch
         || history.base_ref.record_kind != RecordKind::SpecialistBase
         || history.candidate_base_ref.record_kind != RecordKind::SpecialistBase
         || history.base.checkpoint.record_kind != RecordKind::BranchCheckpoint
@@ -674,6 +688,7 @@ fn task_history_refs(
         }
         refs.extend(
             OrchestrationRecord {
+                retention: crate::orchestration_retention::Retention::Complete,
                 version: 1,
                 payload: OrchestrationPayload::Result(Box::new(result.clone())),
             }

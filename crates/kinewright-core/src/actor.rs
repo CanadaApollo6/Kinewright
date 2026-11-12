@@ -50,6 +50,20 @@ pub struct TimelineRevision(pub u64);
 pub struct HistoryChangeId {
     revision: TimelineRevision,
     batch_count: usize,
+    floor_offset: u64,
+}
+impl HistoryChangeId {
+    #[must_use]
+    pub const fn revision(self) -> TimelineRevision {
+        self.revision
+    }
+    /// Absolute accepted-batch coordinate survives a committed history floor.
+    #[must_use]
+    pub fn position(self) -> Option<u64> {
+        u64::try_from(self.batch_count)
+            .ok()
+            .and_then(|count| self.floor_offset.checked_add(count))
+    }
 }
 
 impl std::fmt::Display for TimelineRevision {
@@ -773,6 +787,7 @@ impl CoreState {
         HistoryChangeId {
             revision: self.revision,
             batch_count: self.batches.len(),
+            floor_offset: self.floor_offset,
         }
     }
     fn new(document: impl Into<Arc<Document>>, revision: TimelineRevision) -> Self {

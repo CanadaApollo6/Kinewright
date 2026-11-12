@@ -124,7 +124,8 @@ fn te1_review_wake_accounting_expansion_is_frozen_at_b4e9abc8() {
     let admitted = owner
         .owner_mut()
         .unwrap()
-        .admit_scheduler_record(&OrchestrationRecord {
+        .admit_scheduler_record(OrchestrationRecord {
+            retention: kinewright_project::orchestration_retention::Retention::Complete,
             version: 1,
             payload: OrchestrationPayload::Accounting(Box::new(observed)),
         })
@@ -133,11 +134,8 @@ fn te1_review_wake_accounting_expansion_is_frozen_at_b4e9abc8() {
     let mut actual = owner.expanded_result(&admitted.reference).unwrap().contents;
     actual["payload"]["record"]["project"] = serde_json::json!("1".repeat(32));
     legacy.project = serde_json::from_value(serde_json::json!("1".repeat(32))).unwrap();
-    let expected = serde_json::to_value(OrchestrationRecord {
-        version: 1,
-        payload: OrchestrationPayload::Accounting(Box::new(legacy)),
-    })
-    .unwrap();
+    let expected = serde_json::json!({"version": 1,
+        "payload": OrchestrationPayload::Accounting(Box::new(legacy))});
     let expected_bytes = serde_json::to_vec(&expected).unwrap();
     let hash = kinewright_media::sha256_bytes(&expected_bytes);
     println!("TE1_BASE_WAKE_USAGE {hash}");
