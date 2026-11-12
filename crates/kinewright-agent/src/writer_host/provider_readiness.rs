@@ -300,7 +300,7 @@ pub(super) fn execute(
             ..HostReply::default()
         };
     };
-    if owner.authorize_request(Some(bearer), &request).is_err() {
+    if owner.lifecycle.stopping() || owner.authorize_request(Some(bearer), &request).is_err() {
         return owner.execute_bearer(Some(bearer), request);
     }
     if owner.command_readiness(bearer, &request) != plan {

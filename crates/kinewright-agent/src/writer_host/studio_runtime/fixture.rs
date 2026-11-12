@@ -25,6 +25,10 @@ pub enum ProtocolFixtureMode {
     Dormant,
     /// Hold initial recovery until release, without delaying the request server.
     RecoveryHeld,
+    /// Hold startup recovery while allowing the fixture's real launch path.
+    RecoveryHeldRunning,
+    /// Hold after recovery restored continuable runs, before marking it ready.
+    RecoveryRestoredHeld,
     Normal,
     Startup,
     FullQueue,
@@ -70,8 +74,9 @@ pub struct ProtocolObservation {
     pub identity: crate::orchestration::ExecutionIdentity,
 }
 struct State {
-    recovery: Mutex<(u8, bool)>,
+    recovery: Mutex<(u8, u8)>,
     recovery_changed: std::sync::Condvar,
+    hold_startup_ingress: AtomicBool,
     root: PathBuf,
     mode: ProtocolFixtureMode,
     /// C6: `scripted` speaks Codex's dialect, `scripted-claude` Claude's.
@@ -104,8 +109,9 @@ impl ProtocolFixture {
         event: Option<&'static str>,
     ) -> Self {
         Self(Arc::new(State {
-            recovery: Mutex::new((0, false)),
+            recovery: Mutex::new((0, 0)),
             recovery_changed: std::sync::Condvar::new(),
+            hold_startup_ingress: AtomicBool::new(false),
             root: root.into(),
             mode,
             connector,
@@ -124,7 +130,18 @@ impl ProtocolFixture {
             .recovery
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .1 = true;
+            .1 = u8::MAX;
+        self.0.recovery_changed.notify_all();
+    }
+    pub fn hold_startup_ingress(&self) {
+        self.0.hold_startup_ingress.store(true, Ordering::Release);
+    }
+    pub fn release_recovery(&self) {
+        self.0
+            .recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1 |= recovery_bit(super::RecoveryPhase::Entered);
         self.0.recovery_changed.notify_all();
     }
     pub fn wait_recovery(&self, phase: super::RecoveryPhase, timeout: Duration) -> bool {
@@ -193,15 +210,26 @@ impl ProtocolFixture {
                 let mut state = recovery.recovery.lock().unwrap();
                 state.0 |= recovery_bit(phase);
                 recovery.recovery_changed.notify_all();
-                if matches!(phase, super::RecoveryPhase::Entered)
-                    && recovery.mode == ProtocolFixtureMode::RecoveryHeld
-                {
+                let held = (matches!(phase, super::RecoveryPhase::Entered)
+                    && matches!(
+                        recovery.mode,
+                        ProtocolFixtureMode::RecoveryHeld
+                            | ProtocolFixtureMode::RecoveryHeldRunning
+                    ))
+                    || (matches!(phase, super::RecoveryPhase::Restored)
+                        && recovery.mode == ProtocolFixtureMode::RecoveryRestoredHeld)
+                    || (matches!(phase, super::RecoveryPhase::BeforeIngress)
+                        && recovery.hold_startup_ingress.load(Ordering::Acquire));
+                if held {
+                    let bit = recovery_bit(phase);
                     let (state, timeout) = recovery
                         .recovery_changed
-                        .wait_timeout_while(state, Duration::from_secs(5), |state| !state.1)
+                        .wait_timeout_while(state, Duration::from_secs(5), |state| {
+                            state.1 & bit == 0
+                        })
                         .unwrap();
                     assert!(
-                        !timeout.timed_out() || state.1,
+                        !timeout.timed_out() || state.1 & bit != 0,
                         "C7_RECOVERY_RELEASE_BOUNDED"
                     );
                 }
@@ -220,7 +248,9 @@ impl ProtocolFixture {
             fixture_claim: Some(self.claim_root()),
             fixture_autostart: !matches!(
                 self.0.mode,
-                ProtocolFixtureMode::Dormant | ProtocolFixtureMode::RecoveryHeld
+                ProtocolFixtureMode::Dormant
+                    | ProtocolFixtureMode::RecoveryHeld
+                    | ProtocolFixtureMode::RecoveryRestoredHeld
             ),
             qualification: None,
             stop_gate: None,
@@ -256,6 +286,10 @@ fn recovery_bit(phase: super::RecoveryPhase) -> u8 {
         super::RecoveryPhase::Entered => 1,
         super::RecoveryPhase::Queued => 2,
         super::RecoveryPhase::Completed => 4,
+        super::RecoveryPhase::BeforeIngress => 8,
+        super::RecoveryPhase::Restored => 16,
+        super::RecoveryPhase::Dispatch => 32,
+        super::RecoveryPhase::Waiting => 64,
     }
 }
 impl Drop for ProtocolFixture {

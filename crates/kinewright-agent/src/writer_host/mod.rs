@@ -472,10 +472,13 @@ impl WriterHost {
             true,
         )?;
         let owner = Arc::new(Mutex::new(owner));
-        owner
-            .lock()
-            .map_err(|_| HostError::Protocol("host owner unavailable".into()))?
-            .runtime_owner = Arc::downgrade(&owner);
+        let lifecycle = {
+            let mut state = owner
+                .lock()
+                .map_err(|_| HostError::Protocol("host owner unavailable".into()))?;
+            state.runtime_owner = Arc::downgrade(&owner);
+            Arc::clone(&state.lifecycle)
+        };
         #[cfg(target_os = "linux")]
         let runtime = studio_runtime::StudioRuntime::new(&owner, ports);
         let roots = config.roots.canonicalize()?;
@@ -487,6 +490,7 @@ impl WriterHost {
         };
         let stop = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(HttpState {
+            lifecycle,
             #[cfg(target_os = "linux")]
             runtime: runtime.clone(),
             issuer,
@@ -586,13 +590,11 @@ impl WriterHost {
 }
 impl Drop for WriterHost {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner.upgrade() {
             let mut owner = owner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            owner.recovery_only = true;
-            owner.revoke_native_owner(None);
+            owner.fence_shutdown();
         }
         #[cfg(target_os = "linux")]
         self.runtime.stop();
@@ -639,7 +641,35 @@ fn serve(
         thread: Some(thread),
     })
 }
+/// One shutdown latch shared by dispatch, HTTP waiters and the native runtime.
+#[derive(Default)]
+struct HostLifecycle {
+    stopping: AtomicBool,
+    changed: tokio::sync::Notify,
+}
+impl HostLifecycle {
+    fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
+    }
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+    #[cfg(target_os = "linux")]
+    async fn stopped(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.stopping() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
 struct HttpState {
+    lifecycle: Arc<HostLifecycle>,
     #[cfg(target_os = "linux")]
     runtime: Arc<studio_runtime::StudioRuntime>,
     issuer: Option<HostAuth>,
@@ -722,7 +752,15 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
             if !state.runtime.wait_for_startup().await {
                 return None;
             }
-            Arc::clone(&state.ingress).acquire_owned().await.ok()
+            #[cfg(any(test, feature = "test-util"))]
+            state.runtime.before_startup_ingress();
+            tokio::select! {
+                biased;
+                () = state.lifecycle.stopped() => None,
+                permit = Arc::clone(&state.ingress).acquire_owned() => {
+                    permit.ok().filter(|_| !state.lifecycle.stopping())
+                }
+            }
         };
         match tokio::time::timeout(HOST_REQUEST_TIMEOUT, queued).await {
             Ok(Some(permit)) => permit,
@@ -731,17 +769,29 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
     } else {
         permit
     };
+    if state.lifecycle.stopping() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let reply = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let shutting_down = matches!(request.command, HostCommand::Shutdown);
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        if matches!(request.command, HostCommand::ReviseCut { .. }) {
+            state
+                .runtime
+                .recovery_phase(studio_runtime::RecoveryPhase::Dispatch);
+        }
         #[cfg(target_os = "linux")]
         let reply = provider_readiness::execute(&state.owner, &bearer, request);
         #[cfg(not(target_os = "linux"))]
         let reply = run_inputs::execute(&state.owner, &bearer, request);
-        #[cfg(target_os = "linux")]
-        state.runtime.update();
         if shutting_down && reply.error.is_none() {
+            #[cfg(target_os = "linux")]
+            state.runtime.request_stop();
             state.stop.notify_one();
+        } else {
+            #[cfg(target_os = "linux")]
+            state.runtime.update();
         }
         reply
     })
@@ -1206,6 +1256,7 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    lifecycle: Arc<HostLifecycle>,
     #[cfg(all(test, target_os = "linux"))]
     preparation_fault: Option<task_preparation::PreparationCheckpoint>,
     runtime_owner: std::sync::Weak<Mutex<HostCommandOwner>>,
@@ -1384,6 +1435,7 @@ impl HostCommandOwner {
             owner.freeze_manual_barrier()?;
         }
         let mut host = Self {
+            lifecycle: Arc::default(),
             runtime_owner: std::sync::Weak::new(),
             #[cfg(all(feature = "te1-eval", target_os = "linux"))]
             evaluation_observer: Arc::default(),
@@ -1529,6 +1581,26 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    fn require_open_command(&self, command: &HostCommand) -> Result<(), HostError> {
+        if self.lifecycle.stopping()
+            && !matches!(command, HostCommand::Status | HostCommand::Shutdown)
+        {
+            return Err(HostRefusal::new(
+                "host_stopping",
+                "The host is shutting down. Reopen the project before trying again.",
+            )
+            .into());
+        }
+        Ok(())
+    }
+    fn fence_shutdown(&mut self) {
+        self.lifecycle.stop();
+        #[cfg(target_os = "linux")]
+        {
+            self.recovery_only = true;
+            self.revoke_native_owner(None);
+        }
+    }
     /// Errors stay typed in the reply; source retention loss is latched for the whole context.
     #[allow(
         clippy::needless_pass_by_value,
@@ -1538,6 +1610,7 @@ impl HostCommandOwner {
         let previous_snapshot_owner = self.snapshot_read_owner();
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {
+            self.require_open_command(&command)?;
             let write = !matches!(
                 command,
                 HostCommand::ListVersions
@@ -2379,6 +2452,7 @@ impl HostCommandOwner {
                     )
                     .into());
                 }
+                self.fence_shutdown();
                 for session in self.sessions.values_mut() {
                     session.stop();
                 }

@@ -34,6 +34,10 @@ pub enum RecoveryPhase {
     Entered,
     Queued,
     Completed,
+    BeforeIngress,
+    Restored,
+    Dispatch,
+    Waiting,
 }
 #[cfg(any(test, feature = "test-util"))]
 pub(super) struct RuntimeWitness {
@@ -115,6 +119,7 @@ struct Worker {
 #[derive(Default)]
 struct State {
     recovered: bool,
+    // A native runtime can be retired while its command host remains live.
     stopping: bool,
     recovering: bool,
     retry_at: Option<std::time::Instant>,
@@ -124,7 +129,7 @@ struct State {
     worker: Option<Worker>,
 }
 pub(super) struct StudioRuntime {
-    recovery_changed: tokio::sync::Notify,
+    lifecycle: Arc<super::HostLifecycle>,
     recovery_waiter: tokio::sync::Semaphore,
     me: Weak<Self>,
     host: Weak<Mutex<HostCommandOwner>>,
@@ -158,7 +163,7 @@ impl StudioRuntime {
                 qualification: ports.qualification,
             }));
         }
-        {
+        let lifecycle = {
             let mut owner = host.lock().expect("new host owner");
             #[cfg(any(test, feature = "test-util"))]
             {
@@ -169,9 +174,10 @@ impl StudioRuntime {
             owner.native_readiness_checks = Some(ports.checks.clone());
             owner.native_recovery_status = Some("cleanup pending: checking native recovery".into());
             owner.native_recovery_pending = true;
-        }
+            Arc::clone(&owner.lifecycle)
+        };
         Arc::new_cyclic(|me| Self {
-            recovery_changed: tokio::sync::Notify::new(),
+            lifecycle,
             recovery_waiter: tokio::sync::Semaphore::new(1),
             me: me.clone(),
             host: Arc::downgrade(host),
@@ -198,25 +204,37 @@ impl StudioRuntime {
         }
         let wait = async {
             loop {
-                let changed = self.recovery_changed.notified();
+                let changed = self.lifecycle.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
                 {
                     let Ok(state) = self.state.lock() else {
                         return false;
                     };
-                    if state.stopping {
+                    if state.stopping || self.lifecycle.stopping() {
                         return false;
                     }
                     if state.recovered || !state.recovering {
                         return true;
                     }
                 }
+                #[cfg(any(test, feature = "test-util"))]
+                self.recovery_phase(RecoveryPhase::Waiting);
                 changed.await;
             }
         };
         // The ingress bounds recovery plus command-slot acquisition together.
         wait.await
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub(super) fn before_startup_ingress(&self) {
+        self.recovery_phase(RecoveryPhase::BeforeIngress);
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub(super) fn recovery_phase(&self, phase: RecoveryPhase) {
+        if let Some(witness) = &self.ports.recovery_witness {
+            witness(phase);
+        }
     }
     #[cfg(test)]
     pub(super) fn bind_profile_for_test(
@@ -240,6 +258,7 @@ impl StudioRuntime {
             .lock()
             .map_err(|e| io::Error::other(e.to_string()))?;
         if state.stopping
+            || self.lifecycle.stopping()
             || state.recovered
             || state.recovering
             || state
@@ -272,6 +291,10 @@ impl StudioRuntime {
                         witness(RecoveryPhase::Entered);
                     }
                     let result = recover_on_open(&host, fixture_root.as_deref());
+                    #[cfg(any(test, feature = "test-util"))]
+                    if let Some(witness) = &witness {
+                        witness(RecoveryPhase::Restored);
+                    }
                     let status = result
                         .as_ref()
                         .err()
@@ -288,7 +311,7 @@ impl StudioRuntime {
                             .then(|| std::time::Instant::now() + Duration::from_millis(250));
                     }
                     if let Some(runtime) = runtime.upgrade() {
-                        runtime.recovery_changed.notify_waiters();
+                        runtime.lifecycle.changed.notify_waiters();
                         #[cfg(any(test, feature = "test-util"))]
                         if let Some(witness) = &witness {
                             witness(RecoveryPhase::Completed);
@@ -330,7 +353,7 @@ impl StudioRuntime {
             .state
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        if runtime.stopping {
+        if runtime.stopping || self.lifecycle.stopping() {
             return Ok(());
         }
         if !runtime.recovered {
@@ -609,7 +632,7 @@ impl StudioRuntime {
         let recovered = self
             .state
             .lock()
-            .is_ok_and(|state| state.recovered && !state.stopping);
+            .is_ok_and(|state| state.recovered && !state.stopping && !self.lifecycle.stopping());
         if recovered {
             let status = self.drive().err().map(|error| error.to_string());
             if let Some(host) = self.host.upgrade()
@@ -619,12 +642,22 @@ impl StudioRuntime {
             }
         }
     }
-    pub(super) fn stop(&self) {
-        let recovery = self.state.lock().ok().and_then(|mut state| {
+    pub(super) fn request_stop(&self) {
+        if let Ok(mut state) = self.state.lock() {
             state.stopping = true;
-            state.recovery_worker.take()
-        });
-        self.recovery_changed.notify_waiters();
+            if let Some(worker) = &state.worker {
+                worker.cancel.store(true, Ordering::Release);
+            }
+        }
+        self.lifecycle.changed.notify_waiters();
+    }
+    pub(super) fn stop(&self) {
+        self.request_stop();
+        let recovery = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.recovery_worker.take());
         if let Some(recovery) = recovery {
             let _ = recovery.join();
         }
