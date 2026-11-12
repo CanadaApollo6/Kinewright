@@ -3406,6 +3406,7 @@ impl KinewrightApp {
                             for task in &state.view.tasks {
                                 ui.colored_label(po0::TEXT_2, format!("{} · {}", task.provider, task.model));
                                 ui.small(&task.usage);
+                                if let Some(reason) = &task.wait_reason { ui.small(reason); }
                                 if let Some(completion) = &task.completion { ui.small(completion); }
                             }
                             for approval in &state.view.edit_approvals { ui.small(approval); }

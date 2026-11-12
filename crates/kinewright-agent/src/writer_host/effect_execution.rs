@@ -55,23 +55,32 @@ impl HostCommandOwner {
             return Ok(None);
         }
         let accounting = self.native_accounting(&state)?;
+        let mut decision_capacity_refused = false;
         let effect = state
             .effects
             .iter()
             .filter(|e| e.safety == EffectSafety::ProcessBound)
             .find(|e| {
-                !accounting.as_ref().is_some_and(|a| {
+                let ready = !accounting.as_ref().is_some_and(|a| {
                     a.tasks
                         .iter()
                         .any(|t| t.task == e.task.0 && t.wait_reason.is_some())
                 }) && crate::orchestration::outbox::next_effect(&state, &e.lane)
                     .is_some_and(|next| next.id == e.id)
-                    && !state.attempts.iter().any(|a| {
-                        a.identity.task == e.task && !matches!(a.state, AttemptState::Retired(_))
-                    })
+                    && Self::native_task_can_launch(&state, &e.task);
+                if ready && Self::native_launch_context_full(&state, &e.task) {
+                    decision_capacity_refused = true;
+                    return false;
+                }
+                ready
             })
             .cloned();
         let Some(effect) = effect else {
+            if decision_capacity_refused {
+                return Err(super::orchestration::scheduler_error(
+                    crate::orchestration::orchestration_records::Refusal::TaskDecisionCapacity,
+                ));
+            }
             return Ok(None);
         };
         let task = state

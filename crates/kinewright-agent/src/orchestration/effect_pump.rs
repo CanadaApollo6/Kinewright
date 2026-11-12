@@ -315,15 +315,12 @@ impl<L: GuardianLauncher> EffectPump<L> {
             |a| a.identity.clone(),
         );
         let accounting = host.native_accounting(&state).map_err(io::Error::other)?;
-        let available = self.active.len() < 3
+        let ready = self.active.len() < 3
             && state.effects.iter().any(|e| {
                 crate::orchestration::outbox::next_effect(&state, &e.lane)
                     .is_some_and(|n| n.id == e.id)
-            });
-        let ready = available
-            && state.effects.iter().any(|e| {
-                crate::orchestration::outbox::next_effect(&state, &e.lane)
-                    .is_some_and(|n| n.id == e.id)
+                    && HostCommandOwner::native_task_can_launch(&state, &e.task)
+                    && !HostCommandOwner::native_launch_context_full(&state, &e.task)
                     && !accounting.as_ref().is_some_and(|a| {
                         a.tasks
                             .iter()

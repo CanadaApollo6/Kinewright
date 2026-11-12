@@ -59,6 +59,7 @@ mod tests {
     include!("c4_fix1_tests.rs");
     include!("c5_fix1_tests.rs");
     include!("c5_linear_fix1_tests.rs");
+    include!("c5_launch_capacity_tests.rs");
     include!("run_limit_person_tests.rs");
     include!("run_limit_cleanup_tests.rs");
     include!("c5_fix2_tests.rs");
