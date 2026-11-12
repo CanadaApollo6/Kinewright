@@ -574,6 +574,12 @@ impl WriterHost {
     pub fn endpoint(&self) -> &HostEndpoint {
         &self.endpoint
     }
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn shutdown_requested(&self) -> bool {
+        self.lifecycle.stopping()
+    }
+
     pub fn shutdown(self) -> Result<(), HostError> {
         drop(self);
         Ok(())

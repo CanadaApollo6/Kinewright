@@ -335,6 +335,21 @@ class Sharding(unittest.TestCase):
                 self.assertFalse(result["completed"])
                 self.assertEqual(result["runs"][1]["code"], 0)
 
+    def test_alsa_noise_uses_shared_parser_without_hiding_a_crash(self):
+        for status in (0, -11):
+            with tempfile.TemporaryDirectory(prefix="kinewright-ci-selftest-") as directory:
+                root = Path(directory)
+                binary = root / "witness-0123456789abcdef"
+                binary.touch()
+                data = {"tier": "fast", "suites": [{"path": str(binary), "cwd": str(root), "label": "witness"}]}
+                unit = {"suite": 0, "tests": ["x"], "full": False}
+                def execute(*args, **kwargs):
+                    kwargs["stdout"].write("running 1 test\ntest x ... ALSA lib pcm.c:1:(open_pcm) Unknown PCM default\nok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
+                    return subprocess.CompletedProcess(args[0], status)
+                with mock.patch.object(subprocess, "run", side_effect=execute), contextlib.redirect_stdout(io.StringIO()):
+                    result = cs.execute_unit(data, unit, 0, 0, root)
+                self.assertEqual(result["code"], status)
+
     def test_runner_records_timeout_and_never_marks_it_complete(self):
         with tempfile.TemporaryDirectory(prefix="kinewright-ci-selftest-") as directory:
             root = Path(directory)

@@ -1179,6 +1179,11 @@ impl Recovery {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn journal_path(&self) -> &Path {
+        &self.path
+    }
+
     /// Close finishes journal IO before relinquishing the project's writer capability.
     pub(crate) fn close(&mut self) {
         self.stop_active();

@@ -551,6 +551,7 @@ pub struct McpServer {
     /// project session (IN1 §6.5 rule 22).
     incidents: IncidentLogHandle,
     tool_surface_metrics: ToolSurfaceMetrics,
+    export_queue: Option<ExportQueue>,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -651,6 +652,7 @@ impl McpServer {
             project_path,
             incidents,
             tool_surface_metrics,
+            export_queue: None,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
@@ -887,6 +889,7 @@ impl McpServer {
             capability_denylist,
             Some(worker_threads),
             Some(investigator),
+            None,
         )
     }
 
@@ -942,6 +945,7 @@ impl McpServer {
             capability_denylist,
             worker_threads,
             None,
+            None,
         )
     }
 
@@ -967,6 +971,7 @@ impl McpServer {
         capability_denylist: &'static [&'static str],
         worker_threads: Option<usize>,
         investigator: Option<InvestigatorSessionContext>,
+        shared_exports: Option<ExportQueue>,
     ) -> Result<Self, McpServerError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(McpServerError::Bind)?;
@@ -976,7 +981,7 @@ impl McpServer {
             .map_err(McpServerError::Listener)?;
         let endpoint = format!("http://{address}/mcp");
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let export_queue = exporter
+        let export_queue = shared_exports.or(exporter
             .map(|exporter| {
                 ExportQueue::with_lut_project_path(
                     exporter,
@@ -984,7 +989,7 @@ impl McpServer {
                     Arc::clone(&project_path),
                 )
             })
-            .transpose()?;
+            .transpose()?);
         let tool_surface_metrics = ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools()?);
         let served_tool_allowlist = if investigator.is_some() {
             Some(&crate::runtime::INVESTIGATOR_TOOL_NAMES as &'static [&'static str])
@@ -995,7 +1000,7 @@ impl McpServer {
             core,
             playback,
             analysis,
-            export_queue,
+            export_queue.clone(),
             confirmations.clone(),
             publish_to_playback,
             Arc::clone(&project_path),
@@ -1020,6 +1025,7 @@ impl McpServer {
             project_path,
             incidents,
             tool_surface_metrics,
+            export_queue,
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
@@ -1090,6 +1096,46 @@ impl McpServer {
     #[must_use]
     pub const fn tool_surface_metrics(&self) -> ToolSurfaceMetrics {
         self.tool_surface_metrics
+    }
+
+    /// Use the project's queue so endpoint retirement cannot cancel accepted exports.
+    ///
+    /// # Errors
+    /// Returns an MCP server error if the listener or server thread cannot start.
+    pub fn start_isolated_with_export_queue(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        queue: ExportQueue,
+        project_path: Arc<RwLock<Option<PathBuf>>>,
+        incidents: IncidentLogHandle,
+    ) -> Result<Self, McpServerError> {
+        Self::start_configured_for_investigator(
+            core,
+            playback,
+            analysis,
+            None,
+            ConfirmationBroker::default(),
+            false,
+            project_path,
+            incidents,
+            &[],
+            None,
+            None,
+            Some(queue),
+        )
+    }
+
+    #[must_use]
+    pub fn export_queue(&self) -> Option<ExportQueue> {
+        self.export_queue.clone()
+    }
+
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
     }
 
     /// Stop the server and join its thread.

@@ -827,6 +827,16 @@ impl InvestigatorSession {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn hold_retired_for_test(&mut self, worker: std::thread::JoinHandle<()>) {
+        self.retired
+            .push(crate::joined_thread::JoinedThread::new(worker));
+    }
+
+    pub(crate) fn take_retired(&mut self) -> Vec<crate::joined_thread::JoinedThread<()>> {
+        std::mem::take(&mut self.retired)
+    }
+
     /// Shut the running session down and return its incident to `Open`: the
     /// hand-resolve path (§3.7 rule 41) and project close share it.
     pub(crate) fn shutdown_for_close(&mut self, reason: &str, incidents: &IncidentLogHandle) {
@@ -2671,9 +2681,10 @@ mod tests {
     fn in2b_every_stop_site_argument_is_in_stops_or_categorical() {
         use kinewright_core::STOPS;
         /// The stop shapes and the 0-based index of the stop argument.
-        const SHAPES: [(&str, usize); 5] = [
+        const SHAPES: [(&str, usize); 6] = [
             ("shutdown_for_close(", 0),
             ("stop_threads(", 0),
+            ("prepare_close(", 0),
             ("session_resolver(", 2),
             ("resolver(", 0),
             ("return_proposal_open_with_stale(", 2),
@@ -2791,8 +2802,8 @@ mod tests {
         }
         assert_eq!(truncated, 3, "every file keeps its tests below `mod tests`");
         assert_eq!(
-            defs, 4,
-            "the four shape definitions are skipped, not classified"
+            defs, 5,
+            "the five shape definitions are skipped, not classified"
         );
         assert_eq!(
             prefixed, 2,
@@ -2811,9 +2822,10 @@ mod tests {
                 "investigator.rs::shutdown_for_close::reason",
                 "investigator.rs::write_investigator_end::stop",
                 "investigator.rs::write_investigator_end::stop",
+                "project.rs::prepare_close::reason",
                 "project.rs::stop_threads::reason",
             ],
-            "the six stop/reason passthroughs are exactly the named set"
+            "the seven stop/reason passthroughs are exactly the named set"
         );
         assert!(
             covered.len() >= 17,

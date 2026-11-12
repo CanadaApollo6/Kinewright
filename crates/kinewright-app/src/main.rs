@@ -33,6 +33,7 @@ mod preview_ui;
 mod project;
 mod recording;
 mod recovery;
+mod retirement;
 mod screenshot;
 mod settings_ui;
 mod slash;

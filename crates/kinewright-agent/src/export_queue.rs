@@ -280,24 +280,34 @@ pub struct ExportQueue {
     capacity: usize,
 }
 
-/// Queue clones share one sender and join their worker when the last owner closes.
+/// Queue owners drain accepted work before joining; only explicit cancellation stops a job.
 struct QueueRuntime {
-    work_tx: Option<Sender<WorkItem>>,
-    worker: Option<thread::JoinHandle<()>>,
-    state: std::sync::Weak<QueueState>,
+    work_tx: Mutex<Option<Sender<WorkItem>>>,
+    worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
-impl Drop for QueueRuntime {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.upgrade() {
-            for job in lock_jobs(&state).values() {
-                job.cancellation.cancel();
-            }
-        }
-        self.work_tx.take();
-        if let Some(worker) = self.worker.take() {
+impl QueueRuntime {
+    fn close_admission(&self) {
+        self.work_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+    fn join(&self) {
+        self.close_admission();
+        // The worker owns only QueueState, never this join mutex.
+        let mut worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(worker) = worker.take() {
             let _ = worker.join();
         }
+    }
+}
+impl Drop for QueueRuntime {
+    fn drop(&mut self) {
+        self.join();
     }
 }
 
@@ -627,9 +637,8 @@ impl ExportQueue {
             .spawn(move || worker_loop(&worker_state, &work_rx))
             .map_err(ExportQueueError::WorkerThread)?;
         let runtime = Arc::new(QueueRuntime {
-            work_tx: Some(work_tx),
-            worker: Some(worker),
-            state: Arc::downgrade(&state),
+            work_tx: Mutex::new(Some(work_tx)),
+            worker: Mutex::new(Some(worker)),
         });
         Ok(Self {
             state,
@@ -768,7 +777,12 @@ impl ExportQueue {
             cancellation,
             verified_sources,
         };
-        let sent = match &self.runtime.work_tx {
+        let sent = match &*self
+            .runtime
+            .work_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             Some(sender) => sender.try_send(work),
             None => Err(crossbeam_channel::TrySendError::Disconnected(work)),
         };
@@ -800,6 +814,27 @@ impl ExportQueue {
             .values()
             .map(|job| job.record.clone())
             .collect()
+    }
+
+    /// Stop accepting new exports without cancelling accepted work or joining.
+    pub fn close_admission(&self) {
+        self.runtime.close_admission();
+    }
+
+    /// Terminal owner join, after all projects persisted and signalled their producers.
+    pub fn join(&self) {
+        self.runtime.join();
+    }
+
+    /// Cancel every unfinished job after the person chose to close its project.
+    pub fn cancel_all(&self) {
+        for job in self
+            .list()
+            .into_iter()
+            .filter(|job| !job.state.is_terminal())
+        {
+            let _ = self.cancel(job.id);
+        }
     }
 
     /// Idempotently cancel a queued or running export.
@@ -1868,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn last_queue_owner_cancels_and_joins_the_exporter() {
+    fn last_queue_owner_joins_the_explicitly_cancelled_exporter() {
         let (started_tx, started_rx) = crossbeam_channel::bounded(1);
         let (finished_tx, finished_rx) = crossbeam_channel::bounded(1);
         let queue = queue(Arc::new(CancellableExporter {
@@ -1895,6 +1930,7 @@ mod tests {
             finished_rx.try_recv().is_err(),
             "another queue owner is still live"
         );
+        let _ = another_owner.cancel(job.id);
         drop(another_owner);
         let finished = finished_rx.try_recv().is_ok();
         // Release a broken implementation too, before asserting the ordering.

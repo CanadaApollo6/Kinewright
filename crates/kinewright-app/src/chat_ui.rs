@@ -524,6 +524,37 @@ impl BranchProvenance {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn start_branch_server(
+    core: kinewright_core::Core,
+    playback: Arc<dyn Playback>,
+    analysis: Arc<dyn Analysis>,
+    exporter: Arc<dyn Export>,
+    project_path: ProjectPathHandle,
+    incidents: IncidentLogHandle,
+    exports: Option<kinewright_agent::export_queue::ExportQueue>,
+) -> Result<McpServer, kinewright_agent::McpServerError> {
+    if let Some(exports) = exports {
+        McpServer::start_isolated_with_export_queue(
+            core,
+            playback,
+            analysis,
+            exports,
+            project_path,
+            incidents,
+        )
+    } else {
+        McpServer::start_isolated_with_exporter_project_path_and_incidents(
+            core,
+            playback,
+            analysis,
+            exporter,
+            project_path,
+            incidents,
+        )
+    }
+}
+
 impl AgentThread {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -550,6 +581,7 @@ impl AgentThread {
             project_path,
             incidents,
             true,
+            None,
         )
     }
 
@@ -566,18 +598,20 @@ impl AgentThread {
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
         local_execution: bool,
+        exports: Option<kinewright_agent::export_queue::ExportQueue>,
     ) -> Result<Self, String> {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
         let mcp_server = if local_execution {
-            match McpServer::start_isolated_with_exporter_project_path_and_incidents(
+            match start_branch_server(
                 branch.core(),
                 Arc::clone(playback),
                 Arc::clone(analysis),
                 Arc::clone(exporter),
                 Arc::clone(project_path),
                 Arc::clone(incidents),
+                exports,
             ) {
                 Ok(server) => Some(server),
                 Err(error) => {
@@ -624,6 +658,8 @@ impl AgentThread {
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
         local_execution: bool,
+        exports: Option<kinewright_agent::export_queue::ExportQueue>,
+        retirement: &mut crate::retirement::RetirementGroup,
     ) -> Result<(), String> {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the agent branch was replaced");
@@ -634,23 +670,26 @@ impl AgentThread {
             .map_err(|error| error.to_string())?;
         if !local_execution {
             if let Some(server) = self.mcp_server.take() {
-                server.shutdown();
+                retirement.server(server);
             }
             self.confirmations = None;
             self.branch = branch;
             return Ok(());
         }
-        let server = McpServer::start_isolated_with_exporter_project_path_and_incidents(
+        let server = start_branch_server(
             branch.core(),
             playback,
             analysis,
             exporter,
             Arc::clone(project_path),
             Arc::clone(incidents),
+            exports,
         )
         .map_err(|error| error.to_string())?;
         self.confirmations = Some(server.confirmations());
-        self.mcp_server = Some(server);
+        if let Some(old) = self.mcp_server.replace(server) {
+            retirement.server(old);
+        }
         self.branch = branch;
         Ok(())
     }
@@ -1028,6 +1067,24 @@ impl KinewrightApp {
         "Agent stopped".clone_into(&mut self.status);
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn exit_fix1_branch_action(&mut self, action: &str) {
+        match action {
+            "refresh" => {
+                let revision = self.projects[0].revision;
+                let document = Arc::clone(&self.projects[0].document);
+                assert!(self.replace_agent_branch(0, 0, revision, document));
+            }
+            "apply" => self.merge_agent_branch(0, 0),
+            "discard" => self.discard_agent_branch(0, 0),
+            "close" => {
+                self.add_agent_thread();
+                self.close_agent_thread(0);
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn replace_agent_branch(
         &mut self,
         project_index: usize,
@@ -1039,6 +1096,7 @@ impl KinewrightApp {
         let incidents = Arc::clone(&self.projects[project_index].incidents);
         let local_execution = !self.projects[project_index].studio_host_managed();
         let ports = self.projects[project_index].media();
+        let exports = self.projects[project_index].exports.clone();
         let result = self.projects[project_index].threads[thread_index].replace_branch(
             revision,
             document,
@@ -1048,12 +1106,21 @@ impl KinewrightApp {
             &project_path,
             &incidents,
             local_execution,
+            exports,
+            &mut self.retirement,
         );
         if let Err(error) = result {
             // Appendix B row 38.
             self.note_label(LabelIncident::AgentBranch, IncidentSubject::Agent, error);
             false
         } else {
+            if self.projects[project_index].exports.is_none() {
+                self.projects[project_index].exports = self.projects[project_index].threads
+                    [thread_index]
+                    .mcp_server
+                    .as_ref()
+                    .and_then(McpServer::export_queue);
+            }
             let id = self.projects[project_index].threads[thread_index].id;
             self.projects[project_index]
                 .retired_agent_threads
@@ -1631,6 +1698,7 @@ impl KinewrightApp {
             &project_path,
             &incidents,
             local_execution,
+            self.projects[project_index].exports.clone(),
         );
         let Ok(thread) = thread else {
             // Appendix B row 48.
@@ -1641,6 +1709,10 @@ impl KinewrightApp {
             );
             return;
         };
+        if self.projects[project_index].exports.is_none() {
+            self.projects[project_index].exports =
+                thread.mcp_server.as_ref().and_then(McpServer::export_queue);
+        }
         self.projects[project_index].threads.push(thread);
         self.projects[project_index].active_thread = self.projects[project_index].threads.len() - 1;
     }
@@ -1666,7 +1738,10 @@ impl KinewrightApp {
         } else {
             self.stop_agent(thread_index);
         }
-        self.projects[project_index].threads.remove(thread_index);
+        let mut thread = self.projects[project_index].threads.remove(thread_index);
+        if let Some(server) = thread.mcp_server.take() {
+            self.retirement.server(server);
+        }
         self.projects[project_index].active_thread = next_active;
     }
 

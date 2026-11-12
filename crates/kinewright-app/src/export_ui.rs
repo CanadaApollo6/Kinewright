@@ -154,16 +154,37 @@ pub(crate) struct ExportOutcome {
 }
 
 pub(crate) struct ExportJob {
+    pub(crate) project: u64,
     pub(crate) cancellation: ExportCancellation,
     pub(crate) progress_rx: crossbeam_channel::Receiver<ExportProgress>,
     pub(crate) result_rx: mpsc::Receiver<ExportOutcome>,
     pub(crate) progress: ExportProgress,
-    _worker: crate::joined_thread::JoinedThread<()>,
+    worker: crate::joined_thread::JoinedThread<()>,
 }
 
-impl Drop for ExportJob {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
+impl ExportJob {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn held_for_test(
+        project: u64,
+        cancellation: ExportCancellation,
+        worker: std::thread::JoinHandle<()>,
+    ) -> Self {
+        let (_, result_rx) = mpsc::channel();
+        Self {
+            project,
+            cancellation,
+            worker: crate::joined_thread::JoinedThread::new(worker),
+            progress_rx: crossbeam_channel::never(),
+            result_rx,
+            progress: ExportProgress {
+                completed_frames: 0,
+                total_frames: 0,
+            },
+        }
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.worker.is_finished()
     }
 }
 
@@ -1851,7 +1872,8 @@ impl KinewrightApp {
         self.export_dialog.audio_verification = None;
         self.export_dialog.audio_report = None;
         self.export_job = Some(ExportJob {
-            _worker: worker,
+            project: self.focused().id,
+            worker,
             cancellation,
             progress_rx,
             result_rx,
@@ -1938,7 +1960,9 @@ impl KinewrightApp {
             audio_verification,
         }) = completed
         {
-            self.export_job = None;
+            if let Some(job) = self.export_job.take() {
+                self.retirement.export(job);
+            }
             match result {
                 Ok(report) => {
                     self.export_dialog.verification = verification;

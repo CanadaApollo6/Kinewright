@@ -1,6 +1,6 @@
 # Process-exit thread ownership
 
-Source audit for the process-exit fix on `te1-linear`, based on `8673b79c`.
+Source audit for the process-exit fix on `te1-linear`, based on `8673b79c`, updated for fix 1 atop `d77b308b`.
 “Native” below means in-process Vulkan, FFmpeg, audio or Whisper work, not a
 provider or FFmpeg subprocess. Joining an OS thread also waits for its TLS
 destructors. An event/channel saying “finished” does not do that.
@@ -13,7 +13,7 @@ destructors. An event/channel saying “finished” does not do that.
 | `engine.rs::spawn_preview`, `kinewright-preview` | Worker retains `PreviewThread`; terminal shutdown joins. Renderer is owned by Preview. | No after engine joins. Previously worker itself could outlive engine. |
 | `preview.rs::spawn_reader`, `kinewright-decode-*` | Preview retains `ReaderThread`. Terminal Drop signals retirement/interrupt, then joins all readers before dropping renderer. Interactive retirement keeps its 200 ms admission deadline and retains unfinished handles. | No. Previously terminal Drop sent unfinished readers to an unowned retire reaper. |
 | FFmpeg decoder/encoder frame and slice workers | Library-owned codec contexts live on joined reader, analysis and export threads. Rust wrappers close/free their codec contexts on scope exit. | No detached Kinewright handle; codec-internal worker termination was not independently instrumented. |
-| `derived_cache.rs::spawn_worker` for `VisualAssetService` | Service owns queue sender and thread together; close and join. | No; previously handle discarded. |
+| `derived_cache.rs::spawn_worker` for `VisualAssetService` | Service owns queue sender and thread together; close and join. | No detached worker. In-flight thumbnail/waveform decoding lacks a cooperative cancellation input; it can delay terminal joining. Propagating cancellation into those decode APIs is a follow-up. |
 | Same helper for `DerivedAnalysisService` | Cancel existing cooperative tokens for every authority; close queue and join. | No; previously handle discarded. |
 | Same helper for `TranscriptService` | Cancel all authorities' tokens; close queue and join. | No; previously handle discarded. |
 | `voice_note.rs::VoiceTask::spawn`, `voice-note-whisper` | Task cancels unfinished inference and always joins, including after receiving a result. | No; previously cancellation without join. |
@@ -32,7 +32,7 @@ bounds and tests are unchanged. OS process termination is not used as product cl
 
 | Spawn site / thread | Handle owner / stop and join | Native lifetime / remaining boundary |
 |---|---|---|
-| `server.rs`, both MCP server constructors | `McpServer` signals shutdown/rejects confirmations and now joins on Drop as well as explicit shutdown. `request_shutdown` is signal-only; caller retains owner until join is appropriate. | Can own media through handler and export queue. Previously plain Drop discarded server handle. |
+| `server.rs`, both MCP server constructors | `McpServer` signals shutdown/rejects confirmations and now joins on Drop as well as explicit shutdown. `request_shutdown` is signal-only; caller retains owner until join is appropriate. | Can own media through handler and export queue. The App retires revoked/replaced servers into its RetirementGroup; frames drop only OS-finished servers. Standalone owner Drop still joins. |
 | `server.rs::server_runtime`, Tokio workers and blocking jobs | Runtime local to joined MCP server thread. Network grace is 2 s; runtime Drop still waits for started blocking work. | Includes native tool calls. Abort of an async future alone does not join blocking work; runtime ownership supplies final join. |
 | `writer_host/mod.rs::serve`, HTTP thread + Tokio runtime | Existing `ServerThread` / WriterHost Drop stop and join; runtime drops in server thread. | Native host backend cannot outlive server thread through its handler. |
 | `writer_host/mod.rs`, owned-session turn thread | `HostOwnedSession` retains handle, interrupts and joins on Drop. | Existing owner, no new detach. |
@@ -41,7 +41,7 @@ bounds and tests are unchanged. OS process termination is not used as product cl
 | Same file, effect pump | Runtime retains Worker handle; stop cancels then joins outside owner mutex. | Existing owner; underlying native provider reader is described separately below. |
 | `writer_host/task_context.rs`, `task-media-watch` | HostLifecycle now retains watchers; WriterHost fences/cancels, joins watchers outside owner mutex, then joins server. Finished handles are reaped between starts. | Previously detached watcher could retain a native read past host Drop. |
 | Same file, `task-media-read` | Watcher owns child handle, signals shared decode cancellation when endpoint/host stops, then joins. | FFmpeg input and its permits remain owned until child completes. |
-| `export_queue.rs`, queue worker | Existing Clone queue now shares one runtime owner. Last queue closes sender, cancels jobs and joins worker. Worker owns queue state, not runtime, so no ownership cycle. | Can own media exporter/analysis; previously worker handle discarded. |
+| `export_queue.rs`, queue worker | Existing Clone queue now shares one runtime owner. Project owns one queue shared by replacement endpoints. Explicit cancel alone sets tokens; phase 1 closes admission, phase 2 closes the sender and joins/drains accepted work. Last-owner Drop also drains without cancellation. Worker owns queue state, not runtime, so no ownership cycle. | Can own media exporter/analysis; previously worker handle discarded. |
 | Same file, progress relay | Export worker retains and joins relay handle after normal/caught-panicking export. | No native work itself; ordered before export worker exits. |
 | `scripted.rs`, session worker + current-thread Tokio runtime | ScriptedSession interrupts and joins worker, including setup failures. Runtime lives inside joined worker. | Fixture transport; already owned. |
 | `writer_host/te1_eval.rs`, scripted transport | ScriptedSession owns returned handle and joins. | Feature-gated fixture transport. |
@@ -84,17 +84,35 @@ engine and real GPU; it does not bypass native Drop.
 
 | Owner | Change / existing ordering |
 |---|---|
-| `KinewrightApp::off_ui` and media import/relink/status/cache/LUT/room-tone/solo jobs | App retains JoinedThread handles, reaps finished jobs, joins remaining jobs on Drop. Closures can hold engine Arcs, so joining just the engine is insufficient. |
+| `KinewrightApp::off_ui` and media import/relink/status/cache/LUT/room-tone/solo jobs | App retains JoinedThread handles, reaps finished jobs, joins remaining jobs on Drop. Closures can hold engine Arcs, so joining just the engine is insufficient. These jobs have no stop signal. A stalled drive probe is a known terminal wait after all projects completed phase 1. |
 | Noise learning, QC mask, matte overlay, colour scopes and colour QC | Their worker handles now join on Drop. Interactive cancelled workers remain retained until finished. |
-| ExportJob | Cancels backend on Drop, then joins owned export thread. |
-| Investigator RunningSession and retired sessions | Signals cancel, rejects confirmations, signals MCP shutdown, joins session thread, joins server. Interactive completion/cancel hands full session to a project-owned reaper; project Drop joins reapers. Previously reaper itself detached. |
+| ExportJob | Accepted work finishes or is explicitly cancelled. Project close and Quit ask first when it is active. Finished results retire the thread owner to the App group; frames reap only OS-finished jobs. Terminal Drop joins without silently changing cancellation. |
+| Investigator RunningSession and retired sessions | Signals cancel, rejects confirmations, signals MCP shutdown, joins session thread, joins server. Interactive completion/cancel hands full session to a project-owned reaper. Project close transfers those handles to the App retirement group; frame pruning joins only finished handles, terminal shutdown joins the remainder. |
 | NativeDisplay | Declared first: terminal/release display leases before joining native jobs or releasing engine owners. `on_exit` already calls terminal too. |
 | Voice capture / pixel proof | CaptureStop signals capture before JoinedThread drops; readback owns its CPU image and joined digest thread. |
 | Writer-host Shutdown | Accepted fence prevents new dispatch (C7 fix); runtime stop/join runs outside owner mutex. Host Drop also joins media watcher group and server. Refused Shutdown changes nothing. |
-| Originating JA1 session, save/recovery actions | Save/history guards and continuation rules are unchanged. Existing source/host close has a 5 s process deadline then kill/reap; a detached continuation deliberately owns a separate host process. This change does not turn client close into cancellation of a kept run. |
+| Originating JA1 session, save/recovery actions | Save/history guards and continuation rules are unchanged. Phase 1 sends host Shutdown without joining its source server or child; phase 2 retains those owners until close finishes. Existing terminal source/host close has a 5 s process deadline then kill/reap; a detached continuation deliberately owns a separate host process. This change does not turn client close into cancellation of a kept run. |
 
 App provider discovery, model catalog, chat/HTTP requests and upload jobs that
 capture no native engine remain outside the native-owner fix. Their process/IO
 completion is not claimed joined by this patch. No change to save acknowledgments,
 recovery durability, provider teardown policy or forced-process-kill semantics
 is inferred from the native join witness.
+
+## Fix 1 shutdown phases
+
+Each project first persists kept feedback, requests host Shutdown, cancels its
+investigator and records that close, flushes the incident sidecar, interrupts
+sessions, revokes MCP ingress, closes export admission, and closes the recovery
+journal. Quit performs this phase for every project before any native-owner join.
+`on_exit` then releases native display leases and joins active and retired owners.
+App destruction repeats the phases idempotently for non-GUI owners.
+
+The project owns one export queue shared by every branch endpoint. Accepted
+snapshots and job ids survive refresh, apply, discard and thread close. Dropping
+an endpoint does not cancel them. Queue admission closes on project close;
+explicitly chosen cancellation changes tokens, and terminal queue join drains
+all accepted work. Replaced endpoints, closed-project investigator reapers,
+interrupted session owners, source-close workers and completed GUI export owners
+all remain owned by the App retirement group. Reapers and queue records retain
+native owners; no live handle is discarded.
