@@ -2681,10 +2681,11 @@ mod tests {
     fn in2b_every_stop_site_argument_is_in_stops_or_categorical() {
         use kinewright_core::STOPS;
         /// The stop shapes and the 0-based index of the stop argument.
-        const SHAPES: [(&str, usize); 6] = [
+        const SHAPES: [(&str, usize); 7] = [
             ("shutdown_for_close(", 0),
             ("stop_threads(", 0),
             ("prepare_close(", 0),
+            ("request_close(", 0),
             ("session_resolver(", 2),
             ("resolver(", 0),
             ("return_proposal_open_with_stale(", 2),
@@ -2802,8 +2803,8 @@ mod tests {
         }
         assert_eq!(truncated, 3, "every file keeps its tests below `mod tests`");
         assert_eq!(
-            defs, 5,
-            "the five shape definitions are skipped, not classified"
+            defs, 6,
+            "the six shape definitions are skipped, not classified"
         );
         assert_eq!(
             prefixed, 2,
@@ -2823,9 +2824,10 @@ mod tests {
                 "investigator.rs::write_investigator_end::stop",
                 "investigator.rs::write_investigator_end::stop",
                 "project.rs::prepare_close::reason",
+                "project.rs::request_close::reason",
                 "project.rs::stop_threads::reason",
             ],
-            "the seven stop/reason passthroughs are exactly the named set"
+            "the eight stop/reason passthroughs are exactly the named set"
         );
         assert!(
             covered.len() >= 17,

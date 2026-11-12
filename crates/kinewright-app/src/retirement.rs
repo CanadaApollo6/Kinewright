@@ -8,6 +8,9 @@ pub(crate) struct RetirementGroup {
     workers: Vec<JoinedThread<()>>,
     exports: Vec<ExportJob>,
     queues: Vec<ExportQueue>,
+    unstarted: Vec<Box<dyn FnOnce() + Send>>,
+    #[cfg(all(test, target_os = "linux"))]
+    refuse_spawn: bool,
 }
 
 impl RetirementGroup {
@@ -44,11 +47,34 @@ impl RetirementGroup {
     }
 
     fn retire_close(&mut self, close: impl FnOnce() + Send + 'static) {
-        let worker = std::thread::Builder::new()
-            .name("kinewright-owner-reaper".into())
-            .spawn(close)
-            .expect("native retirement worker must start");
-        self.workers.push(JoinedThread::new(worker));
+        // Spawn with only the receiving end. Failure never drops the live owner on this frame.
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(1);
+        let spawn = || {
+            std::thread::Builder::new()
+                .name("kinewright-owner-reaper".into())
+                .spawn(move || {
+                    if let Ok(close) = receiver.recv() {
+                        close();
+                    }
+                })
+        };
+        #[cfg(all(test, target_os = "linux"))]
+        let worker = if self.refuse_spawn {
+            Err(std::io::Error::other("fixture spawn refused"))
+        } else {
+            spawn()
+        };
+        #[cfg(not(all(test, target_os = "linux")))]
+        let worker = spawn();
+        match worker {
+            Ok(worker) => {
+                if let Err(error) = sender.send(Box::new(close)) {
+                    self.unstarted.push(error.0);
+                }
+                self.workers.push(JoinedThread::new(worker));
+            }
+            Err(_) => self.unstarted.push(Box::new(close)),
+        }
     }
 
     pub(crate) fn export(&mut self, export: ExportJob) {
@@ -59,9 +85,13 @@ impl RetirementGroup {
         self.servers.retain(|server| !server.is_finished());
         self.workers.retain(|worker| !worker.is_finished());
         self.exports.retain(|export| !export.is_finished());
+        self.queues.retain(|queue| !queue.is_finished());
     }
 
     pub(crate) fn join(&mut self) {
+        for close in self.unstarted.drain(..) {
+            close();
+        }
         self.servers.clear();
         self.workers.clear();
         self.exports.clear();
@@ -75,5 +105,54 @@ impl RetirementGroup {
 impl Drop for RetirementGroup {
     fn drop(&mut self) {
         self.join();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn spawn_failure_keeps_the_owner_for_terminal_join() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let closing = Arc::clone(&closed);
+        let mut group = RetirementGroup {
+            servers: vec![],
+            workers: vec![],
+            exports: vec![],
+            queues: vec![],
+            unstarted: vec![],
+            refuse_spawn: true,
+        };
+        group.retire_close(move || closing.store(true, Ordering::Release));
+        assert!(!closed.load(Ordering::Acquire));
+        group.prune();
+        assert!(!closed.load(Ordering::Acquire));
+        assert_eq!(group.unstarted.len(), 1);
+        group.join();
+        assert!(closed.load(Ordering::Acquire));
+        assert!(group.unstarted.is_empty());
+    }
+
+    #[test]
+    fn queue_retirement_prunes_only_after_os_completion() {
+        let queue = ExportQueue::with_lut_project_path(
+            Arc::new(kinewright_core::RefusedMedia),
+            Arc::new(kinewright_core::RefusedMedia),
+            Arc::new(RwLock::new(None)),
+        )
+        .unwrap();
+        let mut group = RetirementGroup::default();
+        group.queues.push(queue.clone());
+        group.prune();
+        assert_eq!(group.queues.len(), 1);
+        queue.close_admission();
+        queue.join();
+        group.prune();
+        assert!(group.queues.is_empty());
     }
 }

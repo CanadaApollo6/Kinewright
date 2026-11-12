@@ -825,6 +825,15 @@ impl ExportQueue {
     pub fn join(&self) {
         self.runtime.join();
     }
+    /// Retirement may release an OS-finished queue without waiting on a live join.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.runtime.worker.try_lock().is_ok_and(|worker| {
+            worker
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+        })
+    }
 
     /// Cancel every unfinished job after the person chose to close its project.
     pub fn cancel_all(&self) {

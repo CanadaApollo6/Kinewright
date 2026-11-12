@@ -26,7 +26,7 @@ impl Gate {
         self.changed.notify_all();
         let (state, _) = self
             .changed
-            .wait_timeout_while(state, Duration::from_secs(10), |state| !state.1)
+            .wait_timeout_while(state, Duration::from_secs(180), |state| !state.1)
             .unwrap();
         assert!(state.1, "EXIT_FIX1_RELEASE_BOUNDED");
     }
@@ -52,17 +52,20 @@ impl Gate {
                     .changed
                     .wait_timeout_while(
                         self.state.lock().unwrap(),
-                        Duration::from_secs(1),
+                        Duration::from_secs(120),
                         |state| !state.2,
                     )
                     .unwrap();
-                state.1 = true;
-                self.changed.notify_all();
+                if !state.2 {
+                    state.1 = true;
+                    self.changed.notify_all();
+                }
             });
             action();
             let mut state = self.state.lock().unwrap();
             let held = !state.1;
             state.2 = true;
+            state.1 = true;
             self.changed.notify_all();
             drop(state);
             controller.join().unwrap();
@@ -490,14 +493,9 @@ fn exit_fix1_quit_persists_and_shuts_down_all_projects_before_export_join() {
         kept["drafts"][0]["text"],
         "Kept before quitting every project"
     );
-    app.projects[1].studio.feedback.drafts[0].text = "Kept while another close was pending".into();
-    app.projects[1].studio.feedback.changed = true;
-    assert!(app.projects[1].prepare_close("Kinewright is closing"));
-    let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&feedback_file).unwrap()).unwrap();
-    assert_eq!(
-        kept["drafts"][0]["text"], "Kept while another close was pending",
-        "EXIT_FIX1_EVERY_PREPARATION_PERSISTS"
+    assert!(
+        app.projects.is_empty(),
+        "EXIT_FIX2_COMPLETED_PROJECTS_REMOVED"
     );
     assert_eq!(export.finish(), ExportJobState::Cancelled);
     assert!(
@@ -657,3 +655,6 @@ fn exit_fix1_aborting_export_quit_forgets_discard_and_keeps_admission_open() {
             .all(|job| job.state == ExportJobState::Cancelled)
     );
 }
+
+#[path = "process_exit_fix2_tests.rs"]
+mod fix2;

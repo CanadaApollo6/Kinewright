@@ -25,8 +25,8 @@ PAIRS = [
      "    pub(crate) fn project(&mut self, mut project: ProjectSession) {\n        project.join_closed();",
      "exit_fix1_project_close_retires_its_live_investigator_reaper", "EXIT_FIX1_PROJECT_FRAME_RETURNS"),
     ("quit-joins-before-all-persistence", "app.rs",
-     'if !project.prepare_close("Kinewright is closing") && pending_close.is_none() {',
-     'if !{ let ready = project.prepare_close("Kinewright is closing"); project.join_closed(); ready } && pending_close.is_none() {',
+     '.map(|project| project.request_close("Kinewright is closing"))',
+     '.map(|project| { let prepared = project.request_close("Kinewright is closing"); project.join_closed(); prepared })',
      "exit_fix1_quit_persists_and_shuts_down_all_projects_before_export_join", "EXIT_FIX1_ALL_PROJECTS_PERSIST_AND_SIGNAL_BEFORE_JOIN"),
     ("export-close-choice", "app.rs", None, None,
      "exit_fix1_close_and_quit_ask_before_explicit_export_cancel", "EXIT_FIX1_EXPORT_CLOSE_CHOICE"),
@@ -54,10 +54,18 @@ def main():
                 end = source.index("\n    fn export_close_choice", start)
                 before = source[start:end]
                 after = "    fn project_has_exports(&self, index: usize) -> bool { self.projects.get(index).is_none() }\n"
-            assert source.count(before) == 1, (name, "target drift")
+            if name == "quit-joins-before-all-persistence":
+                start = source.index("    pub(crate) fn request_exit(")
+                end = source.index("\n    fn handle_close_request", start)
+                body = source[start:end]
+                assert body.count(before) == 1, (name, "target drift")
+                mutant = source[:start] + body.replace(before, after) + source[end:]
+            else:
+                assert source.count(before) == 1, (name, "target drift")
+                mutant = source.replace(before, after)
             try:
                 for color in ("red", "green"):
-                    path.write_text(source.replace(before, after)) if color == "red" else path.write_bytes(original)
+                    path.write_text(mutant) if color == "red" else path.write_bytes(original)
                     log = OUT / f"{name}-{color}.log"
                     with log.open("w") as output:
                         result = subprocess.run([

@@ -910,6 +910,11 @@ impl KinewrightApp {
         if self.focused().ja1_job.is_some() || self.focused().ja1_activation.is_some() {
             return;
         }
+        if self.project_has_exports(self.focused_project) {
+            self.status =
+                "Wait for the export to finish, or cancel it, before turning on Studio".into();
+            return;
+        }
         let was_legacy = !self.focused().source_admission.is_studio();
         if was_legacy && self.focused().project_path.is_some() {
             self.status = "Studio cannot attach this legacy project yet. Your edits remain here; local editing and Save are available.".into();
@@ -2107,8 +2112,6 @@ impl KinewrightApp {
             self.pending_export_close = Some(ProjectAction::CloseProject(id));
             return;
         }
-        let closing_focused = index == self.focused_project;
-        let next_focus = index_after_close(self.focused_project, index, self.projects.len());
         if !self.projects[index].prepare_close("the project was closed") {
             self.status = self.projects[index].ja1.as_ref().map_or_else(
                 || "Source cleanup is pending. Retry Close.".into(),
@@ -2116,8 +2119,19 @@ impl KinewrightApp {
             );
             return;
         }
+        self.remove_closed_project(index);
+    }
+
+    fn remove_closed_project(&mut self, index: usize) {
+        let closing_focused = index == self.focused_project;
+        let next_focus = if self.projects.len() > 1 {
+            index_after_close(self.focused_project, index, self.projects.len())
+        } else {
+            0
+        };
+        let id = self.projects[index].id;
         let name = self.projects[index].name.clone();
-        if index == 0 {
+        if index == 0 && self.projects.len() > 1 {
             let (first, remaining) = self.projects.split_at_mut(1);
             first[0]
                 .recovery
@@ -2142,7 +2156,10 @@ impl KinewrightApp {
         {
             self.pending_legacy_relink = None;
         }
-        self.focus_project_with_rebind(next_focus, closing_focused);
+        if !self.projects.is_empty() {
+            self.focus_project_with_rebind(next_focus, closing_focused);
+        }
+        self.exit_discarded_projects.retain(|closed| *closed != id);
         self.status = format!("Closed {name}");
     }
 
@@ -2218,7 +2235,15 @@ impl KinewrightApp {
     fn join_native_owners(&mut self) {
         // Also covers owner destruction without the GUI's ordinary Quit callback.
         for project in &mut self.projects {
-            let _ = project.prepare_close("Kinewright is closing");
+            project.keep_close_feedback();
+        }
+        let prepared = self
+            .projects
+            .iter_mut()
+            .map(|project| project.request_close("Kinewright is closing"))
+            .collect::<Vec<_>>();
+        for (project, prepared) in self.projects.iter_mut().zip(prepared) {
+            let _ = project.finish_close(prepared);
         }
         if let Some(display) = &mut self.native_display {
             display.terminal();
@@ -2274,15 +2299,29 @@ impl KinewrightApp {
             self.pending_export_close = Some(ProjectAction::Exit(self.projects[index].id));
             return;
         }
-        let mut pending_close = None;
-        for (index, project) in self.projects.iter_mut().enumerate() {
-            if !project.prepare_close("Kinewright is closing") && pending_close.is_none() {
-                pending_close = Some(index);
+        for project in &mut self.projects {
+            project.keep_close_feedback();
+        }
+        let prepared = self
+            .projects
+            .iter_mut()
+            .map(|project| project.request_close("Kinewright is closing"))
+            .collect::<Vec<_>>();
+        let closed = self
+            .projects
+            .iter_mut()
+            .zip(prepared)
+            .map(|(project, prepared)| project.finish_close(prepared))
+            .collect::<Vec<_>>();
+        // No retirement reaper starts its joins before every acknowledgement wait finishes.
+        for (index, closed) in closed.into_iter().enumerate().rev() {
+            if closed {
+                self.remove_closed_project(index);
             }
         }
-        if let Some(index) = pending_close {
-            self.focus_project(index);
-            self.status = self.projects[index].ja1.as_ref().map_or_else(
+        if !self.projects.is_empty() {
+            self.focus_project(0);
+            self.status = self.projects[0].ja1.as_ref().map_or_else(
                 || "Source cleanup is pending. Retry Close.".into(),
                 |attachment| attachment.message.clone(),
             );
@@ -3212,6 +3251,9 @@ impl KinewrightApp {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn poll_background(&mut self, ctx: &egui::Context) {
         self.retirement.prune();
+        if self.projects.is_empty() {
+            return;
+        }
         self.poll_ja1(ctx);
         while let Ok(reply) = self.ui_replies.1.try_recv() {
             reply(self, ctx);
@@ -3939,9 +3981,15 @@ impl eframe::App for KinewrightApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.projects.is_empty() {
+            return;
+        }
         let measured_frame = self.performance.as_ref().map(|_| std::time::Instant::now());
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
+        if self.projects.is_empty() {
+            return;
+        }
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
@@ -4002,6 +4050,9 @@ impl eframe::App for KinewrightApp {
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
         self.show_export_close_confirmation(ui.ctx());
+        if self.projects.is_empty() {
+            return;
+        }
         self.show_ja1(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
