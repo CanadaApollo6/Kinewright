@@ -15,6 +15,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod preparation;
+pub(crate) use preparation::PreparedObjects;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreManifest {
@@ -77,6 +80,7 @@ struct Ledger {
     support_fields: BTreeMap<String, StorageReservation<BTreeSet<String>>>,
     committed: Vec<ObjectRef>,
     acknowledged_objects: BTreeSet<String>,
+    preparation_objects: Option<BTreeSet<String>>,
     mirrors: Vec<(ObjectRef, PortablePath)>,
     can_collect: bool,
     metadata_sizes: BTreeMap<String, u64>,
@@ -711,6 +715,7 @@ impl ProjectStore {
                     support_fields: BTreeMap::new(),
                     committed: vec![],
                     acknowledged_objects: BTreeSet::new(),
+                    preparation_objects: None,
                     mirrors: vec![],
                     can_collect,
                     metadata_sizes: BTreeMap::new(),
@@ -1209,6 +1214,11 @@ impl ProjectStore {
                 reference.sha256.clone(),
                 (reference.clone(), dependencies.to_vec()),
             );
+            if unclassified.is_none()
+                && let Some(names) = &mut ledger.preparation_objects
+            {
+                names.insert(reference.sha256.clone());
+            }
             ledger.verified.insert(reference.sha256.clone());
             if unclassified.is_some() {
                 ledger.unclassified.remove(&reference.sha256);
@@ -2037,12 +2047,15 @@ impl Drop for StorePin {
     reason = "one authority retires known objects and owned temporary charges after durable publication"
 )]
 fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
+    collect_scope(inner, false)
+}
+fn collect_scope(inner: &StoreInner, exact_names: bool) -> Result<u64, BundleError> {
     inner
         .namespace
         .lock()
         .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
         .begin_object_batch()?;
-    let result = collect_objects(inner);
+    let result = collect_objects(inner, exact_names);
     let barrier = inner
         .namespace
         .lock()
@@ -2053,7 +2066,7 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
+fn collect_objects(inner: &StoreInner, exact_names: bool) -> Result<u64, BundleError> {
     let previous = inner
         .ledger
         .lock()
@@ -2134,7 +2147,8 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
             .filter(|(h, _)| {
                 ledger.pins.get(*h).copied().unwrap_or(0) == 0
                     && !durable.contains_key(*h)
-                    && (ledger.committed.is_empty() || ledger.acknowledged_objects.contains(*h))
+                    && ((!exact_names && ledger.committed.is_empty())
+                        || ledger.acknowledged_objects.contains(*h))
             })
             .map(|(h, (r, d))| {
                 (

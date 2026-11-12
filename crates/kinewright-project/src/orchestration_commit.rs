@@ -22,9 +22,9 @@ use std::collections::BTreeSet;
 #[path = "orchestration_store.rs"]
 mod store;
 pub use store::{
-    PreparedOrchestrationCut, PreparedOrchestrationPublication, PublishedRunCut,
-    RegisteredRunIndex, commit_orchestration, commit_prepared_orchestration,
-    prepare_orchestration_pair,
+    PreparedOrchestrationCut, PreparedOrchestrationPair, PreparedOrchestrationPublication,
+    PublishedRunCut, RegisteredRunIndex, commit_orchestration, commit_prepared_orchestration,
+    discard_prepared_orchestration, prepare_orchestration_pair,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -24,7 +24,11 @@ impl RunView {
     pub(crate) fn of(page: &RunViewPage) -> Self {
         let accounting = page.accounting.as_ref();
         Self {
-            edit_approvals: edit_lines(&page.edit_approvals, &page.missing_approved_edits),
+            edit_approvals: edit_lines(
+                &page.edit_approvals,
+                &page.missing_approved_edits,
+                &page.uncertain_approved_edits,
+            ),
             runtime_status: page.runtime_status.clone(),
             wait_reason: page.wait_reason.clone(),
             continue_unavailable_reason: page.continue_unavailable_reason.clone(),
@@ -191,13 +195,17 @@ fn removal_words(clips: usize, tracks: usize) -> String {
 fn edit_lines(
     rows: &[kinewright_agent::writer_host::EditApproval],
     missing: &[kinewright_project::edit_audit::MissingApprovedEdit],
+    uncertain: &[kinewright_project::edit_audit::UncertainApprovedEdit],
 ) -> Vec<String> {
     let is_missing = |row: &kinewright_agent::writer_host::EditApproval| {
         missing.iter().any(|edit| edit.digest == row.digest)
     };
+    let is_uncertain = |row: &kinewright_agent::writer_host::EditApproval| {
+        uncertain.iter().any(|edit| edit.digest == row.digest)
+    };
     let applied = rows
         .iter()
-        .filter(|r| r.applied && r.issue.is_none() && !is_missing(r))
+        .filter(|r| r.applied && r.issue.is_none() && !is_missing(r) && !is_uncertain(r))
         .collect::<Vec<_>>();
     let mut lines = Vec::new();
     if applied.len() > 5 {
@@ -212,11 +220,11 @@ fn edit_lines(
     }
     let pending = rows
         .iter()
-        .filter(|r| !r.applied && r.issue.is_none() && !is_missing(r))
+        .filter(|r| !r.applied && r.issue.is_none() && !is_missing(r) && !is_uncertain(r))
         .count();
     if pending > 0 {
         lines.push(format!(
-            "{pending} {} approved, but {} changes are not confirmed.",
+            "{pending} {} approved, but {} changes are not confirmed. Review the kept branch, then re-run the edit or continue the task.",
             if pending == 1 {
                 "edit was"
             } else {
@@ -225,12 +233,20 @@ fn edit_lines(
             if pending == 1 { "its" } else { "their" }
         ));
     }
-    if rows.iter().any(|r| r.issue.is_some() && !is_missing(r)) {
+    if rows
+        .iter()
+        .any(|r| r.issue.is_some() && !is_missing(r) && !is_uncertain(r))
+    {
         lines.push("Some edit records could not be verified.".into());
     }
     if !missing.is_empty() {
         lines.push(kinewright_project::edit_audit::missing_edits_disclosure(
             missing,
+        ));
+    }
+    if !uncertain.is_empty() {
+        lines.push(kinewright_project::edit_audit::uncertain_edits_disclosure(
+            uncertain,
         ));
     }
     lines
@@ -239,6 +255,41 @@ fn edit_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn c4_followups_uncertain_and_unconfirmed_edits_keep_their_action_words() {
+        use kinewright_project::{
+            bundle_records::{ObjectRef, RecordKind, SessionId},
+            edit_audit::UncertainApprovedEdit,
+            orchestration_records::TaskId,
+        };
+        let task = TaskId(SessionId::fresh().unwrap());
+        let edit = UncertainApprovedEdit {
+            task: task.clone(),
+            approval: ObjectRef {
+                sha256: "a".repeat(64),
+                byte_length: 1,
+                record_kind: RecordKind::OwnedEvidence,
+            },
+            digest: "b".repeat(64),
+            description: "Remove clip 1 on track 81".into(),
+        };
+        let row = kinewright_agent::writer_host::EditApproval {
+            task,
+            removed_clips: 1,
+            removed_tracks: 0,
+            applied: false,
+            issue: Some(edit.disclosure()),
+            digest: edit.digest.clone(),
+        };
+        let lines = edit_lines(std::slice::from_ref(&row), &[], std::slice::from_ref(&edit));
+        assert_eq!(lines, vec![edit.disclosure()]);
+        assert!(!lines[0].contains("could not be verified") && !lines[0].contains("Removed"));
+        let mut pending = row;
+        pending.issue = None;
+        let lines = edit_lines(&[pending], &[], &[]);
+        assert!(lines[0].contains("approved, but its changes are not confirmed"));
+        assert!(lines[0].contains("re-run the edit or continue the task"));
+    }
     #[test]
     fn c4b_missing_approved_edits_are_named_and_never_displayed_as_applied() {
         use kinewright_project::{
@@ -271,7 +322,7 @@ mod tests {
                 digest: edit.digest.clone(),
             })
             .collect::<Vec<_>>();
-        let lines = edit_lines(&rows, &missing);
+        let lines = edit_lines(&rows, &missing, &[]);
         assert_eq!(lines.len(), 1);
         let words = &lines[0];
         assert!(words.contains("2 approved edits are not in the kept version"));

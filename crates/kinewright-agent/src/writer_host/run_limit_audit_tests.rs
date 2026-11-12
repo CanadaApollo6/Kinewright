@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod kept_audit {
     use super::*;
-    fn remove_clip(b: &B21, clip: u64) {
+    pub(super) fn remove_clip(b: &B21, clip: u64) {
         let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
             revision,
             document,
@@ -62,7 +62,7 @@ mod kept_audit {
         // No Drop, Stop, freeze, or final task checkpoint after the durable audits.
         std::process::exit(86);
     }
-    fn stop_with_absence_proof(host: &WriterHost, run: &RunId, root: &std::path::Path) {
+    pub(super) fn stop_with_absence_proof(host: &WriterHost, run: &RunId, root: &std::path::Path) {
         let shared = host.owner.upgrade().unwrap();
         let state = shared
             .lock()

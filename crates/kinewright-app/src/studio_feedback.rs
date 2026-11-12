@@ -494,6 +494,7 @@ pub(crate) trait FeedbackPort {
         Ok(RunViewPage {
             edit_approvals: vec![],
             missing_approved_edits: vec![],
+            uncertain_approved_edits: vec![],
             completions: vec![],
             projection: self.observe(run)?,
             accounting: None,

@@ -47,12 +47,6 @@ run() {
 }
 run --workspace --all-targets
 run -p kinewright-agent --all-targets --features slow-tests
-# Also compile the MSVC shipping feature graph, without linking/running it.
-shipping() {
-    flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 19 \
-        cargo xwin check "$@" --target x86_64-pc-windows-msvc --target-dir target/win-xwin
-}
-shipping -p kinewright-agent --no-default-features --lib
-shipping -p kinewright-app --no-default-features --bin kinewright-app
-shipping -p kinewright-agent --no-default-features --bin kinewright
+# Compile the MSVC shipping feature graph in its own disposable target as well.
+bash scripts/ci-shipping-builds.sh --windows-check
 rm -rf "$TMPDIR"

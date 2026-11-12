@@ -40,6 +40,19 @@ pub enum RemovedObject {
     Track { track: TrackId },
 }
 impl RemovedObject {
+    fn present_in(&self, document: &kinewright_core::Document) -> bool {
+        match self {
+            Self::Clip { clip, .. } => document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .any(|candidate| candidate.id == *clip),
+            Self::Track { track } => document
+                .tracks
+                .iter()
+                .any(|candidate| candidate.id == *track),
+        }
+    }
     #[must_use]
     pub fn label(&self) -> String {
         match self {
@@ -148,10 +161,36 @@ pub struct MissingApprovedEdit {
     pub digest: String,
     pub description: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UncertainApprovedEdit {
+    pub task: TaskId,
+    pub approval: ObjectRef,
+    pub digest: String,
+    pub description: String,
+}
+impl UncertainApprovedEdit {
+    #[must_use]
+    pub fn disclosure(&self) -> String {
+        format!(
+            "The kept version could not be confirmed to contain this approved edit: {}. Review the kept branch, then re-run the edit or continue the task.",
+            self.description
+        )
+    }
+}
 #[derive(Debug, Default)]
 pub struct EditAuditSummary {
     pub approvals: Vec<EditApproval>,
     pub missing: Vec<MissingApprovedEdit>,
+    pub uncertain: Vec<UncertainApprovedEdit>,
+}
+#[must_use]
+pub fn uncertain_edits_disclosure(edits: &[UncertainApprovedEdit]) -> String {
+    edits
+        .iter()
+        .map(UncertainApprovedEdit::disclosure)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 #[must_use]
 pub fn missing_edits_disclosure(edits: &[MissingApprovedEdit]) -> String {
@@ -164,7 +203,7 @@ pub fn missing_edits_disclosure(edits: &[MissingApprovedEdit]) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "{} approved {} not in the kept version: {labels}. Re-run the missing edits, or continue the task to make them again.",
+        "{} approved {} not in the kept version: {labels}. These edits were approved, then undone or not kept. Re-run the missing edits, or continue the task to make them again.",
         edits.len(),
         if edits.len() == 1 {
             "edit is"
@@ -201,6 +240,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct LiveEditCut {
     pub task: TaskId,
     pub cut: KeptHistoryCut,
+    pub document: std::sync::Arc<kinewright_core::Document>,
+}
+struct KeptTaskAudit {
+    coverage: KeptEditCoverage,
+    document: Option<crate::storage_budget::StorageReservation<kinewright_core::Document>>,
 }
 impl Ja1EditingSession {
     #[allow(
@@ -221,6 +265,7 @@ impl Ja1EditingSession {
         let mut integrity = false;
         for task in &state.tasks {
             let mut coverage = KeptEditCoverage::default();
+            let mut document = None;
             let inspected = (|| -> Result<(), BundleError> {
                 for reference in task
                     .progress
@@ -243,6 +288,13 @@ impl Ja1EditingSession {
                             .is_ok_and(|source| source == history.source)
                         {
                             coverage = history.edit_coverage;
+                            if !coverage.cuts.is_empty() || coverage.incomplete {
+                                let bundle = self.active_bundle()?;
+                                document =
+                                    Some(bundle.store.read_record::<kinewright_core::Document>(
+                                        &bundle.checkpoint(&history.source.branch)?.document_ref,
+                                    )?);
+                            }
                         } else {
                             coverage.incomplete = true;
                         }
@@ -255,7 +307,7 @@ impl Ja1EditingSession {
                 coverage.incomplete = true;
                 integrity = true;
             }
-            kept.insert(task.id.clone(), coverage);
+            kept.insert(task.id.clone(), KeptTaskAudit { coverage, document });
         }
         let mut applications = BTreeMap::<_, Option<TimelineRevision>>::new();
         for reference in &state.edit_applications {
@@ -331,13 +383,24 @@ impl Ja1EditingSession {
                 continue;
             }
             let durable = application.is_some_and(|revision| {
-                kept[&record.binding.task].covers(&record.binding, revision)
+                let kept = &kept[&record.binding.task];
+                kept.coverage.covers(&record.binding, revision)
+                    && kept.document.as_ref().is_some_and(|document| {
+                        !record
+                            .targets
+                            .iter()
+                            .any(|target| target.present_in(document))
+                    })
             });
             let in_live = application.is_some_and(|revision| {
                 live.iter().any(|cut| {
                     cut.task == record.binding.task
                         && cut.cut.epoch == record.binding.history_epoch
                         && cut.cut.revision >= revision
+                        && !record
+                            .targets
+                            .iter()
+                            .any(|target| target.present_in(&cut.document))
                         && record
                             .binding
                             .history_position
@@ -346,7 +409,15 @@ impl Ja1EditingSession {
                 })
             });
             let unkept = application.is_some() && !durable && !in_live;
-            let uncertain = unkept && kept[&record.binding.task].incomplete;
+            let kept = &kept[&record.binding.task];
+            let uncertain = unkept
+                && kept.coverage.incomplete
+                && !kept.document.as_ref().is_some_and(|document| {
+                    record
+                        .targets
+                        .iter()
+                        .any(|target| target.present_in(document))
+                });
             let issue = if unkept {
                 let targets = record
                     .targets
@@ -359,26 +430,30 @@ impl Ja1EditingSession {
                 } else {
                     format!("{} ({targets})", record.binding.description)
                 };
-                let entry = MissingApprovedEdit {
-                    task: record.binding.task.clone(),
-                    approval: reference.clone(),
-                    digest: record.digest.clone(),
-                    description,
-                };
                 let words = if uncertain {
-                    format!(
-                        "The kept version could not be confirmed to contain this approved edit: {}. Review the kept branch, then re-run the edit or continue the task.",
-                        entry.description
-                    )
+                    let entry = UncertainApprovedEdit {
+                        task: record.binding.task.clone(),
+                        approval: reference.clone(),
+                        digest: record.digest.clone(),
+                        description,
+                    };
+                    let words = entry.disclosure();
+                    summary.uncertain.push(entry);
+                    words
                 } else {
-                    format!(
-                        "This approved edit is not in the kept version: {}. Re-run the edit, or continue the task.",
+                    let entry = MissingApprovedEdit {
+                        task: record.binding.task.clone(),
+                        approval: reference.clone(),
+                        digest: record.digest.clone(),
+                        description,
+                    };
+                    let words = format!(
+                        "This approved edit is not in the kept version: {}. It was undone or not kept. Re-run the edit, or continue the task.",
                         entry.description
-                    )
-                };
-                if !uncertain {
+                    );
                     summary.missing.push(entry);
-                }
+                    words
+                };
                 Some(words)
             } else {
                 None

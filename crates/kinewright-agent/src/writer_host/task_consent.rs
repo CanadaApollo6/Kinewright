@@ -30,18 +30,34 @@ pub use kinewright_project::edit_audit::EditApproval;
 use kinewright_project::edit_audit::{AppliedRecord, ApprovalRecord, BatchBinding, RemovedObject};
 pub(in crate::writer_host) struct PendingEditApplication {
     run: RunId,
-    bytes: Vec<u8>,
-    prepared: kinewright_project::orchestration_commit::PreparedOrchestrationCut,
+    prepared: kinewright_project::orchestration_commit::PreparedOrchestrationPair,
 }
 fn capacity(error: HostError) -> HostError {
-    if matches!(&error, HostError::Refused(refusal) if matches!(refusal.code.as_str(), "run_limit" | "storage_backpressure"))
-    {
-        problem(
+    match &error {
+        HostError::Refused(refusal) if refusal.code == "run_limit" => problem(
             "consent_capacity",
-            "This run cannot safely keep both records for another approved edit. This edit was not applied. Tell the Director to finish or Stop the run; start a new run for more edits.",
-        )
+            format!(
+                "This run cannot safely keep both records for another approved edit. This edit was not applied. Tell the Director to finish or Stop the run. If this run reached its own limit, start a new run after cleanup. If project storage is full, review retained project data or free storage before trying again. Cause: {error}"
+            ),
+        ),
+        HostError::Refused(refusal) if refusal.code == "storage_backpressure" => problem(
+            "consent_capacity",
+            format!(
+                "The project's storage capacity cannot keep both edit records. This edit was not applied. Tell the Director to finish or Stop the run, then review retained project data or free storage before trying again. Cause: {error}"
+            ),
+        ),
+        _ => error,
+    }
+}
+pub(in crate::writer_host) fn pending_retry_error(error: HostError) -> HostError {
+    let message = format!(
+        "The previous edit's audit could not be saved. This new edit was not applied. Tell the Director to finish or Stop this run and retry once the storage problem is resolved. Cause: {error}"
+    );
+    if let HostError::Refused(mut refusal) = error {
+        refusal.message = message;
+        HostError::Refused(refusal)
     } else {
-        error
+        problem("consent_pending", message)
     }
 }
 fn evidence_reference(bytes: &[u8]) -> kinewright_project::bundle_records::ObjectRef {
@@ -266,6 +282,22 @@ impl HostCommandOwner {
                 let Some(position) = identity.position() else {
                     continue;
                 };
+                // Core already shares this immutable document. Keep its exact
+                // snapshot with a stable history identity, rather than copying it.
+                let Ok(Event::QueryResult(kinewright_core::QueryResult::Snapshot {
+                    revision,
+                    document,
+                })) = runtime
+                    .core()
+                    .request(Command::Query(kinewright_core::Query::Snapshot))
+                else {
+                    continue;
+                };
+                if revision != identity.revision()
+                    || runtime.core().history_change_id().ok() != Some(identity)
+                {
+                    continue;
+                }
                 live.push(kinewright_project::edit_audit::LiveEditCut {
                     task: task.clone(),
                     cut: kinewright_project::edit_audit::KeptHistoryCut {
@@ -273,6 +305,7 @@ impl HostCommandOwner {
                         revision: identity.revision(),
                         position,
                     },
+                    document,
                 });
             }
         }
@@ -771,11 +804,8 @@ impl TaskMcp {
             removed_tracks,
             targets,
         };
-        if host.hooks.pending_edit_applications.len() >= ITEM_LIMIT {
-            return Err(problem(
-                "consent_capacity",
-                "The host must save the pending edit audit before another edit. Tell the Director to finish or Stop this run.",
-            ));
+        if host.hooks.pending.is_none() {
+            host.acknowledge_current_edit_applications()?;
         }
         let producer = host.run_producer(&state.run)?;
         let producer_index = host.resolve_attachment(Some(&producer.bearer()))?;
@@ -790,12 +820,16 @@ impl TaskMcp {
         }
         self.validate_consent(&host, &fresh, &rechecked, core, before, edit)?;
         state = fresh;
-        if state.edit_approvals.len() >= ITEM_LIMIT
-            || !host.hooks.pending_edit_applications.is_empty()
-        {
+        if state.edit_approvals.len() >= ITEM_LIMIT {
             return Err(problem(
                 "consent_capacity",
-                "The host must save the pending edit audit or finish this run before another approval. This edit was not applied. Tell the Director.",
+                "The run's edit-approval history is full. Tell the Director to finish or Stop this run; this edit was not applied.",
+            ));
+        }
+        if host.has_pending_edit_in_run(&state.run) {
+            return Err(problem(
+                "consent_capacity",
+                "This run still has an edit audit waiting to be saved. This edit was not applied. Tell the Director to finish or Stop this run before requesting another approval.",
             ));
         }
         let approval_bytes = serde_json::to_vec(&record)?;
@@ -835,7 +869,7 @@ impl TaskMcp {
         // snapshot intact while deriving its application successor.
         let mut application_state = first.projection().clone();
         application_state.edit_applications.push(marker_reference);
-        let ((approval_update, mut approval_hold), application, bytes) =
+        let mut prepared = Some(
             kinewright_project::orchestration_commit::prepare_orchestration_pair(
                 host.owner_mut()?,
                 first,
@@ -856,57 +890,96 @@ impl TaskMcp {
                 },
             )
             .map_err(HostError::from)
-            .map_err(capacity)?;
-        #[cfg(test)]
-        if let Some(hook) = host.hooks.consent_prepared_hook.take() {
-            hook()?;
-        }
-        host.publish_prepared_edit(&producer, &approval_update, &mut approval_hold)?;
-        drop(approval_hold);
-        self.endpoint
-            .check_live()
-            .map_err(|reason| problem("consent_liveness", reason))?;
-        answer.approve().map_err(|e| problem("consent_broker", e))?;
-        #[cfg(test)]
-        if let Some(hook) = host.hooks.consent_apply_hook.take() {
-            hook(core);
-        }
-        let outcome = edit.apply(&self.endpoint, core, revision)?;
-        if outcome.applied() {
-            if let Some(runtime) = host
-                .hooks
-                .runs
-                .get_mut(&execution.run)
-                .and_then(|run| run.tasks.get_mut(&execution.task))
-            {
-                runtime.record_approved_edit();
+            .map_err(capacity)?,
+        );
+        let result = (|| {
+            #[cfg(test)]
+            if let Some(hook) = host.hooks.consent_prepared_hook.take() {
+                hook()?;
             }
-            // Both exact records were sealed before approval. The successful Core
-            // outcome survives a non-capacity application-publication failure.
-            let mut pending = PendingEditApplication {
-                run: execution.run.clone(),
-                bytes,
-                prepared: application,
-            };
-            let (update, held) = &mut pending.prepared;
-            if let Err(error) = host.publish_prepared_edit(&producer, update, held) {
-                host.hooks.pending_edit_applications.push(pending);
-                host.message = format!("Edit applied; its audit is pending publication: {error}");
-                eprintln!("{}", host.message);
+            let pair = prepared.as_mut().ok_or_else(stale)?;
+            let (approval_update, approval_hold) = pair.approval_mut()?;
+            host.publish_prepared_edit(&producer, approval_update, approval_hold)?;
+            pair.release_approval();
+            self.endpoint
+                .check_live()
+                .map_err(|reason| problem("consent_liveness", reason))?;
+            answer.approve().map_err(|e| problem("consent_broker", e))?;
+            #[cfg(test)]
+            if let Some(hook) = host.hooks.consent_apply_hook.take() {
+                hook(core);
             }
+            let outcome = edit.apply(&self.endpoint, core, revision)?;
+            if outcome.applied() {
+                if let Some(runtime) = host
+                    .hooks
+                    .runs
+                    .get_mut(&execution.run)
+                    .and_then(|run| run.tasks.get_mut(&execution.task))
+                {
+                    runtime.record_approved_edit();
+                }
+                // Both exact records were sealed before approval. The successful Core
+                // outcome survives a non-capacity application-publication failure.
+                let (update, held) = pair.application_mut();
+                if let Err(error) = host.publish_prepared_edit(&producer, update, held) {
+                    host.hooks
+                        .pending_edit_applications
+                        .push(PendingEditApplication {
+                            run: execution.run.clone(),
+                            prepared: prepared.take().ok_or_else(stale)?,
+                        });
+                    host.message =
+                        format!("Edit applied; its audit is pending publication: {error}");
+                    eprintln!("{}", host.message);
+                }
+            }
+            Ok(outcome)
+        })();
+        if let Some(prepared) = prepared {
+            host.discard_prepared_edit(prepared);
         }
-        Ok(outcome)
+        result
     }
 }
 
 impl HostCommandOwner {
     pub(in crate::writer_host) fn acknowledge_edit_applications(&mut self, state: &RunProjection) {
-        self.hooks.pending_edit_applications.retain(|pending| {
-            pending.run != state.run
-                || !state
-                    .edit_applications
-                    .contains(&evidence_reference(&pending.bytes))
+        use crate::orchestration::orchestration_records::{RunCleanup, RunOutcome};
+        let pending = std::mem::take(&mut self.hooks.pending_edit_applications);
+        for entry in pending {
+            let recorded = state
+                .edit_applications
+                .contains(&evidence_reference(entry.prepared.marker()));
+            if entry.run == state.run
+                && (recorded
+                    || state.edit_applications.len() >= ITEM_LIMIT
+                    || (state.outcome != RunOutcome::Pending
+                        && state.cleanup == RunCleanup::Settled))
+            {
+                self.discard_prepared_edit(entry.prepared);
+                if !recorded {
+                    self.message = "This edit was approved, but its application record was not kept. Review the kept branch, then re-run the edit or continue the task.".into();
+                }
+            } else {
+                self.hooks.pending_edit_applications.push(entry);
+            }
+        }
+    }
+    fn discard_prepared_edit(
+        &mut self,
+        prepared: kinewright_project::orchestration_commit::PreparedOrchestrationPair,
+    ) {
+        let result = self.owner_mut().and_then(|owner| {
+            kinewright_project::orchestration_commit::discard_prepared_orchestration(
+                owner, prepared,
+            )
+            .map_err(HostError::from)
         });
+        if let Err(error) = result {
+            self.message = format!("Unused edit preparation awaits storage cleanup: {error}");
+            eprintln!("{}", self.message);
+        }
     }
     pub(in crate::writer_host) fn has_pending_edit_in_run(&self, run: &RunId) -> bool {
         self.hooks
@@ -921,7 +994,7 @@ impl HostCommandOwner {
         self.hooks
             .pending_edit_applications
             .iter()
-            .any(|entry| &entry.prepared.0 == update)
+            .any(|entry| entry.prepared.application_update() == update)
     }
     fn acknowledge_current_edit_applications(&mut self) -> Result<(), HostError> {
         let runs = self
@@ -933,6 +1006,15 @@ impl HostCommandOwner {
         for run in runs {
             if let Some(state) = self.owner()?.orchestration_projection(&run)? {
                 self.acknowledge_edit_applications(&state);
+            } else {
+                let pending = std::mem::take(&mut self.hooks.pending_edit_applications);
+                for entry in pending {
+                    if entry.run == run {
+                        self.discard_prepared_edit(entry.prepared);
+                    } else {
+                        self.hooks.pending_edit_applications.push(entry);
+                    }
+                }
             }
         }
         Ok(())
@@ -948,7 +1030,19 @@ impl HostCommandOwner {
         let mut pending = std::mem::take(&mut self.hooks.pending_edit_applications);
         let result = (|| {
             for entry in &mut pending {
-                let (update, held) = &mut entry.prepared;
+                let update = entry.prepared.application_update();
+                if self.hooks.pending.is_none()
+                    && self
+                        .owner()?
+                        .orchestration_projection(&entry.run)?
+                        .is_some_and(|current| current.sequence >= update.projection().sequence)
+                {
+                    // A different durable H1 cut consumed this successor slot.
+                    // Only a fresh cut carrying the marker can acknowledge the
+                    // debt; the old command identity must never be replayed.
+                    continue;
+                }
+                let (update, held) = entry.prepared.application_mut();
                 let producer = self.run_producer(&entry.run)?;
                 match self.publish_prepared_edit(&producer, update, held) {
                     Ok(()) => {}
@@ -985,7 +1079,13 @@ impl HostCommandOwner {
         let pending = std::mem::take(&mut self.hooks.pending_edit_applications);
         let result = (|| {
             for entry in pending.iter().filter(|entry| entry.run == state.run) {
-                let reference = self.owner_mut()?.admit_host_grant(&entry.bytes)?;
+                #[cfg(test)]
+                if let Some(hook) = &mut self.hooks.consent_marker_hook {
+                    hook()?;
+                }
+                let reference = self
+                    .owner_mut()?
+                    .admit_host_grant(entry.prepared.marker())?;
                 if !state.edit_applications.contains(&reference) {
                     state.edit_applications.push(reference);
                 }
@@ -1000,6 +1100,37 @@ impl HostCommandOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn c4_followups_refusal_words_name_the_action_and_keep_the_cause() {
+        for code in ["run_limit", "storage_backpressure"] {
+            let HostError::Refused(refusal) = capacity(problem(code, "fixture capacity cause"))
+            else {
+                panic!("typed refusal")
+            };
+            assert_eq!(refusal.code, "consent_capacity");
+            assert!(
+                refusal.message.contains("not applied")
+                    && refusal.message.contains("Director")
+                    && refusal.message.contains("fixture capacity cause")
+            );
+            if code == "storage_backpressure" {
+                assert!(refusal.message.contains("project's storage capacity"));
+                assert!(!refusal.message.contains("start a new run"));
+            } else {
+                assert!(refusal.message.contains("If project storage is full"));
+            }
+        }
+        let HostError::Refused(refusal) = pending_retry_error(problem("io", "fixture disk cause"))
+        else {
+            panic!("typed refusal")
+        };
+        assert_eq!(refusal.code, "io");
+        assert!(
+            refusal.message.contains("This new edit was not applied")
+                && refusal.message.contains("finish or Stop")
+                && refusal.message.contains("fixture disk cause")
+        );
+    }
     #[test]
     fn te15_b21f_every_operation_is_decided() {
         const REFUSED: &[&str] = &[

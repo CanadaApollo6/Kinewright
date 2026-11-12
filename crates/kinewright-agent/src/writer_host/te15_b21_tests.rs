@@ -141,6 +141,9 @@ mod tests {
                 .consent_fixture =
                 Some(crate::writer_host::task_mcp::consent::ConsentFixture::Missing);
         }
+        b21_run(f, role)
+    }
+    fn b21_run(f: Fixture, role: Role) -> B21 {
         let (run, parent, director) = c4_director(&f);
         let child = b20_assign(&f, &run, &parent, &director, role);
         b20_retire(&f, &run, &parent);
@@ -150,7 +153,8 @@ mod tests {
         assert_eq!(
             sent.lock().unwrap().len(),
             1,
-            "B21_REAL_PUMP_ONE_SCRIPTED_SEND"
+            "B21_REAL_PUMP_ONE_SCRIPTED_SEND {}",
+            b21_send_diagnostic(&f, &run)
         );
         {
             let owner = f.host.owner.upgrade().unwrap();
@@ -191,6 +195,26 @@ mod tests {
             run,
             f,
         }
+    }
+    fn b21_send_diagnostic(f: &Fixture, run: &RunId) -> String {
+        let page = b201_page(f, run);
+        format!(
+            "phase={:?} wait={:?} runtime={:?} accounting={:?} tasks={:?}",
+            page.projection.phase,
+            page.wait_reason,
+            page.runtime_status,
+            page.accounting,
+            page.projection
+                .tasks
+                .iter()
+                .map(|t| (
+                    &t.id,
+                    &t.state,
+                    t.progress.expired,
+                    t.progress.decisions.len()
+                ))
+                .collect::<Vec<_>>()
+        )
     }
     fn b21_operations() -> serde_json::Value {
         serde_json::json!([{"op":"delete_clip","clip":1},{"op":"ripple_delete_clip","clip":2}])
