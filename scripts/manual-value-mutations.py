@@ -30,6 +30,8 @@ CASES = {
     'in-flight-return': (APP+'manual_edits.rs', 'inspector_ui::manual_gesture_tests::manual_widget_return_in_flight_follows_the_accepted_excursion', 'WIDGET_RETURN_IN_FLIGHT_FINAL'),
     'slider-return': (APP+'inspector_ui.rs', 'inspector_ui::manual_gesture_tests::native_slider_return_and_relative_release_preserve_intent', 'SLIDER_EQUAL_RAIL_RELEASE_IS_INTENT'),
     'curve-return': (APP+'curve_editor_widget.rs', 'inspector_ui::manual_gesture_tests::curve_widget_emits_its_complete_return_to_the_document', 'CURVE_EQUAL_RETURN_IS_INTENT'),
+    'full-notice-room': (APP+'manual_edits.rs', 'manual_edits::tests::full_notice_clears_as_soon_as_the_queue_has_room', 'MANUAL_FULL_NOTICE_CLEARS_WITH_ROOM'),
+    'prepared-refusal': (APP+'ja1_attachment.rs', PREFIX+'manual_value_glm_prepared_media_clean_refusal_stays_editable', 'MANUAL_PREPARED_REFUSAL_STAYS_EDITABLE'),
 }
 
 def mutate(name, source):
@@ -58,6 +60,12 @@ def mutate(name, source):
     elif name == 'send-time-ack':
         before = 'action.waiting_at = Some(flight.acknowledgement);'
         after = 'action.waiting_at = Some(self.acknowledgement);'
+    elif name == 'full-notice-room':
+        before = '        if self.actions.len() < PENDING_ACTIONS && matches!(self.notice, Some(Notice::Full)) {'
+        after = '        if false {'
+    elif name == 'prepared-refusal':
+        before = '                if let Some(reason) = manual_refusal {'
+        after = '                if let Some(reason) = manual_refusal.filter(|_| false) {'
     elif name == 'accepted-undo-replay':
         before = '                    action.accepted = Some(flight.command.command);'
         after = before + '\n                    action.latest = action.accepted.take().map(|command| PendingValue { command, unchanged_at: None });'

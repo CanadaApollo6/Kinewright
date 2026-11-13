@@ -229,6 +229,8 @@ pub(crate) struct Ja1Attachment {
     #[cfg(all(test, target_os = "linux"))]
     before_manual_playback: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(all(test, target_os = "linux"))]
+    before_host_reply: Option<fn(&mut kinewright_agent::writer_host::HostReply)>,
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fixture_host: Option<kinewright_agent::writer_host::WriterHost>,
     host_history_digest: std::cell::RefCell<
         Option<(
@@ -283,6 +285,8 @@ impl Ja1Attachment {
             host: None,
             #[cfg(all(test, target_os = "linux"))]
             before_manual_playback: None,
+            #[cfg(all(test, target_os = "linux"))]
+            before_host_reply: None,
             #[cfg(all(test, target_os = "linux"))]
             fixture_host: None,
             host_history_digest: std::cell::RefCell::new(None),
@@ -1003,9 +1007,33 @@ impl Ja1Attachment {
         match result {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.host_reply_failed = true;
-                if !known_refusal {
-                    self.host_request_failed(&error);
+                let manual_refusal = match &error {
+                    BundleError::CoreMutationRefused(reason)
+                        if matches!(
+                            reason,
+                            kinewright_core::CoreMutationRefusal::ManualBackpressure
+                                | kinewright_core::CoreMutationRefusal::ManualInputRequired
+                                | kinewright_core::CoreMutationRefusal::ManualHistoryCapacity
+                        ) && self.host.as_ref().is_some_and(|host| !host.read_only()) =>
+                    {
+                        Some(*reason)
+                    }
+                    _ => None,
+                };
+                if let Some(reason) = manual_refusal {
+                    // The hand-off is installed and Core definitively refused the edit.
+                    self.host_reply_failed = false;
+                    self.message = reason.to_string();
+                    self.host
+                        .as_mut()
+                        .expect("attached host")
+                        .edits
+                        .record_refusal(reason);
+                } else {
+                    self.host_reply_failed = true;
+                    if !known_refusal {
+                        self.host_request_failed(&error);
+                    }
                 }
                 Err(error)
             }
@@ -1044,6 +1072,10 @@ impl Ja1Attachment {
         &mut self,
         mut reply: kinewright_agent::writer_host::HostReply,
     ) -> Result<(), BundleError> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(hook) = self.before_host_reply.take() {
+            hook(&mut reply);
+        }
         self.host_reply_failed = reply.error.is_some();
         if !reply.status.retention_proven
             || reply
@@ -1083,6 +1115,8 @@ impl Ja1Attachment {
             });
             host.cut = None;
             host.accept_status(reply.status);
+            self.frozen = false;
+            host.edits.dismiss_notice();
             // This authority-installation step already runs on the action worker. Its fresh
             // permit has no pending prefix: confirm the local installation before announcing it.
             let event = host
@@ -1106,7 +1140,6 @@ impl Ja1Attachment {
             if is_import {
                 self.imported_media = Some(asset.id);
             }
-            self.frozen = false;
             self.message = if is_import {
                 format!("Imported {}. Saving is pending.", asset.name)
             } else {

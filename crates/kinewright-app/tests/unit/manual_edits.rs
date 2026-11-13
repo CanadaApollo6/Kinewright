@@ -109,3 +109,42 @@ fn accepted_command_never_replayed_by_extra_acks_or_polls() {
     assert!(!edits.pending());
     assert_eq!(edits.message(), None);
 }
+
+#[test]
+fn full_notice_clears_as_soon_as_the_queue_has_room() {
+    let (core, owner, permit, mut edits) = fixture();
+    permit.request(add(1)).unwrap();
+    for id in 2..=17 {
+        edits.submit(add(id), &permit).unwrap();
+    }
+    collect(&mut edits);
+    assert_eq!(edits.action_count(), super::PENDING_ACTIONS);
+    assert_eq!(
+        edits.submit(add(18), &permit),
+        Err(super::ManualSendError::PendingCapacity)
+    );
+    assert_eq!(edits.notice(), Some(super::FULL_WORDS));
+    ack(&owner, &permit, &mut edits);
+    edits.start_next(&permit);
+    collect(&mut edits);
+    edits.start_next(&permit);
+    assert!(edits.action_count() < super::PENDING_ACTIONS);
+    assert_ne!(
+        edits.notice(),
+        Some(super::FULL_WORDS),
+        "MANUAL_FULL_NOTICE_CLEARS_WITH_ROOM"
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while edits.pending() {
+        assert!(Instant::now() < deadline);
+        collect(&mut edits);
+        ack(&owner, &permit, &mut edits);
+        edits.start_next(&permit);
+    }
+    assert_eq!(
+        edits.message(),
+        None,
+        "MANUAL_DRAINED_QUEUE_HAS_NO_FULL_NOTICE"
+    );
+    assert_eq!(core.export_history().unwrap().document.tracks.len(), 17);
+}

@@ -216,6 +216,9 @@ impl ManualEdits {
     pub(crate) fn dismiss_notice(&mut self) {
         self.notice = None;
     }
+    pub(crate) fn record_refusal(&mut self, reason: CoreMutationRefusal) {
+        self.notice = Some(Notice::Refused(reason.to_string()));
+    }
     fn waiting(&self) -> bool {
         self.actions.iter().enumerate().any(|(index, action)| {
             action.waiting_at.is_some()
@@ -356,6 +359,9 @@ impl ManualEdits {
                 break;
             }
             self.actions.pop_front();
+        }
+        if self.actions.len() < PENDING_ACTIONS && matches!(self.notice, Some(Notice::Full)) {
+            self.notice = None;
         }
         let Some(action) = self.actions.front_mut() else {
             return;

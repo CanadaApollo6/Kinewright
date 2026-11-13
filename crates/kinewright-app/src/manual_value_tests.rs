@@ -968,3 +968,98 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
         f.finish();
     }
 }
+
+#[test]
+fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
+    for capacity in [true, false] {
+        let mut f = Fixture::new();
+        let source = f.temp.path("refused.wav");
+        std::fs::write(
+            &source,
+            kinewright_media::test_support::wav_f32(
+                &vec![0.25; 4800].into_boxed_slice(),
+                48_000,
+                1,
+            ),
+        )
+        .unwrap();
+        let before = f.app.focused().core.export_history().unwrap();
+        f.app.focused_mut().ja1.as_mut().unwrap().before_host_reply = Some(if capacity {
+            limit_prepared_media_reply
+        } else {
+            unbind_prepared_media_reply
+        });
+        let reason = if capacity {
+            CoreMutationRefusal::ManualHistoryCapacity
+        } else {
+            CoreMutationRefusal::ManualInputRequired
+        };
+        let error = f
+            .app
+            .focused_mut()
+            .ja1
+            .as_mut()
+            .unwrap()
+            .apply(Action::ImportMedia(source))
+            .unwrap_err();
+        assert!(
+            matches!(error, BundleError::CoreMutationRefused(actual) if actual == reason),
+            "MANUAL_PREPARED_REAL_CORE_REFUSAL: {error}"
+        );
+        assert_eq!(f.app.focused().core.export_history().unwrap(), before);
+        assert!(
+            f.attachment().imported_media.is_none(),
+            "MANUAL_REFUSED_ASSET_NOT_ANNOUNCED"
+        );
+        assert!(
+            !f.attachment().read_only(),
+            "MANUAL_PREPARED_REFUSAL_STAYS_EDITABLE: {}",
+            f.attachment().message
+        );
+        let host = f.attachment().host.as_ref().unwrap();
+        assert!(host.cut.is_none() && !host.unknown_operation && !host.recovery_running());
+        assert_eq!(f.attachment().message, reason.to_string());
+        f.until(|f| f.app.status.contains(&reason.to_string()) && !f.attachment().read_only());
+        assert!(!f.attachment().read_only());
+        assert!(
+            f.app.status.contains(&reason.to_string()),
+            "MANUAL_PREPARED_REASON_REMAINS_VISIBLE"
+        );
+        assert!(!f.app.status.contains("reply was not confirmed"));
+        assert!(f.app.focused().pending_timeline_adds.is_empty());
+        if !capacity {
+            f.app.send_operation(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            });
+            f.finish();
+            assert!(
+                !f.app.focused().document.tracks[0].sync_lock,
+                "MANUAL_EDIT_AFTER_PREPARED_REFUSAL_LANDS"
+            );
+            assert!(f.app.focused().document.media_pool.is_empty());
+            assert!(!f.attachment().read_only());
+        }
+    }
+}
+
+fn limit_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostReply) {
+    assert!(reply.error.is_none() && reply.owned_media.is_some());
+    let lease = reply.manual_lease.as_mut().expect("real manual lease");
+    lease.history_limits = kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
+        &kinewright_project::storage_budget::StorageLimits {
+            command_bytes: 1,
+            ..kinewright_project::storage_budget::StorageLimits::default()
+        },
+    )
+    .unwrap();
+}
+fn unbind_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostReply) {
+    assert!(reply.error.is_none() && reply.manual_lease.is_some());
+    // Keep the authentic input manifest but ask for an uncovered asset identity.
+    reply
+        .owned_media
+        .as_mut()
+        .expect("real prepared media reply")
+        .id = AssetId(999);
+}
