@@ -885,18 +885,16 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
         let policy =
             kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&profile)
                 .unwrap();
-        let fitting: Vec<_> = (0..before.batches.len())
-            .filter_map(|cut| {
-                let candidate = if cut == 0 {
-                    before.clone()
-                } else {
-                    kinewright_core::HistoryTransition::floor_after(&before, cut).ok()?
-                };
-                policy.check(&candidate).is_ok().then_some(candidate)
-            })
-            .collect();
+        let mut fitting = (0..before.batches.len()).filter_map(|cut| {
+            let candidate = if cut == 0 {
+                before.clone()
+            } else {
+                kinewright_core::HistoryTransition::floor_after(&before, cut).ok()?
+            };
+            policy.check(&candidate).is_ok().then_some(candidate)
+        });
         let first = fitting
-            .first()
+            .next()
             .expect("independent earliest legal fitting floor");
         let depth = first
             .cursor
@@ -904,15 +902,14 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
             .len()
             .saturating_sub(first.cursor.undo.len().div_ceil(8))
             .max(1);
-        let ordinary = if first.floor_offset == before.floor_offset {
-            first.clone()
-        } else {
-            fitting
-                .iter()
-                .find(|cut| cut.cursor.undo.len() <= depth)
-                .unwrap_or(first)
-                .clone()
-        };
+        let ordinary =
+            if first.floor_offset == before.floor_offset || first.cursor.undo.len() <= depth {
+                first
+            } else {
+                fitting
+                    .find(|cut| cut.cursor.undo.len() <= depth)
+                    .unwrap_or(first)
+            };
         let missing = selection.consent();
         let inspection = session.inspect_rescue_destination(&b).unwrap();
         assert!(session.rescue(selection, &missing, &inspection).is_err());

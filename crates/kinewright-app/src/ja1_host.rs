@@ -207,7 +207,7 @@ impl HostAttachment {
             })
             .map_err(host_error)?;
         if let Some(error) = &reply.error {
-            return Err(BundleError::Identity(error.to_string()));
+            return Err(host_refusal(error));
         }
         let permit = owner.finish_host_switch(
             reply
@@ -341,7 +341,7 @@ impl HostAttachment {
         let unknown = response.is_err() && child.try_wait().map_err(BundleError::Io)?.is_none();
         let attached = response.map_err(host_error).and_then(|reply| {
             if let Some(error) = reply.error {
-                return Err(BundleError::Identity(error.to_string()));
+                return Err(host_refusal(&error));
             }
             if !reply.status.retention_proven {
                 return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
@@ -427,7 +427,7 @@ impl HostAttachment {
     ) -> Result<Self, BundleError> {
         let reply = client.request(HostCommand::Attach).map_err(host_error)?;
         if let Some(error) = reply.error {
-            return Err(BundleError::Identity(error.to_string()));
+            return Err(host_refusal(&error));
         }
         if !reply.status.retention_proven {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
@@ -539,7 +539,7 @@ impl HostAttachment {
             self.pending_operation = None;
             self.unknown_operation = false;
             self.accept_status(reply.status);
-            return Err(BundleError::Identity(error.to_string()));
+            return Err(host_refusal(&error));
         }
         let lease = reply.manual_lease.ok_or(BundleError::HistoryChanged)?;
         let inputs = reply.manual_inputs.ok_or(BundleError::HistoryChanged)?;
@@ -576,7 +576,7 @@ impl HostAttachment {
             self.accept_manual_ack(&reply, owner)?;
             self.accept_status(reply.status);
             if let Some(error) = reply.error {
-                return Err(BundleError::Identity(error.to_string()));
+                return Err(host_refusal(&error));
             }
         }
         if let Some(gate) = &self.manual {
@@ -595,7 +595,7 @@ impl HostAttachment {
                 self.accept_manual_ack(&reply, owner)?;
                 self.accept_status(reply.status);
                 if let Some(error) = reply.error {
-                    return Err(BundleError::Identity(error.to_string()));
+                    return Err(host_refusal(&error));
                 }
             }
         }
@@ -765,11 +765,19 @@ impl HostAttachment {
                     | Action::PreviewRescue
                     | Action::PreviewRecovery(_)
             );
-        if needs_cut && self.cut.is_none() {
+        let frozen_here = needs_cut && self.cut.is_none();
+        if frozen_here {
             self.cut = Some(owner.freeze_host_cut()?);
         }
-        if !retry_original {
-            self.drain_manual(owner)?;
+        if !retry_original && let Err(error) = self.drain_manual(owner) {
+            // No foreground command has been sent. A known queue refusal can
+            // release this local fence; the ordinary publisher still owns the
+            // unacknowledged messages and will retry them on its existing lane.
+            if frozen_here && is_manual_backpressure(&error) {
+                owner.resume_manual_barrier(self.cut.as_ref().expect("new local cut"))?;
+                self.cut = None;
+            }
+            return Err(error);
         }
         if matches!(
             &action,
@@ -1371,7 +1379,23 @@ impl HostAttachment {
     reason = "map_err consumes the owned transport error at this boundary"
 )]
 fn host_error(error: kinewright_agent::writer_host::HostError) -> BundleError {
-    BundleError::Identity(error.to_string())
+    match error {
+        kinewright_agent::writer_host::HostError::Refused(refusal) => host_refusal(&refusal),
+        other => BundleError::Identity(other.to_string()),
+    }
+}
+pub(super) fn is_manual_backpressure(error: &BundleError) -> bool {
+    matches!(
+        error,
+        BundleError::CoreMutationRefused(kinewright_core::CoreMutationRefusal::ManualBackpressure)
+    )
+}
+pub(super) fn host_refusal(error: &kinewright_agent::writer_host::HostRefusal) -> BundleError {
+    if error.code == "manual_backpressure" {
+        BundleError::CoreMutationRefused(kinewright_core::CoreMutationRefusal::ManualBackpressure)
+    } else {
+        BundleError::Identity(error.to_string())
+    }
 }
 
 pub(super) fn executable() -> PathBuf {
@@ -1393,4 +1417,31 @@ pub(super) fn executable() -> PathBuf {
         .and_then(|path| path.parent().map(|parent| parent.join(name)))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+#[cfg(test)]
+mod manual_refusal_tests {
+    use super::*;
+    #[test]
+    fn writer_backpressure_stays_typed_through_the_wire_and_app_boundary() {
+        let refusal =
+            kinewright_agent::writer_host::HostRefusal::from(BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::ManualBackpressure,
+            ));
+        let wire = serde_json::to_vec(&refusal).unwrap();
+        let decoded = serde_json::from_slice(&wire).unwrap();
+        let error = host_error(kinewright_agent::writer_host::HostError::Refused(decoded));
+        assert!(matches!(
+            error,
+            BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::ManualBackpressure
+            )
+        ));
+        assert_eq!(refusal.code, "manual_backpressure");
+        let final_reason =
+            kinewright_agent::writer_host::HostRefusal::from(BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::ManualSaveRequired,
+            ));
+        assert_ne!(final_reason.code, "manual_backpressure");
+    }
 }

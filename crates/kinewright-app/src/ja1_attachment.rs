@@ -844,7 +844,7 @@ impl Ja1Attachment {
         match result {
             Ok(()) => Ok(()),
             Err(error) => {
-                if !known_refusal {
+                if !known_refusal && !host::is_manual_backpressure(&error) {
                     self.host_request_failed(&error);
                 }
                 Err(error)
@@ -853,6 +853,10 @@ impl Ja1Attachment {
     }
 
     fn host_request_failed(&mut self, error: &BundleError) {
+        if host::is_manual_backpressure(error) {
+            self.message = error.to_string();
+            return;
+        }
         let host = self.host.as_mut().expect("attached host");
         if host.confirmed_lost() || self.owner.host_retention_lost() {
             self.operation_panicked();
@@ -977,7 +981,7 @@ impl Ja1Attachment {
             host.complete_switch_handoff();
             host.accept_status(confirmed.status);
             if let Some(error) = reply.error {
-                return Err(BundleError::Identity(error.to_string()));
+                return Err(host::host_refusal(&error));
             }
             return Ok(());
         }
@@ -992,13 +996,21 @@ impl Ja1Attachment {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
         }
-        let manual_failed = reply.error.is_some() && host.pending_count() > 0;
+        let manual_failed = reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code != "manual_backpressure")
+            && host.pending_count() > 0;
         if manual_failed && host.cut.is_none() {
             host.cut = Some(self.owner.freeze_host_cut()?);
         }
         // A bootstrap cut stays frozen through Status/Retry, including errors.
         // Only a successful foreground publication can establish its manual base.
         let can_resume = !host.unknown_operation
+            && reply
+                .error
+                .as_ref()
+                .is_none_or(|error| error.code != "manual_backpressure")
             && !manual_failed
             && !reply.status.frozen
             && reply.status.choice.is_none()
@@ -1080,7 +1092,7 @@ impl Ja1Attachment {
             self.message = manual_status_message(&self.message, !self.manual_save_required());
         }
         if let Some(error) = reply.error {
-            return Err(BundleError::Identity(error.to_string()));
+            return Err(host::host_refusal(&error));
         }
         Ok(())
     }
@@ -1102,6 +1114,10 @@ impl Ja1Attachment {
                 true
             }
             Ok(None) => false,
+            Err(error) if host::is_manual_backpressure(&error) => {
+                self.message = error.to_string();
+                true
+            }
             Err(error) => {
                 self.host_request_failed(&error);
                 if self.retention_lost {

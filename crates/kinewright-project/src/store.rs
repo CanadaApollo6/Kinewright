@@ -2711,6 +2711,7 @@ impl ProjectStore {
         &self,
         bytes: &[u8],
         role: crate::history_record::HistoryRole,
+        prefix: Option<&crate::history_size::OrdinaryHistoryProof>,
     ) -> Result<
         (
             StorageReservation<kinewright_core::HistorySnapshot>,
@@ -2719,12 +2720,13 @@ impl ProjectStore {
         BundleError,
     > {
         self.replay_gate()
-            .with(|| self.check_history_bytes_serial(bytes, role))?
+            .with(|| self.check_history_bytes_serial(bytes, role, prefix))?
     }
     fn check_history_bytes_serial(
         &self,
         bytes: &[u8],
         role: crate::history_record::HistoryRole,
+        prefix: Option<&crate::history_size::OrdinaryHistoryProof>,
     ) -> Result<
         (
             StorageReservation<kinewright_core::HistorySnapshot>,
@@ -2739,14 +2741,42 @@ impl ProjectStore {
         let transport: kinewright_core::HistoryTransport = serde_json::from_slice(bytes)
             .map_err(|error| BundleError::Corrupt(error.to_string()))?;
         let reserve = self.reserve_history_replay(role.replay_limit(self.limits()), role)?;
-        let history = crate::history_size::resolve_history_journal(
-            &transport.journal,
-            transport.baseline,
-            &transport.document,
-            role,
-            role.replay_limit(self.limits()),
-        )?;
-        let live = crate::history_size::check_retained_history(&history, role, self.limits())?;
+        // This is the writer's own bounded proof, never a wire assertion. The
+        // strict decode, document hashes, complete journal/cursor agreement and
+        // current budget are checked even when its proven prefix is reusable.
+        let history = if role == crate::history_record::HistoryRole::Ordinary {
+            transport
+                .journal
+                .resolve_canonical_with_budget(
+                    &transport.baseline,
+                    &transport.document,
+                    role.replay_limit(self.limits()),
+                    prefix.map(crate::history_size::OrdinaryHistoryProof::replay),
+                )
+                .map(kinewright_core::ResolvedHistory::into_snapshot)
+                .map_err(crate::bundle::history_error)?
+        } else {
+            crate::history_size::resolve_history_journal(
+                &transport.journal,
+                transport.baseline,
+                &transport.document,
+                role,
+                role.replay_limit(self.limits()),
+            )?
+        };
+        let live = if role == crate::history_record::HistoryRole::Ordinary
+            && prefix.is_some_and(|proof| proof.admits(&history, self.limits()))
+        {
+            // The writer checked the complete predicate on these exact values
+            // at these limits. Recheck the actual allocation, not a wire claim.
+            let live = crate::history_size::native_history_live_bytes(&history)?;
+            if live > role.live_limit(self.limits()) {
+                return Err(BundleError::Capacity("role history memory"));
+            }
+            live
+        } else {
+            crate::history_size::check_retained_history(&history, role, self.limits())?
+        };
         let checked = reserve.finish_history_replay(live)?.hold(history);
         let record = crate::history_record::HistoryRecord::capture(&checked, role)?;
         let raw = serde_json::to_value(&record.journal).map_err(crate::bundle::encoding_error)?;

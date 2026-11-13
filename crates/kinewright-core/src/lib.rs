@@ -210,7 +210,7 @@ pub use effect::{
 pub use history::{
     GestureBoundary, HISTORY_BYTES, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError,
     HistoryReplayEvidence, HistorySnapshot, OperationIdentityEffect, OrdinaryFloorSource,
-    ResolvedHistory,
+    OrdinarySourcePublication, ResolvedHistory,
 };
 pub use history_journal::{
     HistoryJournal, HistoryTransport, JournalBatch, JournalCursor, JournalIdentityEffect,

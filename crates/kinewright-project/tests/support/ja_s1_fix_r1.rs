@@ -338,11 +338,24 @@ fn post_ack_gc_failure_never_changes_committed_outcome_and_retries() {
     bundle.save(&core, &inputs).unwrap();
 }
 #[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn realistic_history_saves_every_edit_and_advances_durable_floor() {
+    realistic_history_walk(2_000, 110, Some(8 << 20));
+}
+
+#[test]
+fn realistic_history_saves_every_edit_and_advances_durable_floor_fast() {
+    realistic_history_walk(40, 20, None);
+}
+
+fn realistic_history_walk(tracks: u64, edits: u64, allowance: Option<u64>) {
     let temp = temp("r1-history-capacity");
     let path = temp.path("edit.kinewright");
     let mut doc = Document::default();
-    for id in 1..=2_000 {
+    for id in 1..=tracks {
         doc.tracks.push(Track {
             id: TrackId(id),
             kind: TrackKind::Video,
@@ -350,21 +363,43 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
             clips: vec![],
         });
     }
-    assert!(serde_json::to_vec(&doc).unwrap().len() >= 50_000);
+    if tracks == 2_000 {
+        assert!(serde_json::to_vec(&doc).unwrap().len() >= 50_000);
+    }
     let core = Core::spawn(doc).unwrap();
     let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
     bundle.save(&core, &input_ref).unwrap();
     drop(inputs);
-    // Lower the real ingress bound so this witness crosses it repeatedly without filling 32 MiB.
+    let cap = allowance.unwrap_or_else(|| {
+        let sizing = Core::spawn(std::sync::Arc::clone(
+            &core.export_history().unwrap().document,
+        ))
+        .unwrap();
+        for index in 0..3 {
+            sizing
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index % 2 == 0,
+                }))
+                .unwrap();
+        }
+        kinewright_project::bundle_commit::history_cost_probe(
+            &sizing.export_history().unwrap(),
+            &StorageLimits::default(),
+        )
+        .unwrap()
+    });
+    // The short fast walk sizes its real bound from a three-step cut; the slow
+    // row retains the original 2,000-track, 110-publication, 8 MiB fixture.
     let limits = StorageLimits {
-        branch_history_bytes: 8 << 20,
+        branch_history_bytes: cap,
         ..StorageLimits::default()
     };
     bundle.restrict_limits_probe(limits).unwrap();
     let issuer = bundle.issue_issuer(&core, &input_ref, 1).unwrap();
-    for i in 0..110 {
+    for i in 0..edits {
         let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
             core.request(Command::Query(Query::Snapshot)).unwrap()
         else {

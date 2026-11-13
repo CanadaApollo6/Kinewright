@@ -643,8 +643,14 @@ impl Ja1EditingSession {
         if self.dirty()? {
             return Err(BundleError::HistoryChanged);
         }
-        let core = Core::spawn(std::sync::Arc::clone(&live.document))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let core = match role {
+            DurableBranchRole::Session => Core::spawn_delta(
+                std::sync::Arc::clone(&live.document),
+                kinewright_core::TimelineRevision::default(),
+            ),
+            DurableBranchRole::RunCandidate => Core::spawn(std::sync::Arc::clone(&live.document)),
+        }
+        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let bundle = self.active_bundle_mut()?;
         let target = bundle.manual_branch_id().clone();
         if live != *bundle.branch_history(&target)? {
@@ -820,8 +826,15 @@ impl Ja1EditingSession {
             bundle.store().limits(),
         )?;
         drop(lineage);
-        let core =
-            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let core = if role == crate::history_record::HistoryRole::Ordinary {
+            Core::spawn_delta(
+                Document::default(),
+                kinewright_core::TimelineRevision::default(),
+            )
+        } else {
+            Core::spawn(Document::default())
+        }
+        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         bundle
             .attach_core(&core)?
             .restore_history((*history).clone())

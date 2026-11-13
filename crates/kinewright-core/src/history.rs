@@ -64,10 +64,15 @@ pub struct HistorySnapshot {
 /// source of its own, so unpublished floors cannot form a retained actor chain.
 #[derive(Debug)]
 pub struct OrdinaryFloorSource {
+    pub(crate) publishers: std::sync::atomic::AtomicUsize,
     pub(crate) history: HistorySnapshot,
     pub(crate) selected_offset: u64,
 }
 impl OrdinaryFloorSource {
+    pub(crate) fn publication_in_flight(&self) -> bool {
+        self.publishers.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+
     /// Includes the opaque wrapper and its Arc allocation header.
     /// # Errors
     /// Refuses accounting overflow.
@@ -92,6 +97,32 @@ impl OrdinaryFloorSource {
                 .is_some_and(|(current, source)| current >= source)
     }
 }
+/// Owner-authorized scope for a real publication of one exact pending source.
+/// It promises no outcome: leaving the scope removes retryable pressure even
+/// when the writer has to retain an uncertain save for person reconciliation.
+pub struct OrdinarySourcePublication(Arc<OrdinaryFloorSource>);
+impl OrdinarySourcePublication {
+    #[allow(deprecated, reason = "Rust 1.92 MSRV predates AtomicUsize::try_update")]
+    pub(crate) fn begin(source: Arc<OrdinaryFloorSource>) -> Result<Self, HistoryError> {
+        source
+            .publishers
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |count| count.checked_add(1),
+            )
+            .map_err(|_| HistoryError::Capacity)?;
+        Ok(Self(source))
+    }
+}
+impl Drop for OrdinarySourcePublication {
+    fn drop(&mut self) {
+        self.0
+            .publishers
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
 impl HistorySnapshot {
     /// Recover the exact unfloored publication source, including edits accepted
     /// since the floor. The returned value is checked against this retained cut.
@@ -310,6 +341,92 @@ impl ResolvedHistory {
                 .chain(&own.cursor.redo)
                 .zip(other.cursor.undo.iter().chain(&other.cursor.redo))
                 .all(|(before, after)| Arc::ptr_eq(&before.document, &after.document))
+    }
+
+    /// Share a live holder's immutable documents only when their physical
+    /// charges equal the canonical replay's charges, including baseline decode
+    /// padding and alias topology. The replay budget and its maxima remain
+    /// unchanged. A larger or smaller layout keeps the canonical documents.
+    /// # Errors
+    /// Refuses arithmetic or inconsistent replay evidence.
+    pub fn share_canonical_documents(
+        mut self,
+        live: &HistorySnapshot,
+    ) -> Result<Self, HistoryError> {
+        fn documents(history: &HistorySnapshot) -> impl Iterator<Item = &Arc<Document>> {
+            std::iter::once(&history.baseline)
+                .chain(std::iter::once(&history.document))
+                .chain(
+                    history
+                        .cursor
+                        .undo
+                        .iter()
+                        .chain(&history.cursor.redo)
+                        .map(|entry| &entry.document),
+                )
+        }
+        if !self.canonical_allocations
+            || self.snapshot() != live
+            || self.shares_document_allocations(live)
+        {
+            return Ok(self);
+        }
+        let before = self.snapshot();
+        let old_current = Arc::as_ptr(&before.document) as usize;
+        let same_current_geometry =
+            crate::history_size::same_document_geometry(&before.document, &live.document);
+        let shared_boundaries = Arc::ptr_eq(&before.baseline, &live.baseline)
+            && before
+                .cursor
+                .undo
+                .iter()
+                .chain(&before.cursor.redo)
+                .zip(live.cursor.undo.iter().chain(&live.cursor.redo))
+                .all(|(a, b)| Arc::ptr_eq(&a.document, &b.document));
+        if shared_boundaries
+            && same_current_geometry
+            && Arc::make_mut(&mut self.checkpoint)
+                .documents
+                .rebind_current(old_current, &live.document)
+        {
+            let history = Arc::make_mut(&mut self.history);
+            history.document = Arc::clone(&live.document);
+            self.adoption = Arc::new(self.adoption.rebind(history));
+            return Ok(self);
+        }
+        let before = self.snapshot();
+        let mut checked = std::collections::BTreeSet::new();
+        let same_geometry = documents(before)
+            .zip(documents(live))
+            .all(|(canonical, held)| {
+                Arc::ptr_eq(canonical, held)
+                    || !checked
+                        .insert((Arc::as_ptr(canonical) as usize, Arc::as_ptr(held) as usize))
+                    || crate::history_size::same_document_geometry(canonical, held)
+            });
+        if !same_geometry {
+            return Ok(self);
+        }
+        let Some(documents) = self.checkpoint.documents.rebind_exact(before, live)? else {
+            return Ok(self);
+        };
+        // Normal prefix extension owns these metadata buffers uniquely. Rebind
+        // document handles in place; do not clone the journal or operation log.
+        let history = Arc::make_mut(&mut self.history);
+        history.baseline = Arc::clone(&live.baseline);
+        history.document = Arc::clone(&live.document);
+        for (canonical, held) in history
+            .cursor
+            .undo
+            .iter_mut()
+            .chain(&mut history.cursor.redo)
+            .zip(live.cursor.undo.iter().chain(&live.cursor.redo))
+        {
+            canonical.document = Arc::clone(&held.document);
+        }
+        self.adoption = Arc::new(self.adoption.rebind(history));
+        Arc::make_mut(&mut self.checkpoint).documents = documents;
+        Ok(self)
     }
 
     /// Reuse equal immutable documents already resident in a live actor. A

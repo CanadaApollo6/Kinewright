@@ -5,6 +5,7 @@ use kinewright_core::{
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
+    bundle_commit::history_cost_probe,
     bundle_records::BranchId,
     bundle_switch::ProjectSelectionResult,
     io_observer,
@@ -89,13 +90,13 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
     session.save_active().unwrap();
     (temp, session, ids, left)
 }
-fn large_edit(core: &Core) {
+fn large_edit(core: &Core, label_bytes: usize) {
     // Grow the immutable document, independently of journal representation.
     let ops = vec![Operation::AddMarker {
         marker: kinewright_core::Marker {
             id: kinewright_core::MarkerId(9000),
             position: kinewright_core::TimeCode(0),
-            label: "m".repeat(1 << 19),
+            label: "m".repeat(label_bytes),
             color_token: 0,
         },
     }];
@@ -105,28 +106,45 @@ fn large_edit(core: &Core) {
     ));
 }
 #[test]
+fn w13_sparse_cache_capacity_smoke() {
+    // Its cap must also reopen all 24 retained branches. A 64 KiB marker
+    // left only 27 KiB between the source and candidate roots; retain a wider
+    // separation so random branch traversal order cannot decide this fixture.
+    pressure_witness(1 << 17);
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry() {
+    pressure_witness(1 << 19);
+}
+
+fn pressure_witness(label_bytes: usize) {
+    let ((), sync) = io_observer::profile_sync(|| pressure_witness_inner(label_bytes));
+    println!(
+        "PRESSURE_SYNC={}",
+        serde_json::json!({"label_bytes":label_bytes,"profile":sync})
+    );
+}
+
+fn pressure_witness_inner(label_bytes: usize) {
+    let total = std::time::Instant::now();
+    let mut phase = std::time::Instant::now();
+    let mut timed = |name: &str| {
+        println!(
+            "PRESSURE_PHASE={}",
+            serde_json::json!({"phase":name,"label_bytes":label_bytes,"milliseconds":phase.elapsed().as_secs_f64()*1000.0,"total_ms":total.elapsed().as_secs_f64()*1000.0,"history_bound":io_observer::history_bound_profile(),"publication_fit":io_observer::publication_fit_profile(),"sync":io_observer::sync_profile()})
+        );
+        phase = std::time::Instant::now();
+    };
     let (model_temp, mut model, model_ids, _) = source(StorageLimits::default());
-    large_edit(model.core());
+    timed("model-source");
+    large_edit(model.core(), label_bytes);
     let candidate = model.core().export_history().unwrap();
-    let mut minimum = 1;
-    let mut ceiling = StorageLimits::default().branch_history_bytes;
-    while minimum < ceiling {
-        let middle = minimum + (ceiling - minimum) / 2;
-        let profile = StorageLimits {
-            branch_history_bytes: middle,
-            ..StorageLimits::default()
-        };
-        if OrdinaryHistoryLimits::from_limits(&profile)
-            .unwrap()
-            .select(&candidate)
-            .is_ok()
-        {
-            ceiling = middle;
-        } else {
-            minimum = middle + 1;
-        }
-    }
+    let mut minimum = u64::MAX;
     let mut minimum_retained = u64::MAX;
     for cut in 0..=candidate.batches.len() {
         let history = if cut == 0 {
@@ -137,9 +155,33 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
             };
             t.after().clone()
         };
+        // Size every legal cut once, keeping the newest accepted step. Repeated
+        // selection in a binary search replays these same marker-bearing cuts
+        // about 25 times and dominates the unrelated App test binary.
+        if !history.batches.is_empty() {
+            minimum = minimum.min(history_cost_probe(&history, &StorageLimits::default()).unwrap());
+        }
         minimum_retained = minimum_retained
             .min(kinewright_core::history_size::restored_history_live_bytes(&history).unwrap());
     }
+    timed("every-legal-floor-calibration");
+    // Confirm the independent sizing walk against the real whole predicate at
+    // both sides of its boundary. No fixture limit or pressure assertion moves.
+    for (cap, fits) in [(minimum, true), (minimum - 1, false)] {
+        let profile = StorageLimits {
+            branch_history_bytes: cap,
+            ..StorageLimits::default()
+        };
+        assert_eq!(
+            OrdinaryHistoryLimits::from_limits(&profile)
+                .unwrap()
+                .select(&candidate)
+                .is_ok(),
+            fits,
+            "exact canonical cap {cap}"
+        );
+    }
+    timed("boundary-predicate-confirmation");
     // Compare both cuts under the same replay window. The default branch cap
     // otherwise reserves a larger cold-open overlap than this destination profile.
     let before = LoadedBundle::read_with_limits_probe(
@@ -160,6 +202,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         })
         .unwrap();
     model.save_active().unwrap();
+    timed("initial-open-and-flooring-save");
     let candidate = model.core().export_history().unwrap();
     let loaded = LoadedBundle::read(&model_temp.path("b.kinewright")).unwrap();
     let root = loaded.root().unwrap();
@@ -260,6 +303,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     ));
     println!("C5 same-writer exact fresh-open peak={exact}");
     drop(model);
+    timed("inventory-calibrated-open-and-exact-limit-reads");
     for (lane, limit) in [("over", irreducible - 1), ("existing", irreducible - 1)] {
         let profile = StorageLimits {
             live_history_bytes: limit,
@@ -267,7 +311,8 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
             ..StorageLimits::default()
         };
         let (temp, mut session, ids, left) = source(profile.clone());
-        large_edit(session.core());
+        timed(&format!("{lane}-source"));
+        large_edit(session.core(), label_bytes);
         let history = session.core().export_history().unwrap();
         let previous = std::fs::read(temp.path("b.kinewright")).unwrap();
         let (result, trace) = io_observer::observe(|| session.save_active());
@@ -337,6 +382,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         drop(index);
         drop(loaded);
         session.prepare_recovery(target.clone()).unwrap();
+        timed(&format!("{lane}-refusal-and-prepare"));
         let original_target_pin = session
             .store()
             .unwrap()
@@ -388,6 +434,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
             "real retirement/Save rotation must remove P1 from inventory"
         );
         let expected = session.core().export_history().unwrap();
+        timed(&format!("{lane}-retirement-retry"));
         drop(session);
         std::fs::remove_dir_all(temp.path("hidden-a")).unwrap();
         let loaded =
@@ -395,5 +442,6 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         let fresh = Core::spawn(Document::default()).unwrap();
         loaded.restore_manual(&fresh).unwrap();
         assert_eq!(fresh.export_history().unwrap(), expected);
+        timed(&format!("{lane}-cold-open"));
     }
 }

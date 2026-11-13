@@ -90,27 +90,29 @@ fn exhaustive(history: &HistorySnapshot, limits: &StorageLimits) -> Option<Histo
     if policy.check(history).is_ok() {
         return Some(history.clone());
     }
-    let fitting: Vec<_> = (1..history.batches.len())
-        .filter_map(|cut| {
-            HistoryTransition::floor_after(history, cut)
-                .ok()
-                .filter(|h| policy.check(h).is_ok())
-        })
-        .collect();
-    let first = fitting.first()?;
-    let depth = first
-        .cursor
-        .undo
-        .len()
-        .saturating_sub(first.cursor.undo.len().div_ceil(8))
-        .max(1);
-    Some(
-        fitting
-            .iter()
-            .find(|h| h.cursor.undo.len() <= depth)
-            .unwrap_or(first)
-            .clone(),
-    )
+    let mut first: Option<HistorySnapshot> = None;
+    let mut maximum_depth = 0;
+    for cut in 1..history.batches.len() {
+        let Ok(candidate) = HistoryTransition::floor_after(history, cut) else {
+            continue;
+        };
+        if policy.check(&candidate).is_err() {
+            continue;
+        }
+        if first.is_none() {
+            maximum_depth = candidate
+                .cursor
+                .undo
+                .len()
+                .saturating_sub(candidate.cursor.undo.len().div_ceil(8))
+                .max(1);
+        }
+        if candidate.cursor.undo.len() <= maximum_depth {
+            return Some(candidate);
+        }
+        first.get_or_insert(candidate);
+    }
+    first
 }
 fn compare(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
     let expected = exhaustive(history, limits);
@@ -453,7 +455,20 @@ fn prefilter_large_excursion_keeps_low_water_suffix() {
 }
 
 #[test]
+fn production_prefilter_matches_six_hundred_seeded_histories_fast() {
+    seeded_prefilter_histories(600);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn production_prefilter_matches_ten_thousand_seeded_histories() {
+    seeded_prefilter_histories(10_000);
+}
+
+fn seeded_prefilter_histories(cases: usize) {
     const SEED: u64 = 0x4a41_3153_3152_3401;
     let mut rng = SEED;
     let mut next = || {
@@ -462,7 +477,7 @@ fn production_prefilter_matches_ten_thousand_seeded_histories() {
         rng ^= rng << 17;
         rng
     };
-    for case in 0..10_000 {
+    for case in 0..cases {
         let core = core(1);
         let count = 1 + next() % 18;
         for _ in 0..count {
@@ -497,8 +512,8 @@ fn production_prefilter_matches_ten_thousand_seeded_histories() {
             ..StorageLimits::default()
         };
         compare(&history, &limits);
-        if case == 9_999 {
-            println!("R4_DIFFERENTIAL seed={SEED:#x} histories=10000");
+        if case + 1 == cases {
+            println!("R4_DIFFERENTIAL seed={SEED:#x} histories={cases}");
         }
     }
 }

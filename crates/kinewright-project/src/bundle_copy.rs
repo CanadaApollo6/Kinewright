@@ -1119,9 +1119,16 @@ impl SessionStore {
         let frozen = core
             .export_history_for_publication()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let bounded = crate::bundle_commit::select_history(&frozen, &limits)?;
+        let (bounded, proof) = crate::bundle_commit::select_history_with_proof(&frozen, &limits)?;
         let history = &bounded.history;
-        let barrier = crate::bundle::pending_floor(core, bounded.floor)?;
+        // Even an unchanged first cut may become a root before its acknowledgement
+        // is lost. Retain its bridge until the destination owner reconciles it.
+        let barrier = crate::bundle::pending_floor(
+            core,
+            Some(bounded.floor.unwrap_or_else(|| {
+                kinewright_core::HistoryTransition::publication(frozen.clone())
+            })),
+        )?;
         let roots = [inputs.clone()];
         let source = self.store.begin_copy(
             &roots,
@@ -1134,6 +1141,7 @@ impl SessionStore {
             )?,
         )?;
         let (mut target, before, prepared) = destination(path, limits)?;
+        target.ordinary_manual_admission()?.remember(proof)?;
         target.pending_save = Some(crate::bundle::PendingSave {
             ordinary_floor_source: frozen.ordinary_floor_source.clone(),
             candidate_base: None,

@@ -32,6 +32,12 @@ pub enum CoreMutationRefusal {
     ManualUndoCapacity,
     #[error("This edit could not be prepared. Your timeline is unchanged.")]
     ManualHistoryUnavailable,
+    #[error(
+        "This thread's changes have reached their size limit. Merge or discard them to continue."
+    )]
+    ThreadHistoryCapacity,
+    #[error("Save the project to keep editing.")]
+    ManualSaveRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +131,18 @@ pub struct CoreAttachment<P> {
     proof: std::marker::PhantomData<fn(P)>,
 }
 impl<P: 'static> CoreAttachment<P> {
+    /// Scope the writer's real attempt to publish its exact retained source.
+    pub fn begin_ordinary_publication(
+        &self,
+        _proof: &P,
+        source: std::sync::Arc<crate::OrdinaryFloorSource>,
+    ) -> Result<crate::OrdinarySourcePublication, HistoryError> {
+        self.core.begin_ordinary_publication::<P>(source)
+    }
+    /// Mark the disk bridge retained by this persistence owner.
+    pub fn mark_ordinary_destination(&self, _proof: &P) -> Result<(), HistoryError> {
+        self.core.mark_ordinary_destination::<P>()
+    }
     /// Clear only the exact publication source the persistence owner has kept.
     pub fn acknowledge_ordinary_floor(
         &self,

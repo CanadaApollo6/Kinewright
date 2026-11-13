@@ -219,3 +219,11 @@ manual_history_capacity manual_history_seeded_excursions_pair_4 crates/kinewrigh
 manual_history_capacity manual_history_seeded_excursions_pair_5 crates/kinewright-project/tests/manual_history_capacity.rs linux-only # Seeded navigation pair 5 of 6; bounded per-process CI time
 manual_history_capacity manual_history_seeded_excursions_pair_6 crates/kinewright-project/tests/manual_history_capacity.rs linux-only # Seeded navigation pair 6 of 6; bounded per-process CI time
 manual_history_capacity manual_history_natural_vector_growth_keeps_publishing_across_floors crates/kinewright-project/tests/manual_history_capacity.rs linux-only # Natural vector growth and repeated canonical floors through real manual publication
+
+ja_s1_storage final_head::realistic_history_saves_every_edit_and_advances_durable_floor crates/kinewright-project/tests/support/ja_s1_fix_r1.rs linux-only # 60/60 Original 2000-track 110-publication real-store floor walk
+ja_s1_storage round_four::production_prefilter_matches_ten_thousand_seeded_histories crates/kinewright-project/tests/support/ja_s1_fix_r4.rs any # 120/400 Full 10000-history differential floor campaign; fast keeps 600 seeds
+kinewright_app ja1_attachment::tests::manual_floor_queued_at_save_and_quit_drains_without_a_damage_warning crates/kinewright-app/src/ja1_attachment_tests.rs linux-only # Save owns the real queued floor drain; quit disclosure and cold reopen remain truthful
+
+# Same full pressure witness is included by both the Project and App test binaries.
+ja_s2_rescue_record c5_pressure::w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry crates/kinewright-project/tests/support/ja_s2_c5_pressure.rs linux-only # 181/0 Full 512 KiB marker with 24 branches, exact and one-byte-over cold-open capacity; fast keeps 128 KiB with all guards
+kinewright_app ja1_attachment::tests::pressure_cases::w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry crates/kinewright-project/tests/support/ja_s2_c5_pressure.rs linux-only # 181/0 Same full inherited store pressure witness; fast keeps the complete smaller smoke

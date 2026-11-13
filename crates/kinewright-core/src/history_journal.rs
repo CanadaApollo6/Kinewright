@@ -202,9 +202,8 @@ impl HistoryJournal {
         limit: u64,
         prefix: Option<&crate::ResolvedHistory>,
     ) -> Result<crate::ResolvedHistory, HistoryError> {
-        // Document owns its nested arrays and strings. Deep cloning deliberately
-        // rematerializes them at length; it is allocation compaction, not a
-        // change to the charged limit. Journal cloning does the same for inputs.
+        // A prefix retains its one canonical baseline. Cold resolution makes
+        // that baseline once; the expected current and journal stay borrowed.
         let prefix = prefix.filter(|proof| proof.canonical_allocations);
         let baseline = prefix
             .filter(|proof| *proof.snapshot().baseline == *baseline)
@@ -212,10 +211,12 @@ impl HistoryJournal {
                 || Arc::new(baseline.clone()),
                 |proof| Arc::clone(&proof.snapshot().baseline),
             );
-        let current = document.clone();
-        let journal = self.clone();
-        let mut resolved =
-            journal.resolve_verified_with_budget(baseline, &current, limit, prefix)?;
+        // Only the baseline is materialized. Current values and the journal are
+        // borrowed; their input charge is the reproducible decoded geometry.
+        // Replay still charges every real document and temporary it allocates.
+        let mut resolved = crate::actor::resolve_history_journal_input(
+            self, baseline, document, limit, prefix, true,
+        )?;
         resolved.canonical_allocations = true;
         Ok(resolved)
     }

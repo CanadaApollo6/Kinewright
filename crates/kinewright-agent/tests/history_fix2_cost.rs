@@ -123,6 +123,19 @@ fn history_fix2_startup_sample() {
             received.history.as_ref() == Some(&history),
             "STARTUP_RESTORES_ALL_HISTORY_EXACTLY"
         );
+        if std::env::var_os("KINEWRIGHT_BENCH_SAVE").is_some() {
+            assert!(client.request(HostCommand::Attach).unwrap().error.is_none());
+            let started = Instant::now();
+            let saved = client.request(HostCommand::Save {
+                snapshot: HostSnapshot::from_history(history.clone()).unwrap(),
+            });
+            println!(
+                "HOSTED_SAVE_SAMPLE={}",
+                serde_json::json!({"edits":edits,"milliseconds":started.elapsed().as_secs_f64()*1000.0,"error":saved.as_ref().err().map(ToString::to_string),"reply_error":saved.as_ref().ok().and_then(|r|r.error.as_ref()).map(|e|format!("{e:?}")),"host":executable})
+            );
+            let saved = saved.unwrap();
+            assert!(saved.error.is_none(), "{saved:?}");
+        }
         let reply = client.request(HostCommand::Shutdown).unwrap();
         assert!(reply.error.is_none(), "{reply:?}");
         let deadline = Instant::now() + Duration::from_secs(10);

@@ -598,7 +598,7 @@ fn manual_history_capacity_encoder_limit_rolls_back_the_staged_replay_proof() {
 }
 
 #[test]
-fn ordinary_floor_source_saves_unsaved_tail_and_releases_publication_backpressure() {
+fn ordinary_floor_source_saves_unsaved_tail_after_the_final_save_instruction() {
     use kinewright_project::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
     let temp = TempDirectory::new_in(&workspace_target_dir(), "ordinary-floor-source");
     let path = temp.path("pending.kinewright");
@@ -633,13 +633,13 @@ fn ordinary_floor_source_saves_unsaved_tail_and_releases_publication_backpressur
         if matches!(
             event,
             Event::MutationRefused {
-                reason: CoreMutationRefusal::ManualBackpressure,
+                reason: CoreMutationRefusal::ManualSaveRequired,
                 ..
             }
         ) {
             assert!(
                 before.ordinary_floor_source.is_some(),
-                "ONLY_THE_UNPUBLISHED_SOURCE_WINDOW_PAUSES_A_FLOOR"
+                "ONLY_THE_UNPUBLISHED_SOURCE_REQUIRES_A_SAVE"
             );
             assert_eq!(core.export_history_for_publication().unwrap(), before);
             owner.save_active().unwrap();
@@ -2232,4 +2232,1134 @@ fn allocation_sensitive_floor_probe(
                 .then_some(cut)
         })
         .unwrap_or(first)
+}
+
+// Independent review witness: delayed acknowledgements across floors, including
+// coalesced updates and navigation, with exact retries after late writer failure.
+#[test]
+fn astra_review_delayed_ack_carried_floor_and_publish_rollback() {
+    use kinewright_project::io_observer;
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "astra-fix3-delayed");
+    let path = temp.path("delayed.kinewright");
+    let host = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 180_000,
+        ..StorageLimits::default()
+    };
+    let mut owner = Ja1EditingSession::new(temp.root(), &host, limits.clone()).unwrap();
+    owner.first_save(&path, limits.clone()).unwrap();
+    let lease = owner
+        .issue_manual_lease("a".repeat(64), "d".repeat(64))
+        .unwrap();
+    let gui = Core::spawn(Document::default()).unwrap();
+    gui.restore_history(host.export_history().unwrap()).unwrap();
+    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+    let permit = replica
+        .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
+        .unwrap();
+    let mut expected = std::collections::VecDeque::new();
+    let mut floors = 0;
+    let mut offset = 0;
+    let mut failures = 0;
+    let mut redo_count = 0;
+    for index in 0_usize..90 {
+        let lock = Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: index.is_multiple_of(2),
+        };
+        let command = match index % 9 {
+            3 | 4 => Command::DoBatchCoalesced {
+                operations: vec![lock],
+                coalesce_key: format!("drag-{}", index / 9),
+            },
+            5 => Command::Undo,
+            6 => Command::Redo,
+            _ => Command::Do(lock),
+        };
+        let before = gui.export_history().unwrap();
+        let rev = revision(&gui);
+        let event = permit.request(command.clone()).unwrap();
+        if matches!(
+            event,
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualUndoCapacity,
+                ..
+            }
+        ) {
+            assert_eq!(before, gui.export_history().unwrap());
+            assert_eq!(rev, revision(&gui));
+            continue;
+        }
+        assert!(
+            matches!(event, Event::DocumentChanged { .. }),
+            "index={index}: {event:?}"
+        );
+        if matches!(command, Command::Redo) && !before.cursor.redo.is_empty() {
+            redo_count += 1;
+        }
+        let cut = gui.export_history().unwrap();
+        if cut.floor_offset != offset {
+            floors += 1;
+            offset = cut.floor_offset;
+        }
+        expected.push_back(cut);
+        // Three accepted messages can have different floors before any ack.
+        if expected.len() >= 3 || index == 89 {
+            let pending = permit.pending().unwrap();
+            for message in pending {
+                let before = host.export_history().unwrap();
+                let root_bytes = std::fs::read(&path).unwrap();
+                if message.sequence % 7 == 0 {
+                    let failure = io_observer::fail_once("root_file_sync", || {
+                        owner.commit_manual_history(&lease, &message)
+                    });
+                    assert!(failure.is_err(), "late fault must execute");
+                    assert_eq!(host.export_history().unwrap(), before, "writer rollback");
+                    assert_eq!(std::fs::read(&path).unwrap(), root_bytes, "disk rollback");
+                    failures += 1;
+                }
+                owner
+                    .commit_manual_history(&lease, &message)
+                    .expect("exact retry publishes carried floor");
+                assert_eq!(
+                    host.export_history().unwrap(),
+                    expected.pop_front().unwrap()
+                );
+                // Acknowledge the old floor only after the producer already moved further.
+                replica.acknowledge_manual(&permit, vec![message]).unwrap();
+            }
+        }
+    }
+    assert!(expected.is_empty());
+    assert!(
+        floors > 5 && failures > 5 && redo_count > 0,
+        "floors={floors} failures={failures} redos={redo_count}"
+    );
+    let expected = gui.export_history().unwrap();
+    drop(owner);
+    let cold = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read_with_limits_probe(&path, limits)
+        .unwrap()
+        .restore_manual(&cold)
+        .unwrap();
+    assert_eq!(cold.export_history().unwrap(), expected);
+    println!("ASTRA_DELAYED_ACK floors={floors} injected_failures={failures} redos={redo_count}");
+}
+
+#[test]
+fn astra_review_recover_absent_floored_edit() {
+    let mut refused_cases = 0;
+    for production in [false, true] {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "astra-fix3-recover");
+        let path = temp.path("recover.kinewright");
+        let mut document = if production {
+            heavy_document_with_keys(400, 8)
+        } else {
+            Document {
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            }
+        };
+        if production {
+            for clip in 2..=400 {
+                Operation::CopyClipAttributes {
+                    from_clip: ClipId(1),
+                    to_clip: ClipId(clip),
+                    names: None,
+                    include_keyframes: true,
+                }
+                .apply(&mut document)
+                .unwrap();
+            }
+        }
+        let limits = if production {
+            StorageLimits::default()
+        } else {
+            StorageLimits {
+                branch_history_bytes: 87_406,
+                ..StorageLimits::default()
+            }
+        };
+        let host = Core::spawn(document).unwrap();
+        let mut owner = Ja1EditingSession::new(temp.root(), &host, limits.clone()).unwrap();
+        owner.first_save(&path, limits.clone()).unwrap();
+        let lease = owner
+            .issue_manual_lease("a".repeat(64), "r".repeat(64))
+            .unwrap();
+        let gui = Core::spawn(Document::default()).unwrap();
+        gui.restore_history(host.export_history().unwrap()).unwrap();
+        let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+        let permit = replica
+            .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
+            .unwrap();
+        let mut found = false;
+        for index in 0_usize..80 {
+            let before = gui.export_history().unwrap();
+            assert!(matches!(
+                permit
+                    .request(Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: !index.is_multiple_of(2)
+                    }))
+                    .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            let expected = gui.export_history().unwrap();
+            let pending = permit.pending().unwrap();
+            if expected.floor_offset == before.floor_offset {
+                owner.commit_manual_history(&lease, &pending[0]).unwrap();
+                replica.acknowledge_manual(&permit, pending).unwrap();
+                continue;
+            }
+            // Accepted by the GUI; the writer exits before receiving this envelope.
+            drop(owner);
+            let loaded = LoadedBundle::read_with_limits_probe(&path, limits.clone()).unwrap();
+            let inputs = loaded.root().unwrap().input_manifest_ref.clone();
+            let reopened = Core::spawn(Document::default()).unwrap();
+            loaded.restore_manual(&reopened).unwrap();
+            assert_eq!(reopened.export_history().unwrap(), before);
+            let bundle = loaded
+                .into_writer_with_limits_probe(limits.clone())
+                .unwrap();
+            owner = Ja1EditingSession::from_bundle(bundle, &reopened, inputs).unwrap();
+            let first = owner.reconcile_manual_chain(&"a".repeat(64), &pending, Some(&expected));
+            let second = owner.reconcile_manual_chain(&"a".repeat(64), &pending, Some(&expected));
+            println!(
+                "ASTRA_ABSENT_FLOOR production={production} edit={} floor={}->{} first={first:?} second={second:?} live_matches_old={} pending={}",
+                index + 1,
+                before.floor_offset,
+                expected.floor_offset,
+                reopened.export_history().unwrap() == before,
+                pending.len()
+            );
+            // Record both fixtures before making the failure assertion below.
+            let refused = first.is_err() || second.is_err();
+            if refused {
+                refused_cases += 1;
+                assert!(matches!(
+                    first,
+                    Err(kinewright_project::bundle::BundleError::HistoryChanged)
+                ));
+                assert!(matches!(
+                    second,
+                    Err(kinewright_project::bundle::BundleError::HistoryChanged)
+                ));
+                assert_eq!(reopened.export_history().unwrap(), before);
+            }
+            drop(owner);
+            let cold = Core::spawn(Document::default()).unwrap();
+            LoadedBundle::read_with_limits_probe(&path, limits.clone())
+                .unwrap()
+                .restore_manual(&cold)
+                .unwrap();
+            if refused {
+                assert_eq!(cold.export_history().unwrap(), before);
+                assert_ne!(cold.export_history().unwrap().document, expected.document);
+            } else {
+                assert_eq!(cold.export_history().unwrap(), expected);
+            }
+            found = true;
+            break;
+        }
+        assert!(found, "must reach a floor");
+    }
+    assert_eq!(
+        refused_cases, 0,
+        "accepted floored edits must recover after writer restart"
+    );
+}
+
+#[test]
+fn astra_review_pending_ordinary_floor_survives_named_host_handoff() {
+    use kinewright_project::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "astra-fix3-handoff");
+    let path = temp.path("handoff.kinewright");
+    let mut document = heavy_document_with_keys(400, 8);
+    for clip in 2..=400 {
+        Operation::CopyClipAttributes {
+            from_clip: ClipId(1),
+            to_clip: ClipId(clip),
+            names: None,
+            include_keyframes: true,
+        }
+        .apply(&mut document)
+        .unwrap();
+    }
+    let core = Core::spawn(document).unwrap();
+    let limits = StorageLimits::default();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, limits.clone()).unwrap();
+    owner.first_save(&path, limits.clone()).unwrap();
+    let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+        OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+    ));
+    for index in 0_usize..80 {
+        assert!(matches!(
+            admission
+                .request(
+                    &core,
+                    Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: !index.is_multiple_of(2)
+                    })
+                )
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        if core.ordinary_floor_source().unwrap().is_some() {
+            break;
+        }
+        // Leave this accepted tail unpublished before the handoff.
+    }
+    assert!(core.ordinary_floor_source().unwrap().is_some());
+    let expected = core.export_history_for_publication().unwrap();
+    let prepared = owner.prepare_host_attachment().unwrap();
+    println!(
+        "ASTRA_HANDOFF before_source={} prepared_source={} actor_still_has_source={}",
+        expected.ordinary_floor_source.is_some(),
+        prepared.history.ordinary_floor_source.is_some(),
+        core.ordinary_floor_source().unwrap().is_some()
+    );
+    let loaded = LoadedBundle::read_with_limits_probe(&path, limits.clone()).unwrap();
+    let inputs = loaded.root().unwrap().input_manifest_ref.clone();
+    let shadow = Core::spawn(Document::default()).unwrap();
+    loaded.restore_manual(&shadow).unwrap();
+    let disk = shadow.export_history().unwrap();
+    println!(
+        "ASTRA_HANDOFF disk_floor={} accepted_floor={} disk_matches_accepted={}",
+        disk.floor_offset,
+        expected.floor_offset,
+        disk == expected
+    );
+    let bundle = loaded.into_writer_with_limits_probe(limits).unwrap();
+    let mut successor = Ja1EditingSession::from_bundle(bundle, &shadow, inputs).unwrap();
+    successor.install_host_snapshot(prepared.history).unwrap();
+    let first = successor.save_active();
+    let second = successor.save_active();
+    println!("ASTRA_HANDOFF first={first:?} second={second:?}");
+    assert!(
+        first.is_ok(),
+        "named handoff must keep accepted floor publishable"
+    );
+    assert!(second.is_ok());
+}
+
+#[test]
+fn astra_review_floored_branch_applied_operations_still_reconstruct_head() {
+    use kinewright_project::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
+    let mut document = heavy_document_with_keys(400, 8);
+    for clip in 2..=400 {
+        Operation::CopyClipAttributes {
+            from_clip: ClipId(1),
+            to_clip: ClipId(clip),
+            names: None,
+            include_keyframes: true,
+        }
+        .apply(&mut document)
+        .unwrap();
+    }
+    let base = document.clone();
+    let branch = Core::spawn_delta(document, TimelineRevision::default()).unwrap();
+    let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+        OrdinaryHistoryLimits::default(),
+    ));
+    assert!(matches!(
+        admission
+            .request(
+                &branch,
+                Command::Do(Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(999),
+                        position: TimeCode(0),
+                        label: "kept agent edit".into(),
+                        color_token: 0
+                    }
+                })
+            )
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let mut refused = false;
+    for index in 0_usize..80 {
+        let before = branch.export_history().unwrap();
+        let event = admission
+            .request(
+                &branch,
+                Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index.is_multiple_of(2),
+                }),
+            )
+            .unwrap();
+        if let Event::MutationRefused {
+            reason: CoreMutationRefusal::ThreadHistoryCapacity,
+            ..
+        } = event
+        {
+            assert_eq!(before, branch.export_history().unwrap());
+            refused = true;
+            break;
+        }
+        assert!(matches!(event, Event::DocumentChanged { .. }), "{event:?}");
+    }
+    let accepted = branch.export_history().unwrap();
+    assert!(refused);
+    assert_eq!(accepted.floor_offset, 0);
+    assert_eq!(accepted.document.markers.len(), 1);
+    // TimelineBranch::compare and merge_into use exactly this query and batch.
+    let Event::QueryResult(QueryResult::AppliedOperations(operations)) = branch
+        .request(Command::Query(Query::AppliedOperations))
+        .unwrap()
+    else {
+        panic!("applied operations");
+    };
+    let live = Core::spawn(base).unwrap();
+    assert!(matches!(
+        OrdinaryHistoryLimits::default()
+            .request(
+                &live,
+                Command::DoBatchIfRevision {
+                    expected: TimelineRevision(0),
+                    operations: (*operations).clone()
+                }
+            )
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let merged = live.export_history().unwrap();
+    println!(
+        "ASTRA_BRANCH floor={} accepted_markers={} applied_operations={} merged_markers={}",
+        accepted.floor_offset,
+        accepted.document.markers.len(),
+        operations.len(),
+        merged.document.markers.len()
+    );
+    assert!(
+        merged.document == accepted.document,
+        "legacy merge must retain every accepted branch edit"
+    );
+}
+
+#[test]
+fn manual_recovery_publishes_two_pending_floors_in_order_and_retries_exactly() {
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "fix3fix1-recovery-floors");
+    let path = temp.path("recover.kinewright");
+    let host = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 180_000,
+        ..StorageLimits::default()
+    };
+    let mut owner = Ja1EditingSession::new(temp.root(), &host, limits.clone()).unwrap();
+    owner.first_save(&path, limits.clone()).unwrap();
+    let lease = owner
+        .issue_manual_lease("a".repeat(64), "f".repeat(64))
+        .unwrap();
+    let gui = Core::spawn(Document::default()).unwrap();
+    gui.restore_history(host.export_history().unwrap()).unwrap();
+    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+    let permit = replica
+        .bind_manual_producer(lease, owner.manual_input_context().unwrap())
+        .unwrap();
+    let mut floors = 0;
+    let mut offset = 0;
+    for index in 0..60 {
+        assert!(matches!(
+            permit
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index % 2 == 0
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let cut = gui.export_history().unwrap();
+        if cut.floor_offset > offset {
+            floors += 1;
+            offset = cut.floor_offset;
+        }
+        if floors >= 2 {
+            break;
+        }
+    }
+    assert!(floors >= 2);
+    let expected = gui.export_history().unwrap();
+    let pending = permit.pending().unwrap();
+    drop(owner);
+    let loaded = LoadedBundle::read_with_limits_probe(&path, limits.clone()).unwrap();
+    let inputs = loaded.root().unwrap().input_manifest_ref.clone();
+    let reopened = Core::spawn(Document::default()).unwrap();
+    loaded.restore_manual(&reopened).unwrap();
+    owner = Ja1EditingSession::from_bundle(
+        loaded
+            .into_writer_with_limits_probe(limits.clone())
+            .unwrap(),
+        &reopened,
+        inputs,
+    )
+    .unwrap();
+    let interrupted = kinewright_project::io_observer::fail_nth("root_file_sync", 4, || {
+        owner.reconcile_manual_chain(&"a".repeat(64), &pending, Some(&expected))
+    });
+    assert!(interrupted.is_err());
+    let committed = pending
+        .iter()
+        .take_while(|message| {
+            matches!(
+                owner.manual_receipt(message).unwrap(),
+                kinewright_project::receipts::ReceiptLookup::Committed(_)
+                    | kinewright_project::receipts::ReceiptLookup::Retired(_)
+            )
+        })
+        .count();
+    assert!(
+        committed > 0 && committed < pending.len(),
+        "must fail after a durable prefix: {committed}/{}",
+        pending.len()
+    );
+    let original =
+        kinewright_project::manual_history::AcceptedManualCommand::decode(&pending[committed - 1])
+            .unwrap();
+    assert_eq!(
+        kinewright_project::manual_history::history_sha256(&reopened.export_history().unwrap())
+            .unwrap(),
+        original.envelope.manual.unwrap().after_sha256,
+        "a later failure must keep the committed prefix installed"
+    );
+    owner
+        .reconcile_manual_chain(&"a".repeat(64), &pending, Some(&expected))
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    owner
+        .reconcile_manual_chain(&"a".repeat(64), &pending, Some(&expected))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(reopened.export_history().unwrap(), expected);
+    for message in &pending {
+        assert!(matches!(
+            owner.manual_receipt(message).unwrap(),
+            kinewright_project::receipts::ReceiptLookup::Committed(_)
+                | kinewright_project::receipts::ReceiptLookup::Retired(_)
+        ));
+    }
+    drop(owner);
+    let cold = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read_with_limits_probe(&path, limits)
+        .unwrap()
+        .restore_manual(&cold)
+        .unwrap();
+    assert_eq!(cold.export_history().unwrap(), expected);
+    println!(
+        "RECOVERED_PENDING_FLOORS={floors};messages={}",
+        pending.len()
+    );
+}
+
+#[test]
+fn never_saved_ordinary_endpoint_floors_repeatedly_without_waiting_for_an_ack() {
+    use kinewright_project::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 100_000,
+        ..StorageLimits::default()
+    };
+    let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+        OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+    ));
+    let mut floors = 0;
+    let mut offset = 0;
+    for index in 0..60 {
+        assert!(matches!(
+            admission
+                .request(
+                    &core,
+                    Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: index % 2 == 0
+                    })
+                )
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let history = core.export_history_for_publication().unwrap();
+        assert!(history.ordinary_floor_source.is_none());
+        if history.floor_offset > offset {
+            floors += 1;
+            offset = history.floor_offset;
+        }
+    }
+    assert!(floors > 2);
+    println!("UNSAVED_ENDPOINT_FLOORS={floors}");
+    // First Save may have landed even when its durable acknowledgement is lost.
+    // A later runtime floor must remain publishable from that exact root too.
+    for landed in [false, true] {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "first-save-runtime-floor");
+        let path = temp.path("first.kinewright");
+        let branch = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner = Ja1EditingSession::new(temp.root(), &branch, limits.clone()).unwrap();
+        let status = kinewright_project::io_observer::fail_once(
+            if landed {
+                "root_parent_sync"
+            } else {
+                "root_rename_io"
+            },
+            || owner.first_save(&path, limits.clone()),
+        )
+        .unwrap();
+        assert!(matches!(
+            status,
+            kinewright_project::bundle_copy::CopyStatus::DurabilityUnknown
+        ));
+        let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+            OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+        ));
+        assert!(branch.pending_history_save().unwrap().is_some());
+        let mut accepted = 0;
+        let mut refused = false;
+        for index in 0..30 {
+            let before = branch.export_history().unwrap();
+            match admission
+                .request(
+                    &branch,
+                    Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: index % 2 == 0,
+                    }),
+                )
+                .unwrap()
+            {
+                Event::DocumentChanged { .. } => accepted += 1,
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualSaveRequired,
+                    ..
+                } => {
+                    assert_eq!(branch.export_history().unwrap(), before);
+                    refused = true;
+                    break;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let expected = branch.export_history().unwrap();
+        assert!(accepted > 0);
+        assert!(refused, "an uncertain first root must stop a moving floor");
+        assert_eq!(expected.floor_offset, 0);
+        let saved = owner.save_active();
+        println!(
+            "FIRST_SAVE_RUNTIME_FLOOR landed={landed} accepted={accepted} floor={} saved={saved:?}",
+            expected.floor_offset
+        );
+        saved.unwrap();
+        assert!(branch.pending_history_save().unwrap().is_none());
+        assert_eq!(branch.export_history().unwrap(), expected);
+        drop(owner);
+        let cold = Core::spawn(Document::default()).unwrap();
+        LoadedBundle::read_with_limits_probe(&path, limits.clone())
+            .unwrap()
+            .restore_manual(&cold)
+            .unwrap();
+        assert_eq!(cold.export_history().unwrap(), expected);
+    }
+}
+
+#[test]
+fn named_core_only_endpoint_requires_save_instead_of_promising_an_automatic_ack() {
+    use kinewright_project::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "ordinary-final-save-instruction");
+    let path = temp.path("named.kinewright");
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 100_000,
+        ..StorageLimits::default()
+    };
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, limits.clone()).unwrap();
+    owner.first_save(&path, limits.clone()).unwrap();
+    let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+        OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+    ));
+    let mut refused = false;
+    for index in 0..60 {
+        let before = core.export_history_for_publication().unwrap();
+        let command = Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: index % 2 == 0,
+        });
+        match admission.request(&core, command.clone()).unwrap() {
+            Event::DocumentChanged { .. } => {}
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualSaveRequired,
+                ..
+            } => {
+                assert!(before.ordinary_floor_source.is_some());
+                assert_eq!(core.export_history_for_publication().unwrap(), before);
+                assert_eq!(
+                    CoreMutationRefusal::ManualSaveRequired.to_string(),
+                    "Save the project to keep editing."
+                );
+                // An identical retry, with no person action, remains final.
+                assert!(matches!(
+                    admission.request(&core, command).unwrap(),
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualSaveRequired,
+                        ..
+                    }
+                ));
+                refused = true;
+                break;
+            }
+            other => panic!("no automatic publisher: {other:?}"),
+        }
+    }
+    assert!(refused);
+}
+
+#[test]
+fn durable_delta_session_saves_its_unpublished_tail_without_a_runtime_floor_gap() {
+    use kinewright_project::{
+        editing_session::DurableBranchRole,
+        manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits},
+    };
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "session-no-runtime-floor");
+    let path = temp.path("session.kinewright");
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 100_000,
+        ..StorageLimits::default()
+    };
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, limits.clone()).unwrap();
+    owner.first_save(&path, limits.clone()).unwrap();
+    let mut session = owner
+        .fork_durable_branch("legacy session", DurableBranchRole::Session)
+        .unwrap();
+    let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+        OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+    ));
+    let mut refused = false;
+    for index in 0..60 {
+        let before = session.core().export_history().unwrap();
+        match admission
+            .request(
+                session.core(),
+                Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index % 2 == 0,
+                }),
+            )
+            .unwrap()
+        {
+            Event::DocumentChanged { .. } => {}
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ThreadHistoryCapacity,
+                ..
+            } => {
+                assert_eq!(before, session.core().export_history().unwrap());
+                refused = true;
+                break;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(refused);
+    let expected = session.core().export_history().unwrap();
+    assert_eq!(expected.floor_offset, 0);
+    assert!(session.core().ordinary_floor_source().unwrap().is_none());
+    let base = owner.persist_durable_branch(&mut session).unwrap();
+    owner.persist_durable_branch(&mut session).unwrap();
+    assert_eq!(*owner.durable_branch_history(&session).unwrap(), expected);
+    let branch = session.branch_id().clone();
+    drop(session);
+    drop(owner);
+    let loaded = LoadedBundle::read_with_limits_probe(&path, limits.clone()).unwrap();
+    let inputs = loaded.root().unwrap().input_manifest_ref.clone();
+    let live = Core::spawn(Document::default()).unwrap();
+    loaded.restore_manual(&live).unwrap();
+    let mut owner = Ja1EditingSession::from_bundle(
+        loaded.into_writer_with_limits_probe(limits).unwrap(),
+        &live,
+        inputs,
+    )
+    .unwrap();
+    let restored = owner
+        .reopen_durable_branch(branch, &base, "legacy session", DurableBranchRole::Session)
+        .unwrap();
+    assert_eq!(restored.core().export_history().unwrap(), expected);
+}
+
+#[test]
+#[ignore = "on-demand: paired debug lease, edit and publication costs at 1000, 1980, floored 12000 edits and 400 clips"]
+fn history_fix3_followon_costs() {
+    use std::time::Instant;
+    for (row, document, setup) in [
+        (
+            "1000",
+            Document {
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            },
+            1_000,
+        ),
+        (
+            "1980",
+            Document {
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            },
+            1980,
+        ),
+        (
+            "12000-floored",
+            Document {
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            },
+            12000,
+        ),
+        (
+            "400",
+            {
+                let mut document = heavy_document_with_keys(400, 8);
+                for clip in 2..=400 {
+                    Operation::CopyClipAttributes {
+                        from_clip: ClipId(1),
+                        to_clip: ClipId(clip),
+                        names: None,
+                        include_keyframes: true,
+                    }
+                    .apply(&mut document)
+                    .unwrap();
+                }
+                document
+            },
+            0,
+        ),
+    ] {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "fix3-followon-costs");
+        let path = temp.path("cost.kinewright");
+        let host = Core::spawn(document).unwrap();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &host, StorageLimits::default()).unwrap();
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        for index in 0..setup {
+            host.request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: index % 2 == 0,
+            }))
+            .unwrap();
+        }
+        let start = Instant::now();
+        owner.save_active().unwrap();
+        println!(
+            "FOLLOWON_INITIAL_SAVE={}",
+            serde_json::json!({"row":row,"milliseconds":start.elapsed().as_secs_f64()*1000.0})
+        );
+        let lease = owner
+            .issue_manual_lease("cost-person".into(), "cost-local".into())
+            .unwrap();
+        let gui = Core::spawn(Document::default()).unwrap();
+        gui.restore_history(host.export_history().unwrap()).unwrap();
+        let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+        let start = Instant::now();
+        let permit = replica
+            .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
+            .unwrap();
+        println!(
+            "FOLLOWON_LEASE={}",
+            serde_json::json!({"row":row,"milliseconds":start.elapsed().as_secs_f64()*1000.0})
+        );
+        for index in 0..12 {
+            let before = gui.export_history().unwrap();
+            let start = Instant::now();
+            let event = permit
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index % 2 == 0,
+                }))
+                .unwrap();
+            let edit_ms = start.elapsed().as_secs_f64() * 1000.0;
+            if !matches!(event, Event::DocumentChanged { .. }) {
+                println!(
+                    "FOLLOWON_REFUSAL={}",
+                    serde_json::json!({"row":row,"index":index,"reason":format!("{event:?}"),"milliseconds":edit_ms})
+                );
+                break;
+            }
+            let after = gui.export_history().unwrap();
+            let pending = permit.pending().unwrap();
+            let start = Instant::now();
+            owner.commit_manual_history(&lease, &pending[0]).unwrap();
+            let save_ms = start.elapsed().as_secs_f64() * 1000.0;
+            replica.acknowledge_manual(&permit, pending).unwrap();
+            let start = Instant::now();
+            owner.save_active().unwrap();
+            let quiet_save_ms = start.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "FOLLOWON_EDIT_SAVE={}",
+                serde_json::json!({"row":row,"index":index,"moving":before.floor_offset != after.floor_offset,"floor":after.floor_offset,"depth":after.cursor.undo.len(),"hand_edit_ms":edit_ms,"save_ms":save_ms,"quiet_save_ms":quiet_save_ms,"batches_before":before.batches.len()})
+            );
+        }
+        let expected = gui.export_history().unwrap();
+        println!(
+            "FOLLOWON_CUT={}",
+            serde_json::json!({"row":row,"retained_bytes":history_size::history_live_bytes(&expected).unwrap(),"floor":expected.floor_offset,"depth":expected.cursor.undo.len()})
+        );
+        drop(owner);
+        let cold = Core::spawn(Document::default()).unwrap();
+        LoadedBundle::read(&path)
+            .unwrap()
+            .restore_manual(&cold)
+            .unwrap();
+        assert_eq!(cold.export_history().unwrap(), expected);
+    }
+}
+
+#[test]
+fn unsaved_host_handoff_keeps_a_floored_snapshot_without_a_disk_bridge() {
+    use kinewright_project::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "unsaved-floored-handoff");
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: 100_000,
+        ..StorageLimits::default()
+    };
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, limits.clone()).unwrap();
+    let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+        OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+    ));
+    for index in 0..30 {
+        assert!(matches!(
+            admission
+                .request(
+                    &core,
+                    Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: index % 2 == 0
+                    })
+                )
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+    }
+    let expected = core.export_history().unwrap();
+    assert!(expected.floor_offset > 0);
+    assert!(core.ordinary_floor_source().unwrap().is_none());
+    let prepared = owner.prepare_host_attachment().unwrap();
+    assert_eq!(prepared.history, expected);
+    let descriptor = prepared.source.as_ref().unwrap();
+    let service = prepared.source_service.as_ref().unwrap();
+    let binding = service
+        .ensure_snapshot(descriptor, &prepared.history)
+        .unwrap();
+    service.prove_snapshot(descriptor, &binding).unwrap();
+    let encoded =
+        serde_json::to_vec(&HistoryTransport::capture(&prepared.history).unwrap()).unwrap();
+    let transport: HistoryTransport = serde_json::from_slice(&encoded).unwrap();
+    let reopened = transport
+        .journal
+        .resolve_canonical_with_budget(
+            &transport.baseline,
+            &transport.document,
+            limits.branch_history_bytes,
+            None,
+        )
+        .unwrap();
+    assert_eq!(reopened.snapshot(), &expected);
+}
+
+#[test]
+fn uncertain_save_as_keeps_the_frozen_copy_and_the_active_floor_bridge_separate() {
+    use kinewright_project::{
+        bundle_copy::CopyStatus,
+        manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits},
+    };
+    for landed in [false, true] {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "unknown-copy-floor");
+        let path = temp.path("original.kinewright");
+        let copied = temp.path("copy.kinewright");
+        let limits = StorageLimits {
+            branch_history_bytes: 100_000,
+            ..StorageLimits::default()
+        };
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner = Ja1EditingSession::new(temp.root(), &core, limits.clone()).unwrap();
+        owner.first_save(&path, limits.clone()).unwrap();
+        let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+            OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+        ));
+        for index in 0..4 {
+            assert!(matches!(
+                admission
+                    .request(
+                        &core,
+                        Command::Do(Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: index % 2 == 0
+                        })
+                    )
+                    .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            owner.save_active().unwrap();
+        }
+        let frozen = core.export_history().unwrap();
+        let status = kinewright_project::io_observer::fail_once(
+            if landed {
+                "root_parent_sync"
+            } else {
+                "root_rename_io"
+            },
+            || owner.save_as(&copied, limits.clone()),
+        )
+        .unwrap();
+        assert!(matches!(status, CopyStatus::DurabilityUnknown));
+        let mut floors = 0;
+        for index in 0..20 {
+            let before = core.export_history().unwrap();
+            match admission
+                .request(
+                    &core,
+                    Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: index % 2 == 0,
+                    }),
+                )
+                .unwrap()
+            {
+                Event::DocumentChanged { .. } => {}
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualSaveRequired,
+                    ..
+                } => {
+                    assert_eq!(core.export_history().unwrap(), before);
+                    owner.save_active().unwrap();
+                    assert!(matches!(
+                        admission
+                            .request(
+                                &core,
+                                Command::Do(Operation::SetTrackSyncLock {
+                                    track: TrackId(1),
+                                    locked: index % 2 == 0
+                                })
+                            )
+                            .unwrap(),
+                        Event::DocumentChanged { .. }
+                    ));
+                }
+                other => panic!("{other:?}"),
+            }
+            floors +=
+                usize::from(core.export_history().unwrap().floor_offset > before.floor_offset);
+        }
+        assert!(floors > 1);
+        owner.save_active().unwrap();
+        owner.reconcile_retained_destination(&copied).unwrap();
+        let expected = core.export_history().unwrap();
+        drop(owner);
+        let cold = Core::spawn(Document::default()).unwrap();
+        LoadedBundle::read_with_limits_probe(&path, limits.clone())
+            .unwrap()
+            .restore_manual(&cold)
+            .unwrap();
+        assert_eq!(cold.export_history().unwrap(), expected);
+        if landed {
+            let copy = Core::spawn(Document::default()).unwrap();
+            LoadedBundle::read_with_limits_probe(&copied, limits)
+                .unwrap()
+                .restore_manual(&copy)
+                .unwrap();
+            assert_eq!(copy.export_history().unwrap(), frozen);
+        } else {
+            assert!(!copied.exists());
+        }
+        println!("UNKNOWN_SAVE_AS_FLOOR landed={landed} floors={floors}");
+    }
 }

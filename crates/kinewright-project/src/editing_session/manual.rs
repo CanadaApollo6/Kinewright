@@ -62,6 +62,16 @@ impl Ja1EditingSession {
         token: String,
     ) -> Result<ManualLease, BundleError> {
         self.require_local_writer()?;
+        if self
+            .core
+            .ordinary_floor_source()
+            .map_err(crate::bundle::history_error)?
+            .is_some()
+        {
+            // This endpoint owns its destination. Settle the bridge itself
+            // before issuing a successor lease; no person action is needed.
+            self.save_active()?;
+        }
         let core = self.core.clone();
         let inputs = self.inputs.clone();
         let history = core
@@ -249,7 +259,7 @@ impl Ja1EditingSession {
         originals: &[crate::receipts::CommandEnvelope],
         expected: &kinewright_core::HistorySnapshot,
     ) -> Result<(), BundleError> {
-        use kinewright_core::{AttachmentState, Command, Event};
+        use kinewright_core::AttachmentState;
         let bundle = self.active_bundle()?;
         if bundle.unsettled || bundle.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -307,181 +317,49 @@ impl Ja1EditingSession {
             ),
         )?;
         lease.inputs = inputs;
-        let before = self
-            .core
-            .export_history_for_publication()
-            .map_err(crate::bundle::history_error)?;
-        let original_issuer = self.active_bundle()?.issuers[&lease.issuer].clone();
-        let _overlap = self.active_bundle()?.store.reserve_history_shadow(
-            before
-                .encoded_bytes()
-                .map_err(crate::bundle::history_error)?,
-        )?;
-        let mut attempted = false;
-        let outcome = (|| {
-            let mut envelopes = Vec::with_capacity(originals.len());
-            let mut encoded = 0_u64;
-            for (index, original) in originals.iter().enumerate() {
-                let mut renewed = original.clone();
-                renewed.owner_epoch = lease.owner_epoch;
-                renewed.id = crate::receipts::CommandId {
-                    issuer: lease.issuer.clone(),
-                    sequence: u64::try_from(index + 1)
-                        .map_err(|_| BundleError::Capacity("manual recovery sequence"))?,
-                };
-                renewed.lease = Some(lease.token.clone());
-                renewed.expected_head = Some(lease.anchor_head.clone());
-                renewed.expected_revision = self
-                    .attachment
-                    .capture()
-                    .map_err(crate::bundle::history_error)?
-                    .revision();
-                let manual = renewed.manual.as_mut().ok_or(BundleError::HistoryChanged)?;
-                manual.binding = lease.clone();
-                manual.recovery_origin = Some(crate::receipts::OriginalCommand {
-                    id: original.id.clone(),
-                    digest: original.digest()?,
-                });
-                encoded = encoded
-                    .checked_add(renewed.encoded_bytes()?)
-                    .ok_or(BundleError::Capacity("manual recovery controls"))?;
-                envelopes.push(renewed);
-            }
-            let reservation = self.active_bundle()?.store.reserve(
-                0,
-                encoded
-                    .checked_mul(3)
-                    .ok_or(BundleError::Capacity("manual recovery overlap"))?,
-                0,
-                false,
-            )?;
-            let mut predecessor = lease.predecessor.clone();
-            for original in originals {
-                let metadata = original
-                    .manual
-                    .as_ref()
-                    .ok_or(BundleError::HistoryChanged)?;
-                if metadata.recovery_origin.is_some()
-                    || original.project_id != lease.project
-                    || original.target_branch != lease.branch
-                    || metadata.binding.switch_generation != lease.switch_generation
-                    || metadata.binding.inputs != lease.inputs
-                    || metadata.predecessor != predecessor
-                    || history_sha256(
-                        &self
-                            .core
-                            .export_history_for_publication()
-                            .map_err(crate::bundle::history_error)?,
-                    )? != metadata.before_sha256
-                {
-                    return Err(BundleError::HistoryChanged);
-                }
-                if !matches!(
-                    self.core
-                        .request(Command::from(
-                            original
-                                .command
-                                .clone()
-                                .ok_or(BundleError::HistoryChanged)?
-                        ))
-                        .map_err(|_| BundleError::HistoryChanged)?,
-                    Event::DocumentChanged { .. }
-                ) {
-                    return Err(BundleError::HistoryChanged);
-                }
-                let after = self
-                    .core
-                    .export_history_for_publication()
-                    .map_err(crate::bundle::history_error)?;
-                if history_sha256(&after)? != metadata.after_sha256
-                    || after.batches.last() != Some(&metadata.batch)
-                    || kinewright_media::sha256_bytes(
-                        &serde_json::to_vec(
-                            &kinewright_core::HistoryJournal::capture(&after)
-                                .map_err(crate::bundle::history_error)?
-                                .cursor,
-                        )
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                    ) != metadata.cursor_sha256
-                {
-                    return Err(BundleError::HistoryChanged);
-                }
-                predecessor = Some(metadata.batch_id.clone());
-            }
-            let after = self
-                .core
-                .export_history_for_publication()
-                .map_err(crate::bundle::history_error)?;
-            let selected = self
-                .destination
-                .as_ref()
-                .ok_or(BundleError::Unsettled)?
-                .bundle()?
-                .store()
-                .with_history_admission(
-                    crate::history_record::HistoryRole::Ordinary,
-                    &limits,
-                    || crate::bundle_commit::bound_history(&after, &limits),
-                )?;
+        // Commit each accepted cut in order. Each message uses the ordinary
+        // publisher's exact-floor transaction and its own original receipt.
+        // A later failure cannot roll back an earlier durable acknowledgement.
+        for (index, original) in originals.iter().enumerate() {
+            let mut renewed = original.clone();
+            renewed.owner_epoch = lease.owner_epoch;
+            renewed.id = crate::receipts::CommandId {
+                issuer: lease.issuer.clone(),
+                sequence: u64::try_from(index + 1)
+                    .map_err(|_| BundleError::Capacity("manual recovery sequence"))?,
+            };
+            renewed.lease = Some(lease.token.clone());
+            renewed.expected_head = Some(lease.anchor_head.clone());
+            renewed.expected_revision = self
+                .attachment
+                .capture()
+                .map_err(crate::bundle::history_error)?
+                .revision();
+            let metadata = renewed.manual.as_mut().ok_or(BundleError::HistoryChanged)?;
+            metadata.binding = lease.clone();
+            metadata.recovery_origin = Some(crate::receipts::OriginalCommand {
+                id: original.id.clone(),
+                digest: original.digest()?,
+            });
             let bundle = self
                 .destination
                 .as_mut()
                 .ok_or(BundleError::Unsettled)?
                 .bundle_mut()?;
-            bundle.pending_command = Some(
-                reservation.hold(envelopes.last().ok_or(BundleError::HistoryChanged)?.clone()),
-            );
-            bundle
-                .issuers
-                .get_mut(&lease.issuer)
-                .ok_or(BundleError::HistoryChanged)?
-                .next_sequence = u64::try_from(originals.len())
-                .map_err(|_| BundleError::Capacity("manual recovery sequence"))?
-                .checked_add(1)
-                .ok_or(BundleError::Capacity("manual recovery sequence"))?;
-            attempted = true;
-            let report = crate::bundle_commit::BundleCommit::publish_recovery_batch(
+            let (_, report) = crate::bundle_commit::BundleCommit::recovered_history(
                 bundle,
-                &after,
-                &selected,
+                &renewed,
+                &self.core,
                 &lease.inputs,
-                &envelopes,
             )?;
-            bundle.pending_command = None;
-            Ok(report)
-        })();
-        match outcome {
-            Ok(report) => {
-                self.inputs.clone_from(&lease.inputs);
-                if let Some(association) = &mut self.association {
-                    association.saved = Some(report.history_sha256);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                let bundle = self
-                    .destination
-                    .as_mut()
-                    .ok_or(BundleError::Unsettled)?
-                    .bundle_mut()?;
-                if !attempted
-                    || !matches!(
-                        bundle.publication_state,
-                        crate::bundle::PublicationState::Unknown
-                            | crate::bundle::PublicationState::Committed
-                    )
-                {
-                    bundle.pending_command = None;
-                    bundle.issuers.insert(lease.issuer, original_issuer);
-                    self.attachment
-                        .restore_history(before)
-                        .map_err(crate::bundle::history_error)?;
-                } else {
-                    bundle.unsettled = true;
-                }
-                Err(error)
+            if let Some(report) = report
+                && let Some(association) = &mut self.association
+            {
+                association.saved = Some(report.history_sha256);
             }
         }
+        self.inputs.clone_from(&lease.inputs);
+        Ok(())
     }
 
     pub fn published_manual_history(
@@ -846,10 +724,388 @@ mod c0_fix1_tests {
     use crate::{
         bundle::BundleWriteAdmission,
         bundle_records::{ObjectRef, ProjectId, RecordKind},
+        storage_budget::StorageLimits,
         store::BundleRecord,
     };
     use kinewright_core::{AssetId, Command, Core, Document, Operation};
     use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+
+    fn floor_fixture() -> (
+        TempDirectory,
+        std::path::PathBuf,
+        Core,
+        Ja1EditingSession,
+        StorageLimits,
+    ) {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-publication-routes");
+        let path = temp.path("project.kinewright");
+        let core = Core::spawn(Document {
+            tracks: vec![kinewright_core::Track {
+                id: kinewright_core::TrackId(1),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        for index in 0..4 {
+            core.request(Command::Do(Operation::SetTrackSyncLock {
+                track: kinewright_core::TrackId(1),
+                locked: index % 2 == 0,
+            }))
+            .unwrap();
+        }
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        let before = core.export_history().unwrap();
+        let mut low = 1;
+        let mut high = StorageLimits::default().branch_history_bytes;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let limits = StorageLimits {
+                branch_history_bytes: middle,
+                ..StorageLimits::default()
+            };
+            if crate::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
+                .unwrap()
+                .check(&before)
+                .is_ok()
+            {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let limits = StorageLimits {
+            branch_history_bytes: low + 128,
+            ..StorageLimits::default()
+        };
+        owner.restrict_manual_limits_probe(limits.clone()).unwrap();
+        (temp, path, core, owner, limits)
+    }
+    fn floor_producer(
+        temp: &TempDirectory,
+        owner: &mut Ja1EditingSession,
+        host: &Core,
+    ) -> (
+        ManualLease,
+        Core,
+        Ja1EditingSession,
+        kinewright_core::ManualPermit,
+    ) {
+        let lease = owner
+            .issue_manual_lease("a".repeat(64), "b".repeat(64))
+            .unwrap();
+        let gui = Core::spawn(Document::default()).unwrap();
+        gui.restore_history(host.export_history().unwrap()).unwrap();
+        let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+        let permit = replica
+            .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
+            .unwrap();
+        (lease, gui, replica, permit)
+    }
+    #[test]
+    fn ordinary_source_pressure_is_retryable_only_inside_the_real_publication_scope() {
+        use crate::manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits};
+        use kinewright_core::{CoreMutationRefusal, Event};
+        for fail in [false, true] {
+            let (temp, path, host, mut owner, limits) = floor_fixture();
+            let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+                OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+            ));
+            let mut waiting = None;
+            for index in 0..30 {
+                let command = Command::Do(Operation::SetTrackSyncLock {
+                    track: kinewright_core::TrackId(1),
+                    locked: index % 2 == 0,
+                });
+                match admission.request(&host, command.clone()).unwrap() {
+                    Event::DocumentChanged { .. } => {}
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualSaveRequired,
+                        ..
+                    } => {
+                        waiting = Some(command);
+                        break;
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            let waiting = waiting.expect("second unpublished floor");
+            let before = host.export_history().unwrap();
+            let disk = std::fs::read(&path).unwrap();
+            let moving = host.clone();
+            let checking = std::sync::Arc::clone(&admission);
+            let command = waiting.clone();
+            let seen = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = std::rc::Rc::clone(&seen);
+            let result = crate::io_observer::at_barrier(
+                "bundle_B0",
+                move || {
+                    if observed.replace(true) {
+                        return;
+                    }
+                    let before = moving.export_history().unwrap();
+                    assert!(matches!(
+                        checking.request(&moving, command.clone()).unwrap(),
+                        Event::MutationRefused {
+                            reason: CoreMutationRefusal::ManualBackpressure,
+                            ..
+                        }
+                    ));
+                    assert_eq!(moving.export_history().unwrap(), before);
+                },
+                || {
+                    if fail {
+                        crate::io_observer::fail_once("root_file_sync", || owner.save_active())
+                    } else {
+                        owner.save_active()
+                    }
+                },
+            );
+            assert!(seen.get());
+            if fail {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), disk);
+                assert_eq!(host.export_history().unwrap(), before);
+                assert!(matches!(
+                    admission.request(&host, waiting.clone()).unwrap(),
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualSaveRequired,
+                        ..
+                    }
+                ));
+                owner.save_active().unwrap();
+            } else {
+                result.unwrap();
+            }
+            assert!(host.ordinary_floor_source().unwrap().is_none());
+            assert!(matches!(
+                admission.request(&host, waiting).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            let expected = host.export_history().unwrap();
+            owner.save_active().unwrap();
+            drop(owner);
+            let cold = Core::spawn(Document::default()).unwrap();
+            crate::bundle::LoadedBundle::read_with_limits_probe(&path, limits)
+                .unwrap()
+                .restore_manual(&cold)
+                .unwrap();
+            assert_eq!(cold.export_history().unwrap(), expected);
+            drop(temp);
+        }
+    }
+
+    #[test]
+    fn lease_rebind_and_switch_publish_a_pending_floor_without_a_person_save() {
+        use crate::{
+            bundle_recovery::RecoverySelection,
+            bundle_switch::SwitchTarget,
+            manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits},
+        };
+        use kinewright_core::Event;
+        for switch in [false, true] {
+            let (temp, path, host, mut owner, limits) = floor_fixture();
+            let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+                OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+            ));
+            assert!(matches!(
+                admission
+                    .request(
+                        &host,
+                        Command::Do(Operation::SetTrackSyncLock {
+                            track: kinewright_core::TrackId(1),
+                            locked: true
+                        })
+                    )
+                    .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            assert!(host.ordinary_floor_source().unwrap().is_some());
+            let expected = host.export_history().unwrap();
+            let old_branch = owner.active_bundle().unwrap().manual_branch_id().clone();
+            let lease = owner
+                .issue_manual_lease("a".repeat(64), "rebound".into())
+                .unwrap();
+            assert!(host.ordinary_floor_source().unwrap().is_none());
+            assert_eq!(
+                *owner
+                    .active_bundle()
+                    .unwrap()
+                    .branch_history(&old_branch)
+                    .unwrap(),
+                expected
+            );
+            if switch {
+                let selection = owner
+                    .list_recovery_points()
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|point| {
+                        if let RecoverySelection::Checkpoint { root, branch } = point {
+                            Some(SwitchTarget::Snapshot {
+                                root,
+                                branch,
+                                version: "1".repeat(32),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                let envelope = owner.switch_envelope(&lease, selection).unwrap();
+                owner.prepare_host_switch(&envelope).unwrap();
+                owner.publish_host_switch(&envelope).unwrap();
+                assert_eq!(
+                    *owner
+                        .active_bundle()
+                        .unwrap()
+                        .branch_history(&old_branch)
+                        .unwrap(),
+                    expected
+                );
+            } else {
+                let gui = Core::spawn(Document::default()).unwrap();
+                gui.restore_history(expected.clone()).unwrap();
+                let replica =
+                    Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+                let permit = replica
+                    .bind_manual_producer(lease, owner.manual_input_context().unwrap())
+                    .unwrap();
+                assert!(permit.pending().unwrap().is_empty());
+            }
+            let published = owner.core().export_history().unwrap();
+            drop(owner);
+            let cold = Core::spawn(Document::default()).unwrap();
+            crate::bundle::LoadedBundle::read_with_limits_probe(&path, limits)
+                .unwrap()
+                .restore_manual(&cold)
+                .unwrap();
+            assert_eq!(cold.export_history().unwrap(), published);
+        }
+    }
+
+    #[test]
+    fn ordinary_save_ahead_of_the_published_end_is_typed_until_the_stream_drains() {
+        use kinewright_core::{CoreMutationRefusal, Event};
+        let (temp, path, host, mut owner, limits) = floor_fixture();
+        let (lease, gui, replica, permit) = floor_producer(&temp, &mut owner, &host);
+        let published_end = host.export_history().unwrap().batches.len() as u64;
+        for index in 0..30 {
+            assert!(matches!(
+                permit
+                    .request(Command::Do(Operation::SetTrackSyncLock {
+                        track: kinewright_core::TrackId(1),
+                        locked: index % 2 == 0
+                    }))
+                    .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            if gui.export_history().unwrap().floor_offset > published_end {
+                break;
+            }
+        }
+        let expected = gui.export_history().unwrap();
+        assert!(expected.floor_offset > published_end);
+        let disk = std::fs::read(&path).unwrap();
+        let inputs = owner.inputs.clone();
+        let result = owner.active_bundle_mut().unwrap().save(&gui, &inputs);
+        assert!(
+            matches!(
+                result,
+                Err(BundleError::CoreMutationRefused(
+                    CoreMutationRefusal::ManualBackpressure
+                ))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        assert_eq!(gui.export_history().unwrap(), expected);
+        let pending = permit.pending().unwrap();
+        for message in &pending {
+            owner.commit_manual_history(&lease, message).unwrap();
+        }
+        replica.acknowledge_manual(&permit, pending).unwrap();
+        owner.save_active().unwrap();
+        assert_eq!(host.export_history().unwrap(), expected);
+        drop(owner);
+        let cold = Core::spawn(Document::default()).unwrap();
+        crate::bundle::LoadedBundle::read_with_limits_probe(&path, limits)
+            .unwrap()
+            .restore_manual(&cold)
+            .unwrap();
+        assert_eq!(cold.export_history().unwrap(), expected);
+    }
+    #[test]
+    fn writer_keeps_shadow_backpressure_typed_and_the_identical_message_retries() {
+        use kinewright_core::{CoreMutationRefusal, Event};
+        let (temp, path, host, mut owner, limits) = floor_fixture();
+        let (lease, gui, replica, permit) = floor_producer(&temp, &mut owner, &host);
+        assert!(matches!(
+            permit
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: kinewright_core::TrackId(1),
+                    locked: false
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let expected = gui.export_history().unwrap();
+        assert!(expected.floor_offset > host.export_history().unwrap().floor_offset);
+        let message = permit.pending().unwrap().remove(0);
+        let disk = std::fs::read(&path).unwrap();
+        let holder = std::rc::Rc::new(std::cell::RefCell::new(owner));
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let checking = std::rc::Rc::clone(&holder);
+        let seen = std::rc::Rc::clone(&observed);
+        let retry_lease = lease.clone();
+        let retry_message = message.clone();
+        let mut competing = crate::bundle::ProjectBundle::activate(
+            &temp.path("competing.kinewright"),
+            BundleWriteAdmission::new_document(),
+        )
+        .unwrap();
+        let inputs = competing.empty_inputs().unwrap().reference.clone();
+        competing
+            .restrict_limits_probe(StorageLimits {
+                branch_history_bytes: limits.branch_history_bytes - 129,
+                ..limits
+            })
+            .unwrap();
+        let result = crate::io_observer::at_barrier(
+            "bundle_B0",
+            move || {
+                if seen.replace(true) {
+                    return;
+                }
+                let result = checking
+                    .borrow_mut()
+                    .commit_manual_history(&retry_lease, &retry_message);
+                assert!(
+                    matches!(
+                        result,
+                        Err(BundleError::CoreMutationRefused(
+                            CoreMutationRefusal::ManualBackpressure
+                        ))
+                    ),
+                    "{result:?}"
+                );
+            },
+            || crate::io_observer::fail_once("root_file_sync", || competing.save(&host, &inputs)),
+        );
+        assert!(observed.get());
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        holder
+            .borrow_mut()
+            .commit_manual_history(&lease, &message)
+            .unwrap();
+        replica.acknowledge_manual(&permit, vec![message]).unwrap();
+        assert_eq!(host.export_history().unwrap(), expected);
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)]

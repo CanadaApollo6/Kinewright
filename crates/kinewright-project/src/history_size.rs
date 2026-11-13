@@ -1,5 +1,49 @@
 //! The store uses the same typed bound as portable Core history decoding.
 use crate::bundle::BundleError;
+
+/// A complete ordinary admission made here, bound to its values and policy.
+/// Core's replay proof alone cannot certify the Project admission checks.
+#[derive(Debug, Clone)]
+pub(crate) struct OrdinaryHistoryProof {
+    replay: kinewright_core::ResolvedHistory,
+    limits: crate::storage_budget::StorageLimits,
+}
+impl OrdinaryHistoryProof {
+    pub(crate) fn snapshot(&self) -> &kinewright_core::HistorySnapshot {
+        self.replay.snapshot()
+    }
+    pub(crate) const fn replay(&self) -> &kinewright_core::ResolvedHistory {
+        &self.replay
+    }
+    pub(crate) fn share_canonical_documents(
+        mut self,
+        history: &kinewright_core::HistorySnapshot,
+    ) -> Result<Self, BundleError> {
+        self.replay = self.replay.share_canonical_documents(history)
+            .map_err(crate::bundle::history_error)?;
+        Ok(self)
+    }
+    pub(crate) fn admits(
+        &self,
+        history: &kinewright_core::HistorySnapshot,
+        limits: &crate::storage_budget::StorageLimits,
+    ) -> bool {
+        self.limits == *limits && self.snapshot() == history
+    }
+}
+pub(crate) fn verify_ordinary_history(
+    history: &kinewright_core::HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+    prefix: Option<&OrdinaryHistoryProof>,
+) -> Result<OrdinaryHistoryProof, BundleError> {
+    let (_, replay) = verify_history_admission_with_prefix(
+        history,
+        crate::history_record::HistoryRole::Ordinary,
+        limits,
+        prefix.map(OrdinaryHistoryProof::replay),
+    )?;
+    Ok(OrdinaryHistoryProof { replay, limits: limits.clone() })
+}
 pub(crate) fn payload(value: &impl serde::Serialize) -> Result<u64, BundleError> {
     let bytes = serde_json::to_vec(value).map_err(crate::bundle::encoding_error)?;
     crate::store::preflight_record(&bytes, &crate::storage_budget::StorageLimits::default())

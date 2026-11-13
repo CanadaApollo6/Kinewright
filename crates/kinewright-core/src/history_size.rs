@@ -147,6 +147,33 @@ pub fn document_live_bytes(document: &Document) -> Result<u64, HistoryError> {
     document_bytes(document, false)
 }
 
+// Callers have already checked value equality. Every capacity-sensitive term
+// in document_bytes/transport_document_bytes is compared here; payload charges
+// depend only on those equal values. Keep this next to the accounting walk.
+pub(crate) fn same_document_geometry(left: &Document, right: &Document) -> bool {
+    let curve = |value: &Option<crate::AutomationCurve>| {
+        value.as_ref().map(|curve| curve.keyframes.capacity())
+    };
+    left.tracks.capacity() == right.tracks.capacity()
+        && left.media_pool.capacity() == right.media_pool.capacity()
+        && left.markers.capacity() == right.markers.capacity()
+        && left.lut_assets.capacity() == right.lut_assets.capacity()
+        && left.tracks.iter().zip(&right.tracks).all(|(left, right)| {
+            left.clips.capacity() == right.clips.capacity()
+                && left.clips.iter().zip(&right.clips).all(|(left, right)| {
+                    left.effects.capacity() == right.effects.capacity()
+                        && curve(&left.audio_gain_curve) == curve(&right.audio_gain_curve)
+                        && curve(&left.enabled_curve) == curve(&right.enabled_curve)
+                        && match (&left.content, &right.content) {
+                            (ClipContent::Title(left), ClipContent::Title(right)) => {
+                                left.text.capacity() == right.text.capacity()
+                            }
+                            _ => true,
+                        }
+                })
+        })
+}
+
 fn transport_padding<T>(values: &Vec<T>) -> Result<u64, HistoryError> {
     replay_array_padding::<T>(values.len(), values.capacity())
 }
@@ -155,6 +182,18 @@ fn transport_vector_bytes<T>(values: &Vec<T>) -> Result<u64, HistoryError> {
     sum([
         allocation::<T>(values.capacity())?,
         transport_padding(values)?,
+    ])
+}
+
+fn input_vector_bytes<T>(values: &Vec<T>, canonical: bool) -> Result<u64, HistoryError> {
+    let capacity = if canonical {
+        values.len()
+    } else {
+        values.capacity()
+    };
+    sum([
+        allocation::<T>(capacity)?,
+        replay_array_padding::<T>(values.len(), capacity)?,
     ])
 }
 
@@ -178,23 +217,36 @@ fn replay_array_padding<T>(length: usize, retained_capacity: usize) -> Result<u6
     allocation::<T>(capacity.saturating_sub(retained_capacity))
 }
 
-fn transport_document_bytes(document: &Document) -> Result<u64, HistoryError> {
+pub(crate) fn transport_document_bytes(document: &Document) -> Result<u64, HistoryError> {
+    input_document_bytes(document, false)
+}
+fn input_document_bytes(document: &Document, canonical: bool) -> Result<u64, HistoryError> {
+    fn padding<T>(values: &Vec<T>, canonical: bool) -> Result<u64, HistoryError> {
+        replay_array_padding::<T>(
+            values.len(),
+            if canonical {
+                values.len()
+            } else {
+                values.capacity()
+            },
+        )
+    }
     let mut bytes = sum([
-        document_live_bytes(document)?,
-        transport_padding(&document.tracks)?,
-        transport_padding(&document.media_pool)?,
-        transport_padding(&document.markers)?,
-        transport_padding(&document.lut_assets)?,
+        document_bytes(document, canonical)?,
+        padding(&document.tracks, canonical)?,
+        padding(&document.media_pool, canonical)?,
+        padding(&document.markers, canonical)?,
+        padding(&document.lut_assets, canonical)?,
     ])?;
     for track in &document.tracks {
-        bytes = sum([bytes, transport_padding(&track.clips)?])?;
+        bytes = sum([bytes, padding(&track.clips, canonical)?])?;
         for clip in &track.clips {
-            bytes = sum([bytes, transport_padding(&clip.effects)?])?;
+            bytes = sum([bytes, padding(&clip.effects, canonical)?])?;
             for curve in [&clip.audio_gain_curve, &clip.enabled_curve]
                 .into_iter()
                 .flatten()
             {
-                bytes = sum([bytes, transport_padding(&curve.keyframes)?])?;
+                bytes = sum([bytes, padding(&curve.keyframes, canonical)?])?;
             }
         }
     }
@@ -504,19 +556,30 @@ fn identity_owned_bytes(
 // source command heap, replay command/cursor/log heap, operation count.
 fn command_metadata_bytes(
     command: &crate::JournalCommand,
+    canonical: bool,
 ) -> Result<(u64, u64, usize), HistoryError> {
     use crate::JournalCommand;
     let (operations, vector, key) = match command {
         JournalCommand::Do(operation) => (std::slice::from_ref(operation), None, None),
-        JournalCommand::DoBatch(operations) => {
-            (operations.as_slice(), Some(operations.capacity()), None)
-        }
+        JournalCommand::DoBatch(operations) => (
+            operations.as_slice(),
+            Some(if canonical {
+                operations.len()
+            } else {
+                operations.capacity()
+            }),
+            None,
+        ),
         JournalCommand::DoBatchCoalesced {
             operations,
             coalesce_key,
         } => (
             operations.as_slice(),
-            Some(operations.capacity()),
+            Some(if canonical {
+                operations.len()
+            } else {
+                operations.capacity()
+            }),
             Some(coalesce_key),
         ),
         JournalCommand::Undo | JournalCommand::Redo => (&[][..], None, None),
@@ -532,7 +595,10 @@ fn command_metadata_bytes(
                 replay_array_padding::<crate::Operation>(operations.len(), capacity)?,
             ])
         })?,
-        key.map_or(0, |key| key.capacity() as u64),
+        key.map_or(
+            0,
+            |key| if canonical { key.len() } else { key.capacity() } as u64,
+        ),
     ])?;
     let replay = sum([
         owned.checked_mul(3).ok_or(HistoryError::Capacity)?,
@@ -544,27 +610,43 @@ fn command_metadata_bytes(
     Ok((source, replay, operations.len()))
 }
 fn replay_metadata_bytes(
+    canonical: bool,
     journal: &crate::HistoryJournal,
     baseline: &Document,
     current: &Document,
 ) -> Result<u64, HistoryError> {
     let mut bytes = sum([
         size_of::<crate::HistoryJournal>() as u64,
-        transport_vector_bytes(&journal.batches)?,
-        journal.baseline_sha256.capacity() as u64,
-        journal.document_sha256.capacity() as u64,
-        transport_vector_bytes(&journal.cursor.undo)?,
-        transport_vector_bytes(&journal.cursor.redo)?,
+        input_vector_bytes(&journal.batches, canonical)?,
+        if canonical {
+            journal.baseline_sha256.len()
+        } else {
+            journal.baseline_sha256.capacity()
+        } as u64,
+        if canonical {
+            journal.document_sha256.len()
+        } else {
+            journal.document_sha256.capacity()
+        } as u64,
+        input_vector_bytes(&journal.cursor.undo, canonical)?,
+        input_vector_bytes(&journal.cursor.redo, canonical)?,
         crate::history::encoded_size(&(baseline, current, journal))?
             .checked_mul(2)
             .ok_or(HistoryError::Capacity)?,
     ])?;
     for hash in journal.cursor.undo.iter().chain(&journal.cursor.redo) {
-        bytes = sum([bytes, hash.capacity() as u64])?;
+        bytes = sum([
+            bytes,
+            if canonical {
+                hash.len()
+            } else {
+                hash.capacity()
+            } as u64,
+        ])?;
     }
     let mut operations = 0_usize;
     for batch in &journal.batches {
-        let (source, replay, count) = command_metadata_bytes(&batch.command)?;
+        let (source, replay, count) = command_metadata_bytes(&batch.command, canonical)?;
         operations = operations
             .checked_add(count)
             .ok_or(HistoryError::Capacity)?;
@@ -572,7 +654,7 @@ fn replay_metadata_bytes(
             bytes,
             source,
             replay,
-            transport_vector_bytes(&batch.identity_effects)?,
+            input_vector_bytes(&batch.identity_effects, canonical)?,
             allocation::<crate::OperationIdentityEffect>(count)?,
         ])?;
         for effect in &batch.identity_effects {
@@ -636,10 +718,19 @@ impl ReplayBudget {
         current: &Document,
         limit: u64,
     ) -> Result<Self, HistoryError> {
+        Self::with_input(journal, baseline, current, limit, false)
+    }
+    pub(crate) fn with_input(
+        journal: &crate::HistoryJournal,
+        baseline: &Document,
+        current: &Document,
+        limit: u64,
+        canonical: bool,
+    ) -> Result<Self, HistoryError> {
         let overhead = sum([
-            transport_document_bytes(baseline)?,
-            transport_document_bytes(current)?,
-            replay_metadata_bytes(journal, baseline, current)?,
+            input_document_bytes(baseline, canonical)?,
+            input_document_bytes(current, canonical)?,
+            replay_metadata_bytes(canonical, journal, baseline, current)?,
             8192,
         ])?;
         let mut budget = Self {
@@ -666,12 +757,13 @@ impl ReplayBudget {
     }
     pub(crate) fn extend_input(
         &self,
+        canonical: bool,
         journal: &crate::HistoryJournal,
         baseline: &Document,
         current: &Document,
         limit: u64,
     ) -> Result<Self, HistoryError> {
-        let input = Self::new(journal, baseline, current, limit)?.input;
+        let input = Self::with_input(journal, baseline, current, limit, canonical)?.input;
         let mut resumed = self.clone();
         resumed.input = input;
         resumed.limit = limit;

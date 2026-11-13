@@ -491,6 +491,9 @@ impl From<BundleError> for HostRefusal {
     fn from(value: BundleError) -> Self {
         let code = match &value {
             BundleError::RescueMissingOwnedBytes(_) => "rescue_missing_owned_bytes",
+            BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::ManualBackpressure,
+            ) => "manual_backpressure",
             BundleError::CoreMutationRefused(_) => "core_mutation_refused",
             BundleError::Io(_) => "io",
             BundleError::Identity(_) => "identity_refused",

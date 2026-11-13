@@ -599,6 +599,38 @@ fn fields_checked_for_other_bytes_are_not_used() {
         history(1, 5, 1),
         history(2, 6, 1),
     );
+    let writer_proof = crate::history_size::verify_ordinary_history(
+        &first, bundle.store.limits(), None,
+    )
+    .unwrap();
+    let decoded = bundle
+        .store
+        .check_history_bytes(
+            &serde_json::to_vec(&third).unwrap(),
+            crate::history_record::HistoryRole::Ordinary,
+            Some(&writer_proof),
+        )
+        .unwrap()
+        .0;
+    assert_eq!(
+        *decoded, third,
+        "writer proof extends only through the independently decoded journal"
+    );
+    drop(decoded);
+    let mut bad: serde_json::Value =
+        serde_json::from_slice(&serde_json::to_vec(&first).unwrap()).unwrap();
+    bad["document"]["resolution"] = serde_json::json!([1280, 720]);
+    assert!(
+        matches!(
+            bundle.store.check_history_bytes(
+                &serde_json::to_vec(&bad).unwrap(),
+                crate::history_record::HistoryRole::Ordinary,
+                Some(&writer_proof),
+            ),
+            Err(BundleError::Corrupt(_))
+        ),
+        "a writer proof cannot vouch for changed transport bytes"
+    );
     let store = &mut bundle.store;
     let decodes = |store: &ProjectStore, roots: &[ObjectRef], sealed| {
         let before = io_observer::history_decode_count();
@@ -628,6 +660,7 @@ fn fields_checked_for_other_bytes_are_not_used() {
         .check_history_bytes(
             &serde_json::to_vec(&first).unwrap(),
             crate::history_record::HistoryRole::Ordinary,
+            None,
         )
         .unwrap();
     let ((sealed, support), ran) = preflights(store, &second, Some(other));
@@ -647,6 +680,7 @@ fn fields_checked_for_other_bytes_are_not_used() {
         .check_history_bytes(
             &serde_json::to_vec(&third).unwrap(),
             crate::history_record::HistoryRole::Ordinary,
+            None,
         )
         .unwrap();
     let ((third_sealed, third_support), ran) = preflights(store, &third, Some(own));
@@ -673,6 +707,7 @@ fn fields_checked_for_other_bytes_are_not_used() {
         .check_history_bytes(
             &serde_json::to_vec(&third).unwrap(),
             crate::history_record::HistoryRole::Ordinary,
+            None,
         )
         .unwrap();
     let (_, again) = store

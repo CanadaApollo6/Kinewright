@@ -3834,3 +3834,143 @@ fn te13_fix2_host_studio_hides_removed_task_branch() {
 }
 
 include!("ja1_te13_fix3_tests.rs");
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn manual_floor_queued_at_save_and_quit_drains_without_a_damage_warning() {
+    use kinewright_agent::writer_host::SessionRoots;
+    use kinewright_core::{SolidColor, TimeCode};
+    let temp = temp();
+    let path = temp.path("queued-floor.kinewright");
+    let mut document = doc();
+    for index in 0..400 {
+        Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: TimeCode(index * 90),
+            duration: TimeCode(90),
+            color: SolidColor { r: 0, g: 0, b: 0 },
+        }
+        .apply(&mut document)
+        .unwrap();
+    }
+    let core = Core::spawn(document).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    owner.first_save(&path, StorageLimits::default()).unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    app.launch_host_at(
+        &host::executable(),
+        "queued-floor".into(),
+        SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+    )
+    .unwrap();
+    let permit = app
+        .host
+        .as_ref()
+        .unwrap()
+        .manual
+        .as_ref()
+        .unwrap()
+        .permit
+        .clone();
+    for index in 0..60 {
+        assert!(matches!(
+            permit
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index % 2 == 0
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        if core.export_history().unwrap().floor_offset > 0 {
+            break;
+        }
+    }
+    let expected = core.export_history().unwrap();
+    assert!(expected.floor_offset > 0);
+    assert!(!permit.pending().unwrap().is_empty());
+    let disclosure = app.close_text();
+    assert!(
+        disclosure.contains("waiting for a durable acknowledgement"),
+        "{disclosure}"
+    );
+    assert!(!disclosure.to_lowercase().contains("damag"), "{disclosure}");
+    // Save owns the drain. The test does not publish or acknowledge on its behalf.
+    app.apply(Action::Save).unwrap();
+    assert!(permit.pending().unwrap().is_empty());
+    assert_eq!(core.export_history().unwrap(), expected);
+    assert!(app.close());
+    drop(app);
+    let cold = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&cold)
+        .unwrap();
+    assert_eq!(cold.export_history().unwrap(), expected);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn writer_backpressure_keeps_the_app_manual_lane_live_until_acknowledgement() {
+    use kinewright_agent::writer_host::{HostRefusal, HostReply};
+    use kinewright_core::CoreMutationRefusal;
+    let (_temp, mut app, path) = s2h_fix3_app(false);
+    let permit = app
+        .host
+        .as_ref()
+        .unwrap()
+        .manual
+        .as_ref()
+        .unwrap()
+        .permit
+        .clone();
+    assert!(matches!(
+        permit
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false
+            }))
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let expected = app.owner.core().export_history().unwrap();
+    let reply = HostReply {
+        error: Some(HostRefusal::from(BundleError::CoreMutationRefused(
+            CoreMutationRefusal::ManualBackpressure,
+        ))),
+        status: app.host.as_ref().unwrap().status.clone(),
+        ..HostReply::default()
+    };
+    assert!(matches!(
+        app.accept_host_reply(reply),
+        Err(BundleError::CoreMutationRefused(
+            CoreMutationRefusal::ManualBackpressure
+        ))
+    ));
+    assert!(!app.read_only());
+    assert!(app.host.as_ref().unwrap().cut.is_none());
+    assert!(!permit.pending().unwrap().is_empty());
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    app.apply(Action::Save).unwrap();
+    assert!(permit.pending().unwrap().is_empty());
+    assert!(app.close());
+    drop(app);
+    let cold = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&cold)
+        .unwrap();
+    assert_eq!(cold.export_history().unwrap(), expected);
+}

@@ -221,6 +221,13 @@ enum CoreMessage {
         u64,
         Sender<Event>,
     ),
+    OrdinaryDestination(TypeId, Sender<Result<(), HistoryError>>),
+    PendingManualHistory(Sender<bool>),
+    BeginOrdinaryPublication(
+        TypeId,
+        Arc<crate::OrdinaryFloorSource>,
+        Sender<Result<crate::OrdinarySourcePublication, HistoryError>>,
+    ),
     OrdinaryFloorSource(Sender<Option<Arc<crate::OrdinaryFloorSource>>>),
     AcknowledgeOrdinaryFloor(
         TypeId,
@@ -664,6 +671,24 @@ impl Core {
         initial_document: impl Into<Arc<Document>>,
         revision: TimelineRevision,
     ) -> Result<Self, OpError> {
+        Self::spawn_kind(initial_document, revision, false)
+    }
+
+    /// Start a branch whose complete Undo stack is its unpublished delta.
+    /// Such a branch may refuse an edit, but can never discard accepted edits.
+    /// # Errors
+    /// Returns an error when the initial document is invalid.
+    pub fn spawn_delta(
+        initial_document: impl Into<Arc<Document>>,
+        revision: TimelineRevision,
+    ) -> Result<Self, OpError> {
+        Self::spawn_kind(initial_document, revision, true)
+    }
+    fn spawn_kind(
+        initial_document: impl Into<Arc<Document>>,
+        revision: TimelineRevision,
+        delta: bool,
+    ) -> Result<Self, OpError> {
         static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
         let initial_document = initial_document.into();
         initial_document.validate()?;
@@ -681,6 +706,7 @@ impl Core {
                     &receiver,
                     CoreState::new(initial_document, revision),
                     identity,
+                    delta,
                 );
             })
             .expect("failed to spawn Core actor");
@@ -847,6 +873,39 @@ impl Core {
             .send(CoreMessage::ExportPublicationHistory(reply))
             .map_err(|_| HistoryError::Disconnected)?;
         receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    pub(crate) fn begin_ordinary_publication<P: 'static>(
+        &self,
+        source: Arc<crate::OrdinaryFloorSource>,
+    ) -> Result<crate::OrdinarySourcePublication, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::BeginOrdinaryPublication(
+                TypeId::of::<P>(),
+                source,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn mark_ordinary_destination<P: 'static>(&self) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::OrdinaryDestination(TypeId::of::<P>(), reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Whether accepted messages still require their stamped publication route.
+    /// # Errors
+    /// Returns an error if the owning actor has stopped.
+    pub fn has_pending_manual_history(&self) -> Result<bool, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::PendingManualHistory(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
     }
 
     /// Read the single pending source without copying the history value.
@@ -1254,6 +1313,13 @@ impl CoreState {
         Self::adopt_snapshot(history.into_unsealed_snapshot(), capacities)
     }
     fn adopt_snapshot(history: HistorySnapshot, capacities: (usize, usize, usize)) -> Self {
+        Self::adopt_snapshot_with_log(history, capacities, None)
+    }
+    fn adopt_snapshot_with_log(
+        history: HistorySnapshot,
+        capacities: (usize, usize, usize),
+        log: Option<Arc<Vec<Operation>>>,
+    ) -> Self {
         let HistorySnapshot {
             floor_offset,
             baseline,
@@ -1265,17 +1331,23 @@ impl CoreState {
         } = history;
         let mut state = Self::new(baseline, TimelineRevision(0));
         // OpLog includes accepted edits even if a later Undo no longer exposes them.
-        let operations = batches
-            .iter()
-            .flat_map(|batch| match &batch.command {
-                JournalCommand::Do(operation) => std::slice::from_ref(operation),
-                JournalCommand::DoBatch(operations)
-                | JournalCommand::DoBatchCoalesced { operations, .. } => operations.as_slice(),
-                JournalCommand::Undo | JournalCommand::Redo => &[],
-            })
-            .cloned()
-            .collect();
-        state.op_log = Arc::new(operations);
+        let operations = log.unwrap_or_else(|| {
+            Arc::new(
+                batches
+                    .iter()
+                    .flat_map(|batch| match &batch.command {
+                        JournalCommand::Do(operation) => std::slice::from_ref(operation),
+                        JournalCommand::DoBatch(operations)
+                        | JournalCommand::DoBatchCoalesced { operations, .. } => {
+                            operations.as_slice()
+                        }
+                        JournalCommand::Undo | JournalCommand::Redo => &[],
+                    })
+                    .cloned()
+                    .collect(),
+            )
+        });
+        state.op_log = operations;
         state.ordinary_floor_source = ordinary_floor_source;
         state.floor_offset = floor_offset;
         state.document = document;
@@ -1310,7 +1382,10 @@ impl CoreState {
         if !self.history_matches(&transition.before) {
             return Err(HistoryError::CaptureChanged);
         }
-        if transition.after.floor_offset <= self.floor_offset {
+        if transition.after.floor_offset < self.floor_offset
+            || (transition.after.floor_offset == self.floor_offset
+                && transition.after != transition.before)
+        {
             return Err(HistoryError::BarrierInvariant);
         }
         let id = self
@@ -1351,7 +1426,7 @@ impl CoreState {
         let discard = pending.discard;
         let depth = pending.depth;
         let result = (|| {
-            if commit {
+            if commit && discard != 0 {
                 #[cfg(any(test, feature = "test-util"))]
                 let started = std::time::Instant::now();
                 // The barrier kept the prefix unchanged. Replay only the current suffix
@@ -1426,10 +1501,44 @@ pub(crate) struct ReplayDocumentCharges {
     by_address: std::collections::HashMap<usize, (u64, usize)>,
 }
 impl ReplayDocumentCharges {
+    pub(crate) fn rebind_current(&mut self, old: usize, after: &Arc<Document>) -> bool {
+        let new = Arc::as_ptr(after) as usize;
+        if self.current != old
+            || self
+                .by_address
+                .get(&old)
+                .is_none_or(|(_, references)| *references != 1)
+            || self.by_address.contains_key(&new)
+        {
+            return false;
+        }
+        let charge = self
+            .by_address
+            .remove(&old)
+            .expect("checked current document");
+        self.by_address.insert(new, charge);
+        self.current = new;
+        true
+    }
     pub(crate) fn rebind(
         &self,
         before: &HistorySnapshot,
         after: &HistorySnapshot,
+    ) -> Result<Option<Self>, HistoryError> {
+        self.rebind_documents(before, after, true)
+    }
+    pub(crate) fn rebind_exact(
+        &self,
+        before: &HistorySnapshot,
+        after: &HistorySnapshot,
+    ) -> Result<Option<Self>, HistoryError> {
+        self.rebind_documents(before, after, false)
+    }
+    fn rebind_documents(
+        &self,
+        before: &HistorySnapshot,
+        after: &HistorySnapshot,
+        measure: bool,
     ) -> Result<Option<Self>, HistoryError> {
         let documents = |history: &HistorySnapshot| {
             std::iter::once(&history.baseline)
@@ -1470,6 +1579,7 @@ impl ReplayDocumentCharges {
             let new = Arc::as_ptr(document) as usize;
             if let Some(old) = reverse.remove(&new)
                 && old != new
+                && measure
             {
                 let bound = self
                     .by_address
@@ -1622,16 +1732,27 @@ pub(crate) fn resolve_history_journal(
     let peak = resolved.peak;
     Ok((resolved.into_snapshot(), peak))
 }
-#[allow(
-    clippy::too_many_lines,
-    reason = "one bounded replay transaction shares its cold and incremental executor and final checks"
-)]
 pub(crate) fn resolve_history_journal_verified(
     journal: &crate::HistoryJournal,
     baseline: Arc<Document>,
     document: &Document,
     limit: u64,
     prefix: Option<&crate::ResolvedHistory>,
+) -> Result<crate::ResolvedHistory, HistoryError> {
+    resolve_history_journal_input(journal, baseline, document, limit, prefix, false)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded replay transaction shares its cold and incremental executor and final checks"
+)]
+pub(crate) fn resolve_history_journal_input(
+    journal: &crate::HistoryJournal,
+    baseline: Arc<Document>,
+    document: &Document,
+    limit: u64,
+    prefix: Option<&crate::ResolvedHistory>,
+    canonical: bool,
 ) -> Result<crate::ResolvedHistory, HistoryError> {
     if journal.batches.len() > crate::HISTORY_COMMANDS {
         return Err(HistoryError::Capacity);
@@ -1658,7 +1779,7 @@ pub(crate) fn resolve_history_journal_verified(
         let budget = prefix
             .checkpoint
             .budget
-            .extend_input(journal, &baseline, document, limit)?;
+            .extend_input(canonical, journal, &baseline, document, limit)?;
         (
             CoreState::adopt_resolved(prefix.clone()),
             prefix.checkpoint.documents.clone(),
@@ -1666,7 +1787,9 @@ pub(crate) fn resolve_history_journal_verified(
             prefix.snapshot().batches.len(),
         )
     } else {
-        let budget = crate::history_size::ReplayBudget::new(journal, &baseline, document, limit)?;
+        let budget = crate::history_size::ReplayBudget::with_input(
+            journal, &baseline, document, limit, canonical,
+        )?;
         let documents = ReplayDocumentCharges::new(&baseline, budget.document_charge());
         (
             CoreState::new(baseline, TimelineRevision(0)),
@@ -1940,7 +2063,13 @@ fn floor_from_prefix(
     clippy::too_many_lines,
     reason = "one actor dispatch owns history and save tickets"
 )]
-fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: ActorIdentity) {
+fn run_actor(
+    receiver: &Receiver<CoreMessage>,
+    mut state: CoreState,
+    identity: ActorIdentity,
+    delta: bool,
+) {
+    let mut ordinary_destination = false;
     let mut owner: Option<TypeId> = None;
     let mut attachment = AttachmentState::Live;
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
@@ -1969,7 +2098,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                         let generation = manual_generation
                             .checked_add(1)
                             .ok_or(HistoryError::Capacity)?;
-                        let ingress = ManualIngress::new(&mut state, generation, encoder)?;
+                        let ingress = ManualIngress::new(&mut state, generation, delta, encoder)?;
                         manual_generation = generation;
                         manual = Some(ingress);
                         attachment = AttachmentState::Live;
@@ -2099,6 +2228,11 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                         if manual.is_some() {
                             return Err(HistoryError::MutationRefused(
                                 CoreMutationRefusal::ManualPermitRequired,
+                            ));
+                        }
+                        if delta && transition.after().floor_offset > state.floor_offset {
+                            return Err(HistoryError::MutationRefused(
+                                CoreMutationRefusal::ThreadHistoryCapacity,
                             ));
                         }
                         state.begin_floor(identity, &transition)
@@ -2346,6 +2480,38 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                 };
                 broadcast(&mut subscribers, &event);
             }
+            CoreMessage::BeginOrdinaryPublication(requested, source, reply) => {
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        if state
+                            .ordinary_floor_source
+                            .as_ref()
+                            .is_none_or(|current| !Arc::ptr_eq(current, &source))
+                        {
+                            return Err(HistoryError::StaleExpectation);
+                        }
+                        crate::OrdinarySourcePublication::begin(source)
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::PendingManualHistory(reply) => {
+                let _ = reply.send(
+                    manual
+                        .as_ref()
+                        .is_some_and(|ingress| !ingress.pending.is_empty()),
+                );
+            }
+            CoreMessage::OrdinaryDestination(requested, reply) => {
+                let result = if owner == Some(requested) {
+                    ordinary_destination = true;
+                    Ok(())
+                } else {
+                    Err(HistoryError::MutationRefused(
+                        CoreMutationRefusal::OwnerRequired,
+                    ))
+                };
+                let _ = reply.send(result);
+            }
             CoreMessage::OrdinaryFloorSource(reply) => {
                 let _ = reply.send(state.ordinary_floor_source.clone());
             }
@@ -2370,7 +2536,8 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                         attachment,
                         command,
                         admission.as_mut(),
-                        retained_bytes,
+                        ordinary_destination.then_some(retained_bytes),
+                        delta,
                     )
                 };
                 broadcast(&mut subscribers, &event);
@@ -2440,7 +2607,7 @@ fn execute_actor_command(
         && state
             .pending_floor
             .as_ref()
-            .is_some_and(|pending| state.undo.len() <= pending.depth)
+            .is_some_and(|pending| pending.discard != 0 && state.undo.len() <= pending.depth)
     {
         // A blocked Undo is not an accepted journal command: replay after release
         // must never turn it into an Undo of the retained protected prefix.
@@ -2854,6 +3021,23 @@ mod tests {
             Err(HistoryError::CommitInvariant)
         );
         assert_eq!(state.history(), before);
+        assert!(state.pending_floor.is_none());
+    }
+
+    #[test]
+    fn unchanged_publication_ticket_keeps_empty_navigation_and_its_exact_journal() {
+        let mut state = CoreState::new(Arc::new(Document::default()), TimelineRevision(0));
+        let transition = crate::HistoryTransition::publication(state.history());
+        let ticket = state.begin_floor(ActorIdentity(1), &transition).unwrap();
+        for command in [Command::Undo, Command::Redo] {
+            assert!(matches!(
+                execute_actor_command(&mut state, AttachmentState::Live, command),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        let expected = state.history();
+        state.settle_floor(ticket, true).unwrap();
+        assert_eq!(state.history(), expected);
         assert!(state.pending_floor.is_none());
     }
 

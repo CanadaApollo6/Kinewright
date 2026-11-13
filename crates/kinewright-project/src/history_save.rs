@@ -67,6 +67,18 @@ pub struct ProjectAttachment {
     authority: kinewright_core::CoreAttachment<ProjectHistoryProof>,
 }
 impl ProjectAttachment {
+    pub(crate) fn begin_ordinary_publication(
+        &self,
+        source: std::sync::Arc<kinewright_core::OrdinaryFloorSource>,
+    ) -> Result<kinewright_core::OrdinarySourcePublication, HistoryError> {
+        self.authority
+            .begin_ordinary_publication(&ProjectHistoryProof, source)
+    }
+
+    pub(crate) fn mark_ordinary_destination(&self) -> Result<(), HistoryError> {
+        self.authority
+            .mark_ordinary_destination(&ProjectHistoryProof)
+    }
     pub(crate) fn acknowledge_ordinary_floor(
         &self,
         source: std::sync::Arc<kinewright_core::OrdinaryFloorSource>,

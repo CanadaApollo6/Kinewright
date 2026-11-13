@@ -518,7 +518,7 @@ fn exercise_floor_and_close(path: &Path) {
 }
 
 #[test]
-fn floored_specialist_reopens_original_full_delta_and_merges_once() {
+fn bounded_specialist_reopens_full_delta_and_merges_once() {
     let temp = TempDirectory::new_in(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         "r2-specialist-floor",
@@ -547,22 +547,48 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
         .unwrap();
     let mut specialist =
         DurableTimelineBranch::fork_probe(&mut owner, &live, "floor specialist").unwrap();
+    let admission = std::sync::Arc::new(
+        kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
+            kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
+                owner.store().limits(),
+            )
+            .unwrap(),
+        ),
+    );
+    let mut accepted = 0;
+    let mut refused = false;
     for i in 0..40 {
-        apply(&specialist.core(), Command::Do(lock(i % 2 == 0)));
+        let before = specialist.core().export_history().unwrap();
+        match admission
+            .request(&specialist.core(), Command::Do(lock(i % 2 == 0)))
+            .unwrap()
+        {
+            Event::DocumentChanged { .. } => accepted += 1,
+            Event::MutationRefused {
+                reason: kinewright_core::CoreMutationRefusal::ThreadHistoryCapacity,
+                ..
+            } => {
+                assert_eq!(specialist.core().export_history().unwrap(), before);
+                refused = true;
+                break;
+            }
+            other => panic!("{other:?}"),
+        }
     }
+    assert!(refused && accepted > 0 && accepted < 40);
     let proposal = specialist.core().export_history().unwrap().document;
     let reference = specialist.persist(&mut owner).unwrap();
     let branch = specialist.branch_id().clone();
     let history = specialist.core().export_history().unwrap();
     assert!(
-        history.floor_offset > 0,
-        "specialist did not cross the history bound"
+        history.floor_offset == 0,
+        "a specialist's accepted delta must never be floored"
     );
     assert_eq!(history, *owner.branch_history(&branch).unwrap());
     assert_eq!(
         specialist.base().full_applied_delta.len(),
-        40,
-        "floor truncated the merge delta"
+        accepted,
+        "capacity refusal truncated the accepted merge delta"
     );
     drop(specialist);
     drop(owner);
@@ -570,12 +596,20 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
     let (live, mut owner, inputs) = reopen(&path);
     let mut specialist =
         DurableTimelineBranch::reopen_probe(&owner, branch, &reference, "reopened")
-            .expect("floor made the persisted specialist unreopenable");
+            .expect("accepted specialist delta must reopen");
     assert_eq!(specialist.core().export_history().unwrap(), history);
-    apply(&specialist.core(), Command::Do(lock(true)));
-    apply(&specialist.core(), Command::Undo);
+    assert!(matches!(
+        admission
+            .request(&specialist.core(), Command::Do(lock(true)))
+            .unwrap(),
+        Event::MutationRefused {
+            reason: kinewright_core::CoreMutationRefusal::ThreadHistoryCapacity,
+            ..
+        }
+    ));
+    assert_eq!(specialist.core().export_history().unwrap(), history);
     let reference = specialist.persist(&mut owner).unwrap();
-    assert_eq!(specialist.base().full_applied_delta.len(), 40);
+    assert_eq!(specialist.base().full_applied_delta.len(), accepted);
     assert_eq!(
         specialist.core().export_history().unwrap().document,
         proposal

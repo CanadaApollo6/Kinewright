@@ -336,6 +336,26 @@ impl BundleCommit {
         shadow: &Core,
         inputs: &ObjectRef,
     ) -> Result<(ReceiptLookup, Option<BundleSaveReport>), BundleError> {
+        Self::publish_accepted_history(bundle, envelope, shadow, inputs, false)
+    }
+    /// Recovery renews authority, retaining the original accepted identity. The
+    /// command, carried floor, cursor and independent replay checks are identical.
+    pub(crate) fn recovered_history(
+        bundle: &mut ProjectBundle,
+        envelope: &CommandEnvelope,
+        shadow: &Core,
+        inputs: &ObjectRef,
+    ) -> Result<(ReceiptLookup, Option<BundleSaveReport>), BundleError> {
+        Self::publish_accepted_history(bundle, envelope, shadow, inputs, true)
+    }
+    #[allow(clippy::too_many_lines)]
+    fn publish_accepted_history(
+        bundle: &mut ProjectBundle,
+        envelope: &CommandEnvelope,
+        shadow: &Core,
+        inputs: &ObjectRef,
+        recovery: bool,
+    ) -> Result<(ReceiptLookup, Option<BundleSaveReport>), BundleError> {
         use kinewright_core::{Command, Event};
         let lookup = bundle.receipt_lookup(envelope)?;
         if lookup != ReceiptLookup::Absent {
@@ -345,7 +365,7 @@ impl BundleCommit {
             .manual
             .as_ref()
             .ok_or(BundleError::HistoryBarrierInvariant)?;
-        if manual.recovery_origin.is_some() {
+        if manual.recovery_origin.is_some() != recovery {
             return Err(BundleError::HistoryChanged);
         }
         let binding = &manual.binding;
@@ -429,6 +449,9 @@ impl BundleCommit {
         let after = shadow
             .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
+        if let Event::MutationRefused { reason, .. } = event {
+            return Err(BundleError::CoreMutationRefused(reason));
+        }
         if !matches!(event, Event::DocumentChanged { .. })
             || crate::manual_history::history_sha256(&after)? != manual.after_sha256
             || after.batches.last() != Some(&manual.batch)
@@ -458,10 +481,22 @@ impl BundleCommit {
             .ok_or(BundleError::Capacity("manual sequence"))?;
         // The producer and writer selected this exact floor before acknowledgement.
         let branch = bundle.manual_branch_id.clone();
-        let publication =
-            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after));
+        let publication = after
+            .ordinary_floor_source
+            .as_ref()
+            .map(|source| {
+                bundle
+                    .attach_core(shadow)?
+                    .begin_ordinary_publication(std::sync::Arc::clone(source))
+                    .map_err(crate::bundle::history_error)
+            })
+            .transpose()
+            .and_then(|scope| {
+                Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))
+                    .map(|report| (report, scope))
+            });
         match publication {
-            Ok(report) => {
+            Ok((report, _publication_scope)) => {
                 bundle.pending_command = None;
                 if let Some(source) = &after.ordinary_floor_source {
                     bundle
@@ -541,42 +576,7 @@ impl BundleCommit {
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
         Self::publish_branch_impl(
-            bundle,
-            history,
-            inputs,
-            branch_id,
-            seed,
-            selected,
-            None,
-            false,
-            None,
-            &[],
-            None,
-            None,
-        )
-        .and_then(BranchPublication::published)
-    }
-    pub(crate) fn publish_recovery_batch(
-        bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
-        selected: &HistorySnapshot,
-        inputs: &ObjectRef,
-        envelopes: &[CommandEnvelope],
-    ) -> Result<BundleSaveReport, BundleError> {
-        let branch = bundle.manual_branch_id.clone();
-        Self::publish_branch_impl(
-            bundle,
-            history,
-            inputs,
-            &branch,
-            None,
-            Some(selected),
-            None,
-            false,
-            None,
-            envelopes,
-            None,
-            None,
+            bundle, history, inputs, branch_id, seed, selected, None, false, None, None, None,
         )
         .and_then(BranchPublication::published)
     }
@@ -599,7 +599,6 @@ impl BundleCommit {
             Some(selection),
             false,
             None,
-            &[],
             None,
             None,
         )
@@ -630,7 +629,6 @@ impl BundleCommit {
             None,
             true,
             None,
-            &[],
             None,
             None,
         )
@@ -653,7 +651,6 @@ impl BundleCommit {
             None,
             true,
             None,
-            &[],
             None,
             Some(fence),
         )? {
@@ -679,7 +676,6 @@ impl BundleCommit {
             None,
             false,
             Some((source, contexts)),
-            &[],
             None,
             None,
         )
@@ -702,7 +698,6 @@ impl BundleCommit {
             None,
             false,
             None,
-            &[],
             Some(base),
             None,
         )?;
@@ -725,7 +720,6 @@ impl BundleCommit {
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
         metadata_only: bool,
         rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
-        manual_batch: &[CommandEnvelope],
         stage_base: Option<&ObjectRef>,
         preparation: Option<&crate::store::PublicationFence>,
     ) -> Result<BranchPublication, BundleError> {
@@ -740,7 +734,6 @@ impl BundleCommit {
                 selection,
                 metadata_only,
                 rescue_source,
-                manual_batch,
                 stage_base,
                 preparation,
             )
@@ -757,7 +750,6 @@ impl BundleCommit {
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
         metadata_only: bool,
         rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
-        manual_batch: &[CommandEnvelope],
         stage_base: Option<&ObjectRef>,
         preparation: Option<&crate::store::PublicationFence>,
     ) -> Result<BranchPublication, BundleError> {
@@ -899,8 +891,14 @@ impl BundleCommit {
         {
             let cut = usize::try_from(aligned.floor_offset - old.floor_offset)
                 .map_err(|_| BundleError::Capacity("history floor offset"))?;
+            if cut > old.batches.len() {
+                // A Save with queued messages was refused at its Core boundary.
+                // An arbitrary cut without the source that proves this gap is
+                // an invalid publication transition, not a retryable queue.
+                return Err(BundleError::HistoryBarrierInvariant);
+            }
             let expected = kinewright_core::HistoryTransition::floor_after(old, cut)
-                .map_err(|_| BundleError::Corrupt("unproved history floor".into()))?;
+                .map_err(crate::bundle::history_error)?;
             if aligned.baseline != expected.baseline
                 || aligned.batches.len() < expected.batches.len()
                 || aligned.batches[..expected.batches.len()] != expected.batches
@@ -925,11 +923,21 @@ impl BundleCommit {
         } else if role_matches && old_history.as_ref().is_some_and(|old| ***old == *aligned) {
             Cow::Borrowed(&*aligned)
         } else {
-            bundle
-                .store
-                .with_history_admission(history_role, bundle.store.limits(), || {
-                    bound_history_borrowed(&aligned, bundle.store.limits())
-                })?
+            #[cfg(any(test, feature = "test-util"))]
+            let started = std::time::Instant::now();
+            let (selected, proof) =
+                bundle
+                    .store
+                    .with_history_admission(history_role, bundle.store.limits(), || {
+                        select_admitted_history(&aligned, bundle.store.limits(), None)
+                    })?;
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::note_history_bound(started.elapsed());
+            bundle.ordinary_manual_admission()?.remember(proof)?;
+            match selected {
+                Some(selected) => Cow::Owned(selected.history),
+                None => Cow::Borrowed(&*aligned),
+            }
         };
         // `check_bytes` keeps the checked encoding with the support fields its decode
         // observed, so sealing that same encoding needs no second decode for the inventory.
@@ -939,9 +947,26 @@ impl BundleCommit {
             (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
         } else {
             let serialized = serde_json::to_vec(&bounded).map_err(crate::bundle::encoding_error)?;
-            let (checked, check_bytes) = bundle
-                .store
-                .check_history_bytes(&serialized, history_role)?;
+            let prefix = if history_role == crate::history_record::HistoryRole::Ordinary {
+                bundle
+                    .ordinary_manual_admission
+                    .as_ref()
+                    .map(|admission| admission.prior())
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            #[cfg(any(test, feature = "test-util"))]
+            let prefix = if crate::io_observer::save_reuse_disabled() {
+                None
+            } else {
+                prefix
+            };
+            let (checked, check_bytes) =
+                bundle
+                    .store
+                    .check_history_bytes(&serialized, history_role, prefix.as_ref())?;
             if *checked != *bounded {
                 return Err(BundleError::Corrupt(
                     "history transport differs from capture".into(),
@@ -1056,24 +1081,15 @@ impl BundleCommit {
             .map_or_else(Vec::new, |p| p.batch_ids.clone());
         let total_batches = checked.batches.len() + floor_discard.unwrap_or(0);
         while batch_ids.len() < total_batches {
-            let accepted = if manual_batch.is_empty() {
-                bundle
-                    .pending_command
-                    .as_ref()
-                    .and_then(|e| e.manual.as_ref())
-            } else {
-                manual_batch
-                    .iter()
-                    .filter_map(|e| e.manual.as_ref())
-                    .find(|m| usize::try_from(m.batch.order).ok() == Some(batch_ids.len()))
-            };
+            let accepted = bundle
+                .pending_command
+                .as_ref()
+                .and_then(|e| e.manual.as_ref());
             batch_ids.push(if let Some(manual) = accepted {
-                if manual_batch.is_empty() && batch_ids.len() + 1 != total_batches {
+                if batch_ids.len() + 1 != total_batches {
                     return Err(BundleError::HistoryChanged);
                 }
                 manual.batch_id.clone()
-            } else if !manual_batch.is_empty() {
-                return Err(BundleError::HistoryChanged);
             } else {
                 BatchId::fresh()?
             });
@@ -1405,14 +1421,10 @@ impl BundleCommit {
         recovery.staging = None;
         let mut receipts = bundle.receipts.clone();
         let mut issuers = bundle.issuers.clone();
-        for envelope in manual_batch
-            .iter()
-            .chain(
-                bundle
-                    .pending_command
-                    .as_deref()
-                    .filter(|_| manual_batch.is_empty()),
-            )
+        for envelope in bundle
+            .pending_command
+            .as_deref()
+            .into_iter()
             .chain(selection.and_then(|s| s.envelope.as_ref()))
         {
             let result = if let Some(request) = &envelope.switch {
@@ -2043,51 +2055,27 @@ pub(crate) fn select_history(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<BoundedHistory, BundleError> {
-    observed_bound(history, limits, |bounded| {
-        bounded.unwrap_or_else(|| BoundedHistory {
-            history: history.clone(),
-            floor: None,
-        })
-    })
+    select_history_with_proof(history, limits).map(|(selected, _)| selected)
 }
 
-/// [`bound_history`], borrowing `history` when it already fits (the common
-/// path) instead of copying it.
-fn bound_history_borrowed<'a>(
-    history: &'a HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<Cow<'a, HistorySnapshot>, BundleError> {
-    observed_bound(history, limits, |bounded| match bounded {
-        Some(selected) => Cow::Owned(selected.history),
-        None => Cow::Borrowed(history),
-    })
-}
-
-/// Bound `history` and turn the result (`None`: it fits as it is) into the
-/// caller's value. The test-util profile times both, so a caller's copy of
-/// a fitting history is counted once, inside this one call.
-fn observed_bound<T>(
+pub(crate) fn select_history_with_proof(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-    finish: impl FnOnce(Option<BoundedHistory>) -> T,
-) -> Result<T, BundleError> {
+) -> Result<(BoundedHistory, crate::history_size::OrdinaryHistoryProof), BundleError> {
     #[cfg(any(test, feature = "test-util"))]
     let started = std::time::Instant::now();
-    let result = bound_history_inner(history, limits).map(finish);
+    let result = select_admitted_history(history, limits, None).map(|(bounded, proof)| {
+        (
+            bounded.unwrap_or_else(|| BoundedHistory {
+                history: history.clone(),
+                floor: None,
+            }),
+            proof,
+        )
+    });
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::note_history_bound(started.elapsed());
     result
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "the conservative prefilter and authoritative fit share one selection policy"
-)]
-fn bound_history_inner(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<Option<BoundedHistory>, BundleError> {
-    select_admitted_history(history, limits, None).map(|(selected, _)| selected)
 }
 
 /// Ordinary selectors choose a cut from canonical values. A complete successful
@@ -2096,41 +2084,14 @@ fn bound_history_inner(
 pub(crate) fn select_admitted_history(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-    prefix: Option<&kinewright_core::ResolvedHistory>,
-) -> Result<(Option<BoundedHistory>, kinewright_core::ResolvedHistory), BundleError> {
-    match crate::history_size::verify_history_admission_with_prefix(
-        history,
-        crate::history_record::HistoryRole::Ordinary,
-        limits,
-        prefix,
-    ) {
-        Ok((_, proof)) => return Ok((None, proof)),
+    prefix: Option<&crate::history_size::OrdinaryHistoryProof>,
+) -> Result<(Option<BoundedHistory>, crate::history_size::OrdinaryHistoryProof), BundleError> {
+    match crate::history_size::verify_ordinary_history(history, limits, prefix) {
+        Ok(proof) => return Ok((None, proof)),
         Err(BundleError::Capacity(_)) => {}
         Err(error) => return Err(error),
     }
-    let first = first_fitting_floor(history, limits, usize::MAX)?;
-    let retained = first.after().cursor.undo.len();
-    let maximum = retained
-        .saturating_sub(retained.div_ceil(ORDINARY_LOW_WATER_PARTS))
-        .max(1);
-    // The minimum fitting cut establishes the real retained depth. Move the
-    // floor far enough to amortize a long history, checking the actual candidate
-    // again: a later baseline can increase its replay peak.
-    let floor = if retained > maximum {
-        match first_fitting_floor(history, limits, maximum) {
-            Ok(floor) => floor,
-            Err(BundleError::Capacity(_)) => first,
-            Err(error) => return Err(error),
-        }
-    } else {
-        first
-    };
-    let (_, proof) = crate::history_size::verify_history_admission_with_prefix(
-        floor.after(),
-        crate::history_record::HistoryRole::Ordinary,
-        limits,
-        None,
-    )?;
+    let (floor, proof) = first_fitting_floor(history, limits)?;
     Ok((
         Some(BoundedHistory {
             history: floor.after().clone(),
@@ -2149,16 +2110,24 @@ const ORDINARY_LOW_WATER_PARTS: usize = 8;
 fn first_fitting_floor(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-    maximum_undo: usize,
-) -> Result<kinewright_core::HistoryTransition, BundleError> {
-    let fits = |h: &HistorySnapshot| {
-        crate::history_size::verify_history_admission(
-            h,
-            crate::history_record::HistoryRole::Ordinary,
-            limits,
-        )
-        .is_ok()
-    };
+) -> Result<
+    (
+        kinewright_core::HistoryTransition,
+        crate::history_size::OrdinaryHistoryProof,
+    ),
+    BundleError,
+> {
+    let mut failure = None;
+    let fits =
+        |h: &HistorySnapshot| match crate::history_size::verify_ordinary_history(h, limits, None)
+        .and_then(|proof| proof.share_canonical_documents(h)) {
+            Ok(proof) => Some(proof),
+            Err(BundleError::Capacity(_)) => None,
+            Err(error) => {
+                failure = Some(error);
+                None
+            }
+        };
     // A retained command is unchanged by flooring. Complete batch costs are
     // also stable when the suffix never undoes below the new baseline. Keep
     // that exception: an excursion can rewrite effects and cursor counters.
@@ -2196,16 +2165,13 @@ fn first_fitting_floor(
     };
     let overhead = record_cost(&skeleton, limits)?;
     let hash = record_cost(&"0".repeat(64), limits)?;
-    kinewright_core::HistoryTransition::find_floor(
+    let result = kinewright_core::HistoryTransition::find_floor_with_headroom(
         history.clone(),
         |cut, dropped, baseline| {
             let count = history.batches.len() - cut;
             let Some(undo) = history.cursor.undo.len().checked_sub(dropped) else {
                 return false;
             };
-            if undo > maximum_undo {
-                return false;
-            }
             let Some(offset) = history.floor_offset.checked_add(cut as u64) else {
                 return false;
             };
@@ -2253,8 +2219,13 @@ fn first_fitting_floor(
                 && journal <= limits.branch_history_bytes
         },
         fits,
+        ORDINARY_LOW_WATER_PARTS,
     )
-    .map_err(crate::bundle::history_error)
+    .map_err(crate::bundle::history_error);
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    result
 }
 
 fn record_cost(
@@ -2687,13 +2658,22 @@ pub fn history_cost_probe(
     if retained > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
         return Ok(charge);
     }
-    let peak = kinewright_core::history_size::measure_replay_peak(
-        &record.journal,
-        &history.baseline,
-        &history.document,
-    )
-    .map_err(crate::bundle::history_error)?;
-    Ok(charge.max(peak))
+    // A test's ordinary cap must describe the same reproducible input as
+    // ordinary selection and cold open, rather than this holder's spare slots.
+    let resolved = record
+        .journal
+        .resolve_canonical_with_budget(
+            &history.baseline,
+            &history.document,
+            kinewright_core::history_size::TRANSPORT_LIVE_BYTES,
+            None,
+        )
+        .map_err(crate::bundle::history_error)?;
+    let canonical = crate::history_size::native_history_live_bytes(resolved.snapshot())?;
+    let charge = record_cost(&record, limits)?
+        .max(canonical)
+        .max(ordinary_history_admission_cost(history, limits)?);
+    Ok(charge.max(resolved.replay_peak()))
 }
 
 pub(crate) fn validate_manifest_extension(

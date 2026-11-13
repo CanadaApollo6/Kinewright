@@ -158,7 +158,7 @@ impl TimelineBranch {
         base_revision: TimelineRevision,
         base_document: Arc<Document>,
     ) -> Result<Self, BranchError> {
-        let core = Core::spawn(Arc::clone(&base_document))?;
+        let core = Core::spawn_delta(Arc::clone(&base_document), TimelineRevision::default())?;
         Ok(Self {
             name: name.into(),
             base_revision,
@@ -193,7 +193,7 @@ impl TimelineBranch {
         base_revision: TimelineRevision,
         base_document: Arc<Document>,
     ) -> Result<Self, BranchError> {
-        let core = Core::spawn_at(Arc::clone(&base_document), base_revision)?;
+        let core = Core::spawn_delta(Arc::clone(&base_document), base_revision)?;
         Ok(Self {
             name: name.into(),
             base_revision,
@@ -359,6 +359,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delta_limit_keeps_every_accepted_edit_for_merge_cherry_pick_and_approve() {
+        use kinewright_core::{CoreMutationRefusal, Marker, MarkerId, Track, TrackId, TrackKind};
+        use kinewright_project::{
+            manual_history::{OrdinaryHistoryAdmission, OrdinaryHistoryLimits},
+            storage_budget::StorageLimits,
+        };
+        for investigator in [false, true] {
+            let base = Arc::new(Document {
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            });
+            let revision = TimelineRevision(41);
+            let branch = if investigator {
+                TimelineBranch::new_at("investigator", revision, Arc::clone(&base))
+            } else {
+                TimelineBranch::new("chat", revision, Arc::clone(&base))
+            }
+            .unwrap();
+            let limits = StorageLimits {
+                branch_history_bytes: 100_000,
+                ..StorageLimits::default()
+            };
+            let admission = Arc::new(OrdinaryHistoryAdmission::new(
+                OrdinaryHistoryLimits::from_limits(&limits).unwrap(),
+            ));
+            let marker = Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(1),
+                    position: TimeCode(0),
+                    label: "oldest accepted delta".into(),
+                    color_token: 0,
+                },
+            };
+            assert!(matches!(
+                admission
+                    .request(&branch.core(), Command::Do(marker))
+                    .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            let mut count = 1;
+            let mut refused = false;
+            for index in 0..100 {
+                let before = branch.core().export_history().unwrap();
+                let event = admission
+                    .request(
+                        &branch.core(),
+                        Command::Do(Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: index % 2 == 0,
+                        }),
+                    )
+                    .unwrap();
+                match event {
+                    Event::DocumentChanged { .. } => count += 1,
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ThreadHistoryCapacity,
+                        ..
+                    } => {
+                        assert_eq!(before, branch.core().export_history().unwrap());
+                        refused = true;
+                        break;
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            assert!(refused);
+            let comparison = branch.compare().unwrap();
+            assert_eq!(comparison.operations.len(), count);
+            assert_eq!(branch.core().export_history().unwrap().floor_offset, 0);
+            assert_eq!(comparison.document.markers.len(), 1);
+            let merge = Core::spawn_at(Arc::clone(&base), revision).unwrap();
+            assert!(
+                matches!(branch.merge_into(&merge).unwrap(), BranchApplyOutcome::Applied { operation_count, .. } if operation_count == count)
+            );
+            let cherry = Core::spawn_at(Arc::clone(&base), revision).unwrap();
+            assert!(
+                matches!(branch.cherry_pick_into(&cherry, revision, &(1..=count).collect::<Vec<_>>()).unwrap(), BranchApplyOutcome::Applied { operation_count, .. } if operation_count == count)
+            );
+            let approve = Core::spawn_at(base, revision).unwrap();
+            assert!(
+                matches!(apply_to_live(&approve, revision, (*comparison.operations).clone()).unwrap(), BranchApplyOutcome::Applied { operation_count, .. } if operation_count == count)
+            );
+            for live in [merge, cherry, approve] {
+                assert_eq!(live.export_history().unwrap().document, comparison.document);
+            }
+        }
+    }
+
+    #[test]
     fn history_capacity_legacy_merge_and_cherry_pick_floor_then_refuse_oversized_step() {
         let core = Core::spawn(Document {
             tracks: vec![kinewright_core::Track {
@@ -397,7 +491,10 @@ mod tests {
             }
         ));
         assert!(core.export_history().unwrap().floor_offset > 0);
-        assert!(core.ordinary_floor_source().unwrap().is_some());
+        assert!(
+            core.ordinary_floor_source().unwrap().is_none(),
+            "an unsaved destination has no disk prefix to bridge"
+        );
 
         let core = Core::spawn(Document::default()).unwrap();
         let before = core.export_history().unwrap();

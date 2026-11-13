@@ -867,7 +867,14 @@ pub(crate) struct PendingSave {
 impl ProjectBundle {
     /// Bind before exposing a project actor; the private proof gates every history install.
     pub fn attach_core(&self, core: &Core) -> Result<crate::ProjectAttachment, BundleError> {
-        crate::history_save::ProjectAttachment::new(core).map_err(history_error)
+        let attachment =
+            crate::history_save::ProjectAttachment::new(core).map_err(history_error)?;
+        if self.root.is_some() {
+            attachment
+                .mark_ordinary_destination()
+                .map_err(history_error)?;
+        }
+        Ok(attachment)
     }
     #[must_use]
     pub fn pending_attempt(&self) -> Option<crate::AttemptBinding> {
@@ -1537,6 +1544,14 @@ impl ProjectBundle {
         branch: &BranchId,
         base: Option<&ObjectRef>,
     ) -> Result<BundleSaveReport, BundleError> {
+        // Accepted messages have their own identities and carried floors.
+        // The automatic stream must publish them before an ordinary Save may
+        // capture the same producer; never manufacture different batch IDs.
+        if core.has_pending_manual_history().map_err(history_error)? {
+            return Err(BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::ManualBackpressure,
+            ));
+        }
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }
@@ -1586,11 +1601,13 @@ impl ProjectBundle {
                 floor: None,
             }
         } else {
-            self.store.with_history_admission(
+            let (selected, proof) = self.store.with_history_admission(
                 crate::history_record::HistoryRole::Ordinary,
                 self.store.limits(),
-                || crate::bundle_commit::select_history(&aligned, self.store.limits()),
-            )?
+                || crate::bundle_commit::select_history_with_proof(&aligned, self.store.limits()),
+            )?;
+            self.ordinary_manual_admission()?.remember(proof)?;
+            selected
         };
         let transition = if aligned_floor == selected.floor_offset {
             bounded.floor
@@ -1608,6 +1625,20 @@ impl ProjectBundle {
         };
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("history_selected");
+        let _source_publication = selected
+            .ordinary_floor_source
+            .as_ref()
+            .map(|source| {
+                self.attach_core(core)?
+                    .begin_ordinary_publication(Arc::clone(source))
+                    .map_err(history_error)
+            })
+            .transpose()?;
+        let transition = transition.or_else(|| {
+            self.root
+                .is_none()
+                .then(|| kinewright_core::HistoryTransition::publication(selected.clone()))
+        });
         let barrier = pending_floor(core, transition)?;
         self.pending_save = Some(PendingSave {
             ordinary_floor_source: selected.ordinary_floor_source.clone(),
@@ -1709,11 +1740,13 @@ impl ProjectBundle {
         }
         if let Some(pending) = self.pending_save.take()
             && commit
-            && let Some(source) = pending.ordinary_floor_source
         {
-            self.attach_core(&pending.core)?
-                .acknowledge_ordinary_floor(source)
-                .map_err(history_error)?;
+            let attachment = self.attach_core(&pending.core)?;
+            if let Some(source) = pending.ordinary_floor_source {
+                attachment
+                    .acknowledge_ordinary_floor(source)
+                    .map_err(history_error)?;
+            }
         }
         Ok(())
     }

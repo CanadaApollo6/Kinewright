@@ -120,7 +120,7 @@ impl crate::bundle::ProjectBundle {
 /// successful admission can replace its immutable prefix proof.
 pub struct OrdinaryHistoryAdmission {
     limits: OrdinaryHistoryLimits,
-    proof: std::sync::Mutex<Option<kinewright_core::ResolvedHistory>>,
+    proof: std::sync::Mutex<Option<crate::history_size::OrdinaryHistoryProof>>,
 }
 impl OrdinaryHistoryAdmission {
     #[must_use]
@@ -130,7 +130,7 @@ impl OrdinaryHistoryAdmission {
             proof: std::sync::Mutex::new(None),
         }
     }
-    fn prior(&self) -> Result<Option<kinewright_core::ResolvedHistory>, BundleError> {
+    pub(crate) fn prior(&self) -> Result<Option<crate::history_size::OrdinaryHistoryProof>, BundleError> {
         self.proof
             .lock()
             .map(|proof| proof.clone())
@@ -139,7 +139,7 @@ impl OrdinaryHistoryAdmission {
     fn prove(
         &self,
         history: &HistorySnapshot,
-    ) -> Result<kinewright_core::ResolvedHistory, BundleError> {
+    ) -> Result<crate::history_size::OrdinaryHistoryProof, BundleError> {
         let prior = self.prior()?;
         if let Some(proof) = &prior
             && proof.snapshot() == history
@@ -153,7 +153,10 @@ impl OrdinaryHistoryAdmission {
         )?;
         Ok(proof)
     }
-    fn remember(&self, proof: kinewright_core::ResolvedHistory) -> Result<(), BundleError> {
+    pub(crate) fn remember(
+        &self,
+        proof: crate::history_size::OrdinaryHistoryProof,
+    ) -> Result<(), BundleError> {
         *self
             .proof
             .lock()
@@ -164,7 +167,7 @@ impl OrdinaryHistoryAdmission {
     fn verify(
         &self,
         history: &HistorySnapshot,
-    ) -> Result<kinewright_core::ResolvedHistory, BundleError> {
+    ) -> Result<crate::history_size::OrdinaryHistoryProof, BundleError> {
         let proof = self.prove(history)?;
         self.remember(proof.clone())?;
         Ok(proof)
@@ -231,7 +234,7 @@ fn manual_preparation_error(error: &BundleError, undo: bool) -> HistoryError {
 
 struct OrdinaryHistoryGuard {
     admission: std::sync::Arc<OrdinaryHistoryAdmission>,
-    staged: Option<kinewright_core::ResolvedHistory>,
+    staged: Option<crate::history_size::OrdinaryHistoryProof>,
     exact_floor: Option<u64>,
 }
 impl kinewright_core::HistoryAdmission for OrdinaryHistoryGuard {
@@ -252,11 +255,8 @@ impl kinewright_core::HistoryAdmission for OrdinaryHistoryGuard {
                         .map_err(crate::bundle::history_error)?
                 };
                 let prior = self.admission.prior()?;
-                let (_, proof) = crate::history_size::verify_history_admission_with_prefix(
-                    &selected,
-                    crate::history_record::HistoryRole::Ordinary,
-                    &self.admission.limits.limits()?,
-                    prior.as_ref(),
+                let proof = crate::history_size::verify_ordinary_history(
+                    &selected, &self.admission.limits.limits()?, prior.as_ref(),
                 )?;
                 Ok(proof)
             })()
@@ -264,9 +264,13 @@ impl kinewright_core::HistoryAdmission for OrdinaryHistoryGuard {
             self.admission.prove(history)
         };
         proof
+            .and_then(|proof| {
+                proof.share_canonical_documents(history)
+            })
             .map(|proof| {
-                self.staged = Some(proof.clone());
-                Some(proof)
+                let replay = proof.replay().clone();
+                self.staged = Some(proof);
+                Some(replay)
             })
             .map_err(|error| {
                 manual_preparation_error(
@@ -530,7 +534,7 @@ mod admission_tests {
                     fresh.snapshot(),
                     "EQUAL_VALUE_REPLACEMENT_USES_THE_SAME_FLOOR"
                 );
-                assert_eq!(cached.replay_peak(), fresh.replay_peak());
+                assert_eq!(cached.replay().replay_peak(), fresh.replay().replay_peak());
             }
             (Err(BundleError::Capacity(_)), Err(BundleError::Capacity(_))) => {}
             (cached, fresh) => panic!("cached={cached:?} fresh={fresh:?}"),
@@ -557,13 +561,17 @@ mod admission_tests {
                 track: TrackId(1),
                 locked: index.is_multiple_of(2),
             }];
-            assert!(matches!(
-                admission
-                    .request(&core, Command::DoBatch(operations))
-                    .unwrap(),
-                Event::DocumentChanged { .. }
-            ));
+            let Event::DocumentChanged { doc, .. } = admission
+                .request(&core, Command::DoBatch(operations))
+                .unwrap()
+            else {
+                panic!("accepted edit");
+            };
             let live = core.export_history().unwrap();
+            assert!(
+                std::sync::Arc::ptr_eq(&doc, &live.document),
+                "ORDINARY_EDIT_KEEPS_ITS_ALREADY_CHECKED_DOCUMENT"
+            );
             admission.check(&live).unwrap();
             let held = admission.proof.lock().unwrap();
             let proof = held.as_ref().unwrap().snapshot();

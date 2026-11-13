@@ -138,6 +138,15 @@ fn replay(core: &Core, command: Command) -> Result<(), HistoryError> {
 }
 
 impl HistoryTransition {
+    /// Retain this exact cut for an uncertain publication without moving its floor.
+    /// The owning actor checks the cut again when the barrier is installed.
+    #[must_use]
+    pub fn publication(before: HistorySnapshot) -> Self {
+        Self {
+            after: before.clone(),
+            before,
+        }
+    }
     /// Search in command order, replaying each prefix command once. The budget callback
     /// can skip candidates using a lower bound; every accepted cut still replays its suffix.
     /// # Errors
@@ -149,6 +158,66 @@ impl HistoryTransition {
     ) -> Result<Self, HistoryError> {
         let after = crate::actor::find_floor_history(&before, may_fit, accepts)?;
         Ok(Self { before, after })
+    }
+    /// Search once, retaining the first fitting proof as a fallback while
+    /// preferring modest step headroom. Candidates are checked independently:
+    /// moving heavy content into the baseline need not reduce replay cost.
+    /// # Errors
+    /// Refuses invalid history or a history with no admitted legal floor.
+    pub fn find_floor_with_headroom<T>(
+        before: HistorySnapshot,
+        mut may_fit: impl FnMut(usize, usize, &std::sync::Arc<crate::Document>) -> bool,
+        mut prove: impl FnMut(&HistorySnapshot) -> Option<T>,
+        parts: usize,
+    ) -> Result<(Self, T), HistoryError> {
+        let mut first = None;
+        let mut winning = None;
+        let maximum = std::cell::Cell::new(usize::MAX);
+        let result = crate::actor::find_floor_history(
+            &before,
+            |cut, dropped, baseline| {
+                before
+                    .cursor
+                    .undo
+                    .len()
+                    .checked_sub(dropped)
+                    .is_some_and(|undo| undo <= maximum.get())
+                    && may_fit(cut, dropped, baseline)
+            },
+            |after| {
+                if first.is_some() && after.cursor.undo.len() > maximum.get() {
+                    return false;
+                }
+                let Some(proof) = prove(after) else {
+                    return false;
+                };
+                if first.is_none() {
+                    let retained = after.cursor.undo.len();
+                    maximum.set(
+                        retained
+                            .saturating_sub(retained.div_ceil(parts.max(1)))
+                            .max(1),
+                    );
+                    if retained > maximum.get() {
+                        first = Some((after.clone(), proof));
+                        return false;
+                    }
+                }
+                winning = Some(proof);
+                true
+            },
+        );
+        match result {
+            Ok(after) => Ok((
+                Self { before, after },
+                winning.ok_or(HistoryError::CommitInvariant)?,
+            )),
+            Err(HistoryError::Capacity) => {
+                let (after, proof) = first.ok_or(HistoryError::Capacity)?;
+                Ok((Self { before, after }, proof))
+            }
+            Err(error) => Err(error),
+        }
     }
     /// Discard a closed prefix only when the retained cursor is exactly equivalent.
     /// # Errors

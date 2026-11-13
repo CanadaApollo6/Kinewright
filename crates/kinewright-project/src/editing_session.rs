@@ -415,7 +415,12 @@ impl Ja1EditingSession {
                 {
                     return Err(BundleError::Unsettled);
                 }
-                if cut.history().ordinary_floor_source.is_some() {
+                if self
+                    .core
+                    .ordinary_floor_source()
+                    .map_err(crate::bundle::history_error)?
+                    .is_some()
+                {
                     // A pending local floor cannot lose its source at the
                     // process boundary. Keep it under this owner's namespace.
                     bundle.save_frozen(&self.core, &self.inputs, &cut)?;
@@ -451,9 +456,13 @@ impl Ja1EditingSession {
                 )?;
                 let service = owner.borrowed_source_service(&descriptor)?;
                 service.ensure_snapshot(&descriptor, cut.history())?;
-                if let Some(pending) = &cut.history().ordinary_floor_source {
+                if let Some(pending) = self
+                    .core
+                    .ordinary_floor_source()
+                    .map_err(crate::bundle::history_error)?
+                {
                     self.attachment
-                        .acknowledge_ordinary_floor(std::sync::Arc::clone(pending))
+                        .acknowledge_ordinary_floor(pending)
                         .map_err(crate::bundle::history_error)?;
                     cut = self
                         .attachment

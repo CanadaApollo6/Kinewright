@@ -769,25 +769,24 @@ pub(super) fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
         let policy =
             kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(profile)
                 .unwrap();
-        let fitting: Vec<_> = (1..before.batches.len())
-            .filter_map(|cut| {
-                let candidate =
-                    kinewright_core::HistoryTransition::floor_after(&before, cut).ok()?;
-                policy.check(&candidate).is_ok().then_some(candidate)
-            })
-            .collect();
-        let first = fitting.first().expect("ordinary legal earliest floor");
+        let mut fitting = (1..before.batches.len()).filter_map(|cut| {
+            let candidate = kinewright_core::HistoryTransition::floor_after(&before, cut).ok()?;
+            policy.check(&candidate).is_ok().then_some(candidate)
+        });
+        let first = fitting.next().expect("ordinary legal earliest floor");
         let depth = first
             .cursor
             .undo
             .len()
             .saturating_sub(first.cursor.undo.len().div_ceil(8))
             .max(1);
-        let expected = fitting
-            .iter()
-            .find(|cut| cut.cursor.undo.len() <= depth)
-            .unwrap_or(first)
-            .clone();
+        let expected = if first.cursor.undo.len() <= depth {
+            first
+        } else {
+            fitting
+                .find(|cut| cut.cursor.undo.len() <= depth)
+                .unwrap_or(first)
+        };
         assert!(expected.floor_offset > before.floor_offset);
         let disclosure = session.recovery_save_disclosure().unwrap();
         assert!(disclosure.contains(&format!(
