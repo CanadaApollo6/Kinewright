@@ -116,8 +116,12 @@ impl Fixture {
             .as_ref()
             .unwrap()
     }
-    fn gate_mut(&mut self) -> &mut ManualProducerGate {
-        self.app
+    fn edits(&self) -> &crate::manual_edits::ManualEdits {
+        &self.attachment().host.as_ref().unwrap().edits
+    }
+    fn edits_mut(&mut self) -> &mut crate::manual_edits::ManualEdits {
+        &mut self
+            .app
             .focused_mut()
             .ja1
             .as_mut()
@@ -125,9 +129,7 @@ impl Fixture {
             .host
             .as_mut()
             .unwrap()
-            .manual
-            .as_mut()
-            .unwrap()
+            .edits
     }
     fn tick(&mut self) {
         self.app.poll_background(&self.ctx);
@@ -147,7 +149,7 @@ impl Fixture {
     }
     fn attempt(&mut self) {
         self.tick();
-        self.until(|f| !f.gate().edits.attempt_running());
+        self.until(|f| !f.edits().attempt_running());
     }
     fn send_value(&mut self, value: i64) {
         self.app
@@ -158,11 +160,11 @@ impl Fixture {
         // Full curve values fill the real byte window; no transport acknowledgement is allowed.
         for step in 1..30 {
             self.send_value(step);
-            if self.gate().edits.waiting_for_ack() {
+            if self.edits().waiting_for_ack() {
                 break;
             }
         }
-        assert!(self.gate().edits.waiting_for_ack(), "MANUAL_FULL_WINDOW");
+        assert!(self.edits().waiting_for_ack(), "MANUAL_FULL_WINDOW");
         let pending = self.gate().permit.pending().unwrap();
         assert!(!pending.is_empty());
         println!(
@@ -261,7 +263,7 @@ fn manual_value_final_drag_is_saved_and_one_undo() {
     assert_ne!(accepted, -555);
     for value in [-111, -222, -555] {
         f.send_value(value);
-        assert_eq!(f.gate().edits.action_count(), 1, "MANUAL_LATEST_ONLY");
+        assert_eq!(f.edits().action_count(), 1, "MANUAL_LATEST_ONLY");
     }
     f.app
         .focused_mut()
@@ -301,7 +303,7 @@ fn manual_value_final_capacity_refusal_is_truthful() {
     f.attempt();
     // Acknowledge the full window, so this final value reaches its own history predicate.
     f.release();
-    f.until(|f| !f.gate().edits.attempt_running() && f.gate().permit.pending().unwrap().is_empty());
+    f.until(|f| !f.edits().attempt_running() && f.gate().permit.pending().unwrap().is_empty());
     f.attempt();
     let reasons = events
         .try_iter()
@@ -371,7 +373,7 @@ fn manual_value_close_and_quit_ask_for_unapplied_value() {
     let gate = Arc::new(SendGate::default());
     let _release = Release(Arc::clone(&gate));
     let held = Arc::clone(&gate);
-    f.gate_mut().edits.before_send = Some(Box::new(move || held.hold()));
+    f.edits_mut().before_send = Some(Box::new(move || held.hold()));
     f.release();
     f.until(|f| gate.entered() && f.gate().permit.pending().unwrap().is_empty());
     assert!(
@@ -433,7 +435,7 @@ fn manual_value_discrete_edits_are_ordered_and_bounded() {
         "MANUAL_BOUNDED_REFUSAL"
     );
     assert_eq!(
-        f.gate().edits.action_count(),
+        f.edits().action_count(),
         crate::manual_edits::PENDING_ACTIONS
     );
     assert!(
@@ -488,7 +490,7 @@ fn manual_value_release_frame_submits_before_finishing_gesture() {
     assert!(f.ctx.input(|i| i.pointer.any_down()));
     f.send_value(10);
     f.release();
-    f.until(|f| f.gate().permit.pending().unwrap().is_empty() && !f.gate().edits.attempt_running());
+    f.until(|f| f.gate().permit.pending().unwrap().is_empty() && !f.edits().attempt_running());
     assert!(
         f.attachment().manual_edits_pending(),
         "MANUAL_GESTURE_STILL_OPEN"
@@ -518,4 +520,451 @@ fn manual_value_release_frame_submits_before_finishing_gesture() {
     f.app.finish_manual_frame(&f.ctx);
     f.finish();
     assert_eq!(f.value(), -555, "MANUAL_RELEASE_FINAL_VALUE");
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered real-host refusal, recovery and cold-copy witness"
+)]
+fn manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits() {
+    let mut f = Fixture::new();
+    f.fill();
+    f.send_value(-555);
+    let accepted = Arc::clone(&f.app.focused().document);
+    assert_ne!(f.value(), -555);
+    assert!(!f.gate().permit.pending().unwrap().is_empty());
+    {
+        let saved = Core::spawn(Document::default()).unwrap();
+        LoadedBundle::read(&f.temp.path("p.kinewright"))
+            .unwrap()
+            .restore_manual(&saved)
+            .unwrap();
+        assert_ne!(
+            *saved.export_history().unwrap().document,
+            *accepted,
+            "MANUAL_RECOVERY_PREFIX_WAS_NOT_SAVED"
+        );
+    }
+    let proxy = f
+        .app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_replies(vec!["commit_history", "publish_barrier"], true);
+    f.release();
+    f.until(|f| {
+        proxy.lost.lock().unwrap().len() == 2
+            && f.attachment().read_only()
+            && !f.attachment().host.as_ref().unwrap().recovery_running()
+    });
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        proxy.lost.lock().unwrap().as_slice(),
+        &["commit_history", "publish_barrier"]
+    );
+    let host = f.attachment().host.as_ref().unwrap();
+    let lease_probe = host
+        .client
+        .request(kinewright_agent::writer_host::HostCommand::CommitHistory {
+            client: host.manual_identity_for_test(),
+            messages: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        lease_probe.error.as_ref().map(|error| error.code.as_str()),
+        Some("recovery_frozen"),
+        "MANUAL_RECOVERY_REFUSES_OLD_LEASE_STREAM"
+    );
+    assert!(
+        !f.attachment().manual_edits_pending(),
+        "MANUAL_RECOVERY_DROPS_UNACCEPTED"
+    );
+    assert!(
+        f.attachment()
+            .manual_edit_message()
+            .unwrap()
+            .contains("1 hand edit was not applied."),
+        "MANUAL_RECOVERY_NOTICE_BEFORE_RETRY"
+    );
+    assert!(
+        f.app.status.contains("host reply was not confirmed"),
+        "MANUAL_NOTICE_KEEPS_HOST_ERROR"
+    );
+    // The pending-value gate must not hide rescue. The pre-existing unresolved-barrier
+    // guard may still refuse it; Retry must first finish that authenticated handoff.
+    f.app.start_ja1(Action::PreviewRescue);
+    assert!(
+        f.app.focused().ja1_job.is_some(),
+        "MANUAL_RECOVERY_RESCUE_IS_AVAILABLE"
+    );
+    f.until(|f| f.app.focused().ja1_job.is_none());
+    assert_ne!(f.attachment().message, crate::manual_edits::PENDING_WORDS);
+    let preview = Arc::new(SendGate::default());
+    let _release = Release(Arc::clone(&preview));
+    let held = Arc::clone(&preview);
+    f.app.focused_mut().studio.manual_inputs = None;
+    f.app.focused_mut().studio.failure = None;
+    f.app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .before_manual_playback = Some(Box::new(move || held.hold()));
+    f.app.start_ja1(Action::Retry);
+    assert!(
+        f.app.focused().ja1_job.is_some(),
+        "MANUAL_RECOVERY_RETRY_IS_AVAILABLE"
+    );
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while !preview.entered() {
+        assert!(
+            Instant::now() < deadline,
+            "MANUAL_RECOVERY_PREVIEW_ENTERED {}",
+            f.app.status
+        );
+        f.tick();
+    }
+    assert!(f.app.focused().ja1.is_none() && f.app.focused().ja1_job.is_some());
+    assert!(
+        f.app.status.contains("1 hand edit was not applied."),
+        "MANUAL_NOTICE_DURING_PREVIEW {}",
+        f.app.status
+    );
+    preview.release();
+    f.until(|f| !f.attachment().read_only());
+    assert_eq!(
+        *f.app.focused().document,
+        *accepted,
+        "MANUAL_RECOVERY_KEEPS_ACCEPTED"
+    );
+    let notice = f.attachment().manual_edit_message().unwrap();
+    assert!(
+        notice.contains("1 hand edit was not applied."),
+        "MANUAL_RECOVERY_NOTICE_SURVIVES {notice}"
+    );
+    let recovered = f.temp.path("recovered.kinewright");
+    f.app.start_ja1(Action::SaveAs(recovered.clone()));
+    f.until(|f| {
+        f.app.focused().ja1_job.is_none()
+            && f.attachment().project_path().as_ref() == Some(&recovered)
+    });
+    let cold = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&recovered)
+        .unwrap()
+        .restore_manual(&cold)
+        .unwrap();
+    assert_eq!(
+        *cold.export_history().unwrap().document,
+        *accepted,
+        "MANUAL_RECOVERY_COPY_KEEPS_ACCEPTED"
+    );
+    assert!(
+        f.attachment()
+            .manual_edit_message()
+            .unwrap()
+            .contains("1 hand edit was not applied.")
+    );
+}
+
+#[test]
+fn manual_value_fix1_acknowledgement_during_attempt_is_not_lost() {
+    let mut f = Fixture::new();
+    f.send_value(10);
+    let gate = Arc::new(SendGate::default());
+    let _release = Release(Arc::clone(&gate));
+    let held = Arc::clone(&gate);
+    f.edits_mut().after_send = Some(Box::new(move || held.hold()));
+    f.app
+        .send_operations_coalesced(vec![curve(450, -555)], f.key.clone());
+    f.until(|_| gate.entered());
+    // Exercise the queue's correlation contract separately from the poll exclusion:
+    // the actual publication is acknowledged after the refused send, before its result is collected.
+    let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
+    let host = attachment.host.as_mut().unwrap();
+    let messages = host.manual.as_ref().unwrap().permit.pending().unwrap();
+    assert!(!messages.is_empty());
+    let reply = host
+        .client
+        .request(kinewright_agent::writer_host::HostCommand::CommitHistory {
+            client: host.manual_identity_for_test(),
+            messages,
+        })
+        .unwrap();
+    assert!(reply.error.is_none(), "{reply:?}");
+    host.accept_manual_ack(&reply, &attachment.owner).unwrap();
+    gate.release();
+    f.until(|f| !f.edits().attempt_running());
+    assert!(
+        !f.edits().waiting_for_ack(),
+        "MANUAL_SEND_TIME_ACKNOWLEDGEMENT"
+    );
+    f.finish();
+    assert_eq!(f.value(), -555);
+}
+
+#[test]
+fn manual_value_fix1_poll_keeps_publication_behind_attempt() {
+    let mut f = Fixture::new();
+    f.send_value(10);
+    let gate = Arc::new(SendGate::default());
+    let _release = Release(Arc::clone(&gate));
+    let held = Arc::clone(&gate);
+    f.edits_mut().after_send = Some(Box::new(move || held.hold()));
+    f.app
+        .send_operations_coalesced(vec![curve(450, -555)], f.key.clone());
+    f.until(|_| gate.entered());
+    f.release();
+    f.tick();
+    assert!(
+        !f.attachment()
+            .host
+            .as_ref()
+            .unwrap()
+            .manual_stream_inflight_for_test(),
+        "MANUAL_POLL_WAIT_FOR_ATTEMPT"
+    );
+    assert!(!f.gate().permit.pending().unwrap().is_empty());
+    gate.release();
+    f.finish();
+    assert_eq!(f.value(), -555);
+}
+
+#[test]
+fn manual_value_fix1_revision_conflict_notice_survives_later_acceptance() {
+    let mut f = Fixture::new();
+    let expected = f.app.focused().revision;
+    f.app
+        .focused_mut()
+        .send_manual_command(Command::Do(param(1)))
+        .unwrap();
+    f.attempt();
+    f.app
+        .focused_mut()
+        .send_manual_command(Command::DoIfRevision {
+            expected,
+            operation: param(-10),
+            token: None,
+        })
+        .unwrap();
+    f.app
+        .focused_mut()
+        .send_manual_command(Command::Do(param(20)))
+        .unwrap();
+    f.until(|f| !f.attachment().manual_edits_pending());
+    assert_eq!(f.scalar(), 20);
+    let words = "The document changed before this edit could be applied. Check its current value and try again.";
+    assert_eq!(
+        f.attachment().manual_edit_message(),
+        Some(words),
+        "MANUAL_REVISION_CONFLICT_NOTICE"
+    );
+    f.finish();
+    f.tick();
+    assert_eq!(
+        f.app.status, words,
+        "MANUAL_NOTICE_SURVIVES_ACCEPTANCE_AND_SAVE"
+    );
+    f.app.start_ja1(Action::DismissManualNotice);
+    assert!(f.edits().notice().is_none());
+    assert_ne!(f.app.status, words, "MANUAL_DISMISS_REMOVES_NOTICE");
+    f.app
+        .focused_mut()
+        .send_manual_command(Command::DoIfRevision {
+            expected,
+            operation: param(-30),
+            token: None,
+        })
+        .unwrap();
+    f.until(|f| !f.attachment().manual_edits_pending());
+    assert_eq!(f.edits().notice(), Some(words));
+    f.app
+        .focused_mut()
+        .send_manual_command(Command::Do(param(40)))
+        .unwrap();
+    assert!(
+        f.edits().notice().is_none(),
+        "MANUAL_NEXT_PERSON_EDIT_DISMISSES_NOTICE"
+    );
+    f.finish();
+    assert_eq!(f.scalar(), 40);
+}
+
+#[test]
+fn manual_value_fix1_open_gesture_does_not_claim_backpressure() {
+    let mut f = Fixture::new();
+    f.send_value(10);
+    assert!(f.attachment().manual_edits_pending());
+    assert_eq!(
+        f.attachment().manual_edit_message(),
+        None,
+        "MANUAL_OPEN_GESTURE_IS_NOT_WAITING"
+    );
+    f.send_value(-555);
+    assert!(f.edits().waiting_for_ack());
+    assert_eq!(
+        f.attachment().manual_edit_message(),
+        Some(crate::manual_edits::PENDING_WORDS)
+    );
+    let close = f.attachment().close_text();
+    assert!(
+        close.contains("Cancel keeps this project open")
+            && close.contains("Discard closes the project")
+    );
+    assert!(
+        close.contains("waiting for a durable acknowledgement"),
+        "MANUAL_CLOSE_DISCLOSES_BOTH"
+    );
+    f.finish();
+}
+
+#[test]
+fn manual_value_fix1_waiting_value_does_not_hide_a_live_host_refusal() {
+    let mut f = Fixture::new();
+    f.fill();
+    let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
+    let host = attachment.host.as_mut().unwrap();
+    let messages = host.manual.as_ref().unwrap().permit.pending().unwrap();
+    let reply = host
+        .client
+        .request(kinewright_agent::writer_host::HostCommand::CommitHistory {
+            client: host.manual_identity_for_test(),
+            messages,
+        })
+        .unwrap();
+    assert!(reply.error.is_none(), "{reply:?}");
+    host.accept_manual_ack(&reply, &attachment.owner).unwrap();
+    // This refusal is final for that session command, but the working editor is healthy.
+    let absent = kinewright_project::bundle_records::BranchId::fresh().unwrap();
+    let Err(BundleError::Identity(error)) = attachment.apply(Action::SaveSession(absent)) else {
+        panic!("MANUAL_TYPED_SESSION_REFUSAL");
+    };
+    assert!(error.contains("history_changed"), "{error}");
+    assert!(
+        !attachment.read_only(),
+        "MANUAL_HOST_REFUSAL_IS_NOT_A_FREEZE"
+    );
+    assert!(attachment.manual_edits_pending());
+    assert!(
+        attachment.manual_edit_message().is_none(),
+        "MANUAL_WAIT_DOES_NOT_HIDE_HOST_ERROR"
+    );
+    f.tick();
+    assert_eq!(
+        f.app.status,
+        f.attachment().message,
+        "MANUAL_HOST_ERROR_STATUS_PRIORITY"
+    );
+    f.finish();
+}
+
+#[test]
+fn manual_value_fix1_project_switch_keeps_pending_value_with_its_project() {
+    let mut f = Fixture::new();
+    f.fill();
+    f.send_value(-555);
+    let target = f.app.focused_project;
+    let other = Arc::clone(&f.app.projects[0].document);
+    f.app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .end_manual_gestures();
+    f.release();
+    f.app.focus_project(0);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while f.app.projects[target]
+        .ja1
+        .as_ref()
+        .is_none_or(|a| a.manual_edits_pending() || a.is_dirty())
+    {
+        assert!(Instant::now() < deadline, "MANUAL_BACKGROUND_PROJECT_LANDS");
+        f.tick();
+    }
+    assert_eq!(f.app.focused_project, 0);
+    assert_eq!(
+        *f.app.projects[0].document, *other,
+        "MANUAL_OTHER_PROJECT_UNCHANGED"
+    );
+    f.app.focus_project(target);
+    assert_eq!(f.value(), -555, "MANUAL_PENDING_VALUE_STAYS_WITH_PROJECT");
+}
+
+#[test]
+fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
+    for (refused, before_send) in [(false, false), (true, false), (false, true)] {
+        let mut f = Fixture::new();
+        let first = if refused { curve(450, 10) } else { param(10) };
+        f.app.send_operations_coalesced(vec![first], f.key.clone());
+        f.attempt();
+        let gate = Arc::new(SendGate::default());
+        let _release = Release(Arc::clone(&gate));
+        let held = Arc::clone(&gate);
+        if before_send {
+            f.edits_mut().before_send = Some(Box::new(move || held.hold()));
+        } else {
+            f.edits_mut().after_send = Some(Box::new(move || held.hold()));
+        }
+        let next = if refused { curve(450, 20) } else { param(20) };
+        f.app.send_operations_coalesced(vec![next], f.key.clone());
+        f.until(|_| gate.entered());
+        if before_send {
+            // Two distinct click commands wait behind the in-flight gesture value.
+            for value in [30, 40] {
+                f.app
+                    .focused_mut()
+                    .send_manual_command(Command::Do(param(value)))
+                    .unwrap();
+            }
+        }
+        let accepted = f.app.focused().core.export_history().unwrap().document;
+        let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
+        attachment
+            .host
+            .as_mut()
+            .unwrap()
+            .begin_manual_recovery(&mut attachment.owner)
+            .unwrap();
+        assert!(
+            !attachment.manual_edits_pending(),
+            "MANUAL_LATE_RESULT_IS_NOT_A_RECOVERY_LOCK"
+        );
+        f.release();
+        f.until(|f| !f.attachment().read_only());
+        assert!(f.edits().worker_owned(), "MANUAL_LATE_WORKER_STILL_OWNED");
+        assert_eq!(
+            *f.app.focused().document,
+            *accepted,
+            "MANUAL_LATE_ACCEPTED_PREFIX_KEPT"
+        );
+        gate.release();
+        f.until(|f| !f.edits().worker_owned());
+        assert_eq!(
+            *f.app.focused().document,
+            *accepted,
+            "MANUAL_OLD_PERMIT_CANNOT_APPLY_AFTER_RECOVERY"
+        );
+        if refused || before_send {
+            let words = if before_send {
+                "3 hand edits were not applied."
+            } else {
+                "1 hand edit was not applied."
+            };
+            assert!(
+                f.edits().notice().unwrap().contains(words),
+                "MANUAL_UNAPPLIED_COUNT_INCLUDES_LATE_REFUSAL"
+            );
+        } else {
+            assert!(
+                f.edits().notice().is_none(),
+                "MANUAL_ACCEPTED_IS_NOT_REPORTED_UNAPPLIED"
+            );
+        }
+        f.finish();
+    }
 }

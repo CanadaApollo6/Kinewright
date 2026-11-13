@@ -38,15 +38,24 @@ struct InFlight {
     command: Command,
     acknowledgement: u64,
     worker: JoinedThread<Result<Event, CoreDisconnected>>,
+    disposition: Disposition,
+}
+enum Disposition {
+    Active,
+    /// Keep the worker owned until it finishes, but never retry its old capability.
+    Abandoned {
+        count_if_refused: bool,
+    },
 }
 enum Notice {
     Refused(String),
+    Unapplied { count: usize, text: String },
     Full,
 }
 impl Notice {
     fn text(&self) -> &str {
         match self {
-            Self::Refused(text) => text,
+            Self::Refused(text) | Self::Unapplied { text, .. } => text,
             Self::Full => FULL_WORDS,
         }
     }
@@ -59,6 +68,8 @@ pub(crate) struct ManualEdits {
     notice: Option<Notice>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) before_send: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) after_send: Option<Box<dyn FnOnce() + Send>>,
 }
 impl ManualEdits {
     pub(crate) fn submit(
@@ -104,20 +115,70 @@ impl ManualEdits {
         self.acknowledgement = self.acknowledgement.wrapping_add(1);
     }
     pub(crate) fn pending(&self) -> bool {
-        self.in_flight.is_some() || self.actions.iter().any(|a| !a.ended || a.latest.is_some())
+        self.attempt_running() || self.actions.iter().any(|a| !a.ended || a.latest.is_some())
     }
     pub(crate) fn message(&self) -> Option<&str> {
         self.notice
             .as_ref()
             .map(Notice::text)
-            .or_else(|| self.pending().then_some(PENDING_WORDS))
+            .or_else(|| self.waiting().then_some(PENDING_WORDS))
+    }
+    pub(crate) fn notice(&self) -> Option<&str> {
+        self.notice.as_ref().map(Notice::text)
+    }
+    pub(crate) fn dismiss_notice(&mut self) {
+        self.notice = None;
+    }
+    fn waiting(&self) -> bool {
+        self.actions.iter().enumerate().any(|(index, action)| {
+            action.waiting_at.is_some()
+                || (action.ended
+                    && (action.latest.is_some() || (index == 0 && self.attempt_running())))
+        })
     }
     pub(crate) fn attempt_running(&self) -> bool {
-        self.in_flight.is_some()
+        self.in_flight
+            .as_ref()
+            .is_some_and(|f| matches!(f.disposition, Disposition::Active))
+    }
+    /// These values never entered Core. Accepted history remains owned by its permit and cut.
+    pub(crate) fn abandon_unaccepted(&mut self) {
+        self.collect_ready();
+        let count = self.actions.iter().filter(|a| a.latest.is_some()).count();
+        if let Some(flight) = &mut self.in_flight
+            && matches!(flight.disposition, Disposition::Active)
+        {
+            flight.disposition = Disposition::Abandoned {
+                count_if_refused: self.actions.front().is_none_or(|a| a.latest.is_none()),
+            };
+        }
+        self.actions.clear();
+        if count > 0 {
+            self.note_unapplied(count);
+        }
+    }
+    fn note_unapplied(&mut self, count: usize) {
+        let count = count
+            + match &self.notice {
+                Some(Notice::Unapplied { count, .. }) => *count,
+                _ => 0,
+            };
+        let edit = if count == 1 { "edit was" } else { "edits were" };
+        self.notice = Some(Notice::Unapplied {
+            count,
+            text: format!(
+                "{count} hand {edit} not applied. Check the document and repeat {} after recovery.",
+                if count == 1 { "it" } else { "them" }
+            ),
+        });
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn action_count(&self) -> usize {
         self.actions.len()
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn worker_owned(&self) -> bool {
+        self.in_flight.is_some()
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn waiting_for_ack(&self) -> bool {
@@ -134,6 +195,21 @@ impl ManualEdits {
         {
             let flight = self.in_flight.take().expect("finished manual request");
             let result = flight.worker.join();
+            if let Disposition::Abandoned { count_if_refused } = flight.disposition {
+                if count_if_refused {
+                    match result {
+                        Ok(Ok(Event::DocumentChanged { .. })) => {}
+                        Ok(Ok(_)) => self.note_unapplied(1),
+                        Ok(Err(CoreDisconnected)) => self.notice = Some(Notice::Refused(
+                            "The Core actor stopped. Check the document; this edit's outcome could not be confirmed.".into()
+                        )),
+                        Err(_) => self.notice = Some(Notice::Refused(
+                            "The edit worker panicked. Check the document; this edit's outcome could not be confirmed.".into()
+                        )),
+                    }
+                }
+                return;
+            }
             let action = self.actions.front_mut().expect("in-flight action retained");
             match result {
                 Ok(Ok(Event::MutationRefused {
@@ -148,9 +224,6 @@ impl ManualEdits {
                 }
                 Ok(Ok(Event::DocumentChanged { .. })) => {
                     action.waiting_at = None;
-                    if matches!(self.notice, Some(Notice::Refused(_))) {
-                        self.notice = None;
-                    }
                 }
                 other => {
                     self.notice = Some(Notice::Refused(match other {
@@ -159,7 +232,9 @@ impl ManualEdits {
                         Ok(Ok(Event::BatchRejected { error, .. })) => error.to_string(),
                         Ok(Ok(Event::RevisionConflict { .. })) => "The document changed before this edit could be applied. Check its current value and try again.".into(),
                         Ok(Ok(Event::UndoBlockedBySave { .. })) => "Undo is waiting for the save to finish. Retry after the destination is reconciled.".into(),
-                        _ => "The edit outcome could not be confirmed because its worker stopped. Check the document before trying again.".into(),
+                        Ok(Err(CoreDisconnected)) => "The Core actor stopped. Check the document; this edit's outcome could not be confirmed.".into(),
+                        Err(_) => "The edit worker panicked. Check the document; this edit's outcome could not be confirmed.".into(),
+                        _ => "The Core actor returned an unexpected reply. Check the document before trying this edit again.".into(),
                     }));
                     // A final refusal belongs to the sent value. A newer value remains a new command.
                     action.waiting_at = None;
@@ -194,6 +269,8 @@ impl ManualEdits {
         let permit = permit.clone();
         #[cfg(all(test, target_os = "linux"))]
         let before_send = self.before_send.take();
+        #[cfg(all(test, target_os = "linux"))]
+        let after_send = self.after_send.take();
         match std::thread::Builder::new()
             .name("manual-edit".into())
             .spawn(move || {
@@ -201,13 +278,19 @@ impl ManualEdits {
                 if let Some(hook) = before_send {
                     hook();
                 }
-                permit.request(sent)
+                let result = permit.request(sent);
+                #[cfg(all(test, target_os = "linux"))]
+                if let Some(hook) = after_send {
+                    hook();
+                }
+                result
             }) {
             Ok(worker) => {
                 self.in_flight = Some(InFlight {
                     command,
                     acknowledgement: self.acknowledgement,
                     worker: JoinedThread::new(worker),
+                    disposition: Disposition::Active,
                 });
             }
             Err(error) => {

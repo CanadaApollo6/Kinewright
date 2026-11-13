@@ -189,6 +189,7 @@ impl HostAttachment {
         let cut = owner.recapture_host_recovery_cut()?;
         self.cut = Some(cut.clone());
         self.status.frozen = true;
+        self.edits.abandon_unaccepted();
         let gate = self.manual.as_ref().ok_or(BundleError::HistoryChanged)?;
         let retained_plan = self
             .recovery_plan
@@ -397,7 +398,6 @@ impl HostAttachment {
         self.manual = Some(super::super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit: completed.permit,
-            edits: crate::manual_edits::ManualEdits::default(),
         });
         self.cut = None;
         self.unknown_operation = false;

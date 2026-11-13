@@ -1083,6 +1083,16 @@ impl KinewrightApp {
             self.open_project(path);
             return;
         }
+        if matches!(action, crate::ja1_attachment::Action::DismissManualNotice) {
+            let message = self.focused_mut().ja1.as_mut().map(|attachment| {
+                let _ = attachment.apply(action);
+                attachment.message.clone()
+            });
+            if let Some(message) = message {
+                self.status = message;
+            }
+            return;
+        }
         if !action.keeps_identity() && self.refuse_unkept_voice(self.focused_project) {
             return;
         }
@@ -1090,7 +1100,7 @@ impl KinewrightApp {
             .focused()
             .ja1
             .as_ref()
-            .is_some_and(crate::ja1_attachment::Ja1Attachment::manual_edits_pending)
+            .is_some_and(|attachment| attachment.manual_pending_blocks(&action))
         {
             self.status = crate::manual_edits::PENDING_WORDS.into();
             return;
@@ -1103,6 +1113,7 @@ impl KinewrightApp {
             return;
         };
         attachment.panel_open = true;
+        session.ja1_job_notice = attachment.manual_persistent_status();
         session.ja1_job = Some(std::thread::spawn(move || {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = attachment.apply(action);
@@ -1177,6 +1188,7 @@ impl KinewrightApp {
                 .is_some_and(std::thread::JoinHandle::is_finished)
             {
                 let job = session.ja1_job.take().expect("finished job");
+                session.ja1_job_notice = None;
                 match job.join() {
                     Ok(mut attachment) => {
                         if index == focused {
@@ -1267,7 +1279,14 @@ impl KinewrightApp {
             return;
         }
         if self.focused().ja1_job.is_some() {
-            egui::Modal::new(egui::Id::new("ja1-busy")).show(ctx, |ui| { ui.label("Editing is read-only while your current work is saved and the selection or rescue is checked."); ui.spinner(); });
+            let notice = self.focused().ja1_job_notice.as_deref();
+            egui::Modal::new(egui::Id::new("ja1-busy")).show(ctx, |ui| {
+                ui.label("Editing is read-only while your current work is saved and the selection or rescue is checked.");
+                if let Some(notice) = notice {
+                    ui.label(notice);
+                }
+                ui.spinner();
+            });
             return;
         }
         let Some(attachment) = &self.focused().ja1 else {
@@ -3891,13 +3910,8 @@ impl KinewrightApp {
             ctx.request_repaint_after(Duration::from_millis(10));
         }
         self.sync_studio_selection();
-        if let Some(message) = self
-            .focused()
-            .ja1
-            .as_ref()
-            .and_then(crate::ja1_attachment::Ja1Attachment::manual_edit_message)
-        {
-            self.status = message.into();
+        if let Some(message) = self.focused().manual_edit_status() {
+            self.status = message;
         }
     }
 

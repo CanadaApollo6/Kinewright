@@ -167,6 +167,9 @@ impl Drop for HostAttachment {
 }
 
 impl HostAttachment {
+    pub(in crate::ja1_attachment) fn manual_stream_inflight_for_test(&self) -> bool {
+        self.manual_inflight.is_some()
+    }
     pub(in crate::ja1_attachment) fn take_child_for_test(&mut self) -> std::process::Child {
         self.child.take().expect("owned fixture host")
     }

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Final manual value controls. Owns the cargo lock; restores exact source bytes."""
 import fcntl
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'target/gesture-final-value/pairs'
@@ -19,6 +19,10 @@ CASES = {
     'release-frame': (APP+'app.rs', PREFIX+'manual_value_release_frame_submits_before_finishing_gesture', 'MANUAL_RELEASE_BEFORE_WIDGETS'),
     'retry-correlation': (APP+'app.rs', 'app::in1_tests::in1b_the_routers_own_rejected_send_is_dropped_not_left_outstanding', 'MANUAL_RETRY_CORRELATION'),
     'retry-reservation': (APP+'app.rs', PREFIX+'manual_value_final_drag_is_saved_and_one_undo', 'MANUAL_RETRY_RESERVATION'),
+    'recovery-unaccepted': (APP+'manual_edits.rs', PREFIX+'manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits', 'MANUAL_RECOVERY_DROPS_UNACCEPTED'),
+    'send-time-ack': (APP+'manual_edits.rs', PREFIX+'manual_value_fix1_acknowledgement_during_attempt_is_not_lost', 'MANUAL_SEND_TIME_ACKNOWLEDGEMENT'),
+    'poll-attempt': (APP+'ja1_host.rs', PREFIX+'manual_value_fix1_poll_keeps_publication_behind_attempt', 'MANUAL_POLL_WAIT_FOR_ATTEMPT'),
+    'notice-job': (APP+'app.rs', PREFIX+'manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits', 'MANUAL_NOTICE_DURING_PREVIEW'),
 }
 
 def mutate(name, source):
@@ -32,7 +36,7 @@ def mutate(name, source):
         after = 'reason: _,'
     elif name == 'pending-close':
         start = source.index('    pub(crate) fn manual_edits_pending(')
-        end = source.index('    pub(crate) fn manual_edit_message(', start)
+        end = source.index('    pub(crate) fn manual_pending_blocks(', start)
         return source[:start] + '    pub(crate) fn manual_edits_pending(&self) -> bool { false }\n' + source[end:]
     elif name == 'retry-correlation':
         before = '*reason != kinewright_core::CoreMutationRefusal::ManualBackpressure'
@@ -40,6 +44,19 @@ def mutate(name, source):
     elif name == 'retry-reservation':
         before = 'if reason != kinewright_core::CoreMutationRefusal::ManualBackpressure {'
         after = 'if true {'
+    elif name == 'recovery-unaccepted':
+        start = source.index('    pub(crate) fn abandon_unaccepted(')
+        end = source.index('    fn note_unapplied(', start)
+        return source[:start] + '    pub(crate) fn abandon_unaccepted(&mut self) {}\n' + source[end:]
+    elif name == 'send-time-ack':
+        before = 'action.waiting_at = Some(flight.acknowledgement);'
+        after = 'action.waiting_at = Some(self.acknowledgement);'
+    elif name == 'poll-attempt':
+        before = '        if self.edits.attempt_running() {\n            return Ok(None);\n        }'
+        after = '        if false && self.edits.attempt_running() {\n            return Ok(None);\n        }'
+    elif name == 'notice-job':
+        before = 'session.ja1_job_notice = attachment.manual_persistent_status();'
+        after = 'session.ja1_job_notice = None;'
     else:
         before = '        self.retirement.prune();'
         after = '        self.finish_manual_frame(ctx);\n        self.retirement.prune();'
@@ -50,9 +67,14 @@ def mutate(name, source):
     return source.replace(before, after, 1)
 
 def main():
-    selected = sys.argv[1:] or list(CASES)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('pairs', nargs='*')
+    parser.add_argument('--out', type=Path, default=OUT)
+    args = parser.parse_args()
+    selected = args.pairs or list(CASES)
     assert all(name in CASES for name in selected)
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = args.out
+    out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CARGO_BUILD_JOBS='4', CARGO_INCREMENTAL='0', RUST_TEST_THREADS='4',
                TMPDIR=str(ROOT/'target/t'), LOCALAPPDATA=str(ROOT/'target/l'), PYTHONDONTWRITEBYTECODE='1')
     rows = []
@@ -68,7 +90,7 @@ def main():
                 for side in ('red', 'green'):
                     path.write_text(mutate(name, original.decode())) if side=='red' else path.write_bytes(original)
                     if side=='green': assert path.read_bytes()==original, 'restore differs'
-                    log = OUT/f'{name}-{side}.log'
+                    log = out/f'{name}-{side}.log'
                     with log.open('w') as stream:
                         run = subprocess.run(['bash', '-c',
                             'source scripts/setup-ffmpeg.sh && exec nice -n 10 cargo test -j4 -p kinewright-app --bin kinewright-app "$1" -- --exact --nocapture',
@@ -82,7 +104,7 @@ def main():
                 path.write_bytes(original)
                 assert path.read_bytes()==original, 'final restore differs'
             rows.append(dict(pair=name, red=101, green=0, restore_sha256=digest, source=file))
-            (OUT/'results.json').write_text(json.dumps(rows, indent=2)+'\n')
+            (out/'results.json').write_text(json.dumps(rows, indent=2)+'\n')
             print('PASS', name, 'byte-identical restore', digest, flush=True)
 
 if __name__ == '__main__':

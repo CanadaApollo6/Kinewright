@@ -88,6 +88,8 @@ pub(super) struct HostAttachment {
     heartbeat: Option<StatusLane>,
     last_heartbeat: Instant,
     pub manual: Option<super::ManualProducerGate>,
+    // UI commands and notices outlive a replaceable manual lease during recovery.
+    pub(super) edits: crate::manual_edits::ManualEdits,
     manual_client: String,
     #[cfg(all(test, target_os = "linux"))]
     pub(super) manual_publication_hold: bool,
@@ -234,7 +236,6 @@ impl HostAttachment {
         self.manual = Some(super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit,
-            edits: crate::manual_edits::ManualEdits::default(),
         });
         self.client = self.client.with_manual_editor(self.manual_client.clone());
         self.cut = None;
@@ -413,6 +414,7 @@ impl HostAttachment {
             #[cfg(all(test, target_os = "linux"))]
             manual_publication_hold: false,
             manual_inflight: None,
+            edits: crate::manual_edits::ManualEdits::default(),
         })
     }
 
@@ -486,6 +488,7 @@ impl HostAttachment {
             #[cfg(all(test, target_os = "linux"))]
             manual_publication_hold: false,
             manual_inflight: None,
+            edits: crate::manual_edits::ManualEdits::default(),
         })
     }
 
@@ -577,7 +580,6 @@ impl HostAttachment {
         self.manual = Some(super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit,
-            edits: crate::manual_edits::ManualEdits::default(),
         });
         self.pending_operation = None;
         self.unknown_operation = false;
@@ -633,9 +635,7 @@ impl HostAttachment {
                     .permit,
                 reply.manual_ack.clone(),
             )?;
-            if let Some(gate) = &mut self.manual {
-                gate.edits.acknowledged();
-            }
+            self.edits.acknowledged();
         }
         Ok(())
     }
@@ -789,6 +789,9 @@ impl HostAttachment {
         if needs_cut && self.cut.is_none() {
             self.cut = Some(owner.freeze_host_cut()?);
         }
+        if self.read_only() {
+            self.edits.abandon_unaccepted();
+        }
         if !retry_original {
             self.drain_manual(owner)?;
         }
@@ -824,7 +827,8 @@ impl HostAttachment {
             })
         };
         let command = match action {
-            Action::StudioVersions
+            Action::DismissManualNotice
+            | Action::StudioVersions
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)
             | Action::StudioEditCopy(_) => {
@@ -987,12 +991,10 @@ impl HostAttachment {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<Option<HostReply>, BundleError> {
-        if let Some(gate) = &mut self.manual {
-            gate.edits.collect_ready();
-            // Do not put a UI query behind this frame's pure-Core acceptance work.
-            if gate.edits.attempt_running() {
-                return Ok(None);
-            }
+        self.edits.collect_ready();
+        // Do not put a UI query behind this frame's pure-Core acceptance work.
+        if self.edits.attempt_running() {
+            return Ok(None);
         }
         #[cfg(all(test, target_os = "linux"))]
         if self.manual_publication_hold {
@@ -1210,16 +1212,15 @@ impl HostAttachment {
     #[allow(clippy::too_many_lines)]
     pub fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let pending = if self
-            .manual
-            .as_ref()
-            .is_some_and(|g| g.edits.attempt_running())
-        {
+        let pending = if self.edits.attempt_running() {
             0
         } else {
             self.pending_count()
         };
-        if let Some(message) = self.manual.as_ref().and_then(|g| g.edits.message()) {
+        if self.edits.notice().is_none()
+            && !self.read_only()
+            && let Some(message) = self.edits.message()
+        {
             ui.label(message);
         }
         if pending > 0 {
