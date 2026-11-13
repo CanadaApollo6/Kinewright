@@ -659,7 +659,7 @@ fn c7_shutdown_queue(before_ingress: bool) {
             .message
             .as_deref()
             .unwrap()
-            .contains("attachment_refused"),
+            .contains("host_stopping: The host is stopping. Your request has not been dispatched."),
         "C7_SHUTDOWN_TRANSPORT_FENCE"
     );
     let kept: serde_json::Value = serde_json::from_slice(
@@ -789,3 +789,6 @@ fn s3_c7_fix1_refused_shutdown_keeps_queue_open() {
         Some(&run_id)
     );
 }
+
+#[path = "studio_feedback_c7_retry_tests.rs"]
+mod retry;

@@ -33,13 +33,14 @@ def mutate(name, data):
     if name == 'ingress-fence':
         data = replace_once(data, b'''            tokio::select! {
                 biased;
-                () = state.lifecycle.stopped() => None,
+                () = state.lifecycle.stopped() => Err(HostRefusal::stopping()),
                 permit = Arc::clone(&state.ingress).acquire_owned() => {
                     permit.ok().filter(|_| !state.lifecycle.stopping())
+                        .ok_or_else(HostRefusal::stopping)
                 }
-            }''', b'            Arc::clone(&state.ingress).acquire_owned().await.ok()')
+            }''', b'            Arc::clone(&state.ingress).acquire_owned().await.map_err(|_| HostRefusal::stopping())')
         return replace_once(data, b'''    if state.lifecycle.stopping() {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return startup_refusal(&HostRefusal::stopping());
     }
 ''', b'')
     data = replace_once(data, b'''            HostCommand::Shutdown => {

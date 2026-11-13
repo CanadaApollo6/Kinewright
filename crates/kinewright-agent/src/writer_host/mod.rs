@@ -1,6 +1,9 @@
 //! Product-owned, serialized named-project IO and authenticated UI-free sessions.
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 const HOST_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// Leave transport time for the authenticated pre-dispatch expiry response.
+#[cfg(target_os = "linux")]
+const HOST_STARTUP_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(55);
 mod attention;
 #[cfg(test)]
 mod hooks_tests;
@@ -192,6 +195,18 @@ impl HostClient {
     pub fn endpoint(&self) -> &HostEndpoint {
         &self.bootstrap.endpoint
     }
+    /// A recovery retry belongs to the same authenticated attachment, not just its URL.
+    #[must_use]
+    pub fn same_attachment(&self, other: &Self) -> bool {
+        self.endpoint().address == other.endpoint().address
+            && self.endpoint().project == other.endpoint().project
+            && self.endpoint().protocol == other.endpoint().protocol
+            && self
+                .bootstrap
+                .auth
+                .accepts(Some(&other.bootstrap.auth.bearer()))
+            && self.editor == other.editor
+    }
     #[must_use]
     pub fn bootstrap(&self) -> HostBootstrap {
         self.bootstrap.clone()
@@ -262,7 +277,8 @@ impl HostClient {
                     "host connection failed; retained ownership must be re-established".into(),
                 )
             })?;
-        if !response.status().is_success() {
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return Err(HostRefusal::new(
                 "attachment_refused",
                 "authentication, project, protocol, roots or ingress admission refused",
@@ -277,6 +293,10 @@ impl HostClient {
             return Err(
                 HostRefusal::new("capacity", "host reply exceeds protocol capacity").into(),
             );
+        }
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            let refusal: HostRefusal = serde_json::from_slice(&bytes)?;
+            return Err(refusal.into());
         }
         Ok(bytes)
     }
@@ -794,28 +814,33 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         // Stop and Shutdown must remain available, and only one waiter is admitted.
         drop(permit);
         let queued = async {
-            if !state.runtime.wait_for_startup().await {
-                return None;
-            }
+            state.runtime.wait_for_startup().await?;
             #[cfg(any(test, feature = "test-util"))]
             state.runtime.before_startup_ingress();
             tokio::select! {
                 biased;
-                () = state.lifecycle.stopped() => None,
+                () = state.lifecycle.stopped() => Err(HostRefusal::stopping()),
                 permit = Arc::clone(&state.ingress).acquire_owned() => {
                     permit.ok().filter(|_| !state.lifecycle.stopping())
+                        .ok_or_else(HostRefusal::stopping)
                 }
             }
         };
-        match tokio::time::timeout(HOST_REQUEST_TIMEOUT, queued).await {
-            Ok(Some(permit)) => permit,
-            Ok(None) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        match tokio::time::timeout(state.runtime.startup_wait_bound(), queued).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(error)) => return startup_refusal(&error),
+            Err(_) => {
+                return startup_refusal(&HostRefusal::new(
+                    "startup_wait_expired",
+                    "Startup recovery is still running. Your request has not been dispatched.",
+                ));
+            }
         }
     } else {
         permit
     };
     if state.lifecycle.stopping() {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return startup_refusal(&HostRefusal::stopping());
     }
     let reply = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -825,6 +850,12 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
             state
                 .runtime
                 .recovery_phase(studio_runtime::RecoveryPhase::Dispatch);
+        }
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        if matches!(request.command, HostCommand::DispatchOrchestration { .. }) {
+            state
+                .runtime
+                .recovery_phase(studio_runtime::RecoveryPhase::ControlDispatch);
         }
         #[cfg(target_os = "linux")]
         let reply = provider_readiness::execute(&state.owner, &bearer, request);
@@ -845,6 +876,11 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         Ok(reply) => json_response(&reply),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+fn startup_refusal(error: &HostRefusal) -> Response {
+    let mut response = json_response(error);
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
 }
 fn json_response(value: &impl Serialize) -> Response {
     match serde_json::to_vec(value) {
@@ -2699,6 +2735,17 @@ impl HostCommandOwner {
                 .map(|o| format!("{o:?}"))
                 .collect();
         }
+        #[cfg(target_os = "linux")]
+        let recovery_pending = self.native_recovery_pending || self.recovery_only;
+        #[cfg(not(target_os = "linux"))]
+        let recovery_pending = false;
+        status.recovery_readiness = if self.lifecycle.stopping() {
+            RecoveryReadiness::Stopping
+        } else if status.frozen || self.owner.is_none() || recovery_pending {
+            RecoveryReadiness::Blocked
+        } else {
+            RecoveryReadiness::Ready
+        };
         status
     }
 }

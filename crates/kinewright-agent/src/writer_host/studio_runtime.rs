@@ -38,6 +38,7 @@ pub enum RecoveryPhase {
     Restored,
     Dispatch,
     Waiting,
+    ControlDispatch,
 }
 #[cfg(any(test, feature = "test-util"))]
 pub(super) struct RuntimeWitness {
@@ -47,6 +48,12 @@ pub(super) struct RuntimeWitness {
     pub raw_type: super::native_invocation::RawTypeWitness,
 }
 pub(super) struct RuntimePorts {
+    #[cfg(any(test, feature = "test-util"))]
+    pub startup_wait_bound: Duration,
+    #[cfg(any(test, feature = "test-util"))]
+    pub recovery_fault: Option<Arc<dyn Fn() -> io::Result<()> + Send + Sync>>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub recovery_retry_delay: Duration,
     #[cfg(any(test, feature = "test-util"))]
     pub recovery_witness: Option<Arc<dyn Fn(RecoveryPhase) + Send + Sync>>,
     pub profiles: Option<Arc<dyn ProfileFactory>>,
@@ -80,6 +87,12 @@ impl Default for RuntimePorts {
             .unwrap_or_default()
             .with_file_name("kinewright-job-guardian");
         Self {
+            #[cfg(any(test, feature = "test-util"))]
+            startup_wait_bound: super::HOST_STARTUP_WAIT_TIMEOUT,
+            #[cfg(any(test, feature = "test-util"))]
+            recovery_fault: None,
+            #[cfg(any(test, feature = "test-util"))]
+            recovery_retry_delay: Duration::from_millis(250),
             #[cfg(any(test, feature = "test-util"))]
             recovery_witness: None,
             profiles: None,
@@ -191,12 +204,28 @@ impl StudioRuntime {
     }
     /// Await this recovery attempt, not a person resolving a persistent block.
     /// No owner lock or ordinary request permit is held across the wait.
-    pub(super) async fn wait_for_startup(&self) -> bool {
+    pub(super) fn startup_wait_bound(&self) -> Duration {
+        #[cfg(any(test, feature = "test-util"))]
+        {
+            self.ports.startup_wait_bound
+        }
+        #[cfg(not(any(test, feature = "test-util")))]
+        {
+            super::HOST_STARTUP_WAIT_TIMEOUT
+        }
+    }
+    pub(super) async fn wait_for_startup(&self) -> Result<(), super::HostRefusal> {
         let Ok(_waiter) = self.recovery_waiter.try_acquire() else {
-            return false;
+            return Err(super::HostRefusal::new(
+                "startup_wait_busy",
+                "Another request is waiting for startup recovery. This request has not been dispatched.",
+            ));
         };
         if self.begin_recovery().is_err() {
-            return false;
+            return Err(super::HostRefusal::new(
+                "startup_wait_failed",
+                "Startup recovery could not begin. This request has not been dispatched.",
+            ));
         }
         #[cfg(any(test, feature = "test-util"))]
         if let Some(witness) = &self.ports.recovery_witness {
@@ -209,13 +238,16 @@ impl StudioRuntime {
                 changed.as_mut().enable();
                 {
                     let Ok(state) = self.state.lock() else {
-                        return false;
+                        return Err(super::HostRefusal::new(
+                            "startup_wait_failed",
+                            "Startup recovery is unavailable. This request has not been dispatched.",
+                        ));
                     };
                     if state.stopping || self.lifecycle.stopping() {
-                        return false;
+                        return Err(super::HostRefusal::stopping());
                     }
                     if state.recovered || !state.recovering {
-                        return true;
+                        return Ok(());
                     }
                 }
                 #[cfg(any(test, feature = "test-util"))]
@@ -279,6 +311,12 @@ impl StudioRuntime {
         #[cfg(any(test, feature = "test-util"))]
         let witness = self.ports.recovery_witness.clone();
         #[cfg(any(test, feature = "test-util"))]
+        let fault = self.ports.recovery_fault.clone();
+        #[cfg(any(test, feature = "test-util"))]
+        let retry_delay = self.ports.recovery_retry_delay;
+        #[cfg(not(any(test, feature = "test-util")))]
+        let retry_delay = Duration::from_millis(250);
+        #[cfg(any(test, feature = "test-util"))]
         let fixture_root = self.ports.fixture_claim.clone();
         #[cfg(not(any(test, feature = "test-util")))]
         let fixture_root: Option<PathBuf> = None;
@@ -290,7 +328,12 @@ impl StudioRuntime {
                     if let Some(witness) = &witness {
                         witness(RecoveryPhase::Entered);
                     }
-                    let result = recover_on_open(&host, fixture_root.as_deref());
+                    #[cfg(any(test, feature = "test-util"))]
+                    let before = fault.as_ref().map_or(Ok(()), |fault| fault());
+                    #[cfg(not(any(test, feature = "test-util")))]
+                    let before = Ok::<(), io::Error>(());
+                    let result =
+                        before.and_then(|()| recover_on_open(&host, fixture_root.as_deref()));
                     #[cfg(any(test, feature = "test-util"))]
                     if let Some(witness) = &witness {
                         witness(RecoveryPhase::Restored);
@@ -308,7 +351,7 @@ impl StudioRuntime {
                         state.recovered = result.is_ok();
                         state.retry_at = result
                             .is_err()
-                            .then(|| std::time::Instant::now() + Duration::from_millis(250));
+                            .then(|| std::time::Instant::now() + retry_delay);
                     }
                     if let Some(runtime) = runtime.upgrade() {
                         runtime.lifecycle.changed.notify_waiters();

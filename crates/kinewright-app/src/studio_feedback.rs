@@ -6,7 +6,9 @@ mod stop;
 use crate::{app::KinewrightApp, presenter::DisplayCell};
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use kinewright_agent::writer_host::{FeedbackMapping, MapTarget};
-use kinewright_agent::writer_host::{RunViewPage, ScopedOrchestrationRequest};
+use kinewright_agent::writer_host::{
+    HostClient, HostError, RecoveryReadiness, RunViewPage, ScopedOrchestrationRequest,
+};
 use kinewright_core::{ClipId, Document, FrameTexture, HistorySnapshot, TimeCode, TrackKind};
 use kinewright_project::orchestration_records::{OpaqueRevision, RunActionKind, RunCleanup};
 use kinewright_project::{
@@ -451,6 +453,12 @@ fn local_reply(result: Result<ReceiptLookup, BundleError>) -> Reply {
 
 /// The owner a feedback write reaches: the in-process writer or the private host.
 pub(crate) trait FeedbackPort {
+    fn host_client(&self) -> Option<&HostClient> {
+        None
+    }
+    fn recovery_readiness(&self) -> Result<RecoveryReadiness, String> {
+        Ok(RecoveryReadiness::Blocked)
+    }
     fn runtime_status(&self) -> Result<Option<String>, String> {
         Ok(None)
     }
@@ -549,6 +557,8 @@ pub(crate) enum RunStart {
     Refused(String),
     /// The original request is retained for an exact retry.
     Unknown(String),
+    /// Authenticated pre-dispatch refusal; resend once this host recovers.
+    RecoveryUnknown(String),
 }
 /// The scheduler and Studio name one run with the same identity string.
 fn same_identity<T: for<'de> Deserialize<'de>>(run: &impl Serialize) -> Result<T, String> {
@@ -749,6 +759,15 @@ impl HostFeedback<'_> {
     }
 }
 impl FeedbackPort for HostFeedback<'_> {
+    fn host_client(&self) -> Option<&HostClient> {
+        Some(self.client)
+    }
+    fn recovery_readiness(&self) -> Result<RecoveryReadiness, String> {
+        Ok(self
+            .request(kinewright_agent::writer_host::HostCommand::Status)?
+            .status
+            .recovery_readiness)
+    }
     fn runtime_status(&self) -> Result<Option<String>, String> {
         Ok(self
             .request(kinewright_agent::writer_host::HostCommand::Status)?
@@ -894,9 +913,15 @@ impl FeedbackPort for HostFeedback<'_> {
                     request: request.clone(),
                 }) {
                 Ok(reply) => reply,
+                Err(HostError::Refused(error)) if error.retry_after_recovery() => {
+                    return RunStart::RecoveryUnknown(error.message);
+                }
                 Err(error) => return RunStart::Unknown(error.to_string()),
             };
         if let Some(error) = reply.error {
+            if error.retry_after_recovery() {
+                return RunStart::RecoveryUnknown(error.message);
+            }
             return if matches!(
                 error.code.as_str(),
                 "durability_unknown" | "unsettled" | "recovery_frozen" | "host_stopping"
@@ -1388,6 +1413,10 @@ pub(crate) const RUN_POLL: std::time::Duration = std::time::Duration::from_secs(
     reason = "independent flags: drawing mode, loaded, kept state changed, resume pending"
 )]
 pub(crate) struct Feedback {
+    #[cfg(all(test, target_os = "linux"))]
+    recovery_ready_witness: Option<Box<dyn FnOnce() + Send>>,
+    /// In-memory recovery arm. Never persisted or used as a transport.
+    revise_recovery: Option<HostClient>,
     pub(crate) drafts: Vec<Draft>,
     pub(crate) voices: BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
     pub(crate) active_voice: Option<NoteId>,
@@ -1437,6 +1466,12 @@ pub(crate) struct Feedback {
     pub(crate) directory_override: Option<PathBuf>,
 }
 impl Feedback {
+    pub(crate) fn cancel_recovery_retry(&mut self) {
+        self.revise_recovery = None;
+        for pending in &mut self.controls {
+            pending.recovery = None;
+        }
+    }
     pub(crate) fn draft_mut(&mut self, comment: &CommentId) -> Option<&mut Draft> {
         self.drafts
             .iter_mut()
@@ -2222,6 +2257,7 @@ impl Feedback {
     /// Send the kept Revise cut. Only a known reply clears it; an unknown one
     /// keeps the exact request for Retry and for the next session.
     fn start_run(&mut self, port: &mut dyn FeedbackPort) -> Option<RunStart> {
+        self.revise_recovery = None;
         let request = self.revise.clone()?;
         let start = port.revise(&request);
         self.message = Some(match &start {
@@ -2233,13 +2269,20 @@ impl Feedback {
             RunStart::Refused(why) => format!(
                 "Revise cut did not start ({why}). Your notes are saved; Start run tries again."
             ),
+            RunStart::RecoveryUnknown(why) => format!(
+                "Revise cut is waiting for startup recovery ({why}). Your request is kept and retries when this host is ready. Retry sends the same request."
+            ),
             RunStart::Unknown(why) => format!(
                 "Revise cut is sent, but its outcome is unknown ({why}). Retry sends this exact request."
             ),
         });
         // A known Waiting reply starts no run. The submitted batch durably keeps
         // its request for Start run; only uncertain replies occupy this slot.
-        if !matches!(start, RunStart::Unknown(_)) {
+        if matches!(start, RunStart::RecoveryUnknown(_)) {
+            // The retained capability binds the arm to its authenticated host.
+            self.revise_recovery = port.host_client().cloned();
+        }
+        if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_)) {
             self.revise = None;
             self.changed = true;
             self.observe_runs(&*port);
@@ -2248,9 +2291,10 @@ impl Feedback {
     }
     /// Whether a linked run has not finished, so Notes keeps reading it.
     pub(crate) fn observing(&self) -> bool {
-        self.controls
-            .iter()
-            .any(|control| control.action() == Some(RunActionKind::Continue))
+        self.revise_recovery.is_some()
+            || self.controls.iter().any(|control| {
+                control.action() == Some(RunActionKind::Continue) || control.recovery.is_some()
+            })
             || self
                 .runtime_status
                 .as_deref()
@@ -2726,7 +2770,7 @@ impl KinewrightApp {
                 .is_none_or(|at| at.elapsed() >= RUN_POLL)
         {
             let _ = self.with_feedback(|feedback, port| {
-                feedback.retry_continues(port);
+                feedback.retry_after_recovery(port);
                 feedback.observe_runs(&*port);
             });
         }

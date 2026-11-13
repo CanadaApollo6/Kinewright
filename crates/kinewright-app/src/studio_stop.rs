@@ -17,6 +17,8 @@ const CONTROL_LIMIT: usize = 64;
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingControl {
     pub(crate) request: ScopedOrchestrationRequest,
+    #[serde(skip)]
+    pub(super) recovery: Option<super::HostClient>,
 }
 impl PendingControl {
     pub(crate) fn run(&self) -> Option<RunId> {
@@ -53,6 +55,7 @@ pub(crate) enum ControlReply {
     Accepted,
     Refused(String),
     Unknown(String),
+    RecoveryUnknown(String),
 }
 pub(super) fn prepare(
     port: &HostFeedback<'_>,
@@ -119,9 +122,15 @@ pub(super) fn send(port: &HostFeedback<'_>, request: &ScopedOrchestrationRequest
         request: Box::new(request.clone()),
     }) {
         Ok(reply) => reply,
+        Err(super::HostError::Refused(error)) if error.retry_after_recovery() => {
+            return ControlReply::RecoveryUnknown(error.message);
+        }
         Err(error) => return ControlReply::Unknown(error.to_string()),
     };
     if let Some(error) = reply.error {
+        if error.retry_after_recovery() {
+            return ControlReply::RecoveryUnknown(error.message);
+        }
         return if matches!(
             error.code.as_str(),
             "durability_unknown" | "unsettled" | "recovery_frozen"
@@ -159,6 +168,10 @@ impl Feedback {
     ) -> Result<ControlReply, String> {
         self.control_run(port, run, RunActionKind::Continue)
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Keep request persistence, recovery arming and receipt handling in one control lifecycle"
+    )]
     fn control_run(
         &mut self,
         port: &mut dyn FeedbackPort,
@@ -206,6 +219,7 @@ impl Feedback {
                     port.prepare_control(run, action, &state.control_revision, &mut self.issuer)?;
                 let pending = PendingControl {
                     request: request.clone(),
+                    recovery: None,
                 };
                 let project = self.keeping.project().ok_or("Save this project first.")?;
                 if !pending.valid(project) {
@@ -228,13 +242,28 @@ impl Feedback {
         };
         if !(PendingControl {
             request: request.clone(),
+            recovery: None,
         })
         .valid(project)
         {
             return Err(super::HANDOFF_REFUSAL.into());
         }
         let reply = port.send_control(&request);
-        if !matches!(reply, ControlReply::Unknown(_)) {
+        if let Some(pending) = self
+            .controls
+            .iter_mut()
+            .find(|pending| pending.request == request)
+        {
+            pending.recovery = if matches!(reply, ControlReply::RecoveryUnknown(_)) {
+                port.host_client().cloned()
+            } else {
+                None
+            };
+        }
+        if !matches!(
+            reply,
+            ControlReply::Unknown(_) | ControlReply::RecoveryUnknown(_)
+        ) {
             self.controls.retain(|pending| pending.request != request);
             self.changed = true;
         }
@@ -245,6 +274,11 @@ impl Feedback {
             ControlReply::Refused(why) => why.clone(),
             ControlReply::Unknown(why) if action == RunActionKind::Continue => {
                 format!("Continue is unconfirmed ({why}). Checking the same request again.")
+            }
+            ControlReply::RecoveryUnknown(why) => {
+                format!(
+                    "{verb} is waiting for recovery ({why}). The same request retries when this host is ready."
+                )
             }
             ControlReply::Unknown(why) => {
                 format!("{verb} is unconfirmed ({why}). Retry {verb} sends the same request.")
@@ -268,18 +302,62 @@ impl Feedback {
             }
         }
     }
-    pub(crate) fn retry_continues(&mut self, port: &mut dyn FeedbackPort) {
+    pub(crate) fn retry_ready_controls(&mut self, port: &mut dyn FeedbackPort) {
         let runs = self
             .controls
             .iter()
-            .filter(|pending| pending.action() == Some(RunActionKind::Continue))
-            .filter_map(PendingControl::run)
+            .filter(|pending| {
+                pending.action() == Some(RunActionKind::Continue) || pending.recovery.is_some()
+            })
+            .filter_map(|pending| Some((pending.run()?, pending.action()?)))
             .collect::<Vec<_>>();
-        for run in runs {
-            if let Err(why) = self.continue_run(port, &run) {
+        for (run, action) in runs {
+            if let Err(why) = self.control_run(port, &run, action) {
                 self.message = Some(why);
             }
         }
+    }
+    pub(crate) fn retry_after_recovery(&mut self, port: &mut dyn FeedbackPort) {
+        let same_host = |saved: &super::HostClient| {
+            port.host_client()
+                .is_some_and(|client| saved.same_attachment(client))
+        };
+        if self
+            .revise_recovery
+            .as_ref()
+            .is_some_and(|saved| !same_host(saved))
+        {
+            self.revise_recovery = None;
+        }
+        for pending in &mut self.controls {
+            if pending
+                .recovery
+                .as_ref()
+                .is_some_and(|saved| !same_host(saved))
+            {
+                pending.recovery = None;
+            }
+        }
+        let Ok(readiness) = port.recovery_readiness() else {
+            return;
+        };
+        if readiness == super::RecoveryReadiness::Stopping {
+            self.revise_recovery = None;
+            for pending in &mut self.controls {
+                pending.recovery = None;
+            }
+        }
+        if readiness != super::RecoveryReadiness::Ready {
+            return;
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(witness) = self.recovery_ready_witness.take() {
+            witness();
+        }
+        if self.revise_recovery.take().is_some() {
+            self.start_run(port);
+        }
+        self.retry_ready_controls(port);
     }
     pub(crate) fn retry_controls(&mut self, port: &mut dyn FeedbackPort) {
         let runs = self

@@ -1353,6 +1353,7 @@ impl KinewrightApp {
         self.clear_preview();
         self.focused().retire_media();
         self.visual_cache = crate::visual_cache::VisualCache::new(crossbeam_channel::never());
+        self.focused_mut().studio.feedback.cancel_recovery_retry();
         self.focused_project = index;
         if let Some(context) = self.focused().studio.selection.clone() {
             let position = self.focused().studio.position;
