@@ -343,7 +343,7 @@ fn manual_retry_order(auto_first: bool) {
         state.0 = true;
         changed.notify_all();
         let (state, _) = changed
-            .wait_timeout_while(state, Duration::from_secs(5), |state| !state.1)
+            .wait_timeout_while(state, ProtocolFixture::RELEASE_GUARD, |state| !state.1)
             .unwrap();
         assert!(state.1, "C7_MANUAL_GATE_RELEASED");
     }));
