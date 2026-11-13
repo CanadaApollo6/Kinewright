@@ -111,7 +111,23 @@ impl HostSnapshot {
         Self::from_history(history)
     }
     pub fn from_history(history: HistorySnapshot) -> Result<Self, super::HostError> {
-        let history_sha256 = kinewright_media::sha256_bytes(&serde_json::to_vec(&history)?);
+        let transport = kinewright_core::HistoryTransport::capture(&history)
+            .map_err(|error| super::HostError::Protocol(error.to_string()))?;
+        // Capturing a transport does not acknowledge a persisted cut. Keep this
+        // sender check from materializing boundary documents; the receiver runs bounded replay before
+        // it can publish anything. Do not add another, unreserved replay here.
+        let live = kinewright_core::history_size::restored_history_live_bytes(&history).map_err(
+            |error| match error {
+                kinewright_core::HistoryError::Capacity => {
+                    super::HostError::from(BundleError::Capacity("foreground history snapshot"))
+                }
+                other => super::HostError::Protocol(other.to_string()),
+            },
+        )?;
+        if live > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
+            return Err(BundleError::Capacity("foreground history snapshot").into());
+        }
+        let history_sha256 = kinewright_media::sha256_bytes(&serde_json::to_vec(&transport)?);
         Ok(Self {
             history,
             history_sha256,
@@ -136,6 +152,36 @@ impl HostSnapshot {
             return Err(BundleError::Capacity("foreground history snapshot").into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod snapshot_capacity_tests {
+    #[test]
+    fn host_snapshot_forged_cursor_counts_refuse_before_adoption() {
+        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let before = core.export_history().unwrap();
+        let mut oversized = before.clone();
+        oversized.batches.push(kinewright_core::HistoryBatch {
+            order: 0,
+            command: kinewright_core::JournalCommand::Undo,
+            identity_effects: vec![],
+            undo_entries: kinewright_core::HISTORY_COMMANDS,
+            redo_entries: 0,
+        });
+        // The counter is not a replay allocation hint. Capturing a sender's
+        // value is cheap; the receiving bounded resolver executes and rejects
+        // the invented cursor before any history can be adopted.
+        let snapshot = super::HostSnapshot::from_history(oversized).unwrap();
+        let wire = serde_json::to_vec(&snapshot).unwrap();
+        let error = serde_json::from_slice::<super::HostSnapshot>(&wire).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&kinewright_core::HistoryError::Corrupt.to_string()),
+            "{error}"
+        );
+        assert_eq!(core.export_history().unwrap(), before);
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

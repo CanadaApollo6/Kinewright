@@ -221,6 +221,13 @@ impl HostSnapshotReader {
     ) -> Result<StorageReservation<T>, BundleError> {
         self.store.read_record(reference)
     }
+    /// Resolve the leased history closure in the GUI's ordinary read budget.
+    pub fn resolve_history(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<StorageReservation<kinewright_core::HistorySnapshot>, BundleError> {
+        self.store.resolve_manual_history(reference)
+    }
 }
 
 pub struct CurrentEditReader {

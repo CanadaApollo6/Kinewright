@@ -191,8 +191,7 @@ impl Ja1EditingSession {
             let saved = self
                 .active_bundle()?
                 .checkpoint(self.active_bundle()?.manual_branch_id())?
-                .history_ref
-                .sha256
+                .history_digest
                 .clone();
             self.association
                 .as_mut()
@@ -309,11 +308,7 @@ impl Ja1EditingSession {
             let digest =
                 Self::cached_history_digest(registered.guard.core(), &registered.digest_cache)?;
             if bundle.unsettled
-                || bundle
-                    .checkpoint(&registered.guard.branch)?
-                    .history_ref
-                    .sha256
-                    != digest
+                || bundle.checkpoint(&registered.guard.branch)?.history_digest != digest
             {
                 disclosure.push(' ');
                 disclosure.push_str(&registered.name);
@@ -478,9 +473,15 @@ impl Ja1EditingSession {
     pub fn retirement_disclosure(&self, branch: &BranchId) -> Result<String, BundleError> {
         let bundle = self.active_bundle()?;
         let checkpoint = bundle.checkpoint(branch)?;
-        let history = bundle.branch_history(branch)?;
-        let bytes =
-            serde_json::to_vec(&*history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let resolved;
+        let history: &kinewright_core::HistorySnapshot =
+            if let Some(cached) = bundle.verified_cached_history(branch)? {
+                cached
+            } else {
+                resolved = bundle.branch_history(branch)?;
+                &resolved
+            };
+        let bytes = serde_json::to_vec(history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let shared = bundle
             .branches
             .iter()

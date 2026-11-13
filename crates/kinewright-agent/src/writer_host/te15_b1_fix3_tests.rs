@@ -522,7 +522,12 @@ fn te15_b1_fix3_pending_child_owns_the_only_next_send() {
         let mut host = owner.lock().unwrap();
         let owner = host.owner_mut().unwrap();
         owner.save_active().unwrap();
-        let mut branch = owner.fork_durable_branch("fix3-child").unwrap();
+        let mut branch = owner
+            .fork_durable_branch(
+                "fix3-child",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         owner.persist_durable_branch(&mut branch).unwrap();
         owner.candidate_binding(branch.branch_id()).unwrap()
     };

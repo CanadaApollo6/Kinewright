@@ -266,7 +266,7 @@ impl JournalWriter {
 }
 
 #[derive(Debug, Clone)]
-struct Damage {
+pub(crate) struct Damage {
     offset: usize,
     ignored_bytes: usize,
     reason: String,
@@ -748,6 +748,7 @@ pub(crate) struct RestoreRequest {
     pub(crate) document: Document,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) journal_path: PathBuf,
+    pub(crate) damage: Option<Damage>,
 }
 
 /// App-owned recovery lifecycle. All filesystem and UI behavior stays here.
@@ -1117,26 +1118,19 @@ impl Recovery {
             return outcome;
         }
         if let Some(index) = restore {
-            let entry = &self.pending[index];
-            let PendingState::Recoverable(report) = &entry.state else {
-                return outcome;
-            };
-            outcome.restore = Some(RestoreRequest {
-                document: report.document.clone(),
-                project_path: report.project_path.clone(),
-                journal_path: entry.journal_path.clone(),
-            });
+            outcome.restore = pending_restore_request(&self.pending[index]);
         }
         outcome
     }
 
-    /// A chosen restore landed: the crash journal has served its purpose.
+    /// A chosen restore landed. Keep a damaged journal, including its unreplayed suffix.
     pub(crate) fn consume_pending(&mut self, journal_path: &Path) {
         if let Some(index) = self
             .pending
             .iter()
             .position(|entry| entry.journal_path == journal_path)
-            && self.remove_pending(&self.pending[index])
+            && (has_unrecovered_suffix(&self.pending[index])
+                || self.remove_pending(&self.pending[index]))
         {
             self.pending.remove(index);
         }
@@ -1148,7 +1142,8 @@ impl Recovery {
             .pending
             .iter()
             .position(|entry| entry.journal_path == journal_path)
-            && owner.remove_pending(&self.pending[index])
+            && (has_unrecovered_suffix(&self.pending[index])
+                || owner.remove_pending(&self.pending[index]))
         {
             self.pending.remove(index);
         }
@@ -1263,6 +1258,14 @@ impl Recovery {
             .expect("the real startup scan recognizes the fixture journal");
         self.pending.push(entry);
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn pending_restore_for_test(&self, journal_path: &Path) -> RestoreRequest {
+        self.pending
+            .iter()
+            .find(|entry| entry.journal_path == journal_path)
+            .and_then(pending_restore_request)
+            .expect("the real startup scan offers this recoverable prefix")
+    }
     /// Studio uses the bundle's owner. Preserve any legacy journal for explicit recovery.
     pub(crate) fn stop_for_studio(&mut self) {
         self.stop_active();
@@ -1365,6 +1368,31 @@ fn pending_project_label(project_path: Option<&Path>) -> String {
     project_path.and_then(Path::file_name).map_or_else(
         || "Unsaved project".to_owned(),
         |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+fn has_unrecovered_suffix(entry: &PendingJournal) -> bool {
+    matches!(&entry.state, PendingState::Recoverable(report) if report.damage.is_some())
+}
+
+fn pending_restore_request(entry: &PendingJournal) -> Option<RestoreRequest> {
+    let PendingState::Recoverable(report) = &entry.state else {
+        return None;
+    };
+    Some(RestoreRequest {
+        document: report.document.clone(),
+        project_path: report.project_path.clone(),
+        journal_path: entry.journal_path.clone(),
+        damage: report.damage.clone(),
+    })
+}
+
+pub(crate) fn partial_restore_notice(damage: &Damage, journal: &Path) -> String {
+    format!(
+        "Recovered the successful prefix. Work after byte {} could not be replayed. The original journal, including {} unrecovered bytes, is retained at {}.",
+        damage.offset,
+        damage.ignored_bytes,
+        journal.display()
     )
 }
 

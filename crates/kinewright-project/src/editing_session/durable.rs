@@ -14,6 +14,21 @@ pub struct BranchBinding {
     pub document_hash: String,
 }
 
+/// Sessions grow per edit; native run candidates grow per accepted merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableBranchRole {
+    Session,
+    RunCandidate,
+}
+impl DurableBranchRole {
+    const fn history_role(self) -> crate::history_record::HistoryRole {
+        match self {
+            Self::Session => crate::history_record::HistoryRole::Ordinary,
+            Self::RunCandidate => crate::history_record::HistoryRole::Candidate,
+        }
+    }
+}
+
 /// Constructed only by freezing a registered, persisted specialist.
 #[derive(Debug, Clone)]
 pub struct FrozenTaskResult {
@@ -64,7 +79,7 @@ pub struct DurableBranchSessionGuard {
     pub(super) base: Arc<StorageReservation<SpecialistBaseRecord>>,
     core: Core,
     pub(super) epoch: u64,
-    floor_source: Arc<StorageReservation<HistorySnapshot>>,
+    floor_source: Arc<StorageReservation<kinewright_core::HistoryTransport>>,
 }
 pub(super) struct RegisteredSession {
     pub(super) digest_cache: std::cell::RefCell<super::HistoryDigestCache>,
@@ -255,6 +270,7 @@ impl Ja1EditingSession {
                 return Err(BundleError::HistoryChanged);
             }
             let specialist = SpecialistBaseRecord {
+                history_role: crate::history_record::HistoryRole::Task,
                 target_branch: base.branch.clone(),
                 base_head: base.head.clone(),
                 base_document_hash: base.document_hash.clone(),
@@ -264,7 +280,12 @@ impl Ja1EditingSession {
             };
             let reference = bundle.stage_specialist_base(&specialist)?;
             return self
-                .reopen_durable_branch(branch.clone(), &reference, name)
+                .reopen_branch(
+                    branch.clone(),
+                    &reference,
+                    name,
+                    crate::history_record::HistoryRole::Task,
+                )
                 .map(Some);
         }
         Ok(None)
@@ -291,6 +312,7 @@ impl Ja1EditingSession {
             .export_history()
             .map_err(crate::bundle::history_error)?;
         let specialist = SpecialistBaseRecord {
+            history_role: crate::history_record::HistoryRole::Task,
             target_branch: base.branch.clone(),
             base_head: base.head.clone(),
             base_document_hash: base.document_hash.clone(),
@@ -299,25 +321,23 @@ impl Ja1EditingSession {
             full_applied_delta: vec![],
         };
         let pin = bundle.store.pin(std::slice::from_ref(&base.checkpoint))?;
-        let encoded =
-            serde_json::to_vec(&specialist).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let encoded = serde_json::to_vec(&specialist).map_err(crate::bundle::encoding_error)?;
         let specialist = Arc::new(
             bundle
                 .store
                 .reserve_retained_capture(&encoded)?
                 .hold(specialist),
         );
-        let encoded =
-            serde_json::to_vec(&frozen).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let floor_source = Arc::new(
-            bundle
-                .store
-                .reserve_retained_capture(&encoded)?
-                .hold(frozen),
-        );
+        let anchor = kinewright_core::HistoryTransport::capture(&frozen)
+            .map_err(crate::bundle::history_error)?;
+        let floor_source = Arc::new(bundle.store.reserve_history_anchor(&anchor)?.hold(anchor));
         let branch = match branch {
-            Some(branch) => bundle.fork_branch_as(&base.branch, branch)?,
-            None => bundle.fork_branch(&base.branch)?,
+            Some(branch) => bundle.fork_branch_as(
+                &base.branch,
+                branch,
+                crate::history_record::HistoryRole::Task,
+            )?,
+            None => bundle.fork_branch(&base.branch, crate::history_record::HistoryRole::Task)?,
         };
         bundle.attach_core(&core)?;
         let guard = DurableBranchSessionGuard {
@@ -341,7 +361,14 @@ impl Ja1EditingSession {
         branch: BranchId,
         base: &ObjectRef,
     ) -> Result<DurableBranchSessionGuard, BundleError> {
-        self.reopen_durable_branch(branch, base, "candidate")
+        let role = self
+            .store()?
+            .read_record::<SpecialistBaseRecord>(base)?
+            .history_role;
+        if role == crate::history_record::HistoryRole::Ordinary {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.reopen_branch(branch, base, "native branch", role)
     }
     pub fn freeze_registered_candidate(
         &mut self,
@@ -418,6 +445,65 @@ impl Ja1EditingSession {
             transition: None,
         })
     }
+    /// Admit a merge before the task retains its pending envelope or checkpoint.
+    /// The commit rechecks the same head and revision before it mutates Core.
+    pub fn admit_candidate_merge(
+        &self,
+        frozen: &FrozenTaskResult,
+        envelope: &crate::receipts::CommandEnvelope,
+    ) -> Result<(), BundleError> {
+        let core = self.candidate_core(frozen.base())?;
+        self.preview_candidate_merge(&core, frozen, envelope)?;
+        Ok(())
+    }
+    fn preview_candidate_merge(
+        &self,
+        core: &Core,
+        frozen: &FrozenTaskResult,
+        envelope: &crate::receipts::CommandEnvelope,
+    ) -> Result<HistorySnapshot, BundleError> {
+        // This preview owns no pending state and cannot latch a store refusal.
+        // The expected head/revision above remains bound until the owner stages it.
+        let target = &frozen.base.branch;
+        self.store()?.replay_gate().with(|| {
+            let before = core
+                .export_history()
+                .map_err(crate::bundle::history_error)?;
+            let preview = Core::spawn(std::sync::Arc::clone(&before.baseline))
+                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+            preview
+                .restore_history(before.clone())
+                .map_err(crate::bundle::history_error)?;
+            let event = preview
+                .request(Command::DoBatch(frozen.delta.clone()))
+                .map_err(|error| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)))?;
+            if !matches!(event, Event::DocumentChanged { .. }) {
+                return Err(BundleError::HistoryChanged);
+            }
+            let proposed = preview
+                .export_history()
+                .map_err(crate::bundle::history_error)?;
+            let registered = &self
+                .durable_sessions
+                .iter()
+                .find(|session| &session.guard.branch == target)
+                .ok_or(BundleError::HistoryChanged)?
+                .guard;
+            self.task_history_admission(registered)?.check_role(&proposed, crate::history_record::HistoryRole::Candidate)
+                .map_err(|error| match error {
+                    BundleError::Capacity(_) | BundleError::RunAdmission(_) => BundleError::RunAdmission("Candidate history limit reached. Keep this result frozen and use publish_result to report the limit."),
+                    other => other,
+                })?;
+            let encoded = serde_json::to_vec(envelope)
+                .map_err(crate::bundle::encoding_error)?;
+            if encoded.len() as u64 > self.store()?.limits().command_bytes {
+                return Err(BundleError::RunAdmission(
+                    "Candidate history limit reached. Keep this result frozen and use publish_result to report the limit.",
+                ));
+            }
+            Ok(before)
+        })?
+    }
     pub fn commit_candidate(
         &mut self,
         frozen: &FrozenTaskResult,
@@ -459,12 +545,20 @@ impl Ja1EditingSession {
             .checkpoint(&target)?
             .input_manifest_ref
             .clone();
+        let verified_before = self.preview_candidate_merge(&core, frozen, envelope)?;
         let attachment = self.active_bundle()?.attach_core(&core)?;
         let cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+        if cut.revision() != envelope.expected_revision || cut.history() != &verified_before {
+            attachment
+                .resume(&cut)
+                .map_err(crate::bundle::history_error)?;
+            return Err(BundleError::HistoryChanged);
+        }
         let charge = match (|| {
-            let encoded = serde_json::to_vec(&(cut.history(), envelope))
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            self.store()?.reserve_retained_capture(&encoded)
+            self.store()?.reserve_history_capture(
+                cut.history(),
+                crate::history_record::HistoryRole::Candidate,
+            )
         })() {
             Ok(charge) => charge,
             Err(error) => {
@@ -531,6 +625,7 @@ impl Ja1EditingSession {
     pub fn fork_durable_branch(
         &mut self,
         name: &str,
+        role: DurableBranchRole,
     ) -> Result<DurableBranchSessionGuard, BundleError> {
         if self
             .core
@@ -557,6 +652,7 @@ impl Ja1EditingSession {
         }
         let checkpoint = bundle.checkpoint(&target)?.clone();
         let base = SpecialistBaseRecord {
+            history_role: role.history_role(),
             target_branch: target.clone(),
             base_head: checkpoint.head_id,
             base_document_hash: checkpoint.document_hash,
@@ -567,7 +663,7 @@ impl Ja1EditingSession {
         let pin = bundle
             .store
             .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
-        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let encoded = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
         let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));
         let attachment = bundle.attach_core(&core)?;
         let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
@@ -577,15 +673,10 @@ impl Ja1EditingSession {
                 .map_err(crate::bundle::history_error)?;
             return Err(BundleError::HistoryChanged);
         }
-        let encoded = serde_json::to_vec(candidate_cut.history())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let floor_source = Arc::new(
-            bundle
-                .store
-                .reserve_retained_capture(&encoded)?
-                .hold(candidate_cut.history().clone()),
-        );
-        let branch = match bundle.fork_branch(&target) {
+        let anchor = kinewright_core::HistoryTransport::capture(candidate_cut.history())
+            .map_err(crate::bundle::history_error)?;
+        let floor_source = Arc::new(bundle.store.reserve_history_anchor(&anchor)?.hold(anchor));
+        let branch = match bundle.fork_branch(&target, role.history_role()) {
             Ok(branch) => branch,
             Err(error) => {
                 attachment
@@ -618,7 +709,69 @@ impl Ja1EditingSession {
         branch: BranchId,
         base_ref: &ObjectRef,
         name: &str,
+        role: DurableBranchRole,
     ) -> Result<DurableBranchSessionGuard, BundleError> {
+        self.reopen_branch(branch, base_ref, name, role.history_role())
+    }
+    fn reopen_branch(
+        &mut self,
+        branch: BranchId,
+        base_ref: &ObjectRef,
+        name: &str,
+        role: crate::history_record::HistoryRole,
+    ) -> Result<DurableBranchSessionGuard, BundleError> {
+        let session = self.prepare_reopened_branch(branch, base_ref, name, role)?;
+        let guard = session.guard.clone();
+        self.durable_sessions.push(session);
+        Ok(guard)
+    }
+    /// Register a native task and its candidate only after both journals replay.
+    pub fn reopen_native_task_pair(
+        &mut self,
+        task: BranchId,
+        task_base: &ObjectRef,
+        candidate: BranchId,
+        candidate_base: &ObjectRef,
+    ) -> Result<(), BundleError> {
+        if task == candidate {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.durable_sessions
+            .try_reserve(2)
+            .map_err(|_| BundleError::Capacity("durable session registrations"))?;
+        let mut prepared = Vec::new();
+        for (branch, base, role) in [
+            (task, task_base, crate::history_record::HistoryRole::Task),
+            (
+                candidate,
+                candidate_base,
+                crate::history_record::HistoryRole::Candidate,
+            ),
+        ] {
+            if !self
+                .durable_sessions
+                .iter()
+                .any(|session| session.guard.branch == branch)
+            {
+                if u64::try_from(self.durable_sessions.len() + prepared.len())
+                    .map_err(|_| BundleError::Capacity("durable session registrations"))?
+                    >= self.store()?.limits().objects
+                {
+                    return Err(BundleError::Capacity("durable session registrations"));
+                }
+                prepared.push(self.prepare_reopened_branch(branch, base, "native branch", role)?);
+            }
+        }
+        self.durable_sessions.extend(prepared);
+        Ok(())
+    }
+    fn prepare_reopened_branch(
+        &mut self,
+        branch: BranchId,
+        base_ref: &ObjectRef,
+        name: &str,
+        role: crate::history_record::HistoryRole,
+    ) -> Result<RegisteredSession, BundleError> {
         if self
             .core
             .attachment_state()
@@ -644,6 +797,9 @@ impl Ja1EditingSession {
         let base = bundle
             .store
             .read_record::<SpecialistBaseRecord>(&base_ref)?;
+        if base.history_role != role || bundle.checkpoint(&branch)?.history_role != role {
+            return Err(BundleError::HistoryChanged);
+        }
         let checkpoint = bundle
             .store
             .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;
@@ -656,6 +812,14 @@ impl Ja1EditingSession {
             return Err(BundleError::HistoryChanged);
         }
         let history = bundle.branch_history(&branch)?;
+        let lineage = bundle.branch_lineage(&branch)?;
+        crate::history_size::verify_history_lineage(
+            &history,
+            &lineage,
+            role,
+            bundle.store().limits(),
+        )?;
+        drop(lineage);
         let core =
             Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         bundle
@@ -667,14 +831,9 @@ impl Ja1EditingSession {
         let pin = bundle
             .store
             .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;
-        let encoded = serde_json::to_vec(candidate_cut.history())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let floor_source = Arc::new(
-            bundle
-                .store
-                .reserve_retained_capture(&encoded)?
-                .hold(candidate_cut.history().clone()),
-        );
+        let anchor = kinewright_core::HistoryTransport::capture(candidate_cut.history())
+            .map_err(crate::bundle::history_error)?;
+        let floor_source = Arc::new(bundle.store.reserve_history_anchor(&anchor)?.hold(anchor));
         let guard = DurableBranchSessionGuard {
             branch,
             floor_source,
@@ -682,19 +841,22 @@ impl Ja1EditingSession {
             core: core.clone(),
             epoch: bundle.store.owner_epoch(),
         };
-        self.durable_sessions.push(RegisteredSession {
+        let session = RegisteredSession {
             digest_cache: std::cell::RefCell::new(None),
-            guard: guard.clone(),
+            guard,
             name: name.into(),
             pin,
             _charge: charge,
-        });
+        };
         attachment
             .resume(&candidate_cut)
             .map_err(crate::bundle::history_error)?;
-        Ok(guard)
+        Ok(session)
     }
-    fn registered(&self, guard: &DurableBranchSessionGuard) -> Result<usize, BundleError> {
+    pub(super) fn registered(
+        &self,
+        guard: &DurableBranchSessionGuard,
+    ) -> Result<usize, BundleError> {
         self.durable_sessions
             .iter()
             .position(|r| {
@@ -759,8 +921,7 @@ impl Ja1EditingSession {
         let history = core
             .export_history()
             .map_err(crate::bundle::history_error)?;
-        let base =
-            specialist_checkpoint_base(guard, &history, &*self.durable_branch_baseline(guard)?)?;
+        let base = self.specialist_checkpoint_base(guard, &history)?;
         crate::orchestration_retention::measure_pending_task_history(
             &history,
             &base,
@@ -805,13 +966,8 @@ impl Ja1EditingSession {
                 *guard = canonical.clone();
                 return Ok(staged.base_ref.clone());
             }
-            let base = specialist_checkpoint_base(
-                &canonical,
-                cut.history(),
-                &*self.durable_branch_baseline(&canonical)?,
-            )?;
-            let base_bytes =
-                serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let base = self.specialist_checkpoint_base(&canonical, cut.history())?;
+            let base_bytes = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
             let same_base = base == *canonical.base();
             let reference = ObjectRef {
                 sha256: kinewright_media::sha256_bytes(&base_bytes),
@@ -849,15 +1005,11 @@ impl Ja1EditingSession {
                 *guard = canonical.clone();
                 return Ok(reference);
             }
-            let history_bytes = serde_json::to_vec(cut.history())
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             let source = self.registered_bundle(&canonical)?.store();
             let base = Arc::new(source.reserve_retained_capture(&base_bytes)?.hold(base));
-            let floor_source = Arc::new(
-                source
-                    .reserve_retained_capture(&history_bytes)?
-                    .hold(cut.history().clone()),
-            );
+            let anchor = kinewright_core::HistoryTransport::capture(cut.history())
+                .map_err(crate::bundle::history_error)?;
+            let floor_source = Arc::new(source.reserve_history_anchor(&anchor)?.hold(anchor));
             *guard = DurableBranchSessionGuard {
                 base,
                 floor_source,
@@ -969,36 +1121,6 @@ impl Ja1EditingSession {
     }
 }
 
-fn specialist_checkpoint_base(
-    guard: &DurableBranchSessionGuard,
-    history: &HistorySnapshot,
-    baseline: &Document,
-) -> Result<SpecialistBaseRecord, BundleError> {
-    let discarded = usize::try_from(
-        history
-            .floor_offset
-            .checked_sub(guard.floor_source.floor_offset)
-            .ok_or(BundleError::HistoryChanged)?,
-    )
-    .map_err(|_| BundleError::Capacity("specialist floor offset"))?;
-    let original = if discarded == 0 {
-        (**guard.floor_source).clone()
-    } else {
-        kinewright_core::HistoryTransition::floor((**guard.floor_source).clone(), discarded)
-            .map_err(crate::bundle::history_error)?
-            .after()
-            .clone()
-    };
-    if original.baseline != history.baseline {
-        return Err(BundleError::HistoryChanged);
-    }
-    let mut full_delta = specialist_floor_delta_from_baseline(guard.base(), &original, baseline)?;
-    full_delta.extend(history.applied_operations());
-    let mut base = guard.base().clone();
-    base.full_applied_delta = full_delta;
-    Ok(base)
-}
-
 pub fn specialist_floor_delta_from_baseline(
     base: &SpecialistBaseRecord,
     history: &kinewright_core::HistorySnapshot,
@@ -1054,6 +1176,138 @@ mod fu2_tests {
     use kinewright_core::{AttachmentState, Operation, Track, TrackId, TrackKind};
 
     #[test]
+    fn session_history_uses_the_ordinary_pool_above_the_candidate_bound() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ordinary-session-history",
+        );
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            markers: vec![kinewright_core::Marker {
+                id: kinewright_core::MarkerId(1),
+                position: kinewright_core::TimeCode(0),
+                label: "x".repeat(150_000),
+                color_token: 0,
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        owner
+            .first_save(&temp.path("project.kinewright"), StorageLimits::default())
+            .unwrap();
+        let mut session = owner
+            .fork_durable_branch("session", DurableBranchRole::Session)
+            .unwrap();
+        for edit in 0..20 {
+            session
+                .core()
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: edit % 2 == 0,
+                }))
+                .unwrap();
+        }
+        let expected = session.core().export_history().unwrap();
+        assert!(
+            crate::history_size::history_live_bytes(&expected).unwrap()
+                > crate::history_record::CANDIDATE_LIVE
+        );
+        owner.persist_durable_branch(&mut session).unwrap();
+        let bundle = owner.active_bundle().unwrap();
+        let checkpoint = bundle.checkpoint(session.branch_id()).unwrap();
+        assert_eq!(
+            checkpoint.history_role,
+            crate::history_record::HistoryRole::Ordinary
+        );
+        assert_eq!(
+            *bundle.branch_history(session.branch_id()).unwrap(),
+            expected
+        );
+        assert!(
+            bundle.store.usage().unwrap().live_history_bytes
+                > crate::history_record::CANDIDATE_LIVE
+        );
+    }
+
+    #[test]
+    fn native_task_keeps_admitted_history_above_ordinary_live_limit() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "native-history-floor",
+        );
+        let document = Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            markers: vec![kinewright_core::Marker {
+                id: kinewright_core::MarkerId(1),
+                position: kinewright_core::TimeCode(0),
+                label: "x".repeat(150_000),
+                color_token: 0,
+            }],
+            ..Document::default()
+        };
+        let core = Core::spawn(document).unwrap();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        owner
+            .first_save(&temp.path("project.kinewright"), StorageLimits::default())
+            .unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "candidate",
+                crate::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
+        owner.persist_durable_branch(&mut candidate).unwrap();
+        let base = owner.candidate_binding(candidate.branch_id()).unwrap();
+        let mut task = owner.fork_registered_from_candidate(&base, "task").unwrap();
+        for edit in 0..70 {
+            assert!(matches!(
+                task.core()
+                    .request(Command::DoBatch(vec![Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: edit % 2 == 0,
+                    }]))
+                    .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        let expected = task.core().export_history().unwrap();
+        assert!(
+            crate::history_size::history_live_bytes(&expected).unwrap()
+                > crate::history_record::HistoryRole::Ordinary
+                    .live_limit(&StorageLimits::default())
+        );
+        owner
+            .task_history_admission(&task)
+            .unwrap()
+            .check(&expected)
+            .unwrap();
+        owner.persist_registered_task_checkpoint(&mut task).unwrap();
+        let staged = &owner.active_bundle().unwrap().task_checkpoints[task.branch_id()];
+        assert_eq!(
+            **staged.history, expected,
+            "NATIVE_ADMISSION_MUST_NOT_FLOOR"
+        );
+        assert_eq!(
+            staged.checkpoint.history_role,
+            crate::history_record::HistoryRole::Task
+        );
+        assert_eq!(task.core().export_history().unwrap(), expected);
+    }
+
+    #[test]
     #[allow(
         clippy::too_many_lines,
         reason = "one candidate settlement and manual-history oracle across issuer retirement"
@@ -1077,7 +1331,12 @@ mod fu2_tests {
         owner
             .first_save(&temp.path("project.kinewright"), StorageLimits::default())
             .unwrap();
-        let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "candidate",
+                crate::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         owner.persist_durable_branch(&mut candidate).unwrap();
         let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
         let mut specialist = owner
@@ -1165,6 +1424,87 @@ mod fu2_tests {
 }
 
 impl Ja1EditingSession {
+    fn specialist_checkpoint_base(
+        &self,
+        guard: &DurableBranchSessionGuard,
+        history: &HistorySnapshot,
+    ) -> Result<SpecialistBaseRecord, BundleError> {
+        let mut full_delta =
+            self.verified_floor_prefix(guard, history.floor_offset, &history.baseline)?;
+        full_delta.extend(history.applied_operations());
+        let mut base = guard.base().clone();
+        base.full_applied_delta = full_delta;
+        Ok(base)
+    }
+    // Keep the reconstructed anchor within the serial replay window and drop
+    // its boundary documents before checkpoint publication materializes another history.
+    fn verified_floor_prefix(
+        &self,
+        guard: &DurableBranchSessionGuard,
+        floor_offset: u64,
+        baseline: &Document,
+    ) -> Result<Vec<kinewright_core::Operation>, BundleError> {
+        let store = self.registered_bundle(guard)?.store();
+        store.replay_gate().with(|| {
+            let source = &guard.floor_source;
+            let role = guard.base.history_role;
+            let limit = if role == crate::history_record::HistoryRole::Ordinary {
+                let usage = store.usage()?;
+                let ordinary = store
+                    .limits()
+                    .live_history_bytes
+                    .saturating_sub(usage.live_history_bytes);
+                let decoded = usage.decoded_bytes.saturating_sub(usage.decoder_bytes);
+                let raw = store
+                    .limits()
+                    .metadata_bytes
+                    .saturating_sub(usage.metadata_bytes)
+                    .saturating_sub(decoded);
+                // A session anchor may exceed its selected ordinary cut. Its
+                // serial proof uses the remaining ordinary pool, with a real
+                // reservation before replay, rather than reserving the whole
+                // pool alongside the already retained saved cut.
+                kinewright_core::history_size::TRANSPORT_LIVE_BYTES
+                    .min(ordinary)
+                    .min(raw)
+                    .min(store.limits().decoded_record_bytes)
+            } else {
+                role.replay_limit(store.limits())
+            };
+            let reservation = if role == crate::history_record::HistoryRole::Ordinary {
+                store.reserve_copy_read(0, limit, limit, false, true)?
+            } else {
+                store.reserve_history_replay(limit, role)?
+            };
+            let (history, _) = source
+                .journal
+                .resolve_with_budget(Arc::clone(&source.baseline), &source.document, limit)
+                .map_err(crate::bundle::history_error)?;
+            let retained = crate::history_size::native_history_live_bytes(&history)?;
+            let materialized = reservation.finish_history_replay(retained)?.hold(history);
+            let discarded = usize::try_from(
+                floor_offset
+                    .checked_sub(source.journal.floor_offset)
+                    .ok_or(BundleError::HistoryChanged)?,
+            )
+            .map_err(|_| BundleError::Capacity("specialist floor offset"))?;
+            let original = if discarded == 0 {
+                (*materialized).clone()
+            } else {
+                kinewright_core::HistoryTransition::floor((*materialized).clone(), discarded)
+                    .map_err(crate::bundle::history_error)?
+                    .into_after()
+            };
+            if &*original.baseline != baseline {
+                return Err(BundleError::HistoryChanged);
+            }
+            specialist_floor_delta_from_baseline(
+                guard.base(),
+                &original,
+                &*self.durable_branch_baseline(guard)?,
+            )
+        })?
+    }
     /// Capture the immutable floor prefix once, before endpoint ingress opens.
     /// Task checkpoints never floor this branch's history.
     pub fn task_history_admission(
@@ -1172,16 +1512,31 @@ impl Ja1EditingSession {
         guard: &DurableBranchSessionGuard,
     ) -> Result<crate::task_history_admission::TaskHistoryAdmission, BundleError> {
         let canonical = &self.durable_sessions[self.registered(guard)?].guard;
-        let prefix = specialist_floor_delta_from_baseline(
-            canonical.base(),
-            &canonical.floor_source,
-            &*self.durable_branch_baseline(canonical)?,
+        let retained_lineage = self
+            .registered_bundle(canonical)?
+            .branch_lineage(&canonical.branch)?;
+        let lineage_seed = crate::bundle_records::LineageRecord {
+            branch_origin: retained_lineage.branch_origin.clone(),
+            baseline: retained_lineage.baseline.clone(),
+            current: retained_lineage.baseline.clone(),
+            undo: vec![],
+            redo: vec![],
+            split_ancestry: retained_lineage.split_ancestry.clone(),
+        };
+        let prefix = self.verified_floor_prefix(
+            canonical,
+            canonical.floor_source.journal.floor_offset,
+            &canonical.floor_source.baseline,
         )?;
         Ok(crate::task_history_admission::TaskHistoryAdmission {
+            usage: self.registered_bundle(canonical)?.store().usage_arc(),
+            replay_gate: self.registered_bundle(canonical)?.store().replay_gate(),
             base: canonical.base().clone(),
             prefix,
-            floor_offset: canonical.floor_source.floor_offset,
+            floor_offset: canonical.floor_source.journal.floor_offset,
             limits: self.registered_bundle(canonical)?.store().limits().clone(),
+            lineage_seed,
+            proof: std::sync::Mutex::new(None),
         })
     }
 }

@@ -744,3 +744,64 @@ mod tests {
         assert!(missing_edits_disclosure(&[]).is_empty());
     }
 }
+
+#[cfg(test)]
+mod compact_position_tests {
+    use super::CapturedHistory;
+    use kinewright_core::{
+        Command, Core, Document, HistorySnapshot, HistoryTransition, Operation, Track, TrackId,
+        TrackKind,
+    };
+
+    #[test]
+    fn c4b_compact_history_preserves_absolute_accepted_batch_position() {
+        for discard in [0, 2] {
+            let core = Core::spawn(Document::default()).unwrap();
+            for command in [
+                Command::Undo,
+                Command::Redo,
+                Command::Do(Operation::AddTrack {
+                    track: Track {
+                        id: TrackId(1),
+                        kind: TrackKind::Video,
+                        sync_lock: false,
+                        clips: vec![],
+                    },
+                }),
+                Command::DoBatch(vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: true,
+                }]),
+                Command::Undo,
+                Command::Redo,
+            ] {
+                core.request(command).unwrap();
+            }
+            let history = core.export_history().unwrap();
+            let absolute = u64::try_from(history.batches.len()).unwrap();
+            assert_eq!(absolute, 6, "empty Undo/Redo remain accepted positions");
+            let floored = if discard == 0 {
+                history
+            } else {
+                HistoryTransition::floor_after(&history, discard).unwrap()
+            };
+            let attachment = crate::ProjectAttachment::new(&core).unwrap();
+            attachment.restore_history(floored).unwrap();
+            let accepted = attachment.capture().unwrap();
+            let captured = CapturedHistory::from_cut(&accepted);
+            assert_eq!(captured.position, Some(absolute));
+            let wire = serde_json::to_vec(accepted.history()).unwrap();
+            let decoded: HistorySnapshot = serde_json::from_slice(&wire).unwrap();
+            let restored = Core::spawn(Document::default()).unwrap();
+            let restored_owner = crate::ProjectAttachment::new(&restored).unwrap();
+            restored_owner.restore_history(decoded).unwrap();
+            let replayed = restored_owner.capture().unwrap();
+            assert_eq!(replayed.history(), accepted.history());
+            assert_eq!(
+                CapturedHistory::from_cut(&replayed).position,
+                captured.position
+            );
+            assert_eq!(replayed.history().floor_offset, discard as u64);
+        }
+    }
+}

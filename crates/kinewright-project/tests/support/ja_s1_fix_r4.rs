@@ -11,12 +11,32 @@ use kinewright_project::{
     owned_inputs::OwnedInputManifest,
 };
 use kinewright_project::{
-    bundle_commit::{bound_history_probe, history_cost_probe},
+    bundle_commit::{bound_history_probe, history_cost_probe as live_history_cost_probe},
     storage_budget::StorageLimits,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::time::Instant;
+
+fn history_cost_probe(
+    history: &HistorySnapshot,
+    limits: &StorageLimits,
+) -> Result<u64, kinewright_project::bundle::BundleError> {
+    let journal = HistoryJournal::capture(history).unwrap();
+    let replay = kinewright_core::history_size::measure_replay_peak(
+        &journal,
+        &history.baseline,
+        &history.document,
+    )
+    .unwrap();
+    Ok(live_history_cost_probe(history, limits)?
+        .max(
+            kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+                history, limits,
+            )?,
+        )
+        .max(replay))
+}
 
 #[cfg(target_os = "linux")]
 fn temp(label: &str) -> TempDirectory {
@@ -65,11 +85,9 @@ fn limits() -> StorageLimits {
     }
 }
 fn exhaustive(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
-    let fits = |h: &HistorySnapshot| {
-        h.encoded_bytes()
-            .is_ok_and(|n| n <= limits.branch_history_bytes)
-            && history_cost_probe(h, limits).is_ok_and(|n| n <= limits.branch_history_bytes)
-    };
+    let policy =
+        kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(limits).unwrap();
+    let fits = |h: &HistorySnapshot| policy.check(h).is_ok();
     if fits(history) {
         return Some(history.clone());
     }
@@ -101,7 +119,10 @@ fn moving_core(specialist: bool) {
     owner.save(&core, &inputs).unwrap();
     let branch = if specialist {
         owner
-            .fork_branch(&owner.manual_branch_id().clone())
+            .fork_branch(
+                &owner.manual_branch_id().clone(),
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
             .unwrap()
     } else {
         owner.manual_branch_id().clone()

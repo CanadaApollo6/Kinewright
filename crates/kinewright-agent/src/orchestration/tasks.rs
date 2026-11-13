@@ -277,6 +277,21 @@ impl TaskEndpoint {
         ),
         String,
     > {
+        self.with_history_preview(|| self.preview_history_step_serial(core, expected, redo))
+    }
+    fn preview_history_step_serial(
+        &self,
+        core: &Core,
+        expected: kinewright_core::TimelineRevision,
+        redo: bool,
+    ) -> Result<
+        (
+            kinewright_core::HistorySnapshot,
+            kinewright_core::HistorySnapshot,
+            Vec<Operation>,
+        ),
+        String,
+    > {
         self.check_live()?;
         if !self.matches_core(core) {
             return Err("task actor changed".into());
@@ -313,9 +328,7 @@ impl TaskEndpoint {
         let operations = boundary.operations.clone();
         let private =
             Core::spawn(std::sync::Arc::clone(&history.baseline)).map_err(|e| e.to_string())?;
-        private
-            .restore_history(history.clone())
-            .map_err(|e| e.to_string())?;
+        self.restore_history_preview(&private, &history)?;
         private
             .request(if redo {
                 kinewright_core::Command::Redo
@@ -363,7 +376,41 @@ impl TaskEndpoint {
         }
         .map_err(|error| error.to_string())
     }
+    fn restore_history_preview(
+        &self,
+        private: &Core,
+        history: &kinewright_core::HistorySnapshot,
+    ) -> Result<(), String> {
+        if let Some(admission) = &self.0.history_admission {
+            admission
+                .restore_preview(private, history)
+                .map_err(|error| error.to_string())
+        } else {
+            private
+                .restore_history(history.clone())
+                .map_err(|error| error.to_string())
+        }
+    }
     pub(crate) fn check_batch_history(
+        &self,
+        core: &Core,
+        operations: &[Operation],
+    ) -> Result<(), String> {
+        self.with_history_preview(|| self.check_batch_history_serial(core, operations))
+    }
+    fn with_history_preview<T>(
+        &self,
+        work: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        if let Some(admission) = &self.0.history_admission {
+            admission
+                .with_preview(work)
+                .map_err(|error| error.to_string())?
+        } else {
+            work()
+        }
+    }
+    fn check_batch_history_serial(
         &self,
         core: &Core,
         operations: &[Operation],
@@ -371,9 +418,7 @@ impl TaskEndpoint {
         let history = core.export_history().map_err(|error| error.to_string())?;
         let private = Core::spawn(std::sync::Arc::clone(&history.baseline))
             .map_err(|error| error.to_string())?;
-        private
-            .restore_history(history)
-            .map_err(|error| error.to_string())?;
+        self.restore_history_preview(&private, &history)?;
         if matches!(
             private
                 .request(kinewright_core::Command::DoBatch(operations.to_vec()))
@@ -625,6 +670,23 @@ impl EditorTask {
             base_ref.captured_history,
         ))
     }
+    pub(crate) fn admit_merge(
+        &self,
+        owner: &Ja1EditingSession,
+        id: CommandId,
+    ) -> Result<(), BundleError> {
+        if let Some(envelope) = &self.merge_envelope {
+            return if envelope.id == id {
+                Ok(())
+            } else {
+                Err(BundleError::HistoryChanged)
+            };
+        }
+        validate_owner_authority(owner, self.endpoint.authority())?;
+        let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let envelope = owner.candidate_merge_envelope(frozen, id)?;
+        owner.admit_candidate_merge(frozen, &envelope)
+    }
     pub(crate) const fn had_approved_edit(&self) -> bool {
         self.had_approved_edit
     }
@@ -648,7 +710,9 @@ impl EditorTask {
         }
         validate_owner_authority(owner, self.endpoint.authority())?;
         let frozen = self.frozen.as_ref().ok_or(BundleError::HistoryChanged)?;
-        self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
+        let envelope = owner.candidate_merge_envelope(frozen, id)?;
+        owner.admit_candidate_merge(frozen, &envelope)?;
+        self.merge_envelope = Some(envelope);
         Ok(())
     }
     pub(crate) fn frozen_delta(&self) -> Option<&[Operation]> {
@@ -661,6 +725,22 @@ impl EditorTask {
     #[must_use]
     pub fn core(&self) -> &Core {
         self.registration.core()
+    }
+    pub(crate) fn release_checkpointed(
+        &self,
+        owner: &mut Ja1EditingSession,
+    ) -> Result<bool, BundleError> {
+        if Arc::strong_count(&self.endpoint.0) != 1
+            || self.endpoint.0.media_read_busy.load(Ordering::SeqCst)
+            || (!self.endpoint.0.revoked.load(Ordering::SeqCst)
+                && self.endpoint.0.phase.load(Ordering::SeqCst) != INGRESS_SEALED)
+        {
+            return Ok(false);
+        }
+        let Ok(_gate) = self.endpoint.0.gate.try_lock() else {
+            return Ok(false);
+        };
+        owner.release_checkpointed_native_branch(&self.registration)
     }
     #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
     pub fn freeze_fixture(
@@ -747,7 +827,9 @@ impl EditorTask {
             .validate_batch(&document, frozen.delta())
             .map_err(BundleError::Unsupported)?;
         if self.merge_envelope.is_none() {
-            self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
+            let envelope = owner.candidate_merge_envelope(frozen, id)?;
+            owner.admit_candidate_merge(frozen, &envelope)?;
+            self.merge_envelope = Some(envelope);
         }
         let envelope = self
             .merge_envelope

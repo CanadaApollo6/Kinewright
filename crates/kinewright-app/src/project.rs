@@ -128,6 +128,8 @@ pub(crate) struct ProjectSession {
     media_retirement: Option<kinewright_core::LegacyMediaGrant>,
     pub(crate) studio: crate::studio::Studio,
     pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
+    pub(crate) checkpoint_recovery:
+        Option<kinewright_project::bundle_recovery::VerifiedCheckpointRecovery>,
     pub(crate) ja1_activation: Option<(
         kinewright_core::LegacyMediaGrant,
         crate::ja1_attachment::Ja1Attachment,
@@ -433,6 +435,7 @@ impl ProjectSession {
             media_backend,
             studio: crate::studio::Studio::default(),
             ja1: None,
+            checkpoint_recovery: None,
             ja1_activation: None,
             ja1_job: None,
             retired_agent_threads: BTreeSet::new(),
@@ -780,11 +783,37 @@ impl ProjectSession {
     pub(crate) fn display_name(&self) -> String {
         project_display_name(self.project_path.as_deref(), &self.name, self.is_dirty())
     }
+    pub(crate) fn retire_legacy_agent_threads(
+        &mut self,
+        reason: &str,
+        retirement: &mut crate::retirement::RetirementGroup,
+    ) {
+        for thread in &mut self.threads {
+            if let Some(local) = &mut thread.session {
+                local.interrupt();
+            }
+            thread.session = None;
+            thread.events = None;
+            thread.running = false;
+            if let Some(confirmations) = &thread.confirmations {
+                confirmations.reject_all(reason);
+            }
+            thread.pending_confirmations.clear();
+            thread.confirmations = None;
+            if let Some(server) = thread.mcp_server.take() {
+                retirement.server(server);
+            }
+        }
+    }
+
     pub(crate) fn send_manual_command(
         &self,
         command: kinewright_core::Command,
     ) -> Result<(), kinewright_core::CoreDisconnected> {
-        if self.ja1_activation.is_some() || self.studio.selection.is_some() {
+        if self.checkpoint_recovery.is_some()
+            || self.ja1_activation.is_some()
+            || self.studio.selection.is_some()
+        {
             return Err(kinewright_core::CoreDisconnected);
         }
         if let Some(attachment) = &self.ja1 {
@@ -794,7 +823,8 @@ impl ProjectSession {
         }
     }
     pub(crate) fn ja1_read_only(&self) -> bool {
-        self.ja1_activation.is_some()
+        self.checkpoint_recovery.is_some()
+            || self.ja1_activation.is_some()
             || self.studio.selection.is_some()
             || self.ja1_job.is_some()
             || self

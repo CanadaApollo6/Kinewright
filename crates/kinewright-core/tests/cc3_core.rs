@@ -7,6 +7,10 @@
 //! follows from them. Expected values are transcribed from the document by
 //! hand rather than read back out of the descriptor tables.
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
@@ -93,7 +97,7 @@ fn add(document: &mut Document, effect: Effect) -> Result<(), OpError> {
         clip: ClipId(1),
         effect,
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn set_param(document: &mut Document, id: u64, name: &str, value: i64) -> Result<(), OpError> {
@@ -103,7 +107,7 @@ fn set_param(document: &mut Document, id: u64, name: &str, value: i64) -> Result
         name: name.to_owned(),
         value: ParamValue::Integer(value),
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn set_keyframes(
@@ -129,7 +133,7 @@ fn set_keyframes(
                 .collect(),
         },
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 /// CC3 §4.1, transcribed by hand from the control table.
@@ -347,7 +351,7 @@ fn control_bounds_accept_the_extremes_and_reject_one_step_beyond() {
         name: "bypass".to_owned(),
         value: ParamValue::Boolean(true),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect_err("bypass is a 0/1 integer token");
     assert_eq!(
         error,
@@ -864,7 +868,9 @@ fn a_sparse_curves_node_resolves_to_neutral_and_survives_history_byte_for_byte()
     };
 
     let mut applied = initial.clone();
-    operation.apply(&mut applied).expect("sparse node is legal");
+    operation
+        .apply_with_history_oracle(&mut applied)
+        .expect("sparse node is legal");
     let stored = &applied.clip(ClipId(1)).expect("clip").effects[0];
     assert_eq!(
         stored.parameters.len(),
@@ -1151,7 +1157,7 @@ fn add_effect_would_reject(document: &Document) -> bool {
         name: "master_point_count".to_owned(),
         value: ParamValue::Integer(2),
     }
-    .apply(&mut candidate)
+    .apply_with_history_oracle(&mut candidate)
     .is_err()
 }
 
@@ -1253,7 +1259,7 @@ fn upsert_effect_keyframe_enforces_hold_only_and_point_count_policy() {
             name: name.to_owned(),
             key,
         }
-        .apply(document)
+        .apply_with_history_oracle(document)
     };
     let hold = |at: i64, value: i64| Keyframe {
         at: TimeCode(at),

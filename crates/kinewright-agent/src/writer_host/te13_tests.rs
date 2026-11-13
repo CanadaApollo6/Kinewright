@@ -41,7 +41,12 @@ fn te13_candidate_fixture(mut f: Fixture) -> Fixture {
         let mut host = host.lock().unwrap();
         let owner = host.owner_mut().unwrap();
         owner.save_active().unwrap();
-        let mut candidate = owner.fork_durable_branch("te13-candidate").unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "te13-candidate",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         owner.persist_durable_branch(&mut candidate).unwrap();
         f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
     }
@@ -714,7 +719,7 @@ fn te13_finish_preserves_exact_task_and_person_redo_histories() {
         .unwrap()
         .store()
         .unwrap()
-        .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+        .resolve_history(&checkpoint.history_ref)
         .unwrap();
     assert_eq!(*persisted, expected, "TE13_EXACT_DURABLE_TASK_HISTORY");
     assert_eq!(

@@ -420,7 +420,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
             .unwrap()
             .store()
             .unwrap()
-            .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+            .resolve_history(&checkpoint.history_ref)
             .unwrap())
         .clone();
         if phase != "merge" {
@@ -643,7 +643,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
         let manual_checkpoint = loaded.branches_probe().get(&manual_branch).unwrap();
         let retained = loaded
             .store()
-            .read_record::<kinewright_core::HistorySnapshot>(&manual_checkpoint.history_ref)
+            .resolve_history(&manual_checkpoint.history_ref)
             .unwrap();
         assert_eq!(*retained, manual, "TE13_FIX1_PERSON_HISTORY_SAVED");
         drop(retained);

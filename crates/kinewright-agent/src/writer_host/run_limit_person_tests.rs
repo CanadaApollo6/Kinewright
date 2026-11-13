@@ -80,7 +80,10 @@ fn person_latched_fixture_inner(
         {
             owner.save_active().unwrap();
             let mut candidate = owner
-                .fork_durable_branch("person-pressure-candidate")
+                .fork_durable_branch(
+                    "person-pressure-candidate",
+                    kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                )
                 .unwrap();
             owner.persist_durable_branch(&mut candidate).unwrap();
             f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
@@ -150,11 +153,10 @@ fn person_latched_fixture_inner(
         assert!(refused, "PERSON_STORAGE_LATCH");
     } else if matches!(latch, PersonLatch::Specialist) {
         let mut refused = false;
-        match owner
-            .owner_mut()
-            .unwrap()
-            .fork_durable_branch("specialist quota pressure")
-        {
+        match owner.owner_mut().unwrap().fork_durable_branch(
+            "specialist quota pressure",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        ) {
             Ok(mut branch) => {
                 for _ in 0..16 {
                     let locked =

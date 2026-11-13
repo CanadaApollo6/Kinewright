@@ -368,7 +368,12 @@ fn r5_retirement_staging_and_publish_refusals_preserve_complete_record() {
 fn r5_refused_branch_retirement_survives_later_save() {
     let temp = temp();
     let mut owner = named(&temp);
-    let guard = owner.fork_durable_branch("retirement control").unwrap();
+    let guard = owner
+        .fork_durable_branch(
+            "retirement control",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
+        .unwrap();
     let branch = guard.branch_id().clone();
     owner.close_durable_branch(&guard).unwrap();
     let before = owner.list_working_branches().unwrap();
@@ -390,11 +395,21 @@ fn r5_refused_branch_retirement_survives_later_save() {
 fn r7_registered_and_manual_branches_refuse_second_writer() {
     let temp = temp();
     let mut owner = named(&temp);
-    let mut guard = owner.fork_durable_branch("writer").unwrap();
+    let mut guard = owner
+        .fork_durable_branch(
+            "writer",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
+        .unwrap();
     let base = owner.persist_durable_branch(&mut guard).unwrap();
     let manual = guard.base().target_branch.clone();
     assert!(matches!(
-        owner.reopen_durable_branch(manual, &base, "manual duplicate"),
+        owner.reopen_durable_branch(
+            manual,
+            &base,
+            "manual duplicate",
+            kinewright_project::editing_session::DurableBranchRole::Session
+        ),
         Err(BundleError::Contention(_))
     ));
     let selection = RecoverySelection::WorkingBranch(guard.branch_id().clone());
@@ -405,7 +420,12 @@ fn r7_registered_and_manual_branches_refuse_second_writer() {
     owner.close_durable_branch(&guard).unwrap();
     owner.prepare_recovery(selection).unwrap();
     let reopened = owner
-        .reopen_durable_branch(guard.branch_id().clone(), &base, "new writer after prepare")
+        .reopen_durable_branch(
+            guard.branch_id().clone(),
+            &base,
+            "new writer after prepare",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap();
     let raw = std::fs::read(temp.path("drive/a.kinewright")).unwrap();
     assert!(matches!(

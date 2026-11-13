@@ -85,7 +85,7 @@ impl Ja1EditingSession {
         let core = self.activate_host_cut_prepared(
             cut,
             std::borrow::Cow::Borrowed(&committed.history),
-            &committed.current.history.sha256,
+            &committed.current.history_digest,
             super::HostActivationKind::Switch,
             |_| Ok(()),
             Some(prepared),
@@ -103,7 +103,7 @@ impl Ja1EditingSession {
         let core = self.activate_host_cut(
             cut,
             committed.history.clone(),
-            &committed.current.history.sha256,
+            &committed.current.history_digest,
             super::HostActivationKind::Switch,
             prepare,
         )?;
@@ -157,12 +157,12 @@ impl Ja1EditingSession {
         }
         let root = bundle.root().ok_or(BundleError::Unsettled)?;
         let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
-        let history = if let Some(cached) = bundle.cached_history(bundle.manual_branch_id()) {
-            bundle.store.verify(&checkpoint.history_ref)?;
-            (***cached).clone()
-        } else {
-            (*bundle.branch_history(bundle.manual_branch_id())?).clone()
-        };
+        let history =
+            if let Some(cached) = bundle.verified_cached_history(bundle.manual_branch_id())? {
+                (***cached).clone()
+            } else {
+                (*bundle.branch_history(bundle.manual_branch_id())?).clone()
+            };
         Ok(SwitchAttachment {
             project: root.project_id.clone(),
             root_sha256: self.root_sha256()?,

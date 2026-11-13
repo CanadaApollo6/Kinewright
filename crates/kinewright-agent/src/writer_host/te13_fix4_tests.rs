@@ -15,7 +15,12 @@ fn te13_fix4_pending(step: CompletionStep, committed: bool, other_run: bool) -> 
             let host = f.host.owner.upgrade().unwrap();
             let mut host = host.lock().unwrap();
             let owner = host.owner_mut().unwrap();
-            let mut candidate = owner.fork_durable_branch("unrelated run").unwrap();
+            let mut candidate = owner
+                .fork_durable_branch(
+                    "unrelated run",
+                    kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                )
+                .unwrap();
             owner.persist_durable_branch(&mut candidate).unwrap();
             owner.candidate_binding(candidate.branch_id()).unwrap()
         };
@@ -486,7 +491,12 @@ fn te13_fix4_stop_between_real_switch_prepare_and_confirm() {
         let mut owner = host.lock().unwrap();
         owner.acquire_manual(client.clone()).unwrap();
         let project = owner.owner_mut().unwrap();
-        let mut branch = project.fork_durable_branch("switch target").unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "switch target",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         branch
             .core()
             .request(kinewright_core::Command::Do(

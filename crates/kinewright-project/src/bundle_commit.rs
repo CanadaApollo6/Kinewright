@@ -48,6 +48,11 @@ impl BranchPublication {
     }
 }
 pub struct BundleCommit;
+#[derive(Clone, Copy)]
+pub(crate) struct BranchSeed<'a> {
+    pub lineage: &'a LineageRecord,
+    pub role: crate::history_record::HistoryRole,
+}
 impl BundleCommit {
     /// Stage through Core, then publish the result and issuer sequence with the same root.
     #[allow(clippy::too_many_lines)]
@@ -172,17 +177,13 @@ impl BundleCommit {
         let reservation = bundle.store.reserve(0, encoded, 0, false)?;
         let mut before = core
             .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            .map_err(crate::bundle::history_error)?;
         let original = before.clone();
         {
             let acknowledged = if let Some(cached) = bundle.cached_history(target) {
                 std::sync::Arc::clone(cached)
             } else {
-                std::sync::Arc::new(
-                    bundle
-                        .store
-                        .read_record::<HistorySnapshot>(&checkpoint.history_ref)?,
-                )
+                std::sync::Arc::new(bundle.store.resolve_history(&checkpoint.history_ref)?)
             };
             if before.floor_offset < acknowledged.floor_offset {
                 let cut = usize::try_from(acknowledged.floor_offset - before.floor_offset)
@@ -308,19 +309,21 @@ impl BundleCommit {
         }
         bundle.pending_command = None;
         bundle.pending_result = None;
-        let published =
-            std::sync::Arc::clone(bundle.cached_history(target).ok_or_else(|| {
-                BundleError::Corrupt("published history missing from owner".into())
-            })?);
-        if install
-            && **published != original
-            && bundle
-                .attach_core(core)?
-                .install_checkpoint(original, (**published).clone())
-                .is_err()
-        {
-            bundle.unsettled = true;
-            return Err(BundleError::Unsettled);
+        if install {
+            let published = if let Some(cached) = bundle.cached_history(target) {
+                std::sync::Arc::clone(cached)
+            } else {
+                std::sync::Arc::new(bundle.branch_history(target)?)
+            };
+            if **published != original
+                && bundle
+                    .attach_core(core)?
+                    .install_checkpoint(original, (**published).clone())
+                    .is_err()
+            {
+                bundle.unsettled = true;
+                return Err(BundleError::Unsettled);
+            }
         }
         bundle.receipt_lookup(envelope)
     }
@@ -362,7 +365,7 @@ impl BundleCommit {
                 .is_none_or(|r| r.manual_switch_generation != binding.switch_generation)
             || inputs != &binding.inputs
             || checkpoint.batch_ids.last() != manual.predecessor.as_ref()
-            || checkpoint.history_ref.sha256 != manual.before_sha256
+            || checkpoint.history_digest != manual.before_sha256
         {
             return Err(BundleError::Unsupported(
                 "manual chain authority/predecessor".into(),
@@ -408,7 +411,7 @@ impl BundleCommit {
                     .clone()
                     .ok_or(BundleError::HistoryChanged)?,
             ))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            .map_err(|e| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)))?;
         let after = shadow
             .export_history()
             .map_err(crate::bundle::history_error)?;
@@ -416,8 +419,12 @@ impl BundleCommit {
             || crate::manual_history::history_sha256(&after)? != manual.after_sha256
             || after.batches.last() != Some(&manual.batch)
             || kinewright_media::sha256_bytes(
-                &serde_json::to_vec(&after.cursor)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                &serde_json::to_vec(
+                    &kinewright_core::HistoryJournal::capture(&after)
+                        .map_err(crate::bundle::history_error)?
+                        .cursor,
+                )
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
             ) != manual.cursor_sha256
         {
             bundle
@@ -500,7 +507,7 @@ impl BundleCommit {
         history: &HistorySnapshot,
         inputs: &ObjectRef,
         branch_id: &crate::bundle_records::BranchId,
-        seed: Option<&LineageRecord>,
+        seed: Option<BranchSeed<'_>>,
     ) -> Result<BundleSaveReport, BundleError> {
         Self::publish_branch_selected(bundle, history, inputs, branch_id, seed, None)
     }
@@ -510,7 +517,7 @@ impl BundleCommit {
         history: &HistorySnapshot,
         inputs: &ObjectRef,
         branch_id: &crate::bundle_records::BranchId,
-        seed: Option<&LineageRecord>,
+        seed: Option<BranchSeed<'_>>,
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
         Self::publish_branch_impl(
@@ -564,7 +571,10 @@ impl BundleCommit {
             &selection.restore.history,
             &selection.restore.checkpoint.input_manifest_ref,
             &selection.target_branch,
-            Some(&selection.restore.lineage),
+            Some(BranchSeed {
+                lineage: &selection.restore.lineage,
+                role: selection.restore.checkpoint.history_role,
+            }),
             Some(&selection.restore.history),
             Some(selection),
             false,
@@ -584,7 +594,11 @@ impl BundleCommit {
         bundle: &mut ProjectBundle,
     ) -> Result<BundleSaveReport, BundleError> {
         let branch = bundle.manual_branch_id.clone();
-        let history = bundle.branch_history(&branch)?;
+        let history = if let Some(cached) = bundle.verified_cached_history(&branch)? {
+            std::sync::Arc::clone(cached)
+        } else {
+            std::sync::Arc::new(bundle.branch_history(&branch)?)
+        };
         let inputs = bundle.checkpoint(&branch)?.input_manifest_ref.clone();
         Self::publish_branch_impl(
             bundle,
@@ -686,7 +700,39 @@ impl BundleCommit {
         history: &HistorySnapshot,
         inputs: &ObjectRef,
         branch_id: &crate::bundle_records::BranchId,
-        seed: Option<&LineageRecord>,
+        seed: Option<BranchSeed<'_>>,
+        selected: Option<&HistorySnapshot>,
+        selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
+        metadata_only: bool,
+        rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
+        manual_batch: &[CommandEnvelope],
+        stage_base: Option<&ObjectRef>,
+        preparation: Option<&crate::store::PublicationFence>,
+    ) -> Result<BranchPublication, BundleError> {
+        bundle.store.replay_gate().with(|| {
+            Self::publish_branch_serial(
+                bundle,
+                history,
+                inputs,
+                branch_id,
+                seed,
+                selected,
+                selection,
+                metadata_only,
+                rescue_source,
+                manual_batch,
+                stage_base,
+                preparation,
+            )
+        })?
+    }
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn publish_branch_serial(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch_id: &crate::bundle_records::BranchId,
+        seed: Option<BranchSeed<'_>>,
         selected: Option<&HistorySnapshot>,
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
         metadata_only: bool,
@@ -697,6 +743,14 @@ impl BundleCommit {
     ) -> Result<BranchPublication, BundleError> {
         let copy_branch = bundle.prepare_plain_copy(branch_id)?;
         let branch_id = copy_branch.as_ref().unwrap_or(branch_id);
+        let history_role = if let Some(seed) = seed {
+            seed.role
+        } else {
+            bundle.history_role(branch_id, stage_base)?
+        };
+        let seed = seed.map(|seed| seed.lineage);
+        let _role_memory = (history_role != crate::history_record::HistoryRole::Ordinary)
+            .then(|| crate::run_admission::reading(&bundle.store));
         let existing_selection = metadata_only
             || selection
                 .is_some_and(crate::bundle_switch::PreparedProjectSelection::reuses_checkpoint);
@@ -765,16 +819,12 @@ impl BundleCommit {
                 std::sync::Arc::new(
                     source
                         .store
-                        .read_copy_record::<HistorySnapshot>(&prior.history_ref, true)?,
+                        .resolve_copy_history(&prior.history_ref, true)?,
                 )
             } else if let Some(cached) = bundle.cached_history(branch_id) {
                 std::sync::Arc::clone(cached)
             } else {
-                std::sync::Arc::new(
-                    bundle
-                        .store
-                        .read_record::<HistorySnapshot>(&prior.history_ref)?,
-                )
+                std::sync::Arc::new(bundle.store.resolve_history(&prior.history_ref)?)
             })
         } else {
             None
@@ -828,41 +878,65 @@ impl BundleCommit {
                 ));
             }
         }
+        let role_matches = prior
+            .as_ref()
+            .is_none_or(|prior| prior.history_role == history_role);
         let bounded: Cow<'_, HistorySnapshot> = if let Some(selected) = selected {
             if selected.floor_offset < aligned.floor_offset {
                 return Err(BundleError::HistoryBarrierInvariant);
             }
             Cow::Borrowed(selected)
-        } else if old_history.as_ref().is_some_and(|old| ***old == *aligned) {
+        } else if history_role != crate::history_record::HistoryRole::Ordinary {
+            // Native admission has its own persisted/live bounds. An admitted
+            // task must not be floored to the ordinary history limit at Finish.
+            Cow::Borrowed(&*aligned)
+        } else if role_matches && old_history.as_ref().is_some_and(|old| ***old == *aligned) {
             Cow::Borrowed(&*aligned)
         } else {
-            bound_history_borrowed(&aligned, bundle.store.limits())?
+            bundle
+                .store
+                .with_history_admission(history_role, bundle.store.limits(), || {
+                    bound_history_borrowed(&aligned, bundle.store.limits())
+                })?
         };
         // `check_bytes` keeps the checked encoding with the support fields its decode
         // observed, so sealing that same encoding needs no second decode for the inventory.
-        let (checked, check_bytes) = if old_history.as_ref().is_some_and(|old| ***old == *bounded) {
+        let (checked, check_bytes) = if role_matches
+            && old_history.as_ref().is_some_and(|old| ***old == *bounded)
+        {
             (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
         } else {
-            let serialized =
-                serde_json::to_vec(&bounded).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            let (checked, check_bytes) = bundle.store.check_history_bytes(serialized)?;
-            // The decode preflighted these bytes under these limits and charged exactly
-            // that; the replay shadow takes the same charge without preflighting again.
-            let replay_charge = checked.decoded_charge();
-            #[cfg(any(test, feature = "test-util"))]
-            let replay_charge = if crate::io_observer::save_reuse_disabled() {
-                crate::store::preflight_record(check_bytes.bytes(), bundle.store.limits())?
-            } else {
-                replay_charge
-            };
-            let _replay = bundle.store.reserve_history_shadow(replay_charge)?;
-            let core = Core::spawn(std::sync::Arc::clone(&checked.baseline))
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            bundle
-                .attach_core(&core)?
-                .restore_history((*checked).clone())
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let serialized = serde_json::to_vec(&bounded).map_err(crate::bundle::encoding_error)?;
+            let (checked, check_bytes) = bundle
+                .store
+                .check_history_bytes(&serialized, history_role)?;
+            if *checked != *bounded {
+                return Err(BundleError::Corrupt(
+                    "history transport differs from capture".into(),
+                ));
+            }
+            // The checked replay proves this exact capture. Keep its immutable document
+            // allocations shared with the live actor and floor capture.
+            let checked = checked.map(|_| (*bounded).clone());
+            // Compact decode already replayed every accepted command and checked
+            // every boundary. A second private actor would duplicate that proof.
             (std::sync::Arc::new(checked), Some(check_bytes))
+        };
+        // Adopting native work as the manual branch transfers this retained
+        // capture to the ordinary pool before publication. The immutable document
+        // images remain shared with the source capture.
+        let checked = if branch_id == &manual_branch_id
+            && history_role != crate::history_record::HistoryRole::Ordinary
+        {
+            let live = checked.decoded_charge();
+            std::sync::Arc::new(
+                bundle
+                    .store
+                    .reserve_copy_read(0, live, live, false, true)?
+                    .hold((**checked).clone()),
+            )
+        } else {
+            checked
         };
         let manifest = bundle.store.read_input_manifest(inputs)?;
         let historical_input_owner = switch_generation != 0
@@ -1013,11 +1087,25 @@ impl BundleCommit {
             floor_seed.as_ref().or(seed).or(old_lineage.as_deref()),
             old_lineage.as_deref().or(seed),
         )?;
+        if history_role != crate::history_record::HistoryRole::Ordinary {
+            let live = crate::history_size::history_live_bytes(&checked)?
+                .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
+                .ok_or(BundleError::Capacity("role history memory overflow"))?;
+            if live > history_role.live_limit(bundle.store.limits()) {
+                return Err(BundleError::RunAdmission(
+                    crate::task_history_admission::LIMIT_REASON,
+                ));
+            }
+        }
         let generation = bundle
             .generation
             .checked_add(1)
             .ok_or(BundleError::Capacity("root generation"))?;
-        let unchanged = old_history.as_ref().is_some_and(|h| ***h == **checked)
+        let role_unchanged = prior
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.history_role == history_role);
+        let unchanged = role_unchanged
+            && old_history.as_ref().is_some_and(|h| ***h == **checked)
             && prior
                 .as_ref()
                 .is_some_and(|p| p.input_manifest_ref == *inputs);
@@ -1057,7 +1145,10 @@ impl BundleCommit {
         } else {
             let document_ref = seal!(&*checked.document);
             let baseline_ref = seal!(&*checked.baseline);
-            let (history, support) = bundle.store.admit_checked_history(&checked, check_bytes)?;
+            let (history, support) =
+                bundle
+                    .store
+                    .admit_checked_history(&checked, check_bytes, history_role)?;
             sealed_support = support;
             let history_ref = history.reference.clone();
             seals.push(history);
@@ -1079,13 +1170,15 @@ impl BundleCommit {
                 document_ref,
                 baseline_ref,
                 history_ref,
+                history_digest: crate::manual_history::history_sha256(&checked)?,
+                history_role,
                 lineage_ref,
                 input_manifest_ref: inputs.clone(),
                 history_input_manifest_refs: contexts,
                 batch_ids,
                 applied_operations_digest: kinewright_media::sha256_bytes(
                     &serde_json::to_vec(&checked.applied_operations())
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                        .map_err(crate::bundle::encoding_error)?,
                 ),
                 checkpoint_generation: generation,
                 floor_generation: if floor_discard.is_some() {
@@ -1135,8 +1228,11 @@ impl BundleCommit {
             .as_ref()
             .map_or_else(BTreeMap::new, |root| root.candidate_recovery.clone());
         if !existing_selection
-            && let Some(base) = bundle.advanced_candidate_base(branch_id, &checked)?
+            && let Some(mut base) = bundle.advanced_candidate_base(branch_id, &checked)?
         {
+            // A person can adopt retained task work as the manual branch. Its
+            // future full delta belongs to ordinary history along with the cursor.
+            base.history_role = history_role;
             let base_ref = seal!(&base);
             candidate_recovery.insert(
                 branch_id.clone(),
@@ -1700,13 +1796,29 @@ impl PreparedBranchPublication {
                     bundle.history_cache.remove(branch);
                 }
             }
-            bundle.history_cache.insert(
-                branch_id.clone(),
-                crate::bundle::CachedHistory {
-                    reference: bundle.branches[branch_id].history_ref.clone(),
-                    history: std::sync::Arc::clone(&checked),
-                },
-            );
+            bundle.history_cache.retain(|branch, _| {
+                branch == &manual_branch_id
+                    || bundle.branches.get(branch).is_some_and(|checkpoint| {
+                        checkpoint.history_role == crate::history_record::HistoryRole::Ordinary
+                    })
+            });
+            if branch_id == &manual_branch_id
+                || bundle.branches[branch_id].history_role
+                    == crate::history_record::HistoryRole::Ordinary
+            {
+                bundle.history_cache.insert(
+                    branch_id.clone(),
+                    crate::bundle::CachedHistory {
+                        reference: bundle.branches[branch_id].history_ref.clone(),
+                        profile: bundle.branches[branch_id]
+                            .history_role
+                            .admission_profile(bundle.store.limits()),
+                        history: std::sync::Arc::clone(&checked),
+                    },
+                );
+            } else {
+                bundle.history_cache.remove(branch_id);
+            }
             bundle.generation = generation;
             bundle.inventory = inventory;
             bundle.recovery = recovery;
@@ -1727,7 +1839,7 @@ impl PreparedBranchPublication {
         bundle.unsettled = false;
         drop(seals);
         Ok(BranchPublication::Published(BundleSaveReport {
-            history_sha256: bundle.checkpoint(branch_id)?.history_ref.sha256.clone(),
+            history_sha256: bundle.checkpoint(branch_id)?.history_digest.clone(),
             collection: published.collection,
             path: published.saved_path,
             project_id: bundle.project_id.clone(),
@@ -1853,7 +1965,7 @@ fn encode_publication_root(
         Some(
             bundle
                 .store
-                .read_record::<HistorySnapshot>(&branches[manual_branch_id].history_ref)?,
+                .resolve_history(&branches[manual_branch_id].history_ref)?,
         )
     };
     let manual_document = manual_history
@@ -1931,118 +2043,103 @@ fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<Option<BoundedHistory>, BundleError> {
-    let fits = |h: &HistorySnapshot| -> bool {
-        let Ok(encoded) = h.encoded_bytes() else {
-            return false;
-        };
-        if encoded > limits.branch_history_bytes {
-            return false;
-        }
-        let Ok(bytes) = serde_json::to_vec(h) else {
-            return false;
-        };
-        crate::store::preflight_record(&bytes, limits)
-            .is_ok_and(|n| n <= limits.branch_history_bytes)
+    let fits = |h: &HistorySnapshot| {
+        crate::history_size::verify_history_admission(
+            h,
+            crate::history_record::HistoryRole::Ordinary,
+            limits,
+        )
+        .is_ok()
     };
-    // Keep the common small checkpoint path direct. For a long session, component
-    // costs can reject the original stream without first serializing tens of MiB.
-    if history.batches.len() <= 64 && fits(history) {
+    if fits(history) {
         return Ok(None);
     }
-    // Independent JSON subtrees give a lower bound without reserializing every suffix.
-    // Zeroing counters only shortens their encoding; the final fit/replay remains authoritative.
-    let undo = suffix_costs(history.cursor.undo.iter(), limits);
-    let redo = suffix_costs(history.cursor.redo.iter(), limits);
-    let zero_undo_counters = history.batches.iter().all(|batch| batch.undo_entries == 0);
-    let mut batches = history.batches.clone();
-    for batch in &mut batches {
-        batch.order = 0;
-        batch.undo_entries = 0;
+    // A retained command is unchanged by flooring. Complete batch costs are
+    // also stable when the suffix never undoes below the new baseline. Keep
+    // that exception: an excursion can rewrite effects and cursor counters.
+    let commands = suffix_costs(history.batches.iter().map(|batch| &batch.command), limits);
+    let batches = suffix_costs(
+        history.batches.iter().map(|batch| {
+            let mut batch = kinewright_core::JournalBatch::from(batch);
+            batch.order = 0;
+            batch.undo_entries = 0;
+            batch
+        }),
+        limits,
+    );
+    let undo_costs = suffix_costs(history.cursor.undo.iter(), limits);
+    let redo_cost = history
+        .cursor
+        .redo
+        .iter()
+        .map(|boundary| record_cost(boundary, limits).unwrap_or(u64::MAX))
+        .fold(0_u64, u64::saturating_add);
+    let current_cost = record_cost(&history.document, limits).unwrap_or(u64::MAX);
+    let mut minimum_undo = vec![usize::MAX; history.batches.len() + 1];
+    for index in (0..history.batches.len()).rev() {
+        minimum_undo[index] = minimum_undo[index + 1].min(history.batches[index].undo_entries);
     }
-    let batches = suffix_costs(batches.iter(), limits);
-    let minimum_undo = if history.cursor.undo.is_empty() {
-        // Every admissible cut drops zero entries; no excursion adjustment is needed.
-        vec![]
-    } else {
-        let mut costs = vec![usize::MAX; history.batches.len() + 1];
-        for index in (0..history.batches.len()).rev() {
-            costs[index] = costs[index + 1].min(history.batches[index].undo_entries);
-        }
-        costs
+    let skeleton = kinewright_core::HistoryJournal {
+        floor_offset: 0,
+        baseline_sha256: "0".repeat(64),
+        document_sha256: "0".repeat(64),
+        batches: vec![],
+        cursor: kinewright_core::JournalCursor {
+            undo: vec![],
+            redo: vec![],
+        },
     };
-    if history.batches.len() > 64
-        && undo[0].saturating_add(redo[0]).saturating_add(batches[0]) <= limits.branch_history_bytes
-        && fits(history)
-    {
-        return Ok(None);
-    }
-    let document_cost = record_cost(&*history.document, limits)?;
-    let skeleton = serde_json::json!({"floor_offset":1,"baseline":null,"document":null,"batches":[],"cursor":{"undo":[],"redo":[]}});
-    // Remove the two null value slots; their actual Document subtrees are added below.
-    let overhead = record_cost(&skeleton, limits)?
-        .checked_sub(2 * record_cost(&serde_json::Value::Null, limits)?)
-        .ok_or(BundleError::Capacity("history cost"))?;
-    let mut baseline_cost: Option<(std::sync::Arc<kinewright_core::Document>, u64)> = None;
+    let overhead = record_cost(&skeleton, limits)?;
+    let hash = record_cost(&"0".repeat(64), limits)?;
     kinewright_core::HistoryTransition::find_floor(
         history.clone(),
         |cut, dropped, baseline| {
             let count = history.batches.len() - cut;
-            let Some(undo_cost) = undo.get(dropped) else {
+            let Some(undo) = history.cursor.undo.len().checked_sub(dropped) else {
                 return false;
             };
-            // An excursion below the cut rewrites batch counters and effects during
-            // fresh replay. Omit those terms; the exact replay/fit decides the cut.
-            let excursion = dropped > 0 && minimum_undo[cut] < dropped;
-            let lower = undo_cost
-                .saturating_add(redo[0])
-                .saturating_add(if excursion { 0 } else { batches[cut] });
-            if count > kinewright_core::HISTORY_COMMANDS || lower > limits.branch_history_bytes {
-                return false;
-            }
-            if baseline_cost
-                .as_ref()
-                .is_none_or(|(prior, _)| !std::sync::Arc::ptr_eq(prior, baseline))
-            {
-                baseline_cost = Some((
-                    std::sync::Arc::clone(baseline),
-                    record_cost(&**baseline, limits).unwrap_or(u64::MAX),
-                ));
-            }
             let Some(offset) = history.floor_offset.checked_add(cut as u64) else {
                 return false;
             };
-            let commas = count.saturating_sub(1)
-                + (history.cursor.undo.len() - dropped).saturating_sub(1)
-                + history.cursor.redo.len().saturating_sub(1);
-            let mut cost = lower
-                .saturating_add(document_cost)
-                .saturating_add(baseline_cost.as_ref().unwrap().1)
-                .saturating_add(overhead)
-                .saturating_add(2 * commas as u64)
-                .saturating_add(2 * u64::from(offset.ilog10()));
-            if !excursion && zero_undo_counters {
-                // Orders are 0..count. Each decimal threshold contributes one
-                // extra digit to every later order; the scratch charge is twice that.
+            let redo = history.cursor.redo.len();
+            let excursion = dropped > 0 && minimum_undo[cut] < dropped;
+            // A successful floor preserves these exact cursor suffixes. Their
+            // document-bearing admission costs are therefore a safe prefilter,
+            // including when an excursion rewrites the retained batch effects.
+            let ordinary = undo_costs[dropped]
+                .saturating_add(redo_cost)
+                .saturating_add(current_cost)
+                .saturating_add(record_cost(baseline, limits).unwrap_or(u64::MAX))
+                .saturating_add(if excursion {
+                    commands[cut]
+                } else {
+                    batches[cut]
+                })
+                .saturating_add(8192);
+            let mut journal = overhead
+                .saturating_add(if excursion {
+                    commands[cut]
+                } else {
+                    batches[cut]
+                })
+                .saturating_add(hash.saturating_mul((undo + redo) as u64))
+                .saturating_add(
+                    2 * (count.saturating_sub(1) + undo.saturating_sub(1) + redo.saturating_sub(1))
+                        as u64,
+                )
+                .saturating_add(2 * u64::from(offset.checked_ilog10().unwrap_or(0)));
+            if !excursion {
                 let mut threshold = 10;
                 while threshold < count {
-                    cost = cost.saturating_add(2 * (count - threshold) as u64);
+                    journal = journal.saturating_add(2 * (count - threshold) as u64);
                     threshold *= 10;
                 }
-            } else if !excursion {
-                for (order, batch) in history.batches[cut..].iter().enumerate() {
-                    let Some(entries) = batch.undo_entries.checked_sub(dropped) else {
-                        return false;
-                    };
-                    // Only normalized order and undo count change in an equivalent retained batch.
-                    cost = cost.saturating_add(
-                        2 * u64::from(
-                            order.checked_ilog10().unwrap_or(0)
-                                + entries.checked_ilog10().unwrap_or(0),
-                        ),
-                    );
-                }
             }
-            cost <= limits.branch_history_bytes
+            // Replay room is decided only by `fits`. A structural JSON
+            // estimate is not a lower bound for the typed replay reservation.
+            count <= kinewright_core::HISTORY_COMMANDS
+                && ordinary <= limits.branch_history_bytes
+                && journal <= limits.branch_history_bytes
         },
         fits,
     )
@@ -2059,25 +2156,64 @@ fn record_cost(
     value: &impl serde::Serialize,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
-    let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let bytes = serde_json::to_vec(value).map_err(crate::bundle::encoding_error)?;
     crate::store::preflight_record(&bytes, limits)
 }
 
-fn suffix_costs<'a, T: serde::Serialize + PartialEq + Clone + 'a>(
-    values: impl DoubleEndedIterator<Item = &'a T>,
+// Ordinary Save keeps its document-bearing decoded admission budget. Count
+// one boundary at a time; the persisted/transport form stays compact and this
+// check never builds a second complete document-bearing JSON history.
+pub(crate) fn ordinary_history_admission_cost(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<u64, BundleError> {
+    let header = (
+        history.floor_offset,
+        &history.baseline,
+        &history.document,
+        &history.batches,
+    );
+    history
+        .cursor
+        .undo
+        .iter()
+        .chain(&history.cursor.redo)
+        .try_fold(
+            record_cost(&header, limits)?.saturating_add(8192),
+            |sum, boundary| {
+                sum.checked_add(record_cost(boundary, limits)?)
+                    .and_then(|bytes| bytes.checked_add(64))
+                    .ok_or(BundleError::Capacity("ordinary history admission overflow"))
+            },
+        )
+}
+
+#[cfg(feature = "test-util")]
+/// The ordinary document-bearing admission cost, without a full encoded copy.
+/// # Errors
+/// Refuses arithmetic overflow or a component beyond the record limit.
+pub fn ordinary_history_admission_cost_probe(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<u64, BundleError> {
+    ordinary_history_admission_cost(history, limits)
+}
+
+fn suffix_costs<T: serde::Serialize + PartialEq>(
+    values: impl DoubleEndedIterator<Item = T>,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Vec<u64> {
     let mut costs = vec![0_u64];
     let mut cache: Vec<(T, u64)> = vec![];
     for value in values.rev() {
-        let cost = if let Some((_, cost)) = cache.iter().find(|(prior, _)| prior == value) {
+        let cost = if let Some((_, cost)) = cache.iter().find(|(prior, _)| prior == &value) {
             *cost
         } else {
-            let cost = record_cost(value, limits).unwrap_or(u64::MAX);
+            let cost = record_cost(&value, limits).unwrap_or(u64::MAX);
             if cache.len() == 16 {
                 cache.remove(0);
             }
-            cache.push((value.clone(), cost));
+            cache.push((value, cost));
             cost
         };
         costs.push(costs.last().unwrap().saturating_add(cost));
@@ -2425,14 +2561,34 @@ pub fn bound_history_probe(
 }
 
 #[cfg(feature = "test-util")]
-/// Charge an actual encoded history using the production record admission.
+/// Minimum single-history allowance, including its measured replay peak.
+/// This is not retained residency; use `restored_history_live_bytes` for that.
 /// # Errors
 /// Refuses an invalid or excessive record.
 pub fn history_cost_probe(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
-    record_cost(history, limits)
+    let record = crate::history_record::HistoryRecord::capture(
+        history,
+        crate::history_record::HistoryRole::Ordinary,
+    )?;
+    let retained = crate::history_size::native_history_live_bytes(history)?;
+    let charge = record_cost(&record, limits)?
+        .max(retained)
+        .max(ordinary_history_admission_cost(history, limits)?);
+    // This sizing witness intentionally measures cuts which admission rejects.
+    // An already excessive retained cut needs no further materialization.
+    if retained > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
+        return Ok(charge);
+    }
+    let peak = kinewright_core::history_size::measure_replay_peak(
+        &record.journal,
+        &history.baseline,
+        &history.document,
+    )
+    .map_err(crate::bundle::history_error)?;
+    Ok(charge.max(peak))
 }
 
 pub(crate) fn validate_manifest_extension(

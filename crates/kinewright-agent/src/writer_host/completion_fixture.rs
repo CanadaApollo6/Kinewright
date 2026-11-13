@@ -119,7 +119,10 @@ impl WriterHost {
         }
         let index = owner.resolve_attachment(Some(&self.auth.bearer()))?;
         let project = owner.owner_mut()?;
-        let mut candidate = project.fork_durable_branch("completion fixture")?;
+        let mut candidate = project.fork_durable_branch(
+            "completion fixture",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )?;
         project.persist_durable_branch(&mut candidate)?;
         let base = project.candidate_binding(candidate.branch_id())?;
         let text = project.admit_host_grant(b"unpaid completion witness")?;

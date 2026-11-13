@@ -158,7 +158,10 @@ mod followups {
             let project = host.owner_mut().unwrap();
             // Each real run gets its own candidate; never reuse a prior run's scope.
             let mut candidate = project
-                .fork_durable_branch("next consent candidate")
+                .fork_durable_branch(
+                    "next consent candidate",
+                    kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                )
                 .unwrap();
             project.persist_durable_branch(&mut candidate).unwrap();
             f.brief.scope.base = project.candidate_binding(candidate.branch_id()).unwrap();

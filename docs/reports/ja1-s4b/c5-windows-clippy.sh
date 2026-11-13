@@ -3,7 +3,7 @@
 #
 # It lints the whole workspace for x86_64-pc-windows-msvc with cargo-xwin, the
 # same `cargo clippy --workspace --all-targets -- -D warnings` the Windows CI
-# lane runs, plus the Agent crate with `slow-tests`. It replaces
+# lane runs, plus Agent slow-tests and App default/slow-tests. It replaces
 # docs/reports/ja1-s4/c2-windows-check.sh as the C5 Windows gate: that script
 # lints only the guardian modules (job_guardian, guardian, execution_claim) in
 # an isolated manifest, so no off-Linux arm elsewhere in the crate is linted.
@@ -14,9 +14,10 @@
 # This is a compile and lint check, not Windows execution.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
+printf 'Windows cross-clippy gate, HEAD %s\n' "$(git rev-parse HEAD)"
 # Match CI's three feature-disabled builds on this Linux host before linting
 # MSVC. This helper owns its lock; never wrap this script in another flock.
-bash scripts/ci-shipping-builds.sh
+CARGO_TARGET_DIR="$PWD/target/shipping" bash scripts/ci-shipping-builds.sh
 # Cross-clippy does not enumerate MSVC libtest names. Keep the platform-scoped
 # manifest/accounting regression in this per-commit gate as well.
 nice -n 19 python3 -I scripts/ci_shards_selftest.py
@@ -47,6 +48,8 @@ run() {
 }
 run --workspace --all-targets
 run -p kinewright-agent --all-targets --features slow-tests
-# Compile the MSVC shipping feature graph in its own disposable target as well.
+run -p kinewright-app --all-targets
+run -p kinewright-app --all-targets --features slow-tests
+# Compile the same three MSVC shipping graphs in a disposable isolated target.
 bash scripts/ci-shipping-builds.sh --windows-check
 rm -rf "$TMPDIR"

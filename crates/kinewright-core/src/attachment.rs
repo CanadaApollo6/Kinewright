@@ -26,6 +26,10 @@ pub enum CoreMutationRefusal {
     ManualBackpressure,
     #[error("This input must be admitted by the project writer before the edit can be accepted.")]
     ManualInputRequired,
+    #[error(
+        "This edit exceeds the project's history capacity. Try a smaller edit or start a new project."
+    )]
+    ManualHistoryCapacity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,8 +75,12 @@ pub struct ManualHistoryCandidate<'a> {
     pub cursor_sha256: &'a str,
 }
 
-/// No operation execution belongs in this codec. The actor supplies exact v1 identities.
+/// The persistence owner checks the complete candidate before its acceptance
+/// identity is encoded. Both steps run inside the actor's rollback transaction.
 pub trait ManualHistoryEncoder: Send + 'static {
+    fn check_history(&mut self, history: &HistorySnapshot) -> Result<(), HistoryError>;
+    /// Commit or discard a staged proof only after the whole admission finishes.
+    fn finish_history_check(&mut self, accepted: bool);
     fn encode(
         &self,
         sequence: u64,
@@ -488,6 +496,10 @@ mod tests {
     }
     struct Encoder(usize);
     impl ManualHistoryEncoder for Encoder {
+        fn check_history(&mut self, _: &HistorySnapshot) -> Result<(), HistoryError> {
+            Ok(())
+        }
+        fn finish_history_check(&mut self, _: bool) {}
         fn encode(
             &self,
             sequence: u64,

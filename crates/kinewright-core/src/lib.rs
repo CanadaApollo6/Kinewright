@@ -33,6 +33,8 @@ mod delivery;
 mod editorial;
 mod effect;
 mod history;
+mod history_journal;
+pub mod history_size;
 mod history_transition;
 mod incident;
 mod journal;
@@ -206,8 +208,12 @@ pub use effect::{
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
 pub use history::{
-    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
-    OperationIdentityEffect,
+    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError,
+    HistoryReplayEvidence, HistorySnapshot, OperationIdentityEffect, ResolvedHistory,
+};
+pub use history_journal::{
+    HistoryJournal, HistoryTransport, JournalBatch, JournalCursor, JournalIdentityEffect,
+    history_document_hash,
 };
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
@@ -267,7 +273,8 @@ pub use model::{
     validate_lut_asset,
 };
 pub use model::{
-    clip_support_fields, document_support_fields, history_support_fields, operation_support_fields,
+    clip_support_fields, document_support_fields, history_journal_support_fields,
+    history_support_fields, operation_support_fields,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

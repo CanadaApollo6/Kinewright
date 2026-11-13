@@ -291,7 +291,12 @@ fn check_other_history() {
     let theirs = capture_cut(&other_core, &branch, 8, 0);
     bundle.save(&published_core, &inputs).unwrap();
     let version = publish(&mut bundle);
-    let forked = bundle.fork_branch(&branch).unwrap();
+    let forked = bundle
+        .fork_branch(
+            &branch,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let history = published_core.export_history().unwrap();
     let elsewhere = capture(&View {
         cell: &manual_cell(9, 0),

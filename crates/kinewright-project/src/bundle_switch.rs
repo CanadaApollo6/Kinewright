@@ -65,6 +65,8 @@ pub struct SwitchBranch {
     pub head: HeadId,
     pub checkpoint: crate::bundle_records::ObjectRef,
     pub history: crate::bundle_records::ObjectRef,
+    pub history_role: crate::history_record::HistoryRole,
+    pub history_digest: String,
     pub inputs: crate::bundle_records::ObjectRef,
     pub lineage: crate::bundle_records::ObjectRef,
 }
@@ -78,6 +80,8 @@ impl SwitchBranch {
             head: value.head_id.clone(),
             checkpoint,
             history: value.history_ref.clone(),
+            history_role: value.history_role,
+            history_digest: value.history_digest.clone(),
             inputs: value.input_manifest_ref.clone(),
             lineage: value.lineage_ref.clone(),
         }
@@ -134,8 +138,17 @@ impl SwitchAttachment {
         })
     }
     pub fn verify(&self) -> Result<(), BundleError> {
+        if crate::manual_history::history_sha256(&self.history)? != self.current.history_digest {
+            return Err(BundleError::HistoryChanged);
+        }
         for (reference, bytes) in [
-            (&self.current.history, serde_json::to_vec(&self.history)),
+            (
+                &self.current.history,
+                serde_json::to_vec(&crate::history_record::HistoryRecord::capture(
+                    &self.history,
+                    self.current.history_role,
+                )?),
+            ),
             (&self.current.inputs, serde_json::to_vec(&self.inputs)),
             (&self.current.lineage, serde_json::to_vec(&self.lineage)),
         ] {
@@ -444,8 +457,7 @@ impl ProjectBundle {
         let report = BundleSaveReport {
             history_sha256: self
                 .checkpoint(&self.manual_branch_id)?
-                .history_ref
-                .sha256
+                .history_digest
                 .clone(),
             collection: self.store.collection_status()?,
             path: self.store.resolved_root()?,

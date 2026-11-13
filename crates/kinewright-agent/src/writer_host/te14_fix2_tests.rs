@@ -683,7 +683,12 @@ fn te14_fix2_real_scale_measurements() {
             ]))
             .unwrap();
         project.save_active().unwrap();
-        let mut branch = project.fork_durable_branch("scale-read").unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "scale-read",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();
         f.brief.scope.base = project.candidate_binding(branch.branch_id()).unwrap();
         f.brief.inputs = project.current_inputs_ref().clone();

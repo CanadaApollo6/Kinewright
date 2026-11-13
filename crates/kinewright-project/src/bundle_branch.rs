@@ -103,7 +103,12 @@ impl ProjectBundle {
         &self,
         id: &BranchId,
     ) -> Result<StorageReservation<HistorySnapshot>, BundleError> {
-        self.store.read_record(&self.checkpoint(id)?.history_ref)
+        let reference = &self.checkpoint(id)?.history_ref;
+        if id == &self.manual_branch_id {
+            self.store.resolve_manual_history(reference)
+        } else {
+            self.store.resolve_history(reference)
+        }
     }
     pub fn branch_lineage(
         &self,
@@ -111,13 +116,18 @@ impl ProjectBundle {
     ) -> Result<StorageReservation<LineageRecord>, BundleError> {
         self.store.read_record(&self.checkpoint(id)?.lineage_ref)
     }
-    pub fn fork_branch(&mut self, source: &BranchId) -> Result<BranchId, BundleError> {
-        self.fork_branch_as(source, BranchId::fresh()?)
+    pub fn fork_branch(
+        &mut self,
+        source: &BranchId,
+        role: crate::history_record::HistoryRole,
+    ) -> Result<BranchId, BundleError> {
+        self.fork_branch_as(source, BranchId::fresh()?, role)
     }
     pub(crate) fn fork_branch_as(
         &mut self,
         source: &BranchId,
         id: BranchId,
+        role: crate::history_record::HistoryRole,
     ) -> Result<BranchId, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -141,7 +151,16 @@ impl ProjectBundle {
         let frozen = candidate
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        BundleCommit::publish_branch(self, &frozen, &inputs, &id, Some(&seed))?;
+        BundleCommit::publish_branch(
+            self,
+            &frozen,
+            &inputs,
+            &id,
+            Some(crate::bundle_commit::BranchSeed {
+                lineage: &seed,
+                role,
+            }),
+        )?;
         Ok(id)
     }
     pub fn save_branch(

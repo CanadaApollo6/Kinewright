@@ -49,6 +49,14 @@ fn app_session_undo_stops_at_saved_floor_and_next_save_keeps_edits() {
         app.undo();
     }
     let floor = app.focused().core.export_history().unwrap();
+    eprintln!(
+        "APP_SESSION_FLOOR saved_batches={} undo={} after_undo_batches={} saved_cost={:?} undo_cost={:?}",
+        saved.batches.len(),
+        saved.cursor.undo.len(),
+        floor.batches.len(),
+        kinewright_project::bundle_commit::history_cost_probe(&saved, &StorageLimits::default()),
+        kinewright_project::bundle_commit::history_cost_probe(&floor, &StorageLimits::default()),
+    );
     assert!(
         floor.cursor.undo.is_empty(),
         "app offered undo below the saved floor"

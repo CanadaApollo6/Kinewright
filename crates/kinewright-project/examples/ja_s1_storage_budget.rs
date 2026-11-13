@@ -211,7 +211,7 @@ fn run() {
     let decode_before_history = bundle.store().usage().unwrap().live_history_bytes;
     let decoded_history = bundle
         .store()
-        .read_record::<kinewright_core::HistorySnapshot>(
+        .resolve_history(
             &bundle
                 .checkpoint(bundle.manual_branch_id())
                 .unwrap()

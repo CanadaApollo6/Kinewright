@@ -192,6 +192,9 @@ pub struct BranchCheckpoint {
     pub document_hash: String,
     pub baseline_ref: ObjectRef,
     pub history_ref: ObjectRef,
+    /// Portable capture identity, distinct from the referenced on-disk record.
+    pub history_digest: String,
+    pub history_role: crate::history_record::HistoryRole,
     pub lineage_ref: ObjectRef,
     pub input_manifest_ref: ObjectRef,
     /// Input context at each accepted command, including undone/recoverable heads.
@@ -209,6 +212,7 @@ pub struct BranchCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpecialistBaseRecord {
+    pub history_role: crate::history_record::HistoryRole,
     pub target_branch: BranchId,
     pub base_head: HeadId,
     pub base_document_hash: String,
@@ -247,8 +251,7 @@ pub struct OccurrenceId {
     pub result_ordinal: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageRecord {
     pub branch_origin: BranchId,
     pub baseline: BTreeMap<ClipId, OccurrenceId>,

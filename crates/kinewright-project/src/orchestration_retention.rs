@@ -224,7 +224,10 @@ pub(crate) fn measure_pending_task_history(
         let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         Ok((bytes.len(), crate::store::preflight_record(&bytes, limits)?))
     }
-    let (history_encoded, history_decoded) = size(history, limits)?;
+    let (history_encoded, history_decoded) = size(
+        &crate::history_record::HistoryRecord::capture(history, base.history_role)?,
+        limits,
+    )?;
     let (specialist_base_encoded, specialist_base_decoded) = size(base, limits)?;
     let (full_delta_encoded, full_delta_decoded) = size(&base.full_applied_delta, limits)?;
     Ok(PendingTaskHistoryProfile {

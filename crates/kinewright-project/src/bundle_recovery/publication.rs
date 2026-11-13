@@ -4,6 +4,7 @@ use super::{
     decoded_reservations, inspect_checkpoints, read_record, validate_archived_root,
     validate_evidence, validate_manifest_apis, walk,
 };
+use crate::history_record::{HistoryRecord, HistoryRole};
 use crate::{
     bundle::{BundleError, BundleWriteAdmission},
     bundle_records::{BranchCheckpoint, BranchId, LineageRecord, ObjectRef, RecordKind},
@@ -12,7 +13,7 @@ use crate::{
     storage_budget::{StorageLimits, StorageReservation, StorageUsage},
     store::{BundleRecord, ProjectStore, StoreManifest},
 };
-use kinewright_core::{Document, HistorySnapshot};
+use kinewright_core::Document;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -24,6 +25,7 @@ pub(crate) struct VerifiedIdentityMemo {
     records: BTreeMap<ObjectRef, RecordCost>,
 }
 struct RecordCost {
+    resolved_history: Option<(u64, HistoryRole)>,
     decoded: u64,
     fields: Option<BTreeSet<String>>,
     dependencies: Vec<ObjectRef>,
@@ -102,6 +104,7 @@ impl VerifiedIdentityMemo {
                 self.records.insert(
                     reference.clone(),
                     RecordCost {
+                        resolved_history: None,
                         decoded: 0,
                         fields: Some(BTreeSet::new()),
                         dependencies: vec![],
@@ -112,6 +115,28 @@ impl VerifiedIdentityMemo {
             }
         }
         Ok(())
+    }
+    pub(crate) fn remember_resolved_history(
+        &mut self,
+        reference: &ObjectRef,
+        bytes: u64,
+        role: HistoryRole,
+        limits: &StorageLimits,
+    ) {
+        self.bind(limits);
+        if let Some(cost) = self.records.get_mut(reference) {
+            cost.resolved_history = Some((bytes, role));
+        }
+    }
+    fn resolved_history(
+        &mut self,
+        reference: &ObjectRef,
+        limits: &StorageLimits,
+    ) -> Option<(u64, HistoryRole)> {
+        self.bind(limits);
+        self.records
+            .get(reference)
+            .and_then(|cost| cost.resolved_history)
     }
     pub(crate) fn clear(&mut self) {
         self.records.clear();
@@ -169,9 +194,11 @@ impl VerifiedIdentityMemo {
                 | RecordKind::SpecialistBase
         );
         let mut prior = self.records.remove(reference);
+        let resolved_history = prior.as_ref().and_then(|cost| cost.resolved_history);
         self.records.insert(
             reference.clone(),
             RecordCost {
+                resolved_history,
                 decoded,
                 fields: fields
                     .or_else(|| prior.as_mut().and_then(|prior| prior.fields.take()))
@@ -193,13 +220,13 @@ impl VerifiedIdentityMemo {
     ) {
         self.bind(limits);
         if self.records.contains_key(reference) || (self.records.len() as u64) < limits.objects {
-            let run_ownership = self
-                .records
-                .remove(reference)
-                .and_then(|prior| prior.run_ownership);
+            let prior = self.records.remove(reference);
+            let resolved_history = prior.as_ref().and_then(|cost| cost.resolved_history);
+            let run_ownership = prior.and_then(|cost| cost.run_ownership);
             self.records.insert(
                 reference.clone(),
                 RecordCost {
+                    resolved_history,
                     decoded,
                     fields: Some(fields),
                     dependencies,
@@ -533,7 +560,7 @@ pub(super) fn validate(
                 payload!(Document);
             }
             RecordKind::History => {
-                payload!(HistorySnapshot);
+                payload!(HistoryRecord);
             }
             RecordKind::Lineage => {
                 payload!(LineageRecord);
@@ -656,13 +683,83 @@ pub(super) fn validate(
         let history = if active && let Some(value) = histories.get(&checkpoint.history_ref.sha256) {
             Arc::clone(value)
         } else {
-            Arc::new(memo.read::<HistorySnapshot>(
+            let _wire = memo.read::<HistoryRecord>(
                 namespace,
                 &checkpoint.history_ref,
                 usage,
                 &mut fields,
                 &manifest,
                 limits,
+            )?;
+            let (charge, role) = if let Some(cost) =
+                memo.resolved_history(&checkpoint.history_ref, limits)
+            {
+                // This is the empty-reader admission model, not the writer's
+                // physical ledger. A proof avoids replaying the bytes, but
+                // must still model the cold reader's full replay overlap.
+                let _replay_baseline = memo.read::<Document>(
+                    namespace,
+                    &checkpoint.baseline_ref,
+                    usage,
+                    &mut fields,
+                    &manifest,
+                    limits,
+                )?;
+                let _replay_document = memo.read::<Document>(
+                    namespace,
+                    &checkpoint.document_ref,
+                    usage,
+                    &mut fields,
+                    &manifest,
+                    limits,
+                )?;
+                let window = cost.1.replay_limit(limits);
+                drop(StorageReservation::reserve(
+                    usage,
+                    limits,
+                    0,
+                    window,
+                    if cost.1 == HistoryRole::Ordinary || (active && id == &root.manual_branch_id) {
+                        window
+                    } else {
+                        0
+                    },
+                    false,
+                    u64::MAX,
+                )?);
+                cost
+            } else {
+                let record = read_record::<HistoryRecord>(
+                    namespace,
+                    &checkpoint.history_ref,
+                    usage,
+                    &mut fields,
+                    limits,
+                )?;
+                let resolved = crate::history_record::resolve_namespace_history(
+                    namespace,
+                    &checkpoint.history_ref,
+                    usage,
+                    &mut fields,
+                    limits,
+                    active && id == &root.manual_branch_id,
+                )?;
+                let cost = (resolved.decoded_charge(), record.role);
+                memo.remember_resolved_history(&checkpoint.history_ref, cost.0, cost.1, limits);
+                cost
+            };
+            Arc::new(StorageReservation::reserve(
+                usage,
+                limits,
+                0,
+                charge,
+                if role == HistoryRole::Ordinary || (active && id == &root.manual_branch_id) {
+                    charge
+                } else {
+                    0
+                },
+                false,
+                u64::MAX,
             )?)
         };
         let lineage = if active && let Some(value) = lineages.get(&checkpoint.lineage_ref.sha256) {
@@ -693,17 +790,17 @@ pub(super) fn validate(
             &manifest,
             limits,
         )?;
-        let charge = history.decoded_charge();
-        let _replay =
-            StorageReservation::reserve(usage, limits, 0, charge, charge, false, u64::MAX)?;
-        if active {
+        let retain = active
+            && (id == &root.manual_branch_id
+                || checkpoint.history_role == crate::history_record::HistoryRole::Ordinary);
+        if retain {
             histories.insert(checkpoint.history_ref.sha256.clone(), Arc::clone(&history));
             lineages.insert(checkpoint.lineage_ref.sha256.clone(), Arc::clone(&lineage));
         }
         Ok((
             checkpoint,
-            active.then_some(history),
-            active.then_some(lineage),
+            retain.then_some(history),
+            retain.then_some(lineage),
         ))
     };
     let _resident_checkpoints = inspect_checkpoints(index, checkpoints, inspect)?;

@@ -1,4 +1,4 @@
-//! Transactional manual admission and the exact, cached v1 JSON byte stream.
+//! Transactional manual admission and the exact cached transport JSON byte stream.
 use std::{collections::VecDeque, fmt::Write as _, io::Write as _};
 
 use super::{
@@ -29,8 +29,10 @@ impl ManualIngress {
     pub(super) fn new(
         state: &CoreState,
         generation: u64,
-        encoder: Box<dyn crate::ManualHistoryEncoder>,
+        mut encoder: Box<dyn crate::ManualHistoryEncoder>,
     ) -> Result<Self, HistoryError> {
+        encoder.check_history(&state.history())?;
+        encoder.finish_history_check(true);
         Ok(Self {
             generation,
             encoder,
@@ -76,8 +78,22 @@ impl ManualIngress {
             delta.rollback(state);
             return event;
         }
+        // The writer's effective policy is authoritative here as well as at
+        // publication and cold open. Do not advance the JSON cache or encoder
+        // until the complete prospective history passes bounded replay.
+        if let Err(error) = self.encoder.check_history(&state.history()) {
+            delta.rollback(state);
+            return manual_refusal(
+                &command,
+                match error {
+                    HistoryError::MutationRefused(reason) => reason,
+                    _ => CoreMutationRefusal::ManualBackpressure,
+                },
+            );
+        }
         let (undo_prefix, redo_prefix) = delta.cache_prefixes(state);
         let Ok(patches) = self.cache.update(state, undo_prefix, redo_prefix) else {
+            self.encoder.finish_history_check(false);
             delta.rollback(state);
             return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
         };
@@ -109,6 +125,7 @@ impl ManualIngress {
         })();
         match admitted {
             Ok((item, bytes, next_sequence, after_sha256)) => {
+                self.encoder.finish_history_check(true);
                 self.next_sequence = next_sequence;
                 self.predecessor = Some(item.batch_id.clone());
                 self.bytes += bytes;
@@ -118,6 +135,7 @@ impl ManualIngress {
                 event
             }
             Err(error) => {
+                self.encoder.finish_history_check(false);
                 self.cache.rollback(patches);
                 delta.rollback(state);
                 let reason = match error {
@@ -290,20 +308,31 @@ impl std::io::Write for BoundedJson {
 /// Comma-separated canonical JSON values, without the surrounding brackets.
 /// End offsets permit exact tail replacement without scanning the closed prefix.
 #[derive(Default)]
+#[cfg_attr(test, derive(Debug, Clone, PartialEq, Eq))]
 struct JsonArray {
     bytes: Vec<u8>,
     ends: Vec<usize>,
+    boundary_bytes: Vec<u64>,
 }
 struct ArrayPatch {
     prefix: usize,
     bytes: Vec<u8>,
     ends: Vec<usize>,
+    boundary_bytes: Vec<u64>,
 }
 impl JsonArray {
     fn replace_tail<T: Serialize>(
         &mut self,
         prefix: usize,
         tail: &[T],
+    ) -> Result<ArrayPatch, HistoryError> {
+        self.replace_tail_with_cost(prefix, tail, |_| Ok(0))
+    }
+    fn replace_tail_with_cost<T: Serialize>(
+        &mut self,
+        prefix: usize,
+        tail: &[T],
+        cost: impl Fn(&T) -> Result<u64, HistoryError>,
     ) -> Result<ArrayPatch, HistoryError> {
         let start = if prefix == 0 {
             0
@@ -316,23 +345,28 @@ impl JsonArray {
             .ok_or(HistoryError::Capacity)?;
         let mut bytes = BoundedJson::new(limit);
         let mut ends = Vec::new();
+        let mut boundary_bytes = Vec::new();
         for value in tail {
             if prefix != 0 || !ends.is_empty() {
                 bytes.write_all(b",").map_err(|_| HistoryError::Capacity)?;
             }
             serde_json::to_writer(&mut bytes, value).map_err(|_| HistoryError::Capacity)?;
             ends.push(start + bytes.bytes.len());
+            boundary_bytes.push(cost(value)?);
         }
         let patch = ArrayPatch {
             prefix,
             bytes: self.bytes[start..].to_vec(),
             ends: self.ends[prefix..].to_vec(),
+            boundary_bytes: self.boundary_bytes[prefix..].to_vec(),
         };
         // S2H_STALE_SEGMENT_ANCHOR: discard replaced cursor bytes before appending.
         self.bytes.truncate(start);
         self.ends.truncate(prefix);
+        self.boundary_bytes.truncate(prefix);
         self.bytes.extend(bytes.bytes);
         self.ends.extend(ends);
+        self.boundary_bytes.extend(boundary_bytes);
         Ok(patch)
     }
 
@@ -344,11 +378,22 @@ impl JsonArray {
         };
         self.bytes.truncate(start);
         self.ends.truncate(patch.prefix);
+        self.boundary_bytes.truncate(patch.prefix);
         self.bytes.extend(patch.bytes);
         self.ends.extend(patch.ends);
+        self.boundary_bytes.extend(patch.boundary_bytes);
     }
 }
 
+fn boundary_bytes(entry: &HistoryEntry) -> Result<u64, HistoryError> {
+    crate::history::boundary_admission_bytes(
+        &entry.document,
+        &entry.operations,
+        entry.coalesce_key.as_deref(),
+    )
+}
+
+#[cfg_attr(test, derive(Debug, Clone, PartialEq, Eq))]
 struct HistoryJson {
     epoch: u64,
     prefix: Vec<u8>,
@@ -369,10 +414,6 @@ impl HistoryJson {
         }
         let mut prefix = BoundedJson::new(usize::try_from(HISTORY_BYTES).unwrap());
         prefix.write_all(b"{").map_err(|_| HistoryError::Capacity)?;
-        if state.floor_offset != 0 {
-            write!(&mut prefix, "\"floor_offset\":{},", state.floor_offset)
-                .map_err(|_| HistoryError::Capacity)?;
-        }
         prefix
             .write_all(b"\"baseline\":")
             .map_err(|_| HistoryError::Capacity)?;
@@ -388,9 +429,18 @@ impl HistoryJson {
             redo: JsonArray::default(),
             sha256: String::new(),
         };
-        cache.batches.replace_tail(0, &state.batches)?;
-        cache.undo.replace_tail(0, &state.undo)?;
-        cache.redo.replace_tail(0, &state.redo)?;
+        let batches: Vec<_> = state
+            .batches
+            .iter()
+            .map(crate::JournalBatch::from)
+            .collect();
+        cache.batches.replace_tail(0, &batches)?;
+        cache
+            .undo
+            .replace_tail_with_cost(0, &state.undo, boundary_bytes)?;
+        cache
+            .redo
+            .replace_tail_with_cost(0, &state.redo, boundary_bytes)?;
         cache.sha256 = cache.identities(state)?.0;
         Ok(cache)
     }
@@ -404,24 +454,27 @@ impl HistoryJson {
         if state.batches.len() > HISTORY_COMMANDS {
             return Err(HistoryError::Capacity);
         }
-        let batches = self.batches.replace_tail(
-            self.batches.ends.len(),
-            &state.batches[self.batches.ends.len()..],
-        )?;
-        let undo = match self
-            .undo
-            .replace_tail(undo_prefix, &state.undo[undo_prefix..])
-        {
+        let tail: Vec<_> = state.batches[self.batches.ends.len()..]
+            .iter()
+            .map(crate::JournalBatch::from)
+            .collect();
+        let batches = self.batches.replace_tail(self.batches.ends.len(), &tail)?;
+        let undo = match self.undo.replace_tail_with_cost(
+            undo_prefix,
+            &state.undo[undo_prefix..],
+            boundary_bytes,
+        ) {
             Ok(patch) => patch,
             Err(error) => {
                 self.batches.rollback(batches);
                 return Err(error);
             }
         };
-        let redo = match self
-            .redo
-            .replace_tail(redo_prefix, &state.redo[redo_prefix..])
-        {
+        let redo = match self.redo.replace_tail_with_cost(
+            redo_prefix,
+            &state.redo[redo_prefix..],
+            boundary_bytes,
+        ) {
             Ok(patch) => patch,
             Err(error) => {
                 self.undo.rollback(undo);
@@ -456,8 +509,20 @@ impl HistoryJson {
         writer: &mut impl std::io::Write,
     ) -> std::io::Result<String> {
         let fixed_bytes = self
-            .encoded_bytes(0)
-            .map_err(|_| std::io::Error::other("history capacity"))?;
+            .undo
+            .boundary_bytes
+            .iter()
+            .chain(&self.redo.boundary_bytes)
+            .try_fold(
+                self.encoded_bytes(state, 0)
+                    .map_err(std::io::Error::other)?,
+                |total, bytes| {
+                    total
+                        .checked_add(*bytes)
+                        .filter(|bytes| *bytes <= HISTORY_BYTES)
+                        .ok_or_else(|| std::io::Error::other("history capacity"))
+                },
+            )?;
         let remaining = HISTORY_BYTES
             .checked_sub(fixed_bytes)
             .ok_or_else(|| std::io::Error::other("history capacity"))?;
@@ -465,7 +530,13 @@ impl HistoryJson {
         serde_json::to_writer(&mut document, &state.document).map_err(std::io::Error::other)?;
         writer.write_all(&self.prefix)?;
         writer.write_all(&document.bytes)?;
-        writer.write_all(b",\"batches\":[")?;
+        write!(
+            writer,
+            ",\"journal\":{{\"floor_offset\":{},\"baseline_sha256\":\"{}\",\"document_sha256\":\"{}\",\"batches\":[",
+            state.floor_offset,
+            crate::history_document_hash(&state.baseline).map_err(std::io::Error::other)?,
+            crate::history_document_hash(&state.document).map_err(std::io::Error::other)?
+        )?;
         writer.write_all(&self.batches.bytes)?;
         writer.write_all(b"],\"cursor\":")?;
         let mut cursor = CursorWriter {
@@ -474,7 +545,7 @@ impl HistoryJson {
         };
         self.write_cursor(&mut cursor)?;
         let cursor_sha256 = hex(cursor.hash.finalize());
-        writer.write_all(b"}")?;
+        writer.write_all(b"}}")?;
         Ok(cursor_sha256)
     }
 
@@ -488,14 +559,16 @@ impl HistoryJson {
         Ok((hex(writer.hash.finalize()), cursor))
     }
 
-    fn encoded_bytes(&self, document_bytes: usize) -> Result<u64, HistoryError> {
+    fn encoded_bytes(&self, state: &CoreState, document_bytes: usize) -> Result<u64, HistoryError> {
         // Every historical segment already carries its exact byte length.
         // Only the newly serialized document and changed array tails contribute
         // new measurements; admission never serializes the closed prefix again.
         [
             self.prefix.len(),
             document_bytes,
-            b",\"batches\":[".len(),
+            b",\"journal\":{\"floor_offset\":,\"baseline_sha256\":\"\",\"document_sha256\":\"\",\"batches\":[".len()
+                + state.floor_offset.to_string().len()
+                + 128,
             self.batches.bytes.len(),
             b"],\"cursor\":".len(),
             b"{\"undo\":[".len(),
@@ -503,7 +576,7 @@ impl HistoryJson {
             b"],\"redo\":[".len(),
             self.redo.bytes.len(),
             b"]}".len(),
-            b"}".len(),
+            b"}}".len(),
         ]
         .into_iter()
         .try_fold(0_u64, |total, bytes| {
@@ -577,6 +650,16 @@ mod tests {
         refusal: Arc<AtomicUsize>,
     }
     impl ManualHistoryEncoder for Encoder {
+        fn check_history(&mut self, _: &HistorySnapshot) -> Result<(), HistoryError> {
+            if self.refusal.load(Ordering::Relaxed) == 5 {
+                Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualHistoryCapacity,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        fn finish_history_check(&mut self, _: bool) {}
         fn encode(
             &self,
             sequence: u64,
@@ -663,12 +746,34 @@ mod tests {
             );
             assert_eq!(
                 cursor,
-                kinewright_hash::sha256_bytes(&serde_json::to_vec(&history.cursor).unwrap())
+                kinewright_hash::sha256_bytes(
+                    &serde_json::to_vec(&crate::HistoryJournal::capture(&history).unwrap().cursor)
+                        .unwrap()
+                )
             );
             let document_bytes = serde_json::to_vec(&history.document).unwrap().len();
             assert_eq!(
-                self.ingress.cache.encoded_bytes(document_bytes).unwrap(),
+                self.ingress
+                    .cache
+                    .encoded_bytes(&self.state, document_bytes)
+                    .unwrap(),
                 history.encoded_bytes().unwrap()
+            );
+            let ordinary = self
+                .ingress
+                .cache
+                .undo
+                .boundary_bytes
+                .iter()
+                .chain(&self.ingress.cache.redo.boundary_bytes)
+                .try_fold(history.encoded_bytes().unwrap(), |total, bytes| {
+                    total.checked_add(*bytes)
+                })
+                .unwrap();
+            assert_eq!(
+                history.ordinary_admission_bytes(),
+                Ok(ordinary),
+                "CACHED_ORDINARY_ADMISSION_COUNTS_MATCH"
             );
         }
 
@@ -680,6 +785,13 @@ mod tests {
             let sequence = self.ingress.next_sequence;
             let predecessor = self.ingress.predecessor.clone();
             let bytes = self.ingress.bytes;
+            // A completed floor invalidates the old encoding independently of
+            // this edit. Refusal must retain the current cut's canonical cache.
+            let cache = if self.ingress.cache.epoch == self.state.history_epoch {
+                self.ingress.cache.clone()
+            } else {
+                HistoryJson::new(&self.state).unwrap()
+            };
             let event = self
                 .ingress
                 .execute(&mut self.state, AttachmentState::Live, command);
@@ -718,6 +830,10 @@ mod tests {
                 assert_eq!(self.ingress.next_sequence, sequence);
                 assert_eq!(self.ingress.predecessor, predecessor);
                 assert_eq!(self.ingress.bytes, bytes);
+                assert_eq!(
+                    self.ingress.cache, cache,
+                    "REFUSAL_PRESERVES_EVERY_ENCODER_CACHE_BYTE_AND_INDEX"
+                );
             }
             self.check_cache();
             event
@@ -817,6 +933,13 @@ mod tests {
 
     #[test]
     fn s2h_cached_history_rolls_back_encoder_and_admission_refusals() {
+        fn roundtrip(harness: &Harness) {
+            let original = harness.state.history();
+            let bytes = serde_json::to_vec(&original).unwrap();
+            let restored: HistorySnapshot = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(restored, original, "REFUSED_TENTATIVE_EDIT_ROUNDTRIP");
+            assert_eq!(restored.applied_operations(), original.applied_operations());
+        }
         let mut harness = Harness::new(CoreState::new(Document::default(), TimelineRevision(0)));
         for command in [
             add_track(1),
@@ -826,7 +949,7 @@ mod tests {
         ] {
             accepted(&harness.run(command));
         }
-        for mode in 1..=4 {
+        for mode in 1..=5 {
             for command in [
                 drag(true, "B"),
                 Command::Undo,
@@ -838,6 +961,7 @@ mod tests {
                     harness.run(command.clone()),
                     Event::MutationRefused { .. }
                 ));
+                roundtrip(&harness);
                 harness.refusal.store(0, Ordering::Relaxed);
                 accepted(&harness.run(command));
                 harness.acknowledge();
@@ -850,6 +974,7 @@ mod tests {
         harness.run(Command::DoBatch(vec![]));
         harness.refusal.store(1, Ordering::Relaxed);
         harness.run(drag(true, "branch"));
+        roundtrip(&harness);
         harness.refusal.store(0, Ordering::Relaxed);
         accepted(&harness.run(drag(true, "branch")));
         assert!(harness.state.redo.is_empty());
@@ -952,17 +1077,24 @@ mod tests {
         assert_eq!(harness.records.lock().unwrap().len(), attempts);
         accepted(&harness.run(drag(false, "after-byte-refusal")));
         let document_bytes = serde_json::to_vec(&harness.state.document).unwrap().len();
-        let current = harness.ingress.cache.encoded_bytes(document_bytes).unwrap();
+        let current = harness
+            .ingress
+            .cache
+            .encoded_bytes(&harness.state, document_bytes)
+            .unwrap();
         let extra = usize::try_from(HISTORY_BYTES - current).unwrap();
         assert_eq!(
-            harness.ingress.cache.encoded_bytes(document_bytes + extra),
+            harness
+                .ingress
+                .cache
+                .encoded_bytes(&harness.state, document_bytes + extra),
             Ok(HISTORY_BYTES)
         );
         assert_eq!(
             harness
                 .ingress
                 .cache
-                .encoded_bytes(document_bytes + extra + 1),
+                .encoded_bytes(&harness.state, document_bytes + extra + 1),
             Err(HistoryError::Capacity)
         );
     }

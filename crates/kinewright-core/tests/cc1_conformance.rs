@@ -5,6 +5,10 @@
 //! §2.1 source failure is reported with a field, an observed value, and the
 //! allowed values.
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
@@ -81,7 +85,7 @@ fn legacy_brightness_is_reported_by_qa_and_delivery_without_silent_translation()
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("a legacy display-coded effect must remain loadable and editable");
 
     let qa = qa_document(&document);
@@ -239,7 +243,7 @@ fn user_override_that_is_still_unsupported_keeps_blocking_managed_delivery() {
         asset: AssetId(1),
         color_description: unsupported_override.clone(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("an explicit override must be an ordinary, journaled edit");
     assert_eq!(
         document.asset(AssetId(1)).expect("asset").color_description,

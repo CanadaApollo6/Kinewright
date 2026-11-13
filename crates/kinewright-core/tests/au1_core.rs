@@ -1,5 +1,9 @@
 //! AU1 manual mix — core contract tests (AU1 §7 items 2–7).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use kinewright_core::{
     AudioMix, Command, Core, Document, Event, MixLevelRequest, OpError, Operation, Rational,
     TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track,
@@ -38,7 +42,7 @@ fn two_track_document() -> Document {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -67,14 +71,14 @@ fn set_track_mix_validates_bounds_and_track_existence_atomically() {
     for gain_tenth_db in [TRACK_MIX_GAIN_MIN, TRACK_MIX_GAIN_MAX] {
         let mut doc = base.clone();
         set_mix(1, gain_tenth_db, 0, false, false)
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap();
         assert_eq!(doc.track_mix(TrackId(1)).gain_tenth_db, gain_tenth_db);
     }
     for pan_percent in [TRACK_MIX_PAN_MIN, TRACK_MIX_PAN_MAX] {
         let mut doc = base.clone();
         set_mix(1, 0, pan_percent, false, false)
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap();
         assert_eq!(doc.track_mix(TrackId(1)).pan_percent, pan_percent);
     }
@@ -115,13 +119,16 @@ fn set_track_mix_validates_bounds_and_track_existence_atomically() {
     ];
     let mut occupied = base.clone();
     set_mix(1, -60, 25, false, false)
-        .apply(&mut occupied)
+        .apply_with_history_oracle(&mut occupied)
         .unwrap();
     assert_eq!(occupied.audio_mix.tracks.len(), 1);
     for before in [&base, &occupied] {
         for (operation, expected) in &rejections {
             let mut doc = before.clone();
-            assert_eq!(operation.apply(&mut doc).unwrap_err(), *expected);
+            assert_eq!(
+                operation.apply_with_history_oracle(&mut doc).unwrap_err(),
+                *expected
+            );
             assert_eq!(doc, *before);
         }
     }
@@ -159,7 +166,9 @@ fn neutral_track_mix_removes_the_entry_and_serializes_byte_identically() {
     let before = serde_json::to_string(&doc).unwrap();
     assert!(!before.contains("audio_mix"));
 
-    set_mix(2, -60, 25, false, true).apply(&mut doc).unwrap();
+    set_mix(2, -60, 25, false, true)
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
     assert_eq!(
         doc.audio_mix.tracks,
         vec![TrackMix {
@@ -174,7 +183,9 @@ fn neutral_track_mix_removes_the_entry_and_serializes_byte_identically() {
     );
     assert!(serde_json::to_string(&doc).unwrap().contains("audio_mix"));
 
-    set_mix(2, 0, 0, false, false).apply(&mut doc).unwrap();
+    set_mix(2, 0, 0, false, false)
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
     assert!(doc.audio_mix.tracks.is_empty());
     assert!(doc.audio_mix.is_empty());
     assert_eq!(serde_json::to_string(&doc).unwrap(), before);
@@ -183,7 +194,9 @@ fn neutral_track_mix_removes_the_entry_and_serializes_byte_identically() {
 
     // A never-set track stays neutral and writes nothing.
     let mut fresh = two_track_document();
-    set_mix(1, 0, 0, false, false).apply(&mut fresh).unwrap();
+    set_mix(1, 0, 0, false, false)
+        .apply_with_history_oracle(&mut fresh)
+        .unwrap();
     assert_eq!(
         serde_json::to_string(&fresh).unwrap(),
         serde_json::to_string(&two_track_document()).unwrap()
@@ -197,8 +210,12 @@ fn neutral_track_mix_removes_the_entry_and_serializes_byte_identically() {
 #[test]
 fn hand_edited_track_mix_entries_are_rejected_during_document_validation() {
     let mut valid = two_track_document();
-    set_mix(1, -60, 0, false, false).apply(&mut valid).unwrap();
-    set_mix(2, 30, -20, true, false).apply(&mut valid).unwrap();
+    set_mix(1, -60, 0, false, false)
+        .apply_with_history_oracle(&mut valid)
+        .unwrap();
+    set_mix(2, 30, -20, true, false)
+        .apply_with_history_oracle(&mut valid)
+        .unwrap();
     assert_eq!(valid.validate(), Ok(()));
 
     let cases: Vec<(Vec<serde_json::Value>, OpError)> = vec![
@@ -267,8 +284,12 @@ fn hand_edited_track_mix_entries_are_rejected_during_document_validation() {
 fn remove_track_drops_the_track_mix_entry() {
     let mut doc = two_track_document();
     // Written in descending track order so the upsert's sort is exercised.
-    set_mix(2, 30, 40, false, true).apply(&mut doc).unwrap();
-    set_mix(1, -60, 0, false, false).apply(&mut doc).unwrap();
+    set_mix(2, 30, 40, false, true)
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
+    set_mix(1, -60, 0, false, false)
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
     assert_eq!(
         doc.audio_mix
             .tracks
@@ -283,7 +304,7 @@ fn remove_track_drops_the_track_mix_entry() {
     assert!(doc.track_audible(TrackId(2)));
 
     Operation::RemoveTrack { track: TrackId(2) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
 
     assert_eq!(
@@ -370,25 +391,33 @@ fn track_mix_gain_range_matches_the_audio_gain_descriptor() {
 fn track_audible_is_false_when_muted_or_solo_suppressed() {
     // A muted track is inaudible even when nothing is soloed.
     let mut muted = two_track_document();
-    set_mix(1, 0, 0, true, false).apply(&mut muted).unwrap();
+    set_mix(1, 0, 0, true, false)
+        .apply_with_history_oracle(&mut muted)
+        .unwrap();
     assert!(!muted.audio_mix.any_solo());
     assert!(!muted.track_audible(TrackId(1)));
     assert!(muted.track_audible(TrackId(2)));
 
     // Another track soloed suppresses every non-soloed track.
     let mut soloed = two_track_document();
-    set_mix(2, 0, 0, false, true).apply(&mut soloed).unwrap();
+    set_mix(2, 0, 0, false, true)
+        .apply_with_history_oracle(&mut soloed)
+        .unwrap();
     assert!(soloed.audio_mix.any_solo());
     assert!(!soloed.track_audible(TrackId(1)));
     assert!(soloed.track_audible(TrackId(2)));
 
     // Both soloed: both audible.
-    set_mix(1, 0, 0, false, true).apply(&mut soloed).unwrap();
+    set_mix(1, 0, 0, false, true)
+        .apply_with_history_oracle(&mut soloed)
+        .unwrap();
     assert!(soloed.track_audible(TrackId(1)));
     assert!(soloed.track_audible(TrackId(2)));
 
     // Mute wins over the track's own solo.
-    set_mix(1, 0, 0, true, true).apply(&mut soloed).unwrap();
+    set_mix(1, 0, 0, true, true)
+        .apply_with_history_oracle(&mut soloed)
+        .unwrap();
     assert!(!soloed.track_audible(TrackId(1)));
     assert!(soloed.track_audible(TrackId(2)));
 }

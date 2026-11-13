@@ -442,7 +442,10 @@ fn s2h_confirm_inputs_failure_revokes_partial_grant_and_refreezes() {
     let _unrelated = host
         .owner_mut()
         .unwrap()
-        .fork_durable_branch("unrelated metadata")
+        .fork_durable_branch(
+            "unrelated metadata",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap();
     let after_metadata = host.owner().unwrap().current_switch_attachment().unwrap();
     assert_ne!(before_metadata.root_sha256, after_metadata.root_sha256);
@@ -467,12 +470,18 @@ fn s2h_status_disclosures_cache_and_invalidate_actual_histories() {
     let first = host
         .owner_mut()
         .unwrap()
-        .fork_durable_branch("first")
+        .fork_durable_branch(
+            "first",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap();
     let second = host
         .owner_mut()
         .unwrap()
-        .fork_durable_branch("second")
+        .fork_durable_branch(
+            "second",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap();
     checked(&mut host, HostCommand::Status);
     let ((), repeated) = io_observer::observe(|| {
@@ -531,11 +540,17 @@ fn s2h_status_and_save_cost_observer() {
     let (_temp, mut host) = fixture();
     host.owner_mut()
         .unwrap()
-        .fork_durable_branch("first")
+        .fork_durable_branch(
+            "first",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap();
     host.owner_mut()
         .unwrap()
-        .fork_durable_branch("second")
+        .fork_durable_branch(
+            "second",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap();
     let history = host.core().export_history().unwrap();
     let mut status_ms = Vec::new();
@@ -675,7 +690,10 @@ fn s2h_foreground_result_replay_is_exact_bounded_and_client_bound() {
     let branch = host
         .owner_mut()
         .unwrap()
-        .fork_durable_branch("M3-interleaved-session")
+        .fork_durable_branch(
+            "M3-interleaved-session",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
         .unwrap()
         .branch_id()
         .clone();

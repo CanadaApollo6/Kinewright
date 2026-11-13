@@ -1,5 +1,9 @@
 //! `MCP` tools and installed-agent CLI drivers for the live `Kinewright` process.
 
+#[cfg(test)]
+#[global_allocator]
+static TEST_HEAP: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
 // S4 C2
 #[path = "orchestration/execution_claim.rs"]
 pub mod execution_claim;

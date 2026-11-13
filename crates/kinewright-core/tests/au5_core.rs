@@ -1,6 +1,10 @@
 //! AU5 repair and room tone — core contract tests (AU5 §7 items A1, A3, A13
 //! and the core halves of A12, A14 and A18).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::collections::BTreeMap;
 
 use kinewright_core::{
@@ -165,7 +169,7 @@ fn document_with_one_clip() -> Document {
             assumed_from: None,
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -173,7 +177,7 @@ fn document_with_one_clip() -> Document {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -404,7 +408,7 @@ fn an_all_neutral_denoise_node_carries_no_profile_rows_on_the_wire() {
             ],
         )]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let encoded = serde_json::to_string(&doc).unwrap();
     assert!(!encoded.contains("profile_band"));
@@ -423,7 +427,7 @@ fn an_all_neutral_denoise_node_carries_no_profile_rows_on_the_wire() {
     Operation::UpsertAudioBus {
         bus: bus_with(vec![effect_with(1, "audio_denoise", &parameters)]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let encoded = serde_json::to_string(&doc).unwrap();
     assert!(encoded.contains("profile_band01_tenth_db"));
@@ -438,7 +442,7 @@ fn an_all_neutral_denoise_node_carries_no_profile_rows_on_the_wire() {
             &[("profile_band01_tenth_db", 1)],
         )]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert!(
         matches!(error, OpError::EffectParamOutOfRange { .. }),
@@ -531,7 +535,7 @@ fn au5_hum_harmonic_count_is_hold_only() {
                 interpolation,
             )]),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap_err();
         assert_eq!(
             error,
@@ -553,7 +557,7 @@ fn au5_hum_harmonic_count_is_hold_only() {
             KeyframeInterpolation::Hold,
         )]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.audio_mix.buses[0].effects[0].name, "audio_hum_removal");
 }
@@ -606,7 +610,7 @@ fn au5_static_rejections_carry_the_two_distinct_reasons() {
                     interpolation,
                 )]),
             }
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap_err();
             assert_eq!(
                 error,
@@ -623,7 +627,7 @@ fn au5_static_rejections_carry_the_two_distinct_reasons() {
         Operation::UpsertAudioBus {
             bus: bus_with(vec![effect_with(1, effect, &[(parameter, value)])]),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         assert_eq!(
             doc.audio_mix.buses[0].effects[0].parameters[parameter],
@@ -646,7 +650,7 @@ fn au5_static_rejections_carry_the_two_distinct_reasons() {
             )],
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -716,7 +720,7 @@ fn au5_repair_chains_spend_the_twenty_millisecond_budget_exactly() {
         let result = Operation::UpsertAudioBus {
             bus: bus_with(effects),
         }
-        .apply(&mut doc);
+        .apply_with_history_oracle(&mut doc);
         if accepted {
             result.unwrap();
         } else {
@@ -748,7 +752,9 @@ fn au5_the_master_chain_spends_its_own_twenty_millisecond_budget() {
     let delivery = vec![effect_with(1, "audio_true_peak_limiter", &[])];
     assert_eq!(chain_lookahead_milliseconds(&delivery), 5);
     let mut doc = base.clone();
-    master(delivery).apply(&mut doc).unwrap();
+    master(delivery)
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
 
     let repair = vec![
         effect_with(1, "audio_denoise", &[]),
@@ -757,13 +763,17 @@ fn au5_the_master_chain_spends_its_own_twenty_millisecond_budget() {
     ];
     assert_eq!(chain_lookahead_milliseconds(&repair), 15);
     let mut doc = base.clone();
-    master(repair.clone()).apply(&mut doc).unwrap();
+    master(repair.clone())
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
 
     let mut at_twenty = repair.clone();
     at_twenty.push(effect_with(4, "audio_true_peak_limiter", &[]));
     assert_eq!(chain_lookahead_milliseconds(&at_twenty), 20);
     let mut doc = base.clone();
-    master(at_twenty).apply(&mut doc).unwrap();
+    master(at_twenty)
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
 
     let mut over = repair;
     over.push(effect_with(
@@ -774,7 +784,9 @@ fn au5_the_master_chain_spends_its_own_twenty_millisecond_budget() {
     assert_eq!(chain_lookahead_milliseconds(&over), 21);
     let mut doc = base.clone();
     assert_eq!(
-        master(over).apply(&mut doc).unwrap_err(),
+        master(over)
+            .apply_with_history_oracle(&mut doc)
+            .unwrap_err(),
         OpError::AudioMasterLookaheadExceeded { milliseconds: 21 }
     );
     assert_eq!(doc, base);
@@ -811,7 +823,7 @@ fn denoise_bus_document(effects: Vec<Effect>) -> Document {
     Operation::UpsertAudioBus {
         bus: bus_with(effects),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -905,7 +917,7 @@ fn au5_noise_profile_missing_is_advice_about_a_wasted_node() {
             )],
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let issues = noise_profile_issues(&doc);
     assert_eq!(issues.len(), 1);
@@ -1717,7 +1729,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
             assumed_from: None,
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     // Clip A occupies 0..25; clip B starts at 32, leaving a seven-frame gap.
     for at in [TimeCode(0), TimeCode(32)] {
@@ -1727,7 +1739,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
             at,
             source: TimeCode(0)..TimeCode(30),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     let gaps = doc.track_gaps(TrackId(1)).unwrap();
@@ -1746,7 +1758,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
         at: gap.start,
         source: TimeCode(0)..source_end,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .expect("a fill of the exact length never collides with its neighbour");
 
     let fill = doc.tracks[0]

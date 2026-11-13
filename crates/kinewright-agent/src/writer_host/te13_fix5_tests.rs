@@ -398,7 +398,12 @@ fn te13_fix6_durable_stop_inside_real_switch() {
         let mut owner = host.lock().unwrap();
         owner.acquire_manual(client.clone()).unwrap();
         let project = owner.owner_mut().unwrap();
-        let mut branch = project.fork_durable_branch("fix6 switch target").unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "fix6 switch target",
+                kinewright_project::editing_session::DurableBranchRole::Session,
+            )
+            .unwrap();
         branch
             .core()
             .request(kinewright_core::Command::Do(history_marker(106)))
@@ -425,7 +430,10 @@ fn te13_fix6_durable_stop_inside_real_switch() {
         .f
         .control(&p.run.f.editor, &p.run.run, RunAction::Stop);
     let reply = te13_fix2_dispatch(&p.run, &p.run.f.editor, &stop);
-    assert!(reply.error.is_none(), "TE13_FIX6_REAL_SWITCH_STOP {reply:?}");
+    assert!(
+        reply.error.is_none(),
+        "TE13_FIX6_REAL_SWITCH_STOP {reply:?}"
+    );
     assert_eq!(
         reply.orchestration.unwrap().decision,
         CommandDecision::Applied,
@@ -438,7 +446,10 @@ fn te13_fix6_durable_stop_inside_real_switch() {
     owner
         .confirm_switch(client, &installed, &mut HostReply::default())
         .unwrap();
-    assert!(!owner.switch_frozen, "TE13_FIX6_SWITCH_CONFIRMED_AFTER_STOP");
+    assert!(
+        !owner.switch_frozen,
+        "TE13_FIX6_SWITCH_CONFIRMED_AFTER_STOP"
+    );
     assert_eq!(
         owner.core().export_history().unwrap(),
         expected,
@@ -446,11 +457,7 @@ fn te13_fix6_durable_stop_inside_real_switch() {
     );
     drop(owner);
     let state = p.run.f.projection(&p.run.run);
-    assert_eq!(
-        state.results.len(),
-        0,
-        "TE13_FIX6_STOP_PUBLISHED_NOTHING"
-    );
+    assert_eq!(state.results.len(), 0, "TE13_FIX6_STOP_PUBLISHED_NOTHING");
 }
 
 fn te13_fix5_frozen_empty(recovering: bool) {
@@ -539,7 +546,12 @@ fn te13_fix5_real_switch_then_exact_finish() {
         let mut owner = host.lock().unwrap();
         owner.acquire_manual(client.clone()).unwrap();
         let project = owner.owner_mut().unwrap();
-        let mut branch = project.fork_durable_branch("fix5 switch target").unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "fix5 switch target",
+                kinewright_project::editing_session::DurableBranchRole::Session,
+            )
+            .unwrap();
         branch
             .core()
             .request(kinewright_core::Command::Do(history_marker(101)))
@@ -695,7 +707,10 @@ fn te13_fix5_publisher_sweep(step: CompletionStep, committed: bool) {
         let mut branch = owner
             .owner_mut()
             .unwrap()
-            .fork_durable_branch("fault sweep task")
+            .fork_durable_branch(
+                "fault sweep task",
+                kinewright_project::editing_session::DurableBranchRole::Session,
+            )
             .unwrap();
         owner
             .owner_mut()

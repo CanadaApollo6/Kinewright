@@ -195,7 +195,7 @@ impl HostCommandOwner {
                     != Some(self.owner()?.manual_namespace_name()?.as_str())
                 || manual.after_sha256 != barrier.before.history_sha256
                 || floor.after() != &barrier.after.history
-                || checkpoint.history_ref.sha256 != barrier.after.history_sha256
+                || checkpoint.history_digest != barrier.after.history_sha256
             {
                 return Err(
                     HostRefusal::new("history_changed", "recorded manual floor differs").into(),
@@ -245,7 +245,7 @@ impl HostCommandOwner {
                 .publish_manual_transition(&barrier.envelope)?;
         }
         let checkpoint = self.owner()?.manual_barrier_result(&barrier.envelope)?;
-        if checkpoint.history_ref.sha256 != barrier.after.history_sha256 {
+        if checkpoint.history_digest != barrier.after.history_sha256 {
             return Err(HostRefusal::new(
                 "recovery_unresolved",
                 "barrier has no exact durable result",
@@ -295,7 +295,7 @@ impl HostCommandOwner {
             || self.recovery.as_ref() != Some(&barrier)
             || installed != barrier.after
             || HostSnapshot::capture(self.core())? != installed
-            || checkpoint.history_ref.sha256 != installed.history_sha256
+            || checkpoint.history_digest != installed.history_sha256
         {
             return Err(HostRefusal::new(
                 "recovery_unconfirmed",

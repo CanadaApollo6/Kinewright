@@ -126,7 +126,12 @@ impl Fixture {
         owner
             .first_save(&temp.path("linear.kinewright"), StorageLimits::default())
             .unwrap();
-        let mut candidate = owner.fork_durable_branch("linear-candidate").unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "linear-candidate",
+                crate::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         owner.persist_durable_branch(&mut candidate).unwrap();
         let base = owner.candidate_binding(candidate.branch_id()).unwrap();
         let (issuer, grant) = owner

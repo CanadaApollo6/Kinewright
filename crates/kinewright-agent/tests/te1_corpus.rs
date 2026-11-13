@@ -4,6 +4,12 @@ use kinewright_agent::orchestration::{
     policy::{TaskPolicy, director_scope},
 };
 use kinewright_core::{Command, Core, Document, Operation, Playback, TimeCode};
+#[cfg(target_os = "linux")]
+use kinewright_project::{
+    bundle_records::BranchCheckpoint,
+    editing_session::{DurableBranchRole::Session, Ja1EditingSession},
+    storage_budget::StorageLimits,
+};
 use kinewright_project::{load_document, write_project_document};
 use serde_json::{Value, json};
 use std::{
@@ -339,10 +345,6 @@ fn te1_six_case_rendered_evidence_uses_production_preview() {
 #[cfg(target_os = "linux")]
 #[test]
 fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
-    use kinewright_project::{
-        bundle_records::BranchCheckpoint, editing_session::Ja1EditingSession,
-        storage_budget::StorageLimits,
-    };
     let dir = kinewright_media::test_support::TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
         "te1-corpus-history",
@@ -379,7 +381,9 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
     owner
         .first_save(&dir.path("source.kinewright"), StorageLimits::default())
         .unwrap();
-    let mut task = owner.fork_durable_branch("TE1 case 1 task").unwrap();
+    let mut task = owner
+        .fork_durable_branch("TE1 case 1 task", Session)
+        .unwrap();
     let source_history = {
         let checkpoint = owner
             .store()
@@ -389,7 +393,7 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
         let source = owner
             .store()
             .unwrap()
-            .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+            .resolve_history(&checkpoint.history_ref)
             .unwrap();
         (*source).clone()
     };

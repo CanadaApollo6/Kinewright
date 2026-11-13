@@ -38,6 +38,7 @@ mod completion_fixture;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use completion_fixture::CompletionFixture;
 mod provider_usage;
+mod settled_release;
 mod task_completion;
 pub(crate) mod task_context;
 mod task_history;
@@ -1706,6 +1707,7 @@ impl HostCommandOwner {
         reason = "The same owned request boundary serves HTTP ingress and scoped observer callers"
     )]
     fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+        self.sweep_settled_run_actors();
         let previous_snapshot_owner = self.snapshot_read_owner();
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {
@@ -2903,9 +2905,17 @@ impl HostCommandOwner {
         let (core, branch) = if let Some(owner) = &mut self.owner {
             let name = format!("host-session-{id}");
             let guard = if let Some((branch, base)) = reopen {
-                owner.reopen_durable_branch(branch, &base, &name)?
+                owner.reopen_durable_branch(
+                    branch,
+                    &base,
+                    &name,
+                    kinewright_project::editing_session::DurableBranchRole::Session,
+                )?
             } else {
-                owner.fork_durable_branch(&name)?
+                owner.fork_durable_branch(
+                    &name,
+                    kinewright_project::editing_session::DurableBranchRole::Session,
+                )?
             };
             (guard.core().clone(), Some(guard.branch_id().clone()))
         } else {
@@ -2933,6 +2943,12 @@ impl HostCommandOwner {
         let worker_core = core.clone();
         let project = self.config.project.clone();
         let roots = self.config.roots.clone();
+        let history_limits = match &self.owner {
+            Some(owner) => kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
+                owner.store()?.limits(),
+            )?,
+            None => kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
+        };
         let thread = thread::Builder::new()
             .name(format!("kinewright-host-session-{id}"))
             .spawn(move || {
@@ -2947,6 +2963,7 @@ impl HostCommandOwner {
                         media,
                         &project,
                         roots,
+                        history_limits,
                     )?;
                     let cfg = SessionConfig {
                         model: cfg.model,

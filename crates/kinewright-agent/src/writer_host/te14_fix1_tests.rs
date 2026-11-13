@@ -337,7 +337,12 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
             host.acquire_manual("e".repeat(64)).unwrap();
         }
         let project = host.owner_mut().unwrap();
-        let mut branch = project.fork_durable_branch("TE14 real switch").unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "TE14 real switch",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();
         let target = branch.branch_id().clone();
         project.close_durable_branch(&branch).unwrap();
