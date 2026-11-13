@@ -84,6 +84,20 @@ pub(crate) const UNKEPT_CLOSE_TEXT: &str = "A spoken note is not saved on this c
 /// How often a failed capture retention is tried again.
 const RETAIN_RETRY: Duration = Duration::from_millis(500);
 impl Voice {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn recording_fixture(
+        capture: Capture,
+        project: kinewright_project::bundle_records::ProjectId,
+    ) -> Self {
+        let note = Some(capture.note_id().clone());
+        Self {
+            state: State::Recording(capture),
+            project: Some(project),
+            note,
+            ..Self::default()
+        }
+    }
+
     /// Why nothing may change this project's identity or end its session: a
     /// capture with no durably kept binding. That is a live recording (S3
     /// stage fix 1), or a finished one whose retention write failed (fix 2).

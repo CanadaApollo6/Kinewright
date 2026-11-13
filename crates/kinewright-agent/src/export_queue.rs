@@ -267,6 +267,8 @@ pub enum ExportQueueError {
     WorkerThread(#[source] std::io::Error),
     #[error("the export queue worker is unavailable")]
     WorkerUnavailable,
+    #[error("This project is closing. Finish or cancel the close to export.")]
+    ProjectClosing,
     #[error(
         "a source file changed between the export preflight and the finished encode, so the output cannot be trusted: {0}"
     )]
@@ -289,10 +291,40 @@ struct QueueRuntime {
 enum ExportAdmission {
     Open(Sender<WorkItem>),
     Suspended(Sender<WorkItem>),
+    Closing(Sender<WorkItem>),
     Closed,
 }
 
+impl ExportAdmission {
+    fn sender(&self) -> Result<&Sender<WorkItem>, ExportQueueError> {
+        match self {
+            Self::Open(sender) => Ok(sender),
+            Self::Suspended(_) | Self::Closing(_) => Err(ExportQueueError::ProjectClosing),
+            Self::Closed => Err(ExportQueueError::WorkerUnavailable),
+        }
+    }
+}
+
 impl QueueRuntime {
+    fn check_admission(&self) -> Result<(), ExportQueueError> {
+        self.admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sender()
+            .map(|_| ())
+    }
+    fn suspend_for_close(&self) {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *admission = match std::mem::replace(&mut *admission, ExportAdmission::Closed) {
+            ExportAdmission::Open(sender) | ExportAdmission::Suspended(sender) => {
+                ExportAdmission::Closing(sender)
+            }
+            other => other,
+        };
+    }
     fn suspend_admission(&self) {
         let mut admission = self
             .admission
@@ -310,6 +342,7 @@ impl QueueRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *admission = match std::mem::replace(&mut *admission, ExportAdmission::Closed) {
             ExportAdmission::Suspended(sender) => ExportAdmission::Open(sender),
+            ExportAdmission::Closing(sender) => ExportAdmission::Closing(sender),
             other => other,
         };
     }
@@ -688,6 +721,7 @@ impl ExportQueue {
         document: &Document,
         request: QueueExportRequest,
     ) -> Result<ExportJobRecord, ExportQueueError> {
+        self.runtime.check_admission()?;
         let QueueExportRequest {
             output_path: requested_output,
             profile,
@@ -747,9 +781,7 @@ impl ExportQueue {
             .admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let ExportAdmission::Open(sender) = &*admission else {
-            return Err(ExportQueueError::WorkerUnavailable);
-        };
+        let sender = admission.sender()?;
         let output_key = output_path_key(&output_path);
         let cancellation = ExportCancellation::default();
         let (id, record) = {
@@ -848,7 +880,12 @@ impl ExportQueue {
         self.runtime.suspend_admission();
     }
 
-    /// Resume a suspended queue. A permanently closed queue stays closed.
+    /// Keep admission suspended while the project's close is in progress.
+    pub fn suspend_for_close(&self) {
+        self.runtime.suspend_for_close();
+    }
+
+    /// Resume a prompt suspension. An in-progress or completed close stays closed.
     pub fn resume_admission(&self) {
         self.runtime.resume_admission();
     }

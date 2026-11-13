@@ -879,7 +879,7 @@ impl ProjectSession {
         }
         self.studio.feedback.cancel_recovery_retry();
         if let Some(queue) = &self.exports {
-            queue.close_admission();
+            queue.suspend_for_close();
         }
         self.retire_media();
         // Cloned before the investigator borrow: `incidents` now resolves
@@ -936,12 +936,6 @@ impl ProjectSession {
         prepared == ClosePreparation::Ready
     }
 
-    pub(crate) fn prepare_close(&mut self, reason: &str) -> bool {
-        self.keep_close_feedback();
-        let prepared = self.request_close(reason);
-        self.finish_close(prepared)
-    }
-
     /// Terminal phase only: persistence and every project's stop signal precede this.
     pub(crate) fn join_closed(&mut self) {
         for thread in &mut self.threads {
@@ -961,11 +955,13 @@ impl ProjectSession {
 
     #[cfg(test)]
     pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
-        let prepared = self.prepare_close(reason);
-        if prepared {
+        self.keep_close_feedback();
+        let prepared = self.request_close(reason);
+        let closed = self.finish_close(prepared);
+        if closed {
             self.join_closed();
         }
-        prepared
+        closed
     }
 }
 

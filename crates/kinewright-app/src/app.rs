@@ -2085,6 +2085,7 @@ impl KinewrightApp {
         if self.projects.len() <= 1 || index >= self.projects.len() {
             return;
         }
+        self.release_export_close_prompt();
         let id = self.projects[index].id;
         if self.projects[index].ja1_job.is_some() || self.projects[index].ja1_activation.is_some() {
             self.status =
@@ -2103,29 +2104,47 @@ impl KinewrightApp {
     }
 
     fn close_project(&mut self, id: u64) {
+        self.close_project_with_exports(id, false);
+    }
+
+    fn close_project_with_exports(&mut self, id: u64, cancel_exports: bool) {
+        self.release_export_close_prompt();
         let Some(index) = session_index_by_id(id, &self.projects) else {
             return;
         };
         if self.projects.len() <= 1 {
             return;
         }
+        let action = ProjectAction::CloseProject(id);
+        if self.projects[index].ja1_job.is_some() || self.projects[index].ja1_activation.is_some() {
+            self.resume_export_admission(action);
+            self.status =
+                "Wait for this save or selection before closing the editing context.".into();
+            return;
+        }
         // The confirmation's Discard never discards a live recording.
         if self.refuse_unkept_voice(index) {
+            self.resume_export_admission(action);
             return;
         }
         if let Some(queue) = &self.projects[index].exports {
             queue.suspend_admission();
         }
-        if self.project_has_exports(index) {
-            self.pending_export_close = Some(ProjectAction::CloseProject(id));
+        if !cancel_exports && self.project_has_exports(index) {
+            self.pending_export_close = Some(action);
             return;
         }
         #[cfg(all(test, target_os = "linux"))]
         if let Some(witness) = self.export_close_witness.take() {
             witness();
         }
-        if !self.projects[index].prepare_close("the project was closed") {
-            self.resume_export_admission(ProjectAction::CloseProject(id));
+        self.projects[index].keep_close_feedback();
+        let prepared = self.projects[index].request_close("the project was closed");
+        if cancel_exports && prepared == crate::project::ClosePreparation::Ready {
+            self.cancel_project_exports(index);
+        }
+        if !self.projects[index].finish_close(prepared) {
+            self.resume_export_admission(action);
             self.status = self.projects[index].ja1.as_ref().map_or_else(
                 || "Source cleanup is pending. Retry Close.".into(),
                 |attachment| attachment.message.clone(),
@@ -2136,6 +2155,9 @@ impl KinewrightApp {
     }
 
     fn remove_closed_project(&mut self, index: usize) {
+        if let Some(queue) = &self.projects[index].exports {
+            queue.close_admission();
+        }
         let closing_focused = index == self.focused_project;
         let next_focus = if self.projects.len() > 1 {
             index_after_close(self.focused_project, index, self.projects.len())
@@ -2201,14 +2223,45 @@ impl KinewrightApp {
         })
     }
 
-    fn resume_export_admission(&self, action: ProjectAction) {
+    fn resume_export_queues(&self) {
         for project in &self.projects {
-            if (matches!(action, ProjectAction::Exit(_))
-                || matches!(action, ProjectAction::CloseProject(id) if id == project.id))
-                && let Some(queue) = &project.exports
-            {
+            if let Some(queue) = &project.exports {
                 queue.resume_admission();
             }
+        }
+    }
+
+    fn resume_export_admission(&self, action: ProjectAction) {
+        match action {
+            ProjectAction::Exit(_) => self.resume_export_queues(),
+            ProjectAction::CloseProject(id) => {
+                if let Some(index) = session_index_by_id(id, &self.projects)
+                    && let Some(queue) = &self.projects[index].exports
+                {
+                    queue.resume_admission();
+                }
+            }
+        }
+    }
+
+    fn release_export_close_prompt(&mut self) {
+        if let Some(action) = self.pending_export_close.take() {
+            self.resume_export_admission(action);
+            if matches!(action, ProjectAction::Exit(_)) {
+                self.exit_discarded_projects.clear();
+            }
+        }
+    }
+
+    fn cancel_project_exports(&self, index: usize) {
+        let project = &self.projects[index];
+        if let Some(queue) = &project.exports {
+            queue.cancel_all();
+        }
+        if let Some(job) = &self.export_job
+            && job.project == project.id
+        {
+            job.cancellation.cancel();
         }
     }
 
@@ -2223,24 +2276,9 @@ impl KinewrightApp {
             }
             return;
         }
-        for project in &self.projects {
-            if matches!(action, ProjectAction::Exit(_))
-                || matches!(action, ProjectAction::CloseProject(id) if id == project.id)
-            {
-                if let Some(queue) = &project.exports {
-                    queue.close_admission();
-                    queue.cancel_all();
-                }
-                if let Some(job) = &self.export_job
-                    && job.project == project.id
-                {
-                    job.cancellation.cancel();
-                }
-            }
-        }
         match action {
-            ProjectAction::Exit(_) => self.request_exit(ctx),
-            ProjectAction::CloseProject(id) => self.close_project(id),
+            ProjectAction::Exit(_) => self.request_exit_with_exports(ctx, true),
+            ProjectAction::CloseProject(id) => self.close_project_with_exports(id, true),
         }
     }
 
@@ -2311,11 +2349,17 @@ impl KinewrightApp {
     }
 
     pub(crate) fn request_exit(&mut self, ctx: &egui::Context) {
+        self.request_exit_with_exports(ctx, false);
+    }
+
+    fn request_exit_with_exports(&mut self, ctx: &egui::Context, cancel_exports: bool) {
+        self.release_export_close_prompt();
         if self
             .projects
             .iter()
             .any(|p| p.ja1_job.is_some() || p.ja1_activation.is_some())
         {
+            self.resume_export_queues();
             self.status = "Wait for the current Studio operation before closing.".into();
             return;
         }
@@ -2328,6 +2372,7 @@ impl KinewrightApp {
             self.exit_discarded_projects.clear();
             self.focus_project(index);
             self.refuse_unkept_voice(index);
+            self.resume_export_queues();
             return;
         }
         if let Some(index) = self.projects.iter().position(|project| {
@@ -2336,6 +2381,7 @@ impl KinewrightApp {
         }) {
             self.focus_project(index);
             self.pending_project_action = Some(ProjectAction::Exit(self.projects[index].id));
+            self.resume_export_queues();
             return;
         }
         for project in &self.projects {
@@ -2343,7 +2389,9 @@ impl KinewrightApp {
                 queue.suspend_admission();
             }
         }
-        if let Some(index) = (0..self.projects.len()).find(|&index| self.project_has_exports(index))
+        if !cancel_exports
+            && let Some(index) =
+                (0..self.projects.len()).find(|&index| self.project_has_exports(index))
         {
             self.pending_export_close = Some(ProjectAction::Exit(self.projects[index].id));
             return;
@@ -2360,6 +2408,13 @@ impl KinewrightApp {
             .iter_mut()
             .map(|project| project.request_close("Kinewright is closing"))
             .collect::<Vec<_>>();
+        if cancel_exports {
+            for (index, prepared) in prepared.iter().enumerate() {
+                if *prepared == crate::project::ClosePreparation::Ready {
+                    self.cancel_project_exports(index);
+                }
+            }
+        }
         let closed = self
             .projects
             .iter_mut()

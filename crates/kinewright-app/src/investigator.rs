@@ -2714,9 +2714,9 @@ mod tests {
     /// A source-shape test over this crate's own `investigator.rs`/`app.rs`/
     /// `project.rs`, in IN2 §9.1 items 35–36's shape: own files through
     /// `CARGO_MANIFEST_DIR`, CRLF-normalised, each file read only up to its
-    /// own `#[cfg(test)] mod tests`. Every call site of the four stop shapes
+    /// own `#[cfg(test)] mod tests`. Every call site of the six stop shapes
     /// is classified — a `STOPS` literal, the off-switch const, a `harness: `/
-    /// `observer: ` payload, an error payload, or one of the six named
+    /// `observer: ` payload, an error payload, or one of the seven named
     /// `stop`/`reason` passthroughs — and anything else fails loudly, so a
     /// new fixed stop can never slip through to persist as `"session"`. The
     /// conflict reasons reach `session_resolver` through
@@ -2732,10 +2732,9 @@ mod tests {
     fn in2b_every_stop_site_argument_is_in_stops_or_categorical() {
         use kinewright_core::STOPS;
         /// The stop shapes and the 0-based index of the stop argument.
-        const SHAPES: [(&str, usize); 7] = [
+        const SHAPES: [(&str, usize); 6] = [
             ("shutdown_for_close(", 0),
             ("stop_threads(", 0),
-            ("prepare_close(", 0),
             ("request_close(", 0),
             ("session_resolver(", 2),
             ("resolver(", 0),
@@ -2854,8 +2853,8 @@ mod tests {
         }
         assert_eq!(truncated, 3, "every file keeps its tests below `mod tests`");
         assert_eq!(
-            defs, 6,
-            "the six shape definitions are skipped, not classified"
+            defs, 5,
+            "the five shape definitions are skipped, not classified"
         );
         assert_eq!(
             prefixed, 2,
@@ -2874,11 +2873,10 @@ mod tests {
                 "investigator.rs::shutdown_for_close::reason",
                 "investigator.rs::write_investigator_end::stop",
                 "investigator.rs::write_investigator_end::stop",
-                "project.rs::prepare_close::reason",
                 "project.rs::request_close::reason",
                 "project.rs::stop_threads::reason",
             ],
-            "the eight stop/reason passthroughs are exactly the named set"
+            "the seven stop/reason passthroughs are exactly the named set"
         );
         assert!(
             covered.len() >= 17,
