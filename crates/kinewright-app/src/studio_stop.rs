@@ -332,13 +332,18 @@ impl Feedback {
                     pending.run().as_ref() == Some(&run) && pending.action() == Some(action)
                 })
                 .and_then(|pending| pending.recovery.take());
-            match self.control_run(port, &run, action) {
-                Ok(ControlReply::Busy(_)) if arm.is_some() => {
-                    if let Some(pending) = self.controls.iter_mut().find(|pending| {
-                        pending.run().as_ref() == Some(&run) && pending.action() == Some(action)
-                    }) {
-                        pending.recovery = arm;
-                    }
+            let reply = self.control_run(port, &run, action);
+            // Every Err from control_run is before send_control.
+            if (reply.is_err() || matches!(&reply, Ok(ControlReply::Busy(_))))
+                && arm.is_some()
+                && let Some(pending) = self.controls.iter_mut().find(|pending| {
+                    pending.run().as_ref() == Some(&run) && pending.action() == Some(action)
+                })
+            {
+                pending.recovery = arm;
+            }
+            match reply {
+                Ok(ControlReply::Busy(_)) => {
                     self.message = Some("The host is busy. Your control request is kept and waiting; checking again on the next poll.".into());
                 }
                 Err(why) => self.message = Some(why),

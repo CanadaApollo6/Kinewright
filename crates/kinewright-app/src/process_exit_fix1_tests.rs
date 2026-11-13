@@ -107,6 +107,9 @@ struct ExportWitness {
 }
 impl ExportWitness {
     fn install(app: &mut KinewrightApp) -> Self {
+        Self::install_at(app, 0)
+    }
+    fn install_at(app: &mut KinewrightApp, index: usize) -> Self {
         let directory = TempDirectory::new_in(&workspace_target_dir(), "exit-fix1-export");
         let gate = Arc::new(Gate::default());
         let token = Arc::new(Mutex::new(None));
@@ -116,11 +119,14 @@ impl ExportWitness {
                 token: Arc::clone(&token),
             }),
             Arc::new(RefusedMedia),
-            Arc::clone(&app.projects[0].agent_project_path),
+            Arc::clone(&app.projects[index].agent_project_path),
         )
         .unwrap();
-        app.projects[0].exports = Some(queue.clone());
-        app.exit_fix1_branch_action("refresh");
+        app.projects[index].exports = Some(queue.clone());
+        app.focus_project(index);
+        if app.projects[index].ja1.is_none() {
+            app.exit_fix1_branch_action("refresh");
+        }
         let output = directory.path("held.mp4");
         let document = renderable_document(10);
         let job = queue
@@ -816,3 +822,6 @@ fn runtime_followup_finished_export_dismisses_prompt_and_reopens_admission() {
         export.queue.join();
     }
 }
+
+#[path = "runtime_followups_fix1_tests.rs"]
+mod runtime_fix1;

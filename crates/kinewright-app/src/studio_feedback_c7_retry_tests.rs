@@ -152,7 +152,14 @@ fn c7_retry_busy_startup_then_healthy() {
     assert_once(app, &project, &request);
 }
 
-fn restored_stop(busy: bool) {
+#[derive(Clone, Copy)]
+enum StopRetryInterruption {
+    None,
+    Busy,
+    BeforeSend,
+}
+
+fn restored_stop(interruption: StopRetryInterruption) {
     let mut project = project("c7-retry-stop");
     let first = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::Dormant);
     let mut attachment = launch_with_fixture(&project, &first);
@@ -200,7 +207,7 @@ fn restored_stop(busy: bool) {
     assert_eq!(fixture.dispatch_counts().1, 1);
     fixture.release();
     assert!(fixture.wait_recovery(RecoveryPhase::Completed, Duration::from_secs(5)));
-    if busy {
+    if matches!(interruption, StopRetryInterruption::Busy) {
         let holder_fixture = Arc::clone(&fixture);
         let client = app.focused().ja1.as_ref().unwrap().host_client().unwrap();
         let lane = Arc::new(std::sync::Mutex::new(None));
@@ -221,6 +228,33 @@ fn restored_stop(busy: bool) {
         assert!(message.contains("kept and waiting") && !message.contains("unknown"));
         assert_eq!(fixture.dispatch_counts().1, 1);
     }
+    if matches!(interruption, StopRetryInterruption::BeforeSend) {
+        let identity = app
+            .focused()
+            .ja1
+            .as_ref()
+            .unwrap()
+            .studio_project_id()
+            .unwrap();
+        let kept = std::mem::replace(
+            &mut app.focused_mut().studio.feedback.keeping,
+            Keeping::Failed {
+                project: Some(identity),
+                why: "fixture keeping temporarily unavailable".into(),
+            },
+        );
+        poll(&mut app);
+        let armed = app.focused().studio.feedback.controls[0].recovery.is_some();
+        let unchanged = app.focused().studio.feedback.controls[0].request == control;
+        app.focused_mut().studio.feedback.keeping = kept;
+        assert!(armed, "RUNTIME_FIX1_PRESEND_STOP_ARM");
+        assert!(unchanged);
+        assert_eq!(
+            fixture.dispatch_counts().1,
+            1,
+            "RUNTIME_FIX1_PRESEND_NO_SEND"
+        );
+    }
     poll(&mut app);
     assert!(
         app.focused().studio.feedback.controls.is_empty(),
@@ -240,11 +274,11 @@ fn restored_stop(busy: bool) {
 
 #[test]
 fn c7_retry_restored_stop_then_healthy() {
-    restored_stop(false);
+    restored_stop(StopRetryInterruption::None);
 }
 #[test]
 fn c7_followup_busy_restored_stop_keeps_exact_arm() {
-    restored_stop(true);
+    restored_stop(StopRetryInterruption::Busy);
 }
 
 #[test]
@@ -588,4 +622,9 @@ fn c7_followup_manual_busy_stays_manual_with_truthful_words() {
     assert_eq!(fixture.dispatch_counts().0, 1);
     drop(attachment);
     assert_eq!(linked(&project.path).1, 1);
+}
+
+#[test]
+fn c7_runtime_fix1_presend_error_keeps_stop_arm_and_exact_request() {
+    restored_stop(StopRetryInterruption::BeforeSend);
 }
