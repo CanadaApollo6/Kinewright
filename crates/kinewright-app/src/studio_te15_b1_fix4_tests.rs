@@ -289,7 +289,7 @@ fn te15_b1_fix4_continue_poll_confirms_same_request() {
     assert!(project.feedback.observing(), "FIX4_UI_CONFIRMATION_POLLED");
     with_host(&attachment, |port| {
         let mut lossy = Lossy::new(port);
-        project.feedback.retry_continues(&mut lossy);
+        project.feedback.retry_ready_controls(&mut lossy);
         assert_eq!(lossy.calls, 1, "FIX4_UI_POLL_REPLAY");
     });
     assert!(

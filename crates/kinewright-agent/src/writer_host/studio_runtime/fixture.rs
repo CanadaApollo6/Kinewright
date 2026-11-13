@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -25,6 +25,8 @@ pub enum ProtocolFixtureMode {
     Dormant,
     /// Hold initial recovery until release, without delaying the request server.
     RecoveryHeld,
+    RecoveryExpired,
+    RecoveryFailsOnce,
     /// Hold startup recovery while allowing the fixture's real launch path.
     RecoveryHeldRunning,
     /// Hold after recovery restored continuable runs, before marking it ready.
@@ -74,6 +76,9 @@ pub struct ProtocolObservation {
     pub identity: crate::orchestration::ExecutionIdentity,
 }
 struct State {
+    revise_dispatches: AtomicUsize,
+    control_dispatches: AtomicUsize,
+    recovery_failed: AtomicBool,
     recovery: Mutex<(u8, u8)>,
     recovery_changed: std::sync::Condvar,
     hold_startup_ingress: AtomicBool,
@@ -109,6 +114,9 @@ impl ProtocolFixture {
         event: Option<&'static str>,
     ) -> Self {
         Self(Arc::new(State {
+            revise_dispatches: AtomicUsize::new(0),
+            control_dispatches: AtomicUsize::new(0),
+            recovery_failed: AtomicBool::new(false),
             recovery: Mutex::new((0, 0)),
             recovery_changed: std::sync::Condvar::new(),
             hold_startup_ingress: AtomicBool::new(false),
@@ -132,6 +140,20 @@ impl ProtocolFixture {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .1 = u8::MAX;
         self.0.recovery_changed.notify_all();
+    }
+    #[must_use]
+    pub fn dispatch_counts(&self) -> (usize, usize) {
+        (
+            self.0.revise_dispatches.load(Ordering::Acquire),
+            self.0.control_dispatches.load(Ordering::Acquire),
+        )
+    }
+    pub fn clear_recovery_completed(&self) {
+        self.0
+            .recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0 &= !recovery_bit(super::RecoveryPhase::Completed);
     }
     pub fn hold_startup_ingress(&self) {
         self.0.hold_startup_ingress.store(true, Ordering::Release);
@@ -205,8 +227,34 @@ impl ProtocolFixture {
         let events = self.0.clone();
         let queues = self.0.clone();
         let recovery = Arc::clone(&self.0);
+        let fault = Arc::clone(&self.0);
         RuntimePorts {
+            recovery_retry_delay: if self.0.mode == ProtocolFixtureMode::RecoveryFailsOnce {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(250)
+            },
+            startup_wait_bound: if self.0.mode == ProtocolFixtureMode::RecoveryExpired {
+                Duration::ZERO
+            } else {
+                super::super::HOST_STARTUP_WAIT_TIMEOUT
+            },
+            recovery_fault: Some(Arc::new(move || {
+                if fault.mode == ProtocolFixtureMode::RecoveryFailsOnce
+                    && !fault.recovery_failed.swap(true, Ordering::AcqRel)
+                {
+                    Err(io::Error::other("fixture startup recovery fails once"))
+                } else {
+                    Ok(())
+                }
+            })),
             recovery_witness: Some(Arc::new(move |phase| {
+                if matches!(phase, super::RecoveryPhase::Dispatch) {
+                    recovery.revise_dispatches.fetch_add(1, Ordering::AcqRel);
+                }
+                if matches!(phase, super::RecoveryPhase::ControlDispatch) {
+                    recovery.control_dispatches.fetch_add(1, Ordering::AcqRel);
+                }
                 let mut state = recovery.recovery.lock().unwrap();
                 state.0 |= recovery_bit(phase);
                 recovery.recovery_changed.notify_all();
@@ -214,8 +262,11 @@ impl ProtocolFixture {
                     && matches!(
                         recovery.mode,
                         ProtocolFixtureMode::RecoveryHeld
+                            | ProtocolFixtureMode::RecoveryExpired
                             | ProtocolFixtureMode::RecoveryHeldRunning
                     ))
+                    || (matches!(phase, super::RecoveryPhase::Entered)
+                        && recovery.mode == ProtocolFixtureMode::RecoveryFailsOnce)
                     || (matches!(phase, super::RecoveryPhase::Restored)
                         && recovery.mode == ProtocolFixtureMode::RecoveryRestoredHeld)
                     || (matches!(phase, super::RecoveryPhase::BeforeIngress)
@@ -232,6 +283,10 @@ impl ProtocolFixture {
                         !timeout.timed_out() || state.1 & bit != 0,
                         "C7_RECOVERY_RELEASE_BOUNDED"
                     );
+                    if recovery.mode == ProtocolFixtureMode::RecoveryFailsOnce {
+                        let mut state = state;
+                        state.1 &= !bit;
+                    }
                 }
             })),
             profiles: Some(Arc::new(Factory(self.0.clone()))),
@@ -250,6 +305,8 @@ impl ProtocolFixture {
                 self.0.mode,
                 ProtocolFixtureMode::Dormant
                     | ProtocolFixtureMode::RecoveryHeld
+                    | ProtocolFixtureMode::RecoveryExpired
+                    | ProtocolFixtureMode::RecoveryFailsOnce
                     | ProtocolFixtureMode::RecoveryRestoredHeld
             ),
             qualification: None,
@@ -290,6 +347,7 @@ fn recovery_bit(phase: super::RecoveryPhase) -> u8 {
         super::RecoveryPhase::Restored => 16,
         super::RecoveryPhase::Dispatch => 32,
         super::RecoveryPhase::Waiting => 64,
+        super::RecoveryPhase::ControlDispatch => 128,
     }
 }
 impl Drop for ProtocolFixture {

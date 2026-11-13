@@ -16,10 +16,10 @@
   },
   "arm": "candidate",
   "arm_bridge_sha256": {
-    "host": "3200b557c301ab432b478f4a242c08862d052bdcedebd57820bc42e49fa30469",
+    "host": "a5fbbb359f563c0c2536099de56a0967a2da9b96fbef0e373abc114a121f3e29",
     "mcp_observation": "f7c22c82f88571e51e9e4426437a9a444dee93edd390cedf8829e378674d54b6",
     "native_child_publication": "1d09c6c35c56d028f8b070c0356d506312ad471887cea305ef2ac427900245cc",
-    "runtime": "63f5999441aeacc657af85779a59022e1a9bdf4e4b418ff3a0b8e6cdadedfdb0",
+    "runtime": "7a8c6f42aff8f0577eaa3996085102bdd6c9a55f1dc4bad3771b8a13c90271e6",
     "studio": "a1822f24495b2a3e38dc8e80d0a892ea00b442f65cded908c4151436708d2a27",
     "surface": "e684e91c1bf89f5e49e523cc6a2bcf36ec005beb1846ac427afc47c91449d6ca",
     "task_observation": "a3b17fdd3a8fa82d338b4519e132841bcdda89a57c998128524a5ec94069bda1"

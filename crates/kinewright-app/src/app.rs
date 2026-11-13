@@ -1353,6 +1353,7 @@ impl KinewrightApp {
         self.clear_preview();
         self.focused().retire_media();
         self.visual_cache = crate::visual_cache::VisualCache::new(crossbeam_channel::never());
+        self.focused_mut().studio.feedback.cancel_recovery_retry();
         self.focused_project = index;
         if let Some(context) = self.focused().studio.selection.clone() {
             let position = self.focused().studio.position;
@@ -2129,6 +2130,12 @@ impl KinewrightApp {
         } else {
             0
         };
+        if self.projects.len() == 1 {
+            self.playback.pause();
+            self.playing = false;
+            self.resume_after_scrub = false;
+            self.clear_preview();
+        }
         let id = self.projects[index].id;
         let name = self.projects[index].name.clone();
         if index == 0 && self.projects.len() > 1 {
@@ -3678,6 +3685,9 @@ impl KinewrightApp {
     /// target's own paint, acked here: a binding alone (a discarded pass,
     /// an abandoned surface) resumes nothing.
     pub(crate) fn acknowledge_paint(&mut self, epoch: u64) {
+        if self.projects.is_empty() {
+            return;
+        }
         let Some(ack) = self.presenter.take_ack(epoch) else {
             return;
         };
@@ -3972,6 +3982,9 @@ impl eframe::App for KinewrightApp {
     /// PF1 R-5 (R17): a paint mark from an earlier root epoch is acked once
     /// per bound image.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.projects.is_empty() {
+            return;
+        }
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
         if let Some(display) = &mut self.native_display {
             display.session.advance(epoch);
@@ -17664,3 +17677,7 @@ mod c2_fix4_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "process_exit_fix1_tests.rs"]
 mod process_exit_fix1_tests;
+
+#[cfg(test)]
+#[path = "late_paint_tests.rs"]
+mod late_paint_tests;

@@ -25,6 +25,15 @@ pub enum AttachmentRole {
     Producer,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryReadiness {
+    Ready,
+    #[default]
+    Blocked,
+    Stopping,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRoots {
@@ -423,6 +432,23 @@ pub struct HostRefusal {
     pub native_code: Option<i32>,
 }
 impl HostRefusal {
+    /// These refusals are issued before dispatch, so recovery can safely resend the request.
+    #[must_use]
+    pub fn retry_after_recovery(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "recovery_frozen"
+                | "startup_wait_busy"
+                | "startup_wait_failed"
+                | "startup_wait_expired"
+        )
+    }
+    pub(crate) fn stopping() -> Self {
+        Self::new(
+            "host_stopping",
+            "The host is stopping. Your request has not been dispatched.",
+        )
+    }
     #[must_use]
     pub fn new(code: &str, message: &str) -> Self {
         Self {
@@ -532,6 +558,7 @@ pub enum HostChoiceKind {
     reason = "Independent wire observations and explicit consent flags reflect the existing authoritative owner states"
 )]
 pub struct HostStatus {
+    pub recovery_readiness: RecoveryReadiness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_runtime_status: Option<String>,
     #[serde(default)]

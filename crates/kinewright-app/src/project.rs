@@ -877,6 +877,7 @@ impl ProjectSession {
         {
             return ClosePreparation::WaitingForContinuation;
         }
+        self.studio.feedback.cancel_recovery_retry();
         if let Some(queue) = &self.exports {
             queue.close_admission();
         }
