@@ -22,7 +22,7 @@ use eframe::egui;
 use kinewright_core::{ColorWheelChannel, ColorWheelControl, ColorWheelControlSet};
 
 use crate::{
-    inspector_ui::is_live_drag,
+    inspector_ui::{gesture_value_changed, is_live_drag},
     theme::{color, space, type_size},
 };
 
@@ -77,7 +77,7 @@ impl ColorWheelState {
 /// What one frame of trackball interaction asks the document to become.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ColorWheelResponse {
-    /// The controls whose stored integer must change, with their new values.
+    /// The complete desired values of the controls owned by this interaction.
     pub(crate) changes: Vec<(ColorWheelChannel, i64)>,
     /// Whether this frame belongs to a live drag, so it coalesces into one
     /// undo entry.
@@ -222,14 +222,12 @@ pub(crate) fn color_wheel(ui: &mut egui::Ui, state: &ColorWheelState) -> ColorWh
             if ball.drag_started() {
                 response.gesture_started = true;
             }
-            if is_live_drag(&ball) {
+            if is_live_drag(&ball) && gesture_value_changed(&ball) {
                 if let Some(pointer) = ball.interact_pointer_pos() {
                     let (u, v) = pointer_to_disc(rect, pointer);
                     let values = disc_channel_values(state.control, u, v);
                     for (channel, value) in BALL_CHANNELS.into_iter().zip(values) {
-                        if value != state.values.channel(channel) {
-                            response.changes.push((channel, value));
-                        }
+                        response.changes.push((channel, value));
                     }
                 }
                 response.live = true;
@@ -240,11 +238,11 @@ pub(crate) fn color_wheel(ui: &mut egui::Ui, state: &ColorWheelState) -> ColorWh
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("M").size(type_size::MICRO));
             ui.spacing_mut().slider_width = BALL_DIAMETER - 22.0;
-            let slider = ui.add(
-                egui::Slider::new(&mut master, min..=max)
-                    .integer()
-                    .show_value(false),
-            );
+            let slider = ui.add(crate::inspector_ui::intent_slider(
+                &mut master,
+                min..=max,
+                |slider| slider.integer().show_value(false),
+            ));
             if slider.drag_started() {
                 response.gesture_started = true;
             }

@@ -19,7 +19,7 @@ use kinewright_core::{
 };
 
 use crate::{
-    inspector_ui::is_live_drag,
+    inspector_ui::{gesture_value_changed, is_live_drag},
     theme::{self, color, radius, type_size},
 };
 
@@ -361,13 +361,12 @@ pub(crate) fn curve_editor(
             }
         }
         if is_live_drag(&area)
+            && gesture_value_changed(&area)
             && let Some(index) = memory.dragging
             && let Some(position) = area.interact_pointer_pos()
         {
             let moved = move_point(points, index, pixel_to_basis(rect, position));
-            if moved.as_slice() != points {
-                response.points = Some(moved);
-            }
+            response.points = Some(moved);
             response.live = true;
         }
         if area.drag_stopped() {

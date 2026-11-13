@@ -587,55 +587,89 @@ fn c7_shutdown_queue(before_ingress: bool) {
     if before_ingress {
         held.hold_startup_ingress();
     }
+    let launch_started = std::time::Instant::now();
     let attachment = launch_with_fixture(&project, &held);
+    let launch_us = launch_started.elapsed().as_micros();
+    let launched = std::time::Instant::now();
     assert!(held.wait_recovery(RecoveryPhase::Entered, std::time::Duration::from_secs(5)));
     let project_id = attachment.studio_project_id().unwrap();
     let client = attachment.host_client().unwrap();
     let completion = (std::sync::Mutex::new(false), std::sync::Condvar::new());
-    let (queued, ingress, shutdown, prompt) = std::thread::scope(|scope| {
-        let held = &held;
-        let client = &client;
-        let completion = &completion;
-        let controller = scope.spawn(move || {
-            let queued = held
-                .wait_recovery(RecoveryPhase::Queued, std::time::Duration::from_secs(5))
-                && held.wait_recovery(RecoveryPhase::Waiting, std::time::Duration::from_secs(5));
-            let ingress = if before_ingress {
-                held.release_recovery();
-                held.wait_recovery(
-                    RecoveryPhase::BeforeIngress,
-                    std::time::Duration::from_secs(5),
-                )
-            } else {
-                true
-            };
-            let shutdown = client.request(HostCommand::Shutdown);
-            if before_ingress {
-                held.release();
-            }
-            let prompt = {
-                let (done, _) = completion
-                    .1
-                    .wait_timeout_while(
-                        completion.0.lock().unwrap(),
-                        std::time::Duration::from_secs(2),
-                        |done| !*done,
+    let ((queued, ingress, shutdown, prompt, mut timings), launch_to_submit_us, submit_us) =
+        std::thread::scope(|scope| {
+            let held = &held;
+            let client = &client;
+            let completion = &completion;
+            let controller = scope.spawn(move || {
+                let queue_started = std::time::Instant::now();
+                let queued = held
+                    .wait_recovery(RecoveryPhase::Queued, std::time::Duration::from_secs(5))
+                    && held
+                        .wait_recovery(RecoveryPhase::Waiting, std::time::Duration::from_secs(5));
+                let queued_us = queue_started.elapsed().as_micros();
+                let recovery_released = std::time::Instant::now();
+                let ingress = if before_ingress {
+                    held.release_recovery();
+                    held.wait_recovery(
+                        RecoveryPhase::BeforeIngress,
+                        std::time::Duration::from_secs(5),
                     )
-                    .unwrap();
-                *done
-            };
-            // Also release on a red run before any assertion or join can unwind.
-            held.release();
-            (queued, ingress, shutdown, prompt)
+                } else {
+                    true
+                };
+                let recovery_to_ingress_us = recovery_released.elapsed().as_micros();
+                let shutdown_started = std::time::Instant::now();
+                let shutdown = client.request(HostCommand::Shutdown);
+                let shutdown_us = shutdown_started.elapsed().as_micros();
+                if before_ingress {
+                    held.release();
+                }
+                let prompt = {
+                    let (done, _) = completion
+                        .1
+                        .wait_timeout_while(
+                            completion.0.lock().unwrap(),
+                            ProtocolFixture::CONTROL_GUARD,
+                            |done| !*done,
+                        )
+                        .unwrap();
+                    *done
+                };
+                // Also release on a red run before any assertion or join can unwind.
+                held.release();
+                (
+                    queued,
+                    ingress,
+                    shutdown,
+                    prompt,
+                    serde_json::json!({
+                        "queue_wait_us": queued_us,
+                        "recovery_to_ingress_us": recovery_to_ingress_us,
+                        "shutdown_us": shutdown_us,
+                    }),
+                )
+            });
+            let launch_to_submit_us = launched.elapsed().as_micros();
+            let submit_started = std::time::Instant::now();
+            assert!(matches!(
+                with_host(&attachment, |port| project.feedback.submit(port)),
+                Outcome::Submitted(_)
+            ));
+            let submit_us = submit_started.elapsed().as_micros();
+            *completion.0.lock().unwrap() = true;
+            completion.1.notify_one();
+            (controller.join().unwrap(), launch_to_submit_us, submit_us)
         });
-        assert!(matches!(
-            with_host(&attachment, |port| project.feedback.submit(port)),
-            Outcome::Submitted(_)
-        ));
-        *completion.0.lock().unwrap() = true;
-        completion.1.notify_one();
-        controller.join().unwrap()
-    });
+    timings["launch_us"] = serde_json::json!(launch_us);
+    timings["launch_to_submit_us"] = serde_json::json!(launch_to_submit_us);
+    timings["submit_us"] = serde_json::json!(submit_us);
+    timings["before_ingress"] = serde_json::json!(before_ingress);
+    timings["project"] = serde_json::json!(project_id.as_str());
+    eprintln!("C7_SHUTDOWN_TIMING {timings}");
+    assert!(
+        held.barriers_healthy(),
+        "C7_CONTROL_HOLD_RELEASED_BY_SIGNAL"
+    );
     assert!(queued && ingress, "C7_SHUTDOWN_ORDERING_HELD");
     let shutdown = shutdown.unwrap();
     assert!(
@@ -660,7 +694,8 @@ fn c7_shutdown_queue(before_ingress: bool) {
             .as_deref()
             .unwrap()
             .contains("host_stopping: The host is stopping. Your request has not been dispatched."),
-        "C7_SHUTDOWN_TRANSPORT_FENCE"
+        "C7_SHUTDOWN_TRANSPORT_FENCE message={:?}",
+        project.feedback.message
     );
     let kept: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
@@ -701,7 +736,15 @@ fn s3_c7_fix1_shutdown_cancels_waiting_revise() {
 
 #[test]
 fn s3_c7_fix1_shutdown_fences_ingress_ready_revise() {
-    c7_shutdown_queue(true);
+    let repeats = match std::env::var("KINEWRIGHT_C7_REPEAT") {
+        Err(std::env::VarError::NotPresent) => 1,
+        Ok(value) if value == "50" => 50,
+        _ => panic!("KINEWRIGHT_C7_REPEAT must be unset or 50"),
+    };
+    for round in 1..=repeats {
+        c7_shutdown_queue(true);
+        eprintln!("C7_SHUTDOWN_REPEAT {round}/{repeats}");
+    }
 }
 
 #[test]

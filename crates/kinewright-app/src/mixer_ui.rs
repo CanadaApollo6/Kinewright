@@ -18,7 +18,7 @@
 //! headless `ctx.run_ui` test pattern can assert what a strip says and that a
 //! frame of painting writes nothing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use eframe::egui;
@@ -34,7 +34,10 @@ use crate::{
     app::KinewrightApp,
     export_ui::export_delivery_profile,
     icons::Icon,
-    inspector_ui::{InspectorEdits, clip_carries_audio, effect_display_name, is_live_drag},
+    inspector_ui::{
+        InspectorEdits, clip_carries_audio, effect_display_name, is_live_drag,
+        relative_value_changed,
+    },
     mixer_pane_ui,
     theme::{self, color, radius, size, space, type_size},
     transport::{DANGER_START, DECAY_PER_SECOND, WARNING_START, peak_to_meter_level},
@@ -262,7 +265,7 @@ fn decayed_level(previous: f32, peak: f32, elapsed: f32) -> f32 {
 /// Which chain the mixer's pane is editing (AU2 §6.6).
 ///
 /// UI state, not document state: nothing here is written to a project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MixerSelection {
     Bus(AudioBusId),
     Master,
@@ -320,6 +323,11 @@ pub(crate) struct MixerChainEdits {
     removed: Vec<AudioBusId>,
     master: Option<AudioMaster>,
     tracks: BTreeMap<TrackId, TrackMix>,
+    track_gain_touched: BTreeSet<TrackId>,
+    track_pan_touched: BTreeSet<TrackId>,
+    /// A complete value was requested, independently of whether its copied
+    /// chain still equals the accepted document.
+    requested_values: BTreeSet<MixerSelection>,
     /// The pan law is document-level rather than part of any chain, but its
     /// control lives on the master pane and obeys the same "never push" rule.
     pan_law: Option<PanLaw>,
@@ -343,6 +351,21 @@ impl MixerChainEdits {
     /// The edited copy of one track mix, cloned in on first touch (AU6 §6.2).
     pub(crate) fn track(&mut self, mix: &TrackMix) -> &mut TrackMix {
         self.tracks.entry(mix.track).or_insert_with(|| mix.clone())
+    }
+
+    pub(crate) fn track_gain_curve(
+        &mut self,
+        mix: &TrackMix,
+    ) -> &mut Option<kinewright_core::AutomationCurve> {
+        self.track_gain_touched.insert(mix.track);
+        &mut self.track(mix).gain_curve
+    }
+    pub(crate) fn track_pan_curve(
+        &mut self,
+        mix: &TrackMix,
+    ) -> &mut Option<kinewright_core::AutomationCurve> {
+        self.track_pan_touched.insert(mix.track);
+        &mut self.track(mix).pan_curve
     }
 
     /// Add a bus the document does not have yet (`+ Bus`, AU2 §6.5).
@@ -373,88 +396,94 @@ impl MixerChainEdits {
         self.gesture_started = true;
     }
 
+    pub(crate) fn request_value(&mut self, selection: MixerSelection) {
+        self.requested_values.insert(selection);
+    }
+
     /// Fold every touched chain into one operation each (AU2 §6.6).
     ///
     /// Runs after both the strips and the pane have painted, because
     /// `InspectorEdits::push_live` sets the coalesce key only on the first
     /// operation of the frame and `submit_inspector_edits` reads exactly one
-    /// key per frame. A copy equal to what the document already holds is
-    /// dropped: a control that reports `changed()` with the value it was given
-    /// is not an edit.
+    /// key per frame. Every touched chain carries its complete requested value;
+    /// the manual queue decides equality against the accepted revision.
     fn drain_into(self, document: &Document, edits: &mut InspectorEdits) {
         if self.gesture_started {
             edits.begin_gesture();
         }
         let live = self.live;
         for id in self.removed {
-            if document.audio_mix.bus(id).is_none() {
-                continue;
+            if document.audio_mix.bus(id).is_some() {
+                file_chain_edit(
+                    edits,
+                    false,
+                    Operation::RemoveAudioBus { bus: id },
+                    MixerSelection::Bus(id).coalesce_key(),
+                    false,
+                );
             }
-            file_chain_edit(
-                edits,
-                false,
-                Operation::RemoveAudioBus { bus: id },
-                MixerSelection::Bus(id).coalesce_key(),
-            );
         }
         for (id, bus) in self.buses {
-            if document.audio_mix.bus(id) == Some(&bus) {
-                continue;
+            let unchanged = document.audio_mix.bus(id) == Some(&bus);
+            if live || !unchanged || self.requested_values.contains(&MixerSelection::Bus(id)) {
+                file_chain_edit(
+                    edits,
+                    live,
+                    Operation::UpsertAudioBus { bus },
+                    MixerSelection::Bus(id).coalesce_key(),
+                    unchanged,
+                );
             }
-            file_chain_edit(
-                edits,
-                live,
-                Operation::UpsertAudioBus { bus },
-                MixerSelection::Bus(id).coalesce_key(),
-            );
         }
-        if let Some(master) = self.master
-            && master != document.audio_mix.master
-        {
-            file_chain_edit(
-                edits,
-                live,
-                Operation::SetAudioMaster { master },
-                MixerSelection::Master.coalesce_key(),
-            );
+        if let Some(master) = self.master {
+            let unchanged = master == document.audio_mix.master;
+            if live || !unchanged || self.requested_values.contains(&MixerSelection::Master) {
+                file_chain_edit(
+                    edits,
+                    live,
+                    Operation::SetAudioMaster { master },
+                    MixerSelection::Master.coalesce_key(),
+                    unchanged,
+                );
+            }
         }
         for (id, mix) in self.tracks {
             let current = document.audio_mix.track(id);
-            if mix.gain_curve != current.gain_curve {
+            let scalar = (mix.gain_tenth_db != current.gain_tenth_db
+                || mix.pan_percent != current.pan_percent
+                || mix.mute != current.mute
+                || mix.solo != current.solo)
+                .then(|| track_mix_operation(&mix));
+            let gain_unchanged = mix.gain_curve == current.gain_curve;
+            if !gain_unchanged || self.track_gain_touched.contains(&id) {
                 file_chain_edit(
                     edits,
                     live,
                     Operation::SetTrackAutomation {
                         track: id,
                         parameter: TRACK_AUTOMATION_PARAMETERS[0].to_owned(),
-                        curve: mix.gain_curve.clone(),
+                        curve: mix.gain_curve,
                     },
                     track_automation_coalesce_key(id, TRACK_AUTOMATION_PARAMETERS[0]),
+                    gain_unchanged,
                 );
             }
-            if mix.pan_curve != current.pan_curve {
+            let pan_unchanged = mix.pan_curve == current.pan_curve;
+            if !pan_unchanged || self.track_pan_touched.contains(&id) {
                 file_chain_edit(
                     edits,
                     live,
                     Operation::SetTrackAutomation {
                         track: id,
                         parameter: TRACK_AUTOMATION_PARAMETERS[1].to_owned(),
-                        curve: mix.pan_curve.clone(),
+                        curve: mix.pan_curve,
                     },
                     track_automation_coalesce_key(id, TRACK_AUTOMATION_PARAMETERS[1]),
+                    pan_unchanged,
                 );
             }
-            if mix.gain_tenth_db != current.gain_tenth_db
-                || mix.pan_percent != current.pan_percent
-                || mix.mute != current.mute
-                || mix.solo != current.solo
-            {
-                file_chain_edit(
-                    edits,
-                    live,
-                    track_mix_operation(&mix),
-                    track_mix_coalesce_key(id),
-                );
+            if let Some(operation) = scalar {
+                file_chain_edit(edits, live, operation, track_mix_coalesce_key(id), false);
             }
         }
         if let Some(law) = self.pan_law
@@ -465,6 +494,7 @@ impl MixerChainEdits {
                 live,
                 Operation::SetPanLaw { law },
                 MixerSelection::Master.coalesce_key(),
+                false,
             );
         }
     }
@@ -483,11 +513,12 @@ fn file_chain_edit(
     live: bool,
     operation: Operation,
     coalesce_key: String,
+    unchanged: bool,
 ) {
     if live {
-        edits.push_live(operation, coalesce_key);
+        edits.push_live_value(operation, coalesce_key, unchanged);
     } else {
-        edits.push(operation);
+        edits.push_value(operation, unchanged);
     }
 }
 
@@ -914,7 +945,8 @@ fn bus_strip(
         if fader.drag_started() {
             chain.begin_gesture();
         }
-        if fader.changed() && gain_tenth_db != bus.gain_tenth_db {
+        if fader.changed() {
+            chain.request_value(MixerSelection::Bus(bus.id));
             chain.bus(bus).gain_tenth_db = gain_tenth_db;
             chain.mark_live(is_live_drag(&fader));
         }
@@ -1036,7 +1068,8 @@ fn master_strip(
         if fader.drag_started() {
             chain.begin_gesture();
         }
-        if fader.changed() && gain_tenth_db != master.gain_tenth_db {
+        if fader.changed() {
+            chain.request_value(MixerSelection::Master);
             chain.master(master).gain_tenth_db = gain_tenth_db;
             chain.mark_live(is_live_drag(&fader));
         }
@@ -1213,14 +1246,18 @@ fn meters_and_fader(
                     ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
                     ui.spacing_mut().button_padding.y = 0.0;
                     match automated {
-                        None => ui.add(
-                            egui::Slider::new(&mut gain_tenth_db, range)
-                                .vertical()
-                                .integer()
-                                .custom_formatter(|value, _| format_gain_db(value))
-                                .custom_parser(parse_gain_db)
-                                .update_while_editing(false),
-                        ),
+                        None => ui.add(crate::inspector_ui::intent_slider(
+                            &mut gain_tenth_db,
+                            range,
+                            |slider| {
+                                slider
+                                    .vertical()
+                                    .integer()
+                                    .custom_formatter(|value, _| format_gain_db(value))
+                                    .custom_parser(parse_gain_db)
+                                    .update_while_editing(false)
+                            },
+                        )),
                         Some(driven) => automated_fader(ui, &mut gain_tenth_db, driven, range),
                     }
                 })
@@ -1229,6 +1266,7 @@ fn meters_and_fader(
             .inner
         })
         .inner;
+
     (response, gain_tenth_db)
 }
 
@@ -1243,7 +1281,8 @@ fn meters_and_fader(
 ///
 /// egui's `Slider` is one widget whose rail and value box share a response, so
 /// the two halves are built here rather than by disabling half a `Slider`.
-/// The returned response is their union, so the strip's recorded `fader` rect
+/// The returned response keeps the editable readout's interaction flags and the
+/// combined rectangle, so the strip's recorded `fader` rect
 /// still covers both and `record_mix_edit` still sees the readout's
 /// `changed()` and `drag_started()` — the disabled rail contributes neither.
 fn automated_fader(
@@ -1257,23 +1296,26 @@ fn automated_fader(
         let rail = ui
             .add_enabled(
                 false,
-                egui::Slider::new(&mut shown, range.clone())
-                    .vertical()
-                    .integer()
-                    .show_value(false),
+                crate::inspector_ui::intent_slider(&mut shown, range.clone(), |slider| {
+                    slider.vertical().integer().show_value(false)
+                }),
             )
             .on_disabled_hover_text(AUTOMATED_FADER_TOOLTIP);
-        let readout = ui
-            .add(
-                egui::DragValue::new(parked)
+        let mut readout = ui
+            .add(crate::inspector_ui::intent_drag_value(parked, |field| {
+                field
                     .range(range)
                     .custom_formatter(|value, _| format_gain_db(value))
                     .custom_parser(parse_gain_db)
-                    .update_while_editing(false),
-            )
+                    .update_while_editing(false)
+            }))
             .on_hover_text(AUTOMATED_FADER_TOOLTIP);
         record_strip_rect("fader_readout", readout.rect);
-        rail.union(readout)
+        if relative_value_changed(&readout) {
+            readout.mark_changed();
+        }
+        readout.rect = rail.rect.union(readout.rect);
+        readout
     })
     .inner
 }
@@ -1288,44 +1330,55 @@ fn pan_control(ui: &mut egui::Ui, mix: &TrackMix, automated: Option<i32>) -> (eg
             ui.spacing_mut().item_spacing.x = space::HALF;
             ui.style_mut().override_font_id = Some(theme::medium(type_size::MICRO));
             match automated {
-                None => ui.add(
-                    egui::Slider::new(&mut pan_percent, TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX)
-                        .integer()
-                        .custom_formatter(|value, _| format_pan_value(value))
-                        .custom_parser(parse_pan)
-                        .update_while_editing(false),
-                ),
+                None => ui.add(crate::inspector_ui::intent_slider(
+                    &mut pan_percent,
+                    TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX,
+                    |slider| {
+                        slider
+                            .integer()
+                            .custom_formatter(|value, _| format_pan_value(value))
+                            .custom_parser(parse_pan)
+                            .update_while_editing(false)
+                    },
+                )),
                 Some(driven) => {
                     let mut shown = driven.clamp(TRACK_MIX_PAN_MIN, TRACK_MIX_PAN_MAX);
                     ui.horizontal(|ui| {
                         let rail = ui
                             .add_enabled(
                                 false,
-                                egui::Slider::new(
+                                crate::inspector_ui::intent_slider(
                                     &mut shown,
                                     TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX,
-                                )
-                                .integer()
-                                .show_value(false),
+                                    |slider| slider.integer().show_value(false),
+                                ),
                             )
                             .on_disabled_hover_text(AUTOMATED_FADER_TOOLTIP);
-                        let readout = ui
-                            .add(
-                                egui::DragValue::new(&mut pan_percent)
-                                    .range(TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX)
-                                    .custom_formatter(|value, _| format_pan_value(value))
-                                    .custom_parser(parse_pan)
-                                    .update_while_editing(false),
-                            )
+                        let mut readout = ui
+                            .add(crate::inspector_ui::intent_drag_value(
+                                &mut pan_percent,
+                                |field| {
+                                    field
+                                        .range(TRACK_MIX_PAN_MIN..=TRACK_MIX_PAN_MAX)
+                                        .custom_formatter(|value, _| format_pan_value(value))
+                                        .custom_parser(parse_pan)
+                                        .update_while_editing(false)
+                                },
+                            ))
                             .on_hover_text(AUTOMATED_FADER_TOOLTIP);
                         record_strip_rect("pan_readout", readout.rect);
-                        rail.union(readout)
+                        if relative_value_changed(&readout) {
+                            readout.mark_changed();
+                        }
+                        readout.rect = rail.rect.union(readout.rect);
+                        readout
                     })
                     .inner
                 }
             }
         })
         .inner;
+
     (response, pan_percent)
 }
 
@@ -1341,7 +1394,7 @@ fn pan_control(ui: &mut egui::Ui, mix: &TrackMix, automated: Option<i32>) -> (eg
 /// The edited mix arrives as a closure so the caller's `..mix.clone()` — which
 /// copies both automation curves — runs on the frames a control actually
 /// changed, not on every frame of every automated track.
-fn record_mix_edit(
+pub(crate) fn record_mix_edit(
     edits: &mut InspectorEdits,
     response: &egui::Response,
     mix: &TrackMix,
@@ -1354,13 +1407,12 @@ fn record_mix_edit(
         return;
     }
     let edited = edited();
-    if edited != *mix {
-        let operation = track_mix_operation(&edited);
-        if is_live_drag(response) {
-            edits.push_live(operation, track_mix_coalesce_key(mix.track));
-        } else {
-            edits.push(operation);
-        }
+    let unchanged = edited == *mix;
+    let operation = track_mix_operation(&edited);
+    if is_live_drag(response) {
+        edits.push_live_value(operation, track_mix_coalesce_key(mix.track), unchanged);
+    } else {
+        edits.push_value(operation, unchanged);
     }
 }
 

@@ -135,6 +135,8 @@ pub(crate) struct ProjectSession {
         crate::ja1_attachment::Ja1Attachment,
     )>,
     pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
+    /// The UI keeps this warning while the action thread owns its originating attachment.
+    pub(crate) ja1_job_notice: Option<String>,
     pub(crate) retired_agent_threads: BTreeSet<u64>,
     /// The project-relative LUT store, derived from `project_path` at runtime
     /// and never serialized (CC4 §2.2). `None` for a project that has never
@@ -438,6 +440,7 @@ impl ProjectSession {
             checkpoint_recovery: None,
             ja1_activation: None,
             ja1_job: None,
+            ja1_job_notice: None,
             retired_agent_threads: BTreeSet::new(),
             lut_store,
             lut_store_error,
@@ -807,19 +810,31 @@ impl ProjectSession {
     }
 
     pub(crate) fn send_manual_command(
-        &self,
+        &mut self,
         command: kinewright_core::Command,
-    ) -> Result<(), kinewright_core::CoreDisconnected> {
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
+        self.send_manual_value(command, None)
+    }
+
+    pub(crate) fn send_manual_value(
+        &mut self,
+        command: kinewright_core::Command,
+        unchanged_at: Option<kinewright_core::TimelineRevision>,
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
         if self.checkpoint_recovery.is_some()
             || self.ja1_activation.is_some()
             || self.studio.selection.is_some()
         {
-            return Err(kinewright_core::CoreDisconnected);
+            return Err(crate::manual_edits::ManualSendError::Disconnected);
         }
-        if let Some(attachment) = &self.ja1 {
-            attachment.send_manual(command)
+        if let Some(attachment) = &mut self.ja1 {
+            if unchanged_at.is_some() {
+                attachment.send_manual_value(command, unchanged_at)
+            } else {
+                attachment.send_manual(command)
+            }
         } else {
-            self.core.send(command)
+            self.core.send(command).map_err(Into::into)
         }
     }
     pub(crate) fn ja1_read_only(&self) -> bool {
@@ -884,6 +899,16 @@ impl ProjectSession {
         }
         self.reconcile_source_state();
         self.publish_project_path_to_agents();
+    }
+    pub(crate) fn manual_edit_status(&self) -> Option<String> {
+        if let Some(attachment) = &self.ja1 {
+            attachment.manual_edit_status()
+        } else if self.ja1_job.is_some() {
+            // This is an owned display value; the worker retains the canonical notice.
+            self.ja1_job_notice.clone()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn keep_close_feedback(&mut self) {
