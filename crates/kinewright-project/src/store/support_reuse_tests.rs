@@ -13,7 +13,7 @@
 //! - every memoized history's fields equal to a fresh decode of that object's bytes on
 //!   disk (the fields belong to the sealed bytes, also when bounding rewrote the history);
 //! - exactly one history decode fewer per changed-history save with reuse on, and with it
-//!   three preflights fewer (that decode's, the replay shadow's and the sealing's), and
+//!   two preflights fewer (that decode's and the sealing's), and
 //!   the same counts on a save that sealed no new history;
 //! - a reopen of the bundle, whose reader decodes every record and refuses an inventory
 //!   that differs from the one written.
@@ -149,7 +149,7 @@ fn object_bytes(store: &ProjectStore, reference: &ObjectRef) -> Vec<u8> {
 
 fn decoded_fields(store: &ProjectStore, bytes: &[u8]) -> BTreeSet<String> {
     let mut fields = BTreeSet::new();
-    crate::bundle_recovery::decode::<HistorySnapshot>(
+    crate::bundle_recovery::decode::<crate::history_record::HistoryRecord>(
         bytes,
         &store.inner.usage,
         RecordKind::History,
@@ -157,6 +157,23 @@ fn decoded_fields(store: &ProjectStore, bytes: &[u8]) -> BTreeSet<String> {
         store.limits(),
     )
     .unwrap();
+    fields
+}
+
+fn decoded_closure_fields(store: &ProjectStore, bytes: &[u8]) -> BTreeSet<String> {
+    let mut fields = decoded_fields(store, bytes);
+    let record: crate::history_record::HistoryRecord = serde_json::from_slice(bytes).unwrap();
+    for reference in [record.baseline_ref, record.current_ref] {
+        let bytes = object_bytes(store, &reference);
+        crate::bundle_recovery::decode::<Document>(
+            &bytes,
+            &store.inner.usage,
+            RecordKind::Document,
+            &mut fields,
+            store.limits(),
+        )
+        .unwrap();
+    }
     fields
 }
 
@@ -371,11 +388,11 @@ fn differential(case: &Case) -> Run {
         assert_eq!(new_save.resting, old_save.resting, "{label}: resting usage");
         assert!(!new_save.inventory.is_empty(), "{label}: empty inventory");
         // One decode fewer when the save sealed a new history, none otherwise; and with
-        // it three preflights of the checked bytes: the skipped decode's, the replay
-        // shadow's and the sealing's.
+        // it two preflights of the checked bytes: the skipped decode's and the
+        // sealing's. Compact decode already proves replay without a second actor.
         assert!(
             (new_save.decodes + 1 == old_save.decodes
-                && new_save.preflights + 3 == old_save.preflights)
+                && new_save.preflights + 2 == old_save.preflights)
                 || (new_save.decodes == old_save.decodes
                     && new_save.preflights == old_save.preflights),
             "{label}: decodes {} and preflights {} with reuse, {} and {} without",
@@ -558,6 +575,10 @@ fn bounded_history_at_the_cap_writes_the_same_bytes_and_inventory() {
 /// history admitted with its own check is read without a decode, with exactly the fields
 /// its sealed bytes decode to.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one byte-binding witness follows mismatched, matched and consumed support tokens"
+)]
 fn fields_checked_for_other_bytes_are_not_used() {
     let temp = TempDirectory::new_in(&root(), "binding");
     let core = Core::spawn(tracks(2)).unwrap();
@@ -586,8 +607,16 @@ fn fields_checked_for_other_bytes_are_not_used() {
     };
 
     let preflights = |store: &mut ProjectStore, record: &HistorySnapshot, checked| {
+        let _base = store.admit_document(&record.baseline).unwrap();
+        let _current = store.admit_document(&record.document).unwrap();
         let before = io_observer::preflight_count();
-        let admitted = store.admit_checked_history(record, checked).unwrap();
+        let admitted = store
+            .admit_checked_history(
+                record,
+                checked,
+                crate::history_record::HistoryRole::Ordinary,
+            )
+            .unwrap();
         (admitted, io_observer::preflight_count() - before)
     };
     // An unchecked admission of a fresh history (`first`), for the preflights it runs.
@@ -596,7 +625,10 @@ fn fields_checked_for_other_bytes_are_not_used() {
     // Checked bytes of `first`, sealed bytes of `second`: nothing to reuse; the sealing
     // preflights its own bytes, as an unchecked admission does.
     let (_, other) = store
-        .check_history_bytes(serde_json::to_vec(&first).unwrap())
+        .check_history_bytes(
+            &serde_json::to_vec(&first).unwrap(),
+            crate::history_record::HistoryRole::Ordinary,
+        )
         .unwrap();
     let ((sealed, support), ran) = preflights(store, &second, Some(other));
     assert!(support.is_none(), "fields of other bytes were offered");
@@ -607,12 +639,15 @@ fn fields_checked_for_other_bytes_are_not_used() {
     let bytes = object_bytes(store, &sealed.reference);
     let (fields, ran) = decodes(store, std::slice::from_ref(&sealed.reference), None);
     assert_eq!(ran, 1, "the support read did not decode the history");
-    assert_eq!(fields, decoded_fields(store, &bytes));
+    assert_eq!(fields, decoded_closure_fields(store, &bytes));
 
     // `third`'s own check: its charge stands in for the sealing's preflight, and its
     // fields are offered, bound to its sealed object.
     let (_, own) = store
-        .check_history_bytes(serde_json::to_vec(&third).unwrap())
+        .check_history_bytes(
+            &serde_json::to_vec(&third).unwrap(),
+            crate::history_record::HistoryRole::Ordinary,
+        )
         .unwrap();
     let ((third_sealed, third_support), ran) = preflights(store, &third, Some(own));
     assert_eq!(
@@ -622,7 +657,7 @@ fn fields_checked_for_other_bytes_are_not_used() {
     );
     let third_support = third_support.expect("own fields are offered");
     // Offered for a different object (`fourth`), they are not used: `fourth` is decoded.
-    let fourth_sealed = store.admit_record(&fourth).unwrap();
+    let fourth_sealed = store.admit_history(&fourth).unwrap();
     let bytes = object_bytes(store, &fourth_sealed.reference);
     let (fields, ran) = decodes(
         store,
@@ -630,18 +665,27 @@ fn fields_checked_for_other_bytes_are_not_used() {
         Some(third_support),
     );
     assert_eq!(ran, 1, "fields bound to another object were used");
-    assert_eq!(fields, decoded_fields(store, &bytes));
+    assert_eq!(fields, decoded_closure_fields(store, &bytes));
 
     // Offered for their own object, they are used: no decode, the sealed bytes' fields,
     // and the support cache holds them as a decode would have left it.
     let (_, own) = store
-        .check_history_bytes(serde_json::to_vec(&third).unwrap())
+        .check_history_bytes(
+            &serde_json::to_vec(&third).unwrap(),
+            crate::history_record::HistoryRole::Ordinary,
+        )
         .unwrap();
-    let (_, again) = store.admit_checked_history(&third, Some(own)).unwrap();
+    let (_, again) = store
+        .admit_checked_history(
+            &third,
+            Some(own),
+            crate::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let bytes = object_bytes(store, &third_sealed.reference);
     let (fields, ran) = decodes(store, std::slice::from_ref(&third_sealed.reference), again);
     assert_eq!(ran, 0, "the bound fields were not used");
-    assert_eq!(fields, decoded_fields(store, &bytes));
+    assert_eq!(fields, decoded_closure_fields(store, &bytes));
     assert_eq!(
         store
             .inner
@@ -651,7 +695,7 @@ fn fields_checked_for_other_bytes_are_not_used() {
             .support_fields
             .get(&third_sealed.reference.sha256)
             .map(|cached| BTreeSet::clone(cached)),
-        Some(fields)
+        Some(decoded_fields(store, &bytes))
     );
 }
 

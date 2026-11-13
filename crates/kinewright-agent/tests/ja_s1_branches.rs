@@ -263,10 +263,30 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
     bundle.save(&core, &inputs).unwrap();
     let manual = bundle.manual_branch_id().clone();
     let origin = bundle.branch_lineage(&manual).unwrap().current[&ClipId(1)].clone();
-    let a = bundle.fork_branch(&manual).unwrap();
-    let b = bundle.fork_branch(&manual).unwrap();
-    let c = bundle.fork_branch(&manual).unwrap();
-    let d = bundle.fork_branch(&manual).unwrap();
+    let a = bundle
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
+    let b = bundle
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
+    let c = bundle
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
+    let d = bundle
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let make = |id: &_| {
         let core = Core::spawn(Document::default()).unwrap();
         core.restore_history((*bundle.branch_history(id).unwrap()).clone())

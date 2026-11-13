@@ -63,12 +63,7 @@ fn run_limit_person_record_uses_project_capacity_without_releasing_the_run() {
     assert!(decoded > crate::run_admission::HISTORY_BYTES);
     assert!(decoded < store.limits().branch_history_bytes);
     let sealed = person.admit_history(&history).unwrap();
-    assert_eq!(
-        *person
-            .read_record::<kinewright_core::HistorySnapshot>(&sealed.reference)
-            .unwrap(),
-        history
-    );
+    assert_eq!(*person.resolve_history(&sealed.reference).unwrap(), history);
     assert!(store.run_limit_reached());
     assert!(matches!(
         store.admit_document(&Document::default()),

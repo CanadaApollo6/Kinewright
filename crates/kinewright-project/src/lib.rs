@@ -14,7 +14,10 @@ pub mod edit_audit;
 pub mod editing_session;
 // JA-1 S3 C4
 pub mod feedback_mapping;
+pub mod history_record;
 mod history_save;
+mod history_size;
+mod lineage_journal;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
 #[cfg(feature = "test-util")]

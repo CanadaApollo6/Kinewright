@@ -49,7 +49,12 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
     let left = bundle.manual_branch_id().clone();
     let mut ids = vec![];
     for n in 0..24 {
-        let id = bundle.fork_branch(&left).unwrap();
+        let id = bundle
+            .fork_branch(
+                &left,
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
+            .unwrap();
         let other = Core::spawn((*bundle.branch_history(&id).unwrap().document).clone()).unwrap();
         grow(&other, 24 + n);
         bundle.save_branch(&id, &other).unwrap();
@@ -85,16 +90,15 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
     (temp, session, ids, left)
 }
 fn large_edit(core: &Core) {
-    let ops = (100..1900)
-        .map(|id| Operation::AddTrack {
-            track: Track {
-                id: TrackId(id),
-                kind: TrackKind::Video,
-                sync_lock: true,
-                clips: vec![],
-            },
-        })
-        .collect();
+    // Grow the immutable document, independently of journal representation.
+    let ops = vec![Operation::AddMarker {
+        marker: kinewright_core::Marker {
+            id: kinewright_core::MarkerId(9000),
+            position: kinewright_core::TimeCode(0),
+            label: "m".repeat(1 << 19),
+            color_token: 0,
+        },
+    }];
     assert!(matches!(
         core.request(Command::DoBatch(ops)).unwrap(),
         Event::DocumentChanged { .. }
@@ -103,14 +107,10 @@ fn large_edit(core: &Core) {
 #[test]
 pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry() {
     let (model_temp, mut model, model_ids, _) = source(StorageLimits::default());
-    let before = LoadedBundle::read(&model_temp.path("b.kinewright"))
-        .unwrap()
-        .usage_probe()
-        .unwrap()
-        .peak_live_history_bytes;
     large_edit(model.core());
     let candidate = model.core().export_history().unwrap();
     let mut minimum = u64::MAX;
+    let mut minimum_retained = u64::MAX;
     for cut in 0..=candidate.batches.len() {
         let history = if cut == 0 {
             candidate.clone()
@@ -121,8 +121,30 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
             t.after().clone()
         };
         minimum = minimum.min(history_cost_probe(&history, &StorageLimits::default()).unwrap());
+        minimum_retained = minimum_retained
+            .min(kinewright_core::history_size::restored_history_live_bytes(&history).unwrap());
     }
+    // Compare both cuts under the same replay window. The default branch cap
+    // otherwise reserves a larger cold-open overlap than this destination profile.
+    let before = LoadedBundle::read_with_limits_probe(
+        &model_temp.path("b.kinewright"),
+        StorageLimits {
+            branch_history_bytes: minimum,
+            ..StorageLimits::default()
+        },
+    )
+    .unwrap()
+    .usage_probe()
+    .unwrap()
+    .peak_live_history_bytes;
+    model
+        .restrict_limits_probe(StorageLimits {
+            branch_history_bytes: minimum,
+            ..StorageLimits::default()
+        })
+        .unwrap();
     model.save_active().unwrap();
+    let candidate = model.core().export_history().unwrap();
     let loaded = LoadedBundle::read(&model_temp.path("b.kinewright")).unwrap();
     let root = loaded.root().unwrap();
     let index=model.store().unwrap().read_record::<std::collections::BTreeMap<BranchId,kinewright_project::bundle_records::ObjectRef>>(&root.branch_index_ref).unwrap();
@@ -139,13 +161,27 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         let h = model
             .store()
             .unwrap()
-            .read_record::<kinewright_core::HistorySnapshot>(&cp.history_ref)
+            .resolve_history(&cp.history_ref)
             .unwrap();
         costs
             .entry(cp.history_ref.sha256.clone())
-            .or_insert(history_cost_probe(&h, &StorageLimits::default()).unwrap());
+            .or_insert(kinewright_core::history_size::restored_history_live_bytes(&h).unwrap());
     }
-    let irreducible = costs.values().sum::<u64>() + minimum;
+    let manifest = model
+        .store()
+        .unwrap()
+        .read_record::<kinewright_project::store::StoreManifest>(&root.store_manifest_ref)
+        .unwrap();
+    assert!(!manifest.recovery.predecessors.is_empty());
+    assert!(manifest.objects.iter().any(|reference| {
+        reference.record_kind == kinewright_project::bundle_records::RecordKind::BranchCheckpoint
+            && !index.values().any(|current| current == reference)
+    }));
+    drop(manifest);
+    // Archived ordinary checkpoints replay after all current histories remain
+    // resident. Count those retained histories once and the shared replay
+    // window once; summing individual replay peaks would overstate this.
+    let irreducible = costs.values().sum::<u64>() + minimum_retained + minimum;
     eprintln!(
         "C5 fresh-open setup peak={before}, no-floor resident lower bound={irreducible}, minimum target={minimum}"
     );
@@ -161,11 +197,19 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     for _ in 0..2 {
         model.save_active().unwrap();
     }
-    let calibrated = LoadedBundle::read(&model_temp.path("b.kinewright")).unwrap();
+    let calibrated = LoadedBundle::read_with_limits_probe(
+        &model_temp.path("b.kinewright"),
+        StorageLimits {
+            branch_history_bytes: minimum,
+            ..StorageLimits::default()
+        },
+    )
+    .unwrap();
     let exact = calibrated.usage_probe().unwrap().peak_live_history_bytes;
     drop(calibrated);
     let exact_profile = StorageLimits {
         live_history_bytes: exact,
+        branch_history_bytes: minimum,
         ..StorageLimits::default()
     };
     model.restrict_limits_probe(exact_profile.clone()).unwrap();
@@ -203,6 +247,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     for (lane, limit) in [("over", irreducible - 1), ("existing", irreducible - 1)] {
         let profile = StorageLimits {
             live_history_bytes: limit,
+            branch_history_bytes: minimum,
             ..StorageLimits::default()
         };
         let (temp, mut session, ids, left) = source(profile.clone());
@@ -269,7 +314,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
         let target_oracle = (*session
             .store()
             .unwrap()
-            .read_record::<kinewright_core::HistorySnapshot>(&cp.history_ref)
+            .resolve_history(&cp.history_ref)
             .unwrap())
         .clone();
         drop(cp);

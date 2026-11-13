@@ -817,12 +817,8 @@ pub(super) fn w13_trim_then_separate_omission_recomputes_closure() {
         selection.consent_trim(&mut consent).unwrap();
         selection.consent_omission(&mut consent).unwrap();
         let inspection = session.inspect_rescue_destination(&b).unwrap();
-        assert!(
-            session
-                .rescue(selection, &consent, &inspection)
-                .unwrap()
-                .activated
-        );
+        let outcome = session.rescue(selection, &consent, &inspection).unwrap();
+        assert!(outcome.activated, "trimmed rescue outcome: {outcome:?}");
         assert_eq!(core.export_history().unwrap(), before);
         let selected = session.core().export_history().unwrap();
         assert!(selected.baseline.lut_assets.is_empty());
@@ -900,7 +896,12 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
                     kinewright_project::bundle_commit::history_cost_probe(&candidate, &profile)
                         .ok()?;
                 (candidate.encoded_bytes().ok()? <= profile.branch_history_bytes
-                    && cost <= profile.branch_history_bytes)
+                    && cost <= profile.branch_history_bytes
+                    && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+                        &candidate, &profile,
+                    )
+                    .ok()?
+                        <= profile.branch_history_bytes)
                     .then_some(candidate)
             })
             .expect("independent earliest legal fitting floor");
@@ -914,12 +915,8 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
         let mut consent = selection.consent();
         selection.consent_trim(&mut consent).unwrap();
         let inspection = session.inspect_rescue_destination(&b).unwrap();
-        assert!(
-            session
-                .rescue(selection, &consent, &inspection)
-                .unwrap()
-                .activated
-        );
+        let outcome = session.rescue(selection, &consent, &inspection).unwrap();
+        assert!(outcome.activated, "trimmed rescue outcome: {outcome:?}");
         assert_eq!(core.export_history().unwrap(), before);
         assert_eq!(session.core().export_history().unwrap(), ordinary);
         assert_eq!(

@@ -105,9 +105,8 @@ impl ProjectBundle {
             self.store.verify(object)?;
         }
         let checkpoint = self.store.read_record::<BranchCheckpoint>(&reference)?;
-        let history = self
-            .store
-            .read_record::<HistorySnapshot>(&checkpoint.history_ref)?;
+        let history = self.store.resolve_history(&checkpoint.history_ref)?;
+        crate::history_record::HistoryRecord::verify_checkpoint(&checkpoint, &history)?;
         let document = self
             .store
             .read_record::<kinewright_core::Document>(&checkpoint.document_ref)?;

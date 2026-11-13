@@ -699,9 +699,7 @@ impl ProjectBundle {
             .branches
             .get(&self.manual_branch_id)
             .ok_or_else(|| BundleError::Corrupt("missing acknowledged checkpoint".into()))?;
-        let history = self
-            .store
-            .read_record::<HistorySnapshot>(&checkpoint.history_ref)?;
+        let history = self.store.resolve_history(&checkpoint.history_ref)?;
         attachment
             .install_checkpoint(before, (*history).clone())
             .map_err(crate::bundle::history_error)

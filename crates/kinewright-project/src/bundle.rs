@@ -48,7 +48,10 @@ impl fmt::Display for BundleError {
             Self::CleanupPending(e) => write!(f, "save failed; cleanup pending: {e}"),
             Self::RunAdmission(reason) => f.write_str(reason),
             Self::RunLimit => f.write_str(crate::run_admission::REASON),
-            Self::Capacity(e) => write!(f, "storage_backpressure: {e}"),
+            Self::Capacity(e) => write!(
+                f,
+                "storage_backpressure: {e}; wait and retry; if a run is active, Stop it to keep its work"
+            ),
             Self::Unsupported(e) => write!(f, "unsupported_bundle: {e}"),
             Self::Corrupt(e) => write!(f, "damaged_bundle: {e}"),
             Self::Unsettled => f.write_str("publication requires reconciliation"),
@@ -632,8 +635,8 @@ use kinewright_core::{Core, HistorySnapshot};
 /// Fully verified, read-only graph. Claiming is a separate consuming operation.
 pub(crate) type LoadedBranch = (
     StorageReservation<BranchCheckpoint>,
-    Arc<StorageReservation<HistorySnapshot>>,
-    Arc<StorageReservation<LineageRecord>>,
+    Option<Arc<StorageReservation<HistorySnapshot>>>,
+    Option<Arc<StorageReservation<LineageRecord>>>,
 );
 
 pub struct LoadedBundle<N = ProjectNamespace> {
@@ -696,7 +699,7 @@ impl<N> LoadedBundle<N> {
             .ok_or_else(|| BundleError::Corrupt("missing manual branch".into()))?;
         crate::history_save::ProjectAttachment::new(core)
             .map_err(history_error)?
-            .restore_history((**branch.1).clone())
+            .restore_history((**branch.1.as_ref().ok_or(BundleError::Unsettled)?).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))
     }
 }
@@ -736,14 +739,17 @@ impl LoadedBundle {
         let history_cache = self
             .branches
             .iter()
-            .map(|(id, branch)| {
-                (
-                    id.clone(),
-                    CachedHistory {
-                        reference: branch.0.history_ref.clone(),
-                        history: Arc::clone(&branch.1),
-                    },
-                )
+            .filter_map(|(id, branch)| {
+                branch.1.as_ref().map(|history| {
+                    (
+                        id.clone(),
+                        CachedHistory {
+                            reference: branch.0.history_ref.clone(),
+                            profile: branch.0.history_role.admission_profile(&self.limits),
+                            history: Arc::clone(history),
+                        },
+                    )
+                })
             })
             .collect();
         let branches = self
@@ -799,6 +805,7 @@ impl LoadedBundle {
 /// A verified history bound to the immutable checkpoint object it came from.
 pub(crate) struct CachedHistory {
     pub(crate) reference: ObjectRef,
+    pub(crate) profile: StorageLimits,
     pub(crate) history: Arc<StorageReservation<HistorySnapshot>>,
 }
 
@@ -1083,11 +1090,27 @@ impl ProjectBundle {
         &self,
         branch: &BranchId,
     ) -> Option<&Arc<StorageReservation<HistorySnapshot>>> {
-        let current = &self.branches.get(branch)?.history_ref;
+        let checkpoint = self.branches.get(branch)?;
+        let profile = checkpoint
+            .history_role
+            .admission_profile(self.store.limits());
         self.history_cache
             .get(branch)
-            .filter(|cached| &cached.reference == current)
+            .filter(|cached| {
+                cached.reference == checkpoint.history_ref && cached.profile == profile
+            })
             .map(|cached| &cached.history)
+    }
+    pub(crate) fn verified_cached_history(
+        &self,
+        branch: &BranchId,
+    ) -> Result<Option<&Arc<StorageReservation<HistorySnapshot>>>, BundleError> {
+        let cached = self.cached_history(branch);
+        if let Some(history) = cached {
+            self.store
+                .verify_cached_history(self.checkpoint(branch)?, history)?;
+        }
+        Ok(cached)
     }
     #[cfg(any(test, feature = "test-util"))]
     pub fn invalidate_history_cache_binding_probe(&mut self) {
@@ -1288,14 +1311,17 @@ impl ProjectBundle {
         self.history_cache = loaded
             .branches
             .iter()
-            .map(|(id, branch)| {
-                (
-                    id.clone(),
-                    CachedHistory {
-                        reference: branch.0.history_ref.clone(),
-                        history: Arc::clone(&branch.1),
-                    },
-                )
+            .filter_map(|(id, branch)| {
+                branch.1.as_ref().map(|history| {
+                    (
+                        id.clone(),
+                        CachedHistory {
+                            reference: branch.0.history_ref.clone(),
+                            profile: branch.0.history_role.admission_profile(&loaded.limits),
+                            history: Arc::clone(history),
+                        },
+                    )
+                })
             })
             .collect();
         self.branches = loaded
@@ -1342,8 +1368,7 @@ impl ProjectBundle {
         Ok(Some(BundleSaveReport {
             history_sha256: self
                 .checkpoint(&self.manual_branch_id)?
-                .history_ref
-                .sha256
+                .history_digest
                 .clone(),
             collection,
             path,
@@ -1515,10 +1540,7 @@ impl ProjectBundle {
             let durable = if let Some(cached) = self.cached_history(branch) {
                 Arc::clone(cached)
             } else {
-                Arc::new(
-                    self.store
-                        .read_record::<HistorySnapshot>(&prior.history_ref)?,
-                )
+                Arc::new(self.store.resolve_history(&prior.history_ref)?)
             };
             if aligned.floor_offset < durable.floor_offset {
                 aligned = kinewright_core::HistoryTransition::floor(
@@ -1531,8 +1553,26 @@ impl ProjectBundle {
                 .clone();
             }
         }
-        let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;
-        let transition = if aligned.floor_offset == selected.floor_offset {
+        let aligned_floor = aligned.floor_offset;
+        let unchanged = self
+            .verified_cached_history(branch)?
+            .is_some_and(|cached| ***cached == aligned);
+        let bounded = if unchanged {
+            // A metadata publication keeps the same fully verified cut. Reuse
+            // its identity- and policy-bound proof while retaining a prepared
+            // target; another replay would reserve the same window twice.
+            crate::bundle_commit::BoundedHistory {
+                history: aligned,
+                floor: None,
+            }
+        } else {
+            self.store.with_history_admission(
+                crate::history_record::HistoryRole::Ordinary,
+                self.store.limits(),
+                || crate::bundle_commit::select_history(&aligned, self.store.limits()),
+            )?
+        };
+        let transition = if aligned_floor == selected.floor_offset {
             bounded.floor
         } else if bounded.history.floor_offset > selected.floor_offset {
             Some(
@@ -1662,16 +1702,30 @@ pub(crate) fn pending_floor(
         .map_err(history_error)
 }
 
+pub(crate) fn encoding_error(error: serde_json::Error) -> BundleError {
+    BundleError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError {
     match error {
         kinewright_core::HistoryError::MutationRefused(reason) => {
             BundleError::CoreMutationRefused(reason)
         }
-        kinewright_core::HistoryError::CaptureChanged => BundleError::HistoryChanged,
+        kinewright_core::HistoryError::CaptureChanged
+        | kinewright_core::HistoryError::StaleExpectation => BundleError::HistoryChanged,
         kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
         kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
         kinewright_core::HistoryError::CommitInvariant => BundleError::HistoryCommitInvariant,
-        other => BundleError::Corrupt(other.to_string()),
+        kinewright_core::HistoryError::Capacity => BundleError::Capacity("history memory"),
+        failure @ kinewright_core::HistoryError::Encoding => {
+            BundleError::Io(io::Error::new(io::ErrorKind::InvalidData, failure))
+        }
+        kinewright_core::HistoryError::Corrupt => {
+            BundleError::Corrupt(kinewright_core::HistoryError::Corrupt.to_string())
+        }
+        failure @ kinewright_core::HistoryError::Disconnected => {
+            BundleError::Io(io::Error::new(io::ErrorKind::BrokenPipe, failure))
+        }
     }
 }
 

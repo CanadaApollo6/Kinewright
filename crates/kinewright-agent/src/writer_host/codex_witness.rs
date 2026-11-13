@@ -1446,7 +1446,7 @@ fn branch_history(
     (*owner
         .store()
         .unwrap()
-        .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+        .resolve_history(&checkpoint.history_ref)
         .unwrap())
     .clone()
 }

@@ -969,7 +969,7 @@ impl Ja1Attachment {
                     .association
                     .as_deref()
                     .ok_or(BundleError::HistoryChanged)?,
-                &committed.current.history.sha256,
+                &committed.current.history_digest,
             )?;
             self.view = Some(view);
             self.message.clone_from(&confirmed.status.message);

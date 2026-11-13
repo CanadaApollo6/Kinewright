@@ -2,6 +2,10 @@
 //! content, the 12 geometric transition descriptors, span integrity,
 //! survival, the adjustment support table, and the four operations).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::collections::BTreeMap;
 
 use kinewright_core::{
@@ -59,7 +63,7 @@ fn empty() -> Document {
     Operation::AddAsset {
         asset: asset(1, MediaKind::AudioVideo, 600),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -119,7 +123,7 @@ fn r1_blend_mode_serde_identity() {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let clip = doc.clip(ClipId(1)).unwrap().clone();
     let bytes = serde_json::to_string(&clip).unwrap();
@@ -157,7 +161,7 @@ fn r1_blend_on_an_audio_clip_is_inert_and_valid() {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc.tracks[2].clips[0].blend_mode = BlendMode::Screen;
     doc.validate().unwrap();
@@ -301,7 +305,7 @@ fn stack() -> Document {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     place(&mut doc, 1, generated(2, ClipContent::Adjustment, 0, 20));
     place(&mut doc, 1, generated(3, solid(), 20, 20));
@@ -337,7 +341,11 @@ fn span(doc: &Document, id: u64) -> (i64, i64, i64, i64) {
 #[allow(clippy::needless_pass_by_value)]
 fn refuse(doc: &Document, op: Operation, error: &OpError) {
     let mut candidate = doc.clone();
-    assert_eq!(op.apply(&mut candidate).as_ref(), Err(error), "{op:?}");
+    assert_eq!(
+        op.apply_with_history_oracle(&mut candidate).as_ref(),
+        Err(error),
+        "{op:?}"
+    );
     assert_eq!(&candidate, doc, "a refused {op:?} must not mutate");
 }
 
@@ -354,7 +362,7 @@ fn r5_span_edits_ride_the_span_paths() {
         clip: ClipId(2),
         new_source: TimeCode(5)..TimeCode(20),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(span(&doc, 2), (5, 20, 5, 20));
 
@@ -363,7 +371,7 @@ fn r5_span_edits_ride_the_span_paths() {
         clip: ClipId(3),
         at: TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(span(&doc, 3), (20, 30, 0, 10));
     let right = doc.tracks[1].clips[2].clone();
@@ -376,7 +384,7 @@ fn r5_span_edits_ride_the_span_paths() {
         right_clip: ClipId(3),
         to: TimeCode(25),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(span(&doc, 2), (0, 25, 0, 25));
     // MO1 R9: a span's origin never moves; the window resizes around it.
@@ -387,7 +395,7 @@ fn r5_span_edits_ride_the_span_paths() {
         clip: ClipId(3),
         to: TimeCode(25),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(span(&doc, 2), (0, 25, 0, 25));
     assert_eq!(span(&doc, 3), (25, 45, 0, 20));
@@ -399,14 +407,14 @@ fn r5_span_edits_ride_the_span_paths() {
         to_track: TrackId(2),
         to: TimeCode(90),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(span(&doc, 4), (90, 110, 0, 20));
     assert_eq!(doc.duration, TimeCode(110));
 
     let mut doc = base.clone();
     Operation::RippleDeleteClip { clip: ClipId(2) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert_eq!(span(&doc, 3), (0, 20, 0, 20));
     assert_eq!(span(&doc, 4), (20, 40, 0, 20));
@@ -639,7 +647,7 @@ fn r6_generated_curves_survive_a_trim_cycle() {
             clip: ClipId(2),
             new_source: TimeCode(5)..TimeCode(20),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         let toggle = vec![(-5, 1), (5, 1), (6, 0), (14, 0)];
         assert_eq!(
@@ -653,7 +661,7 @@ fn r6_generated_curves_survive_a_trim_cycle() {
             clip: ClipId(2),
             new_source: TimeCode(0)..TimeCode(20),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         assert_eq!(doc, base, "{content:?} trimmed back out");
         assert_eq!(
@@ -673,7 +681,7 @@ fn r6_generated_curves_survive_a_split() {
             clip: ClipId(2),
             at: TimeCode(8),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         let toggle = vec![(0, 1), (10, 1), (11, 0), (19, 0)];
         assert_eq!(
@@ -732,7 +740,7 @@ fn r18_adjustment_refuses_chroma_key_on_every_path() {
         clip: ClipId(1),
         effect: disabled.clone(),
     }
-    .apply(&mut keyed_source)
+    .apply_with_history_oracle(&mut keyed_source)
     .unwrap();
     refuse(
         &keyed_source,
@@ -757,7 +765,7 @@ fn r18_adjustment_refuses_chroma_key_on_every_path() {
         clip: ClipId(3),
         effect: disabled,
     }
-    .apply(&mut solid_doc)
+    .apply_with_history_oracle(&mut solid_doc)
     .unwrap();
 }
 
@@ -796,11 +804,11 @@ fn r18_adjustment_refuses_colour_fades_and_admits_the_rest() {
                 clip: ClipId(3),
                 transition,
             }
-            .apply(&mut solid_doc)
+            .apply_with_history_oracle(&mut solid_doc)
             .unwrap();
         } else {
             let mut accepted = doc.clone();
-            op.apply(&mut accepted).unwrap();
+            op.apply_with_history_oracle(&mut accepted).unwrap();
         }
     }
 }
@@ -821,7 +829,7 @@ fn r18_adjustment_accepts_its_supported_rows() {
             clip: ClipId(2),
             effect: effect(id, name),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
     clip_mut(&mut doc, 2).blend_mode = BlendMode::Screen;
@@ -883,7 +891,7 @@ fn r19_generated_kinds_carry_the_mo1_enable_model() {
         clip: ClipId(3),
         enabled: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(!clip(&doc, 3).is_enabled_at(TimeCode(0)));
     doc.validate().unwrap();
@@ -985,7 +993,7 @@ fn r8_creation_places_generated_clips() {
         duration: TimeCode(30),
         effects: vec![look.clone()],
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let adjustment = doc.tracks[1].clips.last().unwrap().clone();
     assert_eq!(adjustment.id, ClipId(5), "the next clip id");
@@ -1001,7 +1009,7 @@ fn r8_creation_places_generated_clips() {
         duration: TimeCode(15),
         color: SolidColor { r: 1, g: 2, b: 3 },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         clip(&doc, 6).content,
@@ -1112,7 +1120,7 @@ fn r8_setters() {
             clip: ClipId(id),
             blend_mode: BlendMode::Overlay,
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         assert_eq!(clip(&doc, id).blend_mode, BlendMode::Overlay);
     }
@@ -1120,7 +1128,7 @@ fn r8_setters() {
         clip: ClipId(1),
         blend_mode: BlendMode::Normal,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(
         !serde_json::to_string(clip(&doc, 1))
@@ -1138,7 +1146,7 @@ fn r8_setters() {
         clip: ClipId(3),
         color,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip(&doc, 3).content, ClipContent::Solid(color));
     for id in [1, 2] {

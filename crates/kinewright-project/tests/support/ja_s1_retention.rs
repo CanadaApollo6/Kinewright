@@ -403,8 +403,14 @@ fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
     let manual = bundle.manual_branch_id().clone();
     let old_checkpoint = bundle.checkpoint_reference(&manual).unwrap();
     let baseline = bundle.checkpoint(&manual).unwrap().clone();
-    let branch = bundle.fork_branch(&manual).unwrap();
+    let branch = bundle
+        .fork_branch(
+            &manual,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )
+        .unwrap();
     let base = SpecialistBaseRecord {
+        history_role: kinewright_project::history_record::HistoryRole::Candidate,
         target_branch: manual.clone(),
         base_head: baseline.head_id,
         base_document_hash: baseline.document_hash,
@@ -625,20 +631,22 @@ fn every_storage_cap_backpressures_without_data_loss() {
     assert_eq!(s.usage().unwrap().reserved_copy_bytes, 0);
     let core = Core::spawn(Document::default()).unwrap();
     let history = core.export_history().unwrap();
-    let encoded = history.encoded_bytes().unwrap();
     let mut control = store(
         &temp,
         "history-control.kinewright",
         StorageLimits::default(),
     );
     let control_pin = control.admit_history(&history).unwrap();
-    let decoded = control
-        .read_record::<kinewright_core::HistorySnapshot>(&control_pin.reference)
-        .unwrap();
+    let decoded = control.resolve_history(&control_pin.reference).unwrap();
     let live = control.usage().unwrap().live_history_bytes;
     drop(decoded);
     let mut limits = StorageLimits::default();
-    limits.branch_history_bytes = encoded.max(live);
+    assert!(
+        live > 0,
+        "resolved ordinary history is charged independently of its wire record"
+    );
+    limits.branch_history_bytes =
+        live.max(kinewright_project::bundle_commit::history_cost_probe(&history, &limits).unwrap());
     let mut s = store(&temp, "history.kinewright", limits);
     let pin = s.admit_history(&history).unwrap();
     apply(
@@ -708,6 +716,7 @@ fn version_and_control_caps(temp: &TempDirectory) {
     let branch = bundle.manual_branch_id().clone();
     let checkpoint = bundle.checkpoint(&branch).unwrap().clone();
     let mut base = SpecialistBaseRecord {
+        history_role: kinewright_project::history_record::HistoryRole::Candidate,
         target_branch: branch.clone(),
         base_head: checkpoint.head_id,
         base_document_hash: checkpoint.document_hash,

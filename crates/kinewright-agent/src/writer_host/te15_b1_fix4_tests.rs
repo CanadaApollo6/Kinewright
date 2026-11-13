@@ -163,7 +163,12 @@ fn fix4_assignment(f: &Fixture, run: &RunId, own: bool) {
         let mut host = owner.lock().unwrap();
         let session = host.owner_mut().unwrap();
         session.save_active().unwrap();
-        let mut branch = session.fork_durable_branch("fix4 child").unwrap();
+        let mut branch = session
+            .fork_durable_branch(
+                "fix4 child",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
         session.persist_durable_branch(&mut branch).unwrap();
         brief.scope.base = session.candidate_binding(branch.branch_id()).unwrap();
     }

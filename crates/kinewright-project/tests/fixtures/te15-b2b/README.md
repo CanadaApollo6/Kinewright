@@ -32,3 +32,12 @@ mutated source files are restored byte-for-byte before fresh-open verification.
 The recovery test's positive-open, specific negative-error and no-rewrite
 assertions are unchanged. Evidence is in `target/run-limit-c4b/cut-generation/`.
 No compatibility decoder or manual graph/receipt rewrite was introduced.
+
+The history-capacity merge regenerates all four archives through the current
+writer with referenced history, compact lineage, C5 retention and C4b coverage.
+It adds no old-shape reader or graph conversion. The three negative captures
+still fail their original publication-refusal assertions with only the two
+successor guards disabled. All three temporary source files are restored
+byte-for-byte before normal reader tests. Current archives, expected-red logs
+and restored SHA-256 values are under
+`target/history-capacity/fixture-generation-merged/`.

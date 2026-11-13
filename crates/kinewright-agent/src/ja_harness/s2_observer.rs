@@ -278,7 +278,10 @@ pub(super) fn rescue_recovery(root: &Path, revised: bool) -> Result<Value, Strin
             );
         }
         let left = bundle.manual_branch_id().clone();
-        let other = bundle.fork_branch(&left)?;
+        let other = bundle.fork_branch(
+            &left,
+            kinewright_project::history_record::HistoryRole::Ordinary,
+        )?;
         let target_ref = bundle.checkpoint_reference(&other)?;
         let target_head = bundle.checkpoint(&other)?.head_id.clone();
         let mut selected = bundle

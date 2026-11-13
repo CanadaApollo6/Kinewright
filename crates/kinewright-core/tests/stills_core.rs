@@ -1,6 +1,10 @@
 //! MO1 R9 still/content integrity — core contract tests (carries reviewer-2's
 //! `i_`/`j_` scenarios plus the per-op still pins).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use kinewright_core::{
     AssetId, AudioMix, ClipContent, ClipId, ColorContext, Document, MediaAsset, MediaCatalog,
     MediaKind, MediaSourceFingerprint, OpError, Operation, Rational, ThreePointMode, TimeCode,
@@ -51,7 +55,7 @@ fn video_asset(doc: &mut Document) {
     Operation::AddAsset {
         asset: asset(1, MediaKind::Video, 600, fps(30)),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
     .unwrap();
 }
 
@@ -59,7 +63,7 @@ fn image_asset(doc: &mut Document) {
     Operation::AddAsset {
         asset: asset(2, MediaKind::Image, 1, Rational::default()),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
     .unwrap();
 }
 
@@ -70,7 +74,7 @@ fn media_clip(doc: &mut Document, at: i64, start: i64, end: i64) {
         at: TimeCode(at),
         source: TimeCode(start)..TimeCode(end),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
     .unwrap();
 }
 
@@ -82,7 +86,7 @@ fn still(doc: &mut Document, at: i64, duration: i64) {
         asset: AssetId(2),
         source_frame: TimeCode(0),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
     .unwrap();
 }
 
@@ -98,7 +102,7 @@ fn add_clip_over_image_is_refused() {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(1),
     }
-    .apply(&mut doc);
+    .apply_with_history_oracle(&mut doc);
     assert!(
         matches!(result, Err(OpError::MissingAsset(_))),
         "wrong asset still misses first, got {result:?}"
@@ -109,7 +113,7 @@ fn add_clip_over_image_is_refused() {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(1),
     }
-    .apply(&mut doc);
+    .apply_with_history_oracle(&mut doc);
     assert!(
         matches!(result, Err(OpError::InvalidSourceRange { .. })),
         "R9 expects InvalidSourceRange, got {result:?}"
@@ -148,7 +152,7 @@ fn roll_with_freeze_neighbour_moves_the_shared_point() {
         right_clip: ClipId(2),
         to: TimeCode(50),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .expect("R9 roll with freeze neighbour");
     let left = &doc.tracks[0].clips[0];
     let right = &doc.tracks[0].clips[1];
@@ -181,7 +185,7 @@ fn slide_with_freeze_clips_moves_span_windows() {
         clip: ClipId(2),
         to: TimeCode(45),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .expect("R9 slide of a freeze middle");
     let middle = &doc.tracks[0].clips[1];
     assert_eq!(middle.timeline_start, TimeCode(45));
@@ -205,7 +209,7 @@ fn roll_and_slide_accept_title_neighbours() {
         duration: TimeCode(60),
         title: Title::default(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::RollEdit {
@@ -213,7 +217,7 @@ fn roll_and_slide_accept_title_neighbours() {
         right_clip: ClipId(2),
         to: TimeCode(50),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .expect("R9 roll onto a title neighbour");
     assert_eq!(doc.tracks[0].clips[1].timeline_start, TimeCode(50));
     assert_eq!(doc.tracks[0].clips[1].source_range.start, TimeCode(0));
@@ -237,7 +241,7 @@ fn trim_and_split_ride_freeze_spans() {
         clip: ClipId(1),
         new_source: TimeCode(10)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.tracks[0].clips[0].timeline_start, TimeCode(10));
     let head = doc.tracks[0].clips[0].clone();
@@ -247,7 +251,7 @@ fn trim_and_split_ride_freeze_spans() {
         clip: ClipId(1),
         at: TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.tracks[0].clips.len(), 2);
     for clip in &doc.tracks[0].clips {
@@ -272,7 +276,7 @@ fn speed_audio_and_replace_refuse_stills() {
         clip: ClipId(1),
         speed_percent: 200,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::SpeedOnNonMediaClip(ClipId(1)));
 
@@ -282,7 +286,7 @@ fn speed_audio_and_replace_refuse_stills() {
         fade_in_frames: TimeCode::ZERO,
         fade_out_frames: TimeCode::ZERO,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::FreezeClipHasNoAudio(ClipId(1)));
 
@@ -291,7 +295,7 @@ fn speed_audio_and_replace_refuse_stills() {
         asset: AssetId(1),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::EditorialRequiresMedia(ClipId(1)));
     let error = Operation::FitToFill {
@@ -299,7 +303,7 @@ fn speed_audio_and_replace_refuse_stills() {
         asset: AssetId(1),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::EditorialRequiresMedia(ClipId(1)));
 }
@@ -315,7 +319,7 @@ fn ripple_moves_and_three_point_splits_stills() {
     still(&mut doc, 60, 60);
 
     Operation::RippleDeleteClip { clip: ClipId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert_eq!(doc.tracks[0].clips[0].timeline_start, TimeCode(0));
     assert!(matches!(
@@ -336,7 +340,7 @@ fn ripple_moves_and_three_point_splits_stills() {
         timeline_out: None,
         mode: ThreePointMode::Insert,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(
         doc.tracks[0]

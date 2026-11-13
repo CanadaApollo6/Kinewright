@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 mod durable;
 mod manual;
 mod owned_media;
+mod release;
 pub use manual::ManualRecoveryEndpoint;
 mod recovery;
 mod retained_work;
@@ -34,8 +35,8 @@ pub use switch::PreparedGuiSwitch;
 mod rescue;
 mod rescue_selection;
 pub use durable::{
-    BranchBinding, DurableBranchSessionGuard, FrozenTaskResult, PersistedTaskCheckpoint,
-    specialist_floor_delta_from_baseline,
+    BranchBinding, DurableBranchRole, DurableBranchSessionGuard, FrozenTaskResult,
+    PersistedTaskCheckpoint, specialist_floor_delta_from_baseline,
 };
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
 type HistoryDigestCache = Option<(
@@ -277,7 +278,7 @@ impl Ja1EditingSession {
             let checkpoint = bundle.checkpoint(&saved.branch)?;
             if report.project_id != *bundle.project_id()
                 || checkpoint.head_id != report.head_id
-                || checkpoint.history_ref.sha256 != report.history_sha256
+                || checkpoint.history_digest != report.history_sha256
                 || checkpoint.checkpoint_generation != report.generation
                 || !crate::same_project_file(&report.path, &store.resolved_root()?)
             {
@@ -286,10 +287,7 @@ impl Ja1EditingSession {
                 ));
             }
             store.with_namespace(|namespace| namespace.verify_read_authority())?;
-            let history = store.read_copy_record::<kinewright_core::HistorySnapshot>(
-                &checkpoint.history_ref,
-                true,
-            )?;
+            let history = store.resolve_copy_history(&checkpoint.history_ref, true)?;
             return Ok((*history).clone());
         }
         let root = bundle.root().ok_or(BundleError::HistoryBarrierInvariant)?;
@@ -298,7 +296,7 @@ impl Ja1EditingSession {
         if report.project_id != *bundle.project_id()
             || report.generation != root.generation
             || report.head_id != checkpoint.head_id
-            || report.history_sha256 != checkpoint.history_ref.sha256
+            || report.history_sha256 != checkpoint.history_digest
             || report.root_sha256 != kinewright_media::sha256_bytes(raw)
             || report.byte_length != raw.len() as u64
             || !crate::same_project_file(&report.path, &store.resolved_root()?)
@@ -316,8 +314,7 @@ impl Ja1EditingSession {
             }
             Ok(())
         })?;
-        let history = store
-            .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;
+        let history = store.resolve_copy_history(&checkpoint.history_ref, true)?;
         Ok((*history).clone())
     }
 
@@ -814,9 +811,7 @@ impl Ja1EditingSession {
         let saved = if let CopyStatus::Committed(report) = copy.status() {
             let destination = copy.destination_owner()?;
             let checkpoint = destination.checkpoint(destination.manual_branch_id())?;
-            let history = destination
-                .store
-                .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)?;
+            let history = destination.store.resolve_history(&checkpoint.history_ref)?;
             attachment
                 .restore_history((*history).clone())
                 .map_err(crate::bundle::history_error)?;
@@ -924,9 +919,11 @@ impl Ja1EditingSession {
             .branches
             .get(&branch)
             .ok_or(BundleError::Unsettled)?
-            .1)
-            .clone();
-        let saved = loaded.manual_checkpoint()?.history_ref.sha256.clone();
+            .1
+            .as_ref()
+            .ok_or(BundleError::Unsettled)?)
+        .clone();
+        let saved = loaded.manual_checkpoint()?.history_digest.clone();
         let bundle = loaded.into_writer()?;
         crate::namespace::note("ja1_session_create", path);
         let core = Core::spawn(kinewright_core::Document::default())
@@ -1415,7 +1412,7 @@ impl Ja1EditingSession {
             let reads = store.admit_retained_reads(&roots)?;
             let bytes = serde_json::to_vec(cut.history())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            let charge = store.reserve_retained_capture(&bytes)?;
+            let charge = reads.reserve_snapshot_history(cut.history())?;
             let history_digest = kinewright_media::sha256_bytes(&bytes);
             let binding =
                 serde_json::to_vec(&(cut.revision(), &roots, &self.inputs, history_digest))

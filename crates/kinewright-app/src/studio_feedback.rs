@@ -582,7 +582,7 @@ fn published_cuts(
                 .read_record::<BranchCheckpoint>(&descriptor.checkpoint_ref)
                 .map_err(text)?;
             let history = store
-                .read_record::<HistorySnapshot>(&checkpoint.history_ref)
+                .resolve_history(&checkpoint.history_ref)
                 .map_err(text)?;
             Ok((
                 descriptor.key,
@@ -899,7 +899,7 @@ impl FeedbackPort for HostFeedback<'_> {
                     .read_record::<BranchCheckpoint>(&reader.descriptor().checkpoint_ref)
                     .map_err(text)?;
                 let history = reader
-                    .read_record::<HistorySnapshot>(&checkpoint.history_ref)
+                    .resolve_history(&checkpoint.history_ref)
                     .map_err(text)?;
                 Ok((key, AcceptedCut::of(&checkpoint.branch_id, &history)?))
             })

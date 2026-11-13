@@ -62,6 +62,9 @@ mod tests {
     include!("c5_launch_capacity_tests.rs");
     include!("run_limit_person_tests.rs");
     include!("run_limit_cleanup_tests.rs");
+    include!("history_capacity_tests.rs");
+    include!("history_capacity_lifecycle_tests.rs");
+    include!("settled_release_tests.rs");
     include!("c5_fix2_tests.rs");
     include!("c5_fix3_tests.rs");
     include!("c5_fix7_tests.rs");
@@ -149,7 +152,12 @@ mod tests {
                 let owner = host.owner.upgrade().unwrap();
                 let mut host = owner.lock().unwrap();
                 let owner = host.owner_mut().unwrap();
-                let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+                let mut candidate = owner
+                    .fork_durable_branch(
+                        "candidate",
+                        kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                    )
+                    .unwrap();
                 owner.persist_durable_branch(&mut candidate).unwrap();
                 let base = owner.candidate_binding(candidate.branch_id()).unwrap();
                 let evidence = owner

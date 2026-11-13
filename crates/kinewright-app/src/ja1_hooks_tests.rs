@@ -52,7 +52,12 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
     // fixture no longer holds the import transaction's temporary input lease.
     drop(owner);
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
-    let mut candidate = owner.fork_durable_branch("run-candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "run-candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     owner.persist_durable_branch(&mut candidate).unwrap();
     owner.close_durable_branch(&candidate).unwrap();
     let base = owner.candidate_binding(candidate.branch_id()).unwrap();

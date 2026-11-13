@@ -70,11 +70,18 @@ fn first_save_over_limit(batch_limit: bool) {
     if batch_limit {
         assert!(original.batches.len() > HISTORY_COMMANDS);
     } else {
-        assert!(serde_json::to_vec(&original).unwrap().len() as u64 > 32 * 1024 * 1024);
+        assert!(
+            kinewright_project::bundle_commit::history_cost_probe(
+                &original,
+                &StorageLimits::default()
+            )
+            .unwrap()
+                > StorageLimits::default().branch_history_bytes
+        );
     }
     assert!(
-        original.encoded_bytes().is_err(),
-        "witness must cross an actual default cap"
+        original.ordinary_admission_bytes().is_err(),
+        "witness must cross an actual default admission cap"
     );
     let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
     let inputs = session
@@ -139,7 +146,7 @@ fn first_save_over_limit(batch_limit: bool) {
     assert_eq!(floor.cursor, stopped.cursor);
 }
 #[test]
-fn first_save_floors_history_above_default_encoded_limit() {
+fn first_save_floors_history_above_default_live_limit() {
     first_save_over_limit(false);
 }
 #[test]
@@ -339,7 +346,10 @@ fn reconcile_floor(landed: bool, branch_save: bool) {
     owner.save(&core, &inputs).unwrap();
     let branch = if branch_save {
         owner
-            .fork_branch(&owner.manual_branch_id().clone())
+            .fork_branch(
+                &owner.manual_branch_id().clone(),
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
             .unwrap()
     } else {
         owner.manual_branch_id().clone()

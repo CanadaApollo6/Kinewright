@@ -53,7 +53,7 @@ fn main() {
     let usage = kinewright_project::studio_records::RunUsageRecord {version:1,run_id:kinewright_project::studio_records::RunId::fresh().unwrap(),event_id:"ordinary".into(),input_tokens:None,output_tokens:None,cache_read_tokens:None,cache_write_tokens:None,cost_microunits:None,coverage:"unavailable".into(),evidence_refs:vec![]};
     refused(bundle.admit_orchestration_record(&usage),"admit_orchestration_record");
     refused(bundle.save_branch(&branch,&manual_core),"save_branch");
-    refused(bundle.fork_branch(&branch),"fork_branch");
+    refused(bundle.fork_branch(&branch, kinewright_project::history_record::HistoryRole::Ordinary),"fork_branch");
     assert!(bundle.store().usage().unwrap().objects <= used,"C5_FIX2_ORDINARY_WRITES_CONSUMED_RESERVE");
     // Person publishers may use the raw reserve; ordinary run writes remain refused.
     for (kind,bytes) in [(kinewright_project::studio_records::FeedbackEvidenceKind::Text,&b"text"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::Strokes,&b"[]"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::FrameProof,&b"{}"[..])] {
@@ -271,7 +271,12 @@ fn c5_fix2_editor(mut f: Fixture) -> C5Fix2History {
             .any(|(_, guard)| guard.branch_id() == &f.brief.scope.base.branch)
         {
             owner.save_active().unwrap();
-            let mut candidate = owner.fork_durable_branch("pressure-candidate").unwrap();
+            let mut candidate = owner
+                .fork_durable_branch(
+                    "pressure-candidate",
+                    kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                )
+                .unwrap();
             owner.persist_durable_branch(&mut candidate).unwrap();
             f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
         }

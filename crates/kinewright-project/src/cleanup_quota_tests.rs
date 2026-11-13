@@ -47,7 +47,12 @@ fn run_limit_cleanup_reserves_specialist_versions_and_reuses_a_full_raw_slot() {
     core.restore_history(history).unwrap();
     let mut owner = Ja1EditingSession::from_bundle(bundle, &core, inputs).unwrap();
     owner.save_active().unwrap();
-    let mut branch = owner.fork_durable_branch("quota witness").unwrap();
+    let mut branch = owner
+        .fork_durable_branch(
+            "quota witness",
+            crate::editing_session::DurableBranchRole::Session,
+        )
+        .unwrap();
     owner.persist_durable_branch(&mut branch).unwrap();
     let count = |owner: &Ja1EditingSession| {
         owner

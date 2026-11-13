@@ -13,17 +13,15 @@ pub const MINIMAL_CUTS: u64 = 16;
 pub const TRANSITION_BYTES: usize = 192 << 10;
 pub const TERMINAL_RECEIPT_BYTES: usize = 6 << 10;
 pub const TERMINAL_TRANSITION_BYTES: usize = 512 << 10;
-pub const HISTORY_BYTES: u64 = 1 << 20;
+pub const HISTORY_BYTES: u64 = crate::history_record::TASK_BYTES;
 pub const RECORD_BYTES: u64 = 8 << 20;
 pub const DECODED_BYTES: u64 = 32 << 20;
 pub const OBJECTS: u64 = 256;
 pub const SPECIALIST_BASES: u64 = TASKS as u64 * 2;
 pub const METADATA: u64 = 256 << 20;
 pub const OWNED: u64 = 8 << 20;
-// At most two branches per task: retained base/delta, retained capture and
-// staged decoded history (each bounded to 1 MiB), plus 16 MiB for serial
-// replay/old-capture overlap. Ordinary writes cannot spend this allowance.
-pub const LIVE_HISTORY: u64 = TASKS as u64 * 2 * 3 * HISTORY_BYTES + (16 << 20);
+// Task and candidate histories have independent live role limits. The raw
+// ordinary/manual pool is unchanged; the simultaneous envelope is reported separately.
 pub const GRAPH_LEVELS: u64 = 8;
 pub const REASON: &str = "Run limit reached. Stop this run to finish cleanup.";
 thread_local! { static READ_HEADROOM: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
@@ -169,8 +167,9 @@ pub(crate) fn ordinary(raw: &StorageLimits) -> StorageLimits {
     limits.issuers = limits.issuers.saturating_sub(4);
     limits.versions = limits.versions.saturating_sub(1);
     limits.control_bytes = limits.control_bytes.min(RECORD_BYTES);
-    limits.branch_history_bytes = limits.branch_history_bytes.min(HISTORY_BYTES);
-    limits.live_history_bytes = limits.live_history_bytes.saturating_sub(LIVE_HISTORY);
+    limits.branch_history_bytes = limits
+        .branch_history_bytes
+        .min(crate::history_record::CANDIDATE_BYTES);
     limits
 }
 impl ProjectStore {
@@ -467,7 +466,6 @@ impl crate::bundle::ProjectBundle {
                 .count() as u64
                 + SPECIALIST_BASES
                 > raw.versions
-            || limits.live_history_bytes < HISTORY_BYTES
             || (index.runs.len() + index.orchestration.len()) as u64 + 1 > limits.versions
             || self.issuers.len() as u64 + u64::from(incoming_issuer) + 4 > limits.issuers
             || self.receipts.detailed.len() as u64
@@ -688,19 +686,22 @@ impl crate::bundle::ProjectBundle {
                 .read_record::<crate::bundle_records::BranchCheckpoint>(
                     &director.brief.scope.base.checkpoint,
                 )?;
-            if checkpoint.history_ref.byte_length > HISTORY_BYTES {
-                return Err(BundleError::RunAdmission(
-                    "Task history is too large to start this run safely.",
-                ));
-            }
-            let history = self
+            // Every native branch starts at this cut with an empty journal. The
+            // person's retained Undo stream is neither copied nor clamped here.
+            let document = self
                 .store
-                .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)?;
-            let bytes =
-                serde_json::to_vec(&*history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if crate::store::preflight_record(&bytes, self.store.limits())? > HISTORY_BYTES {
+                .read_record::<kinewright_core::Document>(&checkpoint.document_ref)?;
+            let seed = kinewright_core::Core::spawn(std::sync::Arc::new((*document).clone()))
+                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+            let history = seed
+                .export_history()
+                .map_err(crate::bundle::history_error)?;
+            if crate::task_history_admission::check_history(&history, self.store.limits()).is_err()
+                || crate::history_size::payload(&history.document)?
+                    > crate::task_history_admission::DOCUMENT_BYTES
+            {
                 return Err(BundleError::RunAdmission(
-                    "Task history is too large to start this run safely.",
+                    "Task history is too large to start this run safely. Save your work, then reduce the document size before trying again.",
                 ));
             }
             if arm {

@@ -188,7 +188,10 @@ fn orphan(own: bool, branch: bool) {
     let (mut owner, input) = start(&path, &core);
     let branch_id = if branch {
         owner
-            .fork_branch(&owner.manual_branch_id().clone())
+            .fork_branch(
+                &owner.manual_branch_id().clone(),
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
             .unwrap()
     } else {
         owner.manual_branch_id().clone()

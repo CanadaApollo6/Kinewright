@@ -114,7 +114,7 @@ fn run_barrier(
                 || published
                     .barrier_checkpoint
                     .as_ref()
-                    .is_none_or(|c| c.history_ref.sha256 != barrier.after.history_sha256)
+                    .is_none_or(|c| c.history_digest != barrier.after.history_sha256)
             {
                 return Err(BundleError::HistoryChanged);
             }

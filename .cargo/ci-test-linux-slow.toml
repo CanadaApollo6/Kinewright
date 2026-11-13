@@ -1,0 +1,13 @@
+# The native history lifecycle test runs real checkpoint codecs on every edit,
+# and only the Linux slow tier runs it. Optimizing core and project in every
+# archive pushed both Windows builds past the 20-minute build limit, so only
+# this archive pays the compile cost. Checks and assertions stay on.
+[profile.test.package.kinewright-core]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.kinewright-project]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true

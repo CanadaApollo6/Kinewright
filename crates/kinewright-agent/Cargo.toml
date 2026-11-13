@@ -88,6 +88,7 @@ rustls = { version = "=0.23.43", optional = true }
 rustls-native-certs = { version = "=0.8.4", optional = true }
 
 [dev-dependencies]
+stats_alloc = "=0.1.10"
 # `tests/mcp_server.rs` drives the AU6 scenarios and generates their sources,
 # so the gates are on when testing this crate even with default features off.
 kinewright-core = { path = "../kinewright-core", features = ["test-util"] }

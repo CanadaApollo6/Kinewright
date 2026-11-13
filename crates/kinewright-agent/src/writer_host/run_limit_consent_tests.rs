@@ -596,7 +596,7 @@ mod tests {
             )
             .unwrap();
         let history = store
-            .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)
+            .resolve_history(&checkpoint.history_ref)
             .unwrap();
         assert_eq!(&*history, &kept, "C4_REOPEN_EXACT_PREVIOUS_CHECKPOINT");
         drop(history);

@@ -1,4 +1,6 @@
 # Slow-tier manifest: tests skipped in the fast tier on the listed OS.
+kinewright_agent writer_host::hooks_tests::tests::run_limit_cleanup_history_bound_refuses_before_any_live_mutation crates/kinewright-agent/src/writer_host/run_limit_cleanup_tests.rs linux-only # Role-bound fixture preserves pre-mutation refusal and Finish
+kinewright_agent writer_host::hooks_tests::tests::history_capacity_vertical_400_finish_merge_stop_reopen crates/kinewright-agent/src/writer_host/history_capacity_tests.rs linux-only # Referenced 400-clip task through Finish, frozen merge, Stop cleanup and exact reopen
 ja_s2_rescue_e2e rescue_reopen_recopy_retention_stress crates/kinewright-agent/tests/ja_s2_rescue_e2e.rs any # C6 bounded local rescue/recopy stress
 kinewright_app ja1_attachment::tests::rescue_complete_app_lifecycle_stress crates/kinewright-app/src/ja1_attachment_tests.rs any # C6 bounded App lifecycle stress
 #
@@ -196,6 +198,11 @@ kinewright_agent writer_host::hooks_tests::tests::te1_media_only_claude_wait_reu
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_small_run_keeps_approvals_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux-only # Scaled maximal dispatch, approvals, Stop and reopen
 kinewright_agent writer_host::hooks_tests::tests::run_limit_person_save_feedback_version_and_dirty_copy_survive_latches crates/kinewright-agent/src/writer_host/run_limit_person_tests.rs linux-only # Person publications before Stop, after Stop and after restart under storage and send latches
 kinewright_agent writer_host::hooks_tests::tests::run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch crates/kinewright-agent/src/writer_host/run_limit_cleanup_tests.rs linux-only # Dirty task cleanup, claim retirement, staged/manual overlap and two reopens at all sticky latches
+
+kinewright_agent writer_host::hooks_tests::tests::history_admission_native_copy_remove_finish_crash_reopen crates/kinewright-agent/src/writer_host/history_capacity_lifecycle_tests.rs linux-only # 1000-keyframe copy/remove checkpoint through Finish, merge, Stop, crash and exact reopen
+kinewright_agent writer_host::hooks_tests::tests::history_capacity_full_lifecycle_crash_reopen crates/kinewright-agent/src/writer_host/history_capacity_lifecycle_tests.rs linux-only # 400 clips/200 real tool edits, abrupt process exit, exact reopen and Redo
+kinewright_agent writer_host::hooks_tests::tests::history_capacity_candidate_refusal_does_not_latch crates/kinewright-agent/src/writer_host/history_capacity_lifecycle_tests.rs linux-only # Native candidate merge capacities and non-latching refusal across four document sizes
+kinewright_agent writer_host::hooks_tests::tests::settled_release_400_clip_resident_heap_after_six_runs crates/kinewright-agent/src/writer_host/settled_release_tests.rs linux-only # Six settled 400-clip/200-edit native runs under an isolated heap profiler
 kinewright_agent writer_host::hooks_tests::tests::c5_linear_fix1_admitted_launch_keeps_its_slots_through_dirty_stop crates/kinewright-agent/src/writer_host/c5_linear_fix1_tests.rs linux-only # C5 whole-attempt context capacity survives dirty Stop and reopen
 kinewright_agent writer_host::hooks_tests::tests::c5_linear_fix1_terminal_notifications_leave_the_history_slot crates/kinewright-agent/src/writer_host/c5_linear_fix1_tests.rs linux-only # C5 terminal reason coalescing retains every attempt wake and a history slot
 kinewright_agent writer_host::hooks_tests::tests::c5_launch_capacity_wait_does_not_stall_other_tasks crates/kinewright-agent/src/writer_host/c5_launch_capacity_tests.rs linux-only # C5 capacity wait preserves other ready launches and Stop

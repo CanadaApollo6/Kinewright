@@ -132,7 +132,7 @@ impl Ja1EditingSession {
                         .clone(),
                 );
             }
-            let original = source.read_copy_record::<HistorySnapshot>(&prior.history_ref, true)?;
+            let original = source.resolve_copy_history(&prior.history_ref, true)?;
             let cut = usize::try_from(history.floor_offset.saturating_sub(original.floor_offset))
                 .map_err(|_| BundleError::Capacity("rescue history cut"))?;
             let contexts = &prior.history_input_manifest_refs;

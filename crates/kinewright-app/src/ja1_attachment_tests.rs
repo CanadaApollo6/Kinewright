@@ -1008,7 +1008,13 @@ fn w13_actual_destination_controls_and_background_freeze() {
 #[cfg(target_os = "linux")]
 fn w13_owner_reported_blockers_render_save_and_close_routes() {
     let (_temp, mut app) = named();
-    let guard = app.owner.fork_durable_branch("Color session").unwrap();
+    let guard = app
+        .owner
+        .fork_durable_branch(
+            "Color session",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
+        .unwrap();
     edit(guard.core(), false);
     app.refresh();
     let text = rendered(&app);
@@ -1873,7 +1879,14 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
             selected.after(),
             &StorageLimits::default(),
         )
-        .unwrap(),
+        .unwrap()
+        .max(
+            kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+                selected.after(),
+                &StorageLimits::default(),
+            )
+            .unwrap(),
+        ),
         ..StorageLimits::default()
     };
     let path = temp.path("committed_history-floor.kinewright");
@@ -3056,6 +3069,8 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     )
     .unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
+    // Keep the original 12,000-edit cut: it must require a real Save floor
+    // while fitting the independently checked portable replay window.
     for index in 0..12_000 {
         edit(&core, index % 2 == 0);
     }
@@ -3343,19 +3358,38 @@ fn te13_fix3_retained_app(
     let core = Core::spawn(doc()).unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     let candidate_base_ref = owner.persist_durable_branch(&mut candidate).unwrap();
     let base = owner.candidate_binding(candidate.branch_id()).unwrap();
-    let mut source = owner.fork_durable_branch("retained task").unwrap();
+    let mut source = owner
+        .fork_registered_from_candidate(&base, "retained task")
+        .unwrap();
     edit(source.core(), false);
     edit(source.core(), true);
     source.core().request(Command::Undo).unwrap();
     let expected = source.core().export_history().unwrap();
     let base_ref = owner.persist_durable_branch(&mut source).unwrap();
     let source = owner.candidate_binding(source.branch_id()).unwrap();
+    assert_eq!(
+        owner
+            .store()
+            .unwrap()
+            .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&source.checkpoint)
+            .unwrap()
+            .history_role,
+        kinewright_project::history_record::HistoryRole::Task,
+        "RETAINED_SOURCE_IS_A_NATIVE_TASK"
+    );
     let mut other_base_ref = None;
     let bad_source = if matches!(scenario, "bad" | "shared-bad" | "two") {
-        let mut bad_source = owner.fork_durable_branch("unreadable task").unwrap();
+        let mut bad_source = owner
+            .fork_registered_from_candidate(&base, "unreadable task")
+            .unwrap();
         edit(bad_source.core(), true);
         other_base_ref = Some(owner.persist_durable_branch(&mut bad_source).unwrap());
         Some(if scenario == "shared-bad" {
@@ -3605,7 +3639,9 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
     );
     assert!(
         rendered(&app).contains("work is open on your timeline"),
-        "TE13_FIX1_STUDIO_OPEN_DISCLOSURE"
+        "TE13_FIX1_STUDIO_OPEN_DISCLOSURE hosted={hosted} completion={completion} {:?}: {}",
+        app.owner.retained_task_discovery(),
+        rendered(&app)
     );
     app.send_manual(Command::Do(Operation::SetTrackSyncLock {
         track: TrackId(1),
@@ -3623,9 +3659,7 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
     );
     let saved = bundle
         .store()
-        .read_record::<kinewright_core::HistorySnapshot>(
-            &bundle.branches_probe()[&manual_branch].history_ref,
-        )
+        .resolve_history(&bundle.branches_probe()[&manual_branch].history_ref)
         .unwrap();
     assert_eq!(*saved, manual, "TE13_FIX1_STUDIO_PERSON_HISTORY");
 }

@@ -7,6 +7,10 @@
 //! follow from them. Every expected value is transcribed from the document by
 //! hand rather than read back out of the descriptor tables.
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
@@ -122,7 +126,7 @@ fn document_with_asset() -> Document {
     Operation::AddLutAsset {
         asset: imported_asset(1),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .expect("a well-formed asset registers");
     document
 }
@@ -155,7 +159,7 @@ fn add(document: &mut Document, effect: Effect) -> Result<(), OpError> {
         clip: ClipId(1),
         effect,
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn set_param(document: &mut Document, id: u64, name: &str, value: i64) -> Result<(), OpError> {
@@ -165,7 +169,7 @@ fn set_param(document: &mut Document, id: u64, name: &str, value: i64) -> Result
         name: name.to_owned(),
         value: ParamValue::Integer(value),
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn set_keyframes(
@@ -180,7 +184,7 @@ fn set_keyframes(
         name: name.to_owned(),
         curve: curve(keyframes),
     }
-    .apply(document)
+    .apply_with_history_oracle(document)
 }
 
 fn curve(keyframes: &[(i64, i64, KeyframeInterpolation)]) -> AutomationCurve {

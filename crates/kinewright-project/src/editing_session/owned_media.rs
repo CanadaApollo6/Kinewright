@@ -114,6 +114,8 @@ impl Ja1EditingSession {
             let after = candidate
                 .export_history()
                 .map_err(crate::bundle::history_error)?;
+            crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
+                .check(&after)?;
             crate::bundle_commit::validate_inputs(&after, &prepared.manifest)?;
             self.attachment
                 .install_checkpoint(before, after)
@@ -309,6 +311,8 @@ impl Ja1EditingSession {
         let after = candidate
             .export_history()
             .map_err(crate::bundle::history_error)?;
+        crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
+            .check(&after)?;
         crate::bundle_commit::validate_inputs(&after, &prepared.manifest)?;
         let retained_entry = prepared
             .manifest

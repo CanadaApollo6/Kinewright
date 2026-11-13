@@ -688,13 +688,16 @@ impl TaskMcp {
             {
                 return Err(refused("merge target/result changed"));
             }
+            host.restore_frozen_task(&state, &merge.task)?;
+            // Refuse candidate capacity before binding a caller or retaining
+            // any pending merge. A different caller cannot poison that state.
+            host.admit_task_merge(&state.run, &merge.task, request.envelope.id.clone())?;
             let reconciliation = host.bind_merge_receipt(
                 &state,
                 &merge.task,
                 &request.envelope,
                 self.endpoint.authority(),
             )?;
-            host.restore_frozen_task(&state, &merge.task)?;
             let producer = host.run_producer(&state.run)?;
             let receipt = host.merge_task_history(
                 &producer,

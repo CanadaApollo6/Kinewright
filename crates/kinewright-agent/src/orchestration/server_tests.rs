@@ -352,7 +352,12 @@ fn s4_drain_and_durable_base() {
     .unwrap();
     let mut owner = Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     candidate
         .core()
         .request(Command::Do(Operation::AddSolidClip {
@@ -624,7 +629,12 @@ fn s4_editor_result_to_candidate() {
     .unwrap();
     let mut owner = Ja1EditingSession::new(root.root(), &manual, StorageLimits::default()).unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    let mut candidate = owner
+        .fork_durable_branch(
+            "candidate",
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        )
+        .unwrap();
     candidate
         .core()
         .request(Command::Do(Operation::AddSolidClip {

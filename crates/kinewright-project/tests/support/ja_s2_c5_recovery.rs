@@ -173,7 +173,7 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     let expected_target = (*session
         .store()
         .unwrap()
-        .read_record::<kinewright_core::HistorySnapshot>(&archived_checkpoint.history_ref)
+        .resolve_history(&archived_checkpoint.history_ref)
         .unwrap())
     .clone();
     drop(archived_checkpoint);
@@ -262,16 +262,41 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
                 );
             }
         }
-        for (clip, occurrence) in &current.baseline {
-            if let Some(original) = source_lineage.current.get(clip) {
-                assert_eq!(occurrence, original);
-            }
-        }
+        // A newly selected floor can precede the source's split. Compare
+        // with that saved document's occurrence map, not the final children.
+        let selected_history = selected.export_history().unwrap();
+        let baseline_lineage = std::iter::once((&*expected_l.baseline, &source_lineage.baseline))
+            .chain(std::iter::once((
+                &*expected_l.document,
+                &source_lineage.current,
+            )))
+            .chain(
+                expected_l
+                    .cursor
+                    .undo
+                    .iter()
+                    .zip(&source_lineage.undo)
+                    .map(|(entry, boundary)| (&*entry.document, boundary)),
+            )
+            .chain(
+                expected_l
+                    .cursor
+                    .redo
+                    .iter()
+                    .zip(&source_lineage.redo)
+                    .map(|(entry, boundary)| (&*entry.document, boundary)),
+            )
+            .find_map(|(document, boundary)| {
+                (document == &*selected_history.baseline).then_some(boundary)
+            })
+            .expect("this fixture only changes sync-lock flags after the saved split");
+        assert_eq!(&current.baseline, baseline_lineage);
         assert_eq!(current.current, source_lineage.current);
         assert_eq!(current.split_ancestry, source_lineage.split_ancestry);
     }
     assert!(selected.export_history().unwrap().floor_offset > expected_r.floor_offset);
     let later_r = selected.export_history().unwrap();
+    let (_, expected_right_lineage) = branch_lineage(&session, &right);
     session
         .prepare_recovery(RecoverySelection::WorkingBranch(original_branch.clone()))
         .unwrap();
@@ -286,11 +311,7 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     session.save_active().unwrap();
     let (later_ids, later_lineage) = branch_lineage(&session, &original_branch);
     let (_, right_lineage) = branch_lineage(&session, &right);
-    for (clip, occurrence) in &right_lineage.baseline {
-        if let Some(original) = later_lineage.current.get(clip) {
-            assert_eq!(occurrence, original);
-        }
-    }
+    assert_eq!(right_lineage, expected_right_lineage);
     for shared in later_ids.iter().filter(|id| target_ids.contains(id)) {
         assert!(source_ids.contains(shared));
     }
@@ -365,7 +386,12 @@ pub(super) fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
 #[test]
 pub(super) fn w13_one_level_retention_and_explicit_retirement() {
     let (_temp, mut session, _, branch) = fixture();
-    let mut guard = session.fork_durable_branch("worker X").unwrap();
+    let mut guard = session
+        .fork_durable_branch(
+            "worker X",
+            kinewright_project::editing_session::DurableBranchRole::Session,
+        )
+        .unwrap();
     let specialist_core = guard.core().clone();
     edit(&specialist_core, false);
     let root = session.root_sha256().unwrap();
@@ -749,7 +775,12 @@ pub(super) fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
                 let cost =
                     kinewright_project::bundle_commit::history_cost_probe(&after, profile).ok()?;
                 (after.encoded_bytes().ok()? <= profile.branch_history_bytes
-                    && cost <= profile.branch_history_bytes)
+                    && cost <= profile.branch_history_bytes
+                    && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+                        &after, profile,
+                    )
+                    .ok()?
+                        <= profile.branch_history_bytes)
                     .then_some(after)
             })
             .expect("ordinary legal earliest floor");

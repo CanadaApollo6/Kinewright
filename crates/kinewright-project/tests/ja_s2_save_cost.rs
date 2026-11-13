@@ -46,7 +46,12 @@ fn fixture() -> SaveCostFixture {
     let manual = owner.manual_branch_id().clone();
     let mut histories = vec![owner.checkpoint(&manual).unwrap().history_ref.clone()];
     for branch in 0..5 {
-        let id = owner.fork_branch(&manual).unwrap();
+        let id = owner
+            .fork_branch(
+                &manual,
+                kinewright_project::history_record::HistoryRole::Ordinary,
+            )
+            .unwrap();
         let other = Core::spawn((*owner.branch_history(&id).unwrap().document).clone()).unwrap();
         for n in 0..24 + branch {
             edit(&other, n % 2 == 0);

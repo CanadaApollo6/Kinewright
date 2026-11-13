@@ -265,7 +265,10 @@ fn te15_b20_foreign_and_widened_assignments_refuse() {
         let candidate = owner
             .owner_mut()
             .unwrap()
-            .fork_durable_branch("other candidate")
+            .fork_durable_branch(
+                "other candidate",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
             .unwrap();
         owner
             .owner()

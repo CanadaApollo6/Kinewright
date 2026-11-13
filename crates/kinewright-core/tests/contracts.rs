@@ -1,3 +1,7 @@
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -94,7 +98,7 @@ fn document_with_one_clip() -> Document {
     Operation::AddAsset {
         asset: asset(1, fps, 300),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -102,7 +106,7 @@ fn document_with_one_clip() -> Document {
         at: TimeCode(10),
         source: TimeCode(0)..TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -113,7 +117,7 @@ fn document_with_three_clips() -> Document {
     Operation::AddAsset {
         asset: asset(1, fps, 300),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for (at, source) in [
         (0, TimeCode(0)..TimeCode(10)),
@@ -126,7 +130,7 @@ fn document_with_three_clips() -> Document {
             at: TimeCode(at),
             source,
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     doc
@@ -143,11 +147,13 @@ fn audio_video_document() -> Document {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let mut av = asset(1, fps, 300);
     av.kind = MediaKind::AudioVideo;
-    Operation::AddAsset { asset: av }.apply(&mut doc).unwrap();
+    Operation::AddAsset { asset: av }
+        .apply_with_history_oracle(&mut doc)
+        .unwrap();
     doc
 }
 
@@ -157,7 +163,7 @@ fn document_with_butt_joined_clips() -> Document {
     Operation::AddAsset {
         asset: asset(1, fps, 600),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for (at, source) in [
         (0, TimeCode(50)..TimeCode(100)),
@@ -170,7 +176,7 @@ fn document_with_butt_joined_clips() -> Document {
             at: TimeCode(at),
             source,
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     doc
@@ -196,7 +202,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             gain_curve: None,
         },
     }
-    .apply(&mut part_b)
+    .apply_with_history_oracle(&mut part_b)
     .unwrap();
     Operation::SetAudioMaster {
         master: AudioMaster {
@@ -215,12 +221,12 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             gain_curve: None,
         },
     }
-    .apply(&mut part_b)
+    .apply_with_history_oracle(&mut part_b)
     .unwrap();
     Operation::SetPanLaw {
         law: PanLaw::ConstantPower,
     }
-    .apply(&mut part_b)
+    .apply_with_history_oracle(&mut part_b)
     .unwrap();
     let encoded = serde_json::to_string(&part_b).unwrap();
     assert!(encoded.contains(r#""gain_tenth_db":-25"#));
@@ -889,7 +895,8 @@ fn source_fingerprint_validation_requires_a_verified_pair() {
 
         let mut through_operation = empty_timeline(Rational::new(30, 1).unwrap());
         assert_eq!(
-            Operation::AddAsset { asset: candidate }.apply(&mut through_operation),
+            Operation::AddAsset { asset: candidate }
+                .apply_with_history_oracle(&mut through_operation),
             Err(expected)
         );
         assert!(through_operation.media_pool.is_empty());
@@ -903,7 +910,7 @@ fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
     original.source_fingerprint = source_fingerprint(2_048);
     let mut document = empty_timeline(fps);
     Operation::AddAsset { asset: original }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -911,13 +918,13 @@ fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
         at: TimeCode(0),
         source: TimeCode(5)..TimeCode(25),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::SetAssetColorDescription {
         asset: AssetId(1),
         color_description: user_color_override(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let before = document.clone();
     let current = document.asset(AssetId(1)).unwrap().clone();
@@ -927,7 +934,7 @@ fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
         allow_unverified_source: false,
     };
 
-    operation.apply(&mut document).unwrap();
+    operation.apply_with_history_oracle(&mut document).unwrap();
     let relinked = document.asset(AssetId(1)).unwrap().clone();
     assert_eq!(relinked.id, before.asset(AssetId(1)).unwrap().id);
     assert_eq!(relinked.name, before.asset(AssetId(1)).unwrap().name);
@@ -948,7 +955,7 @@ fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
             candidate: mismatch,
             allow_unverified_source: false,
         })
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Err(OpError::RelinkMetadataMismatch {
             asset: AssetId(1),
             field: "duration",
@@ -966,7 +973,7 @@ fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
             candidate: hash_mismatch,
             allow_unverified_source: false,
         })
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Err(OpError::RelinkFingerprintMismatch { asset: AssetId(1) })
     );
     assert_eq!(document, unchanged);
@@ -979,7 +986,7 @@ fn relink_asset_requires_verified_compatible_source_and_preserves_references() {
             candidate: missing,
             allow_unverified_source: true,
         })
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Err(OpError::UnverifiedRelinkCandidate { asset: AssetId(1) })
     );
     assert_eq!(document, unchanged);
@@ -992,7 +999,7 @@ fn relink_unknown_legacy_source_requires_explicit_confirmation() {
     Operation::AddAsset {
         asset: asset(1, fps, 120),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let current = document.asset(AssetId(1)).unwrap().clone();
     let candidate = relink_candidate(
@@ -1008,7 +1015,7 @@ fn relink_unknown_legacy_source_requires_explicit_confirmation() {
             candidate: candidate.clone(),
             allow_unverified_source: false,
         })
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: AssetId(1) })
     );
     assert_eq!(document.asset(AssetId(1)).unwrap().path, current.path);
@@ -1018,7 +1025,7 @@ fn relink_unknown_legacy_source_requires_explicit_confirmation() {
         candidate,
         allow_unverified_source: true,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document.asset(AssetId(1)).unwrap().path,
@@ -1271,7 +1278,7 @@ fn asset_colour_override_is_typed_atomic_and_undoable_data() {
     Operation::AddAsset {
         asset: asset(1, fps, 120),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let color_description = user_color_override();
@@ -1279,7 +1286,7 @@ fn asset_colour_override_is_typed_atomic_and_undoable_data() {
         asset: AssetId(1),
         color_description: color_description.clone(),
     };
-    operation.apply(&mut document).unwrap();
+    operation.apply_with_history_oracle(&mut document).unwrap();
     assert_eq!(
         document.asset(AssetId(1)).unwrap().color_description,
         color_description
@@ -1304,6 +1311,9 @@ fn project_colour_context_reset_is_typed_journaled_undoable_and_redoable() {
     let operation = Operation::SetColorContext {
         color_context: target.clone(),
     };
+    operation
+        .apply_with_history_oracle(&mut initial.clone())
+        .unwrap();
     let core = Core::spawn(initial.clone()).unwrap();
 
     let Event::DocumentChanged {
@@ -1345,7 +1355,7 @@ fn project_colour_context_operation_rejects_invalid_confidence_atomically() {
     let error = Operation::SetColorContext {
         color_context: invalid,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
 
     assert_eq!(error, OpError::ColorConfidenceOutOfRange { actual: 10_001 });
@@ -1359,7 +1369,7 @@ fn asset_colour_override_rejects_missing_invalid_and_forged_metadata_atomically(
     Operation::AddAsset {
         asset: asset(1, fps, 120),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let before = document.clone();
 
@@ -1367,7 +1377,7 @@ fn asset_colour_override_rejects_missing_invalid_and_forged_metadata_atomically(
         asset: AssetId(999),
         color_description: user_color_override(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
     assert_eq!(error, OpError::MissingAsset(AssetId(999)));
     assert_eq!(document, before);
@@ -1378,7 +1388,7 @@ fn asset_colour_override_rejects_missing_invalid_and_forged_metadata_atomically(
         asset: AssetId(1),
         color_description: excessive,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
     assert_eq!(error, OpError::ColorConfidenceOutOfRange { actual: 10_001 });
     assert_eq!(document, before);
@@ -1389,7 +1399,7 @@ fn asset_colour_override_rejects_missing_invalid_and_forged_metadata_atomically(
         asset: AssetId(1),
         color_description: zero,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
     assert_eq!(
         error,
@@ -1403,7 +1413,7 @@ fn asset_colour_override_rejects_missing_invalid_and_forged_metadata_atomically(
         asset: AssetId(1),
         color_description: forged,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
     assert_eq!(
         error,
@@ -1435,7 +1445,7 @@ fn document_and_add_asset_validate_every_colour_confidence() {
         Operation::AddAsset {
             asset: invalid_asset,
         }
-        .apply(&mut through_operation),
+        .apply_with_history_oracle(&mut through_operation),
         Err(OpError::ColorConfidenceOutOfRange { actual: 10_001 })
     );
     assert_eq!(through_operation, before);
@@ -1468,7 +1478,7 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddTitle {
         track: TrackId(1),
@@ -1482,7 +1492,7 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
             ..Title::default()
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.duration, TimeCode(120));
     assert!(matches!(
@@ -1494,7 +1504,7 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         clip: ClipId(1),
         at: TimeCode(75),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document
@@ -1522,13 +1532,13 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         to_track: TrackId(2),
         to: TimeCode(90),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::TrimClip {
         clip: ClipId(2),
         new_source: TimeCode(50)..TimeCode(80),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document.clip(ClipId(2)).unwrap().timeline_start,
@@ -1537,17 +1547,24 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
     Operation::LinkClips {
         clips: vec![ClipId(1), ClipId(2)],
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document.clip(ClipId(1)).unwrap().link,
         document.clip(ClipId(2)).unwrap().link
     );
     Operation::RippleDeleteClip { clip: ClipId(1) }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
     assert!(document.clip(ClipId(1)).is_none());
 
+    Operation::SetTitleParam {
+        clip: ClipId(2),
+        name: "text".to_owned(),
+        value: ParamValue::Text("Updated".to_owned()),
+    }
+    .apply_with_history_oracle(&mut document.clone())
+    .unwrap();
     let core = Core::spawn(document.clone()).unwrap();
     core.request(Command::Do(Operation::SetTitleParam {
         clip: ClipId(2),
@@ -1650,7 +1667,7 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
             asset: AssetId(1),
             source_frame: TimeCode(10),
         }
-        .apply(&mut candidate)
+        .apply_with_history_oracle(&mut candidate)
         .unwrap_err(),
         OpError::NegativeTimelinePosition(TimeCode(-1))
     );
@@ -1663,7 +1680,7 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
         asset: AssetId(1),
         source_frame: TimeCode(119),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.duration, TimeCode(40));
 }
@@ -1680,7 +1697,7 @@ fn freeze_content_round_trips_with_freeze_tag_and_hand_edits_are_validated() {
         asset: AssetId(1),
         source_frame: TimeCode(42),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let encoded = serde_json::to_string(&document).unwrap();
@@ -1717,13 +1734,13 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         asset: AssetId(1),
         source_frame: TimeCode(77),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::SplitClip {
         clip: ClipId(1),
         at: TimeCode(75),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     for id in [ClipId(1), ClipId(2)] {
         let clip = document.clip(id).unwrap();
@@ -1740,13 +1757,13 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         to_track: TrackId(2),
         to: TimeCode(90),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::TrimClip {
         clip: ClipId(2),
         new_source: TimeCode(50)..TimeCode(80),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document.clip(ClipId(2)).unwrap().timeline_start,
@@ -1755,14 +1772,14 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
     Operation::LinkClips {
         clips: vec![ClipId(1), ClipId(2)],
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::RippleInsertGap {
         track: TrackId(1),
         at: TimeCode(30),
         duration: TimeCode(10),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document.clip(ClipId(1)).unwrap().timeline_start,
@@ -1793,7 +1810,7 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
             fade_in_frames: TimeCode::ZERO,
             fade_out_frames: TimeCode::ZERO,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap_err(),
         OpError::FreezeClipHasNoAudio(ClipId(1))
     );
@@ -1803,7 +1820,7 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
             name: "text".to_owned(),
             value: ParamValue::Text("no".to_owned()),
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap_err(),
         OpError::NotTitleClip(ClipId(1))
     );
@@ -1819,7 +1836,7 @@ fn title_and_marker_parameter_validation_is_atomic() {
         duration: TimeCode(30),
         title: Title::default(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let before = document.clone();
     let error = Operation::SetTitleParam {
@@ -1827,7 +1844,7 @@ fn title_and_marker_parameter_validation_is_atomic() {
         name: "fade_in_frames".to_owned(),
         value: ParamValue::Integer(31),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
     assert!(matches!(error, OpError::TitleFadeTooLong { .. }));
     assert_eq!(document, before);
@@ -1840,14 +1857,14 @@ fn title_and_marker_parameter_validation_is_atomic() {
             color_token: 0,
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::SetMarkerParam {
         marker: MarkerId(1),
         name: "color_token".to_owned(),
         value: ParamValue::Integer(3),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.marker(MarkerId(1)).unwrap().color_token, 3);
 }
@@ -1864,7 +1881,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(2),
@@ -1872,7 +1889,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         at: TimeCode(25),
         source: TimeCode(70)..TimeCode(80),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(2),
@@ -1880,7 +1897,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         at: TimeCode(35),
         source: TimeCode(80)..TimeCode(90),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(2),
@@ -1888,7 +1905,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         at: TimeCode(70),
         source: TimeCode(90)..TimeCode(100),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddTrack {
         track: Track {
@@ -1898,13 +1915,13 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::SetTrackSyncLock {
         track: TrackId(3),
         locked: false,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(3),
@@ -1912,7 +1929,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         at: TimeCode(70),
         source: TimeCode(100)..TimeCode(110),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     for (id, position) in [(1, 30), (2, 39), (3, 40), (4, 70)] {
         Operation::AddMarker {
@@ -1923,12 +1940,12 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
                 color_token: 0,
             },
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
     }
 
     Operation::RippleDeleteClip { clip: ClipId(2) }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
     assert_eq!(document.tracks[0].clips[1].id, ClipId(3));
     assert_eq!(document.tracks[0].clips[1].timeline_start, TimeCode(30));
@@ -1957,14 +1974,14 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         track: TrackId(1),
         locked: false,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::RippleInsertGap {
         track: TrackId(1),
         at: TimeCode(30),
         duration: TimeCode(7),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.tracks[0].clips[1].timeline_start, TimeCode(37));
     assert_eq!(
@@ -2011,7 +2028,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         },
     ] {
         let before = document.clone();
-        assert!(invalid.apply(&mut document).is_err());
+        assert!(invalid.apply_with_history_oracle(&mut document).is_err());
         assert_eq!(document, before);
     }
 }
@@ -2023,7 +2040,7 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
     Operation::AddAsset {
         asset: asset(1, fps, 300),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -2031,7 +2048,7 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
         at: TimeCode(10),
         source: TimeCode(0)..TimeCode(10),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -2039,7 +2056,7 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
         at: TimeCode(30),
         source: TimeCode(10)..TimeCode(20),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddTrack {
         track: Track {
@@ -2049,7 +2066,7 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(2),
@@ -2057,7 +2074,7 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
         at: TimeCode(15),
         source: TimeCode(20)..TimeCode(30),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::AddClip {
         track: TrackId(2),
@@ -2065,12 +2082,12 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
         at: TimeCode(30),
         source: TimeCode(30)..TimeCode(40),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let before = document.clone();
     assert_eq!(
-        Operation::RippleDeleteClip { clip: ClipId(1) }.apply(&mut document),
+        Operation::RippleDeleteClip { clip: ClipId(1) }.apply_with_history_oracle(&mut document),
         Err(OpError::ClipOverlap {
             track: TrackId(2),
             clip: ClipId(3),
@@ -2093,7 +2110,7 @@ proptest! {
         let fps = Rational::new(30, 1).unwrap();
         let mut document = empty_timeline(fps);
         Operation::AddAsset { asset: asset(1, fps, 300) }
-            .apply(&mut document)
+            .apply_with_history_oracle(&mut document)
             .unwrap();
         Operation::AddTrack {
             track: Track {
@@ -2103,19 +2120,19 @@ proptest! {
                 clips: Vec::new(),
             },
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
         Operation::SetTrackSyncLock {
             track: TrackId(2),
             locked: secondary_locked,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
         Operation::SetTrackSyncLock {
             track: TrackId(1),
             locked: source_locked,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
         let second_start = first_duration.saturating_add(first_gap);
         let third_start = second_start
@@ -2139,7 +2156,7 @@ proptest! {
                 at: TimeCode(at),
                 source,
             }
-            .apply(&mut document)
+            .apply_with_history_oracle(&mut document)
             .unwrap();
         }
         Operation::AddClip {
@@ -2148,7 +2165,7 @@ proptest! {
             at: TimeCode(third_start),
             source: TimeCode(0)..TimeCode(1),
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
         let ripple_point = second_start + removed_duration;
         for (id, position) in [
@@ -2164,12 +2181,12 @@ proptest! {
                     color_token: 0,
                 },
             }
-            .apply(&mut document)
+            .apply_with_history_oracle(&mut document)
             .unwrap();
         }
 
         Operation::RippleDeleteClip { clip: ClipId(2) }
-            .apply(&mut document)
+            .apply_with_history_oracle(&mut document)
             .unwrap();
         prop_assert_eq!(document.clip(ClipId(3)).unwrap().timeline_start, TimeCode(third_start - removed_duration));
         let expected_secondary = if secondary_locked {
@@ -2203,7 +2220,7 @@ proptest! {
             },
         };
         let before = document.clone();
-        let result = operation.apply(&mut document);
+        let result = operation.apply_with_history_oracle(&mut document);
         if fade_in <= duration && fade_out <= duration {
             prop_assert!(result.is_ok());
             prop_assert_eq!(document.duration, TimeCode(duration));
@@ -2226,7 +2243,7 @@ fn link_and_unlink_validate_selection_and_only_mutate_link_data() {
     Operation::LinkClips {
         clips: vec![ClipId(1), ClipId(3)],
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.clip(ClipId(1)).unwrap().link, Some(LinkId(1)));
     assert_eq!(document.clip(ClipId(3)).unwrap().link, Some(LinkId(1)));
@@ -2243,7 +2260,7 @@ fn link_and_unlink_validate_selection_and_only_mutate_link_data() {
     Operation::UnlinkClips {
         clips: vec![ClipId(1)],
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.clip(ClipId(1)).unwrap().link, None);
     assert_eq!(document.clip(ClipId(3)).unwrap().link, Some(LinkId(1)));
@@ -2264,7 +2281,7 @@ fn link_and_unlink_validate_selection_and_only_mutate_link_data() {
         },
     ] {
         let before = document.clone();
-        assert!(invalid.apply(&mut document).is_err());
+        assert!(invalid.apply_with_history_oracle(&mut document).is_err());
         assert_eq!(document, before);
     }
 }
@@ -2287,7 +2304,7 @@ fn marker_operations_validate_sort_move_remove_and_atomic_rejection() {
         },
     ] {
         Operation::AddMarker { marker }
-            .apply(&mut document)
+            .apply_with_history_oracle(&mut document)
             .unwrap();
     }
     assert_eq!(
@@ -2303,13 +2320,13 @@ fn marker_operations_validate_sort_move_remove_and_atomic_rejection() {
         marker: MarkerId(2),
         to: TimeCode(3),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document.markers[0].id, MarkerId(2));
     Operation::RemoveMarker {
         marker: MarkerId(1),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert!(document.marker(MarkerId(1)).is_none());
 
@@ -2347,7 +2364,7 @@ fn marker_operations_validate_sort_move_remove_and_atomic_rejection() {
         },
     ] {
         let before = document.clone();
-        assert!(invalid.apply(&mut document).is_err());
+        assert!(invalid.apply_with_history_oracle(&mut document).is_err());
         assert_eq!(document, before);
     }
 }
@@ -2367,7 +2384,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         clip: ClipId(1),
         effect: effect.clone(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.clip(ClipId(1)).unwrap().effects, vec![effect]);
 
@@ -2384,7 +2401,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
                 keyframes: BTreeMap::new(),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::DuplicateEffect {
             clip: ClipId(1),
             effect: EffectId(7),
@@ -2398,7 +2415,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         name: "percent".to_owned(),
         value: ParamValue::Integer(40),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         doc.clip(ClipId(1)).unwrap().effects[0]
@@ -2415,7 +2432,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
             name: "percent".to_owned(),
             value: ParamValue::Integer(101),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::EffectParamOutOfRange {
             effect: "brightness".to_owned(),
             name: "percent".to_owned(),
@@ -2430,7 +2447,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
         clip: ClipId(1),
         effect: EffectId(7),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(doc.clip(ClipId(1)).unwrap().effects.is_empty());
     assert_eq!(
@@ -2445,7 +2462,7 @@ fn effect_operations_validate_names_ids_parameters_and_are_atomic() {
                 keyframes: BTreeMap::new(),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::UnknownEffect("blur".to_owned()))
     );
 }
@@ -2605,7 +2622,7 @@ fn document_with_neutral_primary_correction() -> Document {
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -2627,7 +2644,7 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
                 name: parameter.name.to_owned(),
                 value: ParamValue::Integer(value),
             }
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap();
         }
 
@@ -2639,7 +2656,7 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
                 name: parameter.name.to_owned(),
                 value: ParamValue::Integer(actual),
             }
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .expect_err("out-of-range primary parameter must be rejected atomically");
 
             assert_eq!(
@@ -2682,7 +2699,7 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
         name: "shadows_percent".to_owned(),
         curve: curve.clone(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
     assert_eq!(effect.keyframes.get("shadows_percent"), Some(&curve));
@@ -2707,7 +2724,7 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
                 }],
             },
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .is_err()
     );
     assert_eq!(doc, before);
@@ -2782,7 +2799,7 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let curve = AutomationCurve {
         keyframes: vec![
@@ -2808,7 +2825,7 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
         name: "percent".to_owned(),
         curve: curve.clone(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
     assert_eq!(effect.integer_parameter_at("percent", TimeCode(5)), Some(0));
@@ -2855,7 +2872,7 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
                 name: "percent".to_owned(),
                 curve: invalid,
             }
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .is_err()
         );
         assert_eq!(doc, before);
@@ -2866,7 +2883,7 @@ fn effect_keyframes_are_exact_validated_and_atomically_clearable() {
         effect: EffectId(7),
         name: "percent".to_owned(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
     assert!(effect.keyframes.is_empty());
@@ -2895,7 +2912,7 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
                 keyframes: BTreeMap::new(),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::MissingCubeLutPath)
     );
     assert_eq!(doc, before);
@@ -2917,7 +2934,7 @@ fn cube_lut_requires_a_non_empty_text_path_and_preserves_it() {
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         doc.clip(ClipId(1)).unwrap().effects[0]
@@ -2976,7 +2993,7 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
             gain_curve: None,
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.audio_mix.buses[0].name, "Dialogue");
 
@@ -3142,12 +3159,16 @@ fn audio_buses_validate_routing_effect_domains_and_project_keyframes_atomically(
         },
     ];
     for bus in invalid_buses {
-        assert!(Operation::UpsertAudioBus { bus }.apply(&mut doc).is_err());
+        assert!(
+            Operation::UpsertAudioBus { bus }
+                .apply_with_history_oracle(&mut doc)
+                .is_err()
+        );
         assert_eq!(doc, before);
     }
 
     Operation::RemoveAudioBus { bus: AudioBusId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(doc.audio_mix.is_empty());
 }
@@ -3175,7 +3196,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
             gain_curve: None,
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.audio_mix.master.gain_tenth_db, -20);
 
@@ -3251,7 +3272,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
     ];
     for (master, expected) in rejected {
         assert_eq!(
-            Operation::SetAudioMaster { master }.apply(&mut doc),
+            Operation::SetAudioMaster { master }.apply_with_history_oracle(&mut doc),
             Err(expected)
         );
         assert_eq!(doc, before);
@@ -3261,7 +3282,7 @@ fn the_audio_master_chain_rejects_ducking_duplicate_ids_and_an_over_budget_chain
     Operation::SetAudioMaster {
         master: AudioMaster::default(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(doc.audio_mix.is_empty());
 }
@@ -3292,7 +3313,7 @@ fn current_neutral_audio_mix_omissions_round_trip() {
             gain_curve: None,
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let current_mix = serde_json::to_string(&doc).unwrap();
     // The current writer omits neutral mix settings.
@@ -3318,7 +3339,7 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
             duration: TimeCode(12),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         doc.clip(ClipId(1)).unwrap().transition_in,
@@ -3337,13 +3358,13 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
                 duration: TimeCode(4),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::DuplicateTransition(ClipId(1)))
     );
     assert_eq!(doc, before_duplicate);
 
     Operation::RemoveTransition { clip: ClipId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert_eq!(
         Operation::AddTransition {
@@ -3353,7 +3374,7 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
                 duration: TimeCode(31),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::TransitionTooLong {
             clip: ClipId(1),
             duration: TimeCode(31),
@@ -3370,7 +3391,7 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
                 duration: TimeCode(4),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::UnknownTransition("unknown".to_owned()))
     );
     assert_eq!(doc, before_invalid);
@@ -3383,7 +3404,7 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
                 duration: TimeCode::ZERO,
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::InvalidTransitionDuration {
             clip: ClipId(1),
             duration: TimeCode::ZERO,
@@ -3420,7 +3441,7 @@ fn transition_descriptors_validate_all_registered_names_and_document_loads() {
                 duration: TimeCode(12),
             },
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
 
         let encoded = serde_json::to_string(&document).unwrap();
@@ -3540,7 +3561,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
         clip: ClipId(1),
         curve: Some(accepted.clone()),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(
         document.clip(ClipId(1)).unwrap().audio_gain_curve.as_ref(),
@@ -3552,7 +3573,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
         clip: ClipId(1),
         curve: Some(accepted.clone()),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert_eq!(document, before);
     assert_eq!(
@@ -3615,7 +3636,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
                 clip: ClipId(1),
                 curve: Some(rejected),
             }
-            .apply(&mut document),
+            .apply_with_history_oracle(&mut document),
             Err(expected)
         );
         assert_eq!(document, before, "a rejection must not mutate");
@@ -3626,7 +3647,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
         clip: ClipId(1),
         curve: None,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     assert!(document.clip(ClipId(1)).unwrap().audio_gain_curve.is_none());
 
@@ -3637,7 +3658,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
         duration: TimeCode(30),
         title: Title::default(),
     }
-    .apply(&mut titled)
+    .apply_with_history_oracle(&mut titled)
     .unwrap();
     let title_clip = titled
         .tracks
@@ -3651,7 +3672,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
             clip: title_clip,
             curve: Some(curve(&[(0, -100)])),
         }
-        .apply(&mut titled),
+        .apply_with_history_oracle(&mut titled),
         Err(OpError::TitleClipHasNoAudio(title_clip))
     );
     let mut hand_edited = titled.clone();
@@ -3676,7 +3697,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
         asset: AssetId(1),
         source_frame: TimeCode(5),
     }
-    .apply(&mut frozen)
+    .apply_with_history_oracle(&mut frozen)
     .unwrap();
     let freeze_clip = frozen
         .tracks
@@ -3690,7 +3711,7 @@ fn clip_gain_envelope_validates_bounds_titles_and_freezes_atomically() {
             clip: freeze_clip,
             curve: Some(curve(&[(0, -100)])),
         }
-        .apply(&mut frozen),
+        .apply_with_history_oracle(&mut frozen),
         Err(OpError::FreezeClipHasNoAudio(freeze_clip))
     );
 }
@@ -3719,14 +3740,14 @@ fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically
         parameter: "gain_tenth_db".to_owned(),
         curve: Some(curve(&[(0, -600), (10, 120)])),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     Operation::SetTrackAutomation {
         track: TrackId(1),
         parameter: "pan_percent".to_owned(),
         curve: Some(curve(&[(0, -100), (10, 100)])),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let rejections: Vec<(&str, AutomationCurve, OpError)> = vec![
@@ -3778,7 +3799,7 @@ fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically
                 parameter: parameter.to_owned(),
                 curve: Some(rejected),
             }
-            .apply(&mut document),
+            .apply_with_history_oracle(&mut document),
             Err(expected)
         );
         assert_eq!(document, before, "a rejection must not mutate");
@@ -3792,7 +3813,7 @@ fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically
                 keyframes: Vec::new(),
             }),
         }
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Err(OpError::UnknownTrackAutomationParameter {
             parameter: "pan".to_owned(),
         })
@@ -3803,7 +3824,7 @@ fn track_automation_validates_its_vocabulary_ranges_and_project_bound_atomically
             parameter: "gain_tenth_db".to_owned(),
             curve: None,
         }
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Err(OpError::MissingTrack(TrackId(9)))
     );
 }
@@ -3818,7 +3839,7 @@ fn clip_audio_operation_validates_bounds_fades_and_titles_atomically() {
             fade_in_frames: TimeCode(10),
             fade_out_frames: TimeCode(20),
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
         assert_eq!(
             document.clip(ClipId(1)).unwrap().audio_gain_tenth_db,
@@ -3835,7 +3856,7 @@ fn clip_audio_operation_validates_bounds_fades_and_titles_atomically() {
                 fade_in_frames: TimeCode::ZERO,
                 fade_out_frames: TimeCode::ZERO,
             }
-            .apply(&mut document),
+            .apply_with_history_oracle(&mut document),
             Err(OpError::AudioGainOutOfRange {
                 clip: ClipId(1),
                 gain_tenth_db,
@@ -3883,7 +3904,7 @@ fn clip_audio_operation_validates_bounds_fades_and_titles_atomically() {
                 fade_in_frames,
                 fade_out_frames,
             }
-            .apply(&mut document),
+            .apply_with_history_oracle(&mut document),
             Err(expected)
         );
         assert_eq!(document, before);
@@ -3896,7 +3917,7 @@ fn clip_audio_operation_validates_bounds_fades_and_titles_atomically() {
         duration: TimeCode(30),
         title: Title::default(),
     }
-    .apply(&mut titles)
+    .apply_with_history_oracle(&mut titles)
     .unwrap();
     assert_eq!(
         Operation::SetClipAudio {
@@ -3905,7 +3926,7 @@ fn clip_audio_operation_validates_bounds_fades_and_titles_atomically() {
             fade_in_frames: TimeCode::ZERO,
             fade_out_frames: TimeCode::ZERO,
         }
-        .apply(&mut titles),
+        .apply_with_history_oracle(&mut titles),
         Err(OpError::TitleClipHasNoAudio(ClipId(1)))
     );
 }
@@ -3991,7 +4012,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
     Operation::AddTrack {
         track: video.clone(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.tracks, vec![video.clone()]);
 
@@ -4000,7 +4021,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
         Operation::AddTrack {
             track: video.clone(),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::DuplicateTrack(TrackId(1)))
     );
     assert_eq!(doc, before_duplicate);
@@ -4029,19 +4050,19 @@ fn add_and_remove_track_are_validated_and_atomic() {
         }],
     };
     assert_eq!(
-        Operation::AddTrack { track: non_empty }.apply(&mut doc),
+        Operation::AddTrack { track: non_empty }.apply_with_history_oracle(&mut doc),
         Err(OpError::NewTrackNotEmpty(TrackId(2)))
     );
 
     Operation::RemoveTrack { track: TrackId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(doc.tracks.is_empty());
     assert_eq!(
         Operation::RemoveTrack {
             track: TrackId(404)
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::MissingTrack(TrackId(404)))
     );
 }
@@ -4050,7 +4071,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
 fn remove_track_cascades_clips_and_recomputes_duration() {
     let mut doc = document_with_one_clip();
     Operation::RemoveTrack { track: TrackId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(doc.tracks.is_empty());
     assert_eq!(doc.duration, TimeCode::ZERO);
@@ -4064,7 +4085,7 @@ fn left_edge_trim_moves_the_timeline_start_as_one_atomic_edit() {
         clip: ClipId(1),
         new_source: TimeCode(5)..TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     assert_eq!(doc.tracks[0].clips[0].timeline_start, TimeCode(15));
@@ -4121,7 +4142,7 @@ fn ripple_marker_shifts_restore_exact_positions_on_snapshot_undo() {
                 color_token: 0,
             },
         }
-        .apply(&mut initial)
+        .apply_with_history_oracle(&mut initial)
         .unwrap();
     }
     let core = Core::spawn(initial.clone()).unwrap();
@@ -4255,7 +4276,7 @@ fn missing_asset_is_rejected_atomically() {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(10),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
 
     assert_eq!(error, OpError::MissingAsset(AssetId(404)));
@@ -4272,7 +4293,7 @@ fn overlapping_clip_is_rejected_atomically() {
         at: TimeCode(20),
         source: TimeCode(0)..TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
 
     assert!(matches!(error, OpError::ClipOverlap { .. }));
@@ -4338,7 +4359,7 @@ fn out_of_bounds_trim_is_rejected_atomically() {
         clip: ClipId(1),
         new_source: TimeCode(0)..TimeCode(301),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
 
     assert!(matches!(error, OpError::SourceOutOfBounds { .. }));
@@ -4354,7 +4375,7 @@ fn slip_preserves_the_timeline_slot_and_moves_equal_source_handles() {
         clip: ClipId(2),
         new_source_in: TimeCode(170),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     let clip = doc.clip(ClipId(2)).unwrap();
@@ -4372,7 +4393,7 @@ fn roll_moves_only_the_shared_boundary_and_preserves_outer_duration() {
         right_clip: ClipId(2),
         to: TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     let left = doc.clip(ClipId(1)).unwrap();
@@ -4392,7 +4413,7 @@ fn slide_keeps_middle_source_and_sequence_outer_boundaries_fixed() {
         clip: ClipId(2),
         to: TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     assert_eq!(doc.clip(ClipId(1)).unwrap().source_range.end, TimeCode(110));
@@ -4413,7 +4434,7 @@ fn replace_and_fit_to_fill_preserve_the_clip_slot() {
         asset: AssetId(1),
         source: TimeCode(300)..TimeCode(330),
     }
-    .apply(&mut replaced)
+    .apply_with_history_oracle(&mut replaced)
     .unwrap();
     let clip = replaced.clip(ClipId(2)).unwrap();
     assert_eq!(clip.timeline_start, TimeCode(50));
@@ -4426,7 +4447,7 @@ fn replace_and_fit_to_fill_preserve_the_clip_slot() {
         asset: AssetId(1),
         source: TimeCode(300)..TimeCode(360),
     }
-    .apply(&mut fitted)
+    .apply_with_history_oracle(&mut fitted)
     .unwrap();
     let clip = fitted.clip(ClipId(2)).unwrap();
     assert_eq!(clip.timeline_start, TimeCode(50));
@@ -4448,7 +4469,7 @@ fn three_point_insert_and_overwrite_derive_the_unmarked_boundary() {
         timeline_out: None,
         mode: ThreePointMode::Insert,
     }
-    .apply(&mut inserted)
+    .apply_with_history_oracle(&mut inserted)
     .unwrap();
     assert_eq!(
         inserted.clip(ClipId(4)).unwrap().timeline_start,
@@ -4470,7 +4491,7 @@ fn three_point_insert_and_overwrite_derive_the_unmarked_boundary() {
         timeline_out: Some(TimeCode(80)),
         mode: ThreePointMode::Overwrite,
     }
-    .apply(&mut overwritten)
+    .apply_with_history_oracle(&mut overwritten)
     .unwrap();
     assert!(overwritten.clip(ClipId(2)).is_none());
     let replacement = overwritten.clip(ClipId(4)).unwrap();
@@ -4492,7 +4513,7 @@ fn three_point_insert_splits_a_target_clip_at_the_record_point() {
         timeline_out: None,
         mode: ThreePointMode::Insert,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     let inserted = doc
@@ -4524,12 +4545,12 @@ fn three_point_insert_splits_every_sync_locked_straddler_before_ripple() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddAsset {
         asset: asset(1, fps, 300),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for track in [TrackId(1), TrackId(2)] {
         Operation::AddClip {
@@ -4538,7 +4559,7 @@ fn three_point_insert_splits_every_sync_locked_straddler_before_ripple() {
             at: TimeCode::ZERO,
             source: TimeCode::ZERO..TimeCode(100),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
 
@@ -4551,7 +4572,7 @@ fn three_point_insert_splits_every_sync_locked_straddler_before_ripple() {
         timeline_out: None,
         mode: ThreePointMode::Insert,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     assert_eq!(doc.tracks[0].clips.len(), 3);
@@ -4568,7 +4589,7 @@ fn patched_three_point_matches_legacy_resolution_for_every_three_mark_combinatio
     Operation::AddAsset {
         asset: asset(1, fps, 300),
     }
-    .apply(&mut base)
+    .apply_with_history_oracle(&mut base)
     .unwrap();
 
     for (source_in, source_out, timeline_in, timeline_out) in [
@@ -4607,7 +4628,7 @@ fn patched_three_point_matches_legacy_resolution_for_every_three_mark_combinatio
             timeline_out,
             mode: ThreePointMode::Overwrite,
         }
-        .apply(&mut legacy)
+        .apply_with_history_oracle(&mut legacy)
         .unwrap();
 
         let mut patched = base.clone();
@@ -4621,7 +4642,7 @@ fn patched_three_point_matches_legacy_resolution_for_every_three_mark_combinatio
             video_track: Some(TrackId(1)),
             audio_track: None,
         }
-        .apply(&mut patched)
+        .apply_with_history_oracle(&mut patched)
         .unwrap();
 
         let resolved = patched.clip(ClipId(1)).unwrap();
@@ -4647,28 +4668,28 @@ fn patched_three_point_rejects_empty_missing_duplicate_and_wrong_routes_atomical
 
     let before = doc.clone();
     assert!(matches!(
-        operation(None, None).apply(&mut doc),
+        operation(None, None).apply_with_history_oracle(&mut doc),
         Err(OpError::EmptySourcePatch)
     ));
     assert_eq!(doc, before);
 
     let before = doc.clone();
     assert!(matches!(
-        operation(Some(TrackId(99)), None).apply(&mut doc),
+        operation(Some(TrackId(99)), None).apply_with_history_oracle(&mut doc),
         Err(OpError::MissingTrack(TrackId(99)))
     ));
     assert_eq!(doc, before);
 
     let before = doc.clone();
     assert!(matches!(
-        operation(Some(TrackId(1)), Some(TrackId(1))).apply(&mut doc),
+        operation(Some(TrackId(1)), Some(TrackId(1))).apply_with_history_oracle(&mut doc),
         Err(OpError::DuplicateSourcePatchTrack(TrackId(1)))
     ));
     assert_eq!(doc, before);
 
     let before = doc.clone();
     assert!(matches!(
-        operation(Some(TrackId(2)), None).apply(&mut doc),
+        operation(Some(TrackId(2)), None).apply_with_history_oracle(&mut doc),
         Err(OpError::InvalidSourcePatchRouteKind {
             component: "video",
             expected: TrackKind::Video,
@@ -4683,7 +4704,7 @@ fn patched_three_point_rejects_empty_missing_duplicate_and_wrong_routes_atomical
     Operation::AddAsset {
         asset: video_only_asset,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let before_video_asset = doc.clone();
     assert!(matches!(
@@ -4697,7 +4718,7 @@ fn patched_three_point_rejects_empty_missing_duplicate_and_wrong_routes_atomical
             video_track: None,
             audio_track: Some(TrackId(2)),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::IncompatibleTrack {
             asset: AssetId(2),
             track: "audio",
@@ -4717,7 +4738,7 @@ fn patched_three_point_invalid_route_rejection_preserves_serialized_document_byt
             at: TimeCode(20),
             source: TimeCode(40)..TimeCode(100),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     let before = serde_json::to_vec(&doc).unwrap();
@@ -4733,7 +4754,7 @@ fn patched_three_point_invalid_route_rejection_preserves_serialized_document_byt
             video_track: Some(TrackId(2)),
             audio_track: None,
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::InvalidSourcePatchRouteKind {
             component: "video",
             expected: TrackKind::Video,
@@ -4755,7 +4776,7 @@ fn patched_three_point_overwrite_routes_dual_av_once_and_only_clears_targets() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for track in [TrackId(1), TrackId(2), TrackId(3)] {
         Operation::AddClip {
@@ -4764,7 +4785,7 @@ fn patched_three_point_overwrite_routes_dual_av_once_and_only_clears_targets() {
             at: TimeCode::ZERO,
             source: TimeCode::ZERO..TimeCode(90),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     let untouched_track = doc
@@ -4784,7 +4805,7 @@ fn patched_three_point_overwrite_routes_dual_av_once_and_only_clears_targets() {
         video_track: Some(TrackId(1)),
         audio_track: Some(TrackId(2)),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     let video = doc
@@ -4847,7 +4868,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddTrack {
         track: Track {
@@ -4857,7 +4878,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for track in [TrackId(1), TrackId(2), TrackId(3)] {
         Operation::AddClip {
@@ -4866,7 +4887,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
             at: TimeCode::ZERO,
             source: TimeCode::ZERO..TimeCode(100),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     Operation::AddClip {
@@ -4875,7 +4896,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
         at: TimeCode(100),
         source: TimeCode::ZERO..TimeCode(100),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::PatchedThreePointEdit {
@@ -4888,7 +4909,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
         video_track: Some(TrackId(1)),
         audio_track: Some(TrackId(2)),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     for track_id in [TrackId(1), TrackId(2)] {
@@ -4974,7 +4995,7 @@ fn patched_three_point_single_routes_edit_only_selected_component() {
         video_track: Some(TrackId(1)),
         audio_track: None,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.tracks[0].clips.len(), 1);
     assert!(doc.tracks[1].clips.is_empty());
@@ -4990,7 +5011,7 @@ fn patched_three_point_single_routes_edit_only_selected_component() {
         video_track: None,
         audio_track: Some(TrackId(2)),
     }
-    .apply(&mut audio_only)
+    .apply_with_history_oracle(&mut audio_only)
     .unwrap();
     assert!(audio_only.tracks[0].clips.is_empty());
     assert_eq!(audio_only.tracks[1].clips.len(), 1);
@@ -5065,7 +5086,7 @@ fn professional_edits_reject_missing_handles_atomically() {
             clip: ClipId(2),
             new_source_in: TimeCode(590),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::SourceOutOfBounds { .. })
     ));
     assert_eq!(doc, before);
@@ -5080,7 +5101,7 @@ fn professional_edits_reject_missing_handles_atomically() {
             timeline_out: Some(TimeCode(40)),
             mode: ThreePointMode::Overwrite,
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::InvalidThreePointSelection)
     ));
     assert_eq!(doc, before);
@@ -5094,7 +5115,7 @@ fn bins_string_outs_and_sync_groups_are_validated_undoable_catalog_data() {
         Operation::AddAsset {
             asset: asset(id, fps, 300),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     Operation::UpsertBin {
@@ -5105,13 +5126,13 @@ fn bins_string_outs_and_sync_groups_are_validated_undoable_catalog_data() {
             assets: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetAssetBin {
         asset: AssetId(1),
         bin: Some(BinId(1)),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.catalog.bins[0].assets, vec![AssetId(1)]);
 
@@ -5126,7 +5147,7 @@ fn bins_string_outs_and_sync_groups_are_validated_undoable_catalog_data() {
             }],
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::UpsertSyncGroup {
         sync_group: SyncGroup {
@@ -5146,12 +5167,25 @@ fn bins_string_outs_and_sync_groups_are_validated_undoable_catalog_data() {
             ],
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc.validate().unwrap();
     let reopened: Document = serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
     assert_eq!(reopened, doc);
 
+    for operation in [
+        Operation::RemoveBin { bin: BinId(1) },
+        Operation::RemoveStringOut {
+            string_out: StringOutId(1),
+        },
+        Operation::RemoveSyncGroup {
+            sync_group: SyncGroupId(1),
+        },
+    ] {
+        operation
+            .apply_with_history_oracle(&mut doc.clone())
+            .unwrap();
+    }
     let core = Core::spawn(doc.clone()).unwrap();
     assert!(matches!(
         core.request(Command::Do(Operation::RemoveStringOut {
@@ -5173,7 +5207,7 @@ fn catalog_rejects_cycles_duplicate_members_and_invalid_selects_atomically() {
     Operation::AddAsset {
         asset: asset(1, fps, 300),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let before = doc.clone();
 
@@ -5186,7 +5220,7 @@ fn catalog_rejects_cycles_duplicate_members_and_invalid_selects_atomically() {
                 assets: Vec::new(),
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::BinSelfParent(BinId(1)))
     ));
     assert_eq!(doc, before);
@@ -5203,7 +5237,7 @@ fn catalog_rejects_cycles_duplicate_members_and_invalid_selects_atomically() {
                 }],
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::SourceOutOfBounds { .. })
     ));
     assert_eq!(doc, before);
@@ -5227,7 +5261,7 @@ fn catalog_rejects_cycles_duplicate_members_and_invalid_selects_atomically() {
                 ],
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::DuplicateSyncGroupAsset { .. })
     ));
     assert_eq!(doc, before);
@@ -5241,7 +5275,7 @@ fn mixed_rate_split_preserves_the_clip_boundary_and_total_duration() {
     Operation::AddAsset {
         asset: asset(1, source_fps, 48),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -5249,7 +5283,7 @@ fn mixed_rate_split_preserves_the_clip_boundary_and_total_duration() {
         at: TimeCode(0),
         source: TimeCode(1)..TimeCode(48),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(59));
 
@@ -5257,7 +5291,7 @@ fn mixed_rate_split_preserves_the_clip_boundary_and_total_duration() {
         clip: ClipId(1),
         at: TimeCode(29),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     assert_eq!(doc.tracks[0].clips.len(), 2);
@@ -5276,7 +5310,7 @@ fn mixed_rate_split_rejects_a_non_source_frame_boundary() {
     Operation::AddAsset {
         asset: asset(1, source_fps, 48),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddClip {
         track: TrackId(1),
@@ -5284,7 +5318,7 @@ fn mixed_rate_split_rejects_a_non_source_frame_boundary() {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(48),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let before = doc.clone();
 
@@ -5292,7 +5326,7 @@ fn mixed_rate_split_rejects_a_non_source_frame_boundary() {
         clip: ClipId(1),
         at: TimeCode(2),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
 
     assert_eq!(
@@ -5315,7 +5349,7 @@ fn clip_speed_scales_duration_exactly_and_validates_bounds() {
         clip: ClipId(1),
         speed_percent: 50,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let clip = doc.clip(ClipId(1)).unwrap().clone();
     assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(60));
@@ -5324,7 +5358,7 @@ fn clip_speed_scales_duration_exactly_and_validates_bounds() {
         clip: ClipId(1),
         speed_percent: 200,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let clip = doc.clip(ClipId(1)).unwrap().clone();
     assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(15));
@@ -5336,7 +5370,7 @@ fn clip_speed_scales_duration_exactly_and_validates_bounds() {
                 clip: ClipId(1),
                 speed_percent: out_of_range,
             }
-            .apply(&mut doc),
+            .apply_with_history_oracle(&mut doc),
             Err(OpError::ClipSpeedOutOfRange(value)) if value == out_of_range
         ));
         assert_eq!(doc, before);
@@ -5352,7 +5386,7 @@ fn slowing_a_clip_into_a_neighbor_is_rejected_atomically() {
             clip: ClipId(1),
             speed_percent: 25,
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::ClipOverlap { .. })
     ));
     assert_eq!(doc, before);
@@ -5361,7 +5395,7 @@ fn slowing_a_clip_into_a_neighbor_is_rejected_atomically() {
         clip: ClipId(1),
         speed_percent: 50,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let clip = doc.clip(ClipId(1)).unwrap().clone();
     assert_eq!(doc.clip_duration(&clip).unwrap(), TimeCode(20));
@@ -5377,14 +5411,14 @@ fn non_media_clips_reject_speed_everywhere() {
         duration: TimeCode(30),
         title: Title::default(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(matches!(
         Operation::SetClipSpeed {
             clip: ClipId(1),
             speed_percent: 50,
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::SpeedOnNonMediaClip(ClipId(1)))
     ));
 
@@ -5405,7 +5439,7 @@ fn split_preserves_project_adjacency_and_total_duration_at_any_speed() {
         Operation::AddAsset {
             asset: asset(1, source_fps, 480),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         Operation::AddClip {
             track: TrackId(1),
@@ -5413,13 +5447,13 @@ fn split_preserves_project_adjacency_and_total_duration_at_any_speed() {
             at: TimeCode(0),
             source: TimeCode(0)..TimeCode(480),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         Operation::SetClipSpeed {
             clip: ClipId(1),
             speed_percent: speed,
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
         let original = doc.clip(ClipId(1)).unwrap().clone();
         let total = doc.clip_duration(&original).unwrap();
@@ -5440,7 +5474,7 @@ fn split_preserves_project_adjacency_and_total_duration_at_any_speed() {
                     clip: ClipId(1),
                     at: TimeCode(candidate),
                 };
-                if split.apply(&mut attempt).is_ok() {
+                if split.apply_with_history_oracle(&mut attempt).is_ok() {
                     doc = attempt;
                     split_at = Some(candidate);
                     break;
@@ -5494,7 +5528,7 @@ fn clip_speed_serde_defaults_skips_and_round_trips() {
         clip: ClipId(1),
         speed_percent: 150,
     }
-    .apply(&mut speeded)
+    .apply_with_history_oracle(&mut speeded)
     .unwrap();
     let encoded = serde_json::to_string(&speeded).unwrap();
     assert!(encoded.contains("\"speed_percent\":150"));
@@ -5865,7 +5899,7 @@ fn in1_document_with_probed_asset(confidence_basis_points: u16) -> Document {
     Operation::AddAsset {
         asset: probed_asset,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     document
 }
@@ -5873,7 +5907,7 @@ fn in1_document_with_probed_asset(confidence_basis_points: u16) -> Document {
 fn in1_assume(document: &mut Document, confidence_basis_points: u16) -> ColorDescription {
     let probed = in1_probed_description(confidence_basis_points);
     kinewright_core::assume_rec709_operation(AssetId(1), &probed)
-        .apply(document)
+        .apply_with_history_oracle(document)
         .unwrap();
     probed
 }
@@ -5914,7 +5948,7 @@ fn in1_every_other_provenance_is_refused_by_name() {
             asset: AssetId(1),
             color_description: description,
         }
-        .apply(&mut document);
+        .apply_with_history_oracle(&mut document);
         if *admitted {
             assert_eq!(result, Ok(()), "{provenance:?} must be admitted");
         } else {
@@ -5959,7 +5993,7 @@ fn in1_a_second_agent_assumption_does_not_overwrite_assumed_from() {
         asset: AssetId(1),
         color_description: second.clone(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let asset = document.asset(AssetId(1)).unwrap();
@@ -5987,7 +6021,7 @@ fn in1_the_revert_restores_the_probed_description_and_clears_assumed_from() {
             asset: AssetId(1),
             color_description: assumed_from,
         }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
 
         let asset = document.asset(AssetId(1)).unwrap();
@@ -6016,7 +6050,7 @@ fn in1_a_different_stream_metadata_description_is_still_refused() {
         asset: AssetId(1),
         color_description: forged,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
 
     assert_eq!(
@@ -6038,7 +6072,7 @@ fn in1_a_user_override_over_an_assumption_leaves_assumed_from_intact() {
         asset: AssetId(1),
         color_description: user_color_override(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let asset = document.asset(AssetId(1)).unwrap();
@@ -6054,7 +6088,7 @@ fn in1_a_user_override_over_an_assumption_leaves_assumed_from_intact() {
         asset: AssetId(1),
         color_description: probed.clone(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let asset = document.asset(AssetId(1)).unwrap();
     assert_eq!(asset.color_description, probed);
@@ -6070,13 +6104,13 @@ fn in1_a_zero_confidence_probed_description_round_trips_through_the_revert() {
     Operation::AddAsset {
         asset: probed_asset,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let probed = ColorDescription::unknown();
     assert_eq!(probed.confidence_basis_points, 0);
 
     kinewright_core::assume_rec709_operation(AssetId(1), &probed)
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
     assert_eq!(
         document.asset(AssetId(1)).unwrap().assumed_from.as_ref(),
@@ -6090,7 +6124,7 @@ fn in1_a_zero_confidence_probed_description_round_trips_through_the_revert() {
             asset: AssetId(1),
             color_description: probed.clone(),
         }
-        .apply(&mut document),
+        .apply_with_history_oracle(&mut document),
         Ok(())
     );
     let asset = document.asset(AssetId(1)).unwrap();
@@ -6110,7 +6144,7 @@ fn in1_a_zero_confidence_agent_assumption_is_still_refused() {
         asset: AssetId(1),
         color_description: zero,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap_err();
 
     assert_eq!(
@@ -6157,7 +6191,7 @@ fn in1_a_revert_into_an_agent_assumption_still_clears_assumed_from() {
         asset: AssetId(1),
         color_description: second.clone(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let recorded = document
         .asset(AssetId(1))
@@ -6177,7 +6211,7 @@ fn in1_a_revert_into_an_agent_assumption_still_clears_assumed_from() {
         asset: AssetId(1),
         color_description: recorded.clone(),
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let asset = document.asset(AssetId(1)).unwrap();
     assert_eq!(asset.assumed_from, None, "the revert must clear it");
@@ -6193,7 +6227,7 @@ fn in1_add_asset_refuses_a_supplied_assumed_from() {
     let mut laundered = asset(1, fps, 50);
     laundered.assumed_from = Some(user_color_override());
     let error = Operation::AddAsset { asset: laundered }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap_err();
     assert_eq!(
         error,
@@ -6204,7 +6238,7 @@ fn in1_add_asset_refuses_a_supplied_assumed_from() {
     let mut honest = asset(1, fps, 50);
     honest.assumed_from = None;
     Operation::AddAsset { asset: honest }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap();
     assert_eq!(document.media_pool.len(), 1);
     assert_eq!(document.asset(AssetId(1)).unwrap().assumed_from, None);
@@ -6230,7 +6264,7 @@ fn in1_add_asset_refuses_an_agent_assumption_description() {
     assert_eq!(claiming.assumed_from, None);
 
     let error = Operation::AddAsset { asset: claiming }
-        .apply(&mut document)
+        .apply_with_history_oracle(&mut document)
         .unwrap_err();
     assert_eq!(
         error,
@@ -6249,7 +6283,7 @@ fn in1_a_relink_leaves_assumed_from_and_the_colour_description_byte_identical() 
     Operation::AddAsset {
         asset: probed_asset,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
     let probed = in1_assume(&mut document, 2_000);
     let before = document.asset(AssetId(1)).unwrap().clone();
@@ -6259,7 +6293,7 @@ fn in1_a_relink_leaves_assumed_from_and_the_colour_description_byte_identical() 
         candidate: relink_candidate(&before, "/moved/in1_untagged.mp4"),
         allow_unverified_source: false,
     }
-    .apply(&mut document)
+    .apply_with_history_oracle(&mut document)
     .unwrap();
 
     let after = document.asset(AssetId(1)).unwrap();
@@ -6382,14 +6416,14 @@ fn three_point_insert_routes_split_halves_through_keep_outside() {
             keyframes: BTreeMap::from([("exposure_milli_stops".to_owned(), colour.clone())]),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc.tracks[0].clips[0].enabled_curve = Some(toggle.clone());
     Operation::SetClipGainEnvelope {
         clip: ClipId(1),
         curve: Some(ramp.clone()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::ThreePointEdit {
@@ -6401,7 +6435,7 @@ fn three_point_insert_routes_split_halves_through_keep_outside() {
         timeline_out: None,
         mode: ThreePointMode::Insert,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     let half = |doc: &Document, source_start: i64| {

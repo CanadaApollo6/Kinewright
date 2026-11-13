@@ -51,9 +51,29 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     (core, owner, inputs)
 }
 fn bounded(owner: &mut ProjectBundle) {
+    // Choose a measured downward limit between an empty stream and this
+    // scenario's forty edits, independently of their compact wire size.
+    let document = owner.branch_history(owner.manual_branch_id()).unwrap();
+    let probe = Core::spawn(std::sync::Arc::clone(&document.document)).unwrap();
+    let initial = kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+        &probe.export_history().unwrap(),
+        &StorageLimits::default(),
+    )
+    .unwrap();
+    for index in 0..40 {
+        apply(&probe, Command::Do(lock(index % 2 == 0)));
+    }
+    let full = kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+        &probe.export_history().unwrap(),
+        &StorageLimits::default(),
+    )
+    .unwrap();
+    assert!(full > initial);
+    drop(document);
+    drop(probe);
     owner
         .restrict_limits_probe(StorageLimits {
-            branch_history_bytes: 1 << 20,
+            branch_history_bytes: initial + (full - initial) / 2,
             ..StorageLimits::default()
         })
         .unwrap();

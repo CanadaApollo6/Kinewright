@@ -225,7 +225,10 @@ impl HostCommandOwner {
     ) -> Result<TaskBrief, HostError> {
         let owner = self.owner_mut()?;
         let name = format!("revise-{}", request.batch_id.as_str());
-        let mut candidate = match owner.fork_durable_branch(&name) {
+        let mut candidate = match owner.fork_durable_branch(
+            &name,
+            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+        ) {
             Ok(candidate) => candidate,
             Err(BundleError::HistoryChanged) => {
                 return Err(HostRefusal::new(

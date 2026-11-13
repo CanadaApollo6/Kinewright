@@ -16,13 +16,13 @@
   },
   "arm": "candidate",
   "arm_bridge_sha256": {
-    "host": "309b9aaa65abc2dcd379e8e78932c3d4bb0418e26d94b50f5081f7771570a7d4",
-    "mcp_observation": "f7c22c82f88571e51e9e4426437a9a444dee93edd390cedf8829e378674d54b6",
-    "native_child_publication": "1d09c6c35c56d028f8b070c0356d506312ad471887cea305ef2ac427900245cc",
-    "runtime": "c5c5bad052ffc746a7eb13cfc72917d642bd6c2a8f2b5d22287b0c813173b86a",
-    "studio": "a1822f24495b2a3e38dc8e80d0a892ea00b442f65cded908c4151436708d2a27",
+    "host": "1dc546325c88cfc3345648715893a4b99c4b9d2192ed099cb10815cc73b8eb9f",
+    "mcp_observation": "3e941ede35386a22b0722b69eea8a2a6074f92036ce6894638044843128962b9",
+    "native_child_publication": "2c2d01a86104177309ed89cc55e3b235ca90b65a97b51b9d761d0206b3b1d7e3",
+    "runtime": "444221c0da246b8844cdd5435a5b0d739826c6bda52aace3eaa4834b8735ff42",
+    "studio": "3e7985882210493e7eb680dba374db131bc07f21204066d9be689899b0d2295d",
     "surface": "e684e91c1bf89f5e49e523cc6a2bcf36ec005beb1846ac427afc47c91449d6ca",
-    "task_observation": "a3b17fdd3a8fa82d338b4519e132841bcdda89a57c998128524a5ec94069bda1"
+    "task_observation": "3e657b71a9959c8e62f901b70cfcf246190fbe0a4addf055aebccfc5c86413f3"
   },
   "cache_protocol": {
     "hidden_provider_cache": "unobserved; record reported cache categories without inferring cache hits",

@@ -1,6 +1,10 @@
 //! AU4 clip envelopes and automation — core contract tests (AU4 §7 items A1 to
 //! A8 plus the core halves of A13, A16 and A20).
 
+#[path = "support/history_oracle.rs"]
+mod history_oracle;
+use history_oracle::ApplyHistoryOracle;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,7 +62,7 @@ fn empty_document() -> Document {
     Operation::AddAsset {
         asset: asset(1, "asset-1", 300, fps()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -72,7 +76,7 @@ fn document_with_one_clip() -> Document {
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -87,7 +91,7 @@ fn document_with_three_clips() -> Document {
             at: TimeCode(index * 60),
             source: TimeCode(index * 60)..TimeCode(index * 60 + 60),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     doc
@@ -152,7 +156,7 @@ fn set_envelope(doc: &mut Document, id: ClipId, curve: &AutomationCurve) {
         clip: id,
         curve: Some(curve.clone()),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
     .unwrap();
 }
 
@@ -162,7 +166,7 @@ fn set_track_curve(doc: &mut Document, track: TrackId, parameter: &str, curve: &
         parameter: parameter.to_owned(),
         curve: Some(curve.clone()),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
     .unwrap();
 }
 
@@ -316,7 +320,7 @@ fn resolution_the_display_bound_and_the_two_coalesce_keys_are_exact() {
         fade_in_frames: TimeCode::ZERO,
         fade_out_frames: TimeCode::ZERO,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let curve = linear(&[(0, 0), (30, -300)]);
     set_envelope(&mut doc, ClipId(1), &curve);
@@ -404,7 +408,7 @@ fn no_validation_path_reads_the_envelope_display_minimum() {
             clip: ClipId(1),
             curve: Some(outside),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::ClipGainEnvelopeOutOfRange { value: -601, .. })
     ));
 }
@@ -426,7 +430,7 @@ fn set_track_mix_merges_the_stored_curves_and_never_drops_a_ride() {
         mute: false,
         solo: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let entry = track_entry(&doc, TrackId(1)).expect("the entry survives a fader nudge");
     assert_eq!(entry.gain_tenth_db, -40);
@@ -440,7 +444,7 @@ fn set_track_mix_merges_the_stored_curves_and_never_drops_a_ride() {
         mute: false,
         solo: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let entry = track_entry(&doc, TrackId(1)).expect("a neutral set keeps the automated entry");
     assert_eq!(entry.gain_tenth_db, 0);
@@ -464,7 +468,7 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let curve = linear(&[(0, -100), (30, -300)]);
     set_track_curve(&mut doc, TrackId(4), "gain_tenth_db", &curve);
@@ -494,12 +498,12 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
             parameter: parameter.to_owned(),
             curve: None,
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     assert!(doc.audio_mix.tracks.is_empty());
     Operation::RemoveTrack { track: TrackId(4) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert_eq!(serde_json::to_string(&doc).unwrap(), pristine_json);
 
@@ -510,7 +514,7 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
         mute: false,
         solo: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     set_track_curve(&mut doc, TrackId(1), "gain_tenth_db", &curve);
     Operation::SetTrackAutomation {
@@ -518,7 +522,7 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
         parameter: "gain_tenth_db".to_owned(),
         curve: None,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let entry = track_entry(&doc, TrackId(1)).expect("an off-neutral scalar keeps the entry");
     assert_eq!(entry.gain_tenth_db, -55);
@@ -557,7 +561,7 @@ fn hand_edited_track_automation_is_rejected_during_document_validation() {
                 keyframes: Vec::new(),
             }),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::UnknownTrackAutomationParameter {
             parameter: "gain".to_owned(),
         })
@@ -675,7 +679,7 @@ fn automated_project() -> Document {
             at: TimeCode(index * 60),
             source: TimeCode(index * 60)..TimeCode(index * 60 + 60),
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     set_envelope(&mut doc, ClipId(2), &linear(&[(0, 0), (59, -590)]));
@@ -696,7 +700,7 @@ fn automated_project() -> Document {
             gain_curve: Some(ride.clone()),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetAudioMaster {
         master: AudioMaster {
@@ -709,7 +713,7 @@ fn automated_project() -> Document {
             )],
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(120));
     doc
@@ -770,7 +774,7 @@ fn shortening_the_project_clamps_every_project_frame_curve_instead_of_failing() 
             .collect();
         let mut doc = before.clone();
         operation
-            .apply(&mut doc)
+            .apply_with_history_oracle(&mut doc)
             .unwrap_or_else(|error| panic!("{name} must succeed, got {error}"));
         assert_eq!(doc.duration, TimeCode(expected), "{name}");
         let after = project_curves(&doc);
@@ -803,7 +807,7 @@ fn deleting_the_only_clip_of_an_automated_project_succeeds_with_one_key_at_frame
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let ride = linear(&[(0, -70), (30, -240)]);
     set_track_curve(&mut doc, TrackId(1), "gain_tenth_db", &ride);
@@ -818,7 +822,7 @@ fn deleting_the_only_clip_of_an_automated_project_succeeds_with_one_key_at_frame
             gain_curve: Some(ride.clone()),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetAudioMaster {
         master: AudioMaster {
@@ -831,11 +835,11 @@ fn deleting_the_only_clip_of_an_automated_project_succeeds_with_one_key_at_frame
             )],
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::DeleteClip { clip: ClipId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert_eq!(doc.duration, TimeCode::ZERO);
     let curves = project_curves(&doc);
@@ -862,7 +866,7 @@ fn a_write_that_over_runs_an_unchanged_duration_is_still_rejected() {
         to_track: TrackId(1),
         to: TimeCode(0),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc, base);
 
@@ -885,7 +889,7 @@ fn a_write_that_over_runs_an_unchanged_duration_is_still_rejected() {
                 gain_curve: None,
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::AudioBusKeyframeOutsideProject { .. })
     ));
     assert!(matches!(
@@ -900,7 +904,7 @@ fn a_write_that_over_runs_an_unchanged_duration_is_still_rejected() {
                 )],
             },
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::AudioMasterKeyframeOutsideProject { .. })
     ));
     assert!(matches!(
@@ -909,7 +913,7 @@ fn a_write_that_over_runs_an_unchanged_duration_is_still_rejected() {
             parameter: "gain_tenth_db".to_owned(),
             curve: Some(outside.clone()),
         }
-        .apply(&mut doc),
+        .apply_with_history_oracle(&mut doc),
         Err(OpError::TrackAutomationKeyframeOutsideProject {
             at: TimeCode(120),
             duration: TimeCode(120),
@@ -990,7 +994,7 @@ fn clip_with_envelope_and_colour_curve() -> Document {
             )]),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc
 }
@@ -1019,7 +1023,7 @@ fn a_move_a_slip_and_a_replace_leave_the_clip_local_curves_verbatim() {
         to_track: TrackId(1),
         to: TimeCode(90),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
     assert_eq!(
@@ -1032,7 +1036,7 @@ fn a_move_a_slip_and_a_replace_leave_the_clip_local_curves_verbatim() {
         clip: ClipId(1),
         new_source_in: TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
     assert_eq!(
@@ -1044,14 +1048,14 @@ fn a_move_a_slip_and_a_replace_leave_the_clip_local_curves_verbatim() {
     Operation::AddAsset {
         asset: asset(2, "asset-2", 300, fps()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::ReplaceClip {
         clip: ClipId(1),
         asset: AssetId(2),
         source: TimeCode(100)..TimeCode(160),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(envelope(&doc, ClipId(1)), envelope(&base, ClipId(1)));
     assert_eq!(
@@ -1069,7 +1073,7 @@ fn a_split_no_longer_slides_the_right_halfs_clip_local_curves() {
         clip: ClipId(1),
         at: TimeCode(20),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let right = ClipId(2);
     assert_eq!(clip(&doc, right).timeline_start, TimeCode(20));
@@ -1102,7 +1106,7 @@ fn both_trim_edges_preserve_the_boundary_value_and_no_longer_fail() {
         clip: ClipId(1),
         new_source: TimeCode(0)..TimeCode(20),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         envelope_at(&doc, ClipId(1), 19),
@@ -1120,7 +1124,7 @@ fn both_trim_edges_preserve_the_boundary_value_and_no_longer_fail() {
         clip: ClipId(1),
         new_source: TimeCode(25)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip(&doc, ClipId(1)).timeline_start, TimeCode(25));
     assert_eq!(
@@ -1144,7 +1148,7 @@ fn both_trim_edges_preserve_the_boundary_value_and_no_longer_fail() {
         name: "exposure_milli_stops".to_owned(),
         curve: linear(&[(0, 0), (60, 4_720)]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 }
 
@@ -1163,7 +1167,7 @@ fn a_slide_and_a_roll_rebase_only_the_neighbour_whose_slot_moved() {
         clip: ClipId(2),
         to: TimeCode(45),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(envelope(&doc, ClipId(2)), ramp, "the middle is untouched");
     assert_eq!(
@@ -1184,7 +1188,7 @@ fn a_slide_and_a_roll_rebase_only_the_neighbour_whose_slot_moved() {
         right_clip: ClipId(2),
         to: TimeCode(40),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         envelope_at(&doc, ClipId(1), 39),
@@ -1203,7 +1207,7 @@ fn a_slide_and_a_roll_rebase_only_the_neighbour_whose_slot_moved() {
         right_clip: ClipId(2),
         to: TimeCode(75),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         envelope_at(&doc, ClipId(2), 75),
@@ -1227,7 +1231,7 @@ fn a_speed_increase_drops_the_keys_past_the_new_duration_and_only_undo_restores_
         clip: ClipId(1),
         speed_percent: 200,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(30));
     let halved = envelope(&doc, ClipId(1));
@@ -1245,7 +1249,7 @@ fn a_speed_increase_drops_the_keys_past_the_new_duration_and_only_undo_restores_
         clip: ClipId(1),
         speed_percent: 100,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(60));
     assert_eq!(envelope(&doc, ClipId(1)), halved);
@@ -1273,7 +1277,7 @@ fn ripple_delete_and_ripple_insert_shift_track_automation_and_never_a_bus_curve(
             gain_curve: Some(linear(&[(0, 0), (100, -50)])),
         },
     }
-    .apply(&mut base)
+    .apply_with_history_oracle(&mut base)
     .unwrap();
     Operation::SetAudioMaster {
         master: AudioMaster {
@@ -1282,13 +1286,13 @@ fn ripple_delete_and_ripple_insert_shift_track_automation_and_never_a_bus_curve(
             effects: Vec::new(),
         },
     }
-    .apply(&mut base)
+    .apply_with_history_oracle(&mut base)
     .unwrap();
 
     // Ripple delete clip 2: `start = 60`, `ripple_point = 120`.
     let mut doc = base.clone();
     Operation::RippleDeleteClip { clip: ClipId(2) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     let after = track_entry(&doc, TrackId(1))
         .unwrap()
@@ -1325,7 +1329,7 @@ fn ripple_delete_and_ripple_insert_shift_track_automation_and_never_a_bus_curve(
         at: TimeCode(60),
         duration: TimeCode(15),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let after = track_entry(&doc, TrackId(1))
         .unwrap()
@@ -1359,7 +1363,7 @@ fn a_ripple_delete_that_removes_every_key_keeps_one_constant() {
         &linear(&[(0, -100), (30, -400), (59, -200)]),
     );
     Operation::RippleDeleteClip { clip: ClipId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     let after = track_entry(&doc, TrackId(1))
         .unwrap()
@@ -1388,7 +1392,7 @@ fn a_ripple_insert_that_does_not_lengthen_the_project_clamps_rather_than_failing
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddClip {
         track: TrackId(2),
@@ -1396,7 +1400,7 @@ fn a_ripple_insert_that_does_not_lengthen_the_project_clamps_rather_than_failing
         at: TimeCode(0),
         source: TimeCode(0)..TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for track in &mut doc.tracks {
         if track.id == TrackId(1) {
@@ -1416,7 +1420,7 @@ fn a_ripple_insert_that_does_not_lengthen_the_project_clamps_rather_than_failing
         at: TimeCode(0),
         duration: TimeCode(20),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(180), "the project did not grow");
     let after = track_entry(&doc, TrackId(2))
@@ -1438,7 +1442,7 @@ fn deleting_an_owner_takes_its_curve_with_it() {
     let mut doc = document_with_three_clips();
     set_envelope(&mut doc, ClipId(2), &linear(&[(0, 0), (30, -100)]));
     Operation::DeleteClip { clip: ClipId(2) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(
         doc.tracks
@@ -1457,11 +1461,11 @@ fn deleting_an_owner_takes_its_curve_with_it() {
             clips: Vec::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     set_track_curve(&mut doc, TrackId(2), "pan_percent", &linear(&[(0, 40)]));
     Operation::RemoveTrack { track: TrackId(2) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(track_entry(&doc, TrackId(2)).is_none());
     assert!(track_entry(&doc, TrackId(1)).is_some());
@@ -1477,10 +1481,10 @@ fn deleting_an_owner_takes_its_curve_with_it() {
             gain_curve: Some(linear(&[(0, -100)])),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::RemoveAudioBus { bus: AudioBusId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(doc.audio_mix.buses.is_empty());
 }
@@ -1495,14 +1499,14 @@ fn a_split_divides_the_audio_fades_and_a_short_trim_clamps_them() {
         fade_in_frames: TimeCode(30),
         fade_out_frames: TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let mut split = doc.clone();
     Operation::SplitClip {
         clip: ClipId(1),
         at: TimeCode(20),
     }
-    .apply(&mut split)
+    .apply_with_history_oracle(&mut split)
     .unwrap();
     let left = clip(&split, ClipId(1));
     let right = clip(&split, ClipId(2));
@@ -1526,7 +1530,7 @@ fn a_split_divides_the_audio_fades_and_a_short_trim_clamps_them() {
         clip: ClipId(1),
         new_source: TimeCode(0)..TimeCode(40),
     }
-    .apply(&mut trimmed)
+    .apply_with_history_oracle(&mut trimmed)
     .unwrap();
     let clip = clip(&trimmed, ClipId(1));
     assert_eq!(clip.audio_fade_in_frames, TimeCode(30));
@@ -1541,7 +1545,7 @@ fn a_split_divides_the_audio_fades_and_a_short_trim_clamps_them() {
             fade_in_frames: TimeCode(40),
             fade_out_frames: TimeCode(40),
         }
-        .apply(&mut trimmed),
+        .apply_with_history_oracle(&mut trimmed),
         Err(OpError::AudioFadesTooLong { .. })
     ));
 }
@@ -1568,7 +1572,7 @@ fn relinking_an_asset_keeps_every_bound_clips_curve_inside_its_duration() {
         },
         allow_unverified_source: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         doc.asset(AssetId(1)).unwrap().path,
@@ -1668,7 +1672,7 @@ fn a_curve_bearing_document_produces_the_same_qa_issue_set_as_one_without() {
         clip: ClipId(2),
         speed_percent: 200,
     }
-    .apply(&mut retimed)
+    .apply_with_history_oracle(&mut retimed)
     .unwrap();
     let mut retimed_curved = retimed.clone();
     set_envelope(&mut retimed_curved, ClipId(2), &linear(&[(0, -200)]));
@@ -1706,7 +1710,7 @@ fn each_new_field_sits_at_its_declared_wire_position() {
         fade_in_frames: TimeCode(5),
         fade_out_frames: TimeCode(6),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetTrackMix {
         track: TrackId(1),
@@ -1715,13 +1719,13 @@ fn each_new_field_sits_at_its_declared_wire_position() {
         mute: true,
         solo: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetClipSpeed {
         clip: ClipId(1),
         speed_percent: 50,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     doc.audio_mix.buses.push(AudioBus {
         id: AudioBusId(1),
@@ -1777,7 +1781,7 @@ fn clip_effects_accept_static_and_keyframed_enable() {
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(!clip(&doc, ClipId(1)).effects[0].enabled);
     // A `Linear` 0 → 1 ramp is accepted (step semantics, not refused).
@@ -1793,7 +1797,7 @@ fn clip_effects_accept_static_and_keyframed_enable() {
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_some());
 }
@@ -1814,7 +1818,7 @@ fn enabled_curve_values_outside_zero_to_one_are_refused() {
             keyframes: BTreeMap::new(),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -1858,7 +1862,7 @@ fn enabled_curve_accepts_negative_and_outside_but_not_unordered() {
                 keyframes: BTreeMap::new(),
             },
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     for curve in [
@@ -1878,7 +1882,7 @@ fn enabled_curve_accepts_negative_and_outside_but_not_unordered() {
                 keyframes: BTreeMap::new(),
             },
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap_err();
         assert!(
             matches!(
@@ -1914,7 +1918,7 @@ fn keep_outside_effect_curves_accept_negative_and_outside_keys() {
                 keyframes,
             },
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     }
     for keyframes in [
@@ -1933,7 +1937,7 @@ fn keep_outside_effect_curves_accept_negative_and_outside_keys() {
                 keyframes,
             },
         }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap_err();
         assert!(
             matches!(
@@ -2075,7 +2079,7 @@ fn trim_shifts_keep_outside_keys_and_round_trips_byte_identical() {
         clip: ClipId(1),
         new_source: TimeCode(25)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip(&doc, ClipId(1)).timeline_start, TimeCode(25));
     // `delta_local` +25: every keep-outside key moves −25, values and shape
@@ -2107,7 +2111,7 @@ fn trim_shifts_keep_outside_keys_and_round_trips_byte_identical() {
         clip: ClipId(1),
         new_source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2131,7 +2135,7 @@ fn split_gives_both_halves_the_full_shifted_curve() {
         clip: ClipId(1),
         at: TimeCode(20),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let right = ClipId(2);
 
@@ -2191,7 +2195,7 @@ fn slide_and_roll_shift_only_the_right_neighbour() {
                 )]),
             },
         }
-        .apply(&mut base)
+        .apply_with_history_oracle(&mut base)
         .unwrap();
         clip_mut(&mut base, *id).enabled_curve = Some(hold_toggle());
     }
@@ -2204,7 +2208,7 @@ fn slide_and_roll_shift_only_the_right_neighbour() {
         clip: ClipId(2),
         to: TimeCode(45),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     for id in [ClipId(1), ClipId(2)] {
         assert_eq!(colour_curve(&doc, id), colour_curve(&base, id));
@@ -2228,7 +2232,7 @@ fn slide_and_roll_shift_only_the_right_neighbour() {
         right_clip: ClipId(2),
         to: TimeCode(40),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2252,7 +2256,7 @@ fn slide_and_roll_shift_only_the_right_neighbour() {
         right_clip: ClipId(2),
         to: TimeCode(75),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         key_positions(&colour_curve(&doc, ClipId(2))),
@@ -2277,7 +2281,7 @@ fn speed_change_leaves_keep_outside_curves_untouched() {
         clip: ClipId(1),
         speed_percent: 200,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(30));
     assert_eq!(
@@ -2302,7 +2306,7 @@ fn speed_change_leaves_keep_outside_curves_untouched() {
         clip: ClipId(1),
         speed_percent: 50,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(doc.duration, TimeCode(120));
     assert_eq!(
@@ -2335,7 +2339,7 @@ fn relink_keeps_every_clip_curve_byte_identical() {
         },
         allow_unverified_source: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2363,14 +2367,14 @@ fn replace_and_fit_to_fill_keep_every_curve_verbatim() {
     Operation::AddAsset {
         asset: asset(2, "asset-2", 300, fps()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::ReplaceClip {
         clip: ClipId(1),
         asset: AssetId(2),
         source: TimeCode(100)..TimeCode(160),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2388,14 +2392,14 @@ fn replace_and_fit_to_fill_keep_every_curve_verbatim() {
     Operation::AddAsset {
         asset: asset(2, "asset-2", 300, fps()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::FitToFill {
         clip: ClipId(1),
         asset: AssetId(2),
         source: TimeCode(100)..TimeCode(160),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2422,7 +2426,7 @@ fn move_slip_and_delete_leave_sibling_curves_alone() {
         to_track: TrackId(1),
         to: TimeCode(90),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2440,7 +2444,7 @@ fn move_slip_and_delete_leave_sibling_curves_alone() {
         clip: ClipId(1),
         new_source_in: TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         colour_curve(&doc, ClipId(1)),
@@ -2454,7 +2458,7 @@ fn move_slip_and_delete_leave_sibling_curves_alone() {
 
     let mut doc = base.clone();
     Operation::DeleteClip { clip: ClipId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert!(doc.tracks.iter().all(|track| track.clips.is_empty()));
     doc.validate().unwrap();
@@ -2484,7 +2488,7 @@ fn ripples_move_track_curves_and_never_clip_curves() {
             )]),
         },
     }
-    .apply(&mut base)
+    .apply_with_history_oracle(&mut base)
     .unwrap();
     clip_mut(&mut base, ClipId(2)).enabled_curve = Some(hold_toggle());
     set_envelope(&mut base, ClipId(2), &linear(&[(0, 0), (59, -590)]));
@@ -2494,7 +2498,7 @@ fn ripples_move_track_curves_and_never_clip_curves() {
     // local curves; the track ride shifts per AU4 rule 22.
     let mut doc = base.clone();
     Operation::RippleDeleteClip { clip: ClipId(1) }
-        .apply(&mut doc)
+        .apply_with_history_oracle(&mut doc)
         .unwrap();
     assert_eq!(clip(&doc, ClipId(2)).timeline_start, TimeCode(0));
     assert_eq!(
@@ -2526,7 +2530,7 @@ fn ripples_move_track_curves_and_never_clip_curves() {
         at: TimeCode(60),
         duration: TimeCode(15),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip(&doc, ClipId(2)).timeline_start, TimeCode(75));
     assert_eq!(
@@ -2587,7 +2591,7 @@ fn push_in_survives_trim_in_then_out() {
             keyframes: BTreeMap::from([("scale_percent".to_owned(), push_in.clone())]),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let scale = |doc: &Document| clip(doc, ClipId(1)).effects[0].keyframes["scale_percent"].clone();
 
@@ -2595,7 +2599,7 @@ fn push_in_survives_trim_in_then_out() {
         clip: ClipId(1),
         new_source: TimeCode(20)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         key_positions(&scale(&doc)),
@@ -2606,7 +2610,7 @@ fn push_in_survives_trim_in_then_out() {
         clip: ClipId(1),
         new_source: TimeCode(0)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(scale(&doc), push_in);
     for local in 0..60 {
@@ -2653,14 +2657,14 @@ fn split_copies_keys_to_both_halves() {
             keyframes: BTreeMap::from([("scale_percent".to_owned(), flight.clone())]),
         },
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::SplitClip {
         clip: ClipId(1),
         at: TimeCode(30),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let left = clip(&doc, ClipId(1)).effects[0].keyframes["scale_percent"].clone();
     let right = clip(&doc, ClipId(2)).effects[0].keyframes["scale_percent"].clone();
@@ -2704,7 +2708,7 @@ fn upsert(doc: &mut Document, name: &str, keyframe: Keyframe) -> Result<(), OpEr
         name: name.to_owned(),
         key: keyframe,
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
 }
 
 fn remove_key(doc: &mut Document, name: &str, at: i64) -> Result<(), OpError> {
@@ -2714,7 +2718,7 @@ fn remove_key(doc: &mut Document, name: &str, at: i64) -> Result<(), OpError> {
         name: name.to_owned(),
         at: TimeCode(at),
     }
-    .apply(doc)
+    .apply_with_history_oracle(doc)
 }
 
 /// R15: insert keeps order, re-upsert at the same frame replaces, and the
@@ -2776,7 +2780,7 @@ fn upsert_validates_range_owner_class_and_names() {
         name: "exposure_milli_stops".to_owned(),
         key: key(0, 0),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -2791,7 +2795,7 @@ fn upsert_validates_range_owner_class_and_names() {
         name: "exposure_milli_stops".to_owned(),
         key: key(0, 0),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::MissingClip(ClipId(9)));
 }
@@ -2903,14 +2907,14 @@ fn effect_and_clip_toggles_write_the_static_flags() {
         effect: EffectId(1),
         enabled: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(!clip(&doc, ClipId(1)).effects[0].enabled);
     Operation::SetClipEnabled {
         clip: ClipId(1),
         enabled: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(!clip(&doc, ClipId(1)).enabled);
     doc.validate().unwrap();
@@ -2920,7 +2924,7 @@ fn effect_and_clip_toggles_write_the_static_flags() {
         effect: EffectId(9),
         enabled: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -2933,7 +2937,7 @@ fn effect_and_clip_toggles_write_the_static_flags() {
         clip: ClipId(9),
         enabled: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::MissingClip(ClipId(9)));
 }
@@ -2949,13 +2953,13 @@ fn disabled_effects_and_clips_read_back_disabled() {
         effect: EffectId(1),
         enabled: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetClipEnabled {
         clip: ClipId(1),
         enabled: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     let effect = &clip(&doc, ClipId(1)).effects[0];
@@ -2973,13 +2977,13 @@ fn disabled_effects_and_clips_read_back_disabled() {
         effect: EffectId(1),
         enabled: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::SetClipEnabled {
         clip: ClipId(1),
         enabled: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(clip(&doc, ClipId(1)).effects[0].is_enabled_at(TimeCode(30)));
     assert!(clip(&doc, ClipId(1)).is_enabled_at(TimeCode(30)));
@@ -2994,7 +2998,7 @@ fn linked_pair_toggles_via_an_atomic_batch() {
     Operation::LinkClips {
         clips: vec![ClipId(1), ClipId(2)],
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip(&doc, ClipId(1)).link, clip(&doc, ClipId(2)).link);
 
@@ -3055,7 +3059,7 @@ fn set_and_clear_effect_keyframes_route_enabled_to_the_sibling() {
         name: "enabled".to_owned(),
         curve: hold_toggle(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         effect_toggle(&doc, ClipId(1)),
@@ -3076,7 +3080,7 @@ fn set_and_clear_effect_keyframes_route_enabled_to_the_sibling() {
         name: "enabled".to_owned(),
         curve: linear(&[(0, 2)]),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -3095,7 +3099,7 @@ fn set_and_clear_effect_keyframes_route_enabled_to_the_sibling() {
         effect: EffectId(1),
         name: "enabled".to_owned(),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(clip(&doc, ClipId(1)).effects[0].enabled_curve.is_none());
     doc.validate().unwrap();
@@ -3110,7 +3114,7 @@ fn clip_enabled_curve_writes_clears_and_survives() {
         clip: ClipId(1),
         curve: Some(hold_toggle()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip_toggle(&doc, ClipId(1)), hold_toggle());
 
@@ -3119,7 +3123,7 @@ fn clip_enabled_curve_writes_clears_and_survives() {
         clip: ClipId(1),
         curve: Some(linear(&[(0, 5)])),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(
         error,
@@ -3138,13 +3142,13 @@ fn clip_enabled_curve_writes_clears_and_survives() {
         clip: ClipId(1),
         curve: Some(linear(&[(-10, 1), (30, 0)])),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::TrimClip {
         clip: ClipId(1),
         new_source: TimeCode(25)..TimeCode(60),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         key_positions(&clip_toggle(&doc, ClipId(1))),
@@ -3155,7 +3159,7 @@ fn clip_enabled_curve_writes_clears_and_survives() {
         clip: ClipId(1),
         curve: None,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert!(clip(&doc, ClipId(1)).enabled_curve.is_none());
     doc.validate().unwrap();
@@ -3198,13 +3202,13 @@ fn copy_attributes_verbatim() {
         clip: ClipId(1),
         effect: primary_effect(1, colour.clone(), false),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddEffect {
         clip: ClipId(1),
         effect: transform_effect(2, scale.clone()),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::CopyClipAttributes {
@@ -3213,7 +3217,7 @@ fn copy_attributes_verbatim() {
         names: None,
         include_keyframes: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let target = &clip(&doc, ClipId(2)).effects;
     assert_eq!(target.len(), 2);
@@ -3238,13 +3242,13 @@ fn copy_attributes_verbatim() {
         clip: ClipId(1),
         effect: primary_effect(1, colour.clone(), false),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddEffect {
         clip: ClipId(2),
         effect: primary_effect(7, linear(&[(0, 1_000)]), true),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::CopyClipAttributes {
         from_clip: ClipId(1),
@@ -3252,7 +3256,7 @@ fn copy_attributes_verbatim() {
         names: None,
         include_keyframes: false,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let target = &clip(&doc, ClipId(2)).effects;
     assert_eq!(target.len(), 1);
@@ -3275,25 +3279,25 @@ fn copy_subset_matches_by_name_and_occurrence() {
         clip: ClipId(1),
         effect: primary_effect(1, linear(&[(0, 100)]), true),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddEffect {
         clip: ClipId(1),
         effect: transform_effect(2, linear(&[(0, 110)])),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddEffect {
         clip: ClipId(1),
         effect: primary_effect(3, linear(&[(0, 300)]), false),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::AddEffect {
         clip: ClipId(2),
         effect: primary_effect(7, linear(&[(0, 700)]), true),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::CopyClipAttributes {
@@ -3302,7 +3306,7 @@ fn copy_subset_matches_by_name_and_occurrence() {
         names: Some(vec!["primary_correction".to_owned()]),
         include_keyframes: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     let target = &clip(&doc, ClipId(2)).effects;
     assert_eq!(target.len(), 2, "the out-of-scope transform never lands");
@@ -3332,7 +3336,7 @@ fn copy_skips_names_absent_on_source_and_rejects_unknown() {
         clip: ClipId(1),
         effect: primary_effect(1, linear(&[(0, 100)]), true),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
 
     Operation::CopyClipAttributes {
@@ -3344,7 +3348,7 @@ fn copy_skips_names_absent_on_source_and_rejects_unknown() {
         ]),
         include_keyframes: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(clip(&doc, ClipId(2)).effects.len(), 1);
 
@@ -3355,7 +3359,7 @@ fn copy_skips_names_absent_on_source_and_rejects_unknown() {
         names: Some(vec!["no_such_effect".to_owned()]),
         include_keyframes: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap_err();
     assert_eq!(error, OpError::UnknownEffect("no_such_effect".to_owned()));
     assert_eq!(doc, before);
@@ -3370,13 +3374,13 @@ fn copy_onto_shorter_clips_is_legal() {
         clip: ClipId(1),
         effect: primary_effect(1, linear(&[(0, 0), (59, 4_720)]), true),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     Operation::TrimClip {
         clip: ClipId(2),
         new_source: TimeCode(60)..TimeCode(80),
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         doc.clip_duration(clip(&doc, ClipId(2))).unwrap(),
@@ -3389,7 +3393,7 @@ fn copy_onto_shorter_clips_is_legal() {
         names: None,
         include_keyframes: true,
     }
-    .apply(&mut doc)
+    .apply_with_history_oracle(&mut doc)
     .unwrap();
     assert_eq!(
         key_positions(&colour_curve(&doc, ClipId(2))),
