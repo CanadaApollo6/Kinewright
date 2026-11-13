@@ -207,7 +207,7 @@ fn differential(seeds: u64, length: usize) {
     for seed in 1..=seeds {
         for (kind, case) in &cases {
             for policy in [Policy::Fold, Policy::NeverFold] {
-                for checkpoints in [0, 1, 8] {
+                for (step_cap, checkpoints) in [(1, 0), (1, 1), (1, 4), (3, 0), (3, 1), (3, 4)] {
                     let budget = serde_json::to_vec(&case.operation).unwrap().len() as u64 + 190;
                     let mut history = History::new(
                         case.document.clone(),
@@ -215,7 +215,10 @@ fn differential(seeds: u64, length: usize) {
                             Policy::Fold => RetentionPolicy::Fold,
                             Policy::NeverFold => RetentionPolicy::NeverFold,
                         },
-                        bounds(budget, checkpoints),
+                        RoleBounds {
+                            step_cap,
+                            ..bounds(budget, checkpoints)
+                        },
                     )
                     .unwrap();
                     let mut model = Model::new(
@@ -223,7 +226,7 @@ fn differential(seeds: u64, length: usize) {
                         usize::try_from(budget).unwrap(),
                         policy,
                     );
-                    model.step_cap = 3;
+                    model.step_cap = step_cap;
                     let mut fates = BTreeMap::new();
                     let mut random = commands::Random(0x4858_200a_0000_0000 | seed);
                     let first = match seed % 3 {
@@ -237,7 +240,7 @@ fn differential(seeds: u64, length: usize) {
                     let prefix = commands::initial_commands(first);
                     for index in 0..prefix.len() + length {
                         let context = format!(
-                            "seed={seed} kind={kind} policy={policy:?} cache={checkpoints} index={index}"
+                            "seed={seed} kind={kind} policy={policy:?} cap={step_cap} cache={checkpoints} index={index}"
                         );
                         // These are independent before states for transactional refusal and effects.
                         let before = model.clone();
@@ -797,5 +800,184 @@ fn both_coalesced_commands_report_undo_redo_and_discard_fates() {
         fates[&(0, 1)],
         Fate::Discarded,
         "COALESCED_SECOND_DISCARDED"
+    );
+}
+#[test]
+fn boundary_queries_preserve_the_pre_top_pointer() {
+    let mut history =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(1000, 1)).unwrap();
+    history.execute(Command::Do(lock(false))).unwrap();
+    history.execute(Command::Do(lock(true))).unwrap();
+    // The test capture shares the pre-edit document with the dedicated cache slot.
+    let before = std::sync::Arc::clone(history.document());
+    history.execute(Command::Do(lock(false))).unwrap();
+    assert!(!history.boundary_document(1).unwrap().tracks[0].sync_lock);
+    history.execute(Command::Undo).unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(history.document(), &before),
+        "BOUNDARY_QUERY_PRESERVES_PRE_TOP"
+    );
+}
+#[test]
+fn optional_warming_cannot_refuse_a_valid_replay() {
+    let mut document = literal_document();
+    document.markers = (0..10)
+        .map(|id| kinewright_core::Marker {
+            id: kinewright_core::MarkerId(id),
+            position: kinewright_core::TimeCode(0),
+            label: "marker".repeat(40),
+            color_token: 0,
+        })
+        .collect();
+    let live = kinewright_core::history_size::document_live_bytes(&document).unwrap();
+    let mut limits = bounds(32_000, 16);
+    limits.step_cap = 512;
+    limits.document_live_bytes = 2 * live;
+    limits.replay_workspace = 10 * live;
+    let mut history = History::new(document, RetentionPolicy::Fold, limits).unwrap();
+    for index in 0..300 {
+        history.execute(Command::Do(lock(index % 2 == 1))).unwrap();
+    }
+    history.drop_cache();
+    let identity = history.snapshot_identity().unwrap();
+    assert!(
+        !history.boundary_document(299).unwrap().tracks[0].sync_lock,
+        "TIGHT_REPLAY_SUCCEEDS"
+    );
+    assert!(
+        history.cache_depths().is_empty(),
+        "WARMING_DROPPED_WITHOUT_REFUSAL"
+    );
+    assert_eq!(
+        history.snapshot_identity().unwrap(),
+        identity,
+        "WARMING_QUERY_LEAVES_RECORD_UNCHANGED"
+    );
+    history.execute(Command::Undo).unwrap();
+    assert!(!history.document().tracks[0].sync_lock);
+}
+
+#[test]
+fn retained_payloads_do_not_keep_callers_spare_allocations() {
+    let mut label = String::with_capacity(1 << 20);
+    label.push_str("marker");
+    let mut history =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(1000, 4)).unwrap();
+    history
+        .execute(Command::Do(Operation::AddMarker {
+            marker: kinewright_core::Marker {
+                id: kinewright_core::MarkerId(1),
+                position: kinewright_core::TimeCode(0),
+                label,
+                color_token: 0,
+            },
+        }))
+        .unwrap();
+    let Operation::AddMarker { marker } =
+        &history.undo().back().unwrap().commands()[0].operations[0]
+    else {
+        panic!("marker")
+    };
+    assert!(
+        marker.label.capacity() <= 12,
+        "NORMALIZED_PAYLOAD_ALLOCATION"
+    );
+}
+
+#[test]
+fn escaped_gesture_keys_are_charged_and_released_consistently() {
+    let mut history =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(1000, 4)).unwrap();
+    history
+        .execute(Command::DoBatchCoalesced {
+            operations: vec![lock(true)],
+            coalesce_key: "\u{0}".repeat(100),
+        })
+        .unwrap();
+    let before = history.charge();
+    let record = history.record();
+    let mut reopened =
+        History::new(Document::default(), RetentionPolicy::Fold, history.bounds()).unwrap();
+    reopened
+        .install_snapshot(record.validate(history.bounds()).unwrap())
+        .unwrap();
+    assert_eq!(reopened.charge(), before, "ESCAPED_KEY_OPEN_CHARGE");
+    history.close_gesture().unwrap();
+    reopened.close_gesture().unwrap();
+    assert_eq!(
+        before.decoded - history.charge().decoded,
+        602,
+        "ESCAPED_KEY_LITERAL_CHARGE"
+    );
+    assert_eq!(
+        history.charge(),
+        reopened.charge(),
+        "ESCAPED_KEY_RELEASE_CHARGE"
+    );
+}
+
+#[test]
+fn typed_snapshot_does_not_install_vacant_queue_allocations() {
+    let mut record = record_fixture().record();
+    record.undo.reserve(1 << 16);
+    record.redo.reserve(1 << 16);
+    let identity = record.snapshot_identity().unwrap();
+    let mut history =
+        History::new(Document::default(), RetentionPolicy::Fold, bounds(1000, 4)).unwrap();
+    let snapshot = record.validate(history.bounds()).unwrap();
+    history.install_snapshot(snapshot).unwrap();
+    assert!(
+        history.retained_live_bound().unwrap() < 1 << 20,
+        "NORMALIZED_SNAPSHOT_STACK_STORAGE"
+    );
+    let mut installed = history.record();
+    installed.epoch = 0;
+    assert_eq!(
+        installed.snapshot_identity().unwrap(),
+        identity,
+        "COMPACTED_RECORD_IDENTITY"
+    );
+}
+
+fn marker_document() -> Document {
+    let mut document = literal_document();
+    document.markers.push(kinewright_core::Marker {
+        id: kinewright_core::MarkerId(1),
+        position: kinewright_core::TimeCode(0),
+        label: "marker".into(),
+        color_token: 0,
+    });
+    document
+}
+#[test]
+fn initial_documents_do_not_retain_spare_nested_allocations() {
+    let mut document = marker_document();
+    document.markers[0].label.reserve(1 << 20);
+    let mut limits = bounds(1000, 4);
+    limits.document_live_bytes = 64 << 10;
+    let history = History::new(document, RetentionPolicy::Fold, limits).unwrap();
+    assert!(
+        history.baseline().markers[0].label.capacity() <= 12,
+        "HISTORY_DOCUMENT_ALLOCATION"
+    );
+}
+#[test]
+fn typed_snapshot_baselines_do_not_retain_spare_nested_allocations() {
+    let mut limits = bounds(1000, 4);
+    limits.document_live_bytes = 64 << 10;
+    let history = History::new(marker_document(), RetentionPolicy::Fold, limits).unwrap();
+    let mut record = history.record();
+    // The malformed allocation is independent of the source's immutable document.
+    let mut baseline = (**history.baseline()).clone();
+    baseline.markers[0].label.reserve(1 << 20);
+    record.baseline = std::sync::Arc::new(baseline);
+    let mut target =
+        History::new(Document::default(), RetentionPolicy::Fold, history.bounds()).unwrap();
+    target
+        .install_snapshot(record.validate(history.bounds()).unwrap())
+        .unwrap();
+    assert!(
+        target.baseline().markers[0].label.capacity() <= 12,
+        "SNAPSHOT_BASELINE_ALLOCATION"
     );
 }

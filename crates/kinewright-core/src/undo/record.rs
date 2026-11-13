@@ -1,6 +1,6 @@
 use super::{
     Cache, Charge, CommandKey, Error, History, RetentionPolicy, RoleBounds, Step, check_document,
-    digest_operations, operation_charge,
+    check_document_value, digest_operations, operation_charge,
 };
 use crate::{Document, history_size::ReplayBudget};
 use serde::{Deserialize, Serialize};
@@ -60,8 +60,8 @@ impl Record {
     ) -> Result<ValidatedSnapshot, Error> {
         self.baseline.validate().map_err(Error::InvalidDocument)?;
         self.document.validate().map_err(Error::InvalidDocument)?;
-        check_document(&self.baseline, bounds)?;
-        check_document(&self.document, bounds)?;
+        check_document_value(&self.baseline, bounds)?;
+        check_document_value(&self.document, bounds)?;
         if self
             .undo
             .len()
@@ -70,6 +70,13 @@ impl Record {
             > bounds.step_cap
         {
             return Err(Error::Capacity);
+        }
+        // A typed capture may have reserved vacant queue storage. Installation
+        // retains values, rather than the source owner's allocation headroom.
+        self.undo.shrink_to_fit();
+        self.redo.shrink_to_fit();
+        for step in self.undo.iter_mut().chain(&mut self.redo) {
+            step.commands.shrink_to_fit();
         }
         let mut keys = BTreeSet::new();
         let mut position = None;
@@ -105,12 +112,15 @@ impl Record {
                     .ok_or(Error::Capacity)?;
                 total = total.add(command_charge)?;
             }
+            step.charge.key_bytes = step
+                .coalesce_key
+                .as_deref()
+                .map(super::encoded_bytes)
+                .transpose()?
+                .unwrap_or(0);
             total.decoded = total
                 .decoded
-                .checked_add(
-                    (std::mem::size_of::<Step>() * 2) as u64
-                        + step.coalesce_key.as_ref().map_or(0, |key| key.len() as u64),
-                )
+                .checked_add((std::mem::size_of::<Step>() * 2) as u64 + step.charge.key_bytes)
                 .ok_or(Error::Capacity)?;
             step.charge.operations = total;
             if index < undo_depth {
@@ -130,6 +140,13 @@ impl Record {
         let mut budget =
             ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
         budget.reserve_input(input).map_err(|_| Error::Capacity)?;
+        budget
+            .check_clone(&self.baseline)
+            .map_err(|_| Error::Capacity)?;
+        // Typed records can carry spare nested allocations too. Normalize the
+        // retained baseline; the saved current is replaced by replay below.
+        self.baseline = Arc::new((*self.baseline).clone());
+        check_document(&self.baseline, bounds)?;
         budget
             .check_clone(&self.baseline)
             .map_err(|_| Error::Capacity)?;
@@ -172,6 +189,7 @@ fn validate_step(
 ) -> Result<(), Error> {
     let mut summary = super::StepCharge {
         operations: step.charge.operations,
+        key_bytes: step.charge.key_bytes,
         ..super::StepCharge::default()
     };
     for command in &step.commands {

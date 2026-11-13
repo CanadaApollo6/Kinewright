@@ -35,6 +35,40 @@ pub struct RoleBounds {
     pub decoded_history_bytes: u64,
 }
 
+impl RoleBounds {
+    /// Proposed ordinary profile: `Fold`, with a 32 MiB retained envelope.
+    /// Owners reserve their ledgers and vacant stack storage separately.
+    pub const ORDINARY: Self = Self {
+        operation_bytes: 512 << 10,
+        step_cap: 16_384,
+        checkpoint_documents: 4,
+        replay_workspace: 32 << 20,
+        document_live_bytes: 7 << 19,
+        document_bytes: 512 << 10,
+        decoded_history_bytes: 5 << 20,
+    };
+    /// Proposed task profile: `NeverFold`. Below the current 41 MiB resident cap.
+    pub const TASK: Self = Self {
+        operation_bytes: 24 << 10,
+        step_cap: 1024,
+        checkpoint_documents: 4,
+        replay_workspace: 64 << 20,
+        document_live_bytes: 4 << 20,
+        document_bytes: 256 << 10,
+        decoded_history_bytes: 512 << 10,
+    };
+    /// Proposed candidate profile: `NeverFold`, within the current 2 MiB cap.
+    pub const CANDIDATE: Self = Self {
+        operation_bytes: 64 << 10,
+        step_cap: 512,
+        checkpoint_documents: 0,
+        replay_workspace: 64 << 20,
+        document_live_bytes: 512 << 10,
+        document_bytes: 64 << 10,
+        decoded_history_bytes: 512 << 10,
+    };
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Charge {
     pub encoded: u64,
@@ -74,6 +108,7 @@ pub(crate) struct StepCharge {
     operations: Charge,
     effects_bytes: u64,
     replay_peak: u64,
+    key_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,8 +230,16 @@ impl History {
                 error,
             })
         })?;
-        check_document(&document, bounds)?;
-        let document = Arc::new(document);
+        check_document_value(&document, bounds)?;
+        let mut budget =
+            ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
+        budget.check_clone(&document).map_err(|_| Error::Capacity)?;
+        // The immutable baseline/current share compact owned storage. A caller's
+        // nested Vec/String headroom does not become retained history memory.
+        let compact = document.clone();
+        drop(document);
+        check_document(&compact, bounds)?;
+        let document = Arc::new(compact);
         Ok(Self {
             baseline: Arc::clone(&document),
             document,
@@ -275,6 +318,49 @@ impl History {
         self.cache.depths()
     }
 
+    /// Conservative live allocation charge, including vacant stack capacity and
+    /// distinct cached documents. Immutable captures held by callers are separate.
+    pub fn retained_live_bound(&self) -> Result<u64, Error> {
+        let mut documents: Vec<&Arc<Document>> = vec![&self.baseline];
+        for document in std::iter::once(&self.document).chain(self.cache.documents()) {
+            if !documents.iter().any(|old| Arc::ptr_eq(old, document)) {
+                documents.push(document);
+            }
+        }
+        let mut total = std::mem::size_of::<Self>() as u64
+            + ((self.undo.capacity() + self.redo.capacity()) * std::mem::size_of::<Step>()) as u64
+            + self.cache.storage_bytes();
+        for document in documents {
+            total = total
+                .checked_add(
+                    crate::history_size::document_live_bytes(document)
+                        .map_err(|_| Error::Capacity)?,
+                )
+                .ok_or(Error::Capacity)?;
+        }
+        for step in self.undo.iter().chain(&self.redo) {
+            let metadata = (step.commands.capacity() * std::mem::size_of::<StepCommand>()) as u64
+                + step.coalesce_key.as_ref().map_or(0, |key| key.len() as u64);
+            total = total.checked_add(metadata).ok_or(Error::Capacity)?;
+            for command in &step.commands {
+                total = total
+                    .checked_add(operation_charge(&command.operations)?.decoded)
+                    .ok_or(Error::Capacity)?;
+            }
+        }
+        if let Some(recorder) = &self.recorder {
+            total = total
+                .checked_add(operation_charge(recorder)?.decoded)
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        ((recorder.capacity() - recorder.len()) * std::mem::size_of::<Operation>())
+                            as u64,
+                    )
+                })
+                .ok_or(Error::Capacity)?;
+        }
+        Ok(total)
+    }
     pub fn execute(&mut self, command: Command) -> Result<Effects, Error> {
         self.next_position()?;
         match command {
@@ -318,22 +404,6 @@ impl History {
             return Err(Error::Batch(BatchError::Empty));
         }
         let old_depth = self.undo.len();
-        let mut charge = operation_charge(&operations)?;
-        let recorder_bytes = if self.recorder.is_some() {
-            self.recorder_bytes
-                .checked_add(charge.decoded)
-                .and_then(|bytes| {
-                    bytes.checked_add((operations.len() * std::mem::size_of::<Operation>()) as u64)
-                })
-                .filter(|bytes| *bytes <= self.bounds.decoded_history_bytes)
-                .ok_or(Error::Capacity)?
-        } else {
-            0
-        };
-        charge.decoded = charge
-            .decoded
-            .checked_add((std::mem::size_of::<StepCommand>() * 2) as u64)
-            .ok_or(Error::Capacity)?;
         let extends = key.is_some()
             && self
                 .undo
@@ -344,27 +414,84 @@ impl History {
         } else {
             StepCharge::default()
         };
-        if top.operations.add(charge)?.encoded > self.bounds.operation_bytes {
+        let encoded = operations.iter().try_fold(0_u64, |bytes, operation| {
+            bytes
+                .checked_add(encoded_bytes(operation)?)
+                .ok_or(Error::Capacity)
+        })?;
+        if top
+            .operations
+            .encoded
+            .checked_add(encoded)
+            .ok_or(Error::Capacity)?
+            > self.bounds.operation_bytes
+        {
             return Err(Error::StepTooLarge);
         }
-        if !extends {
-            charge.decoded = charge
-                .decoded
-                .checked_add(
-                    (std::mem::size_of::<Step>() * 2) as u64
-                        + key.as_ref().map_or(0, |key| key.len() as u64),
-                )
-                .ok_or(Error::Capacity)?;
-        }
-        let mut retained = self.undo_charge.add(charge)?;
         let mut steps = self.undo.len() + usize::from(!extends);
         if self.policy == RetentionPolicy::NeverFold
-            && (retained.encoded > self.bounds.operation_bytes || steps > self.bounds.step_cap)
+            && (self
+                .undo_charge
+                .encoded
+                .checked_add(encoded)
+                .ok_or(Error::Capacity)?
+                > self.bounds.operation_bytes
+                || steps > self.bounds.step_cap)
         {
             return Err(Error::HistoryFull);
         }
+        let mut charge = operation_charge(&operations)?;
+        let normalization_bytes = charge
+            .decoded
+            .checked_mul(1 + u64::from(self.recorder.is_some()))
+            .ok_or(Error::Capacity)?;
+        let recorder_bytes = if self.recorder.is_some() {
+            self.recorder_bytes
+                .checked_add(charge.decoded)
+                .and_then(|bytes| {
+                    bytes.checked_add((operations.len() * std::mem::size_of::<Operation>()) as u64)
+                })
+                .ok_or(Error::Capacity)?
+        } else {
+            0
+        };
+        charge.decoded = charge
+            .decoded
+            .checked_add((std::mem::size_of::<StepCommand>() * 2) as u64)
+            .ok_or(Error::Capacity)?;
+        let key_bytes = if extends {
+            top.key_bytes
+        } else {
+            key.as_deref().map(encoded_bytes).transpose()?.unwrap_or(0)
+        };
+        if !extends {
+            charge.decoded = charge
+                .decoded
+                .checked_add((std::mem::size_of::<Step>() * 2) as u64 + key_bytes)
+                .ok_or(Error::Capacity)?;
+        }
+        if top
+            .operations
+            .decoded
+            .checked_add(charge.decoded)
+            .and_then(|bytes| bytes.checked_add(recorder_bytes))
+            .ok_or(Error::Capacity)?
+            > self.bounds.decoded_history_bytes
+        {
+            return Err(Error::Capacity);
+        }
+        let mut retained = self.undo_charge.add(charge)?;
         let mut budget =
             ReplayBudget::workspace(self.bounds.replay_workspace).map_err(|_| Error::Capacity)?;
+        budget
+            .reserve_input(normalization_bytes)
+            .map_err(|_| Error::Capacity)?;
+        // Retained operations own compact nested Vec/String allocations. Moving
+        // caller payloads directly could retain arbitrary spare capacity that
+        // the shared structural estimator intentionally does not count.
+        let normalized = operations.clone();
+        drop(operations);
+        let operations = normalized;
         budget
             .check_clone(&self.document)
             .map_err(|_| Error::Capacity)?;
@@ -372,6 +499,7 @@ impl History {
         let identities = apply(&mut candidate, &operations, self.bounds, &mut budget)?;
         let mut summary = replay_charge(top, &budget, identities.len(), self.bounds, 0)?;
         summary.operations = top.operations.add(charge)?;
+        summary.key_bytes = key_bytes;
         let accepted = self.position();
         let digest = digest_operations(&operations)?;
         let mut effects = Effects::new(accepted);
@@ -555,6 +683,9 @@ impl History {
         self.replay_to(depth)
     }
     fn replay_to(&mut self, depth: usize) -> Result<Arc<Document>, Error> {
+        if depth == self.undo.len() {
+            return Ok(Arc::clone(&self.document));
+        }
         if depth == 0 {
             return Ok(Arc::clone(&self.baseline));
         }
@@ -562,32 +693,74 @@ impl History {
             return Ok(document);
         }
         let (start, source) = self.cache.nearest(depth).unwrap_or((0, &self.baseline));
-        let mut budget =
-            ReplayBudget::workspace(self.bounds.replay_workspace).map_err(|_| Error::Capacity)?;
-        budget.check_clone(source).map_err(|_| Error::Capacity)?;
-        let mut document = (**source).clone();
-        for step in self.undo.iter().take(depth).skip(start) {
-            for command in &step.commands {
-                replay(&mut document, &command.operations, self.bounds, &mut budget)?;
+        let warm = self.cache.warm_depths(start, depth);
+        // Cache planning owns its temporary snapshots until the entire replay
+        // succeeds. A tight workspace retries without warming; cache policy
+        // cannot turn an otherwise valid Undo into a refusal.
+        let rebuild = |warm: &[usize]| -> Result<_, Error> {
+            let mut budget = ReplayBudget::workspace(self.bounds.replay_workspace)
+                .map_err(|_| Error::Capacity)?;
+            budget
+                .reserve_input(
+                    (warm.len() * 2 * std::mem::size_of::<(usize, Arc<Document>)>()) as u64,
+                )
+                .map_err(|_| Error::Capacity)?;
+            budget.check_clone(source).map_err(|_| Error::Capacity)?;
+            let mut document = (**source).clone();
+            let mut checkpoints = Vec::new();
+            let mut held = 0_u64;
+            for (index, step) in self.undo.iter().enumerate().take(depth).skip(start) {
+                for command in &step.commands {
+                    replay(&mut document, &command.operations, self.bounds, &mut budget)?;
+                }
+                let boundary = index + 1;
+                if warm.contains(&boundary) {
+                    let bytes = crate::history_size::document_live_bytes(&document)
+                        .map_err(|_| Error::Capacity)?;
+                    held = held.checked_add(bytes).ok_or(Error::Capacity)?;
+                    budget
+                        .set_document_charge(held)
+                        .map_err(|_| Error::Capacity)?;
+                    budget.check_clone(&document).map_err(|_| Error::Capacity)?;
+                    // The scratch remains mutable. This copy belongs only to
+                    // the prospective cache, and is committed after success.
+                    checkpoints.push((boundary, Arc::new(document.clone())));
+                }
             }
+            Ok((Arc::new(document), checkpoints))
+        };
+        let result = rebuild(&warm);
+        let (document, checkpoints) = if matches!(&result, Err(Error::Capacity)) && !warm.is_empty()
+        {
+            rebuild(&[])?
+        } else {
+            result?
+        };
+        for (boundary, checkpoint) in checkpoints {
+            self.cache.insert_warm(boundary, checkpoint);
         }
-        let document = Arc::new(document);
-        self.cache.insert(depth, Arc::clone(&document));
+        self.cache.insert_replayed(depth, &document);
         Ok(document)
     }
 }
 
 fn close_key(step: &mut Step) -> u64 {
-    let released = step.coalesce_key.take().map_or(0, |key| key.len() as u64);
+    step.coalesce_key = None;
+    let released = std::mem::take(&mut step.charge.key_bytes);
     step.charge.operations.decoded -= released;
     released
 }
-fn check_document(document: &Document, bounds: RoleBounds) -> Result<(), Error> {
-    if serde_json::to_vec(document)
-        .map_err(|_| Error::Encoding)?
-        .len() as u64
-        > bounds.document_bytes
+fn check_document_value(document: &Document, bounds: RoleBounds) -> Result<(), Error> {
+    if encoded_bytes(document)? > bounds.document_bytes
+        || crate::history_size::document_bytes(document, true).map_err(|_| Error::Capacity)?
+            > bounds.document_live_bytes
     {
+        return Err(Error::DocumentCapacity);
+    }
+    Ok(())
+}
+fn check_document(document: &Document, bounds: RoleBounds) -> Result<(), Error> {
+    if encoded_bytes(document)? > bounds.document_bytes {
         return Err(Error::DocumentCapacity);
     }
     if crate::history_size::document_live_bytes(document).map_err(|_| Error::Capacity)?
@@ -690,6 +863,7 @@ fn replay_charge(
     }
     Ok(StepCharge {
         operations: previous.operations,
+        key_bytes: previous.key_bytes,
         effects_bytes: previous
             .effects_bytes
             .checked_add(effects)
@@ -742,9 +916,7 @@ fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
         .iter()
         .try_fold(Charge::default(), |charge, operation| {
             charge.add(Charge {
-                encoded: serde_json::to_vec(operation)
-                    .map_err(|_| Error::Encoding)?
-                    .len() as u64,
+                encoded: encoded_bytes(operation)?,
                 decoded: (std::mem::size_of::<Operation>() as u64)
                     .checked_add(
                         crate::history_size::operation_owned_bytes(operation)
@@ -753,6 +925,24 @@ fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
                     .ok_or(Error::Capacity)?,
             })
         })
+}
+fn encoded_bytes<T: Serialize + ?Sized>(value: &T) -> Result<u64, Error> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| std::io::Error::other("encoded size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|_| Error::Encoding)?;
+    Ok(counter.0)
 }
 fn digest_operations(operations: &[Operation]) -> Result<[u8; 32], Error> {
     digest(operations)

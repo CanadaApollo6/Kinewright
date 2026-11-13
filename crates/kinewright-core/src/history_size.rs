@@ -206,7 +206,7 @@ const _: () = assert!(
     !std::mem::needs_drop::<crate::ColorContext>(),
     "colour context gained owned storage; include it in the live history bound"
 );
-fn document_bytes(document: &Document, cloned: bool) -> Result<u64, HistoryError> {
+pub(crate) fn document_bytes(document: &Document, cloned: bool) -> Result<u64, HistoryError> {
     // The dominating arrays use their actual typed capacities, including unused slots.
     // Nested owned payloads use the existing conservative structural estimator.
     let Document {
