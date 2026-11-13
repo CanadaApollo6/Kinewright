@@ -216,6 +216,14 @@ fn exit_fix1_accepted_export_survives_refresh_apply_and_discard() {
 
 struct HeldBackend(Arc<Gate>);
 impl Analysis for HeldBackend {
+    fn media_availability(&self, _: &MediaAsset) -> MediaAvailabilityStatus {
+        self.0.hold();
+        MediaAvailabilityStatus {
+            kind: MediaAvailabilityKind::OnlineVerified,
+            observed_fingerprint: None,
+            reason: None,
+        }
+    }
     fn probe(&self, _: &Path) -> Result<MediaAsset, MediaError> {
         Err(MediaError::MediaAdmissionRequired)
     }
@@ -658,3 +666,153 @@ fn exit_fix1_aborting_export_quit_forgets_discard_and_keeps_admission_open() {
 
 #[path = "process_exit_fix2_tests.rs"]
 mod fix2;
+
+#[test]
+fn runtime_followup_export_preflight_cannot_slip_past_close_or_quit() {
+    for quit in [false, true] {
+        let (mut app, _) = in1_tests::in1_harness(Document::default());
+        app.new_project();
+        for project in &mut app.projects {
+            project.saved_document = Some(Arc::clone(&project.document));
+        }
+        let directory = TempDirectory::new_in(&workspace_target_dir(), "followup-preflight");
+        let gate = Arc::new(Gate::default());
+        let encoder = Arc::new(Gate::default());
+        let queue = ExportQueue::with_lut_project_path(
+            Arc::new(HeldExport {
+                gate: Arc::clone(&encoder),
+                token: Arc::default(),
+            }),
+            Arc::new(HeldBackend(Arc::clone(&gate))),
+            Arc::clone(&app.projects[0].agent_project_path),
+        )
+        .unwrap();
+        app.projects[0].exports = Some(queue.clone());
+        let enqueue_queue = queue.clone();
+        let output_path = directory.path("late.mp4");
+        let thread = std::thread::spawn(move || {
+            let mut document = renderable_document(30);
+            document.tracks[0].clips[0].content = ClipContent::Media;
+            document.tracks[0].clips[0].asset = AssetId(1);
+            document.media_pool.push(MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+                name: "preflight-source".into(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: MediaSourceFingerprint::unknown(),
+                color_description: ColorContext::sdr_rec709().delivery,
+                assumed_from: None,
+            });
+            enqueue_queue.enqueue(
+                &document,
+                QueueExportRequest {
+                    output_path,
+                    profile: DeliveryProfile::SourceMaster,
+                    focus_x_percent: 50,
+                    focus_y_percent: 50,
+                    overwrite: false,
+                    verify: false,
+                    delivery_bit_depth: DeliveryEncodeDepth::default(),
+                    normalize_loudness: false,
+                },
+            )
+        });
+        gate.entered();
+        let result = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&result);
+        let release = Arc::clone(&gate);
+        // Production has just checked for accepted exports, but has not closed the project yet.
+        app.export_close_witness = Some(Box::new(move || {
+            release.release();
+            *observed.lock().unwrap() = Some(thread.join().unwrap());
+        }));
+        let ctx = egui::Context::default();
+        if quit {
+            app.request_exit(&ctx);
+        } else {
+            app.request_close_project(0);
+        }
+        let slipped = result.lock().unwrap().take().unwrap().is_ok();
+        // Always release and join the encoder, including a mutant's accepted job.
+        gate.release();
+        encoder.release();
+        queue.close_admission();
+        queue.join();
+        assert!(!slipped, "FOLLOWUP_EXPORT_CLOSE_ADMISSION quit={quit}");
+        assert!(queue.list().is_empty());
+        assert!(app.pending_export_close.is_none());
+    }
+}
+
+#[test]
+fn runtime_followup_finished_export_dismisses_prompt_and_reopens_admission() {
+    for quit in [false, true] {
+        let (mut app, _) = in1_tests::in1_harness(Document::default());
+        let export = ExportWitness::install(&mut app);
+        app.new_project();
+        for project in &mut app.projects {
+            project.saved_document = Some(Arc::clone(&project.document));
+        }
+        let ctx = egui::Context::default();
+        if quit {
+            app.request_exit(&ctx);
+        } else {
+            app.request_close_project(0);
+        }
+        assert!(app.pending_export_close.is_some());
+        // Finish without closing the queue: dismissing the prompt must restore its admission.
+        export.gate.release();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !export.queue.get(export.job).unwrap().state.is_terminal() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        app.show_export_close_confirmation(&ctx);
+        assert!(app.pending_export_close.is_none());
+        assert_eq!(app.projects.len(), 2);
+        assert!(!app.allow_close);
+        assert_eq!(app.status, "Export finished");
+        assert!(!export.cancelled());
+        assert!(app.exit_discarded_projects.is_empty());
+        export
+            .queue
+            .enqueue(
+                &renderable_document(10),
+                QueueExportRequest {
+                    output_path: export.directory.path("next.mp4"),
+                    profile: DeliveryProfile::SourceMaster,
+                    focus_x_percent: 50,
+                    focus_y_percent: 50,
+                    overwrite: false,
+                    verify: false,
+                    delivery_bit_depth: DeliveryEncodeDepth::default(),
+                    normalize_loudness: false,
+                },
+            )
+            .expect("FOLLOWUP_EXPORT_ADMISSION_REOPENED");
+        export.queue.close_admission();
+        export.queue.resume_admission(); // Permanent close is never undone by a stale prompt.
+        assert!(
+            export
+                .queue
+                .enqueue(
+                    &renderable_document(10),
+                    QueueExportRequest {
+                        output_path: export.directory.path("closed.mp4"),
+                        profile: DeliveryProfile::SourceMaster,
+                        focus_x_percent: 50,
+                        focus_y_percent: 50,
+                        overwrite: false,
+                        verify: false,
+                        delivery_bit_depth: DeliveryEncodeDepth::default(),
+                        normalize_loudness: false,
+                    }
+                )
+                .is_err()
+        );
+        export.queue.join();
+    }
+}

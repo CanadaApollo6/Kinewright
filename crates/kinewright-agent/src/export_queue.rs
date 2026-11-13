@@ -282,16 +282,42 @@ pub struct ExportQueue {
 
 /// Queue owners drain accepted work before joining; only explicit cancellation stops a job.
 struct QueueRuntime {
-    work_tx: Mutex<Option<Sender<WorkItem>>>,
+    admission: Mutex<ExportAdmission>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
+enum ExportAdmission {
+    Open(Sender<WorkItem>),
+    Suspended(Sender<WorkItem>),
+    Closed,
+}
+
 impl QueueRuntime {
-    fn close_admission(&self) {
-        self.work_tx
+    fn suspend_admission(&self) {
+        let mut admission = self
+            .admission
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *admission = match std::mem::replace(&mut *admission, ExportAdmission::Closed) {
+            ExportAdmission::Open(sender) => ExportAdmission::Suspended(sender),
+            other => other,
+        };
+    }
+    fn resume_admission(&self) {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *admission = match std::mem::replace(&mut *admission, ExportAdmission::Closed) {
+            ExportAdmission::Suspended(sender) => ExportAdmission::Open(sender),
+            other => other,
+        };
+    }
+    fn close_admission(&self) {
+        *self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ExportAdmission::Closed;
     }
     fn join(&self) {
         self.close_admission();
@@ -637,7 +663,7 @@ impl ExportQueue {
             .spawn(move || worker_loop(&worker_state, &work_rx))
             .map_err(ExportQueueError::WorkerThread)?;
         let runtime = Arc::new(QueueRuntime {
-            work_tx: Mutex::new(Some(work_tx)),
+            admission: Mutex::new(ExportAdmission::Open(work_tx)),
             worker: Mutex::new(Some(worker)),
         });
         Ok(Self {
@@ -715,6 +741,15 @@ impl ExportQueue {
         if !lut_preflight.export_ready() {
             return Err(ExportQueueError::LutPreflight(Box::new(lut_preflight)));
         }
+        // Order acceptance against the close decision, after the native preflight.
+        let admission = self
+            .runtime
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ExportAdmission::Open(sender) = &*admission else {
+            return Err(ExportQueueError::WorkerUnavailable);
+        };
         let output_key = output_path_key(&output_path);
         let cancellation = ExportCancellation::default();
         let (id, record) = {
@@ -777,15 +812,7 @@ impl ExportQueue {
             cancellation,
             verified_sources,
         };
-        let sent = match &*self
-            .runtime
-            .work_tx
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
-            Some(sender) => sender.try_send(work),
-            None => Err(crossbeam_channel::TrySendError::Disconnected(work)),
-        };
+        let sent = sender.try_send(work);
         if let Err(error) = sent {
             lock_jobs(&self.state).remove(&id);
             return Err(match error {
@@ -814,6 +841,16 @@ impl ExportQueue {
             .values()
             .map(|job| job.record.clone())
             .collect()
+    }
+
+    /// Suspend acceptance while a close decision is open. Accepted exports keep running.
+    pub fn suspend_admission(&self) {
+        self.runtime.suspend_admission();
+    }
+
+    /// Resume a suspended queue. A permanently closed queue stays closed.
+    pub fn resume_admission(&self) {
+        self.runtime.resume_admission();
     }
 
     /// Stop accepting new exports without cancelling accepted work or joining.

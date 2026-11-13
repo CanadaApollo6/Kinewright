@@ -518,6 +518,8 @@ pub(crate) struct KinewrightApp {
     pub(crate) show_media_rail: bool,
     pending_project_action: Option<ProjectAction>,
     pending_export_close: Option<ProjectAction>,
+    #[cfg(all(test, target_os = "linux"))]
+    export_close_witness: Option<Box<dyn FnOnce() + Send>>,
     exit_discarded_projects: Vec<u64>,
     allow_close: bool,
     last_window_title: String,
@@ -760,6 +762,8 @@ impl KinewrightApp {
             show_media_rail: false,
             pending_project_action: None,
             pending_export_close: None,
+            #[cfg(all(test, target_os = "linux"))]
+            export_close_witness: None,
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
@@ -2109,11 +2113,19 @@ impl KinewrightApp {
         if self.refuse_unkept_voice(index) {
             return;
         }
+        if let Some(queue) = &self.projects[index].exports {
+            queue.suspend_admission();
+        }
         if self.project_has_exports(index) {
             self.pending_export_close = Some(ProjectAction::CloseProject(id));
             return;
         }
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(witness) = self.export_close_witness.take() {
+            witness();
+        }
         if !self.projects[index].prepare_close("the project was closed") {
+            self.resume_export_admission(ProjectAction::CloseProject(id));
             self.status = self.projects[index].ja1.as_ref().map_or_else(
                 || "Source cleanup is pending. Retry Close.".into(),
                 |attachment| attachment.message.clone(),
@@ -2181,11 +2193,31 @@ impl KinewrightApp {
             })
     }
 
+    fn export_action_has_work(&self, action: ProjectAction) -> bool {
+        self.projects.iter().enumerate().any(|(index, project)| {
+            (matches!(action, ProjectAction::Exit(_))
+                || matches!(action, ProjectAction::CloseProject(id) if id == project.id))
+                && self.project_has_exports(index)
+        })
+    }
+
+    fn resume_export_admission(&self, action: ProjectAction) {
+        for project in &self.projects {
+            if (matches!(action, ProjectAction::Exit(_))
+                || matches!(action, ProjectAction::CloseProject(id) if id == project.id))
+                && let Some(queue) = &project.exports
+            {
+                queue.resume_admission();
+            }
+        }
+    }
+
     fn export_close_choice(&mut self, ctx: &egui::Context, cancel: bool) {
         let Some(action) = self.pending_export_close.take() else {
             return;
         };
         if !cancel {
+            self.resume_export_admission(action);
             if matches!(action, ProjectAction::Exit(_)) {
                 self.exit_discarded_projects.clear();
             }
@@ -2216,6 +2248,11 @@ impl KinewrightApp {
         let Some(action) = self.pending_export_close else {
             return;
         };
+        if !self.export_action_has_work(action) {
+            self.export_close_choice(ctx, false);
+            self.status = "Export finished".into();
+            return;
+        }
         let mut choice = None;
         egui::Window::new("Export in progress")
             .collapsible(false).resizable(false)
@@ -2301,10 +2338,19 @@ impl KinewrightApp {
             self.pending_project_action = Some(ProjectAction::Exit(self.projects[index].id));
             return;
         }
+        for project in &self.projects {
+            if let Some(queue) = &project.exports {
+                queue.suspend_admission();
+            }
+        }
         if let Some(index) = (0..self.projects.len()).find(|&index| self.project_has_exports(index))
         {
             self.pending_export_close = Some(ProjectAction::Exit(self.projects[index].id));
             return;
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(witness) = self.export_close_witness.take() {
+            witness();
         }
         for project in &mut self.projects {
             project.keep_close_feedback();
@@ -2324,6 +2370,8 @@ impl KinewrightApp {
         for (index, closed) in closed.into_iter().enumerate().rev() {
             if closed {
                 self.remove_closed_project(index);
+            } else {
+                self.resume_export_admission(ProjectAction::CloseProject(self.projects[index].id));
             }
         }
         if !self.projects.is_empty() {
@@ -6745,6 +6793,8 @@ pub(crate) mod in1_tests {
             show_media_rail: false,
             pending_project_action: None,
             pending_export_close: None,
+            #[cfg(all(test, target_os = "linux"))]
+            export_close_witness: None,
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),
@@ -11887,6 +11937,8 @@ mod in2b_tests {
             show_media_rail: false,
             pending_project_action: None,
             pending_export_close: None,
+            #[cfg(all(test, target_os = "linux"))]
+            export_close_witness: None,
             exit_discarded_projects: Vec::new(),
             allow_close: false,
             last_window_title: String::new(),

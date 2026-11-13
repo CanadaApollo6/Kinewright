@@ -41,7 +41,7 @@ add('setup-model-stop',R,'The run is waiting for the person to fix Settings. End
 for name,words,marker in [('revise-words','The provider check failed before anything was sent. Press Start run to try again.','FIX4_REVISE_WORDS'),('start-words','The provider check failed before anything was sent. Start the run again to try again.','FIX4_START_WORDS')]:
     add(name,R,words,'The provider check failed before anything was sent. Continue to try again.',T+'no_run_retry_words',marker)
 add('kept-revise',U,'        self.revise = Some(request);','        let _ = request;',UI+'waiting_revise_keeps_valid_request','FIX4_REVISE_REPAIRED','kinewright-app')
-add('waiting-revise-slot',U,'        if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_)) {','        if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Known(ReviseResult::Waiting { .. })) {',UI+'waiting_revise_keeps_valid_request','FIX4_WAITING_NOT_UNCONFIRMED','kinewright-app')
+add('waiting-revise-slot',U,'        if !matches!(\n            start,\n            RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Busy(_)\n        ) {','        if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Busy(_) | RunStart::Known(ReviseResult::Waiting { .. })) {',UI+'waiting_revise_keeps_valid_request','FIX4_WAITING_NOT_UNCONFIRMED','kinewright-app')
 unknown='format!("{error} The send outcome is unknown. Press Stop, then Reopen to review your notes before starting another run. Continue cannot retry this send.")'
 add('unknown-suffix',R,unknown,'error.to_string()',H+'te15_b1_fix3_postcharge_ambiguity_is_not_resumable','FIX4_FINAL_UNKNOWN_WORDS')
 body = '        let state = self.spending_scope(producer, run)?;\n        if self.surface_unknown_send(producer, &state)? {\n            return Ok(());\n        }'
@@ -57,7 +57,7 @@ for name,witness,marker in [('ui-settings-reason','notes_continue_and_exact_reop
     add(name,U,body,'            Some(_reason) => format!("{phase}{wait}{cleanup}"),\n',UI+witness,marker,'kinewright-app')
 body=section(C,'                if let Err(why) = self.retain_for_dispatch() {','\n                request')
 add('ui-keep-before-continue',C,body,'',UI+'notes_continue_and_exact_reopen_replay','C4_STOP_INTENT_KEPT_BEFORE_DISPATCH','kinewright-app')
-body=section(C,'    pub(crate) fn retry_ready_controls(','    pub(crate) fn retry_after_recovery(')
+body=section(C,'    pub(crate) fn retry_ready_controls(','    pub(crate) fn poll_runs(')
 add('ui-poll-exact-continue',C,body,'    pub(crate) fn retry_ready_controls(&mut self, _port: &mut dyn FeedbackPort) {}\n',UI+'continue_poll_confirms_same_request','FIX4_UI_POLL_REPLAY','kinewright-app')
 add('failed-wait-exits',E,'                return Err(error);','                return Ok(());',T+'failed_wait_exits_pump','FIX4_WAIT_FAILURE_EXITS')
 near=load('fix4_near','te15-b1-fix3-mutations.py')
