@@ -24,7 +24,7 @@ fn payload(value: &impl Serialize) -> Result<u64, HistoryError> {
 
 // The same conservative structural costs as store preflight, for generated JSON.
 // This streaming scan allocates no intermediate JSON tree during live admission.
-fn payload_memory_bound(bytes: &[u8]) -> Result<u64, HistoryError> {
+pub(crate) fn payload_memory_bound(bytes: &[u8]) -> Result<u64, HistoryError> {
     use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
     use std::{cell::Cell, fmt};
     struct Scan<'a>(&'a Cell<u64>, u32);
@@ -440,7 +440,7 @@ pub fn measure_replay_peak(
 fn inline_command_bytes<T: Copy>(_: T) -> u64 {
     0
 }
-fn operation_owned_bytes(operation: &crate::Operation) -> Result<u64, HistoryError> {
+pub(crate) fn operation_owned_bytes(operation: &crate::Operation) -> Result<u64, HistoryError> {
     use crate::Operation;
     Ok(match operation {
         Operation::SetTrackSyncLock { track, locked } => inline_command_bytes((*track, *locked)),
@@ -627,6 +627,35 @@ pub(crate) struct ReplayBudget {
     dynamic_peak: u64,
 }
 impl ReplayBudget {
+    /// A streaming replay owns one scratch document, not retained boundary snapshots.
+    pub(crate) fn workspace(limit: u64) -> Result<Self, HistoryError> {
+        let mut budget = Self {
+            limit,
+            documents: 0,
+            input: 0,
+            identities: 0,
+            dynamic_peak: 0,
+        };
+        budget.check(0)?;
+        Ok(budget)
+    }
+
+    pub(crate) fn reserve_input(&mut self, bytes: u64) -> Result<(), HistoryError> {
+        self.input = sum([self.input, bytes])?;
+        self.check(0)
+    }
+    pub(crate) const fn identity_charge(&self) -> u64 {
+        self.identities
+    }
+    pub(crate) fn workspace_peak_without(&self, input: u64) -> Result<u64, HistoryError> {
+        let raw = sum([
+            self.input
+                .checked_sub(input)
+                .ok_or(HistoryError::Capacity)?,
+            self.dynamic_peak,
+        ])?;
+        sum([raw, raw.div_ceil(10)])
+    }
     pub(crate) fn new(
         journal: &crate::HistoryJournal,
         baseline: &Document,

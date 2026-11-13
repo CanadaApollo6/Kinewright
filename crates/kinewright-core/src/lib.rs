@@ -48,6 +48,7 @@ mod time;
 mod title;
 mod transcript_edit;
 mod transition;
+pub mod undo;
 
 pub use history_transition::{
     HistoryFloorBarrier, HistorySaveOwner, HistorySaveTag, HistoryTransition, PendingHistorySave,

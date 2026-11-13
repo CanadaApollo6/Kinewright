@@ -562,6 +562,15 @@ pub(crate) fn apply_batch_observed_in_place(
     apply_batch_unpublished(candidate, operations, true)
 }
 
+/// Bounded streaming replay when the caller does not retain identity observations.
+pub(crate) fn apply_batch_replay(
+    candidate: &mut Document,
+    operations: &[Operation],
+    budget: &mut crate::history_size::ReplayBudget,
+) -> Result<(), BatchError> {
+    apply_batch_checked(candidate, operations, false, Some(budget)).map(|_| ())
+}
+
 pub(crate) fn apply_batch_observed_replay(
     candidate: &mut Document,
     operations: &[Operation],

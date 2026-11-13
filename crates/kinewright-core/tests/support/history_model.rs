@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "each integration binary exercises a subset of the shared reference model"
+)]
 use std::collections::BTreeMap;
 
 use kinewright_core::{BatchError, Command, Document, OpError, Operation};
