@@ -29,7 +29,7 @@ impl RetirementGroup {
             }
         }
         if let Some(investigator) = &mut project.investigator {
-            self.workers.append(&mut investigator.take_retired());
+            self.append(investigator.take_retired());
         }
         if let Some(mut source) = project.ja1.take() {
             self.retire_close(move || {
@@ -42,7 +42,7 @@ impl RetirementGroup {
         }
     }
 
-    fn retire<T: Send + 'static>(&mut self, owner: T) {
+    pub(crate) fn retire<T: Send + 'static>(&mut self, owner: T) {
         self.retire_close(move || drop(owner));
     }
 
@@ -75,6 +75,24 @@ impl RetirementGroup {
             }
             Err(_) => self.unstarted.push(Box::new(close)),
         }
+    }
+
+    pub(crate) fn append(&mut self, mut other: Self) {
+        self.servers.append(&mut other.servers);
+        self.workers.append(&mut other.workers);
+        self.exports.append(&mut other.exports);
+        self.queues.append(&mut other.queues);
+        self.unstarted.append(&mut other.unstarted);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn worker(&mut self, worker: JoinedThread<()>) {
+        self.workers.push(worker);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn refuse_spawn_for_test(&mut self) {
+        self.refuse_spawn = true;
     }
 
     pub(crate) fn export(&mut self, export: ExportJob) {

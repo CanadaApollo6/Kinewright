@@ -52,10 +52,10 @@ def mutate(name, source):
     if name == 'switch-cancels':
         return once(source, '        self.focused_mut().studio.feedback.cancel_recovery_retry();\n', '')
     if name == 'near-waiting-slot':
-        return once(source, 'if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_)) {',
-                    'if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Known(ReviseResult::Waiting { .. })) {')
+        return once(source, 'if !matches!(\n            start,\n            RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Busy(_)\n        ) {',
+                    'if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Busy(_) | RunStart::Known(ReviseResult::Waiting { .. })) {')
     start = source.index('    pub(crate) fn retry_ready_controls(')
-    end = source.index('    pub(crate) fn retry_after_recovery(', start)
+    end = source.index('    pub(crate) fn poll_runs(', start)
     return source[:start] + '    pub(crate) fn retry_ready_controls(&mut self, _port: &mut dyn FeedbackPort) {}\n' + source[end:]
 
 

@@ -56,6 +56,8 @@ pub(super) struct RuntimePorts {
     pub recovery_retry_delay: Duration,
     #[cfg(any(test, feature = "test-util"))]
     pub recovery_witness: Option<Arc<dyn Fn(RecoveryPhase) + Send + Sync>>,
+    #[cfg(any(test, feature = "test-util"))]
+    pub status_witness: Option<Arc<dyn Fn() + Send + Sync>>,
     pub profiles: Option<Arc<dyn ProfileFactory>>,
     #[cfg(feature = "te1-eval")]
     pub evaluation: Option<Arc<super::te1_eval::ScriptedLauncher>>,
@@ -95,6 +97,8 @@ impl Default for RuntimePorts {
             recovery_retry_delay: Duration::from_millis(250),
             #[cfg(any(test, feature = "test-util"))]
             recovery_witness: None,
+            #[cfg(any(test, feature = "test-util"))]
+            status_witness: None,
             profiles: None,
             #[cfg(feature = "te1-eval")]
             evaluation: None,
@@ -135,12 +139,55 @@ struct State {
     // A native runtime can be retired while its command host remains live.
     stopping: bool,
     recovering: bool,
+    recovery_generation: u64,
+    failed_recovery_generation: u64,
     retry_at: Option<std::time::Instant>,
     recovery_worker: Option<JoinHandle<()>>,
     blocked: Option<(RunId, Option<u64>, String)>,
     claim: Option<(RunId, Arc<Mutex<MachineClaim>>)>,
     worker: Option<Worker>,
 }
+/// Every exit of a recovery attempt releases its waiters, including unwinding.
+struct RecoveryExit {
+    host: Arc<Mutex<HostCommandOwner>>,
+    state: Arc<Mutex<State>>,
+    wake: Arc<super::HostLifecycle>,
+    generation: u64,
+    retry_delay: Duration,
+    outcome: Option<Result<(), String>>,
+}
+impl Drop for RecoveryExit {
+    fn drop(&mut self) {
+        let (recovered, status) = match self.outcome.take().unwrap_or_else(|| {
+            Err("cleanup pending: startup recovery stopped unexpectedly; the host will retry recovery".into())
+        }) {
+            Ok(()) => (true, None),
+            Err(reason) => (false, Some(reason)),
+        };
+        {
+            let mut owner = self
+                .host
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            owner.native_recovery_status = status;
+            owner.native_recovery_pending = !recovered;
+        }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.recovering = false;
+            state.recovered = recovered;
+            if !recovered {
+                state.failed_recovery_generation = self.generation;
+            }
+            state.retry_at = (!recovered).then(|| std::time::Instant::now() + self.retry_delay);
+        }
+        self.wake.changed.notify_waiters();
+    }
+}
+
 pub(super) struct StudioRuntime {
     lifecycle: Arc<super::HostLifecycle>,
     recovery_waiter: tokio::sync::Semaphore,
@@ -200,7 +247,7 @@ impl StudioRuntime {
         })
     }
     pub(super) fn startup_pending(&self) -> bool {
-        self.state.lock().is_ok_and(|state| !state.recovered)
+        self.state.lock().map_or(true, |state| !state.recovered)
     }
     /// Await this recovery attempt, not a person resolving a persistent block.
     /// No owner lock or ordinary request permit is held across the wait.
@@ -221,12 +268,12 @@ impl StudioRuntime {
                 "Another request is waiting for startup recovery. This request has not been dispatched.",
             ));
         };
-        if self.begin_recovery().is_err() {
-            return Err(super::HostRefusal::new(
+        let generation = self.begin_recovery().map_err(|_| {
+            super::HostRefusal::new(
                 "startup_wait_failed",
                 "Startup recovery could not begin. This request has not been dispatched.",
-            ));
-        }
+            )
+        })?;
         #[cfg(any(test, feature = "test-util"))]
         if let Some(witness) = &self.ports.recovery_witness {
             witness(RecoveryPhase::Queued);
@@ -245,6 +292,12 @@ impl StudioRuntime {
                     };
                     if state.stopping || self.lifecycle.stopping() {
                         return Err(super::HostRefusal::stopping());
+                    }
+                    if generation != 0 && state.failed_recovery_generation >= generation {
+                        return Err(super::HostRefusal::new(
+                            "startup_wait_failed",
+                            "Startup recovery failed. This request has not been dispatched; it can retry when the host is ready.",
+                        ));
                     }
                     if state.recovered || !state.recovering {
                         return Ok(());
@@ -268,6 +321,12 @@ impl StudioRuntime {
             witness(phase);
         }
     }
+    #[cfg(any(test, feature = "test-util"))]
+    pub(super) fn observe_status_request(&self) {
+        if let Some(witness) = &self.ports.status_witness {
+            witness();
+        }
+    }
     #[cfg(test)]
     pub(super) fn bind_profile_for_test(
         &self,
@@ -284,7 +343,7 @@ impl StudioRuntime {
     }
 
     /// Called only by post-discovery updates. It never blocks an HTTP request.
-    fn begin_recovery(&self) -> io::Result<()> {
+    fn begin_recovery(&self) -> io::Result<u64> {
         let mut state = self
             .state
             .lock()
@@ -297,7 +356,7 @@ impl StudioRuntime {
                 .retry_at
                 .is_some_and(|at| at > std::time::Instant::now())
         {
-            return Ok(());
+            return Ok(state.recovery_generation);
         }
         if let Some(worker) = state.recovery_worker.take() {
             let _ = worker.join();
@@ -306,7 +365,11 @@ impl StudioRuntime {
             .host
             .upgrade()
             .ok_or_else(|| io::Error::other("host closed"))?;
-        let recovery_state = self.state.clone();
+        let generation = state.recovery_generation.checked_add(1).ok_or_else(|| {
+            io::Error::other("startup recovery attempt capacity reached; reopen the project")
+        })?;
+        let recovery_state = Arc::clone(&self.state);
+        let wake = Arc::clone(&self.lifecycle);
         let runtime = self.me.clone();
         #[cfg(any(test, feature = "test-util"))]
         let witness = self.ports.recovery_witness.clone();
@@ -324,6 +387,14 @@ impl StudioRuntime {
             std::thread::Builder::new()
                 .name("kinewright-studio-recovery".into())
                 .spawn(move || {
+                    let mut completion = RecoveryExit {
+                        host,
+                        state: recovery_state,
+                        wake,
+                        generation,
+                        retry_delay,
+                        outcome: None,
+                    };
                     #[cfg(any(test, feature = "test-util"))]
                     if let Some(witness) = &witness {
                         witness(RecoveryPhase::Entered);
@@ -332,41 +403,30 @@ impl StudioRuntime {
                     let before = fault.as_ref().map_or(Ok(()), |fault| fault());
                     #[cfg(not(any(test, feature = "test-util")))]
                     let before = Ok::<(), io::Error>(());
-                    let result =
-                        before.and_then(|()| recover_on_open(&host, fixture_root.as_deref()));
+                    let result = before
+                        .and_then(|()| recover_on_open(&completion.host, fixture_root.as_deref()));
                     #[cfg(any(test, feature = "test-util"))]
                     if let Some(witness) = &witness {
                         witness(RecoveryPhase::Restored);
                     }
-                    let status = result
-                        .as_ref()
-                        .err()
-                        .map(|e| format!("cleanup pending: {e}"));
-                    if let Ok(mut owner) = host.lock() {
-                        owner.native_recovery_status.clone_from(&status);
-                        owner.native_recovery_pending = result.is_err();
-                    }
-                    if let Ok(mut state) = recovery_state.lock() {
-                        state.recovering = false;
-                        state.recovered = result.is_ok();
-                        state.retry_at = result
-                            .is_err()
-                            .then(|| std::time::Instant::now() + retry_delay);
-                    }
+                    let recovered = result.is_ok();
+                    completion.outcome =
+                        Some(result.map_err(|error| format!("cleanup pending: {error}")));
+                    drop(completion);
                     if let Some(runtime) = runtime.upgrade() {
-                        runtime.lifecycle.changed.notify_waiters();
                         #[cfg(any(test, feature = "test-util"))]
                         if let Some(witness) = &witness {
                             witness(RecoveryPhase::Completed);
                         }
-                        if result.is_ok() {
+                        if recovered {
                             runtime.update();
                         }
                     }
                 })?,
         );
         state.recovering = true;
-        Ok(())
+        state.recovery_generation = generation;
+        Ok(generation)
     }
     #[cfg(test)]
     pub(super) fn failed_worker_fixture(&self, run: &RunId) {

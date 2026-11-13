@@ -278,7 +278,12 @@ impl HostClient {
                 )
             })?;
         let status = response.status();
-        if !status.is_success() && status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        if !status.is_success()
+            && !matches!(
+                status,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE | reqwest::StatusCode::TOO_MANY_REQUESTS
+            )
+        {
             return Err(HostRefusal::new(
                 "attachment_refused",
                 "authentication, project, protocol, roots or ingress admission refused",
@@ -294,7 +299,10 @@ impl HostClient {
                 HostRefusal::new("capacity", "host reply exceeds protocol capacity").into(),
             );
         }
-        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        if matches!(
+            status,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE | reqwest::StatusCode::TOO_MANY_REQUESTS
+        ) {
             let refusal: HostRefusal = serde_json::from_slice(&bytes)?;
             return Err(refusal.into());
         }
@@ -779,7 +787,9 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         Err(status) => return status.into_response(),
     };
     let Ok(permit) = Arc::clone(&state.ingress).try_acquire_owned() else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+        let mut response = json_response(&HostRefusal::busy());
+        *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        return response;
     };
     let Ok(bytes) = to_bytes(request.into_body(), HOST_BODY_BYTES).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
@@ -857,6 +867,10 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
                 .runtime
                 .recovery_phase(studio_runtime::RecoveryPhase::ControlDispatch);
         }
+        #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+        if matches!(request.command, HostCommand::Status) {
+            state.runtime.observe_status_request();
+        }
         #[cfg(target_os = "linux")]
         let reply = provider_readiness::execute(&state.owner, &bearer, request);
         #[cfg(not(target_os = "linux"))]
@@ -914,7 +928,9 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
         return StatusCode::FORBIDDEN.into_response();
     }
     let Ok(permit) = Arc::clone(&state.ingress).try_acquire_owned() else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+        let mut response = json_response(&HostRefusal::busy());
+        *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        return response;
     };
     let Ok(bytes) = to_bytes(request.into_body(), HOST_BODY_BYTES).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
@@ -1096,7 +1112,9 @@ async fn source_request(State(state): State<Arc<SourceState>>, request: Request)
         return status.into_response();
     }
     let Ok(permit) = Arc::clone(&state.ingress).try_acquire_owned() else {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+        let mut response = json_response(&HostRefusal::busy());
+        *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        return response;
     };
     let Ok(bytes) = to_bytes(request.into_body(), 4 * 1024 * 1024).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();

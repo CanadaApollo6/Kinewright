@@ -443,6 +443,16 @@ impl HostRefusal {
                 | "startup_wait_expired"
         )
     }
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        self.code == "host_busy"
+    }
+    pub(crate) fn busy() -> Self {
+        Self::new(
+            "host_busy",
+            "The host is busy. This request has not been dispatched.",
+        )
+    }
     pub(crate) fn stopping() -> Self {
         Self::new(
             "host_stopping",

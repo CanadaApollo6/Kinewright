@@ -4,7 +4,7 @@ use kinewright_agent::writer_host::{
     HostCommand, HostRefusal, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase,
     RecoveryReadiness,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 fn in_app(project: &mut Project, attachment: Ja1Attachment) -> KinewrightApp {
     let (mut app, _) = in1_harness(Document::default());
@@ -152,8 +152,7 @@ fn c7_retry_busy_startup_then_healthy() {
     assert_once(app, &project, &request);
 }
 
-#[test]
-fn c7_retry_restored_stop_then_healthy() {
+fn restored_stop(busy: bool) {
     let mut project = project("c7-retry-stop");
     let first = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::Dormant);
     let mut attachment = launch_with_fixture(&project, &first);
@@ -178,7 +177,10 @@ fn c7_retry_restored_stop_then_healthy() {
     let directory = project.temp.path("state");
     project.feedback = Feedback::default();
     drop(attachment);
-    let fixture = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::RecoveryHeld);
+    let fixture = Arc::new(ProtocolFixture::new(
+        project.temp.root(),
+        ProtocolFixtureMode::RecoveryHeld,
+    ));
     let attachment = launch_with_fixture(&project, &fixture);
     assert!(fixture.wait_recovery(RecoveryPhase::Entered, Duration::from_secs(5)));
     project
@@ -198,6 +200,27 @@ fn c7_retry_restored_stop_then_healthy() {
     assert_eq!(fixture.dispatch_counts().1, 1);
     fixture.release();
     assert!(fixture.wait_recovery(RecoveryPhase::Completed, Duration::from_secs(5)));
+    if busy {
+        let holder_fixture = Arc::clone(&fixture);
+        let client = app.focused().ja1.as_ref().unwrap().host_client().unwrap();
+        let lane = Arc::new(std::sync::Mutex::new(None));
+        let lane_result = Arc::clone(&lane);
+        app.focused_mut().studio.feedback.recovery_ready_witness = Some(Box::new(move || {
+            holder_fixture.hold_next_status();
+            let thread = std::thread::spawn(move || client.request(HostCommand::Status));
+            assert!(holder_fixture.wait_status(Duration::from_secs(5)));
+            *lane_result.lock().unwrap() = Some(thread);
+        }));
+        poll(&mut app);
+        let armed = app.focused().studio.feedback.controls[0].recovery.is_some();
+        let message = app.focused().studio.feedback.message.clone().unwrap();
+        fixture.release_status();
+        assert!(lane.lock().unwrap().take().unwrap().join().unwrap().is_ok());
+        assert!(armed, "C7_BUSY_STOP_KEEPS_ARM");
+        assert_eq!(app.focused().studio.feedback.controls[0].request, control);
+        assert!(message.contains("kept and waiting") && !message.contains("unknown"));
+        assert_eq!(fixture.dispatch_counts().1, 1);
+    }
     poll(&mut app);
     assert!(
         app.focused().studio.feedback.controls.is_empty(),
@@ -213,6 +236,15 @@ fn c7_retry_restored_stop_then_healthy() {
         final_state.sequence, stopped.sequence,
         "C7_STOP_APPLIES_ONLY_ONCE"
     );
+}
+
+#[test]
+fn c7_retry_restored_stop_then_healthy() {
+    restored_stop(false);
+}
+#[test]
+fn c7_followup_busy_restored_stop_keeps_exact_arm() {
+    restored_stop(true);
 }
 
 #[test]
@@ -402,4 +434,158 @@ fn c7_retry_replaced_host_cancels_automatic_send_but_keeps_request() {
     assert_eq!(next.dispatch_counts().0, 0);
     drop(attachment);
     assert_eq!(linked(&project.path), (vec![None], 0));
+}
+
+#[test]
+fn c7_followup_panicked_recovery_releases_waiter_and_recovers() {
+    let mut project = project("c7-followup-panic");
+    let request = c7_unconsumed_batch(&mut project);
+    let fixture =
+        ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::RecoveryPanicsOnce);
+    let attachment = launch_with_fixture(&project, &fixture);
+    assert!(fixture.wait_recovery(RecoveryPhase::Entered, Duration::from_secs(5)));
+    let client = attachment.host_client().unwrap();
+    let completion = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+    let (reply, prompt, waiting) = std::thread::scope(|scope| {
+        let control = scope.spawn(|| {
+            let waiting = fixture.wait_recovery(RecoveryPhase::Waiting, Duration::from_secs(5));
+            fixture.release_recovery();
+            let (done, _) = completion
+                .1
+                .wait_timeout_while(
+                    completion.0.lock().unwrap(),
+                    Duration::from_secs(2),
+                    |done| !*done,
+                )
+                .unwrap();
+            let prompt = *done;
+            drop(done);
+            // A broken guard is released through the real shutdown fence, not a 55 s wait.
+            if !prompt {
+                let _ = client.request(HostCommand::Shutdown);
+            }
+            (prompt, waiting)
+        });
+        let reply = client.request(HostCommand::ReviseCut {
+            request: request.clone(),
+        });
+        *completion.0.lock().unwrap() = true;
+        completion.1.notify_all();
+        let (prompt, waiting) = control.join().unwrap();
+        (reply, prompt, waiting)
+    });
+    if !prompt {
+        fixture.release();
+    }
+    assert!(waiting);
+    assert!(prompt, "C7_PANIC_RELEASES_WAITER");
+    let kinewright_agent::writer_host::HostError::Refused(refusal) = reply.unwrap_err() else {
+        panic!("panic must be a typed pre-dispatch refusal")
+    };
+    assert_eq!(refusal.code, "startup_wait_failed");
+    assert!(refusal.retry_after_recovery());
+    assert_eq!(
+        with_host(&attachment, |port| port.recovery_readiness().unwrap()),
+        RecoveryReadiness::Blocked
+    );
+    assert_eq!(fixture.dispatch_counts().0, 0);
+    fixture.release();
+    assert!(fixture.wait_recovery(RecoveryPhase::Completed, Duration::from_secs(5)));
+    assert_eq!(
+        with_host(&attachment, |port| port.recovery_readiness().unwrap()),
+        RecoveryReadiness::Ready
+    );
+    drop(attachment);
+    assert_eq!(linked(&project.path), (vec![None], 0));
+    assert!(fixture.observations().is_empty());
+}
+
+#[test]
+fn c7_followup_busy_resend_keeps_exact_arm_and_one_status_per_tick() {
+    let mut project = project("c7-followup-busy");
+    let request = c7_unconsumed_batch(&mut project);
+    let fixture = Arc::new(ProtocolFixture::new(
+        project.temp.root(),
+        ProtocolFixtureMode::RecoveryExpired,
+    ));
+    let attachment = launch_with_fixture(&project, &fixture);
+    let client = attachment.host_client().unwrap();
+    let mut app = in_app(&mut project, attachment);
+    app.with_feedback(|feedback, port| feedback.submit(port))
+        .unwrap();
+    fixture.release();
+    assert!(fixture.wait_recovery(RecoveryPhase::Completed, Duration::from_secs(5)));
+    // The healthy reply is already read when the other real lane takes ingress.
+    fixture.hold_next_status();
+    let lane = std::thread::spawn(move || client.request(HostCommand::Status));
+    assert!(fixture.wait_status(Duration::from_secs(5)));
+    // A busy poll itself never clears a recovery arm or fabricates readiness.
+    poll(&mut app);
+    let busy_poll_armed = app.focused().studio.feedback.revise_recovery.is_some();
+    fixture.release_status();
+    assert!(lane.join().unwrap().is_ok());
+    assert!(busy_poll_armed);
+
+    // Hold the other lane specifically between the healthy Status and its resend.
+    let fixture_for_lane = Arc::clone(&fixture);
+    let client = app.focused().ja1.as_ref().unwrap().host_client().unwrap();
+    let lane = Arc::new(std::sync::Mutex::new(None));
+    let lane_result = Arc::clone(&lane);
+    app.focused_mut().studio.feedback.recovery_ready_witness = Some(Box::new(move || {
+        fixture_for_lane.hold_next_status();
+        let thread = std::thread::spawn(move || client.request(HostCommand::Status));
+        assert!(fixture_for_lane.wait_status(Duration::from_secs(5)));
+        *lane_result.lock().unwrap() = Some(thread);
+    }));
+    poll(&mut app);
+    let armed = app.focused().studio.feedback.revise_recovery.is_some();
+    let kept = app.focused().studio.feedback.revise.as_ref() == Some(&request);
+    let message = app.focused().studio.feedback.message.clone().unwrap();
+    fixture.release_status();
+    assert!(lane.lock().unwrap().take().unwrap().join().unwrap().is_ok());
+    assert!(armed && kept, "C7_BUSY_RESEND_KEEPS_ARM");
+    assert!(
+        message.contains("kept and waiting") && !message.contains("unknown"),
+        "{message}"
+    );
+    assert_eq!(fixture.dispatch_counts().0, 0);
+    let before = fixture.status_count();
+    poll(&mut app);
+    assert_eq!(fixture.status_count() - before, 1, "C7_ONE_STATUS_PER_TICK");
+    assert_eq!(fixture.dispatch_counts().0, 1);
+    let before = fixture.status_count();
+    poll(&mut app);
+    assert_eq!(fixture.status_count() - before, 1);
+    assert_once(app, &project, &request);
+}
+
+#[test]
+fn c7_followup_manual_busy_stays_manual_with_truthful_words() {
+    let mut project = project("c7-followup-manual-busy");
+    let request = c7_unconsumed_batch(&mut project);
+    let fixture = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::Dormant);
+    let attachment = launch_with_fixture(&project, &fixture);
+    assert!(fixture.wait_recovery(RecoveryPhase::Completed, Duration::from_secs(5)));
+    let client = attachment.host_client().unwrap();
+    fixture.hold_next_status();
+    let lane = std::thread::spawn(move || client.request(HostCommand::Status));
+    assert!(fixture.wait_status(Duration::from_secs(5)));
+    with_host(&attachment, |port| project.feedback.submit(port));
+    let message = project.feedback.message.clone().unwrap();
+    fixture.release_status();
+    assert!(lane.join().unwrap().is_ok());
+    assert!(project.feedback.revise_recovery.is_none());
+    assert_eq!(project.feedback.revise.as_ref(), Some(&request));
+    assert!(
+        message.contains("kept and waiting") && !message.contains("unknown"),
+        "{message}"
+    );
+    with_host(&attachment, |port| {
+        project.feedback.retry_after_recovery(port);
+    });
+    assert_eq!(fixture.dispatch_counts().0, 0);
+    with_host(&attachment, |port| project.feedback.submit(port));
+    assert_eq!(fixture.dispatch_counts().0, 1);
+    drop(attachment);
+    assert_eq!(linked(&project.path).1, 1);
 }

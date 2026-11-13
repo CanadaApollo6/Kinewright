@@ -627,7 +627,7 @@ pub(crate) struct InvestigatorSession {
     pub(crate) settings_durable: bool,
     queue: VecDeque<QueuedIncident>,
     running: Option<RunningSession>,
-    retired: Vec<crate::joined_thread::JoinedThread<()>>,
+    retired: crate::retirement::RetirementGroup,
     pending_refused: Vec<PendingRefused>,
     /// The live per-project mutes (§2.4). The `Document.investigator` snapshot
     /// is the opened file's fossil — core never changes it, and a core event
@@ -830,10 +830,10 @@ impl InvestigatorSession {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn hold_retired_for_test(&mut self, worker: std::thread::JoinHandle<()>) {
         self.retired
-            .push(crate::joined_thread::JoinedThread::new(worker));
+            .worker(crate::joined_thread::JoinedThread::new(worker));
     }
 
-    pub(crate) fn take_retired(&mut self) -> Vec<crate::joined_thread::JoinedThread<()>> {
+    pub(crate) fn take_retired(&mut self) -> crate::retirement::RetirementGroup {
         std::mem::take(&mut self.retired)
     }
 
@@ -849,8 +849,7 @@ impl InvestigatorSession {
         let turns = running.counters.snapshot().turns;
         let resolver = session_resolver(&running.harness, running.model.as_deref(), reason);
         return_investigation_to_open(incidents, running.id, resolver, turns, None);
-        self.retired.retain(|worker| !worker.is_finished());
-        self.retired.push(retire_running_session(running));
+        retire_running_session(&mut self.retired, running);
     }
 }
 
@@ -1058,14 +1057,13 @@ fn signal_running_server(running: &mut RunningSession) {
 
 /// Keep the reaper owned by the project: cancellation stays off the frame path,
 /// but dropping the project waits for all native backend owners to finish.
-fn retire_running_session(mut running: RunningSession) -> crate::joined_thread::JoinedThread<()> {
+fn retire_running_session(
+    retired: &mut crate::retirement::RetirementGroup,
+    mut running: RunningSession,
+) {
     signal_running_server(&mut running);
-    crate::joined_thread::JoinedThread::new(
-        std::thread::Builder::new()
-            .name("kinewright-investigator-reaper".to_owned())
-            .spawn(move || drop(running))
-            .expect("investigator reaper thread must spawn"),
-    )
+    retired.prune();
+    retired.retire(running);
 }
 
 impl Drop for RunningSession {
@@ -1361,8 +1359,7 @@ impl KinewrightApp {
             .investigator
             .as_mut()
             .expect("session state");
-        session.retired.retain(|worker| !worker.is_finished());
-        session.retired.push(retire_running_session(running));
+        retire_running_session(&mut session.retired, running);
     }
 
     /// Start the next queued session on one project, if one may start (§3.2).
@@ -1776,8 +1773,7 @@ impl KinewrightApp {
             .investigator
             .as_mut()
             .expect("session state");
-        session.retired.retain(|worker| !worker.is_finished());
-        session.retired.push(retire_running_session(running));
+        retire_running_session(&mut session.retired, running);
     }
 
     /// Cancel the running session without changing a person-owned outcome;
@@ -2445,6 +2441,61 @@ mod tests {
         pub(crate) fn install_pending_test_session(&mut self, running: RunningSession) {
             self.running = Some(running);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_followup_investigator_spawn_failure_retains_owner_until_terminal_join() {
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        let worker = std::thread::spawn(move || {
+            let (released, _) = worker_gate
+                .1
+                .wait_timeout_while(
+                    worker_gate.0.lock().unwrap(),
+                    std::time::Duration::from_secs(30),
+                    |released| !*released,
+                )
+                .unwrap();
+            assert!(*released, "INVESTIGATOR_REAPER_RELEASE_BOUNDED");
+            worker_finished.store(true, Ordering::Release);
+        });
+        let (_, result) = crossbeam_channel::unbounded();
+        let running = RunningSession {
+            id: IncidentId(1),
+            code: IncidentCode::Label(LabelIncident::Agent),
+            subject: IncidentSubject::Agent,
+            harness: "fixture".into(),
+            model: None,
+            branch: TimelineBranch::new(
+                "spawn-failure",
+                TimelineRevision::default(),
+                Arc::default(),
+            )
+            .unwrap(),
+            server: None,
+            broker: ConfirmationBroker::default(),
+            thread: Some(worker),
+            counters: Arc::default(),
+            cost_events: Arc::default(),
+            cancel: Arc::default(),
+            result,
+            budgets: crate::app::in1_tests::in2_default_budgets(),
+        };
+        let mut retired = crate::retirement::RetirementGroup::default();
+        retired.refuse_spawn_for_test();
+        retire_running_session(&mut retired, running);
+        retired.prune();
+        assert!(
+            !finished.load(Ordering::Acquire),
+            "INVESTIGATOR_SPAWN_FAILURE_NO_INLINE_JOIN"
+        );
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        retired.join();
+        assert!(finished.load(Ordering::Acquire));
     }
 
     fn collect_rust_sources(path: &Path, paths: &mut Vec<PathBuf>) {

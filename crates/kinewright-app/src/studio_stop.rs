@@ -56,6 +56,7 @@ pub(crate) enum ControlReply {
     Refused(String),
     Unknown(String),
     RecoveryUnknown(String),
+    Busy(String),
 }
 pub(super) fn prepare(
     port: &HostFeedback<'_>,
@@ -122,12 +123,18 @@ pub(super) fn send(port: &HostFeedback<'_>, request: &ScopedOrchestrationRequest
         request: Box::new(request.clone()),
     }) {
         Ok(reply) => reply,
+        Err(super::HostError::Refused(error)) if error.is_busy() => {
+            return ControlReply::Busy(error.message);
+        }
         Err(super::HostError::Refused(error)) if error.retry_after_recovery() => {
             return ControlReply::RecoveryUnknown(error.message);
         }
         Err(error) => return ControlReply::Unknown(error.to_string()),
     };
     if let Some(error) = reply.error {
+        if error.is_busy() {
+            return ControlReply::Busy(error.message);
+        }
         if error.retry_after_recovery() {
             return ControlReply::RecoveryUnknown(error.message);
         }
@@ -262,7 +269,7 @@ impl Feedback {
         }
         if !matches!(
             reply,
-            ControlReply::Unknown(_) | ControlReply::RecoveryUnknown(_)
+            ControlReply::Unknown(_) | ControlReply::RecoveryUnknown(_) | ControlReply::Busy(_)
         ) {
             self.controls.retain(|pending| pending.request != request);
             self.changed = true;
@@ -272,6 +279,12 @@ impl Feedback {
             // The run row follows durable cleanup status on each poll.
             ControlReply::Accepted => format!("{verb} accepted."),
             ControlReply::Refused(why) => why.clone(),
+            ControlReply::Busy(why) if action == RunActionKind::Continue => {
+                format!("Continue is kept and waiting ({why}). Checking the same request again.")
+            }
+            ControlReply::Busy(why) => {
+                format!("{verb} is kept and waiting ({why}). Retry {verb} sends the same request.")
+            }
             ControlReply::Unknown(why) if action == RunActionKind::Continue => {
                 format!("Continue is unconfirmed ({why}). Checking the same request again.")
             }
@@ -312,11 +325,41 @@ impl Feedback {
             .filter_map(|pending| Some((pending.run()?, pending.action()?)))
             .collect::<Vec<_>>();
         for (run, action) in runs {
-            if let Err(why) = self.control_run(port, &run, action) {
-                self.message = Some(why);
+            let arm = self
+                .controls
+                .iter_mut()
+                .find(|pending| {
+                    pending.run().as_ref() == Some(&run) && pending.action() == Some(action)
+                })
+                .and_then(|pending| pending.recovery.take());
+            match self.control_run(port, &run, action) {
+                Ok(ControlReply::Busy(_)) if arm.is_some() => {
+                    if let Some(pending) = self.controls.iter_mut().find(|pending| {
+                        pending.run().as_ref() == Some(&run) && pending.action() == Some(action)
+                    }) {
+                        pending.recovery = arm;
+                    }
+                    self.message = Some("The host is busy. Your control request is kept and waiting; checking again on the next poll.".into());
+                }
+                Err(why) => self.message = Some(why),
+                _ => {}
             }
         }
     }
+
+    pub(crate) fn poll_runs(&mut self, port: &mut dyn FeedbackPort) {
+        self.poll_readiness = Some(match port.poll_status() {
+            Ok((readiness, runtime)) => {
+                self.runtime_status = runtime;
+                readiness
+            }
+            Err(_) => super::RecoveryReadiness::Blocked,
+        });
+        self.retry_after_recovery(port);
+        self.observe_runs(&*port);
+        self.poll_readiness = None;
+    }
+
     pub(crate) fn retry_after_recovery(&mut self, port: &mut dyn FeedbackPort) {
         let same_host = |saved: &super::HostClient| {
             port.host_client()
@@ -338,7 +381,11 @@ impl Feedback {
                 pending.recovery = None;
             }
         }
-        let Ok(readiness) = port.recovery_readiness() else {
+        let readiness = if let Some(readiness) = self.poll_readiness {
+            readiness
+        } else if let Ok(readiness) = port.recovery_readiness() {
+            readiness
+        } else {
             return;
         };
         if readiness == super::RecoveryReadiness::Stopping {
@@ -354,8 +401,11 @@ impl Feedback {
         if let Some(witness) = self.recovery_ready_witness.take() {
             witness();
         }
-        if self.revise_recovery.take().is_some() {
-            self.start_run(port);
+        if let Some(arm) = self.revise_recovery.take()
+            && matches!(self.start_run(port), Some(super::RunStart::Busy(_)))
+        {
+            self.revise_recovery = Some(arm);
+            self.message = Some("The host is busy. Your Revise cut request is kept and waiting; checking again on the next poll.".into());
         }
         self.retry_ready_controls(port);
     }

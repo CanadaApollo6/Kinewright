@@ -462,6 +462,9 @@ pub(crate) trait FeedbackPort {
     fn runtime_status(&self) -> Result<Option<String>, String> {
         Ok(None)
     }
+    fn poll_status(&self) -> Result<(RecoveryReadiness, Option<String>), String> {
+        Ok((self.recovery_readiness()?, self.runtime_status()?))
+    }
     /// Seal one bounded evidence object. In-process owners return its pin.
     fn admit(
         &mut self,
@@ -559,6 +562,7 @@ pub(crate) enum RunStart {
     Unknown(String),
     /// Authenticated pre-dispatch refusal; resend once this host recovers.
     RecoveryUnknown(String),
+    Busy(String),
 }
 /// The scheduler and Studio name one run with the same identity string.
 fn same_identity<T: for<'de> Deserialize<'de>>(run: &impl Serialize) -> Result<T, String> {
@@ -774,6 +778,12 @@ impl FeedbackPort for HostFeedback<'_> {
             .status
             .native_runtime_status)
     }
+    fn poll_status(&self) -> Result<(RecoveryReadiness, Option<String>), String> {
+        let status = self
+            .request(kinewright_agent::writer_host::HostCommand::Status)?
+            .status;
+        Ok((status.recovery_readiness, status.native_runtime_status))
+    }
     fn admit(
         &mut self,
         kind: FeedbackEvidenceKind,
@@ -913,12 +923,18 @@ impl FeedbackPort for HostFeedback<'_> {
                     request: request.clone(),
                 }) {
                 Ok(reply) => reply,
+                Err(HostError::Refused(error)) if error.is_busy() => {
+                    return RunStart::Busy(error.message);
+                }
                 Err(HostError::Refused(error)) if error.retry_after_recovery() => {
                     return RunStart::RecoveryUnknown(error.message);
                 }
                 Err(error) => return RunStart::Unknown(error.to_string()),
             };
         if let Some(error) = reply.error {
+            if error.is_busy() {
+                return RunStart::Busy(error.message);
+            }
             if error.retry_after_recovery() {
                 return RunStart::RecoveryUnknown(error.message);
             }
@@ -1417,6 +1433,8 @@ pub(crate) struct Feedback {
     recovery_ready_witness: Option<Box<dyn FnOnce() + Send>>,
     /// In-memory recovery arm. Never persisted or used as a transport.
     revise_recovery: Option<HostClient>,
+    /// The Status observation shared by retries and nested row refreshes in this poll.
+    poll_readiness: Option<RecoveryReadiness>,
     pub(crate) drafts: Vec<Draft>,
     pub(crate) voices: BTreeMap<NoteId, crate::studio_voice::KeptVoice>,
     pub(crate) active_voice: Option<NoteId>,
@@ -2272,6 +2290,9 @@ impl Feedback {
             RunStart::RecoveryUnknown(why) => format!(
                 "Revise cut is waiting for startup recovery ({why}). Your request is kept and retries when this host is ready. Retry sends the same request."
             ),
+            RunStart::Busy(why) => format!(
+                "Revise cut is kept and waiting ({why}). Retry sends the same request."
+            ),
             RunStart::Unknown(why) => format!(
                 "Revise cut is sent, but its outcome is unknown ({why}). Retry sends this exact request."
             ),
@@ -2282,7 +2303,10 @@ impl Feedback {
             // The retained capability binds the arm to its authenticated host.
             self.revise_recovery = port.host_client().cloned();
         }
-        if !matches!(start, RunStart::Unknown(_) | RunStart::RecoveryUnknown(_)) {
+        if !matches!(
+            start,
+            RunStart::Unknown(_) | RunStart::RecoveryUnknown(_) | RunStart::Busy(_)
+        ) {
             self.revise = None;
             self.changed = true;
             self.observe_runs(&*port);
@@ -2308,7 +2332,9 @@ impl Feedback {
     /// the selection, drafts and manual work stay exactly as they are.
     pub(crate) fn observe_runs(&mut self, port: &dyn FeedbackPort) {
         self.observed_at = Some(std::time::Instant::now());
-        if let Ok(status) = port.runtime_status() {
+        if self.poll_readiness.is_none()
+            && let Ok(status) = port.runtime_status()
+        {
             self.runtime_status = status;
         }
         let Ok(index) = port.index() else {
@@ -2770,8 +2796,7 @@ impl KinewrightApp {
                 .is_none_or(|at| at.elapsed() >= RUN_POLL)
         {
             let _ = self.with_feedback(|feedback, port| {
-                feedback.retry_after_recovery(port);
-                feedback.observe_runs(&*port);
+                feedback.poll_runs(port);
             });
         }
         let feedback = &mut self.focused_mut().studio.feedback;
