@@ -2739,14 +2739,13 @@ impl ProjectStore {
         let transport: kinewright_core::HistoryTransport = serde_json::from_slice(bytes)
             .map_err(|error| BundleError::Corrupt(error.to_string()))?;
         let reserve = self.reserve_history_replay(role.replay_limit(self.limits()), role)?;
-        let (history, _) = transport
-            .journal
-            .resolve_with_budget(
-                transport.baseline,
-                &transport.document,
-                role.replay_limit(self.limits()),
-            )
-            .map_err(crate::bundle::history_error)?;
+        let history = crate::history_size::resolve_history_journal(
+            &transport.journal,
+            transport.baseline,
+            &transport.document,
+            role,
+            role.replay_limit(self.limits()),
+        )?;
         let live = crate::history_size::check_retained_history(&history, role, self.limits())?;
         let checked = reserve.finish_history_replay(live)?.hold(history);
         let record = crate::history_record::HistoryRecord::capture(&checked, role)?;
@@ -4422,10 +4421,13 @@ impl ProjectStore {
                     false,
                     true,
                 )?;
-                let (history, _) = record
-                    .journal
-                    .resolve_with_budget(Arc::new(baseline.take()), &current, window)
-                    .map_err(crate::bundle::history_error)?;
+                let history = crate::history_size::resolve_history_journal(
+                    &record.journal,
+                    Arc::new(baseline.take()),
+                    &current,
+                    record.role,
+                    window,
+                )?;
                 crate::history_size::check_retained_history(&history, record.role, limits)?;
                 Ok(())
             })??;

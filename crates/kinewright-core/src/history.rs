@@ -49,6 +49,8 @@ pub struct HistoryBatch {
 #[derive(Debug, Clone, schemars::JsonSchema)]
 #[schemars(with = "crate::HistoryTransport")]
 pub struct HistorySnapshot {
+    /// One unpublished floor's exact source. It is never part of the wire value.
+    pub ordinary_floor_source: Option<Arc<OrdinaryFloorSource>>,
     /// Runtime replay evidence; never serialized or accepted from input bytes.
     pub replay_proof: Option<Arc<HistoryReplayEvidence>>,
     pub floor_offset: u64,
@@ -56,6 +58,48 @@ pub struct HistorySnapshot {
     pub document: Arc<Document>,
     pub batches: Vec<HistoryBatch>,
     pub cursor: HistoryCursor,
+}
+
+/// Kept only until the writer acknowledges this floor. The snapshot has no
+/// source of its own, so unpublished floors cannot form a retained actor chain.
+#[derive(Debug)]
+pub struct OrdinaryFloorSource {
+    pub(crate) history: HistorySnapshot,
+    pub(crate) selected_offset: u64,
+}
+impl OrdinaryFloorSource {
+    /// Includes the opaque wrapper and its Arc allocation header.
+    /// # Errors
+    /// Refuses accounting overflow.
+    pub fn retained_bytes(&self) -> Result<u64, HistoryError> {
+        let header = std::mem::size_of::<Self>() - std::mem::size_of::<HistorySnapshot>()
+            + 2 * std::mem::size_of::<usize>();
+        crate::history_size::history_live_bytes(&self.history)?
+            .checked_add(header as u64)
+            .ok_or(HistoryError::Capacity)
+    }
+    #[must_use]
+    pub fn applies_to(&self, history: &HistorySnapshot) -> bool {
+        history.floor_offset == self.selected_offset
+            && history
+                .floor_offset
+                .checked_add(history.batches.len() as u64)
+                .zip(
+                    self.history
+                        .floor_offset
+                        .checked_add(self.history.batches.len() as u64),
+                )
+                .is_some_and(|(current, source)| current >= source)
+    }
+}
+impl HistorySnapshot {
+    /// Recover the exact unfloored publication source, including edits accepted
+    /// since the floor. The returned value is checked against this retained cut.
+    /// # Errors
+    /// Refuses a changed source or a non-equivalent retained floor.
+    pub fn publication_history(&self) -> Result<Option<Self>, HistoryError> {
+        crate::actor::ordinary_publication_history(self)
+    }
 }
 
 // Runtime evidence does not change the portable history value.
@@ -76,6 +120,8 @@ impl Eq for HistorySnapshot {}
 #[derive(Debug)]
 pub struct HistoryReplayEvidence {
     metadata_sha256: String,
+    replay_dynamic_peak: u64,
+    canonical_redo_input: std::sync::OnceLock<crate::history_size::RedoInputMax>,
     documents: Vec<std::sync::Weak<Document>>,
     pub(crate) capacities: (usize, usize, usize),
 }
@@ -83,9 +129,12 @@ impl HistoryReplayEvidence {
     pub(crate) fn new(
         history: &HistorySnapshot,
         capacities: (usize, usize, usize),
+        replay_dynamic_peak: u64,
     ) -> Result<Self, HistoryError> {
         Ok(Self {
             metadata_sha256: adoption_metadata_hash(history)?,
+            replay_dynamic_peak,
+            canonical_redo_input: std::sync::OnceLock::new(),
             documents: Self::documents(history),
             capacities,
         })
@@ -105,9 +154,31 @@ impl HistoryReplayEvidence {
         );
         documents
     }
+    fn redo_input_max(
+        &self,
+        history: &HistorySnapshot,
+    ) -> Result<crate::history_size::RedoInputMax, HistoryError> {
+        if let Some(bound) = self.canonical_redo_input.get() {
+            return Ok(*bound);
+        }
+        let bound = crate::history_size::redo_input_max(history)?;
+        // Immutable proof metadata may be shared between readers. A racing
+        // initializer computes the same bound; no document is retained here.
+        let _ = self.canonical_redo_input.set(bound);
+        Ok(*self
+            .canonical_redo_input
+            .get()
+            .ok_or(HistoryError::CommitInvariant)?)
+    }
     fn rebind(&self, history: &HistorySnapshot) -> Self {
+        let canonical_redo_input = std::sync::OnceLock::new();
+        if let Some(bound) = self.canonical_redo_input.get() {
+            let _ = canonical_redo_input.set(*bound);
+        }
         Self {
             metadata_sha256: self.metadata_sha256.clone(),
+            replay_dynamic_peak: self.replay_dynamic_peak,
+            canonical_redo_input,
             documents: Self::documents(history),
             capacities: self.capacities,
         }
@@ -181,6 +252,8 @@ fn adoption_metadata_hash(history: &HistorySnapshot) -> Result<String, HistoryEr
 /// replaced by a caller, so adopting it does not need to execute the journal again.
 #[derive(Debug, Clone)]
 pub struct ResolvedHistory {
+    // Sealed construction provenance, never serialized or supplied by a caller.
+    pub(crate) canonical_allocations: bool,
     pub(crate) history: Arc<HistorySnapshot>,
     pub(crate) checkpoint: Arc<crate::actor::ReplayCheckpoint>,
     pub(crate) peak: u64,
@@ -204,12 +277,54 @@ impl ResolvedHistory {
     pub fn replay_peak(&self) -> u64 {
         self.peak
     }
+    /// Bound every remaining Redo without executing another history replay.
+    /// # Errors
+    /// Refuses arithmetic or command-count overflow.
+    pub fn redo_capacity_bound(
+        &self,
+        journal: &crate::HistoryJournal,
+        input: &HistorySnapshot,
+    ) -> Result<crate::history_size::RedoCapacityBound, HistoryError> {
+        if self.snapshot() != input {
+            return Err(HistoryError::StaleExpectation);
+        }
+        crate::history_size::redo_capacity_bound(
+            self.snapshot(),
+            self.adoption.replay_dynamic_peak,
+            journal,
+            input,
+            self.adoption.redo_input_max(self.snapshot())?,
+        )
+    }
+    #[must_use]
+    pub fn shares_document_allocations(&self, other: &HistorySnapshot) -> bool {
+        let own = self.snapshot();
+        Arc::ptr_eq(&own.baseline, &other.baseline)
+            && Arc::ptr_eq(&own.document, &other.document)
+            && own.cursor.undo.len() == other.cursor.undo.len()
+            && own.cursor.redo.len() == other.cursor.redo.len()
+            && own
+                .cursor
+                .undo
+                .iter()
+                .chain(&own.cursor.redo)
+                .zip(other.cursor.undo.iter().chain(&other.cursor.redo))
+                .all(|(before, after)| Arc::ptr_eq(&before.document, &after.document))
+    }
+
     /// Reuse equal immutable documents already resident in a live actor. A
     /// different sharing topology keeps the canonical replay allocations.
     /// # Errors
     /// Refuses a value that differs from the replayed history.
     pub fn share_documents(mut self, mut history: HistorySnapshot) -> Result<Self, HistoryError> {
+        self.canonical_allocations = false;
         history.replay_proof = None;
+        history.ordinary_floor_source = None;
+        if !self.snapshot().cursor.redo.is_empty() {
+            // Sharing smaller equal documents must not erase the canonical
+            // replay allocation needed by a later cold-open Redo input.
+            self.adoption.redo_input_max(self.snapshot())?;
+        }
         if self.snapshot() != &history {
             return Err(HistoryError::StaleExpectation);
         }
@@ -288,6 +403,37 @@ impl HistorySnapshot {
                     .ok_or(HistoryError::Capacity)
             },
         )
+    }
+
+    /// Check sealed replay evidence before using its navigation reservation.
+    /// # Errors
+    /// Refuses invalid history, capacity or unavailable actor evidence.
+    pub fn redo_capacity_bound(
+        &self,
+        replay_limit: u64,
+        journal: &crate::HistoryJournal,
+    ) -> Result<crate::history_size::RedoCapacityBound, HistoryError> {
+        if let Some(proof) = &self.replay_proof
+            && proof.matches(self)?
+        {
+            return crate::history_size::redo_capacity_bound(
+                self,
+                proof.replay_dynamic_peak,
+                journal,
+                self,
+                proof.redo_input_max(self)?,
+            );
+        }
+        let resolved = journal.resolve_verified_with_budget(
+            Arc::clone(&self.baseline),
+            &self.document,
+            replay_limit,
+            None,
+        )?;
+        if resolved.snapshot() != self {
+            return Err(HistoryError::StaleExpectation);
+        }
+        resolved.redo_capacity_bound(journal, self)
     }
 
     #[must_use]

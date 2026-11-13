@@ -1409,17 +1409,25 @@ struct KinewrightMcp {
 
 impl KinewrightMcp {
     fn check_batch_history(&self, operations: &[Operation]) -> Result<(), String> {
-        if let Some(endpoint) = &self.task_endpoint {
+        self.task_endpoint.as_ref().map_or(Ok(()), |endpoint| {
             endpoint.check_batch_history(&self.core, operations)
+        })
+    }
+    fn history_refusal(reason: kinewright_core::CoreMutationRefusal) -> CallToolResult {
+        if reason == kinewright_core::CoreMutationRefusal::ManualHistoryCapacity {
+            error_text(format!("history_capacity: {reason}"))
         } else {
-            self.ordinary_history_limits
-                .check_batch(&self.core, operations)
-                .map_err(|error| match error {
-                    kinewright_project::bundle::BundleError::Capacity(_) => format!(
-                        "history_capacity: {error}. Try a smaller edit or start a new project."
-                    ),
-                    other => other.to_string(),
-                })
+            error_text(reason.to_string())
+        }
+    }
+    fn request_history_command(
+        &self,
+        command: Command,
+    ) -> Result<Event, kinewright_core::CoreDisconnected> {
+        if self.task_endpoint.is_some() {
+            self.core.request(command)
+        } else {
+            self.ordinary_history_limits.request(&self.core, command)
         }
     }
     #[cfg(test)]
@@ -2827,7 +2835,7 @@ impl KinewrightMcp {
         if let Err(error) = self.check_batch_history(std::slice::from_ref(&operation)) {
             return error_text(error);
         }
-        match self.core.request(Command::DoIfRevision {
+        match self.request_history_command(Command::DoIfRevision {
             expected: expected_revision,
             operation,
             // IN1b §4 rule 3: the synchronous request reads its own reply, so
@@ -2848,6 +2856,7 @@ impl KinewrightMcp {
                     revision,
                 ))
             }
+            Ok(Event::MutationRefused { reason, .. }) => Self::history_refusal(reason),
             Ok(Event::OpRejected { error, .. }) => error_text(error.to_string()),
             Ok(Event::BatchRejected { error, .. }) => error_text(error.to_string()),
             Ok(Event::RevisionConflict {
@@ -2945,7 +2954,7 @@ impl KinewrightMcp {
             return Ok(error_text(error));
         }
         let apply = || {
-            self.core.request(Command::DoBatchIfRevision {
+            self.request_history_command(Command::DoBatchIfRevision {
                 expected: expected_revision,
                 operations: operations.to_vec(),
             })
@@ -2992,6 +3001,7 @@ impl KinewrightMcp {
                     serde_json::json!({"revision":revision,"affected_scope":committed_scope(&before,&doc,operations)}),
                 )
             }
+            Event::MutationRefused { reason, .. } => Self::history_refusal(reason),
             Event::BatchRejected { error, .. } => {
                 error_text(render_plan_outcomes(operations, Some(&error), None))
             }
@@ -3792,8 +3802,7 @@ impl KinewrightMcp {
             return Ok(Err(error_text(error)));
         }
         let event = self
-            .core
-            .request(Command::DoBatchIfRevision {
+            .request_history_command(Command::DoBatchIfRevision {
                 expected: expected_revision,
                 operations: operations.to_vec(),
             })
@@ -3805,6 +3814,7 @@ impl KinewrightMcp {
                 }
                 Ok(revision)
             }
+            Event::MutationRefused { reason, .. } => Err(Self::history_refusal(reason)),
             Event::BatchRejected { error, .. } => Err(lut_tool_error(
                 tool,
                 "core_rejected",

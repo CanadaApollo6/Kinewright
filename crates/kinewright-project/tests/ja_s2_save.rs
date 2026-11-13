@@ -842,7 +842,7 @@ mod linux {
         model.save(&core, &model_input).unwrap();
         apply(&core, Command::DoBatch(additions.clone()));
         let candidate = core.export_history().unwrap();
-        let (minimum, minimum_retained) = (0..=candidate.batches.len())
+        let (_, minimum_retained) = (0..=candidate.batches.len())
             .filter_map(|cut| {
                 let history = if cut == 0 {
                     candidate.clone()
@@ -863,6 +863,26 @@ mod linux {
                     ),
                 )
             });
+        // Calibrate against full canonical admission, retaining the newest edit,
+        // exactly as a real ordinary door and Save do (not a record-only cost).
+        let mut minimum = 1;
+        let mut ceiling = StorageLimits::default().branch_history_bytes;
+        while minimum < ceiling {
+            let middle = minimum + (ceiling - minimum) / 2;
+            let limits = StorageLimits {
+                branch_history_bytes: middle,
+                ..StorageLimits::default()
+            };
+            if kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
+                .unwrap()
+                .select(&candidate)
+                .is_ok()
+            {
+                ceiling = middle;
+            } else {
+                minimum = middle + 1;
+            }
+        }
         let profile = StorageLimits {
             branch_history_bytes: minimum,
             ..StorageLimits::default()

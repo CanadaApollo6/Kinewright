@@ -33,7 +33,7 @@ impl Ja1EditingSession {
         }
         let history = self
             .core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         let current = history
             .document
@@ -90,7 +90,7 @@ impl Ja1EditingSession {
         if self.destination.is_none() {
             let before = self
                 .core
-                .export_history()
+                .export_history_for_publication()
                 .map_err(crate::bundle::history_error)?;
             let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
                 .map_err(|error| BundleError::Corrupt(error.to_string()))?;
@@ -112,10 +112,11 @@ impl Ja1EditingSession {
                 ));
             }
             let after = candidate
-                .export_history()
+                .export_history_for_publication()
                 .map_err(crate::bundle::history_error)?;
-            crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
-                .check(&after)?;
+            let after =
+                crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
+                    .select(&after)?;
             crate::bundle_commit::validate_inputs(&after, &prepared.manifest)?;
             self.attachment
                 .install_checkpoint(before, after)
@@ -201,7 +202,7 @@ impl Ja1EditingSession {
         }
         let before = self
             .core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         if before
             .document
@@ -277,7 +278,7 @@ impl Ja1EditingSession {
         }
         let before = self
             .core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         let next = before
             .document
@@ -309,10 +310,11 @@ impl Ja1EditingSession {
             ));
         }
         let after = candidate
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
-        crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
-            .check(&after)?;
+        let after =
+            crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
+                .select(&after)?;
         crate::bundle_commit::validate_inputs(&after, &prepared.manifest)?;
         let retained_entry = prepared
             .manifest
@@ -469,7 +471,7 @@ impl Ja1EditingSession {
             .ok_or(BundleError::HistoryChanged)?;
         let current = self
             .core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         if staged.history != current || staged.inputs != self.inputs {
             return Err(BundleError::HistoryChanged);

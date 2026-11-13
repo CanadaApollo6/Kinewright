@@ -614,3 +614,149 @@ Remaining gates **PASS**: fmt; all-target Clippy `-D warnings` for all four chan
 Comparison cleanup, after verifying no own Cargo process or comparison executable was active, removed **1,955,946,496 allocated bytes**: target usage fell from **27,734,536,192** to **25,778,589,696 bytes**. Small logs, source/binary digests and commands were kept. Completed slow-suite executables and isolated shipping output were also removed at their gate boundaries. At the idle commit boundary, scoped Cargo cleanup removed 2,171 package-output files (Cargo reported 19.5 GiB), preserving the evidence logs. Final allocated `target/` size is **15,346,065,408 bytes (15.35 GB)**, below the approximate 40 GB cap.
 
 Evidence: `target/history-capacity/fix2-final-gates/`, `fix2-current-measure/`, `fix2-final-canonical-core.log`, `fix2-final-prefilter.log`, `fix2-canonical-manual.log` and `fix2-canonical-census.log`, and the pinned 4,000-edit controls under `fix2-startup/final/`. Native rescue remains parked byte-exact outside this change. The unpushed 2a delta is rebased only after this fix commit and checked independently against `3ca9ae3e`. No push is performed.
+
+## Stage 1 fix 3
+
+Fix 3 is built on public `769206fa82f8ebaf58aa5511dd8fb7776b424961`. The final gates below pass; this report accompanies its local commit. The original allocation-disagreement witness is now active and passing. Its pre-fix reproduction accepted `SetTrackSyncLock` at floor 2 on a producer with a spare 4,001-slot baseline, while the tighter writer selected floor 0 and returned identical `HistoryChanged` refusals on both attempts; cold reopen retained the pre-edit cut. Evidence remains in `allocation-floor-parity{,-diagnostic}.log`.
+
+Ordinary selection now executes on tight owned baseline/current/journal values. Deep rematerialization compacts their nested owned arrays and strings. A canonical immutable prefix can extend through the new batch; ordinary proofs never replace their replay documents with a holder's different allocations. Equal-cut memo reuse compares values because the cached proof remains canonical; the receiving actor adopts its checked layout. Native role replay and task doors are unchanged.
+
+The writer derives the producer's absolute chosen floor from the accepted batch's relative order and preceding absolute position. It constructs that exact legal transition, independently performs full canonical admission, and checks the complete history/cursor/batch identities. It does not select a second floor. Direct Save, Save As, copy and adoption remain canonical selectors. The regression now selects floor 3 on both holders and publishes/cold-reopens exactly. Twelve real-lease baseline/cursor/current/vector cases (producer only, writer only, both) pass; 30.8–35.2 MB of injected actual geometry becomes 14,633 typed retained bytes on both actors under an unchanged 87,406-byte test allowance.
+
+Physical spare memory is not discounted: at lease binding and admitted mutations the actor adopts the checked replay allocations, preserving history values and its runtime authority/tickets. An actual floor's retained unpublished source is tightly rematerialized once and checked against its existing pool remainder. This keeps floor choice independent of physical layout while bounding the holder's resulting allocations. Allocator and natural-geometry measurements, mutation pairs and final gates follow below when complete.
+
+
+Ordinary edits now move the Undo floor inside the Core admission transaction when the complete history is full. Save and every ordinary edit door call the same `select_admitted_history` policy. The selected cut preserves the document, accepted absolute batch position and retained cursor. A too-large individual edit refuses before acknowledgement with `ManualHistoryCapacity`: **This edit is too large for one step. Try it in smaller parts.** No bound is raised.
+
+### Floor, headroom and transaction
+
+The selector first finds the fewest oldest steps whose removal produces a fully admitted cut. It then tries dropping another `ceil(retained Undo depth / 8)` steps from that candidate, keeping at least the newest step. Every candidate is measured after moving its actual baseline. If that extra drop costs more than the hard window permits, the first fitting cut remains available. The ordinary door selects this canonical cut. The manual writer applies and fully checks the carried floor, closing ruling point 3 without a second selection. Direct Save and copy remain selectors.
+
+For a new Undo step, the search includes the cut retaining only that newest step at its actual pre-step document and absolute position. If that one-step cut fits, it is an available fallback even when a heavier earlier baseline makes other floors fail. A refusal means that real one-step candidate cannot fit; the check never substitutes an empty or cheaper document for its baseline. An existing coalesced gesture remains one Undo step. The generated setup failures below have no admitted starting cut under their deliberately smaller limits; they are not a saved project becoming stuck after accepting an edit.
+
+A fitting history stays unchanged. Between floors the complete effective ordinary cut remains bounded by the existing ordinary admission, live, replay, command and portable encoded limits, normally a 32 MiB effective per-cut window. Proof extension executes only new commands; full prefix replay is paid when a floor actually moves or a proof cannot be reused. Flooring changes no accepted command on disk. It discards the oldest Undo prefix under the same policy Save uses.
+
+Manual ingress stages the floor, proof, JSON cache and encoder state in the edit transaction. Late encoding, queue, predicate or cache failures restore document, revision, Undo/Redo, journal, sequence, predecessor and every cache byte/index. Ordinary direct/MCP endpoints retain at most one exact unpublished source, without a source chain. Its typed allocation, including its wrapper, is bounded by the ordinary pool remainder, normally 96 MiB beside the selected 32 MiB cut. Save publishes from that source, consumes it only on acknowledgement, and preserves it on failure. A second unpublished floor returns temporary backpressure until that acknowledgement. GUI accepted-envelope streams retain no such extra source. This is a bounded per-endpoint handoff, not qualification of the aggregate raw ledger.
+
+Canonical prefix reuse preserves the proof's canonical baseline allocation. Equal-cut value reuse cannot supply or substitute holder allocations; the actor adopts the checked canonical state when needed. Astra's spare-capacity/rebound-cursor case and equal-cut parity regression are retained without discounting any allocation charge.
+
+### Canonical floor choice and exact writer verification
+
+Allocation geometry is outside the selection domain. The ordinary resolver deep-rematerializes the owned baseline/current documents and journal; all nested owned arrays and strings are tight. Its private construction provenance permits prefix extension only from another canonical replay. A generic/holder proof, or a proof subsequently rebound to holder allocations, cannot enter that reuse path. The ordinary endpoint retains canonical replay documents rather than replacing them with value-equal holder documents. Native replay retains its existing policy.
+
+A lease binds only an already admissible value cut, then compacts the actor to the checked allocations without changing document, revision, history, authority, pending floor ticket or accepted messages. Each admitted ordinary mutation similarly installs the checked allocations inside its rollback transaction. Layout-only changes keep the existing JSON-cache update path; only an actual floor rebuilds it. Publication keeps the canonical decoded allocations whose reservation it checked; it no longer swaps an uncharged holder allocation back into that reservation. A floor's one unpublished source is tightly rematerialized and charged against its existing 96 MiB remainder.
+
+The accepted last batch order carries the producer's selected floor: `previous absolute position - accepted batch.order`. The new batch itself is retained. The writer applies a legal step-boundary transition at that offset, runs the complete ordinary predicate, and checks full history/cursor/batch digests. Its own sealed prefix may skip already proved execution, but no wire field supplies admission evidence. A dedicated producer intentionally chooses a different, still-admissible floor (4 where the writer's selector would choose 3); publication and cold reopen match that exact choice. This is why replacing verification with re-selection is a regression even when the two current selectors usually agree.
+
+For an honest producer, the writer begins at the same acknowledged predecessor values, executes the same typed command, uses the same fixed lease/store limits and canonical construction, and verifies the carried legal floor. Thus its exact predicate sees the same values and charges the producer admitted. A capacity disagreement from physical allocations is unreachable in that sequence; no retry policy hides one. Authority, malformed-command and identity refusals retain their existing typed paths. No native task door, role constant or raw ceiling was changed.
+
+The real-lease geometry generator covers baseline, cursor and current document allocations plus batch/cursor vector allocations, each on the producer, writer and both. All twelve admitted cuts publish and cold-reopen exactly with the same floor. The maximal injected cases start at 30,824,845–35,224,845 typed bytes and finish at 14,633 bytes per actor under the same 87,406-byte test cap.
+
+The isolated allocator witness starts with 280,016,255 heap bytes (308,024,845 typed), deliberately above the ordinary role bound. Its cure peaks at 280,039,796 bytes, only 23,541 bytes above that already inflated entry, then retains **24,687 actual heap bytes / 31,117 typed bytes** under the unchanged 32 MiB bound. Two instrumented executions take **4.86–5.36 ms**. Compaction is paid at lease binding or the admitted transaction; baseline/current/journal normalization and rare unpublished-source rematerialization are the allocations involved. This single-actor measurement does not qualify the aggregate 512 MiB ceiling.
+
+The natural row uses real additions and removals: eight surviving tracks and 69 solid clips, with a seven-slot/six-clip vector left by editing, without injected capacity. Both initial executors report 292,171 bytes; both initial Saves choose floor 3. Across 120 subsequent edits there are **60 floors, zero refusals, zero old/new floor disagreements**, and an exact cold reopen. Thus this natural row does not establish the old shipping trigger; the stronger injected allocation cases close the independently blocking disagreement as ruled.
+
+### Undo pays for every Redo on the way back
+
+The chosen change is a return reservation; navigation still appends its existing journal batches. An Undo passes only if its resulting cut and **every intermediate cut** obtained by draining Redo fit all ordinary bounds. An Undo that cannot make that reservation refuses transactionally with `ManualUndoCapacity`: **Can't undo further. This project's undo history is full.** A new edit clears Redo before selecting a floor, as before.
+
+The forecast does not replay one future history per Redo. Redo moves existing document and operation payloads between current/Undo/Redo. Its only journal growth is a payload-free Redo batch with known numeric counters. Decimal-range sums give the exact additional encoded batch bytes, including commas and counter digit changes. The reservation uses the final batch-vector capacity, both cursor-vector maxima, the largest encoded and allocated current document across the entire return path, and the proven prefix's dynamic replay peak. It includes live and canonical-decoded allocation charges; sharing equal values cannot erase the latter. These quantities stay constant or decrease while Redo drains. The ordinary structural/record checks reserve the same added batches and maximum current-reference length. All arithmetic is checked.
+
+Cold resolution and publication apply this same return predicate before admitting a cut with Redo. No wire flag can supply proof, and a capacity refusal never becomes corruption. A lazy scalar memo retains canonical maximum charges, not boundary documents. One Undo needs linear capture/size scans and a single prefix extension, not a quadratic sequence of full future replays. Existing metadata scans still scale with history and document size; no constant-time claim is made.
+
+The real-lease 180-edit witness passes unchanged in shape. It accepts all 180 edits through 25 floors, with maximum Undo depth 33. After close/cold reopen, the excursion takes 27 Undos and all 27 Redos with zero refusal, including another cold reopen at the Redo cut. The first Undo may legally move the floor; the final document and complete kept cursor match the pre-excursion cut after that exact floor, and the accepted navigation batches append after its exact kept journal. The six seeded pair witnesses cover 12 tiny/heavy cases, 432 requested walk steps and 60 cold reopens: 284 Undos accepted, six Undos refused byte-identically, and 233 walk Redos accepted, plus all final drains. No Redo refuses.
+
+| Document / loop | First floor | Accepted / refused edits | Floors | Undo depth after first floor |
+| --- | ---: | ---: | ---: | --- |
+| 400 clips, 400 effects, 3,200 keyframes | Edit 6 | 18 / 0 | 7 | 4–5; final 4; cold Undo/Redo 4/4 |
+| Plain 300 clips, no effects | Edit 36 | 108 / 0 | 13 | 30–35; final 30; cold Undo/Redo 30/30 |
+
+These loops each exceed three times their observed retained depth. The low-water mark preserves nearly all heavy-document steps while leaving hundreds of steps for the long small-edit case. Exact depth depends on document and payload size; the fraction is not a promise of a fixed number of Undo steps.
+
+### Ordinary acknowledgement doors
+
+| Door | Before acknowledgement | Witness |
+| --- | --- | --- |
+| GUI manual single, batch and coalesced commands | Mandatory encoder guard inside `ManualIngress::execute`; staged floor commits only with the accepted message | Continuous edits, heavy copy refusal/control, lower writer limit, late encoder/cache rollback, coalesced gesture |
+| Ordinary MCP single, plans and LUT batches | Actual revision-gated command goes through persistent ordinary admission and the same Core transaction | Existing single/plan/LUT refusal tests; ordinary source/Save/retry and full Agent suite |
+| Legacy merge, cherry-pick and approved proposals | `branch::apply_to_live` passes its owned operation vector to the admitted revision-gated batch | Shared-funnel refusal tests and full Agent suite |
+| Owned import and colour interpretation | Saved path stages through ordinary publication; unsaved path selects before installing document or inputs | Unsaved import rollback and complete saved import/interpretation suites |
+| GUI Undo and Redo | Same transactional guard, with the complete return reserve whenever Redo remains | Guarded cold cursor round trip and seeded excursions |
+| Save, Save As, copy and cold adoption | Same selected cut and full admission; runtime source is consumed only after exact publication | Exhaustive/seeded floor agreement, source retry, copy/recovery suites |
+| Native task edit/Undo/Redo and native candidate merge | Existing role predicate and pre-mutation guard, unchanged in this commit | Existing native lifecycle/cleanup and candidate reservation tests |
+
+The independent exhaustive oracle agrees on 10,000 seeded inline histories and on 60 additional payload histories at 180 cap neighbors. Payload shapes include copy fanout, split-then-delete and multi-operation batches. Real leases admit, publish and cold-reopen 164 cuts exactly; four attempts refuse before acknowledgement, and 59 selected cuts move the floor. Every door-admitted cut in this set is accepted by Save and cold open. The twenty-clip heavy batch still refuses with the new text and unchanged bytes/stacks/revision/queue; the ten-clip control publishes and reopens exactly.
+
+The final 1,000-keyframe census still accepts copying to **15 destinations, 16 clips including the source**, on the twenty-clip document. Its typed replay peak is 31,929,300 bytes, retained charge 14,306,493 and encoded history 792,678. Sixteen destinations require a 33,704,229-byte peak and refuse the unchanged 33,554,432-byte window. Nineteen destinations need 39,037,324 bytes while retaining 17,674,261; retained room is not the refusal. Copy's 2,280,354-byte temporary allowance is peaked per operation, not held cumulatively (the hypothetical nineteen-operation sum would be 43,326,726 bytes).
+
+The copy-floor witness measures the actual candidate, not a subtraction from the old peak:
+
+| Effect-bearing clips after copy | Full journal peak, bytes | Floored candidate peak, bytes |
+| --- | ---: | ---: |
+| 2 | 7,030,474 | 7,127,151 |
+| 4 | 12,254,084 | 14,221,702 |
+| 8 | 22,708,660 | 28,416,085 |
+| 16 | 43,617,880 | 56,804,902 |
+
+The 16-clip row is an above-limit Core measurement, not an admitted ordinary publication. These increases are why an extra floor is checked again and why the first fitting floor is retained as a fallback.
+
+The twelve setup failures all return typed `Capacity("history memory")` before any lease. Exhaustive selection finds no fitting prefix at those deliberately lowered caps. They are four prefix shapes, each tested at three adjacent values:
+
+| Generated shape | Offered cap range, bytes | Minimum full-prefix allowance | Shortfall |
+| --- | ---: | ---: | ---: |
+| Case 25, split/delete | 229,711–229,713 | 230,186 | 473–475 |
+| Case 29, multi-operation | 848,726–848,728 | 848,730 | 2–4 |
+| Case 44, multi-operation | 566,735–566,737 | 566,775 | 38–40 |
+| Case 45, copy fanout | 1,070,275–1,070,277 | 1,070,278 | 1–3 |
+
+Those caps were derived from a different later candidate, not from the starting prefix. Adding the prospective step permits a different legal floor and baseline. The setup prefixes themselves cannot replay in the offered window; their exact minimums are measured by full-predicate search. These twelve refusals precede any accepted guarded edit; they are separate from the pre-fix allocation disagreement above. Older fixed-floor/disclosure witnesses now independently enumerate full-admission cuts and apply the same ruled headroom. The fresh-reader pressure fixture calibrates its artificially lowered branch cap against full admission with the newest step retained, while preserving its exact shared-pool boundary and quota-retry assertions.
+
+### ManualBackpressure contract
+
+`ManualBackpressure` now means that an acknowledgement can make room for this same command. The accepted-message window stays 262,144 bytes and 64 messages. Own encoded message size is checked against that fixed bound before occupied-byte/count checks; it is not inferred from current occupancy.
+
+| Site | Result |
+| --- | --- |
+| `actor/manual_history.rs`, accepted-message admission | Own message above 262,144 bytes: final `ManualHistoryCapacity`. A fitting message blocked by pending count/bytes: `ManualBackpressure`; acknowledgement admits the identical retry. |
+| `actor/manual_history.rs`, pending floor ticket | `ManualBackpressure` only while the existing floor awaits its Save settlement/acknowledgement. |
+| `actor/manual_history.rs`, one unpublished ordinary source | `ManualBackpressure` until Save acknowledges that exact source; a source that itself exceeds the static source allowance is final `ManualHistoryUnavailable`. |
+| `actor/manual_history.rs`, cache rebuild/update, identity encoding, malformed sequence, arithmetic/invariant or untyped `check_history` failure | Final `ManualHistoryUnavailable`; explicit typed guard refusals remain typed. |
+| `attachment.rs` | No production backpressure return site; boundary contract tests now distinguish an oversized empty-window message from an occupied fitting window. |
+| Project `manual_history.rs`, predicate fallback and encoder fallback | Capacity stays final history/Undo capacity. Every other preparation failure is final `ManualHistoryUnavailable`; no generic backpressure fallback remains. A poisoned proof cache is preparation I/O failure, not a capacity refusal. Intrinsic source/epoch failures are checked before pending source/ticket backpressure, so a pending acknowledgement cannot mask a final failure. |
+
+The new final variant's exact text is **This edit could not be prepared. Your timeline is unchanged.** It adds no retry policy. The failure matrix checks cache rebuild before/after flooring, cache update, predicate errors, encoder errors, malformed sequence and overflow, unchanged state on repeat, and permanent failure despite acknowledgement. The exact-byte test covers 262,145 bytes in an empty window, 262,144 bytes in a full window and success after acknowledgement; count-window retry and an oversized message offered to an already full count window are also pinned. Project's actual poisoned-cache request and encoder-size rollback exercise its two adapters.
+
+### Coalesced gesture and publication cost
+
+The active 400-clip/effect, 3,200-keyframe gesture witness sends 120 distinct slider sub-batches while the real publisher runs. Every accepted sub-batch is acknowledged, retained in order under one Undo step, and cold-reopens exactly. Every refusal must be `ManualBackpressure`, never history capacity. Counts and timings are measurements, not acceptance assertions. The strict all-120/final-119 version remains separately ignored with the GUI resend follow-up reason in `ci/ignored-tests.txt`. The lead assigned GUI retry to the App worker; no queue limit or Project retry is changed here.
+
+The final full-Project run measures 43 accepted and 77 backpressured sub-batches, with all 43 accepted values in order and cold-reopened exactly. The first measured queue refusal is sub-batch 38 with 35 messages and 261,430 queued bytes, leaving 714 bytes. Peak queue usage is 261,514/262,144 bytes. Request median/worst is 38.697/173.144 ms; publication median/worst is 621.417/711.387 ms under this run's load. The saved exposure is 111 versus the requested final 119, the known GUI resend gap. Undo depth moves from five to four through a floor. No sub-batch receives history-capacity refusal, and no accepted value disappears.
+
+An earlier instrumented WIP run, before canonical allocation selection, measured **523.210 ms mean per publication** over 44 publications. Exclusive means were shadow admission 38.560 ms, transport decode/replay 74.567 ms, record read/replay 92.665 ms, JSON preflight 25.133 ms, record encoding 3.089 ms, capture encoding/hash 9.628 ms, seal encoding/hash/remaining I/O 4.175 ms, disk sync 139.065 ms, other publication work 96.365 ms and other manual-commit work 39.964 ms. This is a rough timed split, not CPU attribution inside the I/O-bearing scopes. There were 705 sync calls, about 16 per publication. The host loops and publishes **one new sub-batch per commit**, carrying its cumulative kept journal, rather than combining all pending messages into one publication. No comparable stage-1-base timing was available, and no old head was rebuilt. All six instrumented files were restored byte-exact.
+
+### Cost and gates
+
+The final sampler uses unoptimized Core, Project and Agent, four pinned CPUs (0–3), niceness 19 and the same real-store/manual-lease method as fix 2. It does not wait for a quiet machine: one-minute load is 2.55 before and 2.47 after. All ten subsequent edits in each row are accepted, published and cold-reopened exactly.
+
+| Setup edits | Retained batches before each edit | Hand edit median / worst, ms | Save median / worst, ms | Accepted |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 1,000–1,009 | 130.875 / 131.654 | 832.453 / 857.104 | 10 / 10 |
+| 12,000, after first Save | 1,976–1,985 | 251.497 / 257.144 | 1,500.266 / 1,529.542 | 10 / 10 |
+
+The 12,000-edit floor stays at 10,024 throughout all ten samples; the 1,000-edit floor stays zero. Neither row pays another floor or full-prefix replay per edit. Both still capture, encode, hash and validate metadata over retained history, so they remain O(H) per hand edit; the measured ratio is about 1.92 for about 1.97 times the retained batches. The canonical proof executes only the new batch on a matching prefix. A changed Save verifies its exact chosen cut and performs publication/graph/I/O work; cold open performs one complete linear replay and complete admission. These are debug timings, not shipping-build latency qualification. The separate unchanged 12,000-edit production-startup witness passes with unoptimized Core/Project on four CPUs and its five-second startup limit intact.
+
+All seven negative mutations fail in executed tests at their intended assertions: no door floor; no Redo return reserve; an end-only return check; maximum-fitting rather than step headroom; allocation-sensitive selection; writer re-selection; and missing local compaction. Sources restore byte-exact, and both the original return-reservation controls and all three canonical controls pass after restoration. In the heavy-middle/final-light Core shape the intermediate peak is 5,645,790 bytes versus 5,270,752 at the final cut; the complete return reservation is 5,647,937 bytes.
+
+Current complete gates: workspace build and fmt; all-target Clippy `-D warnings` for Core, Project, Agent and App in default and slow/test-util modes; Core **818 / 0 / 2** across 22 targets; Project **500 / 0 / 5** across 24; Agent **1,730 / 0 / 102** across 31. Counts are passed / failed / ignored. App passes **1,014 / 0 / 5**. Workspace all-feature test compilation passes **82 executables**. The prescribed Windows script passes workspace/all-target Clippy, Agent slow Clippy, App default/slow Clippy, all three isolated Linux shipping builds and their three MSVC shipping checks. Windows execution is not claimed. The Python-driven Cargo runner inherited niceness 19; that actual priority is recorded, rather than describing those processes as niceness 10. Remaining Cargo gates use a shell runner at niceness 10. The performance sampler retains the same four-CPU/niceness-19 method as its baseline. Workspace compilation and the separate startup check ran from the corrected shell runner at actual niceness 10.
+
+Both previously red fixture expectations are corrected. `w13_every_publication_fits_fresh_open` now derives its lowered branch cap by binary search over full canonical selection with the newest step retained; its retained-memory lower bound still independently calibrates the shared-pool boundary. All 13 tests in that target pass. The legacy Agent merge/cherry-pick witness now expects a 4,000-small-edit source plus one fitting step to floor and continue; a separate oversized single marker, derived from the existing `HISTORY_BYTES` constant, still refuses transactionally. The full Agent suite passes that changed expectation.
+
+Slow-test lint currently reports **146 tests / 159 allowlist entries / 27 equipped-session skip sites**; its self-tests pass **48**, and shard self-tests **22**. Evidence is in `target/history-capacity/fix3/final-gates/`, `canonical-mutations/`, `mutations/`, and the original allocation failure logs. A source-patch digest verifies that production code stayed unchanged during this gate run.
+
+At the native task role bound, the unchanged pre-edit guard returns `RunAdmission` with **Task history limit reached. Finish or freeze this task before making more edits.** It applies no refused edit. The previously admitted cut remains eligible for Finish, Freeze and Stop under that monotonic history bound. There is no newly introduced state that can neither continue nor end cleanly. The accepted raw-ledger publication exception is unchanged: **Finish and Freeze are NOT guaranteed after a raw-ledger refusal of an ordinary or terminal native publication; Stop and exact retention are.** Native doors, rescue and release fixes are outside fix 3.
+
+An earlier draft's all-feature compilation reached **48,523,587,584 allocated bytes**, above the requested cap; that breach remains recorded. For the final gate, pruning completed executables **before** workspace compilation reduced 31,727,394,816 bytes to **22,020,059,136**. Compilation reached **31,410,229,248**; deleting its 82 completed compile-only outputs reduced it to **22,021,914,624**. Root fixture binaries, libraries, small logs and results were retained. After Windows/shipping, the isolated shipping directory and Python caches were deleted. Final `target/` is **23,365,373,952 allocated bytes (23.37 GB)**. All 15 parked rescue files still match their original hashes; `/tmp/kinewright-*` contains only the shared lock. Every started build and test has completed.
+
+The source-patch SHA-256 tested by the final gate is `f08ef337e62f365e866f5d8f8e4648fa1f523648f42562b4c56efe0f90e0be51` (Rust, manifests, CI lists and scripts against the public parent; this report is excluded). It still matches immediately before staging. No 2a fix-1 or rescue changes are mixed into this commit.
+
+The role constants remain task 41 MiB, candidate 2 MiB, ordinary/manual pool 128 MiB and native replay window 64 MiB, with raw ceiling 512 MiB. The **568 MiB envelope remains NOT QUALIFIED**, with the existing holder audit and publication-latch limitation. Windows runtime, paid/equipped providers and hosted CI are unrun locally. No migration, old reader, toolchain update, push or signal was performed. The native rescue stays parked; 2a fix 1 is next.

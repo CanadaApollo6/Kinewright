@@ -783,6 +783,7 @@ impl LoadedBundle {
                 .as_ref()
                 .map_or_else(BTreeMap::new, |v| (**v).clone()),
             pending_command: None,
+            ordinary_manual_admission: None,
             prepared_metadata_authorities: BTreeMap::new(),
             pending_result: None,
             pending_metadata: None,
@@ -844,6 +845,8 @@ pub struct ProjectBundle {
     pub(crate) unsettled: bool,
     pub(crate) receipts: crate::receipts::ReceiptLedger,
     pub(crate) issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
+    pub(crate) ordinary_manual_admission:
+        Option<Arc<crate::manual_history::OrdinaryHistoryAdmission>>,
     pub(crate) prepared_metadata_authorities:
         BTreeMap<crate::receipts::IssuerId, crate::studio_store::PreparedMetadataAuthority>,
     pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
@@ -855,6 +858,7 @@ pub struct ProjectBundle {
     pub(crate) voice_slots: crate::voice_store::VoiceSlots,
 }
 pub(crate) struct PendingSave {
+    pub(crate) ordinary_floor_source: Option<Arc<kinewright_core::OrdinaryFloorSource>>,
     pub(crate) candidate_base: Option<(BranchId, ObjectRef)>,
     pub(crate) core: Core,
     pub(crate) barrier: Option<crate::history_save::FloorBarrier>,
@@ -1071,6 +1075,7 @@ impl ProjectBundle {
                 receipts: crate::receipts::ReceiptLedger::default(),
                 issuers: BTreeMap::new(),
                 pending_command: None,
+                ordinary_manual_admission: None,
                 prepared_metadata_authorities: BTreeMap::new(),
                 pending_result: None,
                 pending_metadata: None,
@@ -1463,7 +1468,7 @@ impl ProjectBundle {
             return Err(BundleError::Unsettled);
         }
         let before = core
-            .export_history()
+            .export_history_for_publication()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let id = self.manual_branch_id.clone();
         self.publish_core(core, &before, inputs, &id)
@@ -1535,6 +1540,21 @@ impl ProjectBundle {
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }
+        // Older owner captures may precede the admission source metadata. The
+        // source is opaque and publication still proves the complete floor.
+        let with_source = if selected.ordinary_floor_source.is_none() {
+            core.ordinary_floor_source()
+                .map_err(history_error)?
+                .filter(|source| source.applies_to(selected))
+                .map(|source| {
+                    let mut history = selected.clone();
+                    history.ordinary_floor_source = Some(source);
+                    history
+                })
+        } else {
+            None
+        };
+        let selected = with_source.as_ref().unwrap_or(selected);
         let mut aligned = selected.clone();
         if let Some(prior) = self.branches.get(branch) {
             let durable = if let Some(cached) = self.cached_history(branch) {
@@ -1590,6 +1610,7 @@ impl ProjectBundle {
         crate::test_hook("history_selected");
         let barrier = pending_floor(core, transition)?;
         self.pending_save = Some(PendingSave {
+            ordinary_floor_source: selected.ordinary_floor_source.clone(),
             core: core.clone(),
             barrier,
             root_sha256: None,
@@ -1686,7 +1707,14 @@ impl ProjectBundle {
                 return Err(history_error(error));
             }
         }
-        self.pending_save = None;
+        if let Some(pending) = self.pending_save.take()
+            && commit
+            && let Some(source) = pending.ordinary_floor_source
+        {
+            self.attach_core(&pending.core)?
+                .acknowledge_ordinary_floor(source)
+                .map_err(history_error)?;
+        }
         Ok(())
     }
 }

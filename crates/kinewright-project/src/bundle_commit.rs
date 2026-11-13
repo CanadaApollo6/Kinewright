@@ -176,7 +176,7 @@ impl BundleCommit {
         }
         let reservation = bundle.store.reserve(0, encoded, 0, false)?;
         let mut before = core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         let original = before.clone();
         {
@@ -272,7 +272,7 @@ impl BundleCommit {
                 }
             }
             let after = candidate
-                .export_history()
+                .export_history_for_publication()
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             drop(candidate);
             after
@@ -394,7 +394,7 @@ impl BundleCommit {
         }
         let reservation = bundle.store.reserve(0, bytes, 0, false)?;
         let before = shadow
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         if crate::manual_history::history_sha256(&before)? != manual.before_sha256 {
             return Err(BundleError::HistoryChanged);
@@ -404,16 +404,30 @@ impl BundleCommit {
                 .encoded_bytes()
                 .map_err(crate::bundle::history_error)?,
         )?;
-        let event = shadow
-            .request(Command::from(
-                envelope
-                    .command
-                    .clone()
-                    .ok_or(BundleError::HistoryChanged)?,
-            ))
+        // The accepted batch's relative order carries the producer's selected
+        // absolute floor. It is a choice, not proof: verify that exact legal cut
+        // independently, without choosing a different floor on this holder.
+        let selected_floor = before
+            .floor_offset
+            .checked_add(before.batches.len() as u64)
+            .and_then(|position| position.checked_sub(manual.batch.order))
+            .filter(|offset| *offset >= before.floor_offset)
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        let event = bundle
+            .ordinary_manual_admission()?
+            .request_at_floor(
+                shadow,
+                Command::from(
+                    envelope
+                        .command
+                        .clone()
+                        .ok_or(BundleError::HistoryChanged)?,
+                ),
+                selected_floor,
+            )
             .map_err(|e| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)))?;
         let after = shadow
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         if !matches!(event, Event::DocumentChanged { .. })
             || crate::manual_history::history_sha256(&after)? != manual.after_sha256
@@ -442,13 +456,19 @@ impl BundleCommit {
             .next_sequence
             .checked_add(1)
             .ok_or(BundleError::Capacity("manual sequence"))?;
-        // Selecting the exact accepted history forbids a unilateral manual floor in C9.
+        // The producer and writer selected this exact floor before acknowledgement.
         let branch = bundle.manual_branch_id.clone();
         let publication =
             Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after));
         match publication {
             Ok(report) => {
                 bundle.pending_command = None;
+                if let Some(source) = &after.ordinary_floor_source {
+                    bundle
+                        .attach_core(shadow)?
+                        .acknowledge_ordinary_floor(std::sync::Arc::clone(source))
+                        .map_err(crate::bundle::history_error)?;
+                }
                 let lookup = bundle.receipt_lookup(envelope)?;
                 Ok((lookup, Some(report)))
             }
@@ -749,6 +769,18 @@ impl BundleCommit {
             bundle.history_role(branch_id, stage_base)?
         };
         let seed = seed.map(|seed| seed.lineage);
+        // Ordinary admission may already have installed a bounded floor. Keep
+        // its exact source for continuation and occurrence proof, while writing
+        // only the selected live cut. Native histories never take this route.
+        let publication_source = if history_role == crate::history_record::HistoryRole::Ordinary {
+            history
+                .publication_history()
+                .map_err(crate::bundle::history_error)?
+        } else {
+            None
+        };
+        let selected = selected.or_else(|| publication_source.as_ref().map(|_| history));
+        let history = publication_source.as_ref().unwrap_or(history);
         let _role_memory = (history_role != crate::history_record::HistoryRole::Ordinary)
             .then(|| crate::run_admission::reading(&bundle.store));
         let existing_selection = metadata_only
@@ -917,7 +949,19 @@ impl BundleCommit {
             }
             // The checked replay proves this exact capture. Keep its immutable document
             // allocations shared with the live actor and floor capture.
-            let checked = checked.map(|_| (*bounded).clone());
+            let checked = if history_role == crate::history_record::HistoryRole::Ordinary {
+                // Keep the allocations just admitted by canonical replay. A
+                // value-equal source may own arbitrarily more spare capacity;
+                // substituting it here would discard the real memory bound.
+                checked
+            } else {
+                checked.map(|_| {
+                    let mut kept = (*bounded).clone();
+                    // A committed record does not retain an unpublished source.
+                    kept.ordinary_floor_source = None;
+                    kept
+                })
+            };
             // Compact decode already replayed every accepted command and checked
             // every boundary. A second private actor would duplicate that proof.
             (std::sync::Arc::new(checked), Some(check_bytes))
@@ -2043,6 +2087,70 @@ fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<Option<BoundedHistory>, BundleError> {
+    select_admitted_history(history, limits, None).map(|(selected, _)| selected)
+}
+
+/// Ordinary selectors choose a cut from canonical values. A complete successful
+/// prefix skips command replay until a floor actually moves. Manual publication
+/// independently verifies its producer's exact choice instead of selecting.
+pub(crate) fn select_admitted_history(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+    prefix: Option<&kinewright_core::ResolvedHistory>,
+) -> Result<(Option<BoundedHistory>, kinewright_core::ResolvedHistory), BundleError> {
+    match crate::history_size::verify_history_admission_with_prefix(
+        history,
+        crate::history_record::HistoryRole::Ordinary,
+        limits,
+        prefix,
+    ) {
+        Ok((_, proof)) => return Ok((None, proof)),
+        Err(BundleError::Capacity(_)) => {}
+        Err(error) => return Err(error),
+    }
+    let first = first_fitting_floor(history, limits, usize::MAX)?;
+    let retained = first.after().cursor.undo.len();
+    let maximum = retained
+        .saturating_sub(retained.div_ceil(ORDINARY_LOW_WATER_PARTS))
+        .max(1);
+    // The minimum fitting cut establishes the real retained depth. Move the
+    // floor far enough to amortize a long history, checking the actual candidate
+    // again: a later baseline can increase its replay peak.
+    let floor = if retained > maximum {
+        match first_fitting_floor(history, limits, maximum) {
+            Ok(floor) => floor,
+            Err(BundleError::Capacity(_)) => first,
+            Err(error) => return Err(error),
+        }
+    } else {
+        first
+    };
+    let (_, proof) = crate::history_size::verify_history_admission_with_prefix(
+        floor.after(),
+        crate::history_record::HistoryRole::Ordinary,
+        limits,
+        None,
+    )?;
+    Ok((
+        Some(BoundedHistory {
+            history: floor.after().clone(),
+            floor: Some(floor),
+        }),
+        proof,
+    ))
+}
+
+const ORDINARY_LOW_WATER_PARTS: usize = 8;
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one conservative prefilter precedes the authoritative floor check"
+)]
+fn first_fitting_floor(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+    maximum_undo: usize,
+) -> Result<kinewright_core::HistoryTransition, BundleError> {
     let fits = |h: &HistorySnapshot| {
         crate::history_size::verify_history_admission(
             h,
@@ -2051,9 +2159,6 @@ fn bound_history_inner(
         )
         .is_ok()
     };
-    if fits(history) {
-        return Ok(None);
-    }
     // A retained command is unchanged by flooring. Complete batch costs are
     // also stable when the suffix never undoes below the new baseline. Keep
     // that exception: an excursion can rewrite effects and cursor counters.
@@ -2098,6 +2203,9 @@ fn bound_history_inner(
             let Some(undo) = history.cursor.undo.len().checked_sub(dropped) else {
                 return false;
             };
+            if undo > maximum_undo {
+                return false;
+            }
             let Some(offset) = history.floor_offset.checked_add(cut as u64) else {
                 return false;
             };
@@ -2137,19 +2245,16 @@ fn bound_history_inner(
             }
             // Replay room is decided only by `fits`. A structural JSON
             // estimate is not a lower bound for the typed replay reservation.
-            count <= kinewright_core::HISTORY_COMMANDS
+            // The newest acknowledged step must remain an Undo step. A
+            // one-step batch that cannot replay never becomes a document-only floor.
+            count > 0
+                && count <= kinewright_core::HISTORY_COMMANDS
                 && ordinary <= limits.branch_history_bytes
                 && journal <= limits.branch_history_bytes
         },
         fits,
     )
-    .map(|transition| {
-        Some(BoundedHistory {
-            history: transition.after().clone(),
-            floor: Some(transition),
-        })
-    })
-    .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))
+    .map_err(crate::bundle::history_error)
 }
 
 fn record_cost(

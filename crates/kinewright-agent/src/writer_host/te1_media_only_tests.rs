@@ -550,6 +550,7 @@ fn te1_media_nonmedia_estimates(f: &Fixture, run: &RunId, core: &Core) {
     let template = core.export_history().unwrap().document;
     let history_cost = |document: &kinewright_core::Document| {
         let value = serde_json::to_value(kinewright_core::HistorySnapshot {
+            ordinary_floor_source: None,
             replay_proof: None,
             floor_offset: 0,
             baseline: Arc::new(document.clone()),
@@ -625,6 +626,7 @@ fn te1_media_nonmedia_policy(
     let started = Instant::now();
     private
         .restore_history(kinewright_core::HistorySnapshot {
+            ordinary_floor_source: None,
             replay_proof: None,
             floor_offset: 0,
             baseline: Arc::new(document.clone()),

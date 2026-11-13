@@ -26,10 +26,12 @@ pub enum CoreMutationRefusal {
     ManualBackpressure,
     #[error("This input must be admitted by the project writer before the edit can be accepted.")]
     ManualInputRequired,
-    #[error(
-        "This edit exceeds the project's history capacity. Try a smaller edit or start a new project."
-    )]
+    #[error("This edit is too large for one step. Try it in smaller parts.")]
     ManualHistoryCapacity,
+    #[error("Can't undo further. This project's undo history is full.")]
+    ManualUndoCapacity,
+    #[error("This edit could not be prepared. Your timeline is unchanged.")]
+    ManualHistoryUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,10 +79,16 @@ pub struct ManualHistoryCandidate<'a> {
 
 /// The persistence owner checks the complete candidate before its acceptance
 /// identity is encoded. Both steps run inside the actor's rollback transaction.
-pub trait ManualHistoryEncoder: Send + 'static {
-    fn check_history(&mut self, history: &HistorySnapshot) -> Result<(), HistoryError>;
-    /// Commit or discard a staged proof only after the whole admission finishes.
+pub trait HistoryAdmission: Send + 'static {
+    /// Select an equivalent bounded floor, or retain the already fitting cut.
+    fn check_history(
+        &mut self,
+        history: &HistorySnapshot,
+    ) -> Result<Option<crate::ResolvedHistory>, HistoryError>;
     fn finish_history_check(&mut self, accepted: bool);
+}
+
+pub trait ManualHistoryEncoder: HistoryAdmission {
     fn encode(
         &self,
         sequence: u64,
@@ -117,6 +125,15 @@ pub struct CoreAttachment<P> {
     proof: std::marker::PhantomData<fn(P)>,
 }
 impl<P: 'static> CoreAttachment<P> {
+    /// Clear only the exact publication source the persistence owner has kept.
+    pub fn acknowledge_ordinary_floor(
+        &self,
+        _proof: &P,
+        source: std::sync::Arc<crate::OrdinaryFloorSource>,
+    ) -> Result<(), HistoryError> {
+        self.core.acknowledge_ordinary_floor::<P>(source)
+    }
+
     pub(crate) const fn new(core: Core) -> Self {
         Self {
             core,
@@ -495,11 +512,16 @@ mod tests {
         assert_eq!(core.pending_history_save().unwrap(), pending);
     }
     struct Encoder(usize);
-    impl ManualHistoryEncoder for Encoder {
-        fn check_history(&mut self, _: &HistorySnapshot) -> Result<(), HistoryError> {
-            Ok(())
+    impl HistoryAdmission for Encoder {
+        fn check_history(
+            &mut self,
+            _: &HistorySnapshot,
+        ) -> Result<Option<crate::ResolvedHistory>, HistoryError> {
+            Ok(None)
         }
         fn finish_history_check(&mut self, _: bool) {}
+    }
+    impl ManualHistoryEncoder for Encoder {
         fn encode(
             &self,
             sequence: u64,
@@ -631,7 +653,7 @@ mod tests {
         assert!(matches!(
             oversized.request(edit(1)).unwrap(),
             Event::MutationRefused {
-                reason: CoreMutationRefusal::ManualBackpressure,
+                reason: CoreMutationRefusal::ManualHistoryCapacity,
                 ..
             }
         ));

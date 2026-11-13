@@ -56,10 +56,10 @@ pub enum BranchError {
     InvalidOperationIndex { index: usize, maximum: usize },
     #[error("cherry-pick operation index {0} occurs more than once")]
     DuplicateOperationIndex(usize),
-    #[error(
-        "This edit exceeds the project's history capacity. Try a smaller edit or start a new project."
-    )]
+    #[error("This edit is too large for one step. Try it in smaller parts.")]
     HistoryCapacity,
+    #[error(transparent)]
+    MutationRefused(#[from] kinewright_core::CoreMutationRefusal),
 }
 
 impl BranchError {
@@ -83,6 +83,7 @@ impl BranchError {
             | Self::UnexpectedResponse
             | Self::InvalidOperationIndex { .. }
             | Self::HistoryCapacity
+            | Self::MutationRefused(_)
             | Self::DuplicateOperationIndex(_) => {
                 IncidentCode::Rejection(RejectionIncident::AgentBranch)
             }
@@ -117,6 +118,7 @@ impl BranchError {
             | Self::UnexpectedResponse
             | Self::InvalidOperationIndex { .. }
             | Self::HistoryCapacity
+            | Self::MutationRefused(_)
             | Self::DuplicateOperationIndex(_) => IncidentEvidence::Branch {
                 reason: self.to_string(),
             },
@@ -129,7 +131,10 @@ impl BranchError {
             evidence,
             revision,
             name: None,
-            transient: false,
+            transient: matches!(
+                self,
+                Self::MutationRefused(kinewright_core::CoreMutationRefusal::ManualBackpressure)
+            ),
         }
     }
 }
@@ -317,22 +322,15 @@ pub fn apply_to_live(
     expected: TimelineRevision,
     operations: Vec<Operation>,
 ) -> Result<BranchApplyOutcome, BranchError> {
-    kinewright_project::manual_history::OrdinaryHistoryLimits::default()
-        .check_batch(live, &operations)
-        .map_err(|error| match error {
-            kinewright_project::bundle::BundleError::Capacity(_) => BranchError::HistoryCapacity,
-            kinewright_project::bundle::BundleError::Io(error)
-                if error.kind() == std::io::ErrorKind::BrokenPipe =>
-            {
-                BranchError::CoreDisconnected(CoreDisconnected)
-            }
-            _ => BranchError::UnexpectedResponse,
-        })?;
     let operation_count = operations.len();
-    let outcome = match live.request(Command::DoBatchIfRevision {
-        expected,
-        operations,
-    })? {
+    let outcome = match kinewright_project::manual_history::OrdinaryHistoryLimits::default()
+        .request(
+            live,
+            Command::DoBatchIfRevision {
+                expected,
+                operations,
+            },
+        )? {
         Event::DocumentChanged { doc, revision, .. } => BranchApplyOutcome::Applied {
             revision,
             document: doc,
@@ -344,6 +342,11 @@ pub fn apply_to_live(
         Event::BatchRejected { operations, error } => {
             BranchApplyOutcome::Rejected { operations, error }
         }
+        Event::MutationRefused {
+            reason: kinewright_core::CoreMutationRefusal::ManualHistoryCapacity,
+            ..
+        } => return Err(BranchError::HistoryCapacity),
+        Event::MutationRefused { reason, .. } => return Err(BranchError::MutationRefused(reason)),
         _ => return Err(BranchError::UnexpectedResponse),
     };
     Ok(outcome)
@@ -356,7 +359,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn history_capacity_legacy_merge_and_cherry_pick_refuse_before_live_mutation() {
+    fn history_capacity_legacy_merge_and_cherry_pick_floor_then_refuse_oversized_step() {
         let core = Core::spawn(Document {
             tracks: vec![kinewright_core::Track {
                 id: kinewright_core::TrackId(1),
@@ -377,7 +380,6 @@ mod tests {
                 Event::DocumentChanged { .. }
             ));
         }
-        let before = core.export_history().unwrap();
         let revision = TimelineRevision(4000);
         assert!(matches!(
             apply_to_live(
@@ -387,6 +389,31 @@ mod tests {
                     track: kinewright_core::TrackId(1),
                     locked: true
                 }]
+            )
+            .unwrap(),
+            super::BranchApplyOutcome::Applied {
+                revision: TimelineRevision(4001),
+                ..
+            }
+        ));
+        assert!(core.export_history().unwrap().floor_offset > 0);
+        assert!(core.ordinary_floor_source().unwrap().is_some());
+
+        let core = Core::spawn(Document::default()).unwrap();
+        let before = core.export_history().unwrap();
+        let change = core.history_change_id().unwrap();
+        assert!(matches!(
+            apply_to_live(
+                &core,
+                change.revision(),
+                vec![Operation::AddMarker {
+                    marker: kinewright_core::Marker {
+                        id: kinewright_core::MarkerId(1),
+                        position: TimeCode::ZERO,
+                        label: "x".repeat(usize::try_from(kinewright_core::HISTORY_BYTES).unwrap()),
+                        color_token: 0,
+                    }
+                }]
             ),
             Err(BranchError::HistoryCapacity)
         ));
@@ -395,6 +422,7 @@ mod tests {
             before,
             "COMMON_MERGE_AND_CHERRY_PICK_FUNNEL_PRESERVES_LIVE_HISTORY"
         );
+        assert_eq!(core.history_change_id().unwrap(), change);
     }
 
     /// `IN1b` §6.3 rule 6, §3.4 rule 24 and §7 item 10's agent half: every

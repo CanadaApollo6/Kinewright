@@ -362,6 +362,10 @@ impl Ja1EditingSession {
 
     /// Freeze producers before calling. A named writer is released only after its
     /// exact checkpoint and absence of unresolved owners/readers have been verified.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the frozen source publication and owner handoff settle together"
+    )]
     pub fn prepare_host_attachment(&mut self) -> Result<PreparedHostAttachment, BundleError> {
         if self.host_attached
             || self.host_retention_lost
@@ -383,7 +387,7 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::Unsettled);
         }
-        let cut = self
+        let mut cut = self
             .attachment
             .freeze()
             .map_err(crate::bundle::history_error)?;
@@ -410,6 +414,15 @@ impl Ja1EditingSession {
                     || !self.input_leases.is_empty()
                 {
                     return Err(BundleError::Unsettled);
+                }
+                if cut.history().ordinary_floor_source.is_some() {
+                    // A pending local floor cannot lose its source at the
+                    // process boundary. Keep it under this owner's namespace.
+                    bundle.save_frozen(&self.core, &self.inputs, &cut)?;
+                    cut = self
+                        .attachment
+                        .capture()
+                        .map_err(crate::bundle::history_error)?;
                 }
                 named_path = Some(bundle.store.resolved_root()?);
                 expected_root_sha256 =
@@ -438,6 +451,15 @@ impl Ja1EditingSession {
                 )?;
                 let service = owner.borrowed_source_service(&descriptor)?;
                 service.ensure_snapshot(&descriptor, cut.history())?;
+                if let Some(pending) = &cut.history().ordinary_floor_source {
+                    self.attachment
+                        .acknowledge_ordinary_floor(std::sync::Arc::clone(pending))
+                        .map_err(crate::bundle::history_error)?;
+                    cut = self
+                        .attachment
+                        .capture()
+                        .map_err(crate::bundle::history_error)?;
+                }
                 source_service = Some(service);
                 source = Some(descriptor);
             }

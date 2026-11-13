@@ -191,6 +191,34 @@ impl HistoryJournal {
     ) -> Result<crate::ResolvedHistory, HistoryError> {
         crate::actor::resolve_history_journal_verified(self, baseline, document, limit, prefix)
     }
+    /// Ordinary admission uses tight owned values, independent of a holder's
+    /// spare allocations. The same normalization is used on cold resolution.
+    /// # Errors
+    /// Refuses capacity or a journal/checkpoint mismatch.
+    pub fn resolve_canonical_with_budget(
+        &self,
+        baseline: &Document,
+        document: &Document,
+        limit: u64,
+        prefix: Option<&crate::ResolvedHistory>,
+    ) -> Result<crate::ResolvedHistory, HistoryError> {
+        // Document owns its nested arrays and strings. Deep cloning deliberately
+        // rematerializes them at length; it is allocation compaction, not a
+        // change to the charged limit. Journal cloning does the same for inputs.
+        let prefix = prefix.filter(|proof| proof.canonical_allocations);
+        let baseline = prefix
+            .filter(|proof| *proof.snapshot().baseline == *baseline)
+            .map_or_else(
+                || Arc::new(baseline.clone()),
+                |proof| Arc::clone(&proof.snapshot().baseline),
+            );
+        let current = document.clone();
+        let journal = self.clone();
+        let mut resolved =
+            journal.resolve_verified_with_budget(baseline, &current, limit, prefix)?;
+        resolved.canonical_allocations = true;
+        Ok(resolved)
+    }
     /// Replay inside an already reserved window. Every operation checks its
     /// temporary allocations before applying, including intermediate batch states.
     /// # Errors

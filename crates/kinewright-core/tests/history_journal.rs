@@ -1242,3 +1242,170 @@ fn history_runtime_replay_evidence_is_not_input_authority_or_a_document_owner() 
     );
     drop(evidence);
 }
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the same paths check intermediate peaks, allocation parity and residual reservations"
+)]
+fn history_redo_reservation_covers_every_cut_without_growing_on_redo() {
+    use kinewright_core::{ClipId, EffectId, HistoryJournal};
+    for shape in 0..4 {
+        let core = Core::spawn(fixture(10)).unwrap();
+        for index in 0..17 {
+            let operation = if shape > 0 && index == 2 {
+                Operation::AddEffect {
+                    clip: ClipId(101),
+                    effect: history_effect(if shape == 2 { 400 } else { 60 }),
+                }
+            } else if shape > 0 && index == 12 {
+                Operation::RemoveEffect {
+                    clip: ClipId(101),
+                    effect: EffectId(1),
+                }
+            } else {
+                Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: index % 2 == 0,
+                }
+            };
+            assert!(matches!(
+                core.request(Command::Do(operation)).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        for _ in 0..(if shape == 2 { 16 } else { 9 }) {
+            core.request(Command::Undo).unwrap();
+        }
+        let mut start = core.export_history().unwrap();
+        if shape == 3 {
+            let document = &mut start.cursor.redo.last_mut().unwrap().document;
+            std::sync::Arc::make_mut(document)
+                .tracks
+                .reserve_exact(4000);
+            core.restore_history(start.clone()).unwrap();
+        }
+        let resolve = |history: &HistorySnapshot| {
+            HistoryJournal::capture(history)
+                .unwrap()
+                .resolve_verified_with_budget(
+                    std::sync::Arc::clone(&history.baseline),
+                    &history.document,
+                    kinewright_core::history_size::TRANSPORT_LIVE_BYTES,
+                    None,
+                )
+                .unwrap()
+        };
+        let proof = resolve(&start);
+        let bound = proof
+            .redo_capacity_bound(&HistoryJournal::capture(proof.snapshot()).unwrap(), &start)
+            .unwrap();
+        let bytes_before = serde_json::to_vec(&HistoryJournal::capture(&start).unwrap().batches)
+            .unwrap()
+            .len();
+        let mut peak_during_return = 0;
+        let mut final_peak = 0;
+        for step in 0..start.cursor.redo.len() {
+            assert!(matches!(
+                core.request(Command::Redo).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            let now = core.export_history().unwrap();
+            let proof = resolve(&now);
+            final_peak = proof.replay_peak();
+            peak_during_return = peak_during_return.max(final_peak);
+            assert!(
+                proof.replay_peak() <= bound.replay_bytes,
+                "REDO_PEAK_BOUND shape={shape} step={step}"
+            );
+            assert!(
+                kinewright_core::history_size::restored_history_live_bytes(proof.snapshot())
+                    .unwrap()
+                    <= bound.retained_bytes,
+                "REDO_RETAINED_BOUND"
+            );
+            if now.cursor.redo.is_empty() {
+                let bytes_after =
+                    serde_json::to_vec(&HistoryJournal::capture(&now).unwrap().batches)
+                        .unwrap()
+                        .len();
+                assert_eq!(
+                    (bytes_after - bytes_before) as u64,
+                    bound.encoded_batch_bytes,
+                    "REDO_BATCH_CLOSED_FORM_IS_EXACT"
+                );
+            } else {
+                let remaining = proof
+                    .redo_capacity_bound(&HistoryJournal::capture(proof.snapshot()).unwrap(), &now)
+                    .unwrap();
+                assert!(
+                    remaining.replay_bytes <= bound.replay_bytes,
+                    "REDO_RESERVATION_MUST_NOT_GROW shape={shape} step={step}: {remaining:?} > {bound:?}"
+                );
+                assert!(
+                    remaining.retained_bytes <= bound.retained_bytes,
+                    "REDO_RETAINED_RESERVATION_MUST_NOT_GROW"
+                );
+            }
+        }
+        if shape == 2 {
+            assert!(
+                peak_during_return > final_peak,
+                "INTERMEDIATE_REDO_IS_MORE_EXPENSIVE_THAN_THE_END"
+            );
+            println!(
+                "REDO_INTERMEDIATE_PEAK maximum={peak_during_return} final={final_peak} reserved={}",
+                bound.replay_bytes
+            );
+        }
+    }
+}
+
+#[test]
+fn history_canonical_admission_ignores_a_foreign_allocation_prefix() {
+    let core = Core::spawn(kinewright_core::Document {
+        tracks: vec![kinewright_core::Track {
+            id: TrackId(1),
+            kind: kinewright_core::TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..kinewright_core::Document::default()
+    })
+    .unwrap();
+    core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let history = core.export_history().unwrap();
+    let journal = kinewright_core::HistoryJournal::capture(&history).unwrap();
+    let mut enlarged = (*history.baseline).clone();
+    enlarged.tracks.reserve(100_000);
+    let canonical = journal
+        .resolve_canonical_with_budget(&enlarged, &history.document, 32 << 20, None)
+        .unwrap();
+    let holder = journal
+        .resolve_verified_with_budget(
+            std::sync::Arc::new(enlarged),
+            &history.document,
+            32 << 20,
+            None,
+        )
+        .unwrap();
+    assert!(holder.replay_peak() > canonical.replay_peak());
+    let with_foreign = journal
+        .resolve_canonical_with_budget(
+            &history.baseline,
+            &history.document,
+            canonical.replay_peak(),
+            Some(&holder),
+        )
+        .unwrap();
+    assert_eq!(with_foreign.snapshot(), canonical.snapshot());
+    assert_eq!(
+        with_foreign.replay_peak(),
+        canonical.replay_peak(),
+        "CANONICAL_PREFIX_PROVENANCE"
+    );
+}

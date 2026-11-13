@@ -34,8 +34,8 @@ pub struct ManualLease {
     pub lineage: ObjectRef,
 }
 
-/// Only the effective ordinary predicate crosses the GUI lease boundary; the
-/// writer's raw/shared reservation ledgers remain with their actual owners.
+/// The writer's ordinary cut and pool bounds cross the GUI lease boundary;
+/// raw/shared reservation ledgers remain with their actual owners.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrdinaryHistoryLimits {
@@ -52,18 +52,22 @@ impl Default for OrdinaryHistoryLimits {
     }
 }
 impl OrdinaryHistoryLimits {
-    pub fn check_batch(
+    pub fn request(
         &self,
         core: &kinewright_core::Core,
-        operations: &[kinewright_core::Operation],
-    ) -> Result<(), BundleError> {
-        OrdinaryHistoryAdmission::new(self.clone()).check_batch(core, operations)
+        command: kinewright_core::Command,
+    ) -> Result<kinewright_core::Event, kinewright_core::CoreDisconnected> {
+        std::sync::Arc::new(OrdinaryHistoryAdmission::new(self.clone())).request(core, command)
+    }
+    pub fn select(&self, history: &HistorySnapshot) -> Result<HistorySnapshot, BundleError> {
+        crate::bundle_commit::select_history(history, &self.limits()?)
+            .map(|selected| selected.history)
     }
     pub fn from_limits(limits: &crate::storage_budget::StorageLimits) -> Result<Self, BundleError> {
         limits.validate()?;
         Ok(Self {
             branch_bytes: limits.branch_history_bytes,
-            live_bytes: crate::history_record::HistoryRole::Ordinary.live_limit(limits),
+            live_bytes: limits.live_history_bytes,
             decoded_bytes: limits.decoded_record_bytes,
             graph_depth: limits.graph_depth,
             command_bytes: limits.command_bytes,
@@ -81,6 +85,7 @@ impl OrdinaryHistoryLimits {
         limits.validate()?;
         Ok(limits)
     }
+    /// Check an already selected cut without discarding any Undo steps.
     pub fn check(&self, history: &HistorySnapshot) -> Result<(), BundleError> {
         crate::history_size::verify_history_admission(
             history,
@@ -90,6 +95,27 @@ impl OrdinaryHistoryLimits {
         .map(|_| ())
     }
 }
+impl crate::bundle::ProjectBundle {
+    pub(crate) fn ordinary_manual_admission(
+        &mut self,
+    ) -> Result<std::sync::Arc<OrdinaryHistoryAdmission>, BundleError> {
+        let limits = OrdinaryHistoryLimits::from_limits(self.store.limits())?;
+        if self
+            .ordinary_manual_admission
+            .as_ref()
+            .is_none_or(|admission| admission.limits != limits)
+        {
+            self.ordinary_manual_admission =
+                Some(std::sync::Arc::new(OrdinaryHistoryAdmission::new(limits)));
+        }
+        Ok(std::sync::Arc::clone(
+            self.ordinary_manual_admission
+                .as_ref()
+                .expect("initialized ordinary manual admission"),
+        ))
+    }
+}
+
 /// Runtime proof cache owned by one ordinary editing endpoint. Only a complete
 /// successful admission can replace its immutable prefix proof.
 pub struct OrdinaryHistoryAdmission {
@@ -104,39 +130,35 @@ impl OrdinaryHistoryAdmission {
             proof: std::sync::Mutex::new(None),
         }
     }
+    fn prior(&self) -> Result<Option<kinewright_core::ResolvedHistory>, BundleError> {
+        self.proof
+            .lock()
+            .map(|proof| proof.clone())
+            .map_err(|_| BundleError::Io(std::io::Error::other("history proof unavailable")))
+    }
     fn prove(
         &self,
         history: &HistorySnapshot,
     ) -> Result<kinewright_core::ResolvedHistory, BundleError> {
-        let prior = self
-            .proof
-            .lock()
-            .map_err(|_| BundleError::Capacity("history proof unavailable"))?
-            .clone();
+        let prior = self.prior()?;
         if let Some(proof) = &prior
             && proof.snapshot() == history
         {
-            return proof
-                .clone()
-                .share_documents(history.clone())
-                .map_err(crate::bundle::history_error);
+            return Ok(proof.clone());
         }
-        let (_, proof) = crate::history_size::verify_history_admission_with_prefix(
+        let (_, proof) = crate::bundle_commit::select_admitted_history(
             history,
-            crate::history_record::HistoryRole::Ordinary,
             &self.limits.limits()?,
             prior.as_ref(),
         )?;
-        let proof = proof
-            .share_documents(history.clone())
-            .map_err(crate::bundle::history_error)?;
         Ok(proof)
     }
     fn remember(&self, proof: kinewright_core::ResolvedHistory) -> Result<(), BundleError> {
         *self
             .proof
             .lock()
-            .map_err(|_| BundleError::Capacity("history proof unavailable"))? = Some(proof);
+            .map_err(|_| BundleError::Io(std::io::Error::other("history proof unavailable")))? =
+            Some(proof);
         Ok(())
     }
     fn verify(
@@ -150,36 +172,118 @@ impl OrdinaryHistoryAdmission {
     pub fn check(&self, history: &HistorySnapshot) -> Result<(), BundleError> {
         self.verify(history).map(|_| ())
     }
-    pub fn check_batch(
-        &self,
+    pub(crate) fn request_at_floor(
+        self: &std::sync::Arc<Self>,
         core: &kinewright_core::Core,
-        operations: &[kinewright_core::Operation],
-    ) -> Result<(), BundleError> {
-        let history = core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        let proof = self.verify(&history)?;
-        let private = kinewright_core::Core::spawn(std::sync::Arc::clone(&history.baseline))
-            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-        private
-            .restore_resolved_history(proof)
-            .map_err(crate::bundle::history_error)?;
-        if matches!(
-            private
-                .request(kinewright_core::Command::DoBatch(operations.to_vec()))
-                .map_err(|error| BundleError::Io(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    error
-                )))?,
-            kinewright_core::Event::DocumentChanged { .. }
-        ) {
-            self.check(
-                &private
-                    .export_history()
-                    .map_err(crate::bundle::history_error)?,
-            )?;
+        command: kinewright_core::Command,
+        floor_offset: u64,
+    ) -> Result<kinewright_core::Event, kinewright_core::CoreDisconnected> {
+        core.request_admitted(
+            command,
+            Box::new(OrdinaryHistoryGuard {
+                admission: std::sync::Arc::clone(self),
+                staged: None,
+                exact_floor: Some(floor_offset),
+            }),
+            self.limits.live_bytes.saturating_sub(
+                self.limits
+                    .branch_bytes
+                    .min(self.limits.live_bytes)
+                    .min(self.limits.decoded_bytes),
+            ),
+        )
+    }
+    pub fn request(
+        self: &std::sync::Arc<Self>,
+        core: &kinewright_core::Core,
+        command: kinewright_core::Command,
+    ) -> Result<kinewright_core::Event, kinewright_core::CoreDisconnected> {
+        // This endpoint's proof crosses to the Core actor and returns to the
+        // same endpoint only after its entire mutation transaction succeeds.
+        core.request_admitted(
+            command,
+            Box::new(OrdinaryHistoryGuard {
+                admission: std::sync::Arc::clone(self),
+                staged: None,
+                exact_floor: None,
+            }),
+            self.limits.live_bytes.saturating_sub(
+                self.limits
+                    .branch_bytes
+                    .min(self.limits.live_bytes)
+                    .min(self.limits.decoded_bytes),
+            ),
+        )
+    }
+}
+fn manual_preparation_error(error: &BundleError, undo: bool) -> HistoryError {
+    HistoryError::MutationRefused(match error {
+        BundleError::Capacity(_) => {
+            if undo {
+                kinewright_core::CoreMutationRefusal::ManualUndoCapacity
+            } else {
+                kinewright_core::CoreMutationRefusal::ManualHistoryCapacity
+            }
         }
-        Ok(())
+        _ => kinewright_core::CoreMutationRefusal::ManualHistoryUnavailable,
+    })
+}
+
+struct OrdinaryHistoryGuard {
+    admission: std::sync::Arc<OrdinaryHistoryAdmission>,
+    staged: Option<kinewright_core::ResolvedHistory>,
+    exact_floor: Option<u64>,
+}
+impl kinewright_core::HistoryAdmission for OrdinaryHistoryGuard {
+    fn check_history(
+        &mut self,
+        history: &HistorySnapshot,
+    ) -> Result<Option<kinewright_core::ResolvedHistory>, HistoryError> {
+        let proof = if let Some(offset) = self.exact_floor {
+            (|| {
+                let discard = offset
+                    .checked_sub(history.floor_offset)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or(BundleError::HistoryBarrierInvariant)?;
+                let selected = if discard == 0 {
+                    history.clone()
+                } else {
+                    kinewright_core::HistoryTransition::floor_after(history, discard)
+                        .map_err(crate::bundle::history_error)?
+                };
+                let prior = self.admission.prior()?;
+                let (_, proof) = crate::history_size::verify_history_admission_with_prefix(
+                    &selected,
+                    crate::history_record::HistoryRole::Ordinary,
+                    &self.admission.limits.limits()?,
+                    prior.as_ref(),
+                )?;
+                Ok(proof)
+            })()
+        } else {
+            self.admission.prove(history)
+        };
+        proof
+            .map(|proof| {
+                self.staged = Some(proof.clone());
+                Some(proof)
+            })
+            .map_err(|error| {
+                manual_preparation_error(
+                    &error,
+                    history.batches.last().is_some_and(|batch| {
+                        matches!(batch.command, kinewright_core::JournalCommand::Undo)
+                    }),
+                )
+            })
+    }
+    fn finish_history_check(&mut self, accepted: bool) {
+        if let Some(proof) = self.staged.take()
+            && accepted
+        {
+            // A poisoned memo loses only a performance hint, never the accepted edit.
+            let _ = self.admission.remember(proof);
+        }
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,8 +307,7 @@ pub fn history_sha256(history: &HistorySnapshot) -> Result<String, BundleError> 
 struct AdmittedManualEncoder {
     lease: ManualLease,
     input_manifest: crate::owned_inputs::OwnedInputManifest,
-    admission: OrdinaryHistoryAdmission,
-    staged: Option<kinewright_core::ResolvedHistory>,
+    guard: OrdinaryHistoryGuard,
 }
 impl std::ops::Deref for AdmittedManualEncoder {
     type Target = ManualLease;
@@ -227,44 +330,31 @@ impl ManualLease {
         {
             return Err(BundleError::HistoryChanged);
         }
-        let admission = OrdinaryHistoryAdmission::new(self.history_limits.clone());
+        let admission =
+            std::sync::Arc::new(OrdinaryHistoryAdmission::new(self.history_limits.clone()));
         Ok(Box::new(AdmittedManualEncoder {
             lease: self,
             input_manifest,
-            admission,
-            staged: None,
+            guard: OrdinaryHistoryGuard {
+                admission,
+                staged: None,
+                exact_floor: None,
+            },
         }))
     }
 }
-impl ManualHistoryEncoder for AdmittedManualEncoder {
-    fn check_history(&mut self, history: &HistorySnapshot) -> Result<(), HistoryError> {
-        self.admission
-            .prove(history)
-            .map(|proof| {
-                self.staged = Some(proof);
-            })
-            .map_err(|error| match error {
-                BundleError::Capacity(_) => HistoryError::MutationRefused(
-                    kinewright_core::CoreMutationRefusal::ManualHistoryCapacity,
-                ),
-                BundleError::Corrupt(_) => HistoryError::Corrupt,
-                BundleError::Io(_) => HistoryError::Encoding,
-                _ => HistoryError::MutationRefused(
-                    kinewright_core::CoreMutationRefusal::ManualBackpressure,
-                ),
-            })
+impl kinewright_core::HistoryAdmission for AdmittedManualEncoder {
+    fn check_history(
+        &mut self,
+        history: &HistorySnapshot,
+    ) -> Result<Option<kinewright_core::ResolvedHistory>, HistoryError> {
+        self.guard.check_history(history)
     }
     fn finish_history_check(&mut self, accepted: bool) {
-        if let Some(proof) = self.staged.take()
-            && accepted
-        {
-            // This endpoint is actor-owned; its private proof mutex has no
-            // external holder that can poison it during admission.
-            self.admission
-                .remember(proof)
-                .expect("actor-owned history proof");
-        }
+        self.guard.finish_history_check(accepted);
     }
+}
+impl ManualHistoryEncoder for AdmittedManualEncoder {
     fn encode(
         &self,
         sequence: u64,
@@ -333,12 +423,7 @@ impl ManualHistoryEncoder for AdmittedManualEncoder {
                 envelope: bytes,
             })
         };
-        encode().map_err(|error| match error {
-            BundleError::Capacity(_) => HistoryError::MutationRefused(
-                kinewright_core::CoreMutationRefusal::ManualHistoryCapacity,
-            ),
-            _ => HistoryError::Capacity,
-        })
+        encode().map_err(|error| manual_preparation_error(&error, false))
     }
 }
 impl AcceptedManualCommand {
@@ -370,6 +455,89 @@ mod admission_tests {
     use super::*;
     use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
     #[test]
+    fn ordinary_equal_cut_allocation_replacement_agrees_with_fresh_selection() {
+        use kinewright_core::{HistoryError, HistoryJournal, SolidColor, TimeCode};
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        for index in 0..4 {
+            core.request(Command::Do(Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(index * 90),
+                duration: TimeCode(90),
+                color: SolidColor { r: 1, g: 2, b: 3 },
+            }))
+            .unwrap();
+        }
+        let original = core.export_history().unwrap();
+        let mut changed = original.clone();
+        let mut baseline = (*changed.baseline).clone();
+        baseline.tracks.reserve(100);
+        let enlarged = std::sync::Arc::new(baseline);
+        for boundary in changed
+            .cursor
+            .undo
+            .iter_mut()
+            .chain(&mut changed.cursor.redo)
+        {
+            if std::sync::Arc::ptr_eq(&boundary.document, &changed.baseline) {
+                boundary.document = std::sync::Arc::clone(&enlarged);
+            }
+        }
+        changed.baseline = enlarged;
+        let journal = HistoryJournal::capture(&changed).unwrap();
+        let cold = journal
+            .resolve_verified_with_budget(
+                std::sync::Arc::clone(&changed.baseline),
+                &changed.document,
+                128 << 20,
+                None,
+            )
+            .unwrap();
+        let window = cold.replay_peak() - 1;
+        assert_eq!(
+            journal
+                .resolve_verified_with_budget(
+                    std::sync::Arc::clone(&changed.baseline),
+                    &changed.document,
+                    window,
+                    None
+                )
+                .unwrap_err(),
+            HistoryError::Capacity,
+            "LARGER_ALLOCATION_IS_NOT_FREE"
+        );
+        let limits = crate::storage_budget::StorageLimits {
+            decoded_record_bytes: window,
+            ..crate::storage_budget::StorageLimits::default()
+        };
+        let policy = OrdinaryHistoryLimits::from_limits(&limits).unwrap();
+        let cached = OrdinaryHistoryAdmission::new(policy.clone());
+        cached.check(&original).unwrap();
+        let from_cache = cached.prove(&changed);
+        let fresh = OrdinaryHistoryAdmission::new(policy).prove(&changed);
+        match (from_cache, fresh) {
+            (Ok(cached), Ok(fresh)) => {
+                assert_eq!(
+                    cached.snapshot(),
+                    fresh.snapshot(),
+                    "EQUAL_VALUE_REPLACEMENT_USES_THE_SAME_FLOOR"
+                );
+                assert_eq!(cached.replay_peak(), fresh.replay_peak());
+            }
+            (Err(BundleError::Capacity(_)), Err(BundleError::Capacity(_))) => {}
+            (cached, fresh) => panic!("cached={cached:?} fresh={fresh:?}"),
+        }
+    }
+
+    #[test]
     fn history_admission_cached_previews_rebind_to_actual_actor_documents() {
         let core = Core::spawn(Document {
             tracks: vec![Track {
@@ -381,15 +549,18 @@ mod admission_tests {
             ..Document::default()
         })
         .unwrap();
-        let admission = OrdinaryHistoryAdmission::new(OrdinaryHistoryLimits::default());
+        let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+            OrdinaryHistoryLimits::default(),
+        ));
         for index in 0_usize..32 {
             let operations = vec![Operation::SetTrackSyncLock {
                 track: TrackId(1),
                 locked: index.is_multiple_of(2),
             }];
-            admission.check_batch(&core, &operations).unwrap();
             assert!(matches!(
-                core.request(Command::DoBatch(operations)).unwrap(),
+                admission
+                    .request(&core, Command::DoBatch(operations))
+                    .unwrap(),
                 Event::DocumentChanged { .. }
             ));
             let live = core.export_history().unwrap();
@@ -404,5 +575,88 @@ mod admission_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod manual_failure_contract_tests {
+    use super::*;
+    #[test]
+    fn poisoned_manual_proof_is_a_final_preparation_refusal() {
+        use kinewright_core::{
+            Command, Core, CoreMutationRefusal, Document, Event, Operation, Track, TrackId,
+            TrackKind,
+        };
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let admission = std::sync::Arc::new(OrdinaryHistoryAdmission::new(
+            OrdinaryHistoryLimits::default(),
+        ));
+        let before = core.export_history().unwrap();
+        let revision = match core
+            .request(Command::Query(kinewright_core::Query::Snapshot))
+            .unwrap()
+        {
+            Event::QueryResult(kinewright_core::QueryResult::Snapshot { revision, .. }) => revision,
+            other => panic!("unexpected revision: {other:?}"),
+        };
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = admission.proof.lock().unwrap();
+                panic!("inject unavailable proof");
+            }))
+            .is_err()
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                admission
+                    .request(
+                        &core,
+                        Command::Do(Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: false
+                        })
+                    )
+                    .unwrap(),
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                    ..
+                }
+            ));
+            assert_eq!(core.export_history().unwrap(), before);
+            assert!(
+                matches!(core.request(Command::Query(kinewright_core::Query::Snapshot)).unwrap(), Event::QueryResult(kinewright_core::QueryResult::Snapshot { revision: current, .. }) if current == revision)
+            );
+        }
+    }
+    #[test]
+    fn manual_backend_failures_never_promise_acknowledgement_room() {
+        for undo in [false, true] {
+            for error in [
+                BundleError::HistoryChanged,
+                BundleError::Unsettled,
+                BundleError::Corrupt("probe".into()),
+                BundleError::Io(std::io::Error::other("probe")),
+            ] {
+                assert_eq!(
+                    manual_preparation_error(&error, undo),
+                    HistoryError::MutationRefused(
+                        kinewright_core::CoreMutationRefusal::ManualHistoryUnavailable
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            kinewright_core::CoreMutationRefusal::ManualHistoryUnavailable.to_string(),
+            "This edit could not be prepared. Your timeline is unchanged."
+        );
     }
 }

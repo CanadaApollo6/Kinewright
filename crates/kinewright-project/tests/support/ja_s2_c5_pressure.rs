@@ -5,10 +5,10 @@ use kinewright_core::{
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
-    bundle_commit::history_cost_probe,
     bundle_records::BranchId,
     bundle_switch::ProjectSelectionResult,
     io_observer,
+    manual_history::OrdinaryHistoryLimits,
     storage_budget::StorageLimits,
 };
 fn edit(core: &Core, locked: bool) {
@@ -109,7 +109,24 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     let (model_temp, mut model, model_ids, _) = source(StorageLimits::default());
     large_edit(model.core());
     let candidate = model.core().export_history().unwrap();
-    let mut minimum = u64::MAX;
+    let mut minimum = 1;
+    let mut ceiling = StorageLimits::default().branch_history_bytes;
+    while minimum < ceiling {
+        let middle = minimum + (ceiling - minimum) / 2;
+        let profile = StorageLimits {
+            branch_history_bytes: middle,
+            ..StorageLimits::default()
+        };
+        if OrdinaryHistoryLimits::from_limits(&profile)
+            .unwrap()
+            .select(&candidate)
+            .is_ok()
+        {
+            ceiling = middle;
+        } else {
+            minimum = middle + 1;
+        }
+    }
     let mut minimum_retained = u64::MAX;
     for cut in 0..=candidate.batches.len() {
         let history = if cut == 0 {
@@ -120,7 +137,6 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
             };
             t.after().clone()
         };
-        minimum = minimum.min(history_cost_probe(&history, &StorageLimits::default()).unwrap());
         minimum_retained = minimum_retained
             .min(kinewright_core::history_size::restored_history_live_bytes(&history).unwrap());
     }
@@ -182,7 +198,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
     // resident. Count those retained histories once and the shared replay
     // window once; summing individual replay peaks would overstate this.
     let irreducible = costs.values().sum::<u64>() + minimum_retained + minimum;
-    eprintln!(
+    println!(
         "C5 fresh-open setup peak={before}, no-floor resident lower bound={irreducible}, minimum target={minimum}"
     );
     assert!(
@@ -242,7 +258,7 @@ pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_
             "live history bytes"
         ))
     ));
-    eprintln!("C5 same-writer exact fresh-open peak={exact}");
+    println!("C5 same-writer exact fresh-open peak={exact}");
     drop(model);
     for (lane, limit) in [("over", irreducible - 1), ("existing", irreducible - 1)] {
         let profile = StorageLimits {

@@ -163,8 +163,70 @@ fn history_capacity_restored_heap_is_covered_by_typed_charge() {
         }
         results.push(json!({"candidate_clips":clips,"operations_per_merge":operations_per_merge,"rows":rows}));
     }
+    results.push(manual_spare_compaction_heap());
     let report = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/history-capacity/stage1-combined-heap.json");
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(report, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+}
+
+fn manual_spare_compaction_heap() -> serde_json::Value {
+    let profiler = dhat::Profiler::builder().testing().build();
+    let core = Core::spawn(kinewright_core::Document {
+        tracks: vec![kinewright_core::Track {
+            id: TrackId(1),
+            kind: kinewright_core::TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..kinewright_core::Document::default()
+    })
+    .unwrap();
+    for index in 0_usize..4 {
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: !index.is_multiple_of(2),
+        }))
+        .unwrap();
+    }
+    let inflated_charge = core
+        .inflate_history_allocation_probe(
+            kinewright_core::HistoryAllocationProbe::Baseline,
+            1_000_000,
+        )
+        .unwrap();
+    let inflated = dhat::HeapStats::get();
+    let admission = std::sync::Arc::new(
+        kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
+            kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
+        ),
+    );
+    let start = std::time::Instant::now();
+    let event = admission
+        .request(
+            &core,
+            Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }),
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(matches!(event, Event::DocumentChanged { .. }));
+    let cured_charge = core
+        .inflate_history_allocation_probe(kinewright_core::HistoryAllocationProbe::Metadata, 0)
+        .unwrap();
+    let cured = dhat::HeapStats::get();
+    assert!(inflated_charge > 128 << 20);
+    assert!(
+        cured_charge <= 32 << 20 && cured.curr_bytes < 32 << 20,
+        "ACTUAL_SPARE_COMPACTION_MUST_BOUND_MEMORY"
+    );
+    assert!(inflated.curr_bytes > 128 << 20 && inflated.curr_bytes > cured.curr_bytes);
+    let result = json!({"ordinary_spare_compaction":true,"inflated_typed":inflated_charge,"cured_typed":cured_charge,
+        "inflated_heap":inflated.curr_bytes,"cured_heap":cured.curr_bytes,"transient_peak":cured.max_bytes,
+        "cure_ms":elapsed.as_secs_f64()*1000.0,"unchanged_branch_bound":32<<20});
+    println!("MANUAL_REAL_SPARE_COMPACTION={result}");
+    drop(profiler);
+    result
 }

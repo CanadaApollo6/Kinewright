@@ -194,24 +194,9 @@ fn history_fix2_edit_and_save_sample() {
                 }))
                 .unwrap();
             let edit_ms = start.elapsed().as_secs_f64() * 1000.0;
-            if let Event::MutationRefused { reason, .. } = &event {
-                assert_eq!(
-                    *reason,
-                    kinewright_core::CoreMutationRefusal::ManualHistoryCapacity
-                );
-                assert_eq!(gui.export_history().unwrap(), before);
-                assert!(permit.pending().unwrap().is_empty());
-                let started = Instant::now();
-                owner.save_active().unwrap();
-                println!(
-                    "EDIT_SAVE_REFUSAL={}",
-                    serde_json::json!({"edits":edits,"retained_batches":before.batches.len(),"floor_offset":before.floor_offset,"sample":sample,"hand_edit_ms":edit_ms,"unchanged_save_ms":started.elapsed().as_secs_f64()*1000.0,"reason":reason.to_string()})
-                );
-                continue;
-            }
             assert!(
                 matches!(event, Event::DocumentChanged { .. }),
-                "manual edit must return an exact outcome"
+                "FULL_HISTORY_MUST_KEEP_ACCEPTING: {event:?}"
             );
             let pending = permit.pending().unwrap();
             let start = Instant::now();

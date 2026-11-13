@@ -191,6 +191,7 @@ impl VerifiedCheckpointRecovery {
         // remain with the original quarantined history, not the empty new history.
         let document = document.map(Arc::new);
         let history = HistorySnapshot {
+            ordinary_floor_source: None,
             replay_proof: None,
             floor_offset: 0,
             baseline: Arc::clone(&document),
@@ -389,6 +390,7 @@ impl VerifiedCheckpointRecovery {
             })?
             .reference;
         let history = HistorySnapshot {
+            ordinary_floor_source: None,
             replay_proof: None,
             floor_offset: 0,
             baseline: Arc::clone(&self.document),

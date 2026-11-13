@@ -19,6 +19,16 @@ impl Ja1EditingSession {
             .acknowledge_manual(permit, prefix)
             .map_err(crate::bundle::history_error)
     }
+    /// Test a producer whose floor policy differs while using real actor stamping.
+    #[cfg(feature = "test-util")]
+    pub fn bind_manual_encoder_probe(
+        &self,
+        encoder: Box<dyn kinewright_core::ManualHistoryEncoder>,
+    ) -> Result<kinewright_core::ManualPermit, BundleError> {
+        self.attachment
+            .manual_permit(encoder)
+            .map_err(crate::bundle::history_error)
+    }
     pub fn bind_manual_producer(
         &self,
         lease: ManualLease,
@@ -27,7 +37,7 @@ impl Ja1EditingSession {
         if history_sha256(
             &self
                 .core
-                .export_history()
+                .export_history_for_publication()
                 .map_err(crate::bundle::history_error)?,
         )? != lease.history_sha256
         {
@@ -55,7 +65,7 @@ impl Ja1EditingSession {
         let core = self.core.clone();
         let inputs = self.inputs.clone();
         let history = core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         let bundle = self
             .destination
@@ -299,7 +309,7 @@ impl Ja1EditingSession {
         lease.inputs = inputs;
         let before = self
             .core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)?;
         let original_issuer = self.active_bundle()?.issuers[&lease.issuer].clone();
         let _overlap = self.active_bundle()?.store.reserve_history_shadow(
@@ -360,7 +370,7 @@ impl Ja1EditingSession {
                     || history_sha256(
                         &self
                             .core
-                            .export_history()
+                            .export_history_for_publication()
                             .map_err(crate::bundle::history_error)?,
                     )? != metadata.before_sha256
                 {
@@ -381,7 +391,7 @@ impl Ja1EditingSession {
                 }
                 let after = self
                     .core
-                    .export_history()
+                    .export_history_for_publication()
                     .map_err(crate::bundle::history_error)?;
                 if history_sha256(&after)? != metadata.after_sha256
                     || after.batches.last() != Some(&metadata.batch)
@@ -400,7 +410,7 @@ impl Ja1EditingSession {
             }
             let after = self
                 .core
-                .export_history()
+                .export_history_for_publication()
                 .map_err(crate::bundle::history_error)?;
             let selected = self
                 .destination
@@ -707,7 +717,7 @@ impl ManualRecoveryEndpoint {
     }
     pub fn snapshot(&self) -> Result<kinewright_core::HistorySnapshot, BundleError> {
         self.core
-            .export_history()
+            .export_history_for_publication()
             .map_err(crate::bundle::history_error)
     }
     pub fn finish(
@@ -775,7 +785,7 @@ impl Ja1EditingSession {
             || history_sha256(
                 &self
                     .core
-                    .export_history()
+                    .export_history_for_publication()
                     .map_err(crate::bundle::history_error)?,
             )? != publisher_digest
         {
@@ -881,7 +891,8 @@ mod c0_fix1_tests {
                 .issue_manual_lease_for_inputs("r".repeat(64), "t".repeat(64), &prepared)
                 .unwrap();
             let gui = Core::spawn(Document::default()).unwrap();
-            gui.restore_history(core.export_history().unwrap()).unwrap();
+            gui.restore_history(core.export_history_for_publication().unwrap())
+                .unwrap();
             let replica = Ja1EditingSession::new(
                 temp.root(),
                 &gui,
@@ -899,7 +910,7 @@ mod c0_fix1_tests {
             let mut original = AcceptedManualCommand::decode(&permit.pending().unwrap()[0])
                 .unwrap()
                 .envelope;
-            let mut expected = gui.export_history().unwrap();
+            let mut expected = gui.export_history_for_publication().unwrap();
             let mut manifest = prepared.manifest.clone();
             match fault {
                 "owner" => manifest.project_id = Some(ProjectId::fresh().unwrap()),
@@ -993,7 +1004,11 @@ mod c0_fix1_tests {
             );
             assert_eq!(owner.root_sha256().unwrap(), root, "{fault}");
             assert_eq!(
-                core.export_history().unwrap().document.media_pool.len(),
+                core.export_history_for_publication()
+                    .unwrap()
+                    .document
+                    .media_pool
+                    .len(),
                 1,
                 "{fault}"
             );

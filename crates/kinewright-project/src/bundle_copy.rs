@@ -1117,7 +1117,7 @@ impl SessionStore {
         crate::bundle::reconcile_core_save(core)?;
         settle_copy_source(&mut self.pending_copy_source)?;
         let frozen = core
-            .export_history()
+            .export_history_for_publication()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let bounded = crate::bundle_commit::select_history(&frozen, &limits)?;
         let history = &bounded.history;
@@ -1135,6 +1135,7 @@ impl SessionStore {
         )?;
         let (mut target, before, prepared) = destination(path, limits)?;
         target.pending_save = Some(crate::bundle::PendingSave {
+            ordinary_floor_source: frozen.ordinary_floor_source.clone(),
             candidate_base: None,
             core: core.clone(),
             barrier,

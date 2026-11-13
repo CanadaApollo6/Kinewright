@@ -10,14 +10,14 @@ actor = 'crates/kinewright-core/src/actor.rs'
 R = 'round_four::'
 for name in ['moving_manual_core_reconciles_and_saves', 'moving_specialist_core_reconciles_and_saves', 'first_copy_moving_core_reconciles_and_saves']:
     cases[name] = (actor, 'ja_s1_storage', R+name)
-for name in ['prefilter_small_excursion_keeps_first_valid_cut', 'prefilter_large_excursion_keeps_twenty_undo_steps', 'production_prefilter_matches_ten_thousand_seeded_histories']:
+for name in ['prefilter_small_excursion_keeps_low_water_cut', 'prefilter_large_excursion_keeps_low_water_suffix', 'production_prefilter_matches_ten_thousand_seeded_histories']:
     cases[name] = (project+'bundle_commit.rs', 'ja_s1_storage', R+name)
 cases.update({
     'first_failure_releases_every_original_undo_and_redo_then_retries': (actor, 'ja_s1_storage', R+'first_failure_releases_every_original_undo_and_redo_then_retries'),
     'older_root_releases_every_entry': (project+'bundle.rs', 'ja_s1_storage', R+'older_root_releases_every_entry'),
     'command_lands_mid_save_above_pending_floor': (actor, 'ja_s1_storage', R+'command_lands_mid_save_above_pending_floor'),
     'zero-counter-digits': (project+'bundle_commit.rs', 'ja_s1_storage', R+'prefilter_zero_undo_counters_cross_digit_boundaries'),
-    'exact_cap_saves_and_one_byte_over_floors_one_more_step': (project+'bundle_commit.rs', 'ja_s1_storage', R+'exact_cap_saves_and_one_byte_over_floors_one_more_step'),
+    'exact_cap_and_one_byte_below_publish_the_shared_low_water_floor': (project+'bundle_commit.rs', 'ja_s1_storage', R+'exact_cap_and_one_byte_below_publish_the_shared_low_water_floor'),
     'core-current': (actor, 'core-history', 'pending_floor_blocks_undo_and_commits_current_suffix'),
     'core-floor-revision': (actor, 'core-history', 'pending_floor_blocks_undo_and_commits_current_suffix'),
     'core-settled-guard': ('crates/kinewright-core/src/history_transition.rs', 'core-history', 'pending_floor_release_restores_entries_and_rejects_a_stale_capture'),

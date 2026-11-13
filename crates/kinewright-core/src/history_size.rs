@@ -357,6 +357,9 @@ fn history_owned_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
 /// # Errors
 /// Refuses arithmetic overflow or an excessive nested payload.
 pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
+    with_history_margin(restored_history_base_bytes(history)?)
+}
+fn restored_history_base_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
     let undo_peak = history
         .batches
         .iter()
@@ -416,7 +419,7 @@ pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, His
             ])?;
         }
     }
-    with_history_margin(sum([history_owned_bytes(history)?, padding])?)
+    sum([history_owned_bytes(history)?, padding])
 }
 
 /// Measure the peak of a bounded replay. Store callers reserve their role's
@@ -728,6 +731,9 @@ impl ReplayBudget {
         ])?;
         self.check(0)
     }
+    pub(crate) const fn dynamic_peak(&self) -> u64 {
+        self.dynamic_peak
+    }
     pub(crate) const fn document_charge(&self) -> u64 {
         self.documents
     }
@@ -869,4 +875,238 @@ fn operation_copy_bytes(
         | Operation::AddSolidClip { .. }
         | Operation::SetSolidColor { .. } => Ok(0),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RedoInputMax {
+    pub(crate) document: u64,
+    pub(crate) encoded: u64,
+}
+pub(crate) fn redo_input_max(history: &HistorySnapshot) -> Result<RedoInputMax, HistoryError> {
+    let mut result = RedoInputMax {
+        document: 0,
+        encoded: 0,
+    };
+    for document in std::iter::once(&history.document).chain(
+        history
+            .cursor
+            .undo
+            .iter()
+            .chain(&history.cursor.redo)
+            .map(|entry| &entry.document),
+    ) {
+        result.document = result.document.max(transport_document_bytes(document)?);
+        result.encoded = result.encoded.max(crate::history::encoded_size(document)?);
+    }
+    Ok(result)
+}
+
+/// A conservative reservation for every cut reached by draining Redo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedoCapacityBound {
+    pub replay_bytes: u64,
+    pub retained_bytes: u64,
+    pub encoded_batch_bytes: u64,
+    pub max_current_document_bytes: u64,
+}
+
+fn decimal_range_bytes(start: usize, count: usize) -> Result<u64, HistoryError> {
+    let end = start.checked_add(count).ok_or(HistoryError::Capacity)?;
+    let mut bytes = count as u64;
+    let mut power = 10_usize;
+    while power < end {
+        bytes = sum([bytes, end.saturating_sub(power.max(start)) as u64])?;
+        power = power.checked_mul(10).ok_or(HistoryError::Capacity)?;
+    }
+    Ok(bytes)
+}
+
+/// Encoded size of the additional Redo batches, including array commas.
+/// # Errors
+/// Refuses arithmetic or the unchanged command-count bound.
+pub fn redo_batch_encoded_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
+    let count = history.cursor.redo.len();
+    let batches = history.batches.len();
+    if batches
+        .checked_add(count)
+        .is_none_or(|end| end > crate::HISTORY_COMMANDS)
+    {
+        return Err(HistoryError::Capacity);
+    }
+    let zero = crate::JournalBatch {
+        order: 0,
+        command: crate::JournalCommand::Redo,
+        identity_effects: vec![],
+        undo_entries: 0,
+        redo_entries: 0,
+    };
+    let constant = crate::history::encoded_size(&zero)? - 3 + u64::from(batches > 0);
+    sum([
+        constant
+            .checked_mul(count as u64)
+            .ok_or(HistoryError::Capacity)?,
+        decimal_range_bytes(batches, count)?,
+        decimal_range_bytes(
+            history
+                .cursor
+                .undo
+                .len()
+                .checked_add(1)
+                .ok_or(HistoryError::Capacity)?,
+            count,
+        )?,
+        decimal_range_bytes(0, count)?,
+    ])
+}
+
+fn canonical_slots<T>(count: usize) -> Result<usize, HistoryError> {
+    if count == 0 {
+        return Ok(0);
+    }
+    let minimum = if size_of::<T>() == 1 {
+        8
+    } else if size_of::<T>() <= 1024 {
+        4
+    } else {
+        1
+    };
+    Ok(count
+        .checked_next_power_of_two()
+        .ok_or(HistoryError::Capacity)?
+        .max(minimum))
+}
+
+// Redo only moves the existing current/cursor document and operation payloads.
+// Reserve the final batch count, both cursor-array maxima and the largest input
+// document charge over the ENTIRE current cursor. Those quantities and the
+// prefix's dynamic peak are invariant while Redo drains, so recomputing this
+// reservation cannot newly refuse a later Redo. No future snapshot is built.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one checked derivation covers replay input, intermediate arrays and retained history"
+)]
+pub(crate) fn redo_capacity_bound(
+    history: &HistorySnapshot,
+    dynamic_peak: u64,
+    journal: &crate::HistoryJournal,
+    input_history: &HistorySnapshot,
+    canonical_input: RedoInputMax,
+) -> Result<RedoCapacityBound, HistoryError> {
+    let extra = redo_batch_encoded_bytes(history)?;
+    let count = history.cursor.redo.len();
+    let total = history
+        .cursor
+        .undo
+        .len()
+        .checked_add(count)
+        .ok_or(HistoryError::Capacity)?;
+    let future = history
+        .batches
+        .len()
+        .checked_add(count)
+        .ok_or(HistoryError::Capacity)?;
+    let current_encoded = crate::history::encoded_size(&history.document)?;
+    let current_document = transport_document_bytes(&history.document)?;
+    let mut max_encoded = current_encoded.max(canonical_input.encoded);
+    let mut max_document = current_document.max(canonical_input.document);
+    // Replayed and live documents can have equal values but different spare
+    // allocations. Retain both charges; Redo may make any live boundary current.
+    for document in std::iter::once(&input_history.document).chain(
+        input_history
+            .cursor
+            .undo
+            .iter()
+            .chain(&input_history.cursor.redo)
+            .chain(history.cursor.undo.iter().chain(&history.cursor.redo))
+            .map(|entry| &entry.document),
+    ) {
+        max_encoded = max_encoded.max(crate::history::encoded_size(document)?);
+        max_document = max_document.max(transport_document_bytes(document)?);
+    }
+    let mut input =
+        ReplayBudget::new(journal, &history.baseline, &history.document, u64::MAX)?.input;
+    let old_batches = canonical_slots::<crate::HistoryBatch>(history.batches.len())?;
+    let new_batches = canonical_slots::<crate::HistoryBatch>(future)?;
+    let journal_slots = canonical_slots::<crate::JournalBatch>(future)?;
+    let cursor_slots = canonical_slots::<String>(total)?;
+    let normalize_commas = u64::from(!history.cursor.undo.is_empty() && count > 0);
+    let subtract = sum([
+        current_document,
+        current_encoded
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+        transport_vector_bytes(&journal.batches)?,
+        transport_vector_bytes(&journal.cursor.undo)?,
+        transport_vector_bytes(&journal.cursor.redo)?,
+        allocation::<crate::HistoryBatch>(old_batches)?,
+        allocation::<crate::actor::HistoryEntry>(old_batches)?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+    ])?;
+    input = input
+        .checked_sub(subtract)
+        .ok_or(HistoryError::CommitInvariant)?;
+    input = sum([
+        input,
+        max_document,
+        max_encoded.checked_mul(2).ok_or(HistoryError::Capacity)?,
+        sum([extra, normalize_commas])?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+        allocation::<crate::JournalBatch>(journal_slots)?,
+        allocation::<String>(cursor_slots)?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+        allocation::<crate::HistoryBatch>(new_batches)?,
+        allocation::<crate::actor::HistoryEntry>(new_batches)?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+    ])?;
+    // Reject the portable encoded bound at admission too, before a future Redo
+    // could reach the counter in ReplayBudget::new.
+    let encoded = sum([
+        crate::history::encoded_size(&(&history.baseline, &history.document, &journal))?,
+        max_encoded - current_encoded,
+        extra,
+        normalize_commas,
+    ])?;
+    if encoded > crate::HISTORY_BYTES {
+        return Err(HistoryError::Capacity);
+    }
+    let old_slots = history
+        .batches
+        .capacity()
+        .max(canonical_slots::<crate::HistoryBatch>(
+            history.batches.len(),
+        )?);
+    let new_slots = old_slots.max(new_batches);
+    let old_undo_peak = history
+        .batches
+        .iter()
+        .map(|b| b.undo_entries)
+        .max()
+        .unwrap_or(0)
+        .max(history.cursor.undo.len());
+    let undo_slots = history
+        .cursor
+        .undo
+        .capacity()
+        .max(canonical_slots::<crate::GestureBoundary>(old_undo_peak)?);
+    let future_undo_slots = undo_slots.max(canonical_slots::<crate::GestureBoundary>(total)?);
+    let retained = sum([
+        restored_history_base_bytes(history)?,
+        allocation::<crate::HistoryBatch>(new_slots - old_slots)?,
+        allocation::<crate::GestureBoundary>(future_undo_slots - undo_slots)?,
+        payload(&crate::JournalCommand::Redo)?
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(count as u64))
+            .ok_or(HistoryError::Capacity)?,
+    ])?;
+    let retained_bytes = with_history_margin(retained)?;
+    Ok(RedoCapacityBound {
+        replay_bytes: with_history_margin(sum([input, dynamic_peak])?)?.max(retained_bytes),
+        retained_bytes,
+        encoded_batch_bytes: extra,
+        max_current_document_bytes: max_encoded,
+    })
 }

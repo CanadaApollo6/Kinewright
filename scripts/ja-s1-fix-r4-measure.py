@@ -69,7 +69,7 @@ for pair in range(1,6):
     for workload, witness in [
         ('encoded','round_three::first_save_floors_history_above_default_encoded_limit'),
         ('batch','round_three::first_save_floors_history_above_default_batch_limit'),
-        ('excursion','round_four::prefilter_large_excursion_keeps_twenty_undo_steps')]:
+        ('excursion','round_four::prefilter_large_excursion_keeps_low_water_suffix')]:
         assert hashlib.file_digest(binary.open('rb'),'sha256').hexdigest()==identity['binary_sha256']
         row,text=run(f'f4-{pair}-{workload}',['nice','-n','10',str(binary),'--exact',witness,'--nocapture'],0)
         pattern=r'R4_EXCURSION bound_ms=([\d.]+)' if workload=='excursion' else r'R4_COLD batch_limit=\w+ bound_ms=([\d.]+)'

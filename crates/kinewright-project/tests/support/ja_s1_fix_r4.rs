@@ -87,16 +87,30 @@ fn limits() -> StorageLimits {
 fn exhaustive(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
     let policy =
         kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(limits).unwrap();
-    let fits = |h: &HistorySnapshot| policy.check(h).is_ok();
-    if fits(history) {
+    if policy.check(history).is_ok() {
         return Some(history.clone());
     }
-    (1..=history.batches.len()).find_map(|cut| {
-        HistoryTransition::floor(history.clone(), cut)
-            .ok()
-            .map(|t| t.after().clone())
-            .filter(fits)
-    })
+    let fitting: Vec<_> = (1..history.batches.len())
+        .filter_map(|cut| {
+            HistoryTransition::floor_after(history, cut)
+                .ok()
+                .filter(|h| policy.check(h).is_ok())
+        })
+        .collect();
+    let first = fitting.first()?;
+    let depth = first
+        .cursor
+        .undo
+        .len()
+        .saturating_sub(first.cursor.undo.len().div_ceil(8))
+        .max(1);
+    Some(
+        fitting
+            .iter()
+            .find(|h| h.cursor.undo.len() <= depth)
+            .unwrap_or(first)
+            .clone(),
+    )
 }
 fn compare(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
     let expected = exhaustive(history, limits);
@@ -400,7 +414,7 @@ fn excursion(edits: usize, undos: usize, tail: usize) -> HistorySnapshot {
     core.export_history().unwrap()
 }
 #[test]
-fn prefilter_small_excursion_keeps_first_valid_cut() {
+fn prefilter_small_excursion_keeps_low_water_cut() {
     let history = excursion(2, 2, 1);
     let valid: Vec<_> = (1..=7)
         .filter(|cut| HistoryTransition::floor(history.clone(), *cut).is_ok())
@@ -414,10 +428,10 @@ fn prefilter_small_excursion_keeps_first_valid_cut() {
         branch_history_bytes: history_cost_probe(&first, &StorageLimits::default()).unwrap(),
         ..StorageLimits::default()
     };
-    assert_eq!(compare(&history, &limits).unwrap().floor_offset, 1);
+    assert_eq!(compare(&history, &limits).unwrap().floor_offset, 2);
 }
 #[test]
-fn prefilter_large_excursion_keeps_twenty_undo_steps() {
+fn prefilter_large_excursion_keeps_low_water_suffix() {
     let history = excursion(100, 30, 5);
     let expected = HistoryTransition::floor(history.clone(), 85)
         .unwrap()
@@ -429,13 +443,13 @@ fn prefilter_large_excursion_keeps_twenty_undo_steps() {
     };
     let started = Instant::now();
     let actual = bound_history_probe(&history, &limits).unwrap();
-    eprintln!(
+    println!(
         "R4_EXCURSION bound_ms={:.3}",
         started.elapsed().as_secs_f64() * 1000.0
     );
     assert_eq!(actual, exhaustive(&history, &limits).unwrap());
-    assert_eq!(actual.floor_offset, 85);
-    assert_eq!(actual.cursor.undo.len(), 20);
+    assert_eq!(actual.floor_offset, 88);
+    assert_eq!(actual.cursor.undo.len(), 17);
 }
 
 #[test]
@@ -484,21 +498,21 @@ fn production_prefilter_matches_ten_thousand_seeded_histories() {
         };
         compare(&history, &limits);
         if case == 9_999 {
-            eprintln!("R4_DIFFERENTIAL seed={SEED:#x} histories=10000");
+            println!("R4_DIFFERENTIAL seed={SEED:#x} histories=10000");
         }
     }
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn exact_cap_saves_and_one_byte_over_floors_one_more_step() {
+fn exact_cap_and_one_byte_below_publish_the_shared_low_water_floor() {
     let history = excursion(3, 0, 0);
     let first = HistoryTransition::floor(history.clone(), 1)
         .unwrap()
         .after()
         .clone();
     let cap = history_cost_probe(&first, &StorageLimits::default()).unwrap();
-    for (allowance, floor) in [(cap, 1), (cap - 1, 2)] {
+    for allowance in [cap, cap - 1] {
         let temp = temp("r4-exact-cap");
         let path = temp.path("edit.kinewright");
         let core = core(1);
@@ -508,7 +522,15 @@ fn exact_cap_saves_and_one_byte_over_floors_one_more_step() {
             ..StorageLimits::default()
         };
         let selected = compare(&history, &limits).unwrap();
-        assert_eq!(selected.floor_offset, floor);
+        assert_eq!(selected.floor_offset, 2);
+        assert_eq!(
+            kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
+                .unwrap()
+                .check(&first)
+                .is_ok(),
+            allowance == cap,
+            "EXACT_CAP_ADMISSION_REMAINS_STRICT_BEFORE_LOW_WATER_SELECTION"
+        );
         let mut owner =
             ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
         let inputs = owner.empty_inputs().unwrap().reference.clone();

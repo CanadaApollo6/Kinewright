@@ -215,9 +215,22 @@ enum CoreMessage {
     FinishAttachment(TypeId, AcceptedCut, bool, Sender<Result<(), HistoryError>>),
     Command(Command),
     Request(Command, Sender<Event>),
+    AdmittedRequest(
+        Command,
+        Box<dyn crate::HistoryAdmission>,
+        u64,
+        Sender<Event>,
+    ),
+    OrdinaryFloorSource(Sender<Option<Arc<crate::OrdinaryFloorSource>>>),
+    AcknowledgeOrdinaryFloor(
+        TypeId,
+        Arc<crate::OrdinaryFloorSource>,
+        Sender<Result<(), HistoryError>>,
+    ),
     Subscribe(Sender<Event>),
     HistoryChangeId(Sender<HistoryChangeId>),
     ExportHistory(Sender<Result<(HistoryChangeId, HistorySnapshot), HistoryError>>),
+    ExportPublicationHistory(Sender<Result<(HistoryChangeId, HistorySnapshot), HistoryError>>),
     BeginFloor(
         TypeId,
         crate::HistoryTransition,
@@ -254,6 +267,8 @@ enum CoreMessage {
     ),
     #[cfg(any(test, feature = "test-util"))]
     ObserveHistory(Sender<HistoryObservation>),
+    #[cfg(any(test, feature = "test-util"))]
+    InflateHistoryAllocation(HistoryAllocationProbe, usize, Sender<u64>),
 }
 
 enum HistoryRestore {
@@ -271,6 +286,16 @@ pub struct HistoryObservation {
     pub undo: Vec<HistoryEntryObservation>,
     pub redo: Vec<HistoryEntryObservation>,
     pub op_log: Vec<Operation>,
+}
+
+/// Test-only physical geometry perturbation; it changes no history values.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, Copy)]
+pub enum HistoryAllocationProbe {
+    Baseline,
+    Current,
+    Cursor,
+    Metadata,
 }
 
 /// An exact retained entry, including its pre-edit document and gesture key.
@@ -586,6 +611,21 @@ impl Core {
             .map_err(|_| CoreDisconnected)?;
         receiver.recv().map_err(|_| CoreDisconnected)
     }
+    /// Change physical capacities without changing accepted history values.
+    /// # Errors
+    /// Returns an error if the actor has stopped.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn inflate_history_allocation_probe(
+        &self,
+        target: HistoryAllocationProbe,
+        spare: usize,
+    ) -> Result<u64, CoreDisconnected> {
+        let (sender, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::InflateHistoryAllocation(target, spare, sender))
+            .map_err(|_| CoreDisconnected)?;
+        receiver.recv().map_err(|_| CoreDisconnected)
+    }
     /// Start the core actor with a validated project document.
     ///
     /// # Errors
@@ -767,6 +807,76 @@ impl Core {
         receiver.recv().map_err(|_| CoreDisconnected)
     }
 
+    /// Execute an ordinary edit and its bounded history floor in one actor transaction.
+    /// The admission policy cannot bypass attachment or manual-permit authority.
+    /// # Errors
+    /// Returns an actor-disconnection error before a reply is available.
+    pub fn request_admitted(
+        &self,
+        command: Command,
+        admission: Box<dyn crate::HistoryAdmission>,
+        retained_bytes: u64,
+    ) -> Result<Event, CoreDisconnected> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::AdmittedRequest(
+                command,
+                admission,
+                retained_bytes,
+                reply,
+            ))
+            .map_err(|_| CoreDisconnected)?;
+        receiver.recv().map_err(|_| CoreDisconnected)
+    }
+
+    /// Capture the bounded cut and its one unpublished floor source for a writer.
+    /// # Errors
+    /// Returns an actor-disconnection error before the cut is captured.
+    pub fn export_history_for_publication(&self) -> Result<HistorySnapshot, HistoryError> {
+        self.export_history_with_id_for_publication()
+            .map(|(_, history)| history)
+    }
+    /// The publication capture and its change identity come from one actor turn.
+    /// # Errors
+    /// Returns an actor-disconnection error before the cut is captured.
+    pub fn export_history_with_id_for_publication(
+        &self,
+    ) -> Result<(HistoryChangeId, HistorySnapshot), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ExportPublicationHistory(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Read the single pending source without copying the history value.
+    /// # Errors
+    /// Returns an actor-disconnection error before the reply.
+    pub fn ordinary_floor_source(
+        &self,
+    ) -> Result<Option<Arc<crate::OrdinaryFloorSource>>, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::OrdinaryFloorSource(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
+    }
+
+    pub(crate) fn acknowledge_ordinary_floor<P: 'static>(
+        &self,
+        source: Arc<crate::OrdinaryFloorSource>,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::AcknowledgeOrdinaryFloor(
+                TypeId::of::<P>(),
+                source,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
     /// Subscribe to a true broadcast stream. Each subscriber gets every event.
     /// The first event is the current document snapshot.
     ///
@@ -817,6 +927,7 @@ struct PendingFloor {
 
 #[derive(Clone)]
 struct CoreState {
+    ordinary_floor_source: Option<Arc<crate::OrdinaryFloorSource>>,
     replay_budget: Option<crate::history_size::ReplayBudget>,
     // Changes to the baseline or installed history invalidate manual JSON caches.
     history_epoch: u64,
@@ -836,6 +947,17 @@ struct CoreState {
 }
 
 impl CoreState {
+    #[cfg(any(test, feature = "test-util"))]
+    fn allocation_bytes_probe(&self) -> u64 {
+        let history = self.history();
+        let spare = (self.batches.capacity() - history.batches.capacity())
+            * size_of::<HistoryBatch>()
+            + (self.undo.capacity() - history.cursor.undo.capacity()) * size_of::<HistoryEntry>()
+            + (self.redo.capacity() - history.cursor.redo.capacity()) * size_of::<HistoryEntry>();
+        crate::history_size::history_live_bytes(&history).expect("probe history charge")
+            + spare as u64
+            + (spare as u64).div_ceil(10)
+    }
     fn history_change_id(&self) -> HistoryChangeId {
         HistoryChangeId {
             revision: self.revision,
@@ -846,6 +968,7 @@ impl CoreState {
     fn new(document: impl Into<Arc<Document>>, revision: TimelineRevision) -> Self {
         let document = document.into();
         Self {
+            ordinary_floor_source: None,
             replay_budget: None,
             history_epoch: 0,
             next_floor_id: 0,
@@ -1020,6 +1143,7 @@ impl CoreState {
             coalesce_key: e.coalesce_key.clone(),
         };
         HistorySnapshot {
+            ordinary_floor_source: None,
             replay_proof: None,
             floor_offset: self.floor_offset,
             baseline: Arc::clone(&self.baseline),
@@ -1030,6 +1154,14 @@ impl CoreState {
                 redo: self.redo.iter().map(entry).collect(),
             },
         }
+    }
+
+    fn publication_history(&self) -> HistorySnapshot {
+        let mut history = self.history();
+        history
+            .ordinary_floor_source
+            .clone_from(&self.ordinary_floor_source);
+        history
     }
 
     /// `self.history() == *other`, compared field by field without building
@@ -1060,6 +1192,7 @@ impl CoreState {
             batches,
             cursor: HistoryCursor { undo, redo },
             replay_proof: _,
+            ordinary_floor_source: _,
         } = other;
         self.floor_offset == *floor_offset
             && self.baseline == *baseline
@@ -1096,6 +1229,9 @@ impl CoreState {
         }
         // Replay proves the supplied immutable states. Share those same undo documents
         // with the retained checkpoint instead of keeping a second full replay image.
+        candidate
+            .ordinary_floor_source
+            .clone_from(&snapshot.ordinary_floor_source);
         candidate.document = Arc::clone(&snapshot.document);
         for (entry, boundary) in candidate
             .undo
@@ -1125,6 +1261,7 @@ impl CoreState {
             batches,
             cursor,
             replay_proof: _,
+            ordinary_floor_source,
         } = history;
         let mut state = Self::new(baseline, TimelineRevision(0));
         // OpLog includes accepted edits even if a later Undo no longer exposes them.
@@ -1139,6 +1276,7 @@ impl CoreState {
             .cloned()
             .collect();
         state.op_log = Arc::new(operations);
+        state.ordinary_floor_source = ordinary_floor_source;
         state.floor_offset = floor_offset;
         state.document = document;
         state.batches = Vec::with_capacity(capacities.0);
@@ -1508,7 +1646,7 @@ pub(crate) fn resolve_history_journal_verified(
     let prefix = prefix.filter(|prefix| {
         let history = prefix.snapshot();
         history.floor_offset == journal.floor_offset
-            && history.baseline == baseline
+            && Arc::ptr_eq(&history.baseline, &baseline)
             && history.batches.len() <= journal.batches.len()
             && history
                 .batches
@@ -1600,6 +1738,7 @@ pub(crate) fn resolve_history_journal_verified(
         redo_capacity: state.redo.capacity(),
     };
     let history = HistorySnapshot {
+        ordinary_floor_source: None,
         replay_proof: None,
         floor_offset: journal.floor_offset,
         baseline: state.baseline,
@@ -1622,13 +1761,62 @@ pub(crate) fn resolve_history_journal_verified(
             checkpoint.undo_capacity,
             checkpoint.redo_capacity,
         ),
+        finishing.dynamic_peak(),
     )?);
     Ok(crate::ResolvedHistory {
+        canonical_allocations: false,
         history: Arc::new(history),
         checkpoint: Arc::new(checkpoint),
         peak,
         adoption,
     })
+}
+
+pub(crate) fn ordinary_publication_history(
+    current: &HistorySnapshot,
+) -> Result<Option<HistorySnapshot>, HistoryError> {
+    let Some(source) = &current.ordinary_floor_source else {
+        return Ok(None);
+    };
+    if source.history.ordinary_floor_source.is_some()
+        || source.selected_offset != current.floor_offset
+    {
+        return Err(HistoryError::StaleExpectation);
+    }
+    let source_end = source
+        .history
+        .floor_offset
+        .checked_add(source.history.batches.len() as u64)
+        .ok_or(HistoryError::Capacity)?;
+    let overlap = source_end
+        .checked_sub(current.floor_offset)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(HistoryError::StaleExpectation)?;
+    let mut complete = CoreState::restore(&source.history)?;
+    for batch in current
+        .batches
+        .get(overlap..)
+        .ok_or(HistoryError::StaleExpectation)?
+    {
+        if !matches!(
+            execute_command(&mut complete, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::StaleExpectation);
+        }
+    }
+    let history = complete.history();
+    let discard = usize::try_from(
+        current
+            .floor_offset
+            .checked_sub(history.floor_offset)
+            .ok_or(HistoryError::StaleExpectation)?,
+    )
+    .map_err(|_| HistoryError::Capacity)?;
+    if floor_history(&history, discard)? != *current {
+        return Err(HistoryError::StaleExpectation);
+    }
+    Ok(Some(history))
 }
 
 pub(crate) fn floor_history(
@@ -1672,8 +1860,7 @@ pub(crate) fn find_floor_history(
             return Err(HistoryError::Corrupt);
         }
         let discard = index + 1;
-        if prefix.redo.is_empty()
-            && may_fit(discard, prefix.undo.len(), &prefix.document)
+        if may_fit(discard, prefix.undo.len(), &prefix.document)
             && let Ok(after) = floor_from_prefix(before, discard, &prefix)
             && accepts(&after)
         {
@@ -1707,8 +1894,7 @@ fn floor_from_prefix(
     prefix: &CoreState,
 ) -> Result<HistorySnapshot, HistoryError> {
     let dropped = prefix.undo.len();
-    if !prefix.redo.is_empty()
-        || dropped > before.cursor.undo.len()
+    if dropped > before.cursor.undo.len()
         || (dropped == before.cursor.undo.len()
             && before
                 .cursor
@@ -1718,7 +1904,16 @@ fn floor_from_prefix(
     {
         return Err(HistoryError::Corrupt);
     }
-    let mut suffix = CoreState::new(Arc::clone(&prefix.document), TimelineRevision(0));
+    // Keep the actual retained boundary allocation when it is this baseline.
+    // A temporary prefix replay can allocate an equal document differently.
+    let baseline = before
+        .cursor
+        .undo
+        .get(dropped)
+        .map(|entry| &entry.document)
+        .filter(|document| ***document == *prefix.document)
+        .unwrap_or(&prefix.document);
+    let mut suffix = CoreState::new(Arc::clone(baseline), TimelineRevision(0));
     for batch in &before.batches[discard..] {
         if !matches!(
             execute_command(&mut suffix, batch.command.clone().into()),
@@ -1774,7 +1969,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                         let generation = manual_generation
                             .checked_add(1)
                             .ok_or(HistoryError::Capacity)?;
-                        let ingress = ManualIngress::new(&state, generation, encoder)?;
+                        let ingress = ManualIngress::new(&mut state, generation, encoder)?;
                         manual_generation = generation;
                         manual = Some(ingress);
                         attachment = AttachmentState::Live;
@@ -1942,6 +2137,9 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
             CoreMessage::HistoryChangeId(reply) => {
                 let _ = reply.send(state.history_change_id());
             }
+            CoreMessage::ExportPublicationHistory(reply) => {
+                let _ = reply.send(Ok((state.history_change_id(), state.publication_history())));
+            }
             CoreMessage::ExportHistory(reply) => {
                 // Publication chooses and records any floor before the owner installs it.
                 let _ = reply.send(Ok((state.history_change_id(), state.history())));
@@ -2074,6 +2272,44 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                 let _ = reply.send(result);
             }
             #[cfg(any(test, feature = "test-util"))]
+            CoreMessage::InflateHistoryAllocation(target, spare, reply) => {
+                if let HistoryAllocationProbe::Metadata = target {
+                    state.batches.reserve(spare);
+                    state.undo.reserve(spare);
+                    state.redo.reserve(spare);
+                } else {
+                    let old = match target {
+                        HistoryAllocationProbe::Baseline => Arc::clone(&state.baseline),
+                        HistoryAllocationProbe::Current => Arc::clone(&state.document),
+                        HistoryAllocationProbe::Cursor => {
+                            Arc::clone(&state.undo[state.undo.len() / 2].document)
+                        }
+                        HistoryAllocationProbe::Metadata => unreachable!(),
+                    };
+                    let mut document = (*old).clone();
+                    document.tracks.reserve(spare);
+                    for track in &mut document.tracks {
+                        track.clips.reserve(spare);
+                    }
+                    let document = Arc::new(document);
+                    for held in std::iter::once(&mut state.baseline)
+                        .chain(std::iter::once(&mut state.document))
+                        .chain(
+                            state
+                                .undo
+                                .iter_mut()
+                                .chain(&mut state.redo)
+                                .map(|e| &mut e.document),
+                        )
+                    {
+                        if Arc::ptr_eq(held, &old) {
+                            *held = Arc::clone(&document);
+                        }
+                    }
+                }
+                let _ = reply.send(state.allocation_bytes_probe());
+            }
+            #[cfg(any(test, feature = "test-util"))]
             CoreMessage::ObserveHistory(reply) => {
                 let observe = |entry: &HistoryEntry| HistoryEntryObservation {
                     document: Arc::clone(&entry.document),
@@ -2109,6 +2345,36 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     execute_actor_command(&mut state, attachment, command)
                 };
                 broadcast(&mut subscribers, &event);
+            }
+            CoreMessage::OrdinaryFloorSource(reply) => {
+                let _ = reply.send(state.ordinary_floor_source.clone());
+            }
+            CoreMessage::AcknowledgeOrdinaryFloor(requested, expected, reply) => {
+                let result = authorize_attachment(attachment, owner, Some(requested)).map(|()| {
+                    if state
+                        .ordinary_floor_source
+                        .as_ref()
+                        .is_some_and(|source| Arc::ptr_eq(source, &expected))
+                    {
+                        state.ordinary_floor_source = None;
+                    }
+                });
+                let _ = reply.send(result);
+            }
+            CoreMessage::AdmittedRequest(command, mut admission, retained_bytes, reply) => {
+                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {
+                    manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired)
+                } else {
+                    manual_history::execute_admitted(
+                        &mut state,
+                        attachment,
+                        command,
+                        admission.as_mut(),
+                        retained_bytes,
+                    )
+                };
+                broadcast(&mut subscribers, &event);
+                let _ = reply.send(event);
             }
             CoreMessage::Request(command, reply) => {
                 let event = if manual.is_some() && !matches!(command, Command::Query(_)) {
@@ -2334,6 +2600,101 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
     #[test]
+    fn replay_changed_baseline_allocation_requires_the_full_charge() {
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        for index in 0..4 {
+            core.request(Command::Do(Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(index * 90),
+                duration: TimeCode(90),
+                color: crate::SolidColor { r: 1, g: 2, b: 3 },
+            }))
+            .unwrap();
+        }
+        let original = core.export_history().unwrap();
+        let warm = crate::HistoryJournal::capture(&original)
+            .unwrap()
+            .resolve_verified_with_budget(
+                Arc::clone(&original.baseline),
+                &original.document,
+                128 << 20,
+                None,
+            )
+            .unwrap();
+        let mut changed = original.clone();
+        let mut baseline = (*changed.baseline).clone();
+        baseline.tracks.reserve(100);
+        let enlarged = Arc::new(baseline);
+        for boundary in changed
+            .cursor
+            .undo
+            .iter_mut()
+            .chain(&mut changed.cursor.redo)
+        {
+            if Arc::ptr_eq(&boundary.document, &changed.baseline) {
+                boundary.document = Arc::clone(&enlarged);
+            }
+        }
+        changed.baseline = enlarged;
+        let next = Core::spawn(Document::default()).unwrap();
+        next.restore_history(changed).unwrap();
+        next.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }))
+        .unwrap();
+        let after = next.export_history().unwrap();
+        let journal = crate::HistoryJournal::capture(&after).unwrap();
+        let cold = journal
+            .resolve_verified_with_budget(
+                Arc::clone(&after.baseline),
+                &after.document,
+                128 << 20,
+                None,
+            )
+            .unwrap();
+        let incremental = journal
+            .resolve_verified_with_budget(
+                Arc::clone(&after.baseline),
+                &after.document,
+                128 << 20,
+                Some(&warm),
+            )
+            .unwrap();
+        assert_eq!(
+            incremental.replay_peak(),
+            cold.replay_peak(),
+            "REPLACED_BASELINE_CANNOT_KEEP_THE_OLD_ALLOCATION_CHARGE"
+        );
+        for prefix in [None, Some(&warm)] {
+            assert_eq!(
+                journal
+                    .resolve_verified_with_budget(
+                        Arc::clone(&after.baseline),
+                        &after.document,
+                        cold.replay_peak() - 1,
+                        prefix
+                    )
+                    .unwrap_err(),
+                HistoryError::Capacity
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the generated walk compares incremental and full accounting at every boundary"
+    )]
     fn replay_incremental_document_charges_match_full_resident_walk_and_adoption() {
         let baseline = Arc::new(generated_document(&[30], &[0]));
         let mut state = CoreState::new(Arc::clone(&baseline), TimelineRevision(0));
@@ -2368,6 +2729,28 @@ mod tests {
                 Command::Do(operation(true)),
             ]);
         }
+        let mut seed = 0x9a37_8bd4_0f61_2c55_u64;
+        for index in 0_i64..120 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let edit = match seed % 3 {
+                0 => Command::Do(operation(seed.is_multiple_of(2))),
+                1 => Command::DoBatch(vec![operation(false), operation(true)]),
+                _ => Command::Do(Operation::AddSolidClip {
+                    track: TrackId(1),
+                    timeline_start: TimeCode(1_000_000 + index * 90),
+                    duration: TimeCode(90),
+                    color: crate::SolidColor { r: 1, g: 2, b: 3 },
+                }),
+            };
+            commands.extend([
+                edit,
+                Command::Undo,
+                Command::DoBatchCoalesced {
+                    operations: vec![operation(false), operation(true)],
+                    coalesce_key: format!("after-undo-{}", seed % 5),
+                },
+            ]);
+        }
         for command in commands {
             let new_document = !matches!(command, Command::Undo | Command::Redo);
             assert!(matches!(
@@ -2375,7 +2758,7 @@ mod tests {
                 Event::DocumentChanged { .. }
             ));
             let incremental = charges.refresh(&state, new_document).unwrap();
-            let mut seen = std::collections::BTreeSet::new();
+            let mut addresses = std::collections::BTreeSet::new();
             let mut walked = 0;
             for document in std::iter::once(&state.baseline)
                 .chain(std::iter::once(&state.document))
@@ -2387,7 +2770,7 @@ mod tests {
                         .map(|entry| &entry.document),
                 )
             {
-                if seen.insert(Arc::as_ptr(document) as usize) {
+                if addresses.insert(Arc::as_ptr(document) as usize) {
                     walked += crate::history_size::document_live_bytes(document).unwrap();
                 }
             }

@@ -4,7 +4,7 @@ mod actor;
 mod attachment;
 pub use attachment::{
     AcceptedCut, AcceptedHistory, ActorIdentity, AttachmentState, CoreAttachment,
-    CoreMutationRefusal, MANUAL_BYTES, MANUAL_COMMANDS, ManualHistoryCandidate,
+    CoreMutationRefusal, HistoryAdmission, MANUAL_BYTES, MANUAL_COMMANDS, ManualHistoryCandidate,
     ManualHistoryEncoder, ManualPermit,
 };
 mod agent;
@@ -58,7 +58,7 @@ pub use actor::{
     TimelineRevision,
 };
 #[cfg(any(test, feature = "test-util"))]
-pub use actor::{HistoryEntryObservation, HistoryObservation};
+pub use actor::{HistoryAllocationProbe, HistoryEntryObservation, HistoryObservation};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AgentUsage, AuthenticationStatus, HarnessId,
     HarnessInfo, RuntimeRequest, RuntimeRequestBinding, RuntimeRequestKind, RuntimeResponse,
@@ -208,8 +208,9 @@ pub use effect::{
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
 pub use history::{
-    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError,
-    HistoryReplayEvidence, HistorySnapshot, OperationIdentityEffect, ResolvedHistory,
+    GestureBoundary, HISTORY_BYTES, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError,
+    HistoryReplayEvidence, HistorySnapshot, OperationIdentityEffect, OrdinaryFloorSource,
+    ResolvedHistory,
 };
 pub use history_journal::{
     HistoryJournal, HistoryTransport, JournalBatch, JournalCursor, JournalIdentityEffect,

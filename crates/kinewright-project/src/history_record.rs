@@ -117,14 +117,13 @@ impl HistoryRecord {
         let document = read_document(&self.current_ref)?;
         let reservation = reserve(self.role.replay_limit(limits), self.role)?;
         let document = document.take();
-        let (history, _) = self
-            .journal
-            .resolve_with_budget(
-                Arc::new(baseline.take()),
-                &document,
-                self.role.replay_limit(limits),
-            )
-            .map_err(crate::bundle::history_error)?;
+        let history = crate::history_size::resolve_history_journal(
+            &self.journal,
+            Arc::new(baseline.take()),
+            &document,
+            self.role,
+            self.role.replay_limit(limits),
+        )?;
         let retained = crate::history_size::check_retained_history(&history, self.role, limits)?;
         let reservation = reservation.finish_history_replay(retained)?;
         Ok(reservation.hold(history))

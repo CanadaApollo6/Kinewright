@@ -22,16 +22,28 @@ pub(super) struct ManualIngress {
 pub(super) fn manual_message_bytes(item: &AcceptedHistory) -> Result<usize, HistoryError> {
     serde_json::to_vec(item)
         .map(|bytes| bytes.len())
-        .map_err(|_| HistoryError::Capacity)
+        .map_err(|_| HistoryError::Encoding)
 }
 
 impl ManualIngress {
     pub(super) fn new(
-        state: &CoreState,
+        state: &mut CoreState,
         generation: u64,
         mut encoder: Box<dyn crate::ManualHistoryEncoder>,
     ) -> Result<Self, HistoryError> {
-        encoder.check_history(&state.history())?;
+        if let Some(proof) = encoder.check_history(&state.history())? {
+            if proof.snapshot() != &state.history() {
+                encoder.finish_history_check(false);
+                return Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualHistoryCapacity,
+                ));
+            }
+            // A lease changes no history values. It can release a holder's
+            // excess allocations before the first admitted edit.
+            if !keeps_checked_layout(state, &proof) {
+                *state = checked_state(state, proof, false);
+            }
+        }
         encoder.finish_history_check(true);
         Ok(Self {
             generation,
@@ -44,6 +56,10 @@ impl ManualIngress {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the history, cache and queue share one rollback transaction"
+    )]
     pub(super) fn execute(
         &mut self,
         state: &mut CoreState,
@@ -53,20 +69,17 @@ impl ManualIngress {
         if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {
             return execute_actor_command(state, attachment, command);
         }
-        if self.pending.len() >= crate::MANUAL_COMMANDS {
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
-        }
         if self.cache.epoch != state.history_epoch {
             match HistoryJson::new(state) {
                 Ok(cache) => self.cache = cache,
                 Err(_) => {
-                    return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+                    return manual_refusal(&command, CoreMutationRefusal::ManualHistoryUnavailable);
                 }
             }
         }
         // The actor is the sole reader/writer during admission. Retain only the
         // pieces this command can change, and restore them on every refusal.
-        let delta = CandidateDelta::begin(state, &command);
+        let mut delta = CandidateChange::begin(state, &command);
         let event = execute_actor_command(state, attachment, command.clone());
         if !matches!(
             &event,
@@ -81,32 +94,46 @@ impl ManualIngress {
         // The writer's effective policy is authoritative here as well as at
         // publication and cold open. Do not advance the JSON cache or encoder
         // until the complete prospective history passes bounded replay.
-        if let Err(error) = self.encoder.check_history(&state.history()) {
-            delta.rollback(state);
-            return manual_refusal(
-                &command,
-                match error {
-                    HistoryError::MutationRefused(reason) => reason,
-                    _ => CoreMutationRefusal::ManualBackpressure,
-                },
-            );
-        }
-        let (undo_prefix, redo_prefix) = delta.cache_prefixes(state);
-        let Ok(patches) = self.cache.update(state, undo_prefix, redo_prefix) else {
+        let admission = self
+            .encoder
+            .check_history(&state.history())
+            .and_then(|floor| delta.install_floor(state, floor, None));
+        if let Err(error) = admission {
             self.encoder.finish_history_check(false);
             delta.rollback(state);
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+            return manual_refusal(&command, preparation_failure(&error));
+        }
+        let old_cache = if delta.floor_moved {
+            let Ok(cache) = HistoryJson::new(state) else {
+                self.encoder.finish_history_check(false);
+                delta.rollback(state);
+                return manual_refusal(&command, CoreMutationRefusal::ManualHistoryUnavailable);
+            };
+            Some(std::mem::replace(&mut self.cache, cache))
+        } else {
+            None
+        };
+        let (undo_prefix, redo_prefix) = delta.command.cache_prefixes(state);
+        let patches = if old_cache.is_some() {
+            Ok(None)
+        } else {
+            self.cache.update(state, undo_prefix, redo_prefix).map(Some)
+        };
+        let Ok(patches) = patches else {
+            self.encoder.finish_history_check(false);
+            delta.rollback(state);
+            return manual_refusal(&command, CoreMutationRefusal::ManualHistoryUnavailable);
         };
         let admitted = (|| {
             let (after_sha256, cursor_sha256) = self.cache.identities(state)?;
             let item = self.encoder.encode(
                 self.next_sequence,
-                delta.revision,
+                delta.command.revision,
                 self.predecessor.as_deref(),
                 ManualHistoryCandidate {
                     document: &state.document,
                     batch: state.batches.last().ok_or(HistoryError::Corrupt)?,
-                    before_sha256: &self.cache.sha256,
+                    before_sha256: &old_cache.as_ref().unwrap_or(&self.cache).sha256,
                     after_sha256: &after_sha256,
                     cursor_sha256: &cursor_sha256,
                 },
@@ -115,11 +142,21 @@ impl ManualIngress {
             let next_sequence = self
                 .next_sequence
                 .checked_add(1)
-                .ok_or(HistoryError::Capacity)?;
-            if item.sequence != self.next_sequence
+                .ok_or(HistoryError::CommitInvariant)?;
+            if item.sequence != self.next_sequence {
+                return Err(HistoryError::CommitInvariant);
+            }
+            if bytes > crate::MANUAL_BYTES {
+                return Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualHistoryCapacity,
+                ));
+            }
+            if self.pending.len() >= crate::MANUAL_COMMANDS
                 || bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)
             {
-                return Err(HistoryError::Capacity);
+                return Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualBackpressure,
+                ));
             }
             Ok((item, bytes, next_sequence, after_sha256))
         })();
@@ -136,16 +173,214 @@ impl ManualIngress {
             }
             Err(error) => {
                 self.encoder.finish_history_check(false);
-                self.cache.rollback(patches);
+                if let Some(cache) = old_cache {
+                    self.cache = cache;
+                } else if let Some(patches) = patches {
+                    self.cache.rollback(patches);
+                }
                 delta.rollback(state);
-                let reason = match error {
-                    HistoryError::MutationRefused(reason) => reason,
-                    _ => CoreMutationRefusal::ManualBackpressure,
-                };
+                let reason = preparation_failure(&error);
                 manual_refusal(&command, reason)
             }
         }
     }
+}
+
+fn preparation_failure(error: &HistoryError) -> CoreMutationRefusal {
+    match error {
+        HistoryError::MutationRefused(reason) => *reason,
+        HistoryError::CaptureChanged
+        | HistoryError::StaleExpectation
+        | HistoryError::SaveInProgress
+        | HistoryError::BarrierInvariant
+        | HistoryError::CommitInvariant
+        | HistoryError::Capacity
+        | HistoryError::Encoding
+        | HistoryError::Corrupt
+        | HistoryError::Disconnected => CoreMutationRefusal::ManualHistoryUnavailable,
+    }
+}
+
+pub(super) fn execute_admitted(
+    state: &mut CoreState,
+    attachment: AttachmentState,
+    command: Command,
+    admission: &mut dyn crate::HistoryAdmission,
+    source_bytes: u64,
+) -> Event {
+    if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {
+        return execute_actor_command(state, attachment, command);
+    }
+    let mut change = CandidateChange::begin(state, &command);
+    let event = execute_actor_command(state, attachment, command.clone());
+    if !matches!(
+        event,
+        Event::DocumentChanged {
+            journal_command: Some(_),
+            ..
+        }
+    ) {
+        change.rollback(state);
+        return event;
+    }
+    match admission
+        .check_history(&state.history())
+        .and_then(|floor| change.install_floor(state, floor, Some(source_bytes)))
+    {
+        Ok(()) => {
+            admission.finish_history_check(true);
+            event
+        }
+        Err(error) => {
+            admission.finish_history_check(false);
+            change.rollback(state);
+            manual_refusal(&command, preparation_failure(&error))
+        }
+    }
+}
+
+// A rare floor moves the old state here. Rollback restores it before undoing
+// the command, including caches and discarded Undo documents, without copying it.
+struct CandidateChange {
+    command: CandidateDelta,
+    before_floor: Option<CoreState>,
+    floor_moved: bool,
+}
+impl CandidateChange {
+    fn begin(state: &mut CoreState, command: &Command) -> Self {
+        Self {
+            command: CandidateDelta::begin(state, command),
+            before_floor: None,
+            floor_moved: false,
+        }
+    }
+    fn install_floor(
+        &mut self,
+        state: &mut CoreState,
+        floor: Option<crate::ResolvedHistory>,
+        source_bytes: Option<u64>,
+    ) -> Result<(), HistoryError> {
+        let Some(floor) = floor else { return Ok(()) };
+        let selected = floor.snapshot();
+        if selected.floor_offset < state.floor_offset
+            || selected.document != state.document
+            || selected
+                .floor_offset
+                .checked_add(selected.batches.len() as u64)
+                != state.floor_offset.checked_add(state.batches.len() as u64)
+        {
+            return Err(HistoryError::CommitInvariant);
+        }
+        let moving = selected.floor_offset > state.floor_offset;
+        if !moving {
+            if !state.history_matches(selected) {
+                return Err(HistoryError::CommitInvariant);
+            }
+            if !keeps_checked_layout(state, &floor) {
+                let after = checked_state(state, floor, false);
+                self.before_floor = Some(std::mem::replace(state, after));
+            }
+            return Ok(());
+        }
+        let next_epoch = state
+            .history_epoch
+            .checked_add(1)
+            .ok_or(HistoryError::Capacity)?;
+        let pending_source = if let Some(source_bytes) = source_bytes {
+            let source = crate::OrdinaryFloorSource {
+                history: tight_history(state.history()),
+                selected_offset: selected.floor_offset,
+            };
+            if source.retained_bytes()? > source_bytes {
+                return Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualHistoryUnavailable,
+                ));
+            }
+            // Check intrinsic preparation failures before promising that an
+            // acknowledgement can make room for this exact command.
+            if state.ordinary_floor_source.is_some() {
+                return Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualBackpressure,
+                ));
+            }
+            Some(Arc::new(source))
+        } else {
+            None
+        };
+        if state.pending_floor.is_some() {
+            return Err(HistoryError::MutationRefused(
+                CoreMutationRefusal::ManualBackpressure,
+            ));
+        }
+        let mut after = checked_state(state, floor, true);
+        after.ordinary_floor_source = pending_source;
+        after.history_epoch = next_epoch;
+        self.floor_moved = true;
+        self.before_floor = Some(std::mem::replace(state, after));
+        Ok(())
+    }
+    fn rollback(self, state: &mut CoreState) {
+        if let Some(before) = self.before_floor {
+            *state = before;
+        }
+        self.command.rollback(state);
+    }
+}
+
+// A proof's document geometry and replay vector capacities bound the actor's
+// actual allocations too. Otherwise adopt those allocations; never discount the
+// holder's spare capacity when measuring real resident memory.
+fn keeps_checked_layout(state: &CoreState, proof: &crate::ResolvedHistory) -> bool {
+    let history = proof.snapshot();
+    Arc::ptr_eq(&state.baseline, &history.baseline)
+        && Arc::ptr_eq(&state.document, &history.document)
+        && state.undo.len() == history.cursor.undo.len()
+        && state.redo.len() == history.cursor.redo.len()
+        && state
+            .undo
+            .iter()
+            .chain(&state.redo)
+            .zip(history.cursor.undo.iter().chain(&history.cursor.redo))
+            .all(|(live, checked)| Arc::ptr_eq(&live.document, &checked.document))
+        && state.batches.capacity() <= proof.checkpoint.batches_capacity
+        && state.undo.capacity() <= proof.checkpoint.undo_capacity
+        && state.redo.capacity() <= proof.checkpoint.redo_capacity
+        && state.op_log.capacity() <= state.op_log.len().saturating_mul(2).max(4)
+}
+fn checked_state(state: &mut CoreState, proof: crate::ResolvedHistory, moving: bool) -> CoreState {
+    let mut after = CoreState::adopt_resolved(proof);
+    after.history_epoch = state.history_epoch;
+    after.revision = state.revision;
+    after.next_floor_id = state.next_floor_id;
+    if !moving {
+        after.pending_floor.clone_from(&state.pending_floor);
+        after
+            .ordinary_floor_source
+            .clone_from(&state.ordinary_floor_source);
+    }
+    after.identity_effects.clone_from(&state.identity_effects);
+    after
+}
+fn tight_history(mut history: crate::HistorySnapshot) -> crate::HistorySnapshot {
+    let mut documents = std::collections::HashMap::new();
+    let mut compact = |document: &mut Arc<Document>| {
+        let address = Arc::as_ptr(document) as usize;
+        let tight = documents
+            .entry(address)
+            .or_insert_with(|| Arc::new((**document).clone()));
+        *document = Arc::clone(tight);
+    };
+    compact(&mut history.baseline);
+    compact(&mut history.document);
+    for entry in history
+        .cursor
+        .undo
+        .iter_mut()
+        .chain(&mut history.cursor.redo)
+    {
+        compact(&mut entry.document);
+    }
+    history
 }
 
 struct EntryHead {
@@ -409,6 +644,10 @@ struct HistoryPatch {
 }
 impl HistoryJson {
     fn new(state: &CoreState) -> Result<Self, HistoryError> {
+        #[cfg(test)]
+        if tests::cache_failure(1) {
+            return Err(HistoryError::Encoding);
+        }
         if state.batches.len() > HISTORY_COMMANDS {
             return Err(HistoryError::Capacity);
         }
@@ -451,6 +690,10 @@ impl HistoryJson {
         undo_prefix: usize,
         redo_prefix: usize,
     ) -> Result<HistoryPatch, HistoryError> {
+        #[cfg(test)]
+        if tests::cache_failure(2) {
+            return Err(HistoryError::Encoding);
+        }
         if state.batches.len() > HISTORY_COMMANDS {
             return Err(HistoryError::Capacity);
         }
@@ -649,17 +892,35 @@ mod tests {
         records: Arc<Mutex<Vec<Record>>>,
         refusal: Arc<AtomicUsize>,
     }
-    impl ManualHistoryEncoder for Encoder {
-        fn check_history(&mut self, _: &HistorySnapshot) -> Result<(), HistoryError> {
+    impl crate::HistoryAdmission for Encoder {
+        fn check_history(
+            &mut self,
+            history: &HistorySnapshot,
+        ) -> Result<Option<crate::ResolvedHistory>, HistoryError> {
             if self.refusal.load(Ordering::Relaxed) == 5 {
                 Err(HistoryError::MutationRefused(
                     CoreMutationRefusal::ManualHistoryCapacity,
                 ))
+            } else if self.refusal.load(Ordering::Relaxed) >= 9 {
+                Err(match self.refusal.load(Ordering::Relaxed) {
+                    9 => HistoryError::Encoding,
+                    10 => HistoryError::Corrupt,
+                    11 => HistoryError::StaleExpectation,
+                    12 => HistoryError::SaveInProgress,
+                    _ => HistoryError::Capacity,
+                })
+            } else if self.refusal.load(Ordering::Relaxed) >= 6 && history.batches.len() > 1 {
+                let selected = crate::HistoryTransition::floor_after(history, 1)?;
+                crate::HistoryTransport::capture(&selected)?
+                    .resolve_verified()
+                    .map(Some)
             } else {
-                Ok(())
+                Ok(None)
             }
         }
         fn finish_history_check(&mut self, _: bool) {}
+    }
+    impl ManualHistoryEncoder for Encoder {
         fn encode(
             &self,
             sequence: u64,
@@ -682,10 +943,10 @@ mod tests {
                     CoreMutationRefusal::ManualInputRequired,
                 ));
             }
-            if mode == 4 {
+            if mode == 4 || mode == 6 {
                 return Err(HistoryError::Capacity);
             }
-            let envelope = if mode == 3 {
+            let envelope = if mode == 3 || mode == 7 {
                 vec![255; crate::MANUAL_BYTES]
             } else {
                 serde_json::to_vec(&record).unwrap()
@@ -706,11 +967,11 @@ mod tests {
         refusal: Arc<AtomicUsize>,
     }
     impl Harness {
-        fn new(state: CoreState) -> Self {
+        fn new(mut state: CoreState) -> Self {
             let records = Arc::new(Mutex::new(Vec::new()));
             let refusal = Arc::new(AtomicUsize::new(0));
             let ingress = ManualIngress::new(
-                &state,
+                &mut state,
                 1,
                 Box::new(Encoder {
                     records: Arc::clone(&records),
@@ -843,6 +1104,192 @@ mod tests {
             self.ingress.pending.clear();
             self.ingress.bytes = 0;
         }
+    }
+
+    thread_local! { static CACHE_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    pub(super) fn cache_failure(kind: u8) -> bool {
+        CACHE_FAILURE.with(|value| value.get() == kind)
+    }
+    fn with_cache_failure<T>(kind: u8, run: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CACHE_FAILURE.with(|v| v.set(0));
+            }
+        }
+        CACHE_FAILURE.with(|value| {
+            assert_eq!(value.replace(kind), 0);
+        });
+        let _reset = Reset;
+        run()
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the failure matrix proves rollback of the same cache, cursor and queue"
+    )]
+    fn s2h_manual_preparation_failures_are_final_and_transactional() {
+        let mut harness = Harness::new(CoreState::new(Document::default(), TimelineRevision(0)));
+        accepted(&harness.run(add_track(1)));
+        accepted(&harness.run(Command::Do(lock(false))));
+        accepted(&harness.run(Command::Do(lock(true))));
+        for mode in [2, 4, 6, 9, 10, 11, 12, 13] {
+            harness.refusal.store(mode, Ordering::Relaxed);
+            for _ in 0..2 {
+                assert!(
+                    matches!(
+                        harness.run(Command::Do(lock(false))),
+                        Event::MutationRefused {
+                            reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                            ..
+                        }
+                    ),
+                    "NON_QUEUE_FAILURE_IS_FINAL mode={mode}"
+                );
+                harness.acknowledge();
+            }
+        }
+        for mode in [9, 10, 11, 12, 13] {
+            harness.refusal.store(mode, Ordering::Relaxed);
+            let mut policy = Encoder {
+                records: Arc::clone(&harness.records),
+                refusal: Arc::clone(&harness.refusal),
+            };
+            let before = harness.state.history();
+            assert!(
+                matches!(
+                    execute_admitted(
+                        &mut harness.state,
+                        AttachmentState::Live,
+                        Command::Do(lock(false)),
+                        &mut policy,
+                        96 << 20
+                    ),
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                        ..
+                    }
+                ),
+                "GENERIC_ADMISSION_FAILURE_IS_FINAL"
+            );
+            assert_eq!(harness.state.history(), before);
+        }
+        harness.refusal.store(8, Ordering::Relaxed);
+        let mut policy = Encoder {
+            records: Arc::clone(&harness.records),
+            refusal: Arc::clone(&harness.refusal),
+        };
+        let before = harness.state.history();
+        assert!(
+            matches!(
+                execute_admitted(
+                    &mut harness.state,
+                    AttachmentState::Live,
+                    Command::Do(lock(false)),
+                    &mut policy,
+                    0
+                ),
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                    ..
+                }
+            ),
+            "INTRINSIC_SOURCE_WINDOW_FAILURE_IS_FINAL"
+        );
+        assert_eq!(harness.state.history(), before);
+        harness.refusal.store(0, Ordering::Relaxed);
+        with_cache_failure(2, || {
+            assert!(matches!(
+                harness.run(Command::Do(lock(false))),
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                    ..
+                }
+            ));
+            harness.acknowledge();
+            assert!(matches!(
+                harness.run(Command::Do(lock(false))),
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                    ..
+                }
+            ));
+        });
+        harness.refusal.store(8, Ordering::Relaxed);
+        with_cache_failure(1, || {
+            assert!(
+                matches!(
+                    harness.run(Command::Do(lock(false))),
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                        ..
+                    }
+                ),
+                "FLOOR_CACHE_REBUILD_FAILURE_IS_FINAL"
+            );
+        });
+        harness.refusal.store(0, Ordering::Relaxed);
+        harness.state.history_epoch += 1;
+        let before = harness.state.history();
+        let cache = harness.ingress.cache.clone();
+        with_cache_failure(1, || {
+            assert!(
+                matches!(
+                    harness.ingress.execute(
+                        &mut harness.state,
+                        AttachmentState::Live,
+                        Command::Do(lock(false))
+                    ),
+                    Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                        ..
+                    }
+                ),
+                "EPOCH_CACHE_REBUILD_FAILURE_IS_FINAL"
+            );
+            assert_eq!(harness.state.history(), before);
+            assert_eq!(harness.ingress.cache, cache);
+        });
+        accepted(&harness.run(Command::Do(lock(false))));
+        harness.acknowledge();
+        for _ in 0..crate::MANUAL_COMMANDS {
+            accepted(&harness.run(Command::Redo));
+        }
+        harness.refusal.store(3, Ordering::Relaxed);
+        assert!(
+            matches!(
+                harness.run(Command::Do(lock(true))),
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualHistoryCapacity,
+                    ..
+                }
+            ),
+            "OWN_MESSAGE_SIZE_IS_FINAL_EVEN_WHEN_COUNT_WINDOW_IS_FULL"
+        );
+    }
+
+    #[test]
+    fn s2h_cached_floor_rolls_back_late_encoding_and_queue_refusals() {
+        let mut harness = Harness::new(CoreState::new(Document::default(), TimelineRevision(0)));
+        accepted(&harness.run(add_track(1)));
+        accepted(&harness.run(Command::Do(lock(false))));
+        accepted(&harness.run(Command::Do(lock(true))));
+        for mode in [6, 7] {
+            harness.refusal.store(mode, Ordering::Relaxed);
+            assert!(matches!(
+                harness.run(Command::Do(lock(false))),
+                Event::MutationRefused {
+                    reason,
+                    ..
+                } if reason == if mode == 6 { CoreMutationRefusal::ManualHistoryUnavailable } else { CoreMutationRefusal::ManualHistoryCapacity }
+            ));
+        }
+        harness.refusal.store(8, Ordering::Relaxed);
+        accepted(&harness.run(Command::Do(lock(false))));
+        assert_eq!(harness.state.floor_offset, 1);
+        harness.refusal.store(0, Ordering::Relaxed);
+        accepted(&harness.run(Command::Do(lock(true))));
     }
 
     fn add_track(id: u64) -> Command {
@@ -1054,6 +1501,83 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_pending_floor_backpressure_clears_on_settlement() {
+        let mut harness = Harness::new(CoreState::new(Document::default(), TimelineRevision(0)));
+        accepted(&harness.run(add_track(1)));
+        accepted(&harness.run(Command::Do(lock(false))));
+        accepted(&harness.run(Command::Do(lock(true))));
+        harness.acknowledge();
+        let before = harness.state.history();
+        let revision = harness.state.revision;
+        let transition = crate::HistoryTransition::floor(before.clone(), 1).unwrap();
+        let ticket = harness
+            .state
+            .begin_floor(ActorIdentity(77), &transition)
+            .unwrap();
+        harness.refusal.store(8, Ordering::Relaxed);
+        let mut policy = Encoder {
+            records: Arc::clone(&harness.records),
+            refusal: Arc::clone(&harness.refusal),
+        };
+        let epoch = harness.state.history_epoch;
+        harness.state.history_epoch = u64::MAX;
+        assert!(matches!(
+            execute_admitted(
+                &mut harness.state,
+                AttachmentState::Live,
+                Command::Do(lock(false)),
+                &mut policy,
+                96 << 20
+            ),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                ..
+            }
+        ));
+        assert_eq!(harness.state.history(), before);
+        assert_eq!(harness.state.revision, revision);
+        assert_eq!(harness.state.history_epoch, u64::MAX);
+        harness.state.history_epoch = epoch;
+        for (budget, reason) in [
+            (0, CoreMutationRefusal::ManualHistoryUnavailable),
+            (96 << 20, CoreMutationRefusal::ManualBackpressure),
+        ] {
+            assert!(matches!(
+                execute_admitted(&mut harness.state, AttachmentState::Live, Command::Do(lock(false)), &mut policy, budget),
+                Event::MutationRefused { reason: actual, .. } if actual == reason
+            ));
+            assert_eq!(harness.state.history(), before);
+            assert_eq!(harness.state.revision, revision);
+        }
+        harness.state.settle_floor(ticket, false).unwrap();
+        accepted(&execute_admitted(
+            &mut harness.state,
+            AttachmentState::Live,
+            Command::Do(lock(false)),
+            &mut policy,
+            96 << 20,
+        ));
+        assert_eq!(harness.state.floor_offset, 1);
+        let before = harness.state.history();
+        let revision = harness.state.revision;
+        assert!(matches!(
+            execute_admitted(
+                &mut harness.state,
+                AttachmentState::Live,
+                Command::Do(lock(true)),
+                &mut policy,
+                0
+            ),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualHistoryUnavailable,
+                ..
+            }
+        ));
+        assert_eq!(harness.state.history(), before);
+        assert_eq!(harness.state.revision, revision);
+    }
+
+    #[test]
     fn s2h_cached_history_rejects_exact_byte_limit_then_accepts() {
         let mut bounded = BoundedJson::new(16);
         assert!(serde_json::to_writer(&mut bounded, &"x".repeat(128)).is_err());
@@ -1070,7 +1594,7 @@ mod tests {
         assert!(matches!(
             harness.run(drag(false, &key)),
             Event::MutationRefused {
-                reason: CoreMutationRefusal::ManualBackpressure,
+                reason: CoreMutationRefusal::ManualHistoryUnavailable,
                 ..
             }
         ));

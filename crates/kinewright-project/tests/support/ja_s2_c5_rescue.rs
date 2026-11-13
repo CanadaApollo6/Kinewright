@@ -882,29 +882,37 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
         let selection = session.preview_rescue(capture, profile.clone()).unwrap();
         assert!(selection.removed_undo() > 0);
         assert!(selection.omissions().is_empty());
-        let ordinary = (0..=before.batches.len())
-            .find_map(|cut| {
+        let policy =
+            kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&profile)
+                .unwrap();
+        let fitting: Vec<_> = (0..before.batches.len())
+            .filter_map(|cut| {
                 let candidate = if cut == 0 {
                     before.clone()
                 } else {
-                    kinewright_core::HistoryTransition::floor(before.clone(), cut)
-                        .ok()?
-                        .after()
-                        .clone()
+                    kinewright_core::HistoryTransition::floor_after(&before, cut).ok()?
                 };
-                let cost =
-                    kinewright_project::bundle_commit::history_cost_probe(&candidate, &profile)
-                        .ok()?;
-                (candidate.encoded_bytes().ok()? <= profile.branch_history_bytes
-                    && cost <= profile.branch_history_bytes
-                    && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
-                        &candidate, &profile,
-                    )
-                    .ok()?
-                        <= profile.branch_history_bytes)
-                    .then_some(candidate)
+                policy.check(&candidate).is_ok().then_some(candidate)
             })
+            .collect();
+        let first = fitting
+            .first()
             .expect("independent earliest legal fitting floor");
+        let depth = first
+            .cursor
+            .undo
+            .len()
+            .saturating_sub(first.cursor.undo.len().div_ceil(8))
+            .max(1);
+        let ordinary = if first.floor_offset == before.floor_offset {
+            first.clone()
+        } else {
+            fitting
+                .iter()
+                .find(|cut| cut.cursor.undo.len() <= depth)
+                .unwrap_or(first)
+                .clone()
+        };
         let missing = selection.consent();
         let inspection = session.inspect_rescue_destination(&b).unwrap();
         assert!(session.rescue(selection, &missing, &inspection).is_err());

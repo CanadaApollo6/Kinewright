@@ -67,6 +67,14 @@ pub struct ProjectAttachment {
     authority: kinewright_core::CoreAttachment<ProjectHistoryProof>,
 }
 impl ProjectAttachment {
+    pub(crate) fn acknowledge_ordinary_floor(
+        &self,
+        source: std::sync::Arc<kinewright_core::OrdinaryFloorSource>,
+    ) -> Result<(), HistoryError> {
+        self.authority
+            .acknowledge_ordinary_floor(&ProjectHistoryProof, source)
+    }
+
     pub(crate) fn new(core: &Core) -> Result<Self, HistoryError> {
         core.history_save_owner(&ProjectHistoryProof)
             .map(|authority| Self {
