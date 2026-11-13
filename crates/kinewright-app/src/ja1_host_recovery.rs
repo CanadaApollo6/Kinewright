@@ -397,6 +397,7 @@ impl HostAttachment {
         self.manual = Some(super::super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit: completed.permit,
+            edits: crate::manual_edits::ManualEdits::default(),
         });
         self.cut = None;
         self.unknown_operation = false;

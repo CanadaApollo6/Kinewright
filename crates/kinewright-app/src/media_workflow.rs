@@ -1240,8 +1240,8 @@ impl KinewrightApp {
                             .into();
                     return;
                 }
-                if self.projects[project_index]
-                    .send_manual_command(Command::DoIfRevision {
+                if let Err(error) =
+                    self.projects[project_index].send_manual_command(Command::DoIfRevision {
                         expected: intent.expected_revision,
                         operation: intent.operation,
                         // `IN1b` §4 rule 3: a foreign send, which does not
@@ -1249,10 +1249,10 @@ impl KinewrightApp {
                         // outstanding apply alone when this one conflicts.
                         token: None,
                     })
-                    .is_err()
                 {
                     // Appendix B row 84.
-                    self.note_actor_stopped(
+                    self.note_manual_send_error(
+                        error,
                         subject,
                         "Core actor stopped while applying patched source edit",
                     );
@@ -1483,19 +1483,19 @@ impl KinewrightApp {
             candidate,
             allow_unverified_source,
         };
-        if self.projects[project_index]
-            .send_manual_command(Command::DoIfRevision {
+        if let Err(error) =
+            self.projects[project_index].send_manual_command(Command::DoIfRevision {
                 expected: expected_revision,
                 operation,
                 // `IN1b` §4 rule 3: this send does not correlate yet.
                 token: None,
             })
-            .is_err()
         {
             // Appendix B row 90.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Asset(asset_id),
-                format!("Core actor stopped while relinking in {project_name}"),
+                &format!("Core actor stopped while relinking in {project_name}"),
             );
         } else {
             self.status = format!("Relinking asset {asset_id}…");
@@ -2256,12 +2256,12 @@ impl KinewrightApp {
             );
             return;
         }
-        if self.projects[project_index]
-            .send_manual_command(Command::DoBatch(batch.operations))
-            .is_err()
+        if let Err(error) =
+            self.projects[project_index].send_manual_command(Command::DoBatch(batch.operations))
         {
             // Appendix B row 102.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::LutAsset(lut_asset),
                 "Core actor stopped while registering the look",
             );
@@ -3154,6 +3154,11 @@ mod tests {
         let response = edit_response(&pending, MediaAvailabilityKind::OnlineVerified);
         app.pending_source_edit = Some(pending);
         app.complete_pending_source_edit_revalidation(&response);
+        app.projects[0]
+            .ja1
+            .as_mut()
+            .unwrap()
+            .settle_manual_for_test();
         let after = core.export_history().unwrap();
         assert_eq!(
             after.batches.len(),
@@ -3211,6 +3216,11 @@ mod tests {
         for (offset, id) in [7, 8, 9].into_iter().enumerate() {
             crate::app::in1_tests::in1_drain_core(&mut app, 0);
             app.add_asset_to_timeline_for(0, AssetId(id));
+            app.projects[0]
+                .ja1
+                .as_mut()
+                .unwrap()
+                .settle_manual_for_test();
             assert_eq!(
                 core.export_history().unwrap().batches.len(),
                 offset + 2,
@@ -3228,6 +3238,11 @@ mod tests {
             },
         });
         app.recover_stranded_ab_hold(&egui::Context::default());
+        app.projects[0]
+            .ja1
+            .as_mut()
+            .unwrap()
+            .settle_manual_for_test();
         assert_eq!(
             core.export_history().unwrap().batches.len(),
             5,

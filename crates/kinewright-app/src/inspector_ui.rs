@@ -904,15 +904,15 @@ impl KinewrightApp {
             "{}#{gesture}",
             look_ab_coalesce_key(record.clip, record.effect)
         );
-        if self.projects[index]
-            .send_manual_command(kinewright_core::Command::DoBatchCoalesced {
+        if let Err(error) =
+            self.projects[index].send_manual_command(kinewright_core::Command::DoBatchCoalesced {
                 operations: vec![ab_hold_restore_operation(record)],
                 coalesce_key,
             })
-            .is_err()
         {
             // Appendix B row 63.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Clip(record.clip),
                 "Core actor stopped while releasing the A/B hold",
             );

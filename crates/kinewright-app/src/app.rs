@@ -1086,6 +1086,15 @@ impl KinewrightApp {
         if !action.keeps_identity() && self.refuse_unkept_voice(self.focused_project) {
             return;
         }
+        if self
+            .focused()
+            .ja1
+            .as_ref()
+            .is_some_and(crate::ja1_attachment::Ja1Attachment::manual_edits_pending)
+        {
+            self.status = crate::manual_edits::PENDING_WORDS.into();
+            return;
+        }
         let session = self.focused_mut();
         if session.ja1_job.is_some() {
             return;
@@ -2686,8 +2695,9 @@ impl KinewrightApp {
             }) = dialog.cached
             {
                 let command = motion_plan_apply_command(planned_revision, operations);
-                if self.projects[project].send_manual_command(command).is_err() {
-                    self.note_actor_stopped(
+                if let Err(error) = self.projects[project].send_manual_command(command) {
+                    self.note_manual_send_error(
+                        error,
                         IncidentSubject::Clip(dialog.clip),
                         "Core actor stopped while applying the planned move",
                     );
@@ -2716,6 +2726,33 @@ impl KinewrightApp {
         true
     }
 
+    /// Called after widgets submit the release frame, never before them in the background poll.
+    pub(crate) fn finish_manual_frame(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.pointer.any_down()) {
+            for project in &mut self.projects {
+                if let Some(attachment) = &mut project.ja1 {
+                    attachment.end_manual_gestures();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn note_manual_send_error(
+        &mut self,
+        error: crate::manual_edits::ManualSendError,
+        subject: IncidentSubject,
+        stopped: &str,
+    ) {
+        match error {
+            crate::manual_edits::ManualSendError::Disconnected => {
+                self.note_actor_stopped(subject, stopped);
+            }
+            other @ crate::manual_edits::ManualSendError::PendingCapacity => {
+                self.status = other.to_string();
+            }
+        }
+    }
+
     pub(crate) fn send_operation(&mut self, operation: Operation) {
         if self.refuse_ja1_manual_edit() {
             return;
@@ -2732,12 +2769,12 @@ impl KinewrightApp {
         // a stopped actor is not that operation's problem — it is the whole
         // document's, and a second stopped send must not open a second
         // incident (Appendix B row 12).
-        if self
-            .focused()
+        if let Err(error) = self
+            .focused_mut()
             .send_manual_command(Command::Do(operation))
-            .is_err()
         {
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Project,
                 "Core actor stopped while applying the edit",
             );
@@ -2982,16 +3019,16 @@ impl KinewrightApp {
         // planned against one revision must not land on another (rule 9).
         // The token is what the conflict is matched by (`IN1b` §4 rule 6).
         let token = self.next_command_token();
-        if self.projects[project_index]
-            .send_manual_command(Command::DoIfRevision {
+        if let Err(error) =
+            self.projects[project_index].send_manual_command(Command::DoIfRevision {
                 expected: revision,
                 operation,
                 token: Some(token),
             })
-            .is_err()
         {
             // Appendix B row 14.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Project,
                 "Core actor stopped while applying the edit",
             );
@@ -3157,8 +3194,13 @@ impl KinewrightApp {
                 self.stash_refused_if_eligible(project_index, &observation, op);
                 self.note_observation(observation);
             }
-            Event::MutationRefused { token, .. } => self.drop_router_send(project_index, *token),
-            Event::UndoBlockedBySave { .. }
+            Event::MutationRefused { reason, token }
+                if *reason != kinewright_core::CoreMutationRefusal::ManualBackpressure =>
+            {
+                self.drop_router_send(project_index, *token);
+            }
+            Event::MutationRefused { .. }
+            | Event::UndoBlockedBySave { .. }
             | Event::BatchRejected { .. }
             | Event::QueryResult(_) => {}
         }
@@ -3326,16 +3368,16 @@ impl KinewrightApp {
         }
         let expected = self.projects[project_index].revision;
         let token = self.next_command_token();
-        if self.projects[project_index]
-            .send_manual_command(Command::DoIfRevision {
+        if let Err(error) =
+            self.projects[project_index].send_manual_command(Command::DoIfRevision {
                 expected,
                 operation,
                 token: Some(token),
             })
-            .is_err()
         {
             // Appendix B row 15.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Project,
                 "Core actor stopped while applying the edit",
             );
@@ -3358,13 +3400,13 @@ impl KinewrightApp {
         if count == 0 {
             return;
         }
-        if self
-            .focused()
+        if let Err(error) = self
+            .focused_mut()
             .send_manual_command(Command::DoBatch(operations))
-            .is_err()
         {
             // Appendix B row 16.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Project,
                 "Core actor stopped while applying the edit batch",
             );
@@ -3375,6 +3417,9 @@ impl KinewrightApp {
 
     /// Open a new live-gesture identity and return it.
     pub(crate) fn begin_edit_gesture(&mut self) -> u64 {
+        if let Some(attachment) = &mut self.focused_mut().ja1 {
+            attachment.end_manual_gestures();
+        }
         self.edit_gesture = self.edit_gesture.wrapping_add(1);
         self.edit_gesture
     }
@@ -3401,16 +3446,16 @@ impl KinewrightApp {
         if count == 0 {
             return;
         }
-        if self
-            .focused()
+        if let Err(error) = self
+            .focused_mut()
             .send_manual_command(Command::DoBatchCoalesced {
                 operations,
                 coalesce_key,
             })
-            .is_err()
         {
             // Appendix B row 17.
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Project,
                 "Core actor stopped while applying the live edit",
             );
@@ -3423,9 +3468,13 @@ impl KinewrightApp {
         if self.refuse_ja1_manual_edit() {
             return;
         }
-        if self.focused().send_manual_command(Command::Undo).is_err() {
+        if let Err(error) = self.focused_mut().send_manual_command(Command::Undo) {
             // Appendix B row 18.
-            self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while undoing");
+            self.note_manual_send_error(
+                error,
+                IncidentSubject::Project,
+                "Core actor stopped while undoing",
+            );
         } else {
             "Undo".clone_into(&mut self.status);
         }
@@ -3435,9 +3484,13 @@ impl KinewrightApp {
         if self.refuse_ja1_manual_edit() {
             return;
         }
-        if self.focused().send_manual_command(Command::Redo).is_err() {
+        if let Err(error) = self.focused_mut().send_manual_command(Command::Redo) {
             // Appendix B row 19.
-            self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while redoing");
+            self.note_manual_send_error(
+                error,
+                IncidentSubject::Project,
+                "Core actor stopped while redoing",
+            );
         } else {
             "Redo".clone_into(&mut self.status);
         }
@@ -3519,12 +3572,12 @@ impl KinewrightApp {
                     self.projects[project_index]
                         .pending_timeline_adds
                         .push(asset.id);
-                    if self.projects[project_index]
+                    if let Err(error) = self.projects[project_index]
                         .send_manual_command(Command::Do(Operation::AddAsset { asset }))
-                        .is_err()
                     {
                         // Appendix B row 21.
-                        self.note_actor_stopped(
+                        self.note_manual_send_error(
+                            error,
                             IncidentSubject::Project,
                             "Core actor stopped while importing media",
                         );
@@ -3746,7 +3799,9 @@ impl KinewrightApp {
                 // `note_core_event_for_router`, including the conflict note
                 // `reconcile_router_sends` reads (review-final B1).
                 Event::MutationRefused { reason, .. } => {
-                    self.release_lut_import_reservation(project_index);
+                    if reason != kinewright_core::CoreMutationRefusal::ManualBackpressure {
+                        self.release_lut_import_reservation(project_index);
+                    }
                     self.status = self.projects[project_index]
                         .ja1
                         .as_ref()
@@ -3836,6 +3891,14 @@ impl KinewrightApp {
             ctx.request_repaint_after(Duration::from_millis(10));
         }
         self.sync_studio_selection();
+        if let Some(message) = self
+            .focused()
+            .ja1
+            .as_ref()
+            .and_then(crate::ja1_attachment::Ja1Attachment::manual_edit_message)
+        {
+            self.status = message.into();
+        }
     }
 
     /// Review B (UI blocking): run `work` (an agent-lane request, which may
@@ -4272,6 +4335,7 @@ impl eframe::App for KinewrightApp {
             }
             ui.ctx().request_repaint();
         }
+        self.finish_manual_frame(ui.ctx());
         self.finalize_preview(ui.ctx());
         let picture_present = self.program_picture().is_some();
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
@@ -9171,6 +9235,19 @@ pub(crate) mod in1_tests {
             app.pending_router_applies.len(),
             1,
             "the incident is AutoApply, so the router sends once"
+        );
+        let token = app.pending_router_applies[0].token;
+        app.note_core_event_for_router(
+            0,
+            &Event::MutationRefused {
+                reason: kinewright_core::CoreMutationRefusal::ManualBackpressure,
+                token: Some(token),
+            },
+        );
+        assert_eq!(
+            app.pending_router_applies.len(),
+            1,
+            "MANUAL_RETRY_CORRELATION"
         );
         let incident_id = app.pending_router_applies[0].incident;
         assert_eq!(
@@ -16903,6 +16980,11 @@ pub(crate) mod ja_observe {
         frame_index: usize,
     ) -> Result<serde_json::Value, String> {
         use crate::presenter::paint_support::Pass;
+        app.focused_mut()
+            .ja1
+            .as_mut()
+            .ok_or("manual frame attachment missing")?
+            .settle_manual_for_test();
         let core = app.focused().core.clone();
         let local = core.export_history().map_err(|e| e.to_string())?;
         let attachment = app
@@ -17610,6 +17692,11 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         assert!(!attachment.is_dirty());
 
         app.send_operation(operation(dirty_named));
+        app.focused_mut()
+            .ja1
+            .as_mut()
+            .unwrap()
+            .settle_manual_for_test();
         let accepted_history = core.export_history().unwrap();
         assert_eq!(accepted_history.batches.len(), before.batches.len() + 1);
         assert_eq!(accepted_history.document.tracks[0].sync_lock, dirty_named);
@@ -17712,6 +17799,11 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
     app.send_operations_coalesced(vec![operation()], "c9-live".into());
     app.undo();
     app.redo();
+    app.projects[0]
+        .ja1
+        .as_mut()
+        .unwrap()
+        .settle_manual_for_test();
     let before = core.export_history().unwrap();
     assert_eq!(
         before.batches.len(),
@@ -17728,18 +17820,17 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
     app.send_operations_coalesced(vec![operation()], "c9-live".into());
     app.undo();
     app.redo();
+    let expected = app.projects[0].revision;
     app.projects[0]
         .send_manual_command(Command::DoIfRevision {
-            expected: app.projects[0].revision,
+            expected,
             operation: operation(),
             token: Some(CommandToken(900)),
         })
         .unwrap();
+    let expected = app.projects[0].revision;
     app.projects[0]
-        .send_manual_command(motion_plan_apply_command(
-            app.projects[0].revision,
-            vec![operation()],
-        ))
+        .send_manual_command(motion_plan_apply_command(expected, vec![operation()]))
         .unwrap();
     let asset = MediaAsset {
         id: AssetId(700),
@@ -17756,6 +17847,11 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
     app.projects[0]
         .send_manual_command(Command::Do(Operation::AddAsset { asset }))
         .unwrap();
+    app.projects[0]
+        .ja1
+        .as_mut()
+        .unwrap()
+        .settle_manual_for_test();
     assert_eq!(
         core.export_history().unwrap(),
         history,

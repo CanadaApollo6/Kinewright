@@ -147,10 +147,11 @@ enum Choice {
 pub(crate) struct ManualProducerGate {
     actor: kinewright_core::ActorIdentity,
     permit: kinewright_core::ManualPermit,
+    edits: crate::manual_edits::ManualEdits,
 }
 impl ManualProducerGate {
-    pub fn send(&self, command: Command) -> Result<(), kinewright_core::CoreDisconnected> {
-        self.permit.send(command)
+    pub fn send(&mut self, command: Command) -> Result<(), crate::manual_edits::ManualSendError> {
+        self.edits.submit(command, &self.permit)
     }
 }
 
@@ -282,6 +283,9 @@ impl Ja1Attachment {
         self.destinations = self.owner.retained_destinations().unwrap_or_default();
     }
     pub fn is_dirty(&self) -> bool {
+        if self.manual_edits_pending() {
+            return true;
+        }
         if self.retention_lost {
             return true;
         }
@@ -332,6 +336,9 @@ impl Ja1Attachment {
 
     pub fn destination_change(&self) -> Result<(), BundleError> {
         self.require_retention()?;
+        if self.manual_edits_pending() {
+            return Err(BundleError::Unsettled);
+        }
         if let Some(host) = &self.host {
             if let Some(disclosure) = &host.status.destination_change {
                 return Err(BundleError::Identity(disclosure.clone()));
@@ -348,7 +355,10 @@ impl Ja1Attachment {
         }
         if let Some(host) = &self.host {
             let mut text = host.status.close_disclosure.clone();
-            if host.pending_count() > 0 {
+            if self.manual_edits_pending() {
+                text.push_str(" A hand edit's final value is still waiting to be applied. It is kept only in this window and is not Saved. Wait for it to land, or explicitly discard it before closing.");
+            }
+            if !self.manual_edits_pending() && host.pending_count() > 0 {
                 text.push_str(" Manual edits are still waiting for a durable acknowledgement. Closing can discard this pending work; it is not Saved.");
             }
             return text;
@@ -374,6 +384,11 @@ impl Ja1Attachment {
     )]
     pub fn apply(&mut self, action: Action) -> Result<(), BundleError> {
         self.require_retention()?;
+        if self.manual_edits_pending() {
+            self.message = crate::manual_edits::PENDING_WORDS.into();
+            return Err(BundleError::Unsettled);
+        }
+        self.end_manual_gestures();
         match &action {
             Action::StudioManualPlayback(document) => {
                 // A failure is reported once, with the scope it tried: an
@@ -641,11 +656,46 @@ impl Ja1Attachment {
         }
     }
 
-    pub fn send_manual(&self, command: Command) -> Result<(), kinewright_core::CoreDisconnected> {
-        if let Some(gate) = self.host.as_ref().and_then(|host| host.manual.as_ref()) {
+    pub fn send_manual(
+        &mut self,
+        command: Command,
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
+        if let Some(gate) = self.host.as_mut().and_then(|host| host.manual.as_mut()) {
             gate.send(command)
         } else {
-            self.owner.core().send(command)
+            self.owner.core().send(command).map_err(Into::into)
+        }
+    }
+    pub(crate) fn manual_edits_pending(&self) -> bool {
+        self.host
+            .as_ref()
+            .and_then(|h| h.manual.as_ref())
+            .is_some_and(|g| g.edits.pending())
+    }
+    pub(crate) fn manual_edit_message(&self) -> Option<&str> {
+        if self.retention_lost || self.frozen {
+            return None;
+        }
+        self.host.as_ref()?.manual.as_ref()?.edits.message()
+    }
+    pub(crate) fn end_manual_gestures(&mut self) {
+        if let Some(gate) = self.host.as_mut().and_then(|h| h.manual.as_mut()) {
+            gate.edits.end_gestures();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn settle_manual_for_test(&mut self) {
+        self.end_manual_gestures();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self.manual_edits_pending() {
+            let gate = self.host.as_mut().unwrap().manual.as_mut().unwrap();
+            gate.edits.collect_ready();
+            gate.edits.start_next(&gate.permit);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "MANUAL_ACCEPTANCE_BOUND"
+            );
+            std::thread::yield_now();
         }
     }
     #[cfg(test)]
@@ -917,18 +967,30 @@ impl Ja1Attachment {
             host.manual = Some(ManualProducerGate {
                 actor: self.owner.core().actor_identity(),
                 permit,
+                edits: crate::manual_edits::ManualEdits::default(),
             });
             host.cut = None;
             host.accept_status(reply.status);
-            host.manual
+            // This authority-installation step already runs on the action worker. Its fresh
+            // permit has no pending prefix: confirm the local installation before announcing it.
+            let event = host
+                .manual
                 .as_ref()
                 .ok_or(BundleError::HistoryChanged)?
-                .send(Command::Do(media_edit.unwrap_or_else(|| {
+                .permit
+                .request(Command::Do(media_edit.unwrap_or_else(|| {
                     kinewright_core::Operation::AddAsset {
                         asset: asset.clone(),
                     }
                 })))
                 .map_err(|_| BundleError::HistoryChanged)?;
+            match event {
+                Event::DocumentChanged { .. } => {}
+                Event::MutationRefused { reason, .. } => {
+                    return Err(BundleError::CoreMutationRefused(reason));
+                }
+                _ => return Err(BundleError::HistoryChanged),
+            }
             if is_import {
                 self.imported_media = Some(asset.id);
             }
@@ -1094,7 +1156,7 @@ impl Ja1Attachment {
             .as_mut()
             .expect("attached host")
             .poll(&mut self.owner);
-        match result {
+        let changed = match result {
             Ok(Some(reply)) => {
                 let _ = self
                     .accept_host_reply(reply)
@@ -1103,6 +1165,7 @@ impl Ja1Attachment {
             }
             Ok(None) => false,
             Err(error) => {
+                let unapplied = self.manual_edits_pending();
                 self.host_request_failed(&error);
                 if self.retention_lost {
                     return true;
@@ -1117,9 +1180,16 @@ impl Ja1Attachment {
                 if let Err(cause) = recovery {
                     self.message = format!("Recovery remains paused: {error}; {cause}");
                 }
+                if unapplied {
+                    self.message.push_str(" Unapplied hand edits have not been saved. Check the document and repeat those edits after recovery.");
+                }
                 true
             }
+        };
+        if let Some(gate) = self.host.as_mut().and_then(|h| h.manual.as_mut()) {
+            gate.edits.start_next(&gate.permit);
         }
+        changed
     }
 
     /// Finish source persistence and request Shutdown without joining native owners.
@@ -1972,3 +2042,7 @@ impl Ja1Attachment {
         host.manual = None;
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "manual_value_tests.rs"]
+mod manual_value_tests;

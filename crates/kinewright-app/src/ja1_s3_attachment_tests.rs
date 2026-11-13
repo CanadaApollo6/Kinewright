@@ -10,11 +10,13 @@ fn s3_confirm_host_death_enters_l2_before_replacement() {
             locked: false,
         }))
         .unwrap();
+        app.settle_manual_for_test();
         app.send_manual(Command::Do(Operation::SetTrackSyncLock {
             track: TrackId(1),
             locked: true,
         }))
         .unwrap();
+        app.settle_manual_for_test();
         let actor = app.owner.core().actor_identity();
         let save_proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
         assert!(app.apply(Action::Save).is_err());
@@ -114,6 +116,7 @@ fn s3_chat_status_reply_loss_keeps_pending_manual_work() {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     let before = app.owner.core().export_history().unwrap();
     assert!(app.host.as_ref().unwrap().pending_count() > 0);
     let child = app.host.as_ref().unwrap().child_id();

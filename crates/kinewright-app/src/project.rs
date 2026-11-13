@@ -807,19 +807,19 @@ impl ProjectSession {
     }
 
     pub(crate) fn send_manual_command(
-        &self,
+        &mut self,
         command: kinewright_core::Command,
-    ) -> Result<(), kinewright_core::CoreDisconnected> {
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
         if self.checkpoint_recovery.is_some()
             || self.ja1_activation.is_some()
             || self.studio.selection.is_some()
         {
-            return Err(kinewright_core::CoreDisconnected);
+            return Err(crate::manual_edits::ManualSendError::Disconnected);
         }
-        if let Some(attachment) = &self.ja1 {
+        if let Some(attachment) = &mut self.ja1 {
             attachment.send_manual(command)
         } else {
-            self.core.send(command)
+            self.core.send(command).map_err(Into::into)
         }
     }
     pub(crate) fn ja1_read_only(&self) -> bool {

@@ -622,7 +622,7 @@ fn end_to_end(live: bool) {
     );
     assert!(app.focused().studio.selection.is_none(), "E2E_CURRENT_EDIT");
     // The person's edit goes through the host's manual gate, as the UI does.
-    app.focused()
+    app.focused_mut()
         .send_manual_command(Command::Do(Operation::AddTrack {
             track: Track {
                 id: TrackId(100),
@@ -701,7 +701,7 @@ fn end_to_end(live: bool) {
                 .map(|clip| (track.id, clip.timeline_start))
         })
         .unwrap();
-    app.focused()
+    app.focused_mut()
         .send_manual_command(Command::Do(Operation::MoveClip {
             clip: drawn_clip,
             to_track: track,
@@ -1047,7 +1047,7 @@ fn s3_c11_current_edit_plays_host_attached() {
         .unwrap()
         .clips[0]
         .id;
-    app.focused()
+    app.focused_mut()
         .send_manual_command(Command::Do(Operation::SetClipEnabled {
             clip,
             enabled: false,

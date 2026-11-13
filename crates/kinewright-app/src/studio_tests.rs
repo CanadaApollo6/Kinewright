@@ -822,7 +822,7 @@ fn s3_failed_edit_copy_keeps_frozen_selection() {
     );
     assert_eq!(app.focused().core.actor_identity(), before);
     assert!(
-        app.focused()
+        app.focused_mut()
             .send_manual_command(Command::Do(Operation::AddTrack {
                 track: Track {
                     id: TrackId(99),

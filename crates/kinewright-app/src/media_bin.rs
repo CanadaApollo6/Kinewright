@@ -114,11 +114,11 @@ impl KinewrightApp {
             // MO1 R25: a still lands as a 5 s freeze with the R10 fit baked in.
             match still_placement_operations(&self.projects[project_index].document, &asset) {
                 Ok(operations) => {
-                    if self.projects[project_index]
+                    if let Err(error) = self.projects[project_index]
                         .send_manual_command(kinewright_core::Command::DoBatch(operations))
-                        .is_err()
                     {
-                        self.note_actor_stopped(
+                        self.note_manual_send_error(
+                            error,
                             IncidentSubject::Asset(asset.id),
                             "Core actor stopped while adding a still",
                         );
@@ -161,11 +161,11 @@ impl KinewrightApp {
             at: clip_start,
             source: TimeCode::ZERO..asset.duration,
         };
-        if self.projects[project_index]
+        if let Err(error) = self.projects[project_index]
             .send_manual_command(kinewright_core::Command::Do(operation))
-            .is_err()
         {
-            self.note_actor_stopped(
+            self.note_manual_send_error(
+                error,
                 IncidentSubject::Asset(asset_id),
                 "Core actor stopped while adding media",
             );
@@ -181,11 +181,11 @@ impl KinewrightApp {
     ) -> bool {
         match audio_video_placement_operations(&self.projects[project_index].document, asset) {
             Ok(operations) => {
-                if self.projects[project_index]
+                if let Err(error) = self.projects[project_index]
                     .send_manual_command(kinewright_core::Command::DoBatch(operations))
-                    .is_err()
                 {
-                    self.note_actor_stopped(
+                    self.note_manual_send_error(
+                        error,
                         IncidentSubject::Asset(asset.id),
                         "Core actor stopped while adding A/V media",
                     );

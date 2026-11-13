@@ -44,6 +44,13 @@ enum SwitchState {
     Pending,
 }
 
+#[cfg_attr(
+    all(test, target_os = "linux"),
+    allow(
+        clippy::struct_excessive_bools,
+        reason = "The fourth flag is a test-only publication gate; production state is unchanged"
+    )
+)]
 pub(super) struct HostAttachment {
     issuer: Option<kinewright_agent::writer_host::HostIssuer>,
     hook_inflight: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
@@ -82,6 +89,8 @@ pub(super) struct HostAttachment {
     last_heartbeat: Instant,
     pub manual: Option<super::ManualProducerGate>,
     manual_client: String,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) manual_publication_hold: bool,
     manual_inflight:
         Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
 }
@@ -225,6 +234,7 @@ impl HostAttachment {
         self.manual = Some(super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit,
+            edits: crate::manual_edits::ManualEdits::default(),
         });
         self.client = self.client.with_manual_editor(self.manual_client.clone());
         self.cut = None;
@@ -400,6 +410,8 @@ impl HostAttachment {
             last_heartbeat: Instant::now(),
             manual: None,
             manual_client,
+            #[cfg(all(test, target_os = "linux"))]
+            manual_publication_hold: false,
             manual_inflight: None,
         })
     }
@@ -471,6 +483,8 @@ impl HostAttachment {
             .as_str()
             .ok_or(BundleError::HistoryChanged)?
             .to_owned(),
+            #[cfg(all(test, target_os = "linux"))]
+            manual_publication_hold: false,
             manual_inflight: None,
         })
     }
@@ -563,6 +577,7 @@ impl HostAttachment {
         self.manual = Some(super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit,
+            edits: crate::manual_edits::ManualEdits::default(),
         });
         self.pending_operation = None;
         self.unknown_operation = false;
@@ -605,7 +620,7 @@ impl HostAttachment {
         Ok(())
     }
     pub fn accept_manual_ack(
-        &self,
+        &mut self,
         reply: &HostReply,
         owner: &Ja1EditingSession,
     ) -> Result<(), BundleError> {
@@ -618,6 +633,9 @@ impl HostAttachment {
                     .permit,
                 reply.manual_ack.clone(),
             )?;
+            if let Some(gate) = &mut self.manual {
+                gate.edits.acknowledged();
+            }
         }
         Ok(())
     }
@@ -952,7 +970,6 @@ impl HostAttachment {
             || self.cut.is_some()
             || self.status.frozen
             || self.status.choice.is_some()
-            || self.pending_count() >= kinewright_core::MANUAL_COMMANDS
     }
 
     pub fn manual_save_required(&self) -> bool {
@@ -970,6 +987,17 @@ impl HostAttachment {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<Option<HostReply>, BundleError> {
+        if let Some(gate) = &mut self.manual {
+            gate.edits.collect_ready();
+            // Do not put a UI query behind this frame's pure-Core acceptance work.
+            if gate.edits.attempt_running() {
+                return Ok(None);
+            }
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if self.manual_publication_hold {
+            return Ok(None);
+        }
         if self
             .hook_inflight
             .as_ref()
@@ -1182,7 +1210,18 @@ impl HostAttachment {
     #[allow(clippy::too_many_lines)]
     pub fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let pending = self.pending_count();
+        let pending = if self
+            .manual
+            .as_ref()
+            .is_some_and(|g| g.edits.attempt_running())
+        {
+            0
+        } else {
+            self.pending_count()
+        };
+        if let Some(message) = self.manual.as_ref().and_then(|g| g.edits.message()) {
+            ui.label(message);
+        }
         if pending > 0 {
             ui.label(format!("{pending} manual edits pending durable save. Preview is local; these edits are not Saved yet."));
         }
