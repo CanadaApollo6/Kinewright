@@ -1092,6 +1092,7 @@ impl KinewrightApp {
             pending.begin_gesture();
         }
         if crate::inspector_ui::is_live_drag(response)
+            && crate::inspector_ui::gesture_value_changed(response)
             && let Some(pointer) = response.interact_pointer_pos()
             && let Some((origin, start, scaling)) = ui.data(|data| data.get_temp(memory))
         {
@@ -1103,7 +1104,20 @@ impl KinewrightApp {
                 scaling,
             };
             let operations = transform_drag_operations(clip, *effect, *local, start, drag);
-            pending.extend_live(operations, format!("transform_drag:{}", clip.id.0));
+            let unchanged = clip
+                .effects
+                .iter()
+                .find(|fx| fx.id == *effect)
+                .is_some_and(|fx| {
+                    operations.iter().all(|operation| {
+                        crate::inspector_ui::effect_value_matches(fx, operation, *local)
+                    })
+                });
+            pending.extend_live_value(
+                operations,
+                format!("transform_drag:{}", clip.id.0),
+                unchanged,
+            );
         }
         self.submit_inspector_edits(pending);
     }
@@ -1283,11 +1297,13 @@ impl KinewrightApp {
         if let Some(drag) = self.matte_overlay.drag()
             && drag.target == context.target
             && (response.dragged() || response.drag_stopped())
+            && crate::inspector_ui::gesture_value_changed(response)
             && let Some(pointer) = response.interact_pointer_pos()
         {
             let next =
                 crate::matte_overlay_ui::drag_to_params(&drag, pointer, context.frame(image_rect));
-            if next != context.matte.windows[drag.window] {
+            {
+                let unchanged = next == context.matte.windows[drag.window];
                 let operations = matte_window_drag_operations(
                     context.target.clip,
                     context.target.effect,
@@ -1295,7 +1311,7 @@ impl KinewrightApp {
                     drag.hit,
                     &next,
                 );
-                edits.extend_live(
+                edits.extend_live_value(
                     operations,
                     matte_gesture_coalesce_key(
                         drag.hit,
@@ -1303,6 +1319,7 @@ impl KinewrightApp {
                         context.target.effect,
                         drag.window,
                     ),
+                    unchanged,
                 );
             }
         }

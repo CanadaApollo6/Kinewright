@@ -104,7 +104,7 @@ impl<'a> MixerChain<'a> {
         match self {
             Self::Bus(bus) => edits.bus(bus).gain_curve = curve,
             Self::Master(master) => edits.master(master).gain_curve = curve,
-            Self::Track(_, mix) => edits.track(mix).gain_curve = curve,
+            Self::Track(_, mix) => *edits.track_gain_curve(mix) = curve,
         }
     }
 
@@ -1123,7 +1123,7 @@ pub(crate) fn set_automation_curve(
         AutomationTarget::Fader => chain.set_gain_curve(edits, curve),
         AutomationTarget::TrackParameter(_) => {
             if let MixerChain::Track(_, mix) = chain {
-                edits.track(mix).pan_curve = curve;
+                *edits.track_pan_curve(mix) = curve;
             }
         }
         AutomationTarget::Node(effect, name) => {
@@ -1353,7 +1353,9 @@ pub(crate) fn mixer_parameter_control(
             if response.drag_started() {
                 edits.begin_gesture();
             }
-            if response.changed() && edited != value {
+            if crate::inspector_ui::relative_value_changed(&response)
+                && (is_live_drag(&response) || edited != value)
+            {
                 if let Some(target) = chain.effect_mut(edits, effect.id) {
                     target
                         .parameters

@@ -20,9 +20,16 @@ CASES = {
     'retry-correlation': (APP+'app.rs', 'app::in1_tests::in1b_the_routers_own_rejected_send_is_dropped_not_left_outstanding', 'MANUAL_RETRY_CORRELATION'),
     'retry-reservation': (APP+'app.rs', PREFIX+'manual_value_final_drag_is_saved_and_one_undo', 'MANUAL_RETRY_RESERVATION'),
     'recovery-unaccepted': (APP+'manual_edits.rs', PREFIX+'manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits', 'MANUAL_RECOVERY_DROPS_UNACCEPTED'),
-    'send-time-ack': (APP+'manual_edits.rs', PREFIX+'manual_value_fix1_acknowledgement_during_attempt_is_not_lost', 'MANUAL_SEND_TIME_ACKNOWLEDGEMENT'),
+    'send-time-ack': (APP+'manual_edits.rs', 'manual_edits::tests::refusal_collected_after_curing_ack_retries_without_another_ack', 'ASTRA_MISSED_WAKEUP'),
     'poll-attempt': (APP+'ja1_host.rs', PREFIX+'manual_value_fix1_poll_keeps_publication_behind_attempt', 'MANUAL_POLL_WAIT_FOR_ATTEMPT'),
     'notice-job': (APP+'app.rs', PREFIX+'manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits', 'MANUAL_NOTICE_DURING_PREVIEW'),
+    'accepted-undo-replay': (APP+'manual_edits.rs', 'manual_edits::tests::accepted_command_never_replayed_by_extra_acks_or_polls', 'UNDO_MUST_EXECUTE_EXACTLY_ONCE'),
+    'widget-return': (APP+'color_wheel_widget.rs', 'inspector_ui::manual_gesture_tests::manual_widget_return_queued_has_no_edit_or_undo', 'WIDGET_RETURN_QUEUED_FINAL'),
+    'widget-partial-return': (APP+'color_wheel_widget.rs', 'inspector_ui::manual_gesture_tests::manual_widget_partial_return_keeps_every_owned_channel', 'WIDGET_PARTIAL_RETURN_ZERO_CHANNEL'),
+    'queued-return-no-undo': (APP+'manual_edits.rs', 'inspector_ui::manual_gesture_tests::manual_widget_return_queued_has_no_edit_or_undo', 'WIDGET_RETURN_QUEUED_CLEARS_BEFORE_ACK'),
+    'in-flight-return': (APP+'manual_edits.rs', 'inspector_ui::manual_gesture_tests::manual_widget_return_in_flight_follows_the_accepted_excursion', 'WIDGET_RETURN_IN_FLIGHT_FINAL'),
+    'slider-return': (APP+'inspector_ui.rs', 'inspector_ui::manual_gesture_tests::native_slider_return_and_relative_release_preserve_intent', 'SLIDER_EQUAL_RAIL_RELEASE_IS_INTENT'),
+    'curve-return': (APP+'curve_editor_widget.rs', 'inspector_ui::manual_gesture_tests::curve_widget_emits_its_complete_return_to_the_document', 'CURVE_EQUAL_RETURN_IS_INTENT'),
 }
 
 def mutate(name, source):
@@ -51,6 +58,26 @@ def mutate(name, source):
     elif name == 'send-time-ack':
         before = 'action.waiting_at = Some(flight.acknowledgement);'
         after = 'action.waiting_at = Some(self.acknowledgement);'
+    elif name == 'accepted-undo-replay':
+        before = '                    action.accepted = Some(flight.command.command);'
+        after = before + '\n                    action.latest = action.accepted.take().map(|command| PendingValue { command, unchanged_at: None });'
+    elif name in ('widget-return', 'widget-partial-return'):
+        before = '                        response.changes.push((channel, value));'
+        after = ('                        if value != state.values.channel(channel) {\n'
+                 '                            response.changes.push((channel, value));\n'
+                 '                        }')
+    elif name == 'queued-return-no-undo':
+        before = '.and_then(|v| v.unchanged_at)'
+        after = '.and_then(|v| v.unchanged_at.filter(|_| false))'
+    elif name == 'in-flight-return':
+        before = '.is_none_or(|accepted| accepted <= revision)'
+        after = '.is_none_or(|_| true)'
+    elif name == 'slider-return':
+        before = '            || (response.enabled() && response.drag_stopped() && writes.get() > 1)'
+        after = '            || false'
+    elif name == 'curve-return':
+        before = '            response.points = Some(moved);'
+        after = '            if moved != points { response.points = Some(moved); }'
     elif name == 'poll-attempt':
         before = '        if self.edits.attempt_running() {\n            return Ok(None);\n        }'
         after = '        if false && self.edits.attempt_running() {\n            return Ok(None);\n        }'

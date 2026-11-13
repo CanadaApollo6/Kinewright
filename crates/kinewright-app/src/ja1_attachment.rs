@@ -716,13 +716,34 @@ impl Ja1Attachment {
         &mut self,
         command: Command,
     ) -> Result<(), crate::manual_edits::ManualSendError> {
+        self.send_manual_value(command, None)
+    }
+
+    pub(crate) fn send_manual_value(
+        &mut self,
+        command: Command,
+        unchanged_at: Option<kinewright_core::TimelineRevision>,
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
         if let Some(host) = self.host.as_mut()
             && let Some(gate) = host.manual.as_ref()
         {
-            host.edits.submit(command, &gate.permit)
+            if let Some(revision) = unchanged_at {
+                host.edits
+                    .submit_value(command, Some(revision), &gate.permit)
+            } else {
+                host.edits.submit(command, &gate.permit)
+            }
         } else {
             self.owner.core().send(command).map_err(Into::into)
         }
+    }
+    pub(crate) fn desired_solid_color(
+        &self,
+        clip: kinewright_core::ClipId,
+    ) -> Option<kinewright_core::SolidColor> {
+        self.host
+            .as_ref()
+            .and_then(|host| host.edits.desired_solid_color(clip))
     }
     pub(crate) fn manual_edits_pending(&self) -> bool {
         self.host.as_ref().is_some_and(|host| host.edits.pending())

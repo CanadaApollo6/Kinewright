@@ -3458,6 +3458,15 @@ impl KinewrightApp {
         operations: Vec<Operation>,
         coalesce_key: String,
     ) {
+        self.send_coalesced_value(operations, coalesce_key, false);
+    }
+
+    pub(crate) fn send_coalesced_value(
+        &mut self,
+        operations: Vec<Operation>,
+        coalesce_key: String,
+        matches_document: bool,
+    ) {
         if self.refuse_ja1_manual_edit() {
             return;
         }
@@ -3465,13 +3474,14 @@ impl KinewrightApp {
         if count == 0 {
             return;
         }
-        if let Err(error) = self
-            .focused_mut()
-            .send_manual_command(Command::DoBatchCoalesced {
+        let unchanged_at = matches_document.then_some(self.focused().revision);
+        if let Err(error) = self.focused_mut().send_manual_value(
+            Command::DoBatchCoalesced {
                 operations,
                 coalesce_key,
-            })
-        {
+            },
+            unchanged_at,
+        ) {
             // Appendix B row 17.
             self.note_manual_send_error(
                 error,

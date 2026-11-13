@@ -50,6 +50,8 @@ pub(crate) const LOOK_INCIDENT_CODE: IncidentCode = IncidentCode::Label(LabelInc
 pub(crate) struct InspectorEdits {
     operations: Vec<Operation>,
     coalesce_key: Option<String>,
+    /// All controls owned by this complete live batch equal the accepted document.
+    matches_document: bool,
     /// Set on the frame a drag begins so the app opens a fresh gesture
     /// identity. Without it a second drag over the same control would merge
     /// into the previous drag's undo entry.
@@ -148,6 +150,7 @@ impl InspectorEdits {
     /// Record a discrete edit. Discrete edits are never coalesced.
     pub(crate) fn push(&mut self, operation: Operation) {
         self.coalesce_key = None;
+        self.matches_document = false;
         self.operations.push(operation);
     }
 
@@ -156,13 +159,27 @@ impl InspectorEdits {
         self.operations.extend(operations);
         if self.operations.len() != before {
             self.coalesce_key = None;
+            self.matches_document = false;
         }
     }
 
     /// Record one frame of a live control gesture.
+    #[cfg(test)]
     pub(crate) fn push_live(&mut self, operation: Operation, coalesce_key: String) {
+        self.push_live_value(operation, coalesce_key, false);
+    }
+
+    pub(crate) fn push_live_value(
+        &mut self,
+        operation: Operation,
+        coalesce_key: String,
+        unchanged: bool,
+    ) {
         if self.operations.is_empty() {
             self.coalesce_key = Some(coalesce_key);
+            self.matches_document = unchanged;
+        } else {
+            self.matches_document &= unchanged;
         }
         self.operations.push(operation);
     }
@@ -170,15 +187,28 @@ impl InspectorEdits {
     /// Record one frame of a live control gesture that needs several
     /// operations to express a single value, such as a speed change that also
     /// retimes the linked audio.
+    #[cfg(test)]
     pub(crate) fn extend_live(
         &mut self,
         operations: impl IntoIterator<Item = Operation>,
         coalesce_key: String,
     ) {
+        self.extend_live_value(operations, coalesce_key, false);
+    }
+
+    pub(crate) fn extend_live_value(
+        &mut self,
+        operations: impl IntoIterator<Item = Operation>,
+        coalesce_key: String,
+        unchanged: bool,
+    ) {
         let before = self.operations.len();
         self.operations.extend(operations);
         if before == 0 && self.operations.len() != before {
             self.coalesce_key = Some(coalesce_key);
+            self.matches_document = unchanged;
+        } else if self.operations.len() != before {
+            self.matches_document &= unchanged;
         }
     }
 
@@ -795,6 +825,79 @@ pub(crate) fn is_live_drag(slider: &egui::Response) -> bool {
     slider.dragged() || slider.drag_stopped()
 }
 
+/// Egui compares with the accepted value. A drag can return to it while an older
+/// requested value is still queued, so movement and release also carry intent.
+pub(crate) fn gesture_value_changed(response: &egui::Response) -> bool {
+    response.changed()
+        || (response.enabled()
+            && is_live_drag(response)
+            && (response.drag_stopped() || response.drag_delta() != egui::Vec2::ZERO))
+}
+
+/// Relative `DragValue` calls its setter on movement, not on an unchanged release.
+/// Its release-frame input is document readback, not a new requested value.
+pub(crate) fn relative_value_changed(response: &egui::Response) -> bool {
+    response.changed()
+        || (response.enabled() && response.dragged() && response.drag_delta() != egui::Vec2::ZERO)
+}
+
+/// Only an already identical key is redundant; matching its interpolated
+/// value must not discard the creation of an automation point.
+pub(crate) fn effect_value_matches(effect: &Effect, operation: &Operation, at: TimeCode) -> bool {
+    match operation {
+        Operation::SetEffectParam {
+            name,
+            value: kinewright_core::ParamValue::Integer(value),
+            ..
+        } => {
+            effect.integer_parameter_at(name, at).or_else(|| {
+                kinewright_core::effect_descriptor(&effect.name)
+                    .and_then(|descriptor| descriptor.parameter(name))
+                    .map(|parameter| parameter.neutral)
+            }) == Some(*value)
+        }
+        Operation::UpsertEffectKeyframe { name, key, .. } => effect
+            .keyframes
+            .get(name)
+            .is_some_and(|curve| curve.keyframes.iter().any(|stored| stored == key)),
+        _ => false,
+    }
+}
+
+/// A native slider's rail can write the accepted value without `changed()`;
+/// its relative readout does not write on release. Preserve that distinction.
+pub(crate) fn intent_slider<'value, N: egui::emath::Numeric + 'value>(
+    value: &'value mut N,
+    range: std::ops::RangeInclusive<N>,
+    configure: impl for<'slider> FnOnce(egui::Slider<'slider>) -> egui::Slider<'slider> + 'value,
+) -> impl egui::Widget + 'value {
+    move |ui: &mut egui::Ui| {
+        let writes = std::cell::Cell::new(0usize);
+        let range = range.start().to_f64()..=range.end().to_f64();
+        let slider = egui::Slider::from_get_set(range, |next| {
+            if let Some(next) = next {
+                writes.set(writes.get() + 1);
+                *value = N::from_f64(next);
+            }
+            value.to_f64()
+        });
+        let slider = if N::INTEGRAL {
+            slider.integer()
+        } else {
+            slider
+        };
+        let mut response = ui.add(configure(slider));
+        // Slider's Always clamping writes once before processing input. A
+        // second write on release is the rail's desired value, not readback.
+        if relative_value_changed(&response)
+            || (response.enabled() && response.drag_stopped() && writes.get() > 1)
+        {
+            response.mark_changed();
+        }
+        response
+    }
+}
+
 impl KinewrightApp {
     /// Route one inspector frame's edits to the core actor.
     pub(crate) fn submit_inspector_edits(&mut self, edits: InspectorEdits) {
@@ -852,7 +955,11 @@ impl KinewrightApp {
             match edits.coalesce_key {
                 Some(key) => {
                     let gesture = self.edit_gesture();
-                    self.send_operations_coalesced(edits.operations, format!("{key}#{gesture}"));
+                    self.send_coalesced_value(
+                        edits.operations,
+                        format!("{key}#{gesture}"),
+                        edits.matches_document,
+                    );
                 }
                 None => self.send_operations(edits.operations),
             }
@@ -1050,18 +1157,22 @@ impl KinewrightApp {
         ui.add_space(space::TWO);
         ui.strong("Speed");
         let mut speed_percent = clip.speed_percent;
-        let speed = ui.add(
-            egui::Slider::new(&mut speed_percent, 10..=1000)
-                .integer()
-                .custom_formatter(|value, _| format!("{:.2}x", value / 100.0))
-                .custom_parser(|text| {
-                    text.trim()
-                        .trim_end_matches(['x', 'X'])
-                        .parse::<f64>()
-                        .ok()
-                        .map(|value| value * 100.0)
-                }),
-        );
+        let speed = ui.add(crate::inspector_ui::intent_slider(
+            &mut speed_percent,
+            10..=1000,
+            |slider| {
+                slider
+                    .integer()
+                    .custom_formatter(|value, _| format!("{:.2}x", value / 100.0))
+                    .custom_parser(|text| {
+                        text.trim()
+                            .trim_end_matches(['x', 'X'])
+                            .parse::<f64>()
+                            .ok()
+                            .map(|value| value * 100.0)
+                    })
+            },
+        ));
         if speed.drag_started() {
             pending.begin_gesture();
         }
@@ -1078,7 +1189,8 @@ impl KinewrightApp {
                 speed_percent,
             ) {
                 Ok(operations) if is_live_drag(&speed) => {
-                    pending.extend_live(operations, speed_coalesce_key(clip.id));
+                    let unchanged = operations.iter().all(|operation| matches!(operation, Operation::SetClipSpeed { clip, speed_percent } if self.focused().document.clip(*clip).is_some_and(|c| c.speed_percent == *speed_percent)));
+                    pending.extend_live_value(operations, speed_coalesce_key(clip.id), unchanged);
                 }
                 Ok(operations) => pending.extend(operations),
                 // Appendix B row 64.
@@ -1102,14 +1214,18 @@ impl KinewrightApp {
             let mut gain_tenth_db = audio_clip.audio_gain_tenth_db;
             let mut fade_in_frames = audio_clip.audio_fade_in_frames.0;
             let mut fade_out_frames = audio_clip.audio_fade_out_frames.0;
-            let gain = ui.add(
-                egui::Slider::new(&mut gain_tenth_db, -600..=120)
-                    .text("Gain")
-                    .integer()
-                    .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0))
-                    .custom_parser(crate::mixer_ui::parse_gain_db)
-                    .update_while_editing(false),
-            );
+            let gain = ui.add(crate::inspector_ui::intent_slider(
+                &mut gain_tenth_db,
+                -600..=120,
+                |slider| {
+                    slider
+                        .text("Gain")
+                        .integer()
+                        .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0))
+                        .custom_parser(crate::mixer_ui::parse_gain_db)
+                        .update_while_editing(false)
+                },
+            ));
             if gain.drag_started() {
                 pending.begin_gesture();
             }
@@ -1120,23 +1236,25 @@ impl KinewrightApp {
                 });
             }
             let mut changed = gain.changed();
+            let mut live = is_live_drag(&gain);
             ui.horizontal(|ui| {
                 ui.label("Fade in");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut fade_in_frames)
-                            .range(0..=duration.saturating_sub(fade_out_frames))
-                            .suffix(" f"),
-                    )
-                    .changed();
+                let fade_in = ui.add(
+                    egui::DragValue::new(&mut fade_in_frames)
+                        .range(0..=duration.saturating_sub(fade_out_frames))
+                        .suffix(" f"),
+                );
                 ui.label("Fade out");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut fade_out_frames)
-                            .range(0..=duration.saturating_sub(fade_in_frames))
-                            .suffix(" f"),
-                    )
-                    .changed();
+                let fade_out = ui.add(
+                    egui::DragValue::new(&mut fade_out_frames)
+                        .range(0..=duration.saturating_sub(fade_in_frames))
+                        .suffix(" f"),
+                );
+                if fade_in.drag_started() || fade_out.drag_started() {
+                    pending.begin_gesture();
+                }
+                changed |= relative_value_changed(&fade_in) || relative_value_changed(&fade_out);
+                live |= is_live_drag(&fade_in) || is_live_drag(&fade_out);
             });
             if audio_clip.audio_gain_tenth_db != 0
                 || audio_clip.audio_fade_in_frames != TimeCode::ZERO
@@ -1163,15 +1281,19 @@ impl KinewrightApp {
             let differs = gain_tenth_db != audio_clip.audio_gain_tenth_db
                 || fade_in_frames != audio_clip.audio_fade_in_frames.0
                 || fade_out_frames != audio_clip.audio_fade_out_frames.0;
-            if changed && differs {
+            if changed && (live || differs) {
                 let operation = clip_audio_operation(
                     audio_clip.id,
                     gain_tenth_db,
                     fade_in_frames,
                     fade_out_frames,
                 );
-                if is_live_drag(&gain) {
-                    pending.push_live(operation, audio_gain_coalesce_key(audio_clip.id));
+                if live {
+                    pending.push_live_value(
+                        operation,
+                        audio_gain_coalesce_key(audio_clip.id),
+                        !differs,
+                    );
                 } else {
                     pending.push(operation);
                 }
@@ -1288,7 +1410,12 @@ impl KinewrightApp {
         let playhead_local = clip_playhead_local(clip, self.focused().position);
         clip_enable_header(ui, &document, clip, playhead_local, &mut pending);
         if let Some(color) = solid {
-            solid_color_row(ui, clip.id, color, &mut pending);
+            let desired = self
+                .focused()
+                .ja1
+                .as_ref()
+                .and_then(|attachment| attachment.desired_solid_color(clip.id));
+            solid_color_row(ui, clip.id, color, desired, &mut pending);
         }
         let availability = &self.focused().lut_availability;
         let qc_clipping = self.color_qc.node_clipping();
@@ -1450,19 +1577,25 @@ impl KinewrightApp {
             ("fade_out_frames", "Fade out", title.fade_out_frames.0),
         ] {
             let mut value = current;
-            if ui
-                .add(
-                    egui::Slider::new(&mut value, 0..=maximum)
-                        .text(label)
-                        .integer(),
-                )
-                .changed()
-            {
-                pending.push(title_param_operation(
-                    clip.id,
-                    name,
-                    ParamValue::Integer(value),
-                ));
+            let slider = ui.add(crate::inspector_ui::intent_slider(
+                &mut value,
+                0..=maximum,
+                |slider| slider.text(label).integer(),
+            ));
+            if slider.drag_started() {
+                pending.begin_gesture();
+            }
+            if slider.changed() {
+                let operation = title_param_operation(clip.id, name, ParamValue::Integer(value));
+                if is_live_drag(&slider) {
+                    pending.push_live_value(
+                        operation,
+                        format!("title_param:{}:{name}", clip.id.0),
+                        value == current,
+                    );
+                } else {
+                    pending.push(operation);
+                }
             }
         }
         let clip_duration = title_document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
@@ -1501,7 +1634,7 @@ impl KinewrightApp {
                 ui.text_edit_singleline(&mut draft.1)
             })
             .inner;
-        let mut pending = Vec::new();
+        let mut pending = InspectorEdits::default();
         if response.lost_focus() && draft.1 != marker.label {
             pending.push(marker_param_operation(
                 marker.id,
@@ -1525,21 +1658,28 @@ impl KinewrightApp {
             ));
         }
         let mut position = marker.position.0;
-        if ui
-            .add(
-                egui::DragValue::new(&mut position)
-                    .range(0..=i64::MAX)
-                    .prefix("Frame "),
-            )
-            .changed()
-        {
-            pending.push(marker_param_operation(
-                marker.id,
-                "position",
-                ParamValue::Integer(position),
-            ));
+        let response = ui.add(
+            egui::DragValue::new(&mut position)
+                .range(0..=i64::MAX)
+                .prefix("Frame "),
+        );
+        if response.drag_started() {
+            pending.begin_gesture();
         }
-        self.send_operations(pending);
+        if relative_value_changed(&response) {
+            let operation =
+                marker_param_operation(marker.id, "position", ParamValue::Integer(position));
+            if is_live_drag(&response) {
+                pending.push_live_value(
+                    operation,
+                    format!("marker_position:{}", marker.id.0),
+                    position == marker.position.0,
+                );
+            } else {
+                pending.push(operation);
+            }
+        }
+        self.submit_inspector_edits(pending);
     }
 }
 
@@ -1650,20 +1790,30 @@ fn effects_section(
                             ParamValue::Boolean(_) | ParamValue::Text(_) => None,
                         })
                         .unwrap_or(parameter.neutral);
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut value, parameter.min..=parameter.max)
-                                .text(parameter.name)
-                                .integer(),
-                        )
-                        .changed()
-                    {
-                        pending.push(effect_param_operation(
-                            clip.id,
-                            effect.id,
-                            parameter.name,
-                            value,
-                        ));
+                    let original = value;
+                    let slider = ui.add(crate::inspector_ui::intent_slider(
+                        &mut value,
+                        parameter.min..=parameter.max,
+                        |slider| slider.text(parameter.name).integer(),
+                    ));
+                    if slider.drag_started() {
+                        pending.begin_gesture();
+                    }
+                    if slider.changed() {
+                        let operation =
+                            effect_param_operation(clip.id, effect.id, parameter.name, value);
+                        if is_live_drag(&slider) {
+                            pending.push_live_value(
+                                operation,
+                                format!(
+                                    "effect_param:{}:{}:{}",
+                                    clip.id.0, effect.id.0, parameter.name
+                                ),
+                                value == original,
+                            );
+                        } else {
+                            pending.push(operation);
+                        }
                     }
                 }
             }
@@ -2014,7 +2164,12 @@ pub(crate) fn look_mix_row(
 ) {
     let mut percent = mix_percent(params.mix_basis_points, LUT_MIX_BASIS_POINTS_MAX);
     ui.horizontal(|ui| {
-        let slider = ui.add(mix_slider(&mut percent, LUT_MIX_BASIS_POINTS_MAX, "Mix").suffix(" %"));
+        let slider = ui.add(mix_slider(
+            &mut percent,
+            LUT_MIX_BASIS_POINTS_MAX,
+            "Mix",
+            " %",
+        ));
         if slider.drag_started() {
             pending.begin_gesture();
         }
@@ -2026,7 +2181,11 @@ pub(crate) fn look_mix_row(
                 percent.saturating_mul(100),
             );
             if is_live_drag(&slider) {
-                pending.push_live(operation, look_mix_coalesce_key(clip.id, effect.id));
+                pending.push_live_value(
+                    operation,
+                    look_mix_coalesce_key(clip.id, effect.id),
+                    percent.saturating_mul(100) == params.mix_basis_points,
+                );
             } else {
                 pending.push(operation);
             }
@@ -2061,10 +2220,19 @@ fn mix_percent_range(max_basis_points: i64) -> std::ops::RangeInclusive<i64> {
 ///
 /// Shared by the look mix (CC4 §7) and the matte mix (CC5 §2.2) so neither can
 /// be built with the other's bound.
-fn mix_slider<'a>(percent: &'a mut i64, max_basis_points: i64, text: &str) -> egui::Slider<'a> {
-    egui::Slider::new(percent, mix_percent_range(max_basis_points))
-        .text(text.to_owned())
-        .integer()
+fn mix_slider<'a>(
+    percent: &'a mut i64,
+    max_basis_points: i64,
+    text: &str,
+    suffix: &str,
+) -> impl egui::Widget + 'a {
+    let text = text.to_owned();
+    let suffix = suffix.to_owned();
+    crate::inspector_ui::intent_slider(
+        percent,
+        mix_percent_range(max_basis_points),
+        move |slider| slider.text(text).suffix(suffix).integer(),
+    )
 }
 
 /// The press-and-hold A/B control (CC4 §7).
@@ -2105,7 +2273,12 @@ fn look_ab_row(
         pending.begin_gesture();
     }
     if let Some(operation) = step.operation {
-        pending.push_live(operation, look_ab_coalesce_key(clip.id, effect.id));
+        let desired = if step.state.held { 1 } else { previous.restore };
+        pending.push_live_value(
+            operation,
+            look_ab_coalesce_key(clip.id, effect.id),
+            desired == params.bypass_token,
+        );
     }
     if step.state.held {
         pending.record_ab_hold(AbHoldRecord {
@@ -2325,13 +2498,18 @@ fn primary_correction_section(
                     ParamValue::Boolean(_) | ParamValue::Text(_) => None,
                 })
                 .unwrap_or(parameter.neutral);
+            let original = value;
             let keyframed = parameter_is_keyframed(effect, parameter.name);
             ui.horizontal(|ui| {
-                let mut slider = ui.add(
-                    egui::Slider::new(&mut value, parameter.min..=parameter.max)
-                        .text(primary_parameter_label(parameter.name))
-                        .integer(),
-                );
+                let mut slider = ui.add(crate::inspector_ui::intent_slider(
+                    &mut value,
+                    parameter.min..=parameter.max,
+                    |slider| {
+                        slider
+                            .text(primary_parameter_label(parameter.name))
+                            .integer()
+                    },
+                ));
                 if keyframed {
                     slider = slider.on_hover_text(
                         "Automation drives this parameter. The slider shows the static value; \
@@ -2346,9 +2524,10 @@ fn primary_correction_section(
                     let operation =
                         effect_param_operation(clip.id, effect.id, parameter.name, value);
                     if is_live_drag(&slider) {
-                        pending.push_live(
+                        pending.push_live_value(
                             operation,
                             primary_coalesce_key(clip.id, effect.id, parameter.name),
+                            value == original,
                         );
                     } else {
                         pending.push(operation);
@@ -2980,6 +3159,7 @@ fn matte_section_body(
             &mut percent,
             MATTE_MIX_BASIS_POINTS_MAX,
             "Matte mix",
+            "",
         ));
         if slider.drag_started() {
             pending.begin_gesture();
@@ -2992,7 +3172,11 @@ fn matte_section_body(
                 percent.saturating_mul(100),
             );
             if is_live_drag(&slider) {
-                pending.push_live(operation, matte_mix_coalesce_key(clip.id, effect.id));
+                pending.push_live_value(
+                    operation,
+                    matte_mix_coalesce_key(clip.id, effect.id),
+                    percent.saturating_mul(100) == params.mix_bp,
+                );
             } else {
                 pending.push(operation);
             }
@@ -3184,10 +3368,10 @@ fn matte_integer_control(
     if response.drag_started() {
         pending.begin_gesture();
     }
-    if response.changed() && edited != value {
+    if relative_value_changed(&response) && (is_live_drag(&response) || edited != value) {
         let operation = effect_param_operation(clip, effect.id, name, edited);
         if is_live_drag(&response) {
-            pending.push_live(operation, coalesce_key.to_owned());
+            pending.push_live_value(operation, coalesce_key.to_owned(), edited == value);
         } else {
             pending.push(operation);
         }
@@ -3380,7 +3564,16 @@ fn apply_wheel_response(
         effect_param_operation(clip, effect.id, control.parameter_name(*channel), *value)
     });
     if response.live {
-        pending.extend_live(operations, wheels_coalesce_key(clip, effect.id, control));
+        let params = ColorWheelsParams::from_effect(effect);
+        let unchanged = response
+            .changes
+            .iter()
+            .all(|(channel, value)| params.control(control, *channel) == *value);
+        pending.extend_live_value(
+            operations,
+            wheels_coalesce_key(clip, effect.id, control),
+            unchanged,
+        );
     } else {
         pending.extend(operations);
     }
@@ -3568,7 +3761,11 @@ fn apply_curve_response(
     };
     let operations = curve_edit_operations(clip, effect.id, curve, current, points);
     if response.live {
-        pending.extend_live(operations, curves_coalesce_key(clip, effect.id, curve));
+        pending.extend_live_value(
+            operations,
+            curves_coalesce_key(clip, effect.id, curve),
+            current == points,
+        );
     } else {
         pending.extend(operations);
     }
@@ -4056,12 +4253,14 @@ fn envelope_block(
         }
     });
     if let Some(applied) = next {
+        let next_curve = applied.into_curve();
+        let unchanged = next_curve.as_ref() == curve;
         let operation = Operation::SetClipGainEnvelope {
             clip,
-            curve: applied.into_curve(),
+            curve: next_curve,
         };
         if live {
-            pending.push_live(operation, envelope_coalesce_key(clip));
+            pending.push_live_value(operation, envelope_coalesce_key(clip), unchanged);
         } else {
             pending.push(operation);
         }
@@ -4175,8 +4374,8 @@ pub(crate) fn keyframe_row(
             if frame.drag_started() || level.drag_started() {
                 action.gesture_started = true;
             }
-            action.live = is_live_drag(&level);
-            changed |= frame.changed() || level.changed();
+            action.live = is_live_drag(&frame) || is_live_drag(&level);
+            changed |= relative_value_changed(&frame) || relative_value_changed(&level);
         });
     });
     if focused {
@@ -4197,7 +4396,7 @@ pub(crate) fn keyframe_row(
             tangent_in: stored.tangent_in,
             tangent_out: stored.tangent_out,
         };
-        if edited != *stored {
+        if action.live || edited != *stored {
             action.edited = Some(edited);
         }
     }
@@ -4279,7 +4478,7 @@ pub(crate) fn apply_keyframe_row_action(
         tangent_in: stored.tangent_in,
         tangent_out: stored.tangent_out,
     };
-    if keyframes[index] == curve.keyframes[index] {
+    if !action.live && keyframes[index] == curve.keyframes[index] {
         return None;
     }
     Some(CurveWrite::Set(AutomationCurve { keyframes }))
@@ -4665,17 +4864,50 @@ fn motion_curve_list(
             at,
         });
     } else if let Some(applied) = next {
+        let next_curve = applied.into_curve().expect("a row edit is never a clear");
+        let unchanged = Some(&next_curve) == curve;
         let operation = Operation::SetEffectKeyframes {
             clip,
             effect: effect.id,
             name: name.to_owned(),
-            curve: applied.into_curve().expect("a row edit is never a clear"),
+            curve: next_curve,
         };
         if live {
-            pending.push_live(operation, motion_coalesce_key(clip, effect.id, name));
+            pending.push_live_value(
+                operation,
+                motion_coalesce_key(clip, effect.id, name),
+                unchanged,
+            );
         } else {
             pending.push(operation);
         }
+    }
+}
+
+fn motion_value_control(
+    ui: &mut egui::Ui,
+    value: &mut i64,
+    parameter: &kinewright_core::EffectParameterDescriptor,
+    editable: bool,
+) -> egui::Response {
+    if motion_param_is_slider(parameter.min, parameter.max) {
+        ui.add_enabled(
+            editable,
+            intent_slider(value, parameter.min..=parameter.max, |slider| {
+                slider.text(parameter.name).integer()
+            }),
+        )
+    } else {
+        let mut response = ui.add_enabled(
+            editable,
+            egui::DragValue::new(value)
+                .range(parameter.min..=parameter.max)
+                .prefix(format!("{}: ", parameter.name)),
+        );
+        if relative_value_changed(&response) {
+            response.mark_changed();
+        }
+        response
     }
 }
 
@@ -4724,21 +4956,7 @@ fn motion_param_row(
     // editable outside the clip — only keyed controls disarm.
     let keyable = motion_playhead_keyable(at, clip_duration);
     let editable = keyable || curve.is_none();
-    let response = if motion_param_is_slider(parameter.min, parameter.max) {
-        ui.add_enabled(
-            editable,
-            egui::Slider::new(&mut value, parameter.min..=parameter.max)
-                .text(name)
-                .integer(),
-        )
-    } else {
-        ui.add_enabled(
-            editable,
-            egui::DragValue::new(&mut value)
-                .range(parameter.min..=parameter.max)
-                .prefix(format!("{name}: ")),
-        )
-    };
+    let response = motion_value_control(ui, &mut value, parameter, editable);
     if response.drag_started() {
         pending.begin_gesture();
     }
@@ -4779,7 +4997,12 @@ fn motion_param_row(
             parameter.min..=parameter.max,
         );
         if is_live_drag(&response) {
-            pending.push_live(operation, motion_coalesce_key(clip, effect.id, name));
+            let unchanged = effect_value_matches(effect, &operation, at);
+            pending.push_live_value(
+                operation,
+                motion_coalesce_key(clip, effect.id, name),
+                unchanged,
+            );
         } else {
             pending.push(operation);
         }
@@ -5172,12 +5395,14 @@ fn clip_enable_header(
     });
     if let Some(applied) = next {
         let cleared = matches!(applied, CurveWrite::Clear);
+        let next_curve = applied.into_curve();
+        let unchanged = next_curve.as_ref() == clip.enabled_curve.as_ref();
         let operation = Operation::SetClipEnabledCurve {
             clip: clip.id,
-            curve: applied.into_curve(),
+            curve: next_curve,
         };
         if live {
-            pending.push_live(operation, format!("clip_enable:{}", clip.id.0));
+            pending.push_live_value(operation, format!("clip_enable:{}", clip.id.0), unchanged);
         } else {
             pending.push(operation);
         }
@@ -5246,9 +5471,11 @@ fn solid_color_row(
     ui: &mut egui::Ui,
     clip: ClipId,
     color: kinewright_core::SolidColor,
+    desired: Option<kinewright_core::SolidColor>,
     pending: &mut InspectorEdits,
 ) {
-    let mut rgb = [color.r, color.g, color.b];
+    let input = desired.unwrap_or(color);
+    let mut rgb = [input.r, input.g, input.b];
     ui.horizontal(|ui| {
         ui.label("Colour");
         let picker = ui.color_edit_button_srgb(&mut rgb);
@@ -5264,16 +5491,23 @@ fn solid_color_row(
             crate::mixer_ui::record_strip_rect(id, field.rect);
             // A drag, or a typed-entry session (focus), is its own undo step.
             started |= field.drag_started() || field.gained_focus();
-            changed |= field.changed();
+            changed |= relative_value_changed(&field);
         }
         if started {
             pending.begin_gesture();
         }
         if changed {
             let [r, g, b] = rgb;
-            let color = kinewright_core::SolidColor { r, g, b };
-            let operation = Operation::SetSolidColor { clip, color };
-            pending.push_live(operation, format!("solid_color:{}", clip.0));
+            let desired = kinewright_core::SolidColor { r, g, b };
+            let operation = Operation::SetSolidColor {
+                clip,
+                color: desired,
+            };
+            pending.push_live_value(
+                operation,
+                format!("solid_color:{}", clip.0),
+                desired == color,
+            );
         }
     });
 }
@@ -5451,18 +5685,36 @@ fn transition_section(
                 });
             crate::mixer_ui::record_strip_rect("transition_type", combo.response.rect);
         });
+        let type_changed = changed;
         let mut duration = transition.duration.0;
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut duration, 1..=maximum)
-                    .text("frames")
-                    .integer(),
-            )
-            .changed();
+        let response = ui.add(crate::inspector_ui::intent_slider(
+            &mut duration,
+            1..=maximum,
+            |slider| slider.text("frames").integer(),
+        ));
+        if response.drag_started() {
+            pending.begin_gesture();
+        }
+        changed |= response.changed();
         if changed {
-            pending.extend(transition_duration_operations(
-                document, clip.id, &name, duration,
-            ));
+            let operations = transition_duration_operations(document, clip.id, &name, duration);
+            if !type_changed && is_live_drag(&response) {
+                let unchanged = linked_members(document, clip.id)
+                    .into_iter()
+                    .all(|(_, member)| {
+                        member
+                            .transition_in
+                            .as_ref()
+                            .is_some_and(|t| t.name == name && t.duration.0 == duration)
+                    });
+                pending.extend_live_value(
+                    operations,
+                    format!("transition_duration:{}", clip.id.0),
+                    unchanged,
+                );
+            } else {
+                pending.extend(operations);
+            }
         }
         if ui.small_button("Remove transition").clicked() {
             pending.extend(linked_transition_operations(document, clip.id, None));
@@ -8614,8 +8866,8 @@ mod tests {
         let mut inside = 150;
         let mut beyond = 250;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            ui.add(mix_slider(&mut inside, 20_000, "Mix"));
-            ui.add(mix_slider(&mut beyond, 20_000, "Mix"));
+            ui.add(mix_slider(&mut inside, 20_000, "Mix", ""));
+            ui.add(mix_slider(&mut beyond, 20_000, "Mix", ""));
         });
         assert_eq!(
             inside, 150,
@@ -13167,7 +13419,7 @@ pub(crate) mod mo2_parity {
             let ClipContent::Solid(color) = clip.content else {
                 panic!("a solid")
             };
-            solid_color_row(ui, clip.id, color, pending);
+            solid_color_row(ui, clip.id, color, None, pending);
         });
         let (rects, _) = surface.frame(Vec::new());
         let from = (rects.iter().find(|(name, _)| name == field))
@@ -13785,3 +14037,7 @@ pub(crate) mod mo2_parity {
         crate::app::in1_tests::in1_shutdown(&mut app);
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/unit/manual_gesture.rs"]
+mod manual_gesture_tests;

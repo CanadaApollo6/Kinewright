@@ -1,6 +1,8 @@
 //! The person's latest desired value survives a temporarily full manual door.
 use crate::joined_thread::JoinedThread;
-use kinewright_core::{Command, CoreDisconnected, CoreMutationRefusal, Event, ManualPermit};
+use kinewright_core::{
+    Command, CoreDisconnected, CoreMutationRefusal, Event, ManualPermit, TimelineRevision,
+};
 use std::collections::VecDeque;
 
 pub(crate) const PENDING_ACTIONS: usize = 16;
@@ -31,14 +33,22 @@ struct PendingAction {
     // The identity stays here while Core owns a copy of the command.
     gesture: Option<String>,
     ended: bool,
-    latest: Option<Command>,
+    latest: Option<PendingValue>,
+    /// Keep the accepted request while its gesture is open: a widget frame may
+    /// not have received the corresponding document event yet. Moved, not copied.
+    accepted: Option<Command>,
     waiting_at: Option<u64>,
 }
 struct InFlight {
-    command: Command,
+    command: PendingValue,
     acknowledgement: u64,
     worker: JoinedThread<Result<Event, CoreDisconnected>>,
     disposition: Disposition,
+}
+struct PendingValue {
+    command: Command,
+    /// The complete desired value equals the widget's accepted document at this revision.
+    unchanged_at: Option<TimelineRevision>,
 }
 enum Disposition {
     Active,
@@ -65,6 +75,7 @@ pub(crate) struct ManualEdits {
     actions: VecDeque<PendingAction>,
     in_flight: Option<InFlight>,
     acknowledgement: u64,
+    accepted_revision: Option<TimelineRevision>,
     notice: Option<Notice>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) before_send: Option<Box<dyn FnOnce() + Send>>,
@@ -77,7 +88,23 @@ impl ManualEdits {
         command: Command,
         permit: &ManualPermit,
     ) -> Result<(), ManualSendError> {
-        if let Command::DoBatchCoalesced { coalesce_key, .. } = &command
+        self.submit_value(command, None, permit)
+    }
+    pub(crate) fn submit_value(
+        &mut self,
+        command: Command,
+        unchanged_at: Option<TimelineRevision>,
+        permit: &ManualPermit,
+    ) -> Result<(), ManualSendError> {
+        let gesture = match &command {
+            Command::DoBatchCoalesced { coalesce_key, .. } => Some(coalesce_key.clone()),
+            _ => None,
+        };
+        let command = PendingValue {
+            command,
+            unchanged_at: unchanged_at.filter(|_| gesture.is_some()),
+        };
+        if let Some(coalesce_key) = &gesture
             && let Some(action) = self
                 .actions
                 .iter_mut()
@@ -92,19 +119,79 @@ impl ManualEdits {
             self.notice = Some(Notice::Full);
             return Err(ManualSendError::PendingCapacity);
         }
-        let gesture = match &command {
-            Command::DoBatchCoalesced { coalesce_key, .. } => Some(coalesce_key.clone()),
-            _ => None,
-        };
         self.actions.push_back(PendingAction {
             ended: gesture.is_none(),
             gesture,
             latest: Some(command),
+            accepted: None,
             waiting_at: None,
         });
         self.notice = None;
         self.start_next(permit);
         Ok(())
+    }
+    /// The opaque egui colour picker compares its input with its output. Feed it
+    /// this control's last requested value, including an unresolved flight.
+    pub(crate) fn desired_solid_color(
+        &self,
+        clip: kinewright_core::ClipId,
+    ) -> Option<kinewright_core::SolidColor> {
+        fn color(
+            command: &Command,
+            clip: kinewright_core::ClipId,
+        ) -> Option<kinewright_core::SolidColor> {
+            fn operation(
+                op: &kinewright_core::Operation,
+                clip: kinewright_core::ClipId,
+            ) -> Option<kinewright_core::SolidColor> {
+                match op {
+                    kinewright_core::Operation::SetSolidColor {
+                        clip: target,
+                        color,
+                    } if *target == clip => Some(*color),
+                    _ => None,
+                }
+            }
+            match command {
+                Command::Do(op) | Command::DoIfRevision { operation: op, .. } => {
+                    operation(op, clip)
+                }
+                Command::DoBatch(ops)
+                | Command::DoBatchCoalesced {
+                    operations: ops, ..
+                }
+                | Command::DoBatchIfRevision {
+                    operations: ops, ..
+                } => ops.iter().rev().find_map(|op| operation(op, clip)),
+                _ => None,
+            }
+        }
+        for (index, action) in self.actions.iter().enumerate().rev() {
+            if let Some(found) = action
+                .latest
+                .as_ref()
+                .and_then(|value| color(&value.command, clip))
+            {
+                return Some(found);
+            }
+            if index == 0
+                && let Some(found) = self
+                    .in_flight
+                    .as_ref()
+                    .filter(|flight| matches!(flight.disposition, Disposition::Active))
+                    .and_then(|flight| color(&flight.command.command, clip))
+            {
+                return Some(found);
+            }
+            if let Some(found) = action
+                .accepted
+                .as_ref()
+                .and_then(|command| color(command, clip))
+            {
+                return Some(found);
+            }
+        }
+        None
     }
     pub(crate) fn end_gestures(&mut self) {
         for action in &mut self.actions {
@@ -153,6 +240,7 @@ impl ManualEdits {
             };
         }
         self.actions.clear();
+        self.accepted_revision = None;
         if count > 0 {
             self.note_unapplied(count);
         }
@@ -222,7 +310,9 @@ impl ManualEdits {
                     }
                     action.waiting_at = Some(flight.acknowledgement);
                 }
-                Ok(Ok(Event::DocumentChanged { .. })) => {
+                Ok(Ok(Event::DocumentChanged { revision, .. })) => {
+                    self.accepted_revision = Some(revision);
+                    action.accepted = Some(flight.command.command);
                     action.waiting_at = None;
                 }
                 other => {
@@ -247,11 +337,24 @@ impl ManualEdits {
         if self.in_flight.is_some() {
             return;
         }
-        while self
-            .actions
-            .front()
-            .is_some_and(|a| a.ended && a.latest.is_none())
-        {
+        while let Some(action) = self.actions.front_mut() {
+            // An older flight must finish before this hint can be trusted. Its
+            // accepted revision invalidates a comparison against a stale UI frame.
+            if action
+                .latest
+                .as_ref()
+                .and_then(|v| v.unchanged_at)
+                .is_some_and(|revision| {
+                    self.accepted_revision
+                        .is_none_or(|accepted| accepted <= revision)
+                })
+            {
+                action.latest = None;
+                action.waiting_at = None;
+            }
+            if !action.ended || action.latest.is_some() {
+                break;
+            }
             self.actions.pop_front();
         }
         let Some(action) = self.actions.front_mut() else {
@@ -264,7 +367,7 @@ impl ManualEdits {
             return;
         };
         // Keep the exact command for a refused attempt; Core consumes its independent copy.
-        let sent = command.clone();
+        let sent = command.command.clone();
         // This capability crosses to the acceptance worker; the UI keeps its original owner.
         let permit = permit.clone();
         #[cfg(all(test, target_os = "linux"))]
@@ -302,3 +405,7 @@ impl ManualEdits {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/unit/manual_edits.rs"]
+pub(crate) mod tests;

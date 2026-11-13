@@ -813,6 +813,14 @@ impl ProjectSession {
         &mut self,
         command: kinewright_core::Command,
     ) -> Result<(), crate::manual_edits::ManualSendError> {
+        self.send_manual_value(command, None)
+    }
+
+    pub(crate) fn send_manual_value(
+        &mut self,
+        command: kinewright_core::Command,
+        unchanged_at: Option<kinewright_core::TimelineRevision>,
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
         if self.checkpoint_recovery.is_some()
             || self.ja1_activation.is_some()
             || self.studio.selection.is_some()
@@ -820,7 +828,11 @@ impl ProjectSession {
             return Err(crate::manual_edits::ManualSendError::Disconnected);
         }
         if let Some(attachment) = &mut self.ja1 {
-            attachment.send_manual(command)
+            if unchanged_at.is_some() {
+                attachment.send_manual_value(command, unchanged_at)
+            } else {
+                attachment.send_manual(command)
+            }
         } else {
             self.core.send(command).map_err(Into::into)
         }

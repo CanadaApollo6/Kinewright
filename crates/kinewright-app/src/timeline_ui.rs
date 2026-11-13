@@ -1703,6 +1703,7 @@ impl KinewrightApp {
                                         envelope_drag.filter(|drag| drag.clip == clip.id)
                                         && let Some(stored) = keys.get(drag.index)
                                         && is_live_drag(&envelope)
+                                        && crate::inspector_ui::gesture_value_changed(&envelope)
                                         && let Some(pointer) = envelope.interact_pointer_pos()
                                     {
                                         let (at, guide) = envelope_snapped_local_frame(
@@ -1725,12 +1726,12 @@ impl KinewrightApp {
                                             envelope_grab_value(band, pointer.y, stored.value),
                                             duration,
                                         );
-                                        if moved != keys {
-                                            envelope_edits.extend_live(
-                                                vec![envelope_operation(clip.id, moved)],
-                                                envelope_coalesce_key(clip.id),
-                                            );
-                                        }
+                                        let unchanged = moved == keys;
+                                        envelope_edits.extend_live_value(
+                                            vec![envelope_operation(clip.id, moved)],
+                                            envelope_coalesce_key(clip.id),
+                                            unchanged,
+                                        );
                                     }
                                     if envelope.drag_stopped() {
                                         envelope_drag = None;
@@ -1919,6 +1920,7 @@ impl KinewrightApp {
                                         opacity_drag.filter(|drag| drag.clip == clip.id)
                                         && keys.get(drag.index).is_some()
                                         && is_live_drag(&opacity)
+                                        && crate::inspector_ui::gesture_value_changed(&opacity)
                                         && let Some(pointer) = opacity.interact_pointer_pos()
                                     {
                                         let (at, guide) = envelope_snapped_local_frame(
@@ -1937,12 +1939,12 @@ impl KinewrightApp {
                                         let moved = opacity_drag_keys(
                                             keys, drag.index, at, band, pointer.y, duration,
                                         );
-                                        if moved != keys {
-                                            envelope_edits.extend_live(
-                                                vec![opacity_operation(clip.id, effect.id, moved)],
-                                                opacity_coalesce_key(clip.id),
-                                            );
-                                        }
+                                        let unchanged = moved == keys;
+                                        envelope_edits.extend_live_value(
+                                            vec![opacity_operation(clip.id, effect.id, moved)],
+                                            opacity_coalesce_key(clip.id),
+                                            unchanged,
+                                        );
                                     }
                                     if opacity.drag_stopped() {
                                         opacity_drag = None;
