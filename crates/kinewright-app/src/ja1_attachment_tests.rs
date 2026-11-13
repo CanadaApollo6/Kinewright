@@ -3064,6 +3064,10 @@ fn s2h_lost_save_as_and_preview_replies_replay_original_results() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
