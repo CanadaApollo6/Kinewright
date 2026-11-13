@@ -3,75 +3,15 @@ mod history_model;
 #[path = "support/history_oracle.rs"]
 mod history_oracle;
 
-use history_model::{Fate, Model, Policy, Refusal, StepCommand};
+#[path = "support/history_commands.rs"]
+mod commands;
+use commands::{Random, command, initial_commands, marker};
+
+use history_model::{Fate, InstallRefusal, Model, Policy, Refusal, StepCommand};
 use kinewright_core::{
-    Command, Core, Document, Event, HistorySnapshot, Marker, MarkerId, Operation, Query,
-    QueryResult, TimeCode,
+    Command, Core, Document, Event, HistorySnapshot, MarkerId, Operation, Query, QueryResult,
 };
 use std::collections::BTreeMap;
-
-struct Random(u64);
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn index(&mut self, length: usize) -> usize {
-        usize::try_from(self.next() % u64::try_from(length).unwrap()).unwrap()
-    }
-}
-
-fn marker(id: u64) -> Operation {
-    Operation::AddMarker {
-        marker: Marker {
-            id: MarkerId(id),
-            position: TimeCode(0),
-            label: format!("marker {id}"),
-            color_token: 0,
-        },
-    }
-}
-
-fn command(random: &mut Random, operations: &[&Operation], index: usize) -> Command {
-    let operation = if random.next().is_multiple_of(3) {
-        marker(10_000 + u64::try_from(index).unwrap())
-    } else {
-        (*operations[random.index(operations.len())]).clone()
-    };
-    match random.next() % 12 {
-        0 => Command::Undo,
-        1 => Command::Redo,
-        2 => Command::Do(operation),
-        3 => Command::DoBatch(vec![
-            operation,
-            marker(20_000 + u64::try_from(index).unwrap()),
-        ]),
-        4..=6 => Command::DoBatchCoalesced {
-            operations: vec![operation],
-            coalesce_key: "drag-a".into(),
-        },
-        7 => Command::DoBatchCoalesced {
-            operations: vec![operation],
-            coalesce_key: "drag-b".into(),
-        },
-        8 => Command::DoBatch(vec![]),
-        9 => Command::DoBatchCoalesced {
-            operations: vec![],
-            coalesce_key: "drag-a".into(),
-        },
-        10 => Command::DoBatch(vec![
-            operation,
-            Operation::RemoveMarker {
-                marker: MarkerId(u64::MAX),
-            },
-        ]),
-        _ => Command::Do(Operation::RemoveMarker {
-            marker: MarkerId(u64::MAX),
-        }),
-    }
-}
 
 fn assert_event(result: &Result<usize, Refusal>, event: &Event, context: &str) {
     match (result, event) {
@@ -160,12 +100,14 @@ fn assert_command_boundaries(
                 if let Some(step) = undo.pop() {
                     redo.push(step);
                 }
+                assert_eq!(batch.redo_entries, redo.len(), "BATCH_REDO_DEPTH {context}");
                 continue;
             }
             kinewright_core::JournalCommand::Redo => {
                 if let Some(step) = redo.pop() {
                     undo.push(step);
                 }
+                assert_eq!(batch.redo_entries, redo.len(), "BATCH_REDO_DEPTH {context}");
                 continue;
             }
             kinewright_core::JournalCommand::Do(operation) => std::slice::from_ref(operation),
@@ -184,7 +126,34 @@ fn assert_command_boundaries(
             undo.last_mut().unwrap().push(command);
         }
         redo.clear();
+        assert_eq!(batch.redo_entries, redo.len(), "BATCH_REDO_DEPTH {context}");
     }
+    let mut fates: BTreeMap<_, _> = history
+        .batches
+        .iter()
+        .filter(|batch| {
+            !matches!(
+                batch.command,
+                kinewright_core::JournalCommand::Undo | kinewright_core::JournalCommand::Redo
+            )
+        })
+        .map(|batch| (identities[&batch.order], Fate::Discarded))
+        .collect();
+    for (steps, fate) in [(&undo, Fate::Undo), (&redo, Fate::Redo)] {
+        for command in steps.iter().flatten() {
+            fates.insert(command.id, fate);
+        }
+    }
+    assert_eq!(model.fates, fates, "EVERY_COMMAND_FATE {context}");
+    let encoded: usize = history
+        .cursor
+        .undo
+        .iter()
+        .chain(&history.cursor.redo)
+        .flat_map(|step| &step.operations)
+        .map(|op| serde_json::to_vec(op).unwrap().len())
+        .sum();
+    assert_eq!(model.cost(), encoded, "INDEPENDENT_HISTORY_BYTES {context}");
     for (observed, expected, name) in [(&undo, &model.undo, "UNDO"), (&redo, &model.redo, "REDO")] {
         assert_eq!(
             observed.len(),
@@ -267,33 +236,6 @@ fn assert_identity_observations(
     }
 }
 
-fn initial_commands(first: Command) -> [Command; 10] {
-    [
-        Command::Undo,
-        Command::Redo,
-        first,
-        Command::DoBatchCoalesced {
-            operations: vec![marker(9000)],
-            coalesce_key: "drag-a".into(),
-        },
-        Command::DoBatchCoalesced {
-            operations: vec![marker(9001)],
-            coalesce_key: "drag-a".into(),
-        },
-        Command::DoBatchCoalesced {
-            operations: vec![marker(9002)],
-            coalesce_key: "drag-b".into(),
-        },
-        Command::Undo,
-        Command::Redo,
-        Command::Undo,
-        Command::DoBatchCoalesced {
-            operations: vec![marker(9003)],
-            coalesce_key: "drag-a".into(),
-        },
-    ]
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "one seeded stream keeps each transition and its oracle checks together"
@@ -333,10 +275,23 @@ fn differential(seeds: u64, length: usize) {
                     "seed={:#x} kind={kind} command={index} {command:?}",
                     0x4858_a11c_0000_0000 | seed
                 );
+                let mut submitted = command.clone();
+                match &mut submitted {
+                    Command::DoIfRevision { expected, .. }
+                    | Command::DoBatchIfRevision { expected, .. } => {
+                        *expected = core.history_change_id().unwrap().revision();
+                    }
+                    _ => {}
+                }
+                let plain = commands::plain_command(&submitted);
                 let before = model.document();
                 let identity = (model.epoch, model.position);
-                let result = model.execute(command);
-                let event = core.request(command.clone()).unwrap();
+                let conditional = matches!(
+                    submitted,
+                    Command::DoIfRevision { .. } | Command::DoBatchIfRevision { .. }
+                );
+                let result = model.execute(&plain);
+                let event = core.request(submitted).unwrap();
                 assert_event(&result, &event, &context);
                 if result.is_ok() {
                     identities.insert(identity.1, identity);
@@ -347,6 +302,13 @@ fn differential(seeds: u64, length: usize) {
                 }
                 let history = core.export_history().unwrap();
                 if result.is_ok() {
+                    if conditional {
+                        assert_eq!(
+                            Command::from(history.batches.last().unwrap().command.clone()),
+                            plain,
+                            "CONDITIONAL_RECORDED_PLAIN {context}"
+                        );
+                    }
                     assert_identity_observations(
                         &before,
                         history.batches.last().unwrap(),
@@ -390,7 +352,7 @@ fn differential(seeds: u64, length: usize) {
                     replacement.restore_history(history).unwrap();
                     core = replacement;
                     model = Model::new(kinewright_core::Document::default(), 1, Policy::Fold);
-                    model.install_snapshot(snapshot);
+                    model.install_snapshot(snapshot).unwrap();
                     assert_eq!(model.epoch, epoch + 1, "INSTALL_NEW_EPOCH {context}");
                     let restored = core.export_history().unwrap();
                     assert_stacks(&model, &restored, &context);
@@ -467,6 +429,7 @@ fn tiny_budgets_fold_or_refuse_transactionally() {
                 } else {
                     command(&mut random, &operations, index)
                 };
+                let command = commands::plain_command(&command);
                 let context = format!(
                     "seed=0x4858f01d00000001 kind={kind} policy={policy:?} command={index} {command:?}"
                 );
@@ -631,6 +594,13 @@ fn fold_many_active_steps_both_caps_and_command_fates() {
     assert_eq!(fates.fates[&(0, 1)], Fate::Undo);
     fates.execute(&Command::Undo).unwrap();
     assert_eq!(fates.fates[&(0, 1)], Fate::Redo);
+    fates.execute(&Command::Redo).unwrap();
+    assert_eq!(
+        fates.fates[&(0, 1)],
+        Fate::Undo,
+        "REDO_RESTORES_APPLIED_FATE"
+    );
+    fates.execute(&Command::Undo).unwrap();
     fates.execute(&Command::Do(marker(3))).unwrap(); // C at position 3.
     assert_eq!(
         fates.fates[&(0, 1)],
@@ -640,7 +610,7 @@ fn fold_many_active_steps_both_caps_and_command_fates() {
     fates.step_cap = 1;
     assert_eq!(fates.execute(&Command::Do(marker(4))), Ok(2));
     assert_eq!(fates.fates[&(0, 0)], Fate::Folded, "A_FOLDED");
-    assert_eq!(fates.fates[&(0, 3)], Fate::Folded, "C_FOLDED");
+    assert_eq!(fates.fates[&(0, 5)], Fate::Folded, "C_FOLDED");
     assert_eq!(fates.fates[&(0, 1)], Fate::Discarded, "B_STAYS_DISCARDED");
     assert_eq!(
         fates
@@ -708,7 +678,7 @@ fn snapshot_install_replaces_state_and_starts_epoch_without_a_step() {
     let mut destination = Model::new(Document::default(), 2000, Policy::Fold);
     destination.execute(&Command::Do(marker(99))).unwrap();
     destination.execute(&Command::Undo).unwrap();
-    destination.install_snapshot(source.snapshot());
+    destination.install_snapshot(source.snapshot()).unwrap();
     source.epoch = 1;
     assert_eq!(destination, source, "INSTALL_REPLACES_ALL_STATE");
     assert_eq!(destination.position, 3, "INSTALL_NOT_A_COMMAND_STEP");
@@ -745,4 +715,238 @@ fn command_fates_survive_numeric_object_id_reuse() {
         "REUSED_ID_COMMAND_FOLDED"
     );
     assert_eq!(model.position, 4, "POSITIONS_INCLUDE_UNDO");
+}
+
+#[test]
+fn malformed_snapshot_install_is_typed_and_atomic() {
+    let mut source = Model::new(Document::default(), 1000, Policy::NeverFold);
+    source.execute(&Command::Do(marker(1))).unwrap();
+    source.execute(&Command::Undo).unwrap();
+    let mut destination = Model::new(Document::default(), 2000, Policy::Fold);
+    destination.execute(&Command::Do(marker(2))).unwrap();
+    let before = destination.clone();
+    let mut invalid = source.snapshot();
+    invalid.state.redo[0].commands[0].operations[0] = Operation::RemoveMarker {
+        marker: MarkerId(999),
+    };
+    assert_eq!(
+        destination.install_snapshot(invalid),
+        Err(InstallRefusal::RedoReplay(
+            kinewright_core::OpError::MissingMarker(MarkerId(999))
+        )),
+        "INSTALL_REFUSES_INVALID_REDO"
+    );
+    assert_eq!(destination, before, "INVALID_REDO_INSTALL_UNCHANGED");
+    source.execute(&Command::Redo).unwrap();
+    let mut invalid = source.snapshot();
+    invalid.document.markers.clear();
+    assert_eq!(
+        destination.install_snapshot(invalid),
+        Err(InstallRefusal::DocumentMismatch),
+        "INSTALL_REFUSES_SAVED_DOCUMENT_MISMATCH"
+    );
+    assert_eq!(destination, before, "WRONG_DOCUMENT_INSTALL_UNCHANGED");
+}
+
+fn literal_baseline() -> Document {
+    Document {
+        tracks: vec![kinewright_core::Track {
+            id: kinewright_core::TrackId(1),
+            kind: kinewright_core::TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    }
+}
+fn lock(locked: bool) -> Operation {
+    Operation::SetTrackSyncLock {
+        track: kinewright_core::TrackId(1),
+        locked,
+    }
+}
+
+#[test]
+fn literal_bytes_exact_fit_one_over_and_redo_tail() {
+    // These are the literal lengths of the compact JSON, independent of Model::step_cost.
+    assert_eq!(serde_json::to_vec(&lock(true)).unwrap().len(), 46);
+    assert_eq!(serde_json::to_vec(&lock(false)).unwrap().len(), 47);
+    for policy in [Policy::Fold, Policy::NeverFold] {
+        for (budget, fits) in [(47, true), (46, false)] {
+            let mut model = Model::new(literal_baseline(), budget, policy);
+            let before = model.clone();
+            let result = model.execute(&Command::Do(lock(false)));
+            if fits {
+                assert_eq!(result, Ok(0), "LITERAL_PLAIN_EXACT_FIT");
+                assert_eq!(model.cost(), 47, "LITERAL_CHARGE_47");
+            } else {
+                assert_eq!(result, Err(Refusal::StepTooLarge), "LITERAL_PLAIN_ONE_OVER");
+                assert_eq!(model, before);
+            }
+            let mut model = Model::new(literal_baseline(), budget, policy);
+            model.execute(&Command::Do(lock(true))).unwrap();
+            model.execute(&Command::Undo).unwrap();
+            let before = model.clone();
+            let result = model.execute(&Command::Do(lock(false)));
+            if fits {
+                assert_eq!(result, Ok(0), "LITERAL_REDO_EXACT_FIT");
+                assert_eq!(model.cost(), 47);
+                assert!(model.redo.is_empty());
+            } else {
+                assert_eq!(result, Err(Refusal::StepTooLarge), "LITERAL_REDO_ONE_OVER");
+                assert_eq!(model, before, "LITERAL_REDO_REFUSAL_ATOMIC");
+            }
+        }
+        for (budget, fits) in [(92, false), (93, true)] {
+            let mut model = Model::new(literal_baseline(), budget, policy);
+            model
+                .execute(&Command::DoBatchCoalesced {
+                    operations: vec![lock(true)],
+                    coalesce_key: "drag".into(),
+                })
+                .unwrap();
+            let before = model.clone();
+            let result = model.execute(&Command::DoBatchCoalesced {
+                operations: vec![lock(false)],
+                coalesce_key: "drag".into(),
+            });
+            if fits {
+                assert_eq!(result, Ok(0), "LITERAL_COALESCED_EXACT_FIT");
+                assert_eq!(model.cost(), 93);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(Refusal::StepTooLarge),
+                    "LITERAL_COALESCED_ONE_OVER"
+                );
+                assert_eq!(model, before);
+            }
+        }
+    }
+}
+
+#[test]
+fn literal_budget_generated_streams_account_every_prefix() {
+    let operations = [lock(true), lock(false)];
+    for policy in [Policy::Fold, Policy::NeverFold] {
+        for budget in [46, 47, 92, 93] {
+            let mut model = Model::new(literal_baseline(), budget, policy);
+            model.step_cap = 3;
+            let mut random = Random(0x4858_0046_0047_0093);
+            for index in 0..64 {
+                let command = commands::plain_command(&command(
+                    &mut random,
+                    &[&operations[0], &operations[1]],
+                    index,
+                ));
+                let before = model.clone();
+                if model.execute(&command).is_err() {
+                    assert_eq!(model, before, "LITERAL_STREAM_REFUSAL_ATOMIC");
+                }
+                let independent: usize = model
+                    .undo
+                    .iter()
+                    .chain(&model.redo)
+                    .flat_map(history_model::Step::operations)
+                    .map(|op| serde_json::to_vec(op).unwrap().len())
+                    .sum();
+                assert_eq!(model.cost(), independent, "LITERAL_STREAM_ACCOUNTING");
+                assert!(independent <= budget, "LITERAL_STREAM_BUDGET");
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_batch_precedes_capacity_and_zero_step_cap_folds() {
+    for policy in [Policy::Fold, Policy::NeverFold] {
+        let mut model = Model::new(Document::default(), 0, policy);
+        model.step_cap = 0;
+        for command in [
+            Command::DoBatch(vec![]),
+            Command::DoBatchCoalesced {
+                operations: vec![],
+                coalesce_key: "empty".into(),
+            },
+        ] {
+            let before = model.clone();
+            assert_eq!(
+                model.execute(&command),
+                Err(Refusal::Batch(kinewright_core::BatchError::Empty)),
+                "EMPTY_BEFORE_CAPACITY"
+            );
+            assert_eq!(model, before);
+        }
+    }
+    let mut model = Model::new(Document::default(), 1000, Policy::Fold);
+    model.step_cap = 0;
+    assert_eq!(
+        model.execute(&Command::Do(marker(1))),
+        Ok(1),
+        "ZERO_CAP_FOLDS_NEW_STEP"
+    );
+    assert_eq!(model.fates[&(0, 0)], Fate::Folded);
+    assert!(model.undo.is_empty());
+    assert_eq!(model.document().markers[0].id, MarkerId(1));
+}
+
+#[test]
+fn noop_close_advances_position_without_changing_stacks() {
+    let mut model = Model::new(Document::default(), 1000, Policy::Fold);
+    for filled in [false, true] {
+        if filled {
+            model.execute(&Command::Do(marker(1))).unwrap();
+        }
+        let mut expected = model.clone();
+        expected.position += 1;
+        model.close_gesture();
+        assert_eq!(model, expected, "NOOP_CLOSE_ADVANCES_ONLY_POSITION");
+    }
+}
+
+#[test]
+fn every_command_in_coalesced_step_has_a_fate() {
+    let mut model = Model::new(Document::default(), 1000, Policy::Fold);
+    for id in [1, 2] {
+        model
+            .execute(&Command::DoBatchCoalesced {
+                operations: vec![marker(id)],
+                coalesce_key: "drag".into(),
+            })
+            .unwrap();
+    }
+    for id in [(0, 0), (0, 1)] {
+        assert_eq!(model.fates[&id], Fate::Undo, "COALESCED_APPLIED_FATES");
+    }
+    model.execute(&Command::Undo).unwrap();
+    for id in [(0, 0), (0, 1)] {
+        assert_eq!(model.fates[&id], Fate::Redo, "COALESCED_UNDONE_FATES");
+    }
+    model.execute(&Command::Redo).unwrap();
+    for id in [(0, 0), (0, 1)] {
+        assert_eq!(model.fates[&id], Fate::Undo, "COALESCED_REDONE_FATES");
+    }
+    model.execute(&Command::Undo).unwrap();
+    model.execute(&Command::Do(marker(3))).unwrap();
+    for id in [(0, 0), (0, 1)] {
+        assert_eq!(
+            model.fates[&id],
+            Fate::Discarded,
+            "COALESCED_DISCARDED_FATES"
+        );
+    }
+}
+
+#[test]
+fn document_limit_refusal_is_atomic() {
+    let baseline = literal_baseline();
+    let mut model = Model::new(baseline.clone(), 1000, Policy::Fold);
+    model.document_limit = serde_json::to_vec(&baseline).unwrap().len();
+    let before = model.clone();
+    assert_eq!(
+        model.execute(&Command::Do(lock(false))),
+        Err(Refusal::DocumentTooLarge),
+        "DOCUMENT_LIMIT_REFUSAL"
+    );
+    assert_eq!(model, before, "DOCUMENT_LIMIT_ATOMIC");
 }

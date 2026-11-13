@@ -46,6 +46,7 @@ pub enum Refusal {
     Batch(BatchError),
     StepTooLarge,
     HistoryFull,
+    DocumentTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,11 +55,20 @@ pub struct Model {
     pub undo: Vec<Step>,
     pub redo: Vec<Step>,
     pub budget: usize,
+    pub document_limit: usize,
     pub step_cap: usize,
     pub policy: Policy,
     pub position: u64,
     pub epoch: u64,
     pub fates: BTreeMap<CommandId, Fate>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InstallRefusal {
+    UndoReplay(OpError),
+    DocumentMismatch,
+    RedoReplay(OpError),
+    EpochExhausted,
 }
 
 pub struct Snapshot {
@@ -73,6 +83,7 @@ impl Model {
             undo: Vec::new(),
             redo: Vec::new(),
             budget,
+            document_limit: usize::MAX,
             step_cap: usize::MAX,
             policy,
             position: 0,
@@ -118,19 +129,30 @@ impl Model {
             document: self.document(),
         }
     }
-    pub fn install_snapshot(&mut self, snapshot: Snapshot) {
-        assert_eq!(
-            snapshot.state.document(),
-            snapshot.document,
-            "INSTALL_VALID_UNDO"
-        );
+    pub fn install_snapshot(&mut self, snapshot: Snapshot) -> Result<(), InstallRefusal> {
+        let mut replayed = snapshot.state.baseline.clone();
+        for operation in snapshot.state.undo.iter().flat_map(Step::operations) {
+            operation
+                .apply(&mut replayed)
+                .map_err(InstallRefusal::UndoReplay)?;
+        }
+        if replayed != snapshot.document {
+            return Err(InstallRefusal::DocumentMismatch);
+        }
         let mut redone = snapshot.document;
         for operation in snapshot.state.redo.iter().rev().flat_map(Step::operations) {
-            operation.apply(&mut redone).expect("INSTALL_VALID_REDO");
+            operation
+                .apply(&mut redone)
+                .map_err(InstallRefusal::RedoReplay)?;
         }
-        let epoch = self.epoch.max(snapshot.state.epoch) + 1;
+        let epoch = self
+            .epoch
+            .max(snapshot.state.epoch)
+            .checked_add(1)
+            .ok_or(InstallRefusal::EpochExhausted)?;
         *self = snapshot.state;
         self.epoch = epoch;
+        Ok(())
     }
     pub fn close_gesture(&mut self) {
         if self
@@ -194,6 +216,9 @@ impl Model {
         key: Option<&str>,
         single: bool,
     ) -> Result<usize, Refusal> {
+        if operations.is_empty() {
+            return Err(Refusal::Batch(BatchError::Empty));
+        }
         let extends = key.is_some()
             && self
                 .undo
@@ -205,7 +230,7 @@ impl Model {
         } else {
             0
         };
-        if top_cost + added_cost > self.budget || self.step_cap == 0 {
+        if top_cost + added_cost > self.budget {
             return Err(Refusal::StepTooLarge);
         }
         let undo_cost: usize = self.undo.iter().map(Step::cost).sum();
@@ -216,9 +241,6 @@ impl Model {
             return Err(Refusal::HistoryFull);
         }
         let mut document = self.document();
-        if operations.is_empty() {
-            return Err(Refusal::Batch(BatchError::Empty));
-        }
         for (index, operation) in operations.iter().enumerate() {
             operation.apply(&mut document).map_err(|error| {
                 if single {
@@ -230,6 +252,9 @@ impl Model {
                     })
                 }
             })?;
+            if serde_json::to_vec(&document).unwrap().len() > self.document_limit {
+                return Err(Refusal::DocumentTooLarge);
+            }
         }
         let command = StepCommand {
             id: (self.epoch, self.position),
