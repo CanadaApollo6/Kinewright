@@ -2734,6 +2734,12 @@ impl HostCommandOwner {
         let worker_core = core.clone();
         let project = self.config.project.clone();
         let roots = self.config.roots.clone();
+        let history_limits = match &self.owner {
+            Some(owner) => kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
+                owner.store()?.limits(),
+            )?,
+            None => kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
+        };
         let thread = thread::Builder::new()
             .name(format!("kinewright-host-session-{id}"))
             .spawn(move || {
@@ -2748,6 +2754,7 @@ impl HostCommandOwner {
                         media,
                         &project,
                         roots,
+                        history_limits,
                     )?;
                     let cfg = SessionConfig {
                         model: cfg.model,

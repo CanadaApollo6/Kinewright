@@ -328,9 +328,7 @@ impl TaskEndpoint {
         let operations = boundary.operations.clone();
         let private =
             Core::spawn(std::sync::Arc::clone(&history.baseline)).map_err(|e| e.to_string())?;
-        private
-            .restore_history(history.clone())
-            .map_err(|e| e.to_string())?;
+        self.restore_history_preview(&private, &history)?;
         private
             .request(if redo {
                 kinewright_core::Command::Redo
@@ -378,6 +376,21 @@ impl TaskEndpoint {
         }
         .map_err(|error| error.to_string())
     }
+    fn restore_history_preview(
+        &self,
+        private: &Core,
+        history: &kinewright_core::HistorySnapshot,
+    ) -> Result<(), String> {
+        if let Some(admission) = &self.0.history_admission {
+            admission
+                .restore_preview(private, history)
+                .map_err(|error| error.to_string())
+        } else {
+            private
+                .restore_history(history.clone())
+                .map_err(|error| error.to_string())
+        }
+    }
     pub(crate) fn check_batch_history(
         &self,
         core: &Core,
@@ -405,9 +418,7 @@ impl TaskEndpoint {
         let history = core.export_history().map_err(|error| error.to_string())?;
         let private = Core::spawn(std::sync::Arc::clone(&history.baseline))
             .map_err(|error| error.to_string())?;
-        private
-            .restore_history(history)
-            .map_err(|error| error.to_string())?;
+        self.restore_history_preview(&private, &history)?;
         if matches!(
             private
                 .request(kinewright_core::Command::DoBatch(operations.to_vec()))

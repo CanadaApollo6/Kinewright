@@ -56,6 +56,10 @@ pub enum BranchError {
     InvalidOperationIndex { index: usize, maximum: usize },
     #[error("cherry-pick operation index {0} occurs more than once")]
     DuplicateOperationIndex(usize),
+    #[error(
+        "This edit exceeds the project's history capacity. Try a smaller edit or start a new project."
+    )]
+    HistoryCapacity,
 }
 
 impl BranchError {
@@ -78,6 +82,7 @@ impl BranchError {
             Self::CoreDisconnected(_)
             | Self::UnexpectedResponse
             | Self::InvalidOperationIndex { .. }
+            | Self::HistoryCapacity
             | Self::DuplicateOperationIndex(_) => {
                 IncidentCode::Rejection(RejectionIncident::AgentBranch)
             }
@@ -111,6 +116,7 @@ impl BranchError {
             Self::CoreDisconnected(_)
             | Self::UnexpectedResponse
             | Self::InvalidOperationIndex { .. }
+            | Self::HistoryCapacity
             | Self::DuplicateOperationIndex(_) => IncidentEvidence::Branch {
                 reason: self.to_string(),
             },
@@ -311,6 +317,17 @@ pub fn apply_to_live(
     expected: TimelineRevision,
     operations: Vec<Operation>,
 ) -> Result<BranchApplyOutcome, BranchError> {
+    kinewright_project::manual_history::OrdinaryHistoryLimits::default()
+        .check_batch(live, &operations)
+        .map_err(|error| match error {
+            kinewright_project::bundle::BundleError::Capacity(_) => BranchError::HistoryCapacity,
+            kinewright_project::bundle::BundleError::Io(error)
+                if error.kind() == std::io::ErrorKind::BrokenPipe =>
+            {
+                BranchError::CoreDisconnected(CoreDisconnected)
+            }
+            _ => BranchError::UnexpectedResponse,
+        })?;
     let operation_count = operations.len();
     let outcome = match live.request(Command::DoBatchIfRevision {
         expected,
@@ -337,6 +354,48 @@ mod tests {
     use kinewright_core::{AssetId, MediaAsset, MediaKind, Rational, TimeCode};
 
     use super::*;
+
+    #[test]
+    fn history_capacity_legacy_merge_and_cherry_pick_refuse_before_live_mutation() {
+        let core = Core::spawn(Document {
+            tracks: vec![kinewright_core::Track {
+                id: kinewright_core::TrackId(1),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        for index in 0_usize..4000 {
+            assert!(matches!(
+                core.request(Command::Do(Operation::SetTrackSyncLock {
+                    track: kinewright_core::TrackId(1),
+                    locked: index.is_multiple_of(2)
+                }))
+                .unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        let before = core.export_history().unwrap();
+        let revision = TimelineRevision(4000);
+        assert!(matches!(
+            apply_to_live(
+                &core,
+                revision,
+                vec![Operation::SetTrackSyncLock {
+                    track: kinewright_core::TrackId(1),
+                    locked: true
+                }]
+            ),
+            Err(BranchError::HistoryCapacity)
+        ));
+        assert_eq!(
+            core.export_history().unwrap(),
+            before,
+            "COMMON_MERGE_AND_CHERRY_PICK_FUNNEL_PRESERVES_LIVE_HISTORY"
+        );
+    }
 
     /// `IN1b` §6.3 rule 6, §3.4 rule 24 and §7 item 10's agent half: every
     /// `BranchError` names a code, and `InvalidBase` **delegates** rather than

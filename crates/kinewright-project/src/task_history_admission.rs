@@ -16,6 +16,13 @@ pub struct TaskHistoryAdmission {
     pub(crate) floor_offset: u64,
     pub(crate) limits: StorageLimits,
     pub(crate) lineage_seed: crate::bundle_records::LineageRecord,
+    pub(crate) proof: std::sync::Mutex<
+        Option<(
+            crate::history_record::HistoryRole,
+            StorageLimits,
+            kinewright_core::ResolvedHistory,
+        )>,
+    >,
 }
 impl TaskHistoryAdmission {
     /// All task previews share the store publication replay overlap.
@@ -59,7 +66,36 @@ impl TaskHistoryAdmission {
             u64::MAX,
             true,
         )?;
-        check_role_history(history, &self.limits, role, &self.lineage_seed)?;
+        let prior = self
+            .proof
+            .lock()
+            .map_err(|_| BundleError::Capacity("history proof unavailable"))?
+            .as_ref()
+            .filter(|(prior_role, prior_limits, _)| {
+                *prior_role == role && *prior_limits == self.limits
+            })
+            .map(|(_, _, proof)| proof.clone());
+        if let Some(proof) = &prior
+            && proof.snapshot() == history
+        {
+            let shared = proof
+                .clone()
+                .share_documents(history.clone())
+                .map_err(crate::bundle::history_error)?;
+            *self
+                .proof
+                .lock()
+                .map_err(|_| BundleError::Capacity("history proof unavailable"))? =
+                Some((role, self.limits.clone(), shared));
+            return Ok(());
+        }
+        let proof = check_role_history(
+            history,
+            &self.limits,
+            role,
+            &self.lineage_seed,
+            prior.as_ref(),
+        )?;
         let mut base = SpecialistBaseRecord {
             history_role: role,
             target_branch: self.base.target_branch.clone(),
@@ -83,39 +119,58 @@ impl TaskHistoryAdmission {
         {
             return Err(BundleError::RunAdmission(LIMIT_REASON));
         }
+        let proof = proof
+            .share_documents(history.clone())
+            .map_err(crate::bundle::history_error)?;
+        *self
+            .proof
+            .lock()
+            .map_err(|_| BundleError::Capacity("history proof unavailable"))? =
+            Some((role, self.limits.clone(), proof));
         Ok(())
+    }
+    /// Restore a preview from the exact proven live cut, without replaying its
+    /// closed prefix again. The caller's preview window remains serialized.
+    pub fn restore_preview(
+        &self,
+        core: &kinewright_core::Core,
+        history: &HistorySnapshot,
+    ) -> Result<(), BundleError> {
+        self.check(history)?;
+        let proof = self
+            .proof
+            .lock()
+            .map_err(|_| BundleError::Capacity("history proof unavailable"))?
+            .as_ref()
+            .map(|(_, _, proof)| proof.clone())
+            .ok_or(BundleError::HistoryChanged)?;
+        if proof.snapshot() != history {
+            return Err(BundleError::HistoryChanged);
+        }
+        core.restore_resolved_history(proof)
+            .map_err(crate::bundle::history_error)
     }
 }
 pub fn check_history(history: &HistorySnapshot, limits: &StorageLimits) -> Result<(), BundleError> {
-    let bytes = serde_json::to_vec(&crate::history_record::HistoryRecord::capture(
+    crate::history_size::verify_history_admission(
         history,
         crate::history_record::HistoryRole::Task,
-    )?)
-    .map_err(crate::bundle::encoding_error)?;
-    let bound = crate::history_record::TASK_BYTES.min(limits.branch_history_bytes);
-    if bytes.len() as u64 > bound
-        || crate::store::preflight_record(&bytes, limits).map_err(task_capacity_error)? > bound
-    {
-        return Err(BundleError::RunAdmission(LIMIT_REASON));
-    }
-    Ok(())
+        limits,
+    )
+    .map(|_| ())
+    .map_err(task_capacity_error)
 }
 
 pub const DOCUMENT_BYTES: u64 = 5_645_312;
-pub(crate) fn check_role_history(
+fn check_role_history(
     history: &HistorySnapshot,
     limits: &StorageLimits,
     role: crate::history_record::HistoryRole,
     seed: &crate::bundle_records::LineageRecord,
-) -> Result<(), BundleError> {
-    let record = crate::history_record::HistoryRecord::capture(history, role)?;
-    let bytes = serde_json::to_vec(&record).map_err(crate::bundle::encoding_error)?;
-    let bound = role
-        .persisted_limit(limits)
-        .min(limits.branch_history_bytes);
-    if bytes.len() as u64 > bound || crate::store::preflight_record(&bytes, limits)? > bound {
-        return Err(BundleError::RunAdmission(LIMIT_REASON));
-    }
+    prefix: Option<&kinewright_core::ResolvedHistory>,
+) -> Result<kinewright_core::ResolvedHistory, BundleError> {
+    let (retained, proof) =
+        crate::history_size::verify_history_admission_with_prefix(history, role, limits, prefix)?;
     for document in [&history.baseline, &history.document] {
         if crate::history_size::payload(document)? > DOCUMENT_BYTES {
             return Err(BundleError::RunAdmission(LIMIT_REASON));
@@ -132,17 +187,16 @@ pub(crate) fn check_role_history(
     let lineage =
         crate::bundle_commit::lineage(&seed.branch_origin, history, &ids, Some(seed), Some(seed))?;
     let encoded = serde_json::to_vec(&lineage).map_err(crate::bundle::encoding_error)?;
-    let live = crate::history_size::native_history_live_bytes(history)?
+    let live = retained
         .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
         .ok_or(BundleError::RunAdmission(LIMIT_REASON))?;
-    crate::history_size::verify_history_admission(history, role, limits)?;
     if live > role.live_limit(limits)
         || encoded.len() as u64 > crate::run_admission::RECORD_BYTES
         || crate::store::preflight_record(&encoded, limits)? > crate::run_admission::DECODED_BYTES
     {
         return Err(BundleError::RunAdmission(LIMIT_REASON));
     }
-    Ok(())
+    Ok(proof)
 }
 
 #[cfg(any(test, feature = "test-util"))]

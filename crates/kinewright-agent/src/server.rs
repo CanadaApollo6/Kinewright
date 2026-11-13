@@ -555,6 +555,13 @@ pub struct McpServer {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+enum HostHistoryPolicy {
+    Ordinary(kinewright_project::manual_history::OrdinaryHistoryLimits),
+    Task(
+        crate::orchestration::tasks::TaskEndpoint,
+        Option<crate::writer_host::task_mcp::TaskMcp>,
+    ),
+}
 impl McpServer {
     /// Authenticated isolated endpoint for one host-owned session. File/media operations
     /// without pinned capabilities are refused before dispatch, including asset dependencies.
@@ -564,8 +571,16 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         project: &str,
         roots: crate::writer_host::SessionRoots,
+        history_limits: kinewright_project::manual_history::OrdinaryHistoryLimits,
     ) -> Result<Self, crate::writer_host::HostError> {
-        Self::start_host_endpoint(core, playback, analysis, project, roots, None, None)
+        Self::start_host_endpoint(
+            core,
+            playback,
+            analysis,
+            project,
+            roots,
+            HostHistoryPolicy::Ordinary(history_limits),
+        )
     }
     pub(crate) fn start_task_isolated(
         core: Core,
@@ -582,8 +597,7 @@ impl McpServer {
             analysis,
             project,
             roots,
-            Some(endpoint),
-            control,
+            HostHistoryPolicy::Task(endpoint, control),
         )
     }
     fn start_host_endpoint(
@@ -592,8 +606,7 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         project: &str,
         roots: crate::writer_host::SessionRoots,
-        task: Option<crate::orchestration::tasks::TaskEndpoint>,
-        control: Option<crate::writer_host::task_mcp::TaskMcp>,
+        history_policy: HostHistoryPolicy,
     ) -> Result<Self, crate::writer_host::HostError> {
         use crate::writer_host::{HOST_PROTOCOL, HostAuth, HostBootstrap, HostEndpoint};
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
@@ -623,9 +636,16 @@ impl McpServer {
             Arc::clone(&incidents),
         );
         handler.host_scoped = true;
-        handler.task_control = control.map(|c| c.with_confirmations(confirmations.clone()));
-        if let Some(endpoint) = task {
-            handler = handler.with_task_endpoint(endpoint);
+        match history_policy {
+            HostHistoryPolicy::Ordinary(limits) => {
+                handler.ordinary_history_limits = Arc::new(
+                    kinewright_project::manual_history::OrdinaryHistoryAdmission::new(limits),
+                );
+            }
+            HostHistoryPolicy::Task(endpoint, control) => {
+                handler.task_control = control.map(|c| c.with_confirmations(confirmations.clone()));
+                handler = handler.with_task_endpoint(endpoint);
+            }
         }
         let tool_surface_metrics =
             ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools().map_err(|_| {
@@ -1350,6 +1370,8 @@ fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
 
 #[derive(Clone)]
 struct KinewrightMcp {
+    // Handler clones address the same Core; they share its proven-prefix cache.
+    ordinary_history_limits: Arc<kinewright_project::manual_history::OrdinaryHistoryAdmission>,
     result_sizes: Arc<Mutex<crate::runtime::ResultSizeMetrics>>,
     #[cfg(feature = "eval-harness")]
     ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
@@ -1386,6 +1408,20 @@ struct KinewrightMcp {
 }
 
 impl KinewrightMcp {
+    fn check_batch_history(&self, operations: &[Operation]) -> Result<(), String> {
+        if let Some(endpoint) = &self.task_endpoint {
+            endpoint.check_batch_history(&self.core, operations)
+        } else {
+            self.ordinary_history_limits
+                .check_batch(&self.core, operations)
+                .map_err(|error| match error {
+                    kinewright_project::bundle::BundleError::Capacity(_) => format!(
+                        "history_capacity: {error}. Try a smaller edit or start a new project."
+                    ),
+                    other => other.to_string(),
+                })
+        }
+    }
     #[cfg(test)]
     fn new(
         core: Core,
@@ -1419,6 +1455,11 @@ impl KinewrightMcp {
         incidents: IncidentLogHandle,
     ) -> Self {
         Self {
+            ordinary_history_limits: Arc::new(
+                kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
+                    kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
+                ),
+            ),
             core,
             result_sizes: Arc::default(),
             #[cfg(feature = "eval-harness")]
@@ -2782,11 +2823,9 @@ impl KinewrightMcp {
             {
                 return error_text(error);
             }
-            if let Err(error) =
-                endpoint.check_batch_history(&self.core, std::slice::from_ref(&operation))
-            {
-                return error_text(error);
-            }
+        }
+        if let Err(error) = self.check_batch_history(std::slice::from_ref(&operation)) {
+            return error_text(error);
         }
         match self.core.request(Command::DoIfRevision {
             expected: expected_revision,
@@ -2879,9 +2918,7 @@ impl KinewrightMcp {
                 "AddLutAsset cannot be submitted through apply_edit_plan; use import_lut_asset so the .cube bytes are parsed, hashed, and stored first",
             ));
         }
-        if let Some(endpoint) = &self.task_endpoint
-            && let Err(error) = endpoint.check_batch_history(&self.core, operations)
-        {
+        if let Err(error) = self.check_batch_history(operations) {
             return Ok(error_text(error));
         }
         let confirmation = plan_confirmation_description(&before, operations);
@@ -3750,9 +3787,9 @@ impl KinewrightMcp {
             if let Err(error) = endpoint.validate_batch(&document, operations) {
                 return Ok(Err(error_text(error)));
             }
-            if let Err(error) = endpoint.check_batch_history(&self.core, operations) {
-                return Ok(Err(error_text(error)));
-            }
+        }
+        if let Err(error) = self.check_batch_history(operations) {
+            return Ok(Err(error_text(error)));
         }
         let event = self
             .core
@@ -19109,6 +19146,57 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
         time::Instant,
     };
+
+    #[test]
+    fn history_capacity_ordinary_mcp_single_plan_and_lut_refuse_before_ack() {
+        let (core, playback, analysis) = fixture();
+        let mut service = KinewrightMcp::new(
+            core.clone(),
+            playback,
+            analysis,
+            ConfirmationBroker::default(),
+        );
+        let limits = kinewright_project::storage_budget::StorageLimits {
+            branch_history_bytes: 1,
+            ..kinewright_project::storage_budget::StorageLimits::default()
+        };
+        service.ordinary_history_limits = Arc::new(
+            kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
+                kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
+                    .unwrap(),
+            ),
+        );
+        let before = core.export_history().unwrap();
+        let (revision, _) = service.snapshot().unwrap();
+        let operation = Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        };
+        let single = service.apply_operation("set_track_sync_lock", revision, operation.clone());
+        let plan = service
+            .apply_edit_plan(revision, std::slice::from_ref(&operation))
+            .unwrap();
+        let lut = service
+            .apply_lut_batch("history_capacity", revision, &[operation])
+            .unwrap()
+            .unwrap_err();
+        for reply in [single, plan, lut] {
+            assert_eq!(reply.is_error, Some(true));
+            assert!(
+                reply.content[0]
+                    .as_text()
+                    .unwrap()
+                    .text
+                    .contains("history_capacity")
+            );
+        }
+        assert_eq!(
+            core.export_history().unwrap(),
+            before,
+            "ALL_MCP_MUTATION_FUNNELS_REFUSE_BEFORE_ACK"
+        );
+        assert_eq!(service.snapshot().unwrap().0, revision);
+    }
 
     #[derive(Default)]
     struct NoopMedia {

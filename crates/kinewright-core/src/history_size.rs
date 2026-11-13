@@ -151,6 +151,13 @@ fn transport_padding<T>(values: &Vec<T>) -> Result<u64, HistoryError> {
     replay_array_padding::<T>(values.len(), values.capacity())
 }
 
+fn transport_vector_bytes<T>(values: &Vec<T>) -> Result<u64, HistoryError> {
+    sum([
+        allocation::<T>(values.capacity())?,
+        transport_padding(values)?,
+    ])
+}
+
 fn replay_array_padding<T>(length: usize, retained_capacity: usize) -> Result<u64, HistoryError> {
     if length == 0 {
         return Ok(0);
@@ -193,6 +200,12 @@ fn transport_document_bytes(document: &Document) -> Result<u64, HistoryError> {
     }
     Ok(bytes)
 }
+// Document's inline size already includes the complete colour context. A new
+// owned field must be charged here instead of silently inheriting this omission.
+const _: () = assert!(
+    !std::mem::needs_drop::<crate::ColorContext>(),
+    "colour context gained owned storage; include it in the live history bound"
+);
 fn document_bytes(document: &Document, cloned: bool) -> Result<u64, HistoryError> {
     // The dominating arrays use their actual typed capacities, including unused slots.
     // Nested owned payloads use the existing conservative structural estimator.
@@ -205,7 +218,7 @@ fn document_bytes(document: &Document, cloned: bool) -> Result<u64, HistoryError
         markers,
         catalog,
         audio_mix,
-        color_context,
+        color_context: _,
         lut_assets,
         investigator,
     } = document;
@@ -236,7 +249,6 @@ fn document_bytes(document: &Document, cloned: bool) -> Result<u64, HistoryError
             markers,
             catalog,
             audio_mix,
-            color_context,
             lut_assets,
             investigator,
         ))?,
@@ -268,6 +280,14 @@ pub fn replay_document_bytes(document: &Document) -> Result<u64, HistoryError> {
 /// # Errors
 /// Refuses arithmetic overflow or an excessive nested payload.
 pub fn history_live_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
+    with_history_margin(history_owned_bytes(history)?)
+}
+fn with_history_margin(bytes: u64) -> Result<u64, HistoryError> {
+    bytes
+        .checked_add(bytes.div_ceil(10))
+        .ok_or(HistoryError::Capacity)
+}
+fn history_owned_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError> {
     let mut documents = BTreeSet::new();
     let mut bytes = 2048_u64;
     for document in [&history.baseline, &history.document].into_iter().chain(
@@ -330,9 +350,7 @@ pub fn history_live_bytes(history: &HistorySnapshot) -> Result<u64, HistoryError
     }
     // Structural payload estimates already overcharge their typed storage. The
     // additional ten percent is checked against the restored-heap witness.
-    bytes
-        .checked_add(bytes.div_ceil(10))
-        .ok_or(HistoryError::Capacity)
+    Ok(bytes)
 }
 
 /// Bound retained history after portable decoding and journal replay.
@@ -354,6 +372,10 @@ pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, His
         .unwrap_or(0)
         .max(history.cursor.redo.len());
     let mut padding = sum([
+        std::mem::size_of::<crate::HistoryReplayEvidence>() as u64 + 16 + 64,
+        allocation::<std::sync::Weak<Document>>(
+            2 + history.cursor.undo.len() + history.cursor.redo.len(),
+        )?,
         transport_document_bytes(&history.baseline)?
             .saturating_sub(document_live_bytes(&history.baseline)?),
         replay_array_padding::<crate::HistoryBatch>(
@@ -363,6 +385,20 @@ pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, His
         replay_array_padding::<crate::GestureBoundary>(undo_peak, history.cursor.undo.capacity())?,
         replay_array_padding::<crate::GestureBoundary>(redo_peak, history.cursor.redo.capacity())?,
     ])?;
+    // Rebinding a proved prefix clones its observation vectors at exact length.
+    // A fresh replay may retain the geometric allocation from ID collection.
+    // Both doors charge the same canonical capacity, including those spare slots.
+    for batch in &history.batches {
+        padding = sum([padding, transport_padding(&batch.identity_effects)?])?;
+        for effect in &batch.identity_effects {
+            padding = sum([
+                padding,
+                transport_padding(&effect.created)?,
+                transport_padding(&effect.deleted)?,
+                transport_padding(&effect.split_results)?,
+            ])?;
+        }
+    }
     for entry in history.cursor.undo.iter().chain(&history.cursor.redo) {
         // Ordinary batches clone at exact length. Coalescing can double an
         // arbitrary initial length, so a power-of-two bound is insufficient.
@@ -380,7 +416,7 @@ pub fn restored_history_live_bytes(history: &HistorySnapshot) -> Result<u64, His
             ])?;
         }
     }
-    sum([history_live_bytes(history)?, padding, padding.div_ceil(10)])
+    with_history_margin(sum([history_owned_bytes(history)?, padding])?)
 }
 
 /// Measure the peak of a bounded replay. Store callers reserve their role's
@@ -398,15 +434,197 @@ pub fn measure_replay_peak(
         .map(|(_, peak)| peak)
 }
 
+// A decoded journal is typed Rust data, not a retained serde_json::Value tree.
+// Count its arrays directly; only genuinely owned command payloads use the
+// conservative structural fallback. Prior-document copies remain independent.
+fn inline_command_bytes<T: Copy>(_: T) -> u64 {
+    0
+}
+fn operation_owned_bytes(operation: &crate::Operation) -> Result<u64, HistoryError> {
+    use crate::Operation;
+    Ok(match operation {
+        Operation::SetTrackSyncLock { track, locked } => inline_command_bytes((*track, *locked)),
+        Operation::SetTrackMix {
+            track,
+            gain_tenth_db,
+            pan_percent,
+            mute,
+            solo,
+        } => inline_command_bytes((*track, *gain_tenth_db, *pan_percent, *mute, *solo)),
+        Operation::SetEffectEnabled {
+            clip,
+            effect,
+            enabled,
+        } => inline_command_bytes((*clip, *effect, *enabled)),
+        Operation::SetClipEnabled { clip, enabled } => inline_command_bytes((*clip, *enabled)),
+        Operation::MoveClip { clip, to_track, to } => inline_command_bytes((*clip, *to_track, *to)),
+        Operation::MoveMarker { marker, to } => inline_command_bytes((*marker, *to)),
+        Operation::CopyClipAttributes {
+            from_clip,
+            to_clip,
+            names: None,
+            include_keyframes,
+        } => inline_command_bytes((*from_clip, *to_clip, *include_keyframes)),
+        _ => payload(operation)?,
+    })
+}
+fn transport_clip_payload(clip: &Clip) -> Result<u64, HistoryError> {
+    let mut bytes = sum([
+        clip_payload(clip, false)?,
+        transport_padding(&clip.effects)?,
+    ])?;
+    for curve in [&clip.audio_gain_curve, &clip.enabled_curve]
+        .into_iter()
+        .flatten()
+    {
+        bytes = sum([bytes, transport_padding(&curve.keyframes)?])?;
+    }
+    Ok(bytes)
+}
+fn identity_owned_bytes(
+    created: &Vec<crate::ClipId>,
+    deleted: &Vec<crate::ClipId>,
+    parent: Option<&Clip>,
+    results: &Vec<Clip>,
+) -> Result<u64, HistoryError> {
+    let mut bytes = sum([
+        transport_vector_bytes(created)?,
+        transport_vector_bytes(deleted)?,
+        transport_vector_bytes(results)?,
+        parent.map_or(Ok(0), transport_clip_payload)?,
+    ])?;
+    for clip in results {
+        bytes = sum([bytes, transport_clip_payload(clip)?])?;
+    }
+    Ok(bytes)
+}
+// source command heap, replay command/cursor/log heap, operation count.
+fn command_metadata_bytes(
+    command: &crate::JournalCommand,
+) -> Result<(u64, u64, usize), HistoryError> {
+    use crate::JournalCommand;
+    let (operations, vector, key) = match command {
+        JournalCommand::Do(operation) => (std::slice::from_ref(operation), None, None),
+        JournalCommand::DoBatch(operations) => {
+            (operations.as_slice(), Some(operations.capacity()), None)
+        }
+        JournalCommand::DoBatchCoalesced {
+            operations,
+            coalesce_key,
+        } => (
+            operations.as_slice(),
+            Some(operations.capacity()),
+            Some(coalesce_key),
+        ),
+        JournalCommand::Undo | JournalCommand::Redo => (&[][..], None, None),
+    };
+    let owned = operations.iter().try_fold(0, |total, operation| {
+        sum([total, operation_owned_bytes(operation)?])
+    })?;
+    let source = sum([
+        owned,
+        vector.map_or(Ok(0), |capacity| {
+            sum([
+                allocation::<crate::Operation>(capacity)?,
+                replay_array_padding::<crate::Operation>(operations.len(), capacity)?,
+            ])
+        })?,
+        key.map_or(0, |key| key.capacity() as u64),
+    ])?;
+    let replay = sum([
+        owned.checked_mul(3).ok_or(HistoryError::Capacity)?,
+        vector.map_or(Ok(0), |_| allocation::<crate::Operation>(operations.len()))?,
+        (key.map_or(0, String::len) as u64)
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+    ])?;
+    Ok((source, replay, operations.len()))
+}
+fn replay_metadata_bytes(
+    journal: &crate::HistoryJournal,
+    baseline: &Document,
+    current: &Document,
+) -> Result<u64, HistoryError> {
+    let mut bytes = sum([
+        size_of::<crate::HistoryJournal>() as u64,
+        transport_vector_bytes(&journal.batches)?,
+        journal.baseline_sha256.capacity() as u64,
+        journal.document_sha256.capacity() as u64,
+        transport_vector_bytes(&journal.cursor.undo)?,
+        transport_vector_bytes(&journal.cursor.redo)?,
+        crate::history::encoded_size(&(baseline, current, journal))?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+    ])?;
+    for hash in journal.cursor.undo.iter().chain(&journal.cursor.redo) {
+        bytes = sum([bytes, hash.capacity() as u64])?;
+    }
+    let mut operations = 0_usize;
+    for batch in &journal.batches {
+        let (source, replay, count) = command_metadata_bytes(&batch.command)?;
+        operations = operations
+            .checked_add(count)
+            .ok_or(HistoryError::Capacity)?;
+        bytes = sum([
+            bytes,
+            source,
+            replay,
+            transport_vector_bytes(&batch.identity_effects)?,
+            allocation::<crate::OperationIdentityEffect>(count)?,
+        ])?;
+        for effect in &batch.identity_effects {
+            let crate::JournalIdentityEffect {
+                created,
+                deleted,
+                split_parent,
+                split_results,
+            } = effect;
+            bytes = sum([
+                bytes,
+                identity_owned_bytes(created, deleted, split_parent.as_ref(), split_results)?,
+            ])?;
+        }
+    }
+    let batches = if journal.batches.is_empty() {
+        0
+    } else {
+        journal
+            .batches
+            .len()
+            .checked_next_power_of_two()
+            .ok_or(HistoryError::Capacity)?
+            .max(4)
+    };
+    let operation_slots = if operations == 0 {
+        0
+    } else {
+        operations
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?
+            .max(4)
+    };
+    sum([
+        bytes,
+        allocation::<crate::HistoryBatch>(batches)?,
+        allocation::<crate::actor::HistoryEntry>(batches)?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+        allocation::<crate::Operation>(operation_slots)?
+            .checked_mul(2)
+            .ok_or(HistoryError::Capacity)?,
+    ])
+}
+
 /// The caller reserves `limit` before replay. Resident boundary documents and
 /// temporary operation copies share that window; discarded states release their
 /// charge while the peak still records the whole replay's high-water mark.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct ReplayBudget {
     limit: u64,
     documents: u64,
-    overhead: u64,
-    peak: u64,
+    input: u64,
+    identities: u64,
+    dynamic_peak: u64,
 }
 impl ReplayBudget {
     pub(crate) fn new(
@@ -418,29 +636,46 @@ impl ReplayBudget {
         let overhead = sum([
             transport_document_bytes(baseline)?,
             transport_document_bytes(current)?,
-            payload(journal)?
-                .checked_mul(3)
-                .ok_or(HistoryError::Capacity)?,
+            replay_metadata_bytes(journal, baseline, current)?,
             8192,
         ])?;
         let mut budget = Self {
             limit,
             documents: 0,
-            overhead,
-            peak: 0,
+            input: overhead,
+            identities: 0,
+            dynamic_peak: 0,
         };
         budget.documents = transport_document_bytes(baseline)?;
         budget.check(0)?;
         Ok(budget)
     }
     fn check(&mut self, additional: u64) -> Result<(), HistoryError> {
-        let bytes = sum([self.documents, self.overhead, additional])?;
+        self.dynamic_peak =
+            self.dynamic_peak
+                .max(sum([self.documents, self.identities, additional])?);
+        let bytes = sum([self.input, self.dynamic_peak])?;
         let bytes = sum([bytes, bytes.div_ceil(10)])?;
         if bytes > self.limit {
             return Err(HistoryError::Capacity);
         }
-        self.peak = self.peak.max(bytes);
         Ok(())
+    }
+    pub(crate) fn extend_input(
+        &self,
+        journal: &crate::HistoryJournal,
+        baseline: &Document,
+        current: &Document,
+        limit: u64,
+    ) -> Result<Self, HistoryError> {
+        let input = Self::new(journal, baseline, current, limit)?.input;
+        let mut resumed = self.clone();
+        resumed.input = input;
+        resumed.limit = limit;
+        // The input charge is common to every instant in a cold replay. Recheck
+        // its new value against the prefix's exact maximum, not its old total.
+        resumed.check(0)?;
+        Ok(resumed)
     }
     pub(crate) fn check_clone(&mut self, document: &Document) -> Result<(), HistoryError> {
         self.check(document_bytes(document, true)?)
@@ -469,7 +704,7 @@ impl ReplayBudget {
             document_live_bytes(document)?,
             arrays,
             copied,
-            payload(operation)?
+            operation_owned_bytes(operation)?
                 .checked_mul(4)
                 .ok_or(HistoryError::Capacity)?,
         ])?)
@@ -482,7 +717,15 @@ impl ReplayBudget {
         // Charge actual observations, even if the untrusted journal lied about
         // the identity payload. Later operations in the same batch cannot hide
         // a large observation by deleting its source clip.
-        self.overhead = sum([self.overhead, payload(identity)?])?;
+        self.identities = sum([
+            self.identities,
+            identity_owned_bytes(
+                &identity.created,
+                &identity.deleted,
+                identity.split_parent.as_ref(),
+                &identity.split_results,
+            )?,
+        ])?;
         self.check(0)
     }
     pub(crate) const fn document_charge(&self) -> u64 {
@@ -492,17 +735,35 @@ impl ReplayBudget {
         self.documents = bytes;
         self.check(0)
     }
-    pub(crate) fn finish(mut self, history: &HistorySnapshot) -> Result<u64, HistoryError> {
+    pub(crate) fn check_adoption_metadata(
+        &mut self,
+        history: &HistorySnapshot,
+    ) -> Result<(), HistoryError> {
+        self.check(sum([
+            allocation::<(&Vec<crate::Operation>, &Option<String>)>(
+                history.cursor.undo.len() + history.cursor.redo.len(),
+            )?,
+            allocation::<std::sync::Weak<Document>>(
+                2 + history.cursor.undo.len() + history.cursor.redo.len(),
+            )?,
+            std::mem::size_of::<crate::HistoryReplayEvidence>() as u64 + 16 + 64,
+        ])?)
+    }
+    pub(crate) fn finish(&self, history: &HistorySnapshot) -> Result<u64, HistoryError> {
         let retained = restored_history_live_bytes(history)?;
         if retained > self.limit {
             return Err(HistoryError::Capacity);
         }
-        self.peak = self.peak.max(retained);
-        Ok(self.peak)
+        let raw = sum([self.input, self.dynamic_peak])?;
+        Ok(sum([raw, raw.div_ceil(10)])?.max(retained))
     }
 }
 
 // Keep exhaustive: every new operation must declare its prior-state copies.
+#[allow(
+    clippy::too_many_lines,
+    reason = "every one of the 67 operation kinds declares prior-state copies in one exhaustive match"
+)]
 fn operation_copy_bytes(
     document: &Document,
     operation: &crate::Operation,
@@ -514,6 +775,22 @@ fn operation_copy_bytes(
         })
     };
     match operation {
+        Operation::RelinkAsset { asset, .. } => document
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|source| source.asset == *asset)
+            .try_fold(0, |largest, source| {
+                clip(source.id).map(|bytes| largest.max(bytes))
+            }),
+        Operation::SetTrackMix { track, .. } | Operation::SetTrackAutomation { track, .. } => {
+            document
+                .audio_mix
+                .tracks
+                .iter()
+                .find(|entry| entry.track == *track)
+                .map_or(Ok(0), payload)
+        }
         Operation::CopyClipAttributes {
             from_clip, to_clip, ..
         } => sum([
@@ -548,7 +825,6 @@ fn operation_copy_bytes(
             .checked_mul(4)
             .ok_or(HistoryError::Capacity),
         Operation::AddAsset { .. }
-        | Operation::RelinkAsset { .. }
         | Operation::SetColorContext { .. }
         | Operation::UpsertBin { .. }
         | Operation::RemoveBin { .. }
@@ -564,8 +840,6 @@ fn operation_copy_bytes(
         | Operation::AddTrack { .. }
         | Operation::RemoveTrack { .. }
         | Operation::SetTrackSyncLock { .. }
-        | Operation::SetTrackMix { .. }
-        | Operation::SetTrackAutomation { .. }
         | Operation::AddClip { .. }
         | Operation::AddTitle { .. }
         | Operation::MoveClip { .. }

@@ -205,7 +205,7 @@ fn ordered_floor_install_preserves_open_gesture_and_redo() {
     let stale = HistoryTransition::recovery_close(with_redo.clone(), &with_redo).unwrap();
     assert_eq!(
         restored.install_history_transition(stale),
-        Err(HistoryError::Corrupt)
+        Err(HistoryError::StaleExpectation)
     );
 }
 

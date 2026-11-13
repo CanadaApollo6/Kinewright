@@ -22,20 +22,30 @@ pub(crate) fn verify_history_admission(
     role: crate::history_record::HistoryRole,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
+    verify_history_admission_with_prefix(history, role, limits, None).map(|(retained, _)| retained)
+}
+pub(crate) fn verify_history_admission_with_prefix(
+    history: &kinewright_core::HistorySnapshot,
+    role: crate::history_record::HistoryRole,
+    limits: &crate::storage_budget::StorageLimits,
+    prefix: Option<&kinewright_core::ResolvedHistory>,
+) -> Result<(u64, kinewright_core::ResolvedHistory), BundleError> {
     let record = crate::history_record::HistoryRecord::capture(history, role)?;
     crate::store::BundleRecord::validate(&record, limits)?;
-    let (resolved, _) = record
+    let resolved = record
         .journal
-        .resolve_with_budget(
+        .resolve_verified_with_budget(
             std::sync::Arc::clone(&history.baseline),
             &history.document,
             role.replay_limit(limits),
+            prefix,
         )
         .map_err(crate::bundle::history_error)?;
-    if resolved != *history {
+    if resolved.snapshot() != history {
         return Err(BundleError::Corrupt("history replay agreement".into()));
     }
-    check_retained_history(&resolved, role, limits)
+    let retained = check_retained_history(resolved.snapshot(), role, limits)?;
+    Ok((retained, resolved))
 }
 
 pub(crate) fn check_retained_history(

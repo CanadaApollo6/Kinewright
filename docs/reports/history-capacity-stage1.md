@@ -467,3 +467,150 @@ Final remaining gates **PASS**: fmt; all-target clippy `-D warnings` for Core, P
 Package cleanup before the gates removed **994 files / 16.3 GiB**. Workspace test compilation plus isolated shipping output temporarily reached **45,233,594,368 allocated bytes**, above the target budget. After the three Linux shipping builds passed, their **3,856,478,208-byte** output was removed; at the next idle Cargo boundary, unused example output (**1,912,840,192 bytes**) and the imported Python caches were removed. Final allocated `target/` usage is **39,716,573,184 bytes (39.72 GB)**; apparent size is **39,692,266,650 bytes**. No active build output was removed. All 18 parked 2a files were verified byte-exact, and small evidence logs remain. Cleanup evidence: `fix1-package-clean.log`, `fix1-shipping-cleanup.json` and `fix1-idle-cleanup.json`.
 
 The role constants and raw ceiling are unchanged. The **568 MiB envelope remains NOT QUALIFIED**, with the holder audit and accepted publication-latch limitation above: **Finish and Freeze are NOT guaranteed after a raw-ledger refusal of an ordinary or terminal native publication; Stop and exact retention are.** The non-latching raw-publication change remains a hard precondition of 2c. Settled-run release is outside this commit. This is one local fix commit after the three supplied CI commits; no push is performed.
+
+## Stage 1 fix 2
+
+Manual ingress now runs the writer's effective ordinary history predicate inside the Core transaction, before `DocumentChanged` or `AcceptedHistory`. The strict lease carries the writer's actual history limits. A capacity refusal restores the document, revision, Undo/Redo, journal, pending messages, sequence, predecessor and every JSON-cache byte/index. The actor-owned encoder stages its proof through an exclusive mutable reference and commits it only after encoding and queue admission also succeed. A lower writer limit cannot be replaced by the GUI's defaults.
+
+Astra's twenty-clip batch is refused before acknowledgement, and a smaller retry publishes and cold-reopens exactly. The ten-clip control still publishes, cold-reopens with equal history, and traverses Undo/Redo. The refusal is typed `ManualHistoryCapacity`: “This edit exceeds the project's history capacity. Try a smaller edit or start a new project.” No limit is raised.
+
+The twenty-clip case has 977,382 encoded bytes and **17,674,226 retained bytes** under corrected typed accounting. Its **typed replay peak is 39,037,324 bytes**, exceeding the ordinary 33,554,432-byte window by **5,482,892 bytes**. Retained room is not the refusal. Each operation temporarily reserves three source and two prior-destination clip payloads (2,280,354 bytes here); these allowances are **peaked per operation, never accumulated across the batch**. The hypothetical nineteen-operation sum is 43,326,726 bytes and is not charged. Only actual retained identity observations accumulate. On this exact 1,000-keyframe fixture with twenty clips, an ordinary project accepts copying to **15 destinations (16 clips including the source)**: peak 31,929,300, retained 14,306,457, encoded 792,678 bytes. Sixteen destinations exceed the window (33,704,229). These are conservative typed charges, not measured physical heap. The on-demand census records each fanout and its individual versus hypothetical cumulative copy allowance.
+
+Replay metadata charges canonical portable-vector capacities at capture and cold decode, including command and identity arrays. The prefix witness now also serializes the transport and requires its cold proof to pass at exactly the warm window at every cut. The obsolete three-JSON-payload replay gate was removed from floor prefiltering; encoded/ordinary lower bounds remain, and the shared predicate alone decides replay room. An independent exhaustive floor search agrees across 10,000 seeded histories, undo excursions and decimal counter boundaries. Its quota-setting helper includes the actual replay peak, instead of calibrating only the older retained/ordinary costs.
+
+Acknowledgement-door audit:
+
+| Door | Predicate before acknowledgement | Kept witness |
+| --- | --- | --- |
+| GUI manual lease, single/batch/coalesced edit | `ManualIngress::execute` calls the mandatory encoder guard before cache/identity encoding, then commits the proof only with the queue transaction. `OrdinaryHistoryAdmission` uses the shared Project predicate. | Twenty-clip refusal, ten-clip exact cold control, lower-limit lease; Core cache rollback mode 5. |
+| Native task batch, including specialist direct apply | `TaskEndpoint` previews the proposed cut and `TaskHistoryAdmission` applies the shared role predicate before the consent/apply funnel returns an accepted edit. Its role proof includes the specialist delta and lineage bound. | Existing cleanup history pre-mutation and full native lifecycle witnesses. |
+| Ordinary agent MCP single edit, plans and LUT batches | The three application funnels all call `check_batch_history`; their endpoint's ordinary proof previews before the revision-gated live request. | New single/plan/LUT refusal witness; complete live history and revision unchanged. |
+| Legacy session merge/cherry-pick and approved proposals | All use `branch::apply_to_live`; ordinary admission precedes the optimistic live transaction. | New shared-funnel capacity refusal with live history unchanged. |
+| Native candidate application and accepted merge | Candidate preview applies the same role predicate before staging; publication checks the identical record and live bounds. Capacity remains actionable and non-latching at preview. | Existing candidate merge reservation/refusal and full lifecycle tests. |
+| Owned import and colour interpretation | Saved commands go through ordinary publication's shadow check; unsaved candidate installation now explicitly applies ordinary admission before installing its document/input manifest. GUI input commands additionally use the manual guard. | New unsaved-import refusal preserves document and inputs; existing saved import/interpretation suites. |
+| GUI Undo/Redo | The manual transaction guard also covers history steps, before their accepted event and message. | Cache rollback/cursor cases and ten-clip cold Undo/Redo control. |
+| Native Undo/Redo | `preview_history_step` validates the proposed cursor and runs the role guard before applying the real history step. | Existing bounded cleanup Undo/Redo witness. |
+| Cold restoration and checkpoint/recovery adoption | Store resolution uses bounded replay and the same retained/ordinary checks before returning a cut. Recovered document copies are independently checked before first Save; frozen installation remains an exact-cut transition. | Existing cold capacity/no-recovery and exact recovery suites; new stale-expectation witness. |
+| Bootstrap handoff | Decoding produces an opaque Core replay proof; host adoption consumes that proof. Locally constructed snapshots still require bounded replay and full value agreement. | Forged snapshot/cursor tests, cold-versus-adopted history and operation-log comparison, startup lifecycle measurement. |
+
+The pre-Studio document-only GUI still writes a document without persistent Undo; it is not a durable-history acknowledgement. Its document becomes a new baseline when Studio is activated, where ordinary admission applies before activation/Save succeeds. The native guard's shared-ledger reservation and publication's fresh-reader model remain separate from immutable per-cut proofs: a temporary ledger shortage is not proof of damaged bytes. The existing raw-publication run latch is unchanged in this fix.
+
+The stopped manual shadow request now returns broken-pipe I/O instead of `Corrupt`. The exhaustive `history_error` match maps `StaleExpectation` and `CaptureChanged` to `HistoryChanged`; a changed restore expectation cannot authorize an empty-Undo rescue. The existing `CoreState::restore` raw-snapshot path is left unchanged: production inputs reach it after bounded admission. The new resolved-proof adoption path avoids that second execution for the bootstrap and native preview.
+
+Debug startup A/B uses identical compact input and real subprocess launch with the unchanged five-second production deadline, followed by a complete history comparison and graceful shutdown for every successful launch. Commands force Core, Project and Agent to opt-level 0; media uses the CI test config and the unchanged codec overrides. Ten samples per head alternate in rotating order, pinned to four CPUs on an i5-13600K; no quiet-machine wait. The reported samples span load averages **4.46–13.85**. This is a local four-CPU proxy, not hosted CI execution.
+
+| Head | Batches | Samples | Median / worst attempt | Failed launches |
+| --- | --- | --- | --- | --- |
+| `e4f73529` | 4,000 | 10 | 479.646 / 706.026 ms | 0 |
+| `910a3e89` | 4,000 | 10 | 4,059.361 / 5,114.721 ms | 2, startup deadline |
+| `e4f73529` | 12,000 | 10 | **No ready:** 370.614 / 374.301 ms to refusal | 10 |
+| `910a3e89` | 12,000 | 10 | **No ready:** 367.329 / 425.259 ms to refusal | 10 |
+| Final fix 2 startup implementation | 12,000 | 10 | **1,490.409 / 1,520.028 ms to ready** | **0** |
+
+Both old-head 12,000-edit stderr diagnostics say “history exceeds its bounded admission”; their EOF launch errors are capacity exits, not fast successful startups. The 4,000-edit comparison reproduces the reported deadline regression under load. The final 12,000-edit pairs are the ten samples per head in `fix2-current-measure/samples.json`, built after canonical vector accounting and the floor-prefilter correction. The 4,000-edit controls are the unchanged pinned heads in `fix2-startup/final/samples.json`. Earlier fix-2 prototype samples are retained separately and are not pooled into the final row. Build commands, binary digests and source digests accompany both sets.
+This confirms a fix-1 startup regression. Its accounting rebuilt a boundary map after every journal batch, visiting a growing retained prefix quadratically. Replay now updates document reference counts as Undo/Redo/coalescing move or discard entries; each new document is measured once and abandoned Redo entries are visited once when released. An independent complete resident walk agrees after each command. Bootstrap decoding additionally retains an immutable replay proof, so adoption no longer executes that journal a second time. The proof cannot be set by a wire flag or by a caller-supplied digest. The runtime proof uses an opaque Core-created metadata digest and weak references to the exact immutable documents. It retains no document payload and cannot arrive in input bytes. All decoded cuts can use it; the strict compact transport is unchanged.
+
+The original App fixture used 12,000 edits at `e6893f44`; stage-1 commit `dfde093a` reduced it to 4,000 to fit the then-overcharged portable window. **This fix restores the original 12,000 edits**, without grouping, lowering the fixture, raising a bound or changing the production deadline. Inline `ColorContext` was already inside `size_of::<Document>()` but was charged again as a heap payload; a compile-time no-owned-storage assertion now protects that correction. Replay counts the typed journal, its buffers and future actor metadata directly instead of treating it as three retained JSON trees; owned operation payloads still have conservative charges, and prior-state copies still pass the per-operation guard. Restored observation-vector spare capacity and the ten-percent margin are canonical across cold and incremental proof. The final A/B above includes ten samples of the restored 12,000-edit cut at all three heads. Old-head refusals are reported as failures, never successful fast launches. One invalid archive build reused the current host; its distinct-binary check caught that before any timings, and it is excluded from the A/B evidence.
+
+The measured 1,000-batch hand edit exceeded the lead's 100 ms trigger, so this fix implements incremental proof rather than leaving it as a follow-up. Core retains the proven prefix's exact dynamic peak separately from the charge common to the complete input. Extension updates that common input term, rechecks the old maximum, then executes only the tail through the same bounded executor. Changed baselines, floors or prefixes take full replay. Cold and incremental peaks, peak-minus-one capacity refusals, full cursor/identity agreement, coalescing and copy/split/removal sequences are compared at every cut. Cached proofs share immutable live documents; an equal actual cut rebinds preview documents so previews cannot retain a second growing document history. Canonical replay vector capacities are retained across prefix adoption.
+
+Observed debug cost samples are pinned to the same four CPUs. The earlier full-replay and incremental development runs are descriptive controls, not an alternating speedup claim. Final measured rows use ten attempts per row:
+
+| Accepted edits before selection | Retained cut | Hand edit median / worst | Save median / worst |
+| --- | --- | --- | --- |
+| 1,000, earlier full-replay guard | 1,000–1,009 batches | 225.862 / 311.758 ms | 897.734 / 1,459.549 ms |
+| 1,000, final incremental guard | 1,000–1,009 batches; 10 accepted | **121.168 / 140.966 ms** | Changed publication **676.212 / 706.833 ms** |
+| 12,000, final selection | Initial Save floors 9,741; retains 2,259 | One next edit accepted: **267.275 ms** | Initial flooring Save **5,334.271 ms**; next changed publication **1,293.618 ms** |
+| Same 12,000-edit selection, next nine attempts | 2,260 retained batches | **Capacity refusal**, 253.009 / 442.741 ms; no edit accepted | Unchanged Save 535.559 / 591.217 ms |
+
+A hand edit and a task batch now execute only their new operations for replay admission after the initial proof. Their metadata capture, comparisons, size scans and (for native tasks) lineage/delta construction still scale with retained history length: O(H × document/payload size), plus the new operations. Final retained accounting has a single O(H log H) address-set pass. The remaining **121 ms debug hand-edit cost at 1,000 edits** is a metadata latency limitation, recorded for follow-up; it is not hidden full-prefix command execution. A changed Save performs complete record/publication validation and replay, O(H × document/payload size), plus that retained set pass; selecting a floor may try multiple suffixes. Cold open executes each admitted journal once for resolution with linear boundary bookkeeping. Its opaque runtime proof avoids a second actor execution; raw unproved snapshots retain the original validation/replay fallback. No successful hand-edit timing is claimed at a 12,000-batch ordinary cut: the unchanged ordinary bounds require the stated floor first. No limit was raised, no refusal is counted as an accepted fast edit, and no claim of constant-time Save or zero-copy metadata is made.
+
+The shared-floor host recovery witness had sized its injected quota for recovery-close alone, then expected another Undo after replacement-lease admission. The new guard correctly refuses that extra growth at the old synthetic cap. The fixture now measures both recovery-close and its explicitly requested next Undo, checks that proposed cut with the shared ordinary predicate, and still requires pressure to force a floor. Its full integration target passes **20 / 0 / 1**, retaining the old-permit refusal, new-permit edit, original batch-ID and receipt assertions. No product bound changed.
+
+The lock-file hammer's child and parent code, lock implementation, Project module registration and Cargo.lock are unchanged between the supplied CI-profile parent and fix 1. Children re-exec only the existing `race_child` path, with no history open or new runtime initializer. The parent starts its threads without a child-ready fairness barrier. The lead's rerun passed; this remains a first-occurrence load/fairness flake, with the assertion and ownership checks unchanged.
+
+All 67 operation kinds were walked through the executor helpers and indirect clone calls. The complete table below supersedes the earlier “all other kinds” row. Every operation also reserves the current candidate, typed array growth, its supplied payload and actual retained identity observations. The match remains exhaustive; no estimate-versus-retained comparison becomes corruption.
+
+| Kind | Growth and additional prior-state allowance |
+| --- | --- |
+| `AddAsset` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RelinkAsset` | Clones affected clips sequentially; reserve the largest affected clip once, not their sum. |
+| `SetAssetColorDescription` | Copies prior interpreted provenance; reserve four current documents. |
+| `SetColorContext` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `UpsertBin` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveBin` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `SetAssetBin` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `UpsertStringOut` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveStringOut` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `UpsertSyncGroup` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveSyncGroup` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `UpsertAudioBus` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveAudioBus` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `SetAudioMaster` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `SetPanLaw` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `AddTrack` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveTrack` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `SetTrackSyncLock` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `SetTrackMix` | Clones the stored mix entry and its existing curves; reserve that entry. |
+| `SetTrackAutomation` | Clones existing mix curves and the supplied replacement; reserve the stored entry plus supplied payload. |
+| `AddClip` | Creates a fresh clip from supplied metadata/scalars; typed clip/vector growth and payload are reserved. |
+| `AddTitle` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `SplitClip` | Duplicates the complete source clip and observations; four source clip payloads, with actual identities retained. |
+| `TrimClip` | Local original and automation rewrite can copy prior clip payload; reserve four addressed clips. |
+| `MoveClip` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `ThreePointEdit` | Implicit splitting or multi-clip/automation rewrite; reserve four current documents plus retained observations. |
+| `PatchedThreePointEdit` | Implicit splitting or multi-clip/automation rewrite; reserve four current documents plus retained observations. |
+| `SlipClip` | Local original and automation rewrite can copy prior clip payload; reserve four addressed clips. |
+| `RollEdit` | Implicit splitting or multi-clip/automation rewrite; reserve four current documents plus retained observations. |
+| `SlideClip` | Implicit splitting or multi-clip/automation rewrite; reserve four current documents plus retained observations. |
+| `ReplaceClip` | Local original and automation rewrite can copy prior clip payload; reserve four addressed clips. |
+| `FitToFill` | Local original and automation rewrite can copy prior clip payload; reserve four addressed clips. |
+| `DeleteClip` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `RippleDeleteClip` | Implicit splitting or multi-clip/automation rewrite; reserve four current documents plus retained observations. |
+| `RippleInsertGap` | Implicit splitting or multi-clip/automation rewrite; reserve four current documents plus retained observations. |
+| `LinkClips` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `UnlinkClips` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `AddMarker` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveMarker` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `MoveMarker` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `AddEffect` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `InsertEffect` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveEffect` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `SetEffectParam` | Preset/title/effect/curve edits clone prior payload; reserve four addressed clips plus supplied payload. |
+| `SetEffectKeyframes` | Preset/title/effect/curve edits clone prior payload; reserve four addressed clips plus supplied payload. |
+| `ClearEffectKeyframes` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `UpsertEffectKeyframe` | Preset/title/effect/curve edits clone prior payload; reserve four addressed clips plus supplied payload. |
+| `RemoveEffectKeyframe` | Preset/title/effect/curve edits clone prior payload; reserve four addressed clips plus supplied payload. |
+| `SetEffectEnabled` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `SetClipEnabled` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `SetClipEnabledCurve` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `CopyClipAttributes` | Copies effects/curves out of existing clips; three source plus two destination clip payloads, per operation. |
+| `ConvertLegacyLook` | Preset/title/effect/curve edits clone prior payload; reserve four addressed clips plus supplied payload. |
+| `AddLutAsset` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveLutAsset` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `SetTitleParam` | Preset/title/effect/curve edits clone prior payload; reserve four addressed clips plus supplied payload. |
+| `SetClipAudio` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `SetClipGainEnvelope` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `AddTransition` | New or replacement owned values come from the supplied payload; existing history keeps prior states. |
+| `RemoveTransition` | Removes/moves existing values; no extra prior payload clone. Retained Undo documents and observations remain charged. |
+| `SetMarkerParam` | Replaces a scalar/string from the supplied value without cloning the prior marker payload. |
+| `AddFreezeFrame` | Creates a fresh clip from supplied metadata/scalars; typed clip/vector growth and payload are reserved. |
+| `SetClipSpeed` | Local original and automation rewrite can copy prior clip payload; reserve four addressed clips. |
+| `SetClipBlendMode` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+| `AddAdjustmentClip` | Creates a fresh clip from supplied metadata/scalars; typed clip/vector growth and payload are reserved. |
+| `AddSolidClip` | Creates a fresh clip from supplied metadata/scalars; typed clip/vector growth and payload are reserved. |
+| `SetSolidColor` | In-place scalar/identity update; current candidate and typed collection growth cover the edit. |
+
+The three newly explicit clone allowances have a large-prior-payload witness using real relink and mix/automation operations: a final-retained-only window refuses as Capacity, a full bounded replay agrees exactly, and Undo/Redo retain the original and resulting documents.
+
+The 41 MiB task, 2 MiB candidate, 128 MiB ordinary/manual pool, 64 MiB native replay window and 512 MiB raw ceiling are unchanged. The **568 MiB resident envelope remains NOT QUALIFIED**, before other metadata including runtime proof metadata. Endpoint proofs share live immutable documents after rebinding; the transported evidence uses weak references and retains no document payload. **Finish and Freeze are NOT guaranteed after a raw-ledger refusal of an ordinary or terminal native publication; Stop and exact retention are.** The non-latching raw-publication fix remains a hard precondition of 2c.
+
+Rust stays at 1.99.1. The lead's CI pin `f270876d` is cherry-picked as `0bed2b9d463ffa2042cb82021e7e3d79f2b03486`, underneath this fix and the later rebased 2a. No toolchain update or 1.100 adaptation was made.
+
+Final full suites **PASS** (passed / failed / ignored): Core **811 / 0 / 2**, Project **476 / 0 / 4**, Agent **1,725 / 0 / 102**, App **1,014 / 0 / 5**. Project includes `test-util`; Agent and App include `slow-tests`; the Linux slow configuration optimizes Core and Project only. The exact restored 12,000-edit App witness also passes separately with unoptimized Core/Project, keeping its five-second production startup limit.
+
+Remaining gates **PASS**: fmt; all-target Clippy `-D warnings` for all four changed crates in default and slow/test-util modes; slow-test lint (**133 / 158 / 27**); shard self-tests (**22**) and slow-test self-tests (**48**); workspace test compilation (**82 executables**); the Windows cross-Clippy wrapper (workspace, Agent slow, App default and slow), all **three isolated Linux shipping builds** and **three MSVC shipping checks**. Windows runtime, hosted CI and paid-provider behavior were not run. Shared-lock waiting is included in gate wall times and excluded from startup/edit measurements.
+
+Comparison cleanup, after verifying no own Cargo process or comparison executable was active, removed **1,955,946,496 allocated bytes**: target usage fell from **27,734,536,192** to **25,778,589,696 bytes**. Small logs, source/binary digests and commands were kept. Completed slow-suite executables and isolated shipping output were also removed at their gate boundaries. At the idle commit boundary, scoped Cargo cleanup removed 2,171 package-output files (Cargo reported 19.5 GiB), preserving the evidence logs. Final allocated `target/` size is **15,346,065,408 bytes (15.35 GB)**, below the approximate 40 GB cap.
+
+Evidence: `target/history-capacity/fix2-final-gates/`, `fix2-current-measure/`, `fix2-final-canonical-core.log`, `fix2-final-prefilter.log`, `fix2-canonical-manual.log` and `fix2-canonical-census.log`, and the pinned 4,000-edit controls under `fix2-startup/final/`. Native rescue remains parked byte-exact outside this change. The unpushed 2a delta is rebased only after this fix commit and checked independently against `3ca9ae3e`. No push is performed.

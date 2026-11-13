@@ -151,9 +151,11 @@ impl BundleRecord for HistoryRecord {
             ));
         }
         let bytes = serde_json::to_vec(self).map_err(crate::bundle::encoding_error)?;
-        if bytes.len() as u64 > self.role.persisted_limit(limits)
-            || crate::store::preflight_record(&bytes, limits)? > self.role.persisted_limit(limits)
-        {
+        let limit = self
+            .role
+            .persisted_limit(limits)
+            .min(limits.branch_history_bytes);
+        if bytes.len() as u64 > limit || crate::store::preflight_record(&bytes, limits)? > limit {
             return Err(BundleError::Capacity("branch history"));
         }
         Ok(())

@@ -1473,6 +1473,7 @@ impl Ja1EditingSession {
             floor_offset: canonical.floor_source.journal.floor_offset,
             limits: self.registered_bundle(canonical)?.store().limits().clone(),
             lineage_seed,
+            proof: std::sync::Mutex::new(None),
         })
     }
 }

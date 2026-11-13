@@ -220,3 +220,7 @@ kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_open_81_approval_measu
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_pending_history_capacity_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 pending task history and specialist delta admission charges
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_merged_history_refusal_measure crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5/C3 prospective history admission boundary counter probe
 kinewright_agent writer_host::hooks_tests::tests::history_capacity_1200_lifecycle_crash_reopen crates/kinewright-agent/src/writer_host/history_capacity_lifecycle_tests.rs linux on-demand # Full 1200-clip/68-edit native tools, crash and reopen measurement; kept separate so the required 400/200 CI witness has its own shard budget
+
+history_fix2_cost history_fix2_startup_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Alternating debug host startup probe at 4000 and 12000 edits; actual five-second launch limit and exact history comparison
+history_fix2_cost history_fix2_edit_and_save_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Debug manual admission and changed publication timing at 1000 and 12000 edits
+manual_history_capacity manual_history_heavy_copy_capacity_census crates/kinewright-project/tests/manual_history_capacity.rs linux on-demand # Exact ordinary heavy-copy peak and largest accepted fanout measurement

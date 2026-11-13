@@ -248,12 +248,17 @@ enum CoreMessage {
     ),
     RestoreHistory(
         Option<TypeId>,
-        Box<HistorySnapshot>,
+        HistoryRestore,
         Option<Box<HistorySnapshot>>,
         Sender<Result<(), HistoryError>>,
     ),
     #[cfg(any(test, feature = "test-util"))]
     ObserveHistory(Sender<HistoryObservation>),
+}
+
+enum HistoryRestore {
+    Unverified(Box<HistorySnapshot>),
+    Resolved(crate::ResolvedHistory),
 }
 
 /// Read-only actor-boundary observation. Stack order is oldest to newest;
@@ -380,8 +385,34 @@ impl Core {
         self.sender
             .send(CoreMessage::RestoreHistory(
                 owner,
-                Box::new(history),
+                HistoryRestore::Unverified(Box::new(history)),
                 before.map(Box::new),
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Adopt an immutable bounded replay result without executing it twice.
+    /// # Errors
+    /// Refuses owner, attachment and in-flight save conflicts before mutation.
+    pub fn restore_resolved_history(
+        &self,
+        history: crate::ResolvedHistory,
+    ) -> Result<(), HistoryError> {
+        self.restore_resolved_with_owner(None, history)
+    }
+    fn restore_resolved_with_owner(
+        &self,
+        owner: Option<TypeId>,
+        history: crate::ResolvedHistory,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(
+                owner,
+                HistoryRestore::Resolved(history),
+                None,
                 reply,
             ))
             .map_err(|_| HistoryError::Disconnected)?;
@@ -740,7 +771,7 @@ impl Core {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct HistoryEntry {
+pub(crate) struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
     /// Set only while a live coalescing gesture owns this entry.
@@ -977,6 +1008,7 @@ impl CoreState {
             coalesce_key: e.coalesce_key.clone(),
         };
         HistorySnapshot {
+            replay_proof: None,
             floor_offset: self.floor_offset,
             baseline: Arc::clone(&self.baseline),
             document: Arc::clone(&self.document),
@@ -1015,6 +1047,7 @@ impl CoreState {
             document,
             batches,
             cursor: HistoryCursor { undo, redo },
+            replay_proof: _,
         } = other;
         self.floor_offset == *floor_offset
             && self.baseline == *baseline
@@ -1025,6 +1058,13 @@ impl CoreState {
     }
 
     fn restore(snapshot: &HistorySnapshot) -> Result<Self, HistoryError> {
+        if let Some(proof) = &snapshot.replay_proof
+            && proof.matches(snapshot)?
+        {
+            // Snapshot metadata is mutable to callers. Clone its owned values
+            // into canonical capacities; the proved documents stay shared.
+            return Ok(Self::adopt_snapshot(snapshot.clone(), proof.capacities));
+        }
         snapshot
             .baseline
             .validate()
@@ -1054,6 +1094,53 @@ impl CoreState {
             entry.document = Arc::clone(&boundary.document);
         }
         Ok(candidate)
+    }
+
+    fn adopt_resolved(history: crate::ResolvedHistory) -> Self {
+        let capacities = (
+            history.checkpoint.batches_capacity,
+            history.checkpoint.undo_capacity,
+            history.checkpoint.redo_capacity,
+        );
+
+        Self::adopt_snapshot(history.into_unsealed_snapshot(), capacities)
+    }
+    fn adopt_snapshot(history: HistorySnapshot, capacities: (usize, usize, usize)) -> Self {
+        let HistorySnapshot {
+            floor_offset,
+            baseline,
+            document,
+            batches,
+            cursor,
+            replay_proof: _,
+        } = history;
+        let mut state = Self::new(baseline, TimelineRevision(0));
+        // OpLog includes accepted edits even if a later Undo no longer exposes them.
+        let operations = batches
+            .iter()
+            .flat_map(|batch| match &batch.command {
+                JournalCommand::Do(operation) => std::slice::from_ref(operation),
+                JournalCommand::DoBatch(operations)
+                | JournalCommand::DoBatchCoalesced { operations, .. } => operations.as_slice(),
+                JournalCommand::Undo | JournalCommand::Redo => &[],
+            })
+            .cloned()
+            .collect();
+        state.op_log = Arc::new(operations);
+        state.floor_offset = floor_offset;
+        state.document = document;
+        state.batches = Vec::with_capacity(capacities.0);
+        state.batches.extend(batches);
+        let entry = |boundary: GestureBoundary| HistoryEntry {
+            document: boundary.document,
+            operations: boundary.operations,
+            coalesce_key: boundary.coalesce_key,
+        };
+        state.undo = Vec::with_capacity(capacities.1);
+        state.undo.extend(cursor.undo.into_iter().map(entry));
+        state.redo = Vec::with_capacity(capacities.2);
+        state.redo.extend(cursor.redo.into_iter().map(entry));
+        state
     }
 
     fn begin_floor(
@@ -1178,61 +1265,224 @@ impl CoreState {
 }
 
 /// Costs of the immutable documents resident in one replay. Addresses are used
-/// only as keys: this cache owns no documents and is pruned after every command.
-struct ReplayDocumentCharges {
-    baseline_address: usize,
-    baseline_charge: u64,
-    by_address: std::collections::BTreeMap<usize, u64>,
+/// only as keys: this cache owns no documents. Stack moves update reference
+/// counts; an abandoned Redo entry is visited only when it is discarded.
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayDocumentCharges {
+    current: usize,
+    undo: Vec<usize>,
+    redo: Vec<usize>,
+    resident: u64,
+    by_address: std::collections::HashMap<usize, (u64, usize)>,
 }
 impl ReplayDocumentCharges {
+    pub(crate) fn rebind(
+        &self,
+        before: &HistorySnapshot,
+        after: &HistorySnapshot,
+    ) -> Result<Option<Self>, HistoryError> {
+        let documents = |history: &HistorySnapshot| {
+            std::iter::once(&history.baseline)
+                .chain(std::iter::once(&history.document))
+                .chain(
+                    history
+                        .cursor
+                        .undo
+                        .iter()
+                        .chain(&history.cursor.redo)
+                        .map(|entry| &entry.document),
+                )
+                .map(|document| Arc::as_ptr(document) as usize)
+                .collect::<Vec<_>>()
+        };
+        let old = documents(before);
+        let new = documents(after);
+        let mut forward = std::collections::HashMap::new();
+        let mut reverse = std::collections::HashMap::new();
+        for (old, new) in old.into_iter().zip(new) {
+            if forward.insert(old, new).is_some_and(|mapped| mapped != new)
+                || reverse.insert(new, old).is_some_and(|mapped| mapped != old)
+            {
+                return Ok(None);
+            }
+        }
+        for document in std::iter::once(&after.baseline)
+            .chain(std::iter::once(&after.document))
+            .chain(
+                after
+                    .cursor
+                    .undo
+                    .iter()
+                    .chain(&after.cursor.redo)
+                    .map(|entry| &entry.document),
+            )
+        {
+            let new = Arc::as_ptr(document) as usize;
+            if let Some(old) = reverse.remove(&new)
+                && old != new
+            {
+                let bound = self
+                    .by_address
+                    .get(&old)
+                    .ok_or(HistoryError::CommitInvariant)?
+                    .0;
+                if crate::history_size::document_live_bytes(document)? > bound {
+                    // Equal values can have different spare capacities. Keep the
+                    // canonical replay document if the new allocation is larger.
+                    return Ok(None);
+                }
+            }
+        }
+        let address = |old| {
+            forward
+                .get(&old)
+                .copied()
+                .ok_or(HistoryError::CommitInvariant)
+        };
+        Ok(Some(Self {
+            current: address(self.current)?,
+            undo: self
+                .undo
+                .iter()
+                .map(|old| address(*old))
+                .collect::<Result<_, _>>()?,
+            redo: self
+                .redo
+                .iter()
+                .map(|old| address(*old))
+                .collect::<Result<_, _>>()?,
+            resident: self.resident,
+            by_address: self
+                .by_address
+                .iter()
+                .map(|(old, value)| address(*old).map(|new| (new, *value)))
+                .collect::<Result<_, _>>()?,
+        }))
+    }
     fn new(baseline: &Arc<Document>, charge: u64) -> Self {
         let address = Arc::as_ptr(baseline) as usize;
         Self {
-            baseline_address: address,
-            baseline_charge: charge,
-            by_address: std::collections::BTreeMap::from([(address, charge)]),
+            current: address,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            resident: charge,
+            // Baseline and current initially share one allocation.
+            by_address: std::collections::HashMap::from([(address, (charge, 2))]),
         }
+    }
+    fn add(&mut self, address: usize, charge: u64) -> Result<(), HistoryError> {
+        if let Some((_, references)) = self.by_address.get_mut(&address) {
+            *references = references.checked_add(1).ok_or(HistoryError::Capacity)?;
+        } else {
+            self.resident = self
+                .resident
+                .checked_add(charge)
+                .ok_or(HistoryError::Capacity)?;
+            self.by_address.insert(address, (charge, 1));
+        }
+        Ok(())
+    }
+    fn remove(&mut self, address: usize) -> Result<(), HistoryError> {
+        let (charge, references) = self
+            .by_address
+            .get_mut(&address)
+            .ok_or(HistoryError::CommitInvariant)?;
+        *references = references
+            .checked_sub(1)
+            .ok_or(HistoryError::CommitInvariant)?;
+        if *references == 0 {
+            self.resident = self
+                .resident
+                .checked_sub(*charge)
+                .ok_or(HistoryError::CommitInvariant)?;
+            self.by_address.remove(&address);
+        }
+        Ok(())
     }
     fn refresh(&mut self, state: &CoreState, new_document: bool) -> Result<u64, HistoryError> {
         let current_address = Arc::as_ptr(&state.document) as usize;
-        let mut next = std::collections::BTreeMap::new();
-        let mut bytes = 0_u64;
-        for document in [&state.baseline, &state.document].into_iter().chain(
-            state
-                .undo
-                .iter()
-                .chain(&state.redo)
-                .map(|entry| &entry.document),
-        ) {
-            let address = Arc::as_ptr(document) as usize;
-            let std::collections::btree_map::Entry::Vacant(entry) = next.entry(address) else {
-                continue;
-            };
-            let charge = if address == self.baseline_address {
-                self.baseline_charge
-            } else if new_document && address == current_address {
-                // A new current Arc can reuse a just-cleared Redo allocation's
-                // address. Always measure it, even if that address was cached.
-                crate::history_size::document_live_bytes(document)?
-            } else if let Some(charge) = self.by_address.get(&address) {
-                *charge
-            } else {
-                crate::history_size::document_live_bytes(document)?
-            };
-            bytes = bytes.checked_add(charge).ok_or(HistoryError::Capacity)?;
-            entry.insert(charge);
+        if new_document {
+            if state.undo.len() == self.undo.len() + 1 {
+                let address = Arc::as_ptr(
+                    &state
+                        .undo
+                        .last()
+                        .ok_or(HistoryError::CommitInvariant)?
+                        .document,
+                ) as usize;
+                if address != self.current {
+                    return Err(HistoryError::CommitInvariant);
+                }
+                let (_, references) = self
+                    .by_address
+                    .get_mut(&address)
+                    .ok_or(HistoryError::CommitInvariant)?;
+                *references = references.checked_add(1).ok_or(HistoryError::Capacity)?;
+                self.undo.push(address);
+            } else if state.undo.len() != self.undo.len() {
+                return Err(HistoryError::CommitInvariant);
+            }
+            if !state.redo.is_empty() {
+                return Err(HistoryError::CommitInvariant);
+            }
+            while let Some(address) = self.redo.pop() {
+                self.remove(address)?;
+            }
+            self.remove(self.current)?;
+            // Redo may have freed an allocation whose address this new Arc
+            // reused. Every new current document is measured, never memo-hit.
+            self.add(
+                current_address,
+                crate::history_size::document_live_bytes(&state.document)?,
+            )?;
+            self.current = current_address;
+        } else if state.undo.len() + 1 == self.undo.len() && state.redo.len() == self.redo.len() + 1
+        {
+            self.redo.push(self.current);
+            self.current = self.undo.pop().ok_or(HistoryError::CommitInvariant)?;
+        } else if state.redo.len() + 1 == self.redo.len() && state.undo.len() == self.undo.len() + 1
+        {
+            self.undo.push(self.current);
+            self.current = self.redo.pop().ok_or(HistoryError::CommitInvariant)?;
+        } else if state.undo.len() != self.undo.len() || state.redo.len() != self.redo.len() {
+            return Err(HistoryError::CommitInvariant);
         }
-        self.by_address = next;
-        Ok(bytes)
+        if self.current != current_address {
+            return Err(HistoryError::CommitInvariant);
+        }
+        Ok(self.resident)
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReplayCheckpoint {
+    pub(crate) documents: ReplayDocumentCharges,
+    budget: crate::history_size::ReplayBudget,
+    batches_capacity: usize,
+    undo_capacity: usize,
+    redo_capacity: usize,
+}
 pub(crate) fn resolve_history_journal(
     journal: &crate::HistoryJournal,
     baseline: Arc<Document>,
     document: &Document,
     limit: u64,
 ) -> Result<(HistorySnapshot, u64), HistoryError> {
+    let resolved = resolve_history_journal_verified(journal, baseline, document, limit, None)?;
+    let peak = resolved.peak;
+    Ok((resolved.into_snapshot(), peak))
+}
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded replay transaction shares its cold and incremental executor and final checks"
+)]
+pub(crate) fn resolve_history_journal_verified(
+    journal: &crate::HistoryJournal,
+    baseline: Arc<Document>,
+    document: &Document,
+    limit: u64,
+    prefix: Option<&crate::ResolvedHistory>,
+) -> Result<crate::ResolvedHistory, HistoryError> {
     if journal.batches.len() > crate::HISTORY_COMMANDS {
         return Err(HistoryError::Capacity);
     }
@@ -1243,11 +1493,40 @@ pub(crate) fn resolve_history_journal(
     {
         return Err(HistoryError::Corrupt);
     }
-    let budget = crate::history_size::ReplayBudget::new(journal, &baseline, document, limit)?;
-    let mut documents = ReplayDocumentCharges::new(&baseline, budget.document_charge());
-    let mut state = CoreState::new(baseline, TimelineRevision(0));
+    let prefix = prefix.filter(|prefix| {
+        let history = prefix.snapshot();
+        history.floor_offset == journal.floor_offset
+            && history.baseline == baseline
+            && history.batches.len() <= journal.batches.len()
+            && history
+                .batches
+                .iter()
+                .zip(&journal.batches)
+                .all(|(before, after)| crate::JournalBatch::from(before) == *after)
+    });
+    let (mut state, mut documents, budget, skip) = if let Some(prefix) = prefix {
+        let budget = prefix
+            .checkpoint
+            .budget
+            .extend_input(journal, &baseline, document, limit)?;
+        (
+            CoreState::adopt_resolved(prefix.clone()),
+            prefix.checkpoint.documents.clone(),
+            budget,
+            prefix.snapshot().batches.len(),
+        )
+    } else {
+        let budget = crate::history_size::ReplayBudget::new(journal, &baseline, document, limit)?;
+        let documents = ReplayDocumentCharges::new(&baseline, budget.document_charge());
+        (
+            CoreState::new(baseline, TimelineRevision(0)),
+            documents,
+            budget,
+            0,
+        )
+    };
     state.replay_budget = Some(budget);
-    for batch in &journal.batches {
+    for batch in &journal.batches[skip..] {
         let event = execute_command(&mut state, batch.command.clone().into());
         if matches!(
             &event,
@@ -1301,7 +1580,15 @@ pub(crate) fn resolve_history_journal(
         .replay_budget
         .take()
         .ok_or(HistoryError::CommitInvariant)?;
+    let checkpoint = ReplayCheckpoint {
+        documents,
+        budget,
+        batches_capacity: state.batches.capacity(),
+        undo_capacity: state.undo.capacity(),
+        redo_capacity: state.redo.capacity(),
+    };
     let history = HistorySnapshot {
+        replay_proof: None,
         floor_offset: journal.floor_offset,
         baseline: state.baseline,
         document: state.document,
@@ -1311,8 +1598,25 @@ pub(crate) fn resolve_history_journal(
             redo: state.redo.into_iter().map(boundary).collect(),
         },
     };
-    let peak = budget.finish(&history)?;
-    Ok((history, peak))
+    // The final metadata fingerprint is not an operation in a future cold
+    // replay's prefix. Check its temporary peak without retaining it there.
+    let mut finishing = checkpoint.budget.clone();
+    finishing.check_adoption_metadata(&history)?;
+    let peak = finishing.finish(&history)?;
+    let adoption = Arc::new(crate::HistoryReplayEvidence::new(
+        &history,
+        (
+            checkpoint.batches_capacity,
+            checkpoint.undo_capacity,
+            checkpoint.redo_capacity,
+        ),
+    )?);
+    Ok(crate::ResolvedHistory {
+        history: Arc::new(history),
+        checkpoint: Arc::new(checkpoint),
+        peak,
+        adoption,
+    })
 }
 
 pub(crate) fn floor_history(
@@ -1722,9 +2026,12 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     .as_deref()
                     .is_some_and(|before| !state.history_matches(before))
                 {
-                    Err(HistoryError::Corrupt)
+                    Err(HistoryError::StaleExpectation)
                 } else {
-                    CoreState::restore(&history)
+                    match history {
+                        HistoryRestore::Unverified(history) => CoreState::restore(&history),
+                        HistoryRestore::Resolved(history) => Ok(CoreState::adopt_resolved(history)),
+                    }
                 };
                 let result = admitted.and_then(|mut candidate| {
                     candidate.history_epoch = state
@@ -2013,6 +2320,113 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+
+    #[test]
+    fn replay_incremental_document_charges_match_full_resident_walk_and_adoption() {
+        let baseline = Arc::new(generated_document(&[30], &[0]));
+        let mut state = CoreState::new(Arc::clone(&baseline), TimelineRevision(0));
+        let initial = crate::history_size::document_live_bytes(&baseline).unwrap();
+        let mut charges = ReplayDocumentCharges::new(&baseline, initial);
+        let operation = |locked| Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked,
+        };
+        let mut commands = vec![
+            Command::Do(operation(false)),
+            Command::DoBatchCoalesced {
+                operations: vec![operation(true)],
+                coalesce_key: "drag".into(),
+            },
+            Command::DoBatchCoalesced {
+                operations: vec![operation(false)],
+                coalesce_key: "drag".into(),
+            },
+            Command::Undo,
+            Command::Undo,
+            Command::Redo,
+            Command::Do(operation(true)),
+            Command::Undo,
+            Command::Redo,
+        ];
+        // Repeated branch abandonment exercises address reuse and released Redo documents.
+        for _ in 0..50 {
+            commands.extend([
+                Command::Undo,
+                Command::Do(operation(false)),
+                Command::Do(operation(true)),
+            ]);
+        }
+        for command in commands {
+            let new_document = !matches!(command, Command::Undo | Command::Redo);
+            assert!(matches!(
+                execute_command(&mut state, command),
+                Event::DocumentChanged { .. }
+            ));
+            let incremental = charges.refresh(&state, new_document).unwrap();
+            let mut seen = std::collections::BTreeSet::new();
+            let mut walked = 0;
+            for document in std::iter::once(&state.baseline)
+                .chain(std::iter::once(&state.document))
+                .chain(
+                    state
+                        .undo
+                        .iter()
+                        .chain(&state.redo)
+                        .map(|entry| &entry.document),
+                )
+            {
+                if seen.insert(Arc::as_ptr(document) as usize) {
+                    walked += crate::history_size::document_live_bytes(document).unwrap();
+                }
+            }
+            assert_eq!(
+                incremental, walked,
+                "INCREMENTAL_CHARGES_EQUAL_INDEPENDENT_FULL_WALK"
+            );
+        }
+        let history = state.history();
+        let resolved = crate::HistoryTransport::capture(&history)
+            .unwrap()
+            .resolve_verified()
+            .unwrap();
+        let adopted = CoreState::adopt_resolved(resolved);
+        let replayed = CoreState::restore(&history).unwrap();
+        assert_eq!(adopted.history(), replayed.history());
+        assert_eq!(
+            adopted.op_log, replayed.op_log,
+            "ADOPTION_PRESERVES_UNDONE_OPERATIONS_IN_LOG"
+        );
+        let core = Core::spawn(Document::default()).unwrap();
+        core.restore_resolved_history(
+            crate::HistoryTransport::capture(&history)
+                .unwrap()
+                .resolve_verified()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(core.export_history().unwrap(), history);
+    }
+
+    #[test]
+    fn restore_stale_expectation_is_typed_and_keeps_live_history() {
+        let core = Core::spawn(Document::default()).unwrap();
+        let stale = core.export_history().unwrap();
+        core.request(Command::Do(Operation::AddTrack {
+            track: Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            },
+        }))
+        .unwrap();
+        let live = core.export_history().unwrap();
+        assert_eq!(
+            core.restore_authorized::<()>(stale.clone(), Some(stale)),
+            Err(HistoryError::StaleExpectation)
+        );
+        assert_eq!(core.export_history().unwrap(), live);
+    }
 
     #[test]
     fn w09_floor_commit_checks_suffix_equality_losslessly() {

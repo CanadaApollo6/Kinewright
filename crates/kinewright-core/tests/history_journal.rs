@@ -652,7 +652,15 @@ fn history_replay_reservation_covers_implicit_splits_and_removals() {
         let retained =
             kinewright_core::history_size::restored_history_live_bytes(&history).unwrap();
         println!("IMPLICIT_SPLIT_REPLAY patched={patched} retained={retained} peak={reserved}");
-        assert!(retained <= reserved, "PRIOR_STATE_COPY_IS_RESERVED");
+        assert_eq!(
+            journal.resolve_with_budget(
+                std::sync::Arc::clone(&history.baseline),
+                &history.document,
+                retained
+            ),
+            Err(kinewright_core::HistoryError::Capacity),
+            "IMPLICIT_SPLITS_NEED_TRANSIENT_ROOM_BEYOND_FINAL_RETAINED_STATE"
+        );
         history_oracle::assert_compact_roundtrip(&history);
     }
 }
@@ -897,4 +905,340 @@ fn history_replay_releases_discarded_coalesced_documents_inside_the_window() {
         reopened.export_history().unwrap().document,
         original.document
     );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sequence compares every prefix against independent cold replay and both capacity thresholds"
+)]
+fn history_incremental_proof_equals_cold_peak_and_refusals_at_every_cut() {
+    use kinewright_core::{HistoryError, HistoryJournal, Track, TrackKind};
+    use std::sync::Arc;
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut proof = None;
+    let mut commands = vec![
+        Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }),
+        Command::DoBatchCoalesced {
+            operations: vec![Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: true,
+            }],
+            coalesce_key: "proof".into(),
+        },
+        Command::DoBatchCoalesced {
+            operations: vec![Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }],
+            coalesce_key: "proof".into(),
+        },
+        Command::Undo,
+        Command::Redo,
+        Command::Undo,
+    ];
+    for index in 0..32 {
+        commands.push(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: index % 2 == 0,
+        }));
+    }
+    commands.extend([
+        Command::Do(Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: kinewright_core::TimeCode(0),
+            duration: kinewright_core::TimeCode(90),
+            color: kinewright_core::SolidColor { r: 0, g: 0, b: 0 },
+        }),
+        Command::Do(Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: kinewright_core::TimeCode(90),
+            duration: kinewright_core::TimeCode(90),
+            color: kinewright_core::SolidColor { r: 0, g: 0, b: 0 },
+        }),
+        Command::Do(Operation::AddEffect {
+            clip: kinewright_core::ClipId(1),
+            effect: history_effect(10),
+        }),
+        Command::Do(Operation::CopyClipAttributes {
+            from_clip: kinewright_core::ClipId(1),
+            to_clip: kinewright_core::ClipId(2),
+            names: None,
+            include_keyframes: true,
+        }),
+        Command::Do(Operation::SplitClip {
+            clip: kinewright_core::ClipId(2),
+            at: kinewright_core::TimeCode(120),
+        }),
+        Command::DoBatch(vec![
+            Operation::DeleteClip {
+                clip: kinewright_core::ClipId(3),
+            },
+            Operation::DeleteClip {
+                clip: kinewright_core::ClipId(2),
+            },
+        ]),
+        Command::Undo,
+        Command::Redo,
+    ]);
+    for command in commands {
+        assert!(matches!(
+            core.request(command).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let history = core.export_history().unwrap();
+        let journal = HistoryJournal::capture(&history).unwrap();
+        let cold = journal
+            .resolve_verified_with_budget(
+                Arc::clone(&history.baseline),
+                &history.document,
+                128 << 20,
+                None,
+            )
+            .unwrap();
+        let wire: kinewright_core::HistoryTransport = serde_json::from_slice(
+            &serde_json::to_vec(&kinewright_core::HistoryTransport::capture(&history).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let wire_proof = wire
+            .journal
+            .resolve_verified_with_budget(
+                Arc::clone(&wire.baseline),
+                &wire.document,
+                cold.replay_peak(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            wire_proof.replay_peak(),
+            cold.replay_peak(),
+            "WARM_AND_COLD_ADMISSION_HAVE_THE_SAME_WINDOW"
+        );
+        let incremental = journal
+            .resolve_verified_with_budget(
+                Arc::clone(&history.baseline),
+                &history.document,
+                128 << 20,
+                proof.as_ref(),
+            )
+            .unwrap();
+        assert_eq!(incremental.snapshot(), cold.snapshot());
+        assert_eq!(
+            incremental.replay_peak(),
+            cold.replay_peak(),
+            "PREFIX_PROOF_HAS_THE_SAME_PEAK_AS_COLD_REPLAY at {} batches",
+            history.batches.len()
+        );
+        let just_too_small = cold.replay_peak() - 1;
+        assert!(matches!(
+            journal.resolve_verified_with_budget(
+                Arc::clone(&history.baseline),
+                &history.document,
+                just_too_small,
+                None
+            ),
+            Err(HistoryError::Capacity)
+        ));
+        assert!(matches!(
+            journal.resolve_verified_with_budget(
+                Arc::clone(&history.baseline),
+                &history.document,
+                just_too_small,
+                proof.as_ref()
+            ),
+            Err(HistoryError::Capacity)
+        ));
+        let shared = incremental.share_documents(history.clone()).unwrap();
+        assert!(Arc::ptr_eq(&shared.snapshot().document, &history.document));
+        assert!(Arc::ptr_eq(&shared.snapshot().baseline, &history.baseline));
+        for (proved, live) in shared
+            .snapshot()
+            .cursor
+            .undo
+            .iter()
+            .chain(&shared.snapshot().cursor.redo)
+            .zip(history.cursor.undo.iter().chain(&history.cursor.redo))
+        {
+            assert!(
+                Arc::ptr_eq(&proved.document, &live.document),
+                "PROOF_SHARES_EVERY_LIVE_BOUNDARY_DOCUMENT"
+            );
+        }
+        proof = Some(shared);
+    }
+    let mut larger = core.export_history().unwrap();
+    Arc::make_mut(&mut larger.document).tracks.reserve(10_000);
+    let shared = proof
+        .as_ref()
+        .unwrap()
+        .clone()
+        .share_documents(larger.clone())
+        .unwrap();
+    assert!(
+        !Arc::ptr_eq(&shared.snapshot().document, &larger.document),
+        "EQUAL_BYTES_WITH_LARGER_SPARE_CAPACITY_CANNOT_REPLACE_A_PROVEN_ALLOCATION"
+    );
+    let mut forged = core.export_history().unwrap();
+    forged.cursor.undo.last_mut().unwrap().coalesce_key = Some("forged".into());
+    assert!(matches!(
+        proof.unwrap().share_documents(forged),
+        Err(HistoryError::StaleExpectation)
+    ));
+}
+
+#[test]
+fn history_replay_prior_mix_curves_and_relink_clip_copies_have_bounded_windows() {
+    use kinewright_core::{
+        AutomationCurve, HistoryError, HistoryTransport, Keyframe, KeyframeInterpolation,
+        SolidColor, TimeCode, TrackKind,
+    };
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("support/history_operation_cases.json")).unwrap();
+    for name in ["RelinkAsset", "SetTrackMix", "SetTrackAutomation"] {
+        let mut document: Document =
+            serde_json::from_value(cases[name]["document"].clone()).unwrap();
+        let operation: Operation =
+            serde_json::from_value(cases[name]["operation"].clone()).unwrap();
+        match &operation {
+            Operation::RelinkAsset { .. } => {
+                Operation::AddEffect {
+                    clip: document.tracks[0].clips[0].id,
+                    effect: {
+                        let mut effect = history_effect(1000);
+                        effect.id = kinewright_core::EffectId(1000);
+                        effect
+                    },
+                }
+                .apply(&mut document)
+                .unwrap();
+            }
+            Operation::SetTrackMix { track, .. } | Operation::SetTrackAutomation { track, .. } => {
+                let video = document
+                    .tracks
+                    .iter()
+                    .find(|track| track.kind == TrackKind::Video)
+                    .unwrap()
+                    .id;
+                Operation::AddSolidClip {
+                    track: video,
+                    timeline_start: document.duration,
+                    duration: TimeCode(2000),
+                    color: SolidColor { r: 0, g: 0, b: 0 },
+                }
+                .apply(&mut document)
+                .unwrap();
+                Operation::SetTrackAutomation {
+                    track: *track,
+                    parameter: "pan_percent".into(),
+                    curve: Some(AutomationCurve {
+                        keyframes: (0..1000)
+                            .map(|at| Keyframe {
+                                at: TimeCode(at),
+                                value: 0,
+                                interpolation: KeyframeInterpolation::Linear,
+                                tangent_in: 0,
+                                tangent_out: 0,
+                            })
+                            .collect(),
+                    }),
+                }
+                .apply(&mut document)
+                .unwrap();
+            }
+            _ => unreachable!("three prior-state-copy fixtures"),
+        }
+        let core = Core::spawn(document).unwrap();
+        assert!(
+            matches!(
+                core.request(Command::Do(operation)).unwrap(),
+                Event::DocumentChanged { .. }
+            ),
+            "{name}"
+        );
+        let history = core.export_history().unwrap();
+        let transport = HistoryTransport::capture(&history).unwrap();
+        let retained =
+            kinewright_core::history_size::restored_history_live_bytes(&history).unwrap();
+        assert!(
+            matches!(
+                transport.journal.resolve_with_budget(
+                    std::sync::Arc::clone(&transport.baseline),
+                    &transport.document,
+                    retained
+                ),
+                Err(HistoryError::Capacity)
+            ),
+            "{name}: final retained size alone cannot reserve the prior-state copy peak"
+        );
+        let resolved = transport.resolve_verified().unwrap();
+        assert_eq!(resolved.snapshot(), &history, "{name}");
+        let restored = Core::spawn(Document::default()).unwrap();
+        restored.restore_resolved_history(resolved).unwrap();
+        restored.request(Command::Undo).unwrap();
+        assert_eq!(
+            restored.export_history().unwrap().document,
+            history.baseline
+        );
+        restored.request(Command::Redo).unwrap();
+        assert_eq!(
+            restored.export_history().unwrap().document,
+            history.document
+        );
+    }
+}
+
+#[test]
+fn history_runtime_replay_evidence_is_not_input_authority_or_a_document_owner() {
+    use kinewright_core::{HistoryError, HistoryTransport};
+    use std::sync::Arc;
+    let core = Core::spawn(fixture(10)).unwrap();
+    core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let transport = HistoryTransport::capture(&core.export_history().unwrap()).unwrap();
+    let decoded = transport.resolve().unwrap();
+    assert!(decoded.replay_proof.is_some());
+    let bytes = serde_json::to_value(&decoded).unwrap();
+    assert!(bytes.get("replay_proof").is_none());
+    let mut forged_wire = bytes;
+    forged_wire["replay_proof"] = serde_json::json!({"trusted":true});
+    assert!(
+        serde_json::from_value::<HistorySnapshot>(forged_wire).is_err(),
+        "WIRE_CANNOT_SUPPLY_REPLAY_EVIDENCE"
+    );
+    let restored = Core::spawn(Document::default()).unwrap();
+    restored.restore_history(decoded.clone()).unwrap();
+    assert_eq!(restored.export_history().unwrap(), decoded);
+    let mut changed = decoded.clone();
+    changed.cursor.undo.last_mut().unwrap().operations.clear();
+    assert_eq!(
+        restored.restore_history(changed),
+        Err(HistoryError::Corrupt),
+        "CHANGED_CURSOR_METADATA_CANNOT_REUSE_THE_EVIDENCE"
+    );
+    assert_eq!(restored.export_history().unwrap(), decoded);
+    let independent = transport.resolve().unwrap();
+    let evidence = independent.replay_proof.as_ref().unwrap().clone();
+    let document = Arc::downgrade(&independent.document);
+    drop(independent);
+    assert!(
+        document.upgrade().is_none(),
+        "REPLAY_CARRIER_DOES_NOT_RETAIN_DOCUMENT_PAYLOADS"
+    );
+    drop(evidence);
 }

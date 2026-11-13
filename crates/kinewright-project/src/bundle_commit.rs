@@ -177,7 +177,7 @@ impl BundleCommit {
         let reservation = bundle.store.reserve(0, encoded, 0, false)?;
         let mut before = core
             .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            .map_err(crate::bundle::history_error)?;
         let original = before.clone();
         {
             let acknowledged = if let Some(cached) = bundle.cached_history(target) {
@@ -411,7 +411,7 @@ impl BundleCommit {
                     .clone()
                     .ok_or(BundleError::HistoryChanged)?,
             ))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            .map_err(|e| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)))?;
         let after = shadow
             .export_history()
             .map_err(crate::bundle::history_error)?;
@@ -2091,13 +2091,6 @@ fn bound_history_inner(
     };
     let overhead = record_cost(&skeleton, limits)?;
     let hash = record_cost(&"0".repeat(64), limits)?;
-    // The resolver uses at least the current document's full cloned cost for
-    // every replay boundary. Include its payload, not only the typed cells;
-    // otherwise a small document with many commands admits thousands of
-    // suffix replays that cannot fit. Growth and older peaks can only add cost.
-    let document_min = kinewright_core::history_size::replay_document_bytes(&history.document)
-        .map_err(crate::bundle::history_error)?;
-    let live_limit = crate::history_record::HistoryRole::Ordinary.live_limit(limits);
     kinewright_core::HistoryTransition::find_floor(
         history.clone(),
         |cut, dropped, baseline| {
@@ -2142,17 +2135,11 @@ fn bound_history_inner(
                     threshold *= 10;
                 }
             }
-            // Match the resolver's three journal payload allowances, current
-            // document, replayed boundaries, fixed baseline cells and margin.
-            let live = journal
-                .saturating_mul(3)
-                .saturating_add(document_min.saturating_mul((undo + redo) as u64 + 2))
-                .saturating_add(std::mem::size_of::<kinewright_core::Document>() as u64 + 16)
-                .saturating_add(8192);
+            // Replay room is decided only by `fits`. A structural JSON
+            // estimate is not a lower bound for the typed replay reservation.
             count <= kinewright_core::HISTORY_COMMANDS
                 && ordinary <= limits.branch_history_bytes
                 && journal <= limits.branch_history_bytes
-                && live.saturating_add(live.div_ceil(10)) <= live_limit
         },
         fits,
     )

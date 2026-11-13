@@ -22,9 +22,20 @@ fn history_cost_probe(
     history: &HistorySnapshot,
     limits: &StorageLimits,
 ) -> Result<u64, kinewright_project::bundle::BundleError> {
-    Ok(live_history_cost_probe(history, limits)?.max(
-        kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(history, limits)?,
-    ))
+    let journal = HistoryJournal::capture(history).unwrap();
+    let replay = kinewright_core::history_size::measure_replay_peak(
+        &journal,
+        &history.baseline,
+        &history.document,
+    )
+    .unwrap();
+    Ok(live_history_cost_probe(history, limits)?
+        .max(
+            kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
+                history, limits,
+            )?,
+        )
+        .max(replay))
 }
 
 #[cfg(target_os = "linux")]
@@ -74,14 +85,9 @@ fn limits() -> StorageLimits {
     }
 }
 fn exhaustive(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
-    let fits = |h: &HistorySnapshot| {
-        h.ordinary_admission_bytes().is_ok()
-            && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(h, limits)
-                .is_ok_and(|n| n <= limits.branch_history_bytes)
-            && h.encoded_bytes()
-                .is_ok_and(|n| n <= limits.branch_history_bytes)
-            && history_cost_probe(h, limits).is_ok_and(|n| n <= limits.branch_history_bytes)
-    };
+    let policy =
+        kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(limits).unwrap();
+    let fits = |h: &HistorySnapshot| policy.check(h).is_ok();
     if fits(history) {
         return Some(history.clone());
     }

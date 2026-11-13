@@ -29,8 +29,10 @@ impl ManualIngress {
     pub(super) fn new(
         state: &CoreState,
         generation: u64,
-        encoder: Box<dyn crate::ManualHistoryEncoder>,
+        mut encoder: Box<dyn crate::ManualHistoryEncoder>,
     ) -> Result<Self, HistoryError> {
+        encoder.check_history(&state.history())?;
+        encoder.finish_history_check(true);
         Ok(Self {
             generation,
             encoder,
@@ -76,8 +78,22 @@ impl ManualIngress {
             delta.rollback(state);
             return event;
         }
+        // The writer's effective policy is authoritative here as well as at
+        // publication and cold open. Do not advance the JSON cache or encoder
+        // until the complete prospective history passes bounded replay.
+        if let Err(error) = self.encoder.check_history(&state.history()) {
+            delta.rollback(state);
+            return manual_refusal(
+                &command,
+                match error {
+                    HistoryError::MutationRefused(reason) => reason,
+                    _ => CoreMutationRefusal::ManualBackpressure,
+                },
+            );
+        }
         let (undo_prefix, redo_prefix) = delta.cache_prefixes(state);
         let Ok(patches) = self.cache.update(state, undo_prefix, redo_prefix) else {
+            self.encoder.finish_history_check(false);
             delta.rollback(state);
             return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
         };
@@ -109,6 +125,7 @@ impl ManualIngress {
         })();
         match admitted {
             Ok((item, bytes, next_sequence, after_sha256)) => {
+                self.encoder.finish_history_check(true);
                 self.next_sequence = next_sequence;
                 self.predecessor = Some(item.batch_id.clone());
                 self.bytes += bytes;
@@ -118,6 +135,7 @@ impl ManualIngress {
                 event
             }
             Err(error) => {
+                self.encoder.finish_history_check(false);
                 self.cache.rollback(patches);
                 delta.rollback(state);
                 let reason = match error {
@@ -290,6 +308,7 @@ impl std::io::Write for BoundedJson {
 /// Comma-separated canonical JSON values, without the surrounding brackets.
 /// End offsets permit exact tail replacement without scanning the closed prefix.
 #[derive(Default)]
+#[cfg_attr(test, derive(Debug, Clone, PartialEq, Eq))]
 struct JsonArray {
     bytes: Vec<u8>,
     ends: Vec<usize>,
@@ -374,6 +393,7 @@ fn boundary_bytes(entry: &HistoryEntry) -> Result<u64, HistoryError> {
     )
 }
 
+#[cfg_attr(test, derive(Debug, Clone, PartialEq, Eq))]
 struct HistoryJson {
     epoch: u64,
     prefix: Vec<u8>,
@@ -630,6 +650,16 @@ mod tests {
         refusal: Arc<AtomicUsize>,
     }
     impl ManualHistoryEncoder for Encoder {
+        fn check_history(&mut self, _: &HistorySnapshot) -> Result<(), HistoryError> {
+            if self.refusal.load(Ordering::Relaxed) == 5 {
+                Err(HistoryError::MutationRefused(
+                    CoreMutationRefusal::ManualHistoryCapacity,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        fn finish_history_check(&mut self, _: bool) {}
         fn encode(
             &self,
             sequence: u64,
@@ -755,6 +785,13 @@ mod tests {
             let sequence = self.ingress.next_sequence;
             let predecessor = self.ingress.predecessor.clone();
             let bytes = self.ingress.bytes;
+            // A completed floor invalidates the old encoding independently of
+            // this edit. Refusal must retain the current cut's canonical cache.
+            let cache = if self.ingress.cache.epoch == self.state.history_epoch {
+                self.ingress.cache.clone()
+            } else {
+                HistoryJson::new(&self.state).unwrap()
+            };
             let event = self
                 .ingress
                 .execute(&mut self.state, AttachmentState::Live, command);
@@ -793,6 +830,10 @@ mod tests {
                 assert_eq!(self.ingress.next_sequence, sequence);
                 assert_eq!(self.ingress.predecessor, predecessor);
                 assert_eq!(self.ingress.bytes, bytes);
+                assert_eq!(
+                    self.ingress.cache, cache,
+                    "REFUSAL_PRESERVES_EVERY_ENCODER_CACHE_BYTE_AND_INDEX"
+                );
             }
             self.check_cache();
             event
@@ -908,7 +949,7 @@ mod tests {
         ] {
             accepted(&harness.run(command));
         }
-        for mode in 1..=4 {
+        for mode in 1..=5 {
             for command in [
                 drag(true, "B"),
                 Command::Undo,

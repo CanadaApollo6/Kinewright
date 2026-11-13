@@ -86,6 +86,9 @@ impl Ja1EditingSession {
                 .store
                 .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))?;
             Ok(ManualLease {
+                history_limits: crate::manual_history::OrdinaryHistoryLimits::from_limits(
+                    bundle.store.limits(),
+                )?,
                 parent_identity: Some(parent_identity),
                 namespace_name: Some(namespace_name),
                 client,

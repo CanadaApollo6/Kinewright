@@ -3069,9 +3069,9 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     )
     .unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    // Exceed ordinary Save's bound while remaining within the independently
-    // checked portable replay window used by host attachment.
-    for index in 0..4_000 {
+    // Keep the original 12,000-edit cut: it must require a real Save floor
+    // while fitting the independently checked portable replay window.
+    for index in 0..12_000 {
         edit(&core, index % 2 == 0);
     }
     let before = core.export_history().unwrap();

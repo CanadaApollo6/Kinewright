@@ -90,6 +90,17 @@ impl HistoryTransport {
             journal: HistoryJournal::capture(history)?,
         })
     }
+    /// Resolve once and retain the immutable proof for actor adoption.
+    /// # Errors
+    /// Refuses capacity, malformed commands or any checkpoint mismatch.
+    pub fn resolve_verified(&self) -> Result<crate::ResolvedHistory, HistoryError> {
+        self.journal.resolve_verified_with_budget(
+            Arc::clone(&self.baseline),
+            &self.document,
+            crate::history_size::TRANSPORT_LIVE_BYTES,
+            None,
+        )
+    }
     /// Materialize and verify an anchor through ordinary Core replay.
     /// # Errors
     /// Refuses any command or retained hash mismatch.
@@ -167,6 +178,19 @@ impl HistoryJournal {
         .map(|(history, _)| history)
     }
 
+    /// Resolve with an optional immutable prefix proof. A changed prefix uses
+    /// cold replay; every door still runs exactly the same bounded executor.
+    /// # Errors
+    /// Refuses capacity or any command, identity, document or boundary mismatch.
+    pub fn resolve_verified_with_budget(
+        &self,
+        baseline: Arc<Document>,
+        document: &Document,
+        limit: u64,
+        prefix: Option<&crate::ResolvedHistory>,
+    ) -> Result<crate::ResolvedHistory, HistoryError> {
+        crate::actor::resolve_history_journal_verified(self, baseline, document, limit, prefix)
+    }
     /// Replay inside an already reserved window. Every operation checks its
     /// temporary allocations before applying, including intermediate batch states.
     /// # Errors

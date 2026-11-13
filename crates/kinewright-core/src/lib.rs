@@ -208,8 +208,8 @@ pub use effect::{
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
 pub use history::{
-    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
-    OperationIdentityEffect,
+    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError,
+    HistoryReplayEvidence, HistorySnapshot, OperationIdentityEffect, ResolvedHistory,
 };
 pub use history_journal::{
     HistoryJournal, HistoryTransport, JournalBatch, JournalCursor, JournalIdentityEffect,

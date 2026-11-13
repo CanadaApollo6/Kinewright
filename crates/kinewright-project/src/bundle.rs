@@ -1711,7 +1711,8 @@ pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError
         kinewright_core::HistoryError::MutationRefused(reason) => {
             BundleError::CoreMutationRefused(reason)
         }
-        kinewright_core::HistoryError::CaptureChanged => BundleError::HistoryChanged,
+        kinewright_core::HistoryError::CaptureChanged
+        | kinewright_core::HistoryError::StaleExpectation => BundleError::HistoryChanged,
         kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
         kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
         kinewright_core::HistoryError::CommitInvariant => BundleError::HistoryCommitInvariant,
