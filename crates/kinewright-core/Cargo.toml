@@ -13,6 +13,7 @@ repository.workspace = true
 # shipping path reads them: every user is a test, a fixture module or the
 # `kinewright-eval` harness binary.
 test-util = []
+slow-tests = []
 
 [dependencies]
 ab_glyph.workspace = true

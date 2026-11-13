@@ -119,3 +119,32 @@ impl ApplyHistoryOracle for Operation {
         result
     }
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OperationCase {
+    pub document: Document,
+    pub operation: Operation,
+}
+
+pub(super) fn operation_cases() -> std::collections::BTreeMap<String, OperationCase> {
+    let cases: std::collections::BTreeMap<String, OperationCase> =
+        serde_json::from_str(include_str!("history_operation_cases.json")).unwrap();
+    let schema = serde_json::to_value(schemars::schema_for!(Operation)).unwrap();
+    let expected: std::collections::BTreeSet<_> = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|variant| variant["properties"].as_object().unwrap().keys().cloned())
+        .collect();
+    assert_eq!(expected.len(), 67, "OPERATION_KIND_COUNT");
+    assert_eq!(
+        cases
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected,
+        "EVERY_OPERATION_REQUIRES_AN_ORACLE_CASE"
+    );
+    cases
+}
