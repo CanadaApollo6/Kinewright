@@ -32,6 +32,9 @@ CASES = {
     'curve-return': (APP+'curve_editor_widget.rs', 'inspector_ui::manual_gesture_tests::curve_widget_emits_its_complete_return_to_the_document', 'CURVE_EQUAL_RETURN_IS_INTENT'),
     'full-notice-room': (APP+'manual_edits.rs', 'manual_edits::tests::full_notice_clears_as_soon_as_the_queue_has_room', 'MANUAL_FULL_NOTICE_CLEARS_WITH_ROOM'),
     'prepared-refusal': (APP+'ja1_attachment.rs', PREFIX+'manual_value_glm_prepared_media_clean_refusal_stays_editable', 'MANUAL_PREPARED_REFUSAL_STAYS_EDITABLE'),
+    'typed-return': (APP+'inspector_ui.rs', 'inspector_ui::manual_gesture_tests::astra_matte_numeric_typed_return_keeps_final_value', 'MATTE_TYPED_RETURN_FINAL'),
+    'healthy-preview': (APP+'ja1_attachment.rs', PREFIX+'manual_value_fix2_healthy_previews_wait_without_abandoning', 'MANUAL_HEALTHY_PREVIEW_WAITS'),
+    'unchanged-slider-click': (APP+'inspector_ui.rs', 'inspector_ui::manual_gesture_tests::unchanged_slider_click_does_not_auto_key_or_add_undo', 'NUMERIC_UNCHANGED_CLICK_NO_OPERATION'),
 }
 
 def mutate(name, source):
@@ -63,6 +66,25 @@ def mutate(name, source):
     elif name == 'full-notice-room':
         before = '        if self.actions.len() < PENDING_ACTIONS && matches!(self.notice, Some(Notice::Full)) {'
         after = '        if false {'
+    elif name == 'typed-return':
+        before = '    if relative_value_changed(&response) {\n        let operation = effect_param_operation(clip, effect.id, name, edited);'
+        after = '    if relative_value_changed(&response) && (is_live_drag(&response) || edited != value) {\n        let operation = effect_param_operation(clip, effect.id, name, edited);'
+    elif name == 'healthy-preview':
+        preview = ('            | Self::FirstSave(_)\n'
+                   '            | Self::PreviewRecovery(_)\n'
+                   '            | Self::PreviewRetirement(_)\n'
+                   '            | Self::PreviewForget\n'
+                   '            | Self::PreviewRelease(_) => true,')
+        assert source.count(preview) == 1, 'preview policy target drift'
+        source = source.replace(preview, '            | Self::FirstSave(_) => true,', 1)
+        before = '            | Self::Retry\n'
+        after = (before + '            | Self::PreviewRecovery(_)\n'
+                 '            | Self::PreviewRetirement(_)\n'
+                 '            | Self::PreviewForget\n'
+                 '            | Self::PreviewRelease(_)\n')
+    elif name == 'unchanged-slider-click':
+        before = '            || (response.drag_stopped() && intent.dragged)'
+        after = '            || response.drag_stopped()'
     elif name == 'prepared-refusal':
         before = '                if let Some(reason) = manual_refusal {'
         after = '                if let Some(reason) = manual_refusal.filter(|_| false) {'
@@ -81,7 +103,7 @@ def mutate(name, source):
         before = '.is_none_or(|accepted| accepted <= revision)'
         after = '.is_none_or(|_| true)'
     elif name == 'slider-return':
-        before = '            || (response.enabled() && response.drag_stopped() && writes.get() > 1)'
+        before = '            || (response.drag_stopped() && intent.dragged)'
         after = '            || false'
     elif name == 'curve-return':
         before = '            response.points = Some(moved);'

@@ -148,3 +148,93 @@ fn full_notice_clears_as_soon_as_the_queue_has_room() {
     );
     assert_eq!(core.export_history().unwrap().document.tracks.len(), 17);
 }
+
+#[test]
+fn abandoned_acceptance_invalidates_a_stale_numeric_return() {
+    let (core, owner, permit, mut edits) = fixture();
+    let Event::DocumentChanged { revision, .. } = permit.request(add(1)).unwrap() else {
+        panic!("track")
+    };
+    ack(&owner, &permit, &mut edits);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    edits.after_send = Some(Box::new(move || {
+        held_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(120)).unwrap();
+    }));
+    edits
+        .submit(
+            Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }),
+            &permit,
+        )
+        .unwrap();
+    held_rx.recv_timeout(Duration::from_secs(120)).unwrap();
+    edits.abandon_unaccepted();
+    release_tx.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while edits.worker_owned() {
+        assert!(Instant::now() < deadline);
+        edits.collect_ready();
+        std::thread::yield_now();
+    }
+    ack(&owner, &permit, &mut edits);
+    edits
+        .submit_value(
+            Command::DoBatch(vec![Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: true,
+            }]),
+            Some(revision),
+            &permit,
+        )
+        .unwrap();
+    collect(&mut edits);
+    edits.start_next(&permit);
+    assert!(
+        core.export_history().unwrap().document.tracks[0].sync_lock,
+        "ABANDONED_ACCEPTANCE_INVALIDATES_STALE_RETURN"
+    );
+    assert!(!edits.pending());
+    assert_eq!(edits.notice(), None);
+}
+#[test]
+fn unconfirmed_abandoned_worker_preserves_the_unapplied_count() {
+    for panicked in [false, true] {
+        let mut edits = ManualEdits::default();
+        edits.note_unapplied(3);
+        let worker = std::thread::spawn(move || -> Result<Event, CoreDisconnected> {
+            assert!(!panicked, "injected abandoned worker panic");
+            Err(CoreDisconnected)
+        });
+        edits.in_flight = Some(super::InFlight {
+            command: super::PendingValue {
+                command: add(1),
+                unchanged_at: None,
+            },
+            acknowledgement: 0,
+            worker: crate::joined_thread::JoinedThread::new(worker),
+            disposition: super::Disposition::Abandoned {
+                count_if_refused: true,
+            },
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while edits.worker_owned() {
+            assert!(Instant::now() < deadline);
+            edits.collect_ready();
+            std::thread::yield_now();
+        }
+        let notice = edits.notice().unwrap();
+        assert!(
+            notice.contains("3 hand edits were not applied."),
+            "ABANDONED_UNKNOWN_KEEPS_COUNT: {notice}"
+        );
+        assert!(
+            notice.contains("outcome could not be confirmed"),
+            "{notice}"
+        );
+        assert!(!edits.pending());
+    }
+}

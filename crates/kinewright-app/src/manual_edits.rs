@@ -102,7 +102,7 @@ impl ManualEdits {
         };
         let command = PendingValue {
             command,
-            unchanged_at: unchanged_at.filter(|_| gesture.is_some()),
+            unchanged_at,
         };
         if let Some(coalesce_key) = &gesture
             && let Some(action) = self
@@ -263,6 +263,14 @@ impl ManualEdits {
             ),
         });
     }
+    fn note_unconfirmed(&mut self, reason: &str) {
+        if let Some(Notice::Unapplied { text, .. }) = &mut self.notice {
+            text.push(' ');
+            text.push_str(reason);
+        } else {
+            self.notice = Some(Notice::Refused(reason.into()));
+        }
+    }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn action_count(&self) -> usize {
         self.actions.len()
@@ -287,17 +295,18 @@ impl ManualEdits {
             let flight = self.in_flight.take().expect("finished manual request");
             let result = flight.worker.join();
             if let Disposition::Abandoned { count_if_refused } = flight.disposition {
-                if count_if_refused {
-                    match result {
-                        Ok(Ok(Event::DocumentChanged { .. })) => {}
-                        Ok(Ok(_)) => self.note_unapplied(1),
-                        Ok(Err(CoreDisconnected)) => self.notice = Some(Notice::Refused(
-                            "The Core actor stopped. Check the document; this edit's outcome could not be confirmed.".into()
-                        )),
-                        Err(_) => self.notice = Some(Notice::Refused(
-                            "The edit worker panicked. Check the document; this edit's outcome could not be confirmed.".into()
-                        )),
+                match result {
+                    Ok(Ok(Event::DocumentChanged { revision, .. })) => {
+                        self.accepted_revision = Some(revision);
                     }
+                    Ok(Ok(_)) if count_if_refused => self.note_unapplied(1),
+                    Ok(Err(CoreDisconnected)) => self.note_unconfirmed(
+                        "The Core actor stopped. Check the document; this edit's outcome could not be confirmed."
+                    ),
+                    Err(_) => self.note_unconfirmed(
+                        "The edit worker panicked. Check the document; this edit's outcome could not be confirmed."
+                    ),
+                    Ok(Ok(_)) => {}
                 }
                 return;
             }

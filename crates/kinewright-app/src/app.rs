@@ -3412,6 +3412,14 @@ impl KinewrightApp {
     }
 
     pub(crate) fn send_operations(&mut self, operations: Vec<Operation>) {
+        self.send_operation_values(operations, false);
+    }
+
+    pub(crate) fn send_operation_values(
+        &mut self,
+        operations: Vec<Operation>,
+        matches_document: bool,
+    ) {
         if self.refuse_ja1_manual_edit() {
             return;
         }
@@ -3419,9 +3427,10 @@ impl KinewrightApp {
         if count == 0 {
             return;
         }
+        let unchanged_at = matches_document.then_some(self.focused().revision);
         if let Err(error) = self
             .focused_mut()
-            .send_manual_command(Command::DoBatch(operations))
+            .send_manual_value(Command::DoBatch(operations), unchanged_at)
         {
             // Appendix B row 16.
             self.note_manual_send_error(

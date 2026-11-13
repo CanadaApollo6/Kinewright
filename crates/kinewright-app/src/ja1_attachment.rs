@@ -110,12 +110,15 @@ impl Action {
             | Self::Save
             | Self::ConfirmSuccessorSave
             | Self::SaveAs(_)
-            | Self::FirstSave(_) => true,
+            | Self::FirstSave(_)
+            | Self::PreviewRecovery(_)
+            | Self::PreviewRetirement(_)
+            | Self::PreviewForget
+            | Self::PreviewRelease(_) => true,
             Self::DismissManualNotice
             | Self::StudioVersions
             | Self::StudioSelect(_)
             | Self::Retry
-            | Self::PreviewRecovery(_)
             | Self::OpenRecovery
             | Self::Abandon
             | Self::PreviewRescue
@@ -123,12 +126,9 @@ impl Action {
             | Self::ConsentOmission
             | Self::RescueTo(_)
             | Self::Cancel
-            | Self::PreviewRetirement(_)
             | Self::RemoveBranch
-            | Self::PreviewForget
             | Self::Forget
             | Self::Reconcile(_)
-            | Self::PreviewRelease(_)
             | Self::Release
             | Self::SaveSession(_)
             | Self::CloseSession(_)

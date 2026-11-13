@@ -20,6 +20,9 @@ struct WheelProbe {
 }
 impl WheelProbe {
     fn new() -> Self {
+        Self::with_setup(|_| {})
+    }
+    fn with_setup(setup: impl FnOnce(&mut Document)) -> Self {
         let mut document = Document {
             tracks: vec![Track {
                 id: TrackId(1),
@@ -50,6 +53,7 @@ impl WheelProbe {
         }
         .apply(&mut document)
         .unwrap();
+        setup(&mut document);
         let (core, owner, permit, edits) = fixture_with_document(document);
         // Exactly fill the real byte window with unrelated accepted work.
         let Event::DocumentChanged {
@@ -60,6 +64,8 @@ impl WheelProbe {
         else {
             panic!("accepted unrelated prefix")
         };
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
         Self {
             core,
             owner,
@@ -67,7 +73,7 @@ impl WheelProbe {
             edits,
             document,
             revision,
-            ctx: egui::Context::default(),
+            ctx,
             gesture: 0,
         }
     }
@@ -528,4 +534,546 @@ fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() 
         None,
         "abandon exposes accepted colour"
     );
+}
+
+#[test]
+fn astra_matte_numeric_typed_return_keeps_final_value() {
+    let mut h = WheelProbe::new();
+    let ctx = egui::Context::default();
+    let effect = &h.document.clip(ClipId(1)).unwrap().effects[0];
+    let frame = |events: Vec<egui::Event>| {
+        let mut p = InspectorEdits::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                matte_integer_control(
+                    ui,
+                    ClipId(1),
+                    effect,
+                    "matte_hue_center_centidegrees",
+                    "Hue",
+                    0,
+                    "matte-hue",
+                    &mut p,
+                );
+            },
+        );
+        (p, output)
+    };
+    let (_, out) = frame(vec![]);
+    let pos = out
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == "0" => Some(t.pos + t.galley.size() / 2.0),
+            _ => None,
+        })
+        .expect("numeric readout");
+    frame(vec![egui::Event::PointerMoved(pos), button(pos, true)]);
+    frame(vec![button(pos, false)]);
+    frame(vec![]);
+    let (away, _) = frame(vec![egui::Event::Text("100".into())]);
+    assert!(!away.operations.is_empty(), "typed excursion emitted");
+    h.edits
+        .submit(Command::DoBatch(away.operations), &h.permit)
+        .unwrap();
+    collect(&mut h.edits);
+    assert!(h.edits.waiting_for_ack());
+    let mods = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    let (returned, _) = frame(vec![
+        egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        },
+        egui::Event::Text("0".into()),
+    ]);
+    eprintln!("typed return operations: {}", returned.operations.len());
+    if !returned.operations.is_empty() {
+        h.edits
+            .submit(Command::DoBatch(returned.operations), &h.permit)
+            .unwrap();
+    }
+    let (release, _) = frame(vec![egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    if !release.operations.is_empty() {
+        h.edits
+            .submit(Command::DoBatch(release.operations), &h.permit)
+            .unwrap();
+    }
+    h.edits.end_gestures();
+    h.drain();
+    assert_eq!(h.edits.message(), None);
+    let doc = h.core.export_history().unwrap().document;
+    let params = &doc.clip(ClipId(1)).unwrap().effects[0].parameters;
+    assert_eq!(
+        params["matte_hue_center_centidegrees"],
+        ParamValue::Integer(0),
+        "MATTE_TYPED_RETURN_FINAL"
+    );
+}
+
+impl WheelProbe {
+    fn numeric_frame(
+        &mut self,
+        events: Vec<egui::Event>,
+        mut draw: impl FnMut(&mut egui::Ui, &Document, &mut InspectorEdits),
+    ) -> (egui::FullOutput, usize) {
+        let _ = crate::mixer_ui::take_strip_rects();
+        let mut pending = InspectorEdits::default();
+        let output = self.ctx.run_ui(
+            egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                pending = InspectorEdits::default();
+                draw(ui, &self.document, &mut pending);
+            },
+        );
+        if pending.gesture_started {
+            self.edits.end_gestures();
+            self.gesture += 1;
+        }
+        let count = pending.operations.len();
+        if count > 0 {
+            let command = if let Some(key) = pending.coalesce_key {
+                Command::DoBatchCoalesced {
+                    operations: pending.operations,
+                    coalesce_key: format!("{key}#{}", self.gesture),
+                }
+            } else {
+                Command::DoBatch(pending.operations)
+            };
+            self.edits
+                .submit_value(
+                    command,
+                    pending.matches_document.then_some(self.revision),
+                    &self.permit,
+                )
+                .unwrap();
+        }
+        if !self.ctx.input(|i| i.pointer.any_down()) {
+            self.edits.end_gestures();
+        }
+        (output, count)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NumericFamily {
+    Matte,
+    ClipFade,
+    Keyframe,
+    TrackGain,
+    MixerEffect,
+}
+impl NumericFamily {
+    fn setup(self, document: &mut Document) {
+        document.tracks.push(Track {
+            id: TrackId(3),
+            kind: TrackKind::Audio,
+            sync_lock: true,
+            clips: vec![],
+        });
+        if matches!(self, Self::ClipFade | Self::Keyframe) {
+            document.media_pool.push(kinewright_core::MediaAsset {
+                id: kinewright_core::AssetId(1),
+                path: "numeric-fixture.wav".into(),
+                name: "numeric-fixture.wav".into(),
+                duration: TimeCode(1_000_000),
+                fps: kinewright_core::Rational::new(30, 1).unwrap(),
+                kind: MediaKind::Audio,
+                resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            });
+            let mut clip = document.tracks[0].clips.remove(0);
+            clip.content = ClipContent::Media;
+            clip.asset = kinewright_core::AssetId(1);
+            clip.effects.clear();
+            document.tracks[1].clips.push(clip);
+        }
+        if matches!(self, Self::Keyframe) {
+            document.tracks[1].clips[0].audio_gain_curve =
+                Some(upsert_keyframe(None, TimeCode(0), 0));
+        }
+        if matches!(self, Self::MixerEffect) {
+            document.audio_mix.master.effects.push(Effect {
+                id: EffectId(2),
+                name: "audio_compressor".into(),
+                enabled: true,
+                enabled_curve: None,
+                parameters: std::collections::BTreeMap::from([(
+                    "threshold_tenth_db".into(),
+                    ParamValue::Integer(0),
+                )]),
+                keyframes: std::collections::BTreeMap::new(),
+            });
+        }
+    }
+    fn draw(self, ui: &mut egui::Ui, document: &Document, pending: &mut InspectorEdits) {
+        let clip = document.clip(ClipId(1)).unwrap();
+        match self {
+            Self::Matte => matte_integer_control(
+                ui,
+                clip.id,
+                &clip.effects[0],
+                "matte_hue_center_centidegrees",
+                "Hue",
+                0,
+                "matte-hue",
+                pending,
+            ),
+            Self::ClipFade => clip_audio_controls(ui, document, clip, 0, pending),
+            Self::Keyframe => envelope_block(
+                ui,
+                clip.id,
+                clip.audio_gain_curve.as_ref(),
+                1_000_000,
+                0,
+                0,
+                pending,
+            ),
+            Self::TrackGain => {
+                let mix = document.audio_mix.track(TrackId(3));
+                let mut gain = mix.gain_tenth_db;
+                let response = ui.add(intent_drag_value(&mut gain, |field| {
+                    field
+                        .range(
+                            kinewright_core::TRACK_MIX_GAIN_MIN
+                                ..=kinewright_core::TRACK_MIX_GAIN_MAX,
+                        )
+                        .custom_formatter(|v, _| crate::mixer_ui::format_gain_db(v))
+                        .custom_parser(crate::mixer_ui::parse_gain_db)
+                        .update_while_editing(false)
+                }));
+                crate::mixer_ui::record_strip_rect("typed_track_gain", response.rect);
+                crate::mixer_ui::record_mix_edit(pending, &response, &mix, || {
+                    kinewright_core::TrackMix {
+                        gain_tenth_db: gain,
+                        ..kinewright_core::TrackMix::neutral(mix.track)
+                    }
+                });
+            }
+            Self::MixerEffect => {
+                let master = &document.audio_mix.master;
+                let effect = &master.effects[0];
+                let mut edits = crate::mixer_ui::MixerChainEdits::default();
+                crate::mixer_pane_ui::mixer_parameter_control(
+                    ui,
+                    crate::mixer_pane_ui::MixerChain::Master(master),
+                    effect,
+                    "threshold_tenth_db",
+                    "Threshold",
+                    crate::mixer_pane_ui::MixerUnit::Decibels,
+                    0,
+                    &mut edits,
+                );
+                *pending = edits.take_operations(document);
+            }
+        }
+    }
+    fn position(self, output: &egui::FullOutput) -> egui::Pos2 {
+        let rects = crate::mixer_ui::take_strip_rects();
+        if let Some((_, rect)) = rects.iter().find(|(name, _)| {
+            name == "typed_track_gain"
+                || name == "clip_fade_in"
+                || name == "param:2:threshold_tenth_db"
+                || name == "keyframe_row_value"
+        }) {
+            return rect.center();
+        }
+        let label = if matches!(self, Self::ClipFade) {
+            "0 f"
+        } else {
+            "0"
+        };
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{self:?} numeric readout; rects={rects:?}"))
+    }
+    fn away(self) -> &'static str {
+        match self {
+            Self::TrackGain => "10.0",
+            Self::MixerEffect => "-10.0",
+            _ => "100",
+        }
+    }
+    fn value(self, document: &Document) -> i64 {
+        let clip = document.clip(ClipId(1)).unwrap();
+        match self {
+            Self::Matte => {
+                integer_value(&clip.effects[0].parameters["matte_hue_center_centidegrees"])
+            }
+            Self::ClipFade => clip.audio_fade_in_frames.0,
+            Self::Keyframe => clip.audio_gain_curve.as_ref().unwrap().keyframes[0].value,
+            Self::TrackGain => i64::from(document.audio_mix.track(TrackId(3)).gain_tenth_db),
+            Self::MixerEffect => integer_value(
+                &document.audio_mix.master.effects[0].parameters["threshold_tenth_db"],
+            ),
+        }
+    }
+}
+fn enter_numeric() -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+fn replace_numeric(text: &str) -> Vec<egui::Event> {
+    vec![
+        egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..Default::default()
+            },
+        },
+        egui::Event::Text(text.into()),
+    ]
+}
+fn focus_numeric(h: &mut WheelProbe, family: NumericFamily, position: egui::Pos2) {
+    for events in [
+        vec![egui::Event::PointerMoved(position), button(position, true)],
+        vec![button(position, false)],
+        vec![],
+    ] {
+        let (_, count) = h.numeric_frame(events, |ui, doc, p| family.draw(ui, doc, p));
+        assert_eq!(count, 0, "NUMERIC_UNCHANGED_FOCUS_IS_NOT_INTENT {family:?}");
+    }
+}
+#[test]
+fn typed_numeric_returns_reach_every_producer_family() {
+    for family in [
+        NumericFamily::Matte,
+        NumericFamily::ClipFade,
+        NumericFamily::Keyframe,
+        NumericFamily::TrackGain,
+        NumericFamily::MixerEffect,
+    ] {
+        let mut h = WheelProbe::with_setup(|d| family.setup(d));
+        let (output, _) = h.numeric_frame(vec![], |ui, doc, p| family.draw(ui, doc, p));
+        let position = family.position(&output);
+        focus_numeric(&mut h, family, position);
+        h.numeric_frame(
+            vec![egui::Event::Text(family.away().into())],
+            |ui, doc, p| family.draw(ui, doc, p),
+        );
+        h.numeric_frame(vec![enter_numeric()], |ui, doc, p| family.draw(ui, doc, p));
+        collect(&mut h.edits);
+        assert!(
+            h.edits.waiting_for_ack(),
+            "NUMERIC_TYPED_EXCURSION_WAITS {family:?}"
+        );
+        focus_numeric(&mut h, family, position);
+        h.numeric_frame(replace_numeric("0"), |ui, doc, p| family.draw(ui, doc, p));
+        h.numeric_frame(vec![enter_numeric()], |ui, doc, p| family.draw(ui, doc, p));
+        h.edits.end_gestures();
+        h.drain();
+        assert_eq!(
+            family.value(&h.core.export_history().unwrap().document),
+            0,
+            "NUMERIC_TYPED_RETURN_FINAL {family:?}"
+        );
+        assert!(!h.edits.pending());
+        assert_eq!(h.edits.message(), None);
+    }
+}
+#[test]
+fn invalid_numeric_text_and_unchanged_focus_make_no_edit() {
+    for family in [
+        NumericFamily::Matte,
+        NumericFamily::ClipFade,
+        NumericFamily::Keyframe,
+        NumericFamily::TrackGain,
+        NumericFamily::MixerEffect,
+    ] {
+        let mut h = WheelProbe::with_setup(|d| family.setup(d));
+        let before = h.core.export_history().unwrap();
+        let (output, _) = h.numeric_frame(vec![], |ui, doc, p| family.draw(ui, doc, p));
+        let position = family.position(&output);
+        focus_numeric(&mut h, family, position);
+        let (_, count) =
+            h.numeric_frame(vec![enter_numeric()], |ui, doc, p| family.draw(ui, doc, p));
+        assert_eq!(count, 0, "NUMERIC_UNCHANGED_COMMIT {family:?}");
+        focus_numeric(&mut h, family, position);
+        for events in [replace_numeric("-"), vec![enter_numeric()], vec![]] {
+            let (_, count) = h.numeric_frame(events, |ui, doc, p| family.draw(ui, doc, p));
+            assert_eq!(count, 0, "NUMERIC_INVALID_TEXT_IS_NOT_EDIT {family:?}");
+        }
+        assert!(!h.edits.pending());
+        assert_eq!(h.edits.message(), None);
+        assert_eq!(h.core.export_history().unwrap(), before);
+    }
+}
+#[test]
+fn unchanged_slider_click_does_not_auto_key_or_add_undo() {
+    fn circle(shape: &egui::Shape) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Circle(c) if c.radius > 3.0 && c.radius < 12.0 => Some(c.center),
+            egui::Shape::Rect(r) if r.rect.width() <= 16.0 && r.rect.height() > 8.0 => {
+                Some(r.rect.center())
+            }
+            egui::Shape::Vec(v) => v.iter().find_map(circle),
+            _ => None,
+        }
+    }
+    fn transform_document(d: &mut Document) {
+        let effect = &mut d.tracks[0].clips[0].effects[0];
+        effect.name = "transform".into();
+        effect.keyframes.insert(
+            "scale_x_percent".into(),
+            upsert_keyframe(None, TimeCode(0), 100),
+        );
+    }
+    let mut h = WheelProbe::with_setup(transform_document);
+    let draw = |ui: &mut egui::Ui, doc: &Document, p: &mut InspectorEdits| {
+        let effect = &doc.clip(ClipId(1)).unwrap().effects[0];
+        let parameter = kinewright_core::effect_descriptor("transform")
+            .unwrap()
+            .parameter("scale_x_percent")
+            .unwrap();
+        motion_param_row(
+            ui,
+            ClipId(1),
+            effect,
+            parameter,
+            TimeCode(50),
+            TimeCode(1_000_000),
+            false,
+            p,
+        );
+    };
+    let (output, _) = h.numeric_frame(vec![], draw);
+    let position = output
+        .shapes
+        .iter()
+        .find_map(|s| circle(&s.shape))
+        .expect("painted slider thumb");
+    let before = h.core.export_history().unwrap();
+    for events in [
+        vec![egui::Event::PointerMoved(position), button(position, true)],
+        vec![button(position, false)],
+        vec![],
+    ] {
+        let (_, count) = h.numeric_frame(events, draw);
+        assert_eq!(count, 0, "NUMERIC_UNCHANGED_CLICK_NO_OPERATION");
+    }
+    h.drain();
+    assert_eq!(
+        h.core.export_history().unwrap(),
+        before,
+        "NUMERIC_UNCHANGED_CLICK_NO_UNDO"
+    );
+    let mut h = WheelProbe::with_setup(transform_document);
+    let (output, _) = h.numeric_frame(vec![], draw);
+    let position = output
+        .shapes
+        .iter()
+        .find_map(|s| circle(&s.shape))
+        .expect("painted slider thumb");
+    let before = h.core.export_history().unwrap();
+    h.numeric_frame(
+        vec![egui::Event::PointerMoved(position), button(position, true)],
+        draw,
+    );
+    let (_, count) = h.numeric_frame(
+        vec![egui::Event::PointerMoved(position + egui::vec2(20.0, 0.0))],
+        draw,
+    );
+    assert!(count > 0, "NUMERIC_MOVED_SLIDER_EMITS");
+    collect(&mut h.edits);
+    assert!(h.edits.waiting_for_ack());
+    h.numeric_frame(
+        vec![egui::Event::PointerMoved(position), button(position, false)],
+        draw,
+    );
+    h.drain();
+    let after = h.core.export_history().unwrap();
+    let curve = &after.document.clip(ClipId(1)).unwrap().effects[0].keyframes["scale_x_percent"];
+    assert_eq!(
+        curve.value_at(TimeCode(50)),
+        Some(100),
+        "NUMERIC_MOVED_SLIDER_RETURN"
+    );
+    assert_eq!(
+        after.cursor.undo.len(),
+        before.cursor.undo.len() + 1,
+        "NUMERIC_MOVED_SLIDER_ONE_UNDO"
+    );
+    assert!(matches!(
+        h.permit.request(Command::Undo).unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    assert_eq!(h.core.export_history().unwrap().document, before.document);
+}
+
+fn integer_value(value: &ParamValue) -> i64 {
+    let ParamValue::Integer(value) = value else {
+        panic!("integer numeric field")
+    };
+    *value
+}
+
+#[test]
+fn numeric_text_and_enter_in_one_frame_preserve_the_return() {
+    for family in [NumericFamily::Matte, NumericFamily::MixerEffect] {
+        let mut h = WheelProbe::with_setup(|d| family.setup(d));
+        let (output, _) = h.numeric_frame(vec![], |ui, doc, p| family.draw(ui, doc, p));
+        let position = family.position(&output);
+        focus_numeric(&mut h, family, position);
+        let mut events = replace_numeric(family.away());
+        events.push(enter_numeric());
+        let (_, count) = h.numeric_frame(events, |ui, doc, p| family.draw(ui, doc, p));
+        assert!(count > 0, "NUMERIC_TEXT_AND_ENTER_COMMITS {family:?}");
+        collect(&mut h.edits);
+        assert!(h.edits.waiting_for_ack());
+        focus_numeric(&mut h, family, position);
+        let mut events = replace_numeric("0");
+        events.push(enter_numeric());
+        let (_, count) = h.numeric_frame(events, |ui, doc, p| family.draw(ui, doc, p));
+        assert!(count > 0, "NUMERIC_TEXT_AND_ENTER_RETURN {family:?}");
+        h.drain();
+        assert_eq!(family.value(&h.core.export_history().unwrap().document), 0);
+        assert!(!h.edits.pending());
+        assert_eq!(h.edits.message(), None);
+    }
 }

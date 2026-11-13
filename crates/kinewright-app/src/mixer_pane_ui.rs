@@ -1119,6 +1119,7 @@ pub(crate) fn set_automation_curve(
     curve: Option<AutomationCurve>,
     edits: &mut MixerChainEdits,
 ) {
+    edits.request_value(chain.selection());
     match target {
         AutomationTarget::Fader => chain.set_gain_curve(edits, curve),
         AutomationTarget::TrackParameter(_) => {
@@ -1312,9 +1313,8 @@ fn control_cell_width() -> f32 {
 
 /// One descriptor-driven chain control (AU2 §6.7).
 ///
-/// Mutates the chain copy; never pushes. The no-op filter is the strip's:
-/// a readout that commits on Enter reports one `changed()` frame with the
-/// unchanged value, and a write that changes nothing is not an edit.
+/// Mutates only on valid numeric intent. The folded complete chain carries its
+/// equality hint to the manual queue, including a typed return under pressure.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mixer_parameter_control(
     ui: &mut egui::Ui,
@@ -1342,20 +1342,22 @@ pub(crate) fn mixer_parameter_control(
                 return;
             }
             let mut edited = value;
-            let response = ui.add(
-                egui::DragValue::new(&mut edited)
-                    .range(mixer_parameter_range(effect, name, value))
-                    .custom_formatter(move |value, _| format_mixer_unit(unit, value))
-                    .custom_parser(move |text| parse_mixer_unit_from(unit, text, value))
-                    .update_while_editing(false),
-            );
+            let response = ui.add(crate::inspector_ui::intent_drag_value(
+                &mut edited,
+                |field| {
+                    field
+                        .range(mixer_parameter_range(effect, name, value))
+                        .custom_formatter(move |value, _| format_mixer_unit(unit, value))
+                        .custom_parser(move |text| parse_mixer_unit_from(unit, text, value))
+                        .update_while_editing(false)
+                },
+            ));
             record_param_rect("param", effect.id, name, response.rect);
             if response.drag_started() {
                 edits.begin_gesture();
             }
-            if crate::inspector_ui::relative_value_changed(&response)
-                && (is_live_drag(&response) || edited != value)
-            {
+            if crate::inspector_ui::relative_value_changed(&response) {
+                edits.request_value(chain.selection());
                 if let Some(target) = chain.effect_mut(edits, effect.id) {
                     target
                         .parameters

@@ -1063,3 +1063,32 @@ fn unbind_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostRe
         .expect("real prepared media reply")
         .id = AssetId(999);
 }
+
+#[test]
+fn manual_value_fix2_healthy_previews_wait_without_abandoning() {
+    let mut f = Fixture::new();
+    f.fill();
+    let before = f.app.focused().core.export_history().unwrap();
+    let recovery = f.attachment().host.as_ref().unwrap().status.recovery_points[0].clone();
+    let actions = [
+        Action::PreviewRecovery(recovery.into()),
+        Action::PreviewRetirement(kinewright_project::bundle_records::BranchId::fresh().unwrap()),
+        Action::PreviewForget,
+        Action::PreviewRelease(f.temp.path("preview-source.kinewright")),
+    ];
+    for action in actions {
+        let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
+        let result = attachment.apply(action);
+        assert!(
+            result.is_err() && attachment.message == crate::manual_edits::PENDING_WORDS,
+            "MANUAL_HEALTHY_PREVIEW_WAITS: {result:?}; {}",
+            attachment.message
+        );
+        assert!(attachment.host.as_ref().unwrap().cut.is_none());
+        assert!(f.edits().waiting_for_ack());
+        assert!(f.edits().notice().is_none());
+        assert_eq!(f.app.focused().core.export_history().unwrap(), before);
+    }
+    f.finish();
+    assert!(f.edits().notice().is_none());
+}

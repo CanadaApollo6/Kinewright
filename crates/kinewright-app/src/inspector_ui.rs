@@ -50,7 +50,7 @@ pub(crate) const LOOK_INCIDENT_CODE: IncidentCode = IncidentCode::Label(LabelInc
 pub(crate) struct InspectorEdits {
     operations: Vec<Operation>,
     coalesce_key: Option<String>,
-    /// All controls owned by this complete live batch equal the accepted document.
+    /// All controls owned by this complete requested batch equal the accepted document.
     matches_document: bool,
     /// Set on the frame a drag begins so the app opens a fresh gesture
     /// identity. Without it a second drag over the same control would merge
@@ -149,8 +149,16 @@ pub(crate) enum LookRequest {
 impl InspectorEdits {
     /// Record a discrete edit. Discrete edits are never coalesced.
     pub(crate) fn push(&mut self, operation: Operation) {
+        self.push_value(operation, false);
+    }
+
+    pub(crate) fn push_value(&mut self, operation: Operation, unchanged: bool) {
         self.coalesce_key = None;
-        self.matches_document = false;
+        self.matches_document = if self.operations.is_empty() {
+            unchanged
+        } else {
+            self.matches_document && unchanged
+        };
         self.operations.push(operation);
     }
 
@@ -864,8 +872,84 @@ pub(crate) fn effect_value_matches(effect: &Effect, operation: &Operation, at: T
     }
 }
 
-/// A native slider's rail can write the accepted value without `changed()`;
-/// its relative readout does not write on release. Preserve that distinction.
+#[derive(Clone, Copy, Default)]
+struct NumericIntent {
+    text_edited: bool,
+    dragged: bool,
+    last_value: Option<f64>,
+}
+
+/// A parsed setter call is necessary: `TextEdit` also reports invalid partial text
+/// as changed. A deferred readout commits on focus loss only if its text changed.
+#[allow(
+    clippy::float_cmp,
+    reason = "Widget intent compares exact requested values; an epsilon could discard a real change"
+)]
+fn numeric_intent(
+    ui: &egui::Ui,
+    response: &mut egui::Response,
+    wrote: bool,
+    before: f64,
+    value: f64,
+) {
+    let id = response.id.with("numeric-intent");
+    let mut intent = ui.data(|data| data.get_temp::<NumericIntent>(id).unwrap_or_default());
+    if response.gained_focus() || intent.last_value.is_none() {
+        intent.last_value = Some(before);
+    }
+    if response.drag_started() {
+        intent.dragged = false;
+    }
+    let moved = response.dragged() && response.drag_delta() != egui::Vec2::ZERO;
+    intent.dragged |= moved;
+    if response.has_focus() && response.changed() {
+        intent.text_edited = true;
+    }
+    let changed = wrote
+        && ((response.changed() && !response.lost_focus())
+            || (response.lost_focus()
+                && (intent.text_edited
+                    || (response.changed()
+                        && (value == before || intent.last_value != Some(value)))))
+            || moved
+            || (response.drag_stopped() && intent.dragged));
+    if changed {
+        intent.last_value = Some(value);
+    }
+    if changed || response.lost_focus() {
+        intent.text_edited = false;
+    }
+    response.flags.set(egui::response::Flags::CHANGED, changed);
+    ui.data_mut(|data| data.insert_temp(id, intent));
+}
+
+pub(crate) fn intent_drag_value<'value, N: egui::emath::Numeric + 'value>(
+    value: &'value mut N,
+    configure: impl for<'field> FnOnce(egui::DragValue<'field>) -> egui::DragValue<'field> + 'value,
+) -> impl egui::Widget + 'value {
+    move |ui: &mut egui::Ui| {
+        let wrote = std::cell::Cell::new(false);
+        let before = value.to_f64();
+        let field = egui::DragValue::from_get_set(|next| {
+            if let Some(next) = next {
+                wrote.set(true);
+                *value = N::from_f64(next);
+            }
+            value.to_f64()
+        });
+        let field = if N::INTEGRAL {
+            field.max_decimals(0)
+        } else {
+            field
+        };
+        let mut response = ui.add(configure(field));
+        numeric_intent(ui, &mut response, wrote.get(), before, value.to_f64());
+        response
+    }
+}
+
+/// Preserve the rail's complete return, but do not turn an unchanged click into
+/// an edit. Its relative readout does not write on release.
 pub(crate) fn intent_slider<'value, N: egui::emath::Numeric + 'value>(
     value: &'value mut N,
     range: std::ops::RangeInclusive<N>,
@@ -873,6 +957,7 @@ pub(crate) fn intent_slider<'value, N: egui::emath::Numeric + 'value>(
 ) -> impl egui::Widget + 'value {
     move |ui: &mut egui::Ui| {
         let writes = std::cell::Cell::new(0usize);
+        let before = value.to_f64();
         let range = range.start().to_f64()..=range.end().to_f64();
         let slider = egui::Slider::from_get_set(range, |next| {
             if let Some(next) = next {
@@ -887,13 +972,8 @@ pub(crate) fn intent_slider<'value, N: egui::emath::Numeric + 'value>(
             slider
         };
         let mut response = ui.add(configure(slider));
-        // Slider's Always clamping writes once before processing input. A
-        // second write on release is the rail's desired value, not readback.
-        if relative_value_changed(&response)
-            || (response.enabled() && response.drag_stopped() && writes.get() > 1)
-        {
-            response.mark_changed();
-        }
+        // Always clamping writes once before processing user input.
+        numeric_intent(ui, &mut response, writes.get() > 1, before, value.to_f64());
         response
     }
 }
@@ -961,7 +1041,7 @@ impl KinewrightApp {
                         edits.matches_document,
                     );
                 }
-                None => self.send_operations(edits.operations),
+                None => self.send_operation_values(edits.operations, edits.matches_document),
             }
         }
         for request in edits.look_requests {
@@ -1204,107 +1284,11 @@ impl KinewrightApp {
             }
         }
         if let Some(audio_clip) = audio_target_clip(&self.focused().document, clip.id) {
-            ui.add_space(space::TWO);
-            ui.strong("Audio");
-            let duration = self
-                .focused()
-                .document
-                .clip_duration(&audio_clip)
-                .map_or(0, |duration| duration.0.max(0));
-            let mut gain_tenth_db = audio_clip.audio_gain_tenth_db;
-            let mut fade_in_frames = audio_clip.audio_fade_in_frames.0;
-            let mut fade_out_frames = audio_clip.audio_fade_out_frames.0;
-            let gain = ui.add(crate::inspector_ui::intent_slider(
-                &mut gain_tenth_db,
-                -600..=120,
-                |slider| {
-                    slider
-                        .text("Gain")
-                        .integer()
-                        .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0))
-                        .custom_parser(crate::mixer_ui::parse_gain_db)
-                        .update_while_editing(false)
-                },
-            ));
-            if gain.drag_started() {
-                pending.begin_gesture();
-            }
-            if audio_clip.audio_gain_curve.is_some() {
-                ui.horizontal(|ui| {
-                    ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
-                    ui.colored_label(color::TEXT_MUTED, ENVELOPE_KEYFRAMED_NOTE);
-                });
-            }
-            let mut changed = gain.changed();
-            let mut live = is_live_drag(&gain);
-            ui.horizontal(|ui| {
-                ui.label("Fade in");
-                let fade_in = ui.add(
-                    egui::DragValue::new(&mut fade_in_frames)
-                        .range(0..=duration.saturating_sub(fade_out_frames))
-                        .suffix(" f"),
-                );
-                ui.label("Fade out");
-                let fade_out = ui.add(
-                    egui::DragValue::new(&mut fade_out_frames)
-                        .range(0..=duration.saturating_sub(fade_in_frames))
-                        .suffix(" f"),
-                );
-                if fade_in.drag_started() || fade_out.drag_started() {
-                    pending.begin_gesture();
-                }
-                changed |= relative_value_changed(&fade_in) || relative_value_changed(&fade_out);
-                live |= is_live_drag(&fade_in) || is_live_drag(&fade_out);
-            });
-            if audio_clip.audio_gain_tenth_db != 0
-                || audio_clip.audio_fade_in_frames != TimeCode::ZERO
-                || audio_clip.audio_fade_out_frames != TimeCode::ZERO
-            {
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        color::TEXT_MUTED,
-                        format!(
-                            "gain:{:+.1} dB  fade_in:{}f  fade_out:{}f",
-                            tenth_db_to_db(audio_clip.audio_gain_tenth_db),
-                            audio_clip.audio_fade_in_frames.0,
-                            audio_clip.audio_fade_out_frames.0
-                        ),
-                    );
-                    if ui.small_button("Reset").clicked() {
-                        gain_tenth_db = 0;
-                        fade_in_frames = 0;
-                        fade_out_frames = 0;
-                        changed = true;
-                    }
-                });
-            }
-            let differs = gain_tenth_db != audio_clip.audio_gain_tenth_db
-                || fade_in_frames != audio_clip.audio_fade_in_frames.0
-                || fade_out_frames != audio_clip.audio_fade_out_frames.0;
-            if changed && (live || differs) {
-                let operation = clip_audio_operation(
-                    audio_clip.id,
-                    gain_tenth_db,
-                    fade_in_frames,
-                    fade_out_frames,
-                );
-                if live {
-                    pending.push_live_value(
-                        operation,
-                        audio_gain_coalesce_key(audio_clip.id),
-                        !differs,
-                    );
-                } else {
-                    pending.push(operation);
-                }
-            }
-            envelope_block(
+            clip_audio_controls(
                 ui,
-                audio_clip.id,
-                audio_clip.audio_gain_curve.as_ref(),
-                duration,
+                &self.focused().document,
+                &audio_clip,
                 clip_playhead_local(&audio_clip, self.focused().position),
-                audio_clip.audio_gain_tenth_db,
                 &mut pending,
             );
         }
@@ -1594,7 +1578,7 @@ impl KinewrightApp {
                         value == current,
                     );
                 } else {
-                    pending.push(operation);
+                    pending.push_value(operation, value == current);
                 }
             }
         }
@@ -1658,11 +1642,10 @@ impl KinewrightApp {
             ));
         }
         let mut position = marker.position.0;
-        let response = ui.add(
-            egui::DragValue::new(&mut position)
-                .range(0..=i64::MAX)
-                .prefix("Frame "),
-        );
+        let response = ui.add(crate::inspector_ui::intent_drag_value(
+            &mut position,
+            |field| field.range(0..=i64::MAX).prefix("Frame "),
+        ));
         if response.drag_started() {
             pending.begin_gesture();
         }
@@ -1676,7 +1659,7 @@ impl KinewrightApp {
                     position == marker.position.0,
                 );
             } else {
-                pending.push(operation);
+                pending.push_value(operation, position == marker.position.0);
             }
         }
         self.submit_inspector_edits(pending);
@@ -1812,7 +1795,7 @@ fn effects_section(
                                 value == original,
                             );
                         } else {
-                            pending.push(operation);
+                            pending.push_value(operation, value == original);
                         }
                     }
                 }
@@ -2187,7 +2170,10 @@ pub(crate) fn look_mix_row(
                     percent.saturating_mul(100) == params.mix_basis_points,
                 );
             } else {
-                pending.push(operation);
+                pending.push_value(
+                    operation,
+                    percent.saturating_mul(100) == params.mix_basis_points,
+                );
             }
         }
         ui.monospace(format!("{} bp", params.mix_basis_points));
@@ -3178,7 +3164,7 @@ fn matte_section_body(
                     percent.saturating_mul(100) == params.mix_bp,
                 );
             } else {
-                pending.push(operation);
+                pending.push_value(operation, percent.saturating_mul(100) == params.mix_bp);
             }
         }
         ui.monospace(format!("{} bp", params.mix_bp));
@@ -3363,17 +3349,19 @@ fn matte_integer_control(
 ) {
     let mut edited = value;
     ui.label(label);
-    let response =
-        ui.add(egui::DragValue::new(&mut edited).range(matte_parameter_range(effect, name, value)));
+    let response = ui.add(crate::inspector_ui::intent_drag_value(
+        &mut edited,
+        |field| field.range(matte_parameter_range(effect, name, value)),
+    ));
     if response.drag_started() {
         pending.begin_gesture();
     }
-    if relative_value_changed(&response) && (is_live_drag(&response) || edited != value) {
+    if relative_value_changed(&response) {
         let operation = effect_param_operation(clip, effect.id, name, edited);
         if is_live_drag(&response) {
             pending.push_live_value(operation, coalesce_key.to_owned(), edited == value);
         } else {
-            pending.push(operation);
+            pending.push_value(operation, edited == value);
         }
     }
 }
@@ -4262,7 +4250,7 @@ fn envelope_block(
         if live {
             pending.push_live_value(operation, envelope_coalesce_key(clip), unchanged);
         } else {
-            pending.push(operation);
+            pending.push_value(operation, unchanged);
         }
     }
 }
@@ -4339,17 +4327,20 @@ pub(crate) fn keyframe_row(
             ui.spacing_mut().interact_size.y = size::ICON_SM;
             ui.spacing_mut().item_spacing.x = space::HALF;
             ui.spacing_mut().button_padding = egui::vec2(space::HALF, 0.0);
-            let frame = ui.add(
-                egui::DragValue::new(&mut at)
+            let frame = ui.add(crate::inspector_ui::intent_drag_value(&mut at, |field| {
+                field
                     .range(min_frame..=i64::from(u32::MAX))
                     .suffix(" f")
-                    .update_while_editing(false),
-            );
-            let level = ui.add(
-                egui::DragValue::new(&mut value)
-                    .range(i64::from(i32::MIN)..=i64::from(i32::MAX))
-                    .update_while_editing(false),
-            );
+                    .update_while_editing(false)
+            }));
+            let level = ui.add(crate::inspector_ui::intent_drag_value(
+                &mut value,
+                |field| {
+                    field
+                        .range(i64::from(i32::MIN)..=i64::from(i32::MAX))
+                        .update_while_editing(false)
+                },
+            ));
             crate::mixer_ui::record_strip_rect("keyframe_row_value", level.rect);
             egui::ComboBox::from_id_salt("interpolation")
                 .selected_text(interpolation_label(interpolation))
@@ -4396,9 +4387,7 @@ pub(crate) fn keyframe_row(
             tangent_in: stored.tangent_in,
             tangent_out: stored.tangent_out,
         };
-        if action.live || edited != *stored {
-            action.edited = Some(edited);
-        }
+        action.edited = Some(edited);
     }
     action
 }
@@ -4478,9 +4467,6 @@ pub(crate) fn apply_keyframe_row_action(
         tangent_in: stored.tangent_in,
         tangent_out: stored.tangent_out,
     };
-    if !action.live && keyframes[index] == curve.keyframes[index] {
-        return None;
-    }
     Some(CurveWrite::Set(AutomationCurve { keyframes }))
 }
 
@@ -4879,7 +4865,7 @@ fn motion_curve_list(
                 unchanged,
             );
         } else {
-            pending.push(operation);
+            pending.push_value(operation, unchanged);
         }
     }
 }
@@ -4900,9 +4886,11 @@ fn motion_value_control(
     } else {
         let mut response = ui.add_enabled(
             editable,
-            egui::DragValue::new(value)
-                .range(parameter.min..=parameter.max)
-                .prefix(format!("{}: ", parameter.name)),
+            crate::inspector_ui::intent_drag_value(value, |field| {
+                field
+                    .range(parameter.min..=parameter.max)
+                    .prefix(format!("{}: ", parameter.name))
+            }),
         );
         if relative_value_changed(&response) {
             response.mark_changed();
@@ -5004,7 +4992,8 @@ fn motion_param_row(
                 unchanged,
             );
         } else {
-            pending.push(operation);
+            let unchanged = effect_value_matches(effect, &operation, at);
+            pending.push_value(operation, unchanged);
         }
     }
     motion_curve_list(
@@ -5404,11 +5393,11 @@ fn clip_enable_header(
         if live {
             pending.push_live_value(operation, format!("clip_enable:{}", clip.id.0), unchanged);
         } else {
-            pending.push(operation);
+            pending.push_value(operation, unchanged);
         }
         for operation in clip_enable_removed_static_operations(clip.id, cleared, last_removed_value)
         {
-            pending.push(operation);
+            pending.push_value(operation, unchanged);
         }
     }
 }
@@ -5486,7 +5475,9 @@ fn solid_color_row(
             ("solid_b", "B ", "Blue"),
         ];
         for (channel, (id, prefix, name)) in rgb.iter_mut().zip(channels) {
-            let field = egui::DragValue::new(channel).range(0..=255).prefix(prefix);
+            let field = crate::inspector_ui::intent_drag_value(channel, |field| {
+                field.range(0..=255).prefix(prefix)
+            });
             let field = ui.add(field).on_hover_text(format!("{name}, 0–255"));
             crate::mixer_ui::record_strip_rect(id, field.rect);
             // A drag, or a typed-entry session (focus), is its own undo step.
@@ -5771,6 +5762,123 @@ pub(crate) fn clip_carries_audio(document: &kinewright_core::Document, clip: &Cl
         && document
             .asset(clip.asset)
             .is_some_and(|asset| matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Gain and both fades form one complete control value in this frame"
+)]
+fn clip_audio_controls(
+    ui: &mut egui::Ui,
+    document: &Document,
+    audio_clip: &Clip,
+    playhead_local: i64,
+    pending: &mut InspectorEdits,
+) {
+    ui.add_space(space::TWO);
+    ui.strong("Audio");
+    let duration = document
+        .clip_duration(audio_clip)
+        .map_or(0, |duration| duration.0.max(0));
+    let mut gain_tenth_db = audio_clip.audio_gain_tenth_db;
+    let mut fade_in_frames = audio_clip.audio_fade_in_frames.0;
+    let mut fade_out_frames = audio_clip.audio_fade_out_frames.0;
+    let gain = ui.add(crate::inspector_ui::intent_slider(
+        &mut gain_tenth_db,
+        -600..=120,
+        |slider| {
+            slider
+                .text("Gain")
+                .integer()
+                .custom_formatter(|value, _| format!("{:+.1} dB", value / 10.0))
+                .custom_parser(crate::mixer_ui::parse_gain_db)
+                .update_while_editing(false)
+        },
+    ));
+    if gain.drag_started() {
+        pending.begin_gesture();
+    }
+    if audio_clip.audio_gain_curve.is_some() {
+        ui.horizontal(|ui| {
+            ui.colored_label(color::STATUS_WARNING, "KEYFRAMED");
+            ui.colored_label(color::TEXT_MUTED, ENVELOPE_KEYFRAMED_NOTE);
+        });
+    }
+    let mut changed = gain.changed();
+    let mut live = is_live_drag(&gain);
+    ui.horizontal(|ui| {
+        ui.label("Fade in");
+        let fade_in = ui.add(crate::inspector_ui::intent_drag_value(
+            &mut fade_in_frames,
+            |field| {
+                field
+                    .range(0..=duration.saturating_sub(fade_out_frames))
+                    .suffix(" f")
+            },
+        ));
+        crate::mixer_ui::record_strip_rect("clip_fade_in", fade_in.rect);
+        ui.label("Fade out");
+        let fade_out = ui.add(crate::inspector_ui::intent_drag_value(
+            &mut fade_out_frames,
+            |field| {
+                field
+                    .range(0..=duration.saturating_sub(fade_in_frames))
+                    .suffix(" f")
+            },
+        ));
+        if fade_in.drag_started() || fade_out.drag_started() {
+            pending.begin_gesture();
+        }
+        changed |= relative_value_changed(&fade_in) || relative_value_changed(&fade_out);
+        live |= is_live_drag(&fade_in) || is_live_drag(&fade_out);
+    });
+    if audio_clip.audio_gain_tenth_db != 0
+        || audio_clip.audio_fade_in_frames != TimeCode::ZERO
+        || audio_clip.audio_fade_out_frames != TimeCode::ZERO
+    {
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                color::TEXT_MUTED,
+                format!(
+                    "gain:{:+.1} dB  fade_in:{}f  fade_out:{}f",
+                    tenth_db_to_db(audio_clip.audio_gain_tenth_db),
+                    audio_clip.audio_fade_in_frames.0,
+                    audio_clip.audio_fade_out_frames.0
+                ),
+            );
+            if ui.small_button("Reset").clicked() {
+                gain_tenth_db = 0;
+                fade_in_frames = 0;
+                fade_out_frames = 0;
+                changed = true;
+            }
+        });
+    }
+    let differs = gain_tenth_db != audio_clip.audio_gain_tenth_db
+        || fade_in_frames != audio_clip.audio_fade_in_frames.0
+        || fade_out_frames != audio_clip.audio_fade_out_frames.0;
+    if changed {
+        let operation = clip_audio_operation(
+            audio_clip.id,
+            gain_tenth_db,
+            fade_in_frames,
+            fade_out_frames,
+        );
+        if live {
+            pending.push_live_value(operation, audio_gain_coalesce_key(audio_clip.id), !differs);
+        } else {
+            pending.push_value(operation, !differs);
+        }
+    }
+    envelope_block(
+        ui,
+        audio_clip.id,
+        audio_clip.audio_gain_curve.as_ref(),
+        duration,
+        playhead_local,
+        audio_clip.audio_gain_tenth_db,
+        pending,
+    );
 }
 
 pub(crate) const fn clip_audio_operation(
@@ -11075,7 +11183,7 @@ mod tests {
     fn the_clip_gain_slider_stays_editable_while_the_envelope_rides() {
         const SOURCE: &str = include_str!("inspector_ui.rs");
         let audio = SOURCE
-            .split_once("if let Some(audio_clip) = audio_target_clip")
+            .split_once("fn clip_audio_controls(")
             .expect("the Audio section")
             .1
             .split_once("envelope_block(")
@@ -11134,12 +11242,17 @@ mod tests {
             panic!("this row asks for a value, not a clear");
         };
         assert_eq!(next.keyframes[1].value, 120);
-        // A row that asks for what the curve already holds writes nothing.
+        // A committed typed return is still intent. The queue owns equality.
         let same = KeyframeRowAction {
             edited: Some(curve.keyframes[1]),
             ..KeyframeRowAction::default()
         };
-        assert!(apply_keyframe_row_action(&curve, 1, &same, -600..=120, 0).is_none());
+        let Some(CurveWrite::Set(requested)) =
+            apply_keyframe_row_action(&curve, 1, &same, -600..=120, 0)
+        else {
+            panic!("committed typed return");
+        };
+        assert_eq!(requested, curve);
         // Removing one of three drops one key.
         let remove = KeyframeRowAction {
             removed: true,
