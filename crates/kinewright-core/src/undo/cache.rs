@@ -69,8 +69,8 @@ impl Cache {
         // Periodic anchors serve short replay gaps. The remaining slots
         // subdivide replays as the cursor walks back.
         let grid = self.grid_slots();
-        if grid > 0 && depth.is_multiple_of(16) {
-            self.points[(depth / 16) % grid] = Some(Point {
+        if grid > 0 && depth.is_multiple_of(32) {
+            self.points[(depth / 32) % grid] = Some(Point {
                 depth,
                 document: Arc::clone(&document),
             });
@@ -90,8 +90,8 @@ impl Cache {
         let mut depths = vec![None; self.points.len()];
         for depth in start + 1..end {
             let grid = self.grid_slots();
-            if grid > 0 && depth.is_multiple_of(16) {
-                depths[(depth / 16) % grid] = Some(depth);
+            if grid > 0 && depth.is_multiple_of(32) {
+                depths[(depth / 32) % grid] = Some(depth);
             }
             if let Some(slot) = self.replay_slot(depth) {
                 depths[slot] = Some(depth);
@@ -107,8 +107,8 @@ impl Cache {
             return;
         }
         let grid = self.grid_slots();
-        if grid > 0 && depth.is_multiple_of(16) {
-            self.points[(depth / 16) % grid] = Some(Point {
+        if grid > 0 && depth.is_multiple_of(32) {
+            self.points[(depth / 32) % grid] = Some(Point {
                 depth,
                 document: Arc::clone(document),
             });
@@ -118,8 +118,8 @@ impl Cache {
     }
     pub fn insert_warm(&mut self, depth: usize, document: Arc<Document>) {
         let grid = self.grid_slots();
-        if grid > 0 && depth.is_multiple_of(16) {
-            self.points[(depth / 16) % grid] = Some(Point {
+        if grid > 0 && depth.is_multiple_of(32) {
+            self.points[(depth / 32) % grid] = Some(Point {
                 depth,
                 document: Arc::clone(&document),
             });

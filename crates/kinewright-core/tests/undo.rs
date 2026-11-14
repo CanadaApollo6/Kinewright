@@ -731,6 +731,18 @@ fn coalesced_step_reserves_its_future_redo_observations() {
             Err(Error::Capacity) => {
                 assert_eq!(history, before, "REDO_WORKSPACE_REFUSAL_ATOMIC");
                 let commands = history.undo().back().unwrap().commands().len();
+                // A near-full admitted step must remain replayable as a prefix
+                // with all checkpoints dropped, without charging its margin twice.
+                let expected = std::sync::Arc::clone(history.document());
+                history
+                    .execute(Command::Do(lock(!expected.tracks[0].sync_lock)))
+                    .unwrap();
+                history.drop_cache();
+                assert!(
+                    history.execute(Command::Undo).is_ok(),
+                    "ADMITTED_PREFIX_REPLAY_FITS"
+                );
+                assert_eq!(history.document(), &expected, "ADMITTED_PREFIX_DOCUMENT");
                 assert_eq!(
                     history.execute(Command::Undo).unwrap().to_redo.len(),
                     commands,
@@ -980,4 +992,37 @@ fn typed_snapshot_baselines_do_not_retain_spare_nested_allocations() {
         target.baseline().markers[0].label.capacity() <= 12,
         "SNAPSHOT_BASELINE_ALLOCATION"
     );
+}
+
+#[test]
+fn typed_snapshot_payloads_do_not_retain_spare_nested_allocations() {
+    let mut source =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(1000, 4)).unwrap();
+    source
+        .execute(Command::Do(Operation::AddMarker {
+            marker: marker_document().markers.remove(0),
+        }))
+        .unwrap();
+    let mut value = serde_json::to_value(source.record()).unwrap();
+    let mut label = String::with_capacity(1 << 20);
+    label.push_str("marker");
+    value["undo"][0]["commands"][0]["operations"][0]["AddMarker"]["marker"]["label"] =
+        serde_json::Value::String(label);
+    let record: kinewright_core::undo::Record = serde_json::from_value(value).unwrap();
+    let Operation::AddMarker { marker } = &record.undo[0].commands()[0].operations[0] else {
+        panic!("marker")
+    };
+    assert!(
+        marker.label.capacity() >= 1 << 20,
+        "TYPED_PAYLOAD_HEADROOM_WITNESS"
+    );
+    let mut target =
+        History::new(Document::default(), RetentionPolicy::Fold, source.bounds()).unwrap();
+    target
+        .install_snapshot(record.validate(source.bounds()).unwrap())
+        .unwrap();
+    let Operation::AddMarker { marker } = &target.undo()[0].commands()[0].operations[0] else {
+        panic!("marker")
+    };
+    assert!(marker.label.capacity() <= 12, "SNAPSHOT_PAYLOAD_ALLOCATION");
 }

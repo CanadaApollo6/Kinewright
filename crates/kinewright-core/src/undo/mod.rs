@@ -710,9 +710,7 @@ impl History {
             let mut checkpoints = Vec::new();
             let mut held = 0_u64;
             for (index, step) in self.undo.iter().enumerate().take(depth).skip(start) {
-                for command in &step.commands {
-                    replay(&mut document, &command.operations, self.bounds, &mut budget)?;
-                }
+                replay_step(&mut document, step, &mut budget)?;
                 let boundary = index + 1;
                 if warm.contains(&boundary) {
                     let bytes = crate::history_size::document_live_bytes(&document)
@@ -902,14 +900,24 @@ fn replay_observed(
     canonical_workspace(document, budget)?;
     apply(document, operations, bounds, budget)
 }
-fn replay(
+fn replay_step(
     document: &mut Document,
-    operations: &[Operation],
-    bounds: RoleBounds,
+    step: &Step,
     budget: &mut ReplayBudget,
 ) -> Result<(), Error> {
-    canonical_workspace(document, budget)?;
-    apply_mode(document, operations, bounds, budget, false).map(|_| ())
+    // Step and its peak can enter History only through bounded admission or
+    // record validation. Both paths check every intermediate document. Cache
+    // sources are immutable results of those same operations under these bounds.
+    budget
+        .check_prevalidated_peak(step.charge.replay_peak)
+        .map_err(|_| Error::Capacity)?;
+    for command in &step.commands {
+        // Match admission's compact per-command scratch allocation. The private
+        // peak already includes this extra document; no structural rescan is needed.
+        *document = document.clone();
+        crate::operation::apply_batch_prevalidated(document, &command.operations)?;
+    }
+    Ok(())
 }
 fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
     operations

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Five alternating lanes; run under the Cargo-heavy lock after release builds finish.
+"""Five alternating pairs; run after all owned builds and tests finish.
 
 Only the standalone executor / synchronous raw Core request is timed. This is
 not a GUI, writer, store publication, media, or full application measurement.

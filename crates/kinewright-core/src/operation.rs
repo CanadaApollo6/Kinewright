@@ -562,6 +562,15 @@ pub(crate) fn apply_batch_observed_in_place(
     apply_batch_unpublished(candidate, operations, true)
 }
 
+/// Replay immutable history after the caller reserves its validated step peak.
+/// Untrusted edits and record validation continue through the per-operation budget.
+pub(crate) fn apply_batch_prevalidated(
+    candidate: &mut Document,
+    operations: &[Operation],
+) -> Result<(), BatchError> {
+    apply_batch_unpublished(candidate, operations, false).map(|_| ())
+}
+
 /// Bounded streaming replay when the caller does not retain identity observations.
 pub(crate) fn apply_batch_replay(
     candidate: &mut Document,

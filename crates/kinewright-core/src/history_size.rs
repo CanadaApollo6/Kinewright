@@ -656,6 +656,17 @@ impl ReplayBudget {
         ])?;
         sum([raw, raw.div_ceil(10)])
     }
+    /// A private, already-margined step peak is recomputed at admission/open.
+    /// Add the current replay's staged documents and metadata without applying
+    /// the safety margin to that step a second time.
+    pub(crate) fn check_prevalidated_peak(&self, peak: u64) -> Result<(), HistoryError> {
+        let held = sum([self.input, self.documents, self.identities])?;
+        let held = sum([held, held.div_ceil(10)])?;
+        if sum([held, peak])? > self.limit {
+            return Err(HistoryError::Capacity);
+        }
+        Ok(())
+    }
     pub(crate) fn new(
         journal: &crate::HistoryJournal,
         baseline: &Document,

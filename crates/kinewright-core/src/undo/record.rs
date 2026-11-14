@@ -136,6 +136,23 @@ impl Record {
         if self.redo.iter().any(|step| step.coalesce_key.is_some()) {
             return Err(Error::InvalidMetadata);
         }
+        // Typed deserializers may transfer nested String/Vec headroom. Retain
+        // compact payloads just as edit admission does; reserve each temporary
+        // copy before allocating it, alongside raw decode input when present.
+        for step in self.undo.iter_mut().chain(&mut self.redo) {
+            for command in &mut step.commands {
+                let mut normalization = ReplayBudget::workspace(bounds.replay_workspace)
+                    .map_err(|_| Error::Capacity)?;
+                normalization
+                    .reserve_input(input)
+                    .map_err(|_| Error::Capacity)?;
+                normalization
+                    .reserve_input(operation_charge(&command.operations)?.decoded)
+                    .map_err(|_| Error::Capacity)?;
+                let compact = command.operations.clone();
+                command.operations = compact;
+            }
+        }
         drop(keys);
         let mut budget =
             ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
