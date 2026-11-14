@@ -220,6 +220,40 @@ fn c5e_pending_history(f: &Fixture, core: &Core, cycles: usize, phase: &str) {
         kinewright_project::run_admission::HISTORY_BYTES
     );
 }
+#[derive(Debug)]
+enum C5eApprovalExit {
+    Cap(usize),
+    HistoryLimit { approved: usize },
+}
+impl C5eApprovalExit {
+    fn approvals(&self) -> usize {
+        match self {
+            Self::Cap(count) | Self::HistoryLimit { approved: count } => *count,
+        }
+    }
+    fn keeps_deletion(&self) -> bool {
+        matches!(self, Self::HistoryLimit { .. })
+    }
+}
+fn c5e_undo_counters(f: &Fixture) -> (String, u64, [u64; 6]) {
+    let host = f.host.owner.upgrade().unwrap();
+    let host = host.lock().unwrap();
+    let owner = host.owner().unwrap();
+    let usage = owner.store().unwrap().usage().unwrap();
+    (
+        // The authenticated root includes the receipt registries.
+        owner.root_sha256().unwrap(),
+        owner.metadata_generation().unwrap(),
+        [
+            usage.objects,
+            usage.edges,
+            usage.physical_bytes,
+            usage.metadata_bytes,
+            usage.owned_bytes,
+            usage.unclassified_bytes,
+        ],
+    )
+}
 fn c5e_approval_edits(
     f: &Fixture,
     execution: &ExecutionIdentity,
@@ -227,7 +261,7 @@ fn c5e_approval_edits(
     count: usize,
     depth: &mut u64,
     storage: &mut C5eStorage,
-) {
+) -> C5eApprovalExit {
     let mcp = C4Mcp::new(f, &execution.run, &execution.task);
     for clip in 1..=count {
         let before_document = core.export_history().unwrap().document;
@@ -341,10 +375,84 @@ fn c5e_approval_edits(
         );
         // Restore the same owned clip between deletions. This reaches the full
         // approval cap without requiring more than the admitted object scope.
+        // Independent snapshots prove that a refused Undo accepts no work.
+        let before_undo = core.export_history().unwrap();
+        let before_history_id = core.history_change_id().unwrap();
+        let before_projection = f.projection(&execution.run);
+        let before_accounting = spending_record(f, &execution.run);
+        let before_counters = c5e_undo_counters(f);
         let undone = mcp.invoke(
             "undo_task_edit",
             serde_json::json!({"expected_revision":grant_test_revision(core)}),
         );
+        if undone.is_error != Some(false) {
+            let words = format!(
+                "consent_policy: {}",
+                kinewright_project::task_history_admission::LIMIT_REASON
+            );
+            assert_eq!(undone.is_error, Some(true), "C5E_TYPED_HISTORY_REFUSAL");
+            assert_eq!(
+                undone.structured_content,
+                Some(serde_json::json!({"content":[{"type":"text","text":words}],"is_error":true})),
+                "C5E_TYPED_HISTORY_REFUSAL {undone:?}"
+            );
+            assert!(
+                count == 256 && clip > 224,
+                "C5E_HISTORY_MINIMUM_CYCLES approved={clip} cap={count}"
+            );
+            assert!(
+                core.export_history().unwrap() == before_undo,
+                "C5E_REFUSED_UNDO_HISTORY_UNCHANGED"
+            );
+            assert_eq!(
+                core.history_change_id().unwrap(),
+                before_history_id,
+                "C5E_REFUSED_UNDO_REVISION_UNCHANGED"
+            );
+            assert_eq!(
+                f.projection(&execution.run),
+                before_projection,
+                "C5E_REFUSED_UNDO_PROJECTION_UNCHANGED"
+            );
+            assert_eq!(
+                spending_record(f, &execution.run),
+                before_accounting,
+                "C5E_REFUSED_UNDO_ACCOUNTING_UNCHANGED"
+            );
+            assert_eq!(
+                c5e_undo_counters(f),
+                before_counters,
+                "C5E_REFUSED_UNDO_COUNTERS_AND_RECEIPTS_UNCHANGED"
+            );
+            assert!(
+                before_undo
+                    .document
+                    .clip(kinewright_core::ClipId(1))
+                    .is_none(),
+                "C5E_BOUNDARY_DELETION_STILL_APPLIED"
+            );
+            let host = f.host.owner.upgrade().unwrap();
+            let host = host.lock().unwrap();
+            let summary = host.edit_approval_summary(&before_projection);
+            assert_eq!(summary.approvals.len(), clip);
+            assert!(
+                summary.approvals.last().is_some_and(|row| row.applied
+                    && row.removed_clips == 1
+                    && row.removed_tracks == 0
+                    && row.issue.is_none()),
+                "C5E_BOUNDARY_DELETION_AUDITED_KEPT {summary:?}"
+            );
+            drop(host);
+            c5e_pending_history(f, core, clip, "refused_undo_kept_delete");
+            c5e_depth(f, depth);
+            c5e_storage(f, storage);
+            eprintln!(
+                "C5E_APPROVAL_EXIT history_limit approved={clip} completed_cycles={} deletion_kept=true undo_unchanged=true",
+                clip - 1
+            );
+            // The history rework makes the cap the only exit; then assert exactly 256.
+            return C5eApprovalExit::HistoryLimit { approved: clip };
+        }
         assert_eq!(
             undone.is_error,
             Some(false),
@@ -375,6 +483,8 @@ fn c5e_approval_edits(
             );
         }
     }
+    eprintln!("C5E_APPROVAL_EXIT cap approved={count} completed_cycles={count}");
+    C5eApprovalExit::Cap(count)
 }
 
 #[test]
@@ -533,6 +643,7 @@ fn c5e_run(size: C5eSize) {
     .unwrap();
     let mut all_attempts = vec![];
     let mut histories = vec![];
+    let mut approval_exit = C5eApprovalExit::Cap(0);
     let mut last = parent.clone();
     // Seven serial specialists fit the three simultaneous dependency slots.
     // One task reaches its 80-send ceiling; the run reaches its shared 128-send ceiling.
@@ -583,7 +694,7 @@ fn c5e_run(size: C5eSize) {
             if round == 0 {
                 history_turn(&f, &execution, &client, &endpoint, 1, true);
                 history = Some(if task_index == 0 {
-                    c5e_approval_edits(
+                    approval_exit = c5e_approval_edits(
                         &f,
                         &execution,
                         &core,
@@ -591,14 +702,22 @@ fn c5e_run(size: C5eSize) {
                         &mut maximum,
                         &mut storage,
                     );
-                    c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
+                    if approval_exit.keeps_deletion() {
+                        core.export_history().unwrap()
+                    } else {
+                        c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
+                    }
                 } else {
                     core.export_history().unwrap()
                 });
                 c5e_pending_history(
                     &f,
                     &core,
-                    if task_index == 0 { size.approvals() } else { 0 },
+                    if task_index == 0 {
+                        approval_exit.approvals()
+                    } else {
+                        0
+                    },
                     "checkpoint",
                 );
                 f.host
@@ -648,6 +767,34 @@ fn c5e_run(size: C5eSize) {
                     .unwrap();
                 }
             }
+            if task_index == 0 && round + 1 == size.rounds() {
+                // The final scripted attempt must own a work turn, as a real
+                // specialist does before the Director requests its Freeze.
+                if round != 0 {
+                    history_turn(&f, &execution, &client, &endpoint, 1, true);
+                }
+                director.accepted(
+                    "freeze_task",
+                    OrchestrationCommand::FreezeTask(task.clone()),
+                );
+                let frozen_state = f.projection(&run);
+                let host = f.host.owner.upgrade().unwrap();
+                let host = host.lock().unwrap();
+                assert!(
+                    host.saved_task_history(&frozen_state, &task)
+                        .unwrap()
+                        .unwrap()
+                        .frozen,
+                    "C5E_TAIL_FREEZE_HISTORY"
+                );
+                drop(host);
+                assert_eq!(
+                    c5e_history(&f, &run, &task),
+                    *history.as_ref().unwrap(),
+                    "C5E_TAIL_FREEZE_EXACT"
+                );
+                eprintln!("C5E_TAIL freeze=true");
+            }
             all_attempts.push(execution.clone());
             last = execution.clone();
             if task_index != size.tasks() - 1 || round != size.rounds() - 1 {
@@ -694,7 +841,7 @@ fn c5e_run(size: C5eSize) {
         let profile = owner.owner().unwrap().retained_run_profile(&run).unwrap();
         eprintln!(
             "C5_LINEAR_CAPS approvals={} {}",
-            size.approvals(),
+            approval_exit.approvals(),
             serde_json::to_string(&profile).unwrap()
         );
     }
@@ -752,6 +899,7 @@ fn c5e_run(size: C5eSize) {
             .unwrap(),
         "C5_FIX1_MAX_STOP",
     );
+    eprintln!("C5E_TAIL stop=true");
     // Stop closes H1 authority. Complete this scripted transport's unbound
     // cleanup through the launcher's acknowledgment port, then replay recovery.
     // The recovery-only unbound path itself requires a still-Reserved attempt.
@@ -793,17 +941,17 @@ fn c5e_run(size: C5eSize) {
     let state = f.projection(&run);
     assert_eq!(
         state.edit_approvals.len(),
-        size.approvals(),
+        approval_exit.approvals(),
         "C5E_STOP_APPROVALS"
     );
     assert_eq!(
         state.edit_applications.len(),
-        size.approvals(),
+        approval_exit.approvals(),
         "C5E_STOP_APPLICATIONS"
     );
     assert_eq!(
         state.edit_approvals.iter().collect::<BTreeSet<_>>().len(),
-        size.approvals(),
+        approval_exit.approvals(),
         "C5E_DISTINCT_APPROVALS"
     );
     assert_eq!(
@@ -812,11 +960,17 @@ fn c5e_run(size: C5eSize) {
             .iter()
             .collect::<BTreeSet<_>>()
             .len(),
-        size.approvals(),
+        approval_exit.approvals(),
         "C5E_DISTINCT_APPLICATIONS"
     );
     assert_eq!(state.cleanup, RunCleanup::Settled);
     assert!(state.attempts.is_empty());
+    assert_eq!(state.phase, RunPhase::Finished, "C5E_TAIL_TERMINAL_PHASE");
+    assert!(
+        matches!(&state.outcome, RunOutcome::Cancelled(detail) if detail.code == "stopped_by_person"),
+        "C5E_TAIL_TERMINAL_OUTCOME"
+    );
+    eprintln!("C5E_TAIL terminal=finished_stopped_by_person cleanup=settled");
     for (task, history, sends) in &histories {
         let t = record.tasks.iter().find(|t| t.task == task.0).unwrap();
         assert_eq!(t.sends.len(), *sends);
@@ -853,6 +1007,7 @@ fn c5e_run(size: C5eSize) {
             .verify_retained_run_after_collection(&run)
             .unwrap();
         eprintln!("C5_LINEAR_GC_ALL_CUTS {cuts} receipts_and_complete_references=true");
+        eprintln!("C5E_TAIL collection=true");
     }
     let f = c4_restart(f, &claim_root);
     assert_eq!(
@@ -885,36 +1040,56 @@ fn c5e_run(size: C5eSize) {
     let approvals = &summary.approvals;
     assert_eq!(
         approvals.len(),
-        size.approvals(),
+        approval_exit.approvals(),
         "C5E_REOPEN_APPROVAL_COUNT"
     );
-    assert!(
-        // Every deletion was undone before the marker edits replaced its redo
-        // tail. The application audits are retained, but no removal is kept.
-        approvals.iter().all(|row| !row.applied
-            && row.removed_clips == 1
-            && row.removed_tracks == 0
-            && row
-                .issue
-                .as_deref()
-                .is_some_and(|words| words.contains("undone or not kept"))),
-        "C5E_REOPEN_UNDONE_APPROVALS {approvals:?}"
-    );
-    assert_eq!(
-        summary
-            .missing
-            .iter()
-            .map(|edit| &edit.approval)
-            .collect::<BTreeSet<_>>(),
-        state.edit_approvals.iter().collect::<BTreeSet<_>>(),
-        "C5E_REOPEN_EVERY_UNDONE_APPROVAL_IS_NAMED"
-    );
+    if approval_exit.keeps_deletion() {
+        assert!(
+            approvals.iter().all(|row| row.applied
+                && row.issue.is_none()
+                && row.removed_clips == 1
+                && row.removed_tracks == 0),
+            "C5E_REOPEN_KEPT_DELETION {approvals:?}"
+        );
+        assert!(summary.missing.is_empty(), "C5E_REOPEN_KEPT_NOT_MISSING");
+        assert!(
+            histories[0]
+                .1
+                .document
+                .clip(kinewright_core::ClipId(1))
+                .is_none(),
+            "C5E_REOPEN_DELETION_STILL_APPLIED"
+        );
+    } else {
+        assert!(
+            // Every deletion was undone before the marker edits replaced its redo
+            // tail. The application audits are retained, but no removal is kept.
+            approvals.iter().all(|row| !row.applied
+                && row.removed_clips == 1
+                && row.removed_tracks == 0
+                && row
+                    .issue
+                    .as_deref()
+                    .is_some_and(|words| words.contains("undone or not kept"))),
+            "C5E_REOPEN_UNDONE_APPROVALS {approvals:?}"
+        );
+        assert_eq!(
+            summary
+                .missing
+                .iter()
+                .map(|edit| &edit.approval)
+                .collect::<BTreeSet<_>>(),
+            state.edit_approvals.iter().collect::<BTreeSet<_>>(),
+            "C5E_REOPEN_EVERY_UNDONE_APPROVAL_IS_NAMED"
+        );
+    }
     assert!(summary.uncertain.is_empty(), "C5E_REOPEN_COVERAGE_KNOWN");
     drop(owner);
+    eprintln!("C5E_TAIL reopen_exact=true kept_audit=true");
     eprintln!(
         "C5E_RETAINED_MAXIMA {storage:?} max_depth={maximum} approvals={} h1_edit_publications={}",
-        size.approvals(),
-        size.approvals() * 2
+        approval_exit.approvals(),
+        approval_exit.approvals() * 2
     );
     eprintln!(
         "C5_FIX1_MAXIMAL clocks={} tasks={} sends={} attempts={} max_depth={maximum} stop=true cleanup=true reopen_exact=true",
@@ -945,7 +1120,7 @@ fn c5e_run(size: C5eSize) {
             );
             eprintln!(
                 "C5_OPEN approvals={} sample={sample} seconds={:.6}",
-                size.approvals(),
+                approval_exit.approvals(),
                 opened.as_secs_f64()
             );
             drop(project);
