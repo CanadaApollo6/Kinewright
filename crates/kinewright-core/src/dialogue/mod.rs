@@ -4,6 +4,7 @@
 //! This module neither edits a document nor reads audio. A prepared [`Dialogue`]
 //! owns one complete measurement, its words and the settings used to derive it.
 
+pub mod audit;
 mod evidence;
 mod frame;
 mod profile;
@@ -34,6 +35,15 @@ impl Word {
         let text = self.text.trim();
         !(text.starts_with('[') && text.ends_with(']'))
     }
+}
+
+/// A half-open source interval DTO. Consumers validate it against their
+/// recording before doing interval arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRange {
+    pub start_micros: u64,
+    pub end_micros: u64,
 }
 
 /// A half-open measured interval, in source microseconds.

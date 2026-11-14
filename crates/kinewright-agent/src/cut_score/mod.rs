@@ -15,17 +15,10 @@ pub use metrics::{
 };
 pub use pacing::{Pacing, PacingGap, PacingRepeat};
 
+pub use kinewright_core::dialogue::SourceRange;
 use kinewright_core::dialogue::Word;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-/// A half-open range of the original recording, in integer microseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceRange {
-    pub start_micros: u64,
-    pub end_micros: u64,
-}
 
 /// Inclusive indices in the case's ordered word array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
