@@ -7,6 +7,7 @@
 pub mod audit;
 mod evidence;
 mod frame;
+pub mod measure;
 mod profile;
 mod resolve;
 
