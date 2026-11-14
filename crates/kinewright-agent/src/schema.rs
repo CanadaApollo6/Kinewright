@@ -245,6 +245,13 @@ pub fn capability_tool_names() -> Result<Vec<String>, SchemaError> {
         .map(|definition| definition.tool.name.into_owned())
         .collect::<Vec<_>>();
     names.extend(INSPECTOR_TOOL_NAMES.into_iter().map(str::to_owned));
+    if crate::dialogue_tools::SERVE_DIALOGUE_TOOLS {
+        names.extend(
+            crate::dialogue_tools::TOOL_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        );
+    }
     Ok(names)
 }
 

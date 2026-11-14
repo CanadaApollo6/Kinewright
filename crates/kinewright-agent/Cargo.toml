@@ -50,6 +50,11 @@ path = "src/bin/kinewright-eval.rs"
 required-features = ["eval-harness"]
 
 [[bin]]
+name = "kinewright-cut-score"
+path = "src/bin/kinewright-cut-score.rs"
+required-features = ["eval-harness"]
+
+[[bin]]
 name = "kinewright-ja-baseline"
 path = "src/bin/kinewright-ja-baseline.rs"
 required-features = ["eval-harness"]

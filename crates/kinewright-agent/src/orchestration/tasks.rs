@@ -445,17 +445,23 @@ impl TaskEndpoint {
         self.check_live()?;
         // Evidence-only timeline inspection has no filesystem, cancellation or task effects.
         // Other inspectors/planners need a classified adapter before Studio can expose them.
-        if matches!(
-            name,
-            "get_timeline_state"
-                | "search_capabilities"
-                | "get_capability"
-                | "prepare_edit_plan"
-                | "commit_edit_plan"
-                | "discard_edit_plan"
-                | "invoke_capability"
-                | "plan_motion"
-        ) {
+        if (crate::dialogue_tools::SERVE_DIALOGUE_TOOLS
+            && matches!(
+                name,
+                "get_timeline_transcript" | "cut_dialogue" | "check_dialogue_cut"
+            ))
+            || matches!(
+                name,
+                "get_timeline_state"
+                    | "search_capabilities"
+                    | "get_capability"
+                    | "prepare_edit_plan"
+                    | "commit_edit_plan"
+                    | "discard_edit_plan"
+                    | "invoke_capability"
+                    | "plan_motion"
+            )
+        {
             Ok(())
         } else {
             Err(format!("task_scope: capability {name} is unavailable"))

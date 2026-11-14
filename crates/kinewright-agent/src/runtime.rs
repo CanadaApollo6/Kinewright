@@ -244,7 +244,9 @@ pub fn is_destructive_operation(operation: &Operation) -> bool {
 
 #[must_use]
 pub fn is_invocable_capability(name: &str) -> bool {
-    crate::writer_host::task_mcp::is_capability(name)
+    (crate::dialogue_tools::SERVE_DIALOGUE_TOOLS
+        && crate::dialogue_tools::TOOL_NAMES.contains(&name))
+        || crate::writer_host::task_mcp::is_capability(name)
         || (INSPECTOR_TOOL_NAMES.contains(&name)
             && !matches!(
                 name,

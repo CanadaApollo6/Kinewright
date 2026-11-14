@@ -1,3 +1,5 @@
+#[path = "dialogue_tools/server.rs"]
+mod dialogue_dispatch;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
@@ -533,6 +535,7 @@ pub enum McpServerError {
 pub type IncidentLogHandle = Arc<RwLock<IncidentLog>>;
 
 pub struct McpServer {
+    dialogue_measurements: crate::dialogue_tools::ProviderSlot,
     result_sizes: Arc<Mutex<crate::runtime::ResultSizeMetrics>>,
     #[cfg(feature = "eval-harness")]
     ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
@@ -652,6 +655,7 @@ impl McpServer {
             ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools().map_err(|_| {
                 crate::writer_host::HostError::Protocol("MCP tool schema unavailable".into())
             })?);
+        let dialogue_measurements = Arc::clone(&handler.dialogue_measurements);
         let result_sizes = Arc::clone(&handler.result_sizes);
         #[cfg(feature = "eval-harness")]
         let ja_request_counts = Arc::clone(&handler.ja_request_counts);
@@ -664,6 +668,7 @@ impl McpServer {
             })?;
         crate::writer_host::register_mcp(&endpoint, auth);
         Ok(Self {
+            dialogue_measurements,
             result_sizes,
             #[cfg(feature = "eval-harness")]
             ja_request_counts,
@@ -1029,6 +1034,7 @@ impl McpServer {
         .with_capability_denylist(capability_denylist)
         .with_investigator_context(investigator)
         .with_served_tool_allowlist(served_tool_allowlist);
+        let dialogue_measurements = Arc::clone(&handler.dialogue_measurements);
         let result_sizes = Arc::clone(&handler.result_sizes);
         #[cfg(feature = "eval-harness")]
         let ja_request_counts = Arc::clone(&handler.ja_request_counts);
@@ -1037,6 +1043,7 @@ impl McpServer {
             .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads, None))
             .map_err(McpServerError::Thread)?;
         Ok(Self {
+            dialogue_measurements,
             result_sizes,
             #[cfg(feature = "eval-harness")]
             ja_request_counts,
@@ -1049,6 +1056,21 @@ impl McpServer {
             shutdown: Some(shutdown),
             thread: Some(server_thread),
         })
+    }
+
+    /// Install the content/stream-bound cache service shared by this endpoint's
+    /// handlers. Visibility still depends on `SERVE_DIALOGUE_TOOLS`.
+    /// # Errors
+    /// Refuses a poisoned service slot.
+    pub fn install_dialogue_measurements(
+        &self,
+        provider: Arc<dyn crate::dialogue_tools::DialogueMeasurements>,
+    ) -> Result<(), String> {
+        *self
+            .dialogue_measurements
+            .write()
+            .map_err(|_| "dialogue measurement slot poisoned")? = Some(provider);
+        Ok(())
     }
 
     #[must_use]
@@ -1421,6 +1443,7 @@ fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
 
 #[derive(Clone)]
 struct KinewrightMcp {
+    dialogue_measurements: crate::dialogue_tools::ProviderSlot,
     // Handler clones address the same Core; they share its proven-prefix cache.
     ordinary_history_limits: Arc<kinewright_project::manual_history::OrdinaryHistoryAdmission>,
     result_sizes: Arc<Mutex<crate::runtime::ResultSizeMetrics>>,
@@ -1506,6 +1529,7 @@ impl KinewrightMcp {
         incidents: IncidentLogHandle,
     ) -> Self {
         Self {
+            dialogue_measurements: Arc::default(),
             ordinary_history_limits: Arc::new(
                 kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
                     kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
@@ -1579,6 +1603,9 @@ impl KinewrightMcp {
             .map(|definition| definition.tool)
             .collect::<Vec<_>>();
         tools.extend(inspector_tools());
+        if crate::dialogue_tools::SERVE_DIALOGUE_TOOLS {
+            tools.extend(dialogue_dispatch::tools());
+        }
         Ok(tools)
     }
 
@@ -1706,6 +1733,10 @@ impl KinewrightMcp {
         Ok(result)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep role, liveness, root and served-name gates at one dispatch boundary"
+    )]
     fn call_exposed_inner(
         &self,
         request: CallToolRequestParams,
@@ -1792,12 +1823,22 @@ impl KinewrightMcp {
         if let Some(hook) = &self.task_admission_hook {
             hook();
         }
-        if self.host_scoped && !host_scoped_tool_admitted(&request) {
+        if self.host_scoped
+            && !(host_scoped_tool_admitted(&request)
+                || self.dialogue_enabled() && dialogue_dispatch::host_admitted(&request))
+        {
             return Ok(error_text(
                 "root_refused: this file/media operation requires an identity-pinned input/output capability; forwarded path strings alone do not authorize filesystem IO",
             ));
         }
-        if !crate::runtime::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
+        if !(crate::runtime::COMPACT_TOOL_NAMES.contains(&request.name.as_ref())
+            || self.task_control.is_some()
+                && self.dialogue_enabled()
+                && matches!(
+                    request.name.as_ref(),
+                    "get_timeline_transcript" | "cut_dialogue" | "check_dialogue_cut"
+                ))
+        {
             return Ok(error_text(format!(
                 "{} is an internal capability, not an MCP tool; use search_capabilities, get_capability, and invoke_capability or prepare_edit_plan",
                 request.name
@@ -1815,9 +1856,16 @@ impl KinewrightMcp {
         }
         let arguments = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
+            "cut_dialogue" if self.dialogue_enabled() => {
+                self.cut_dialogue(&decode_args("cut_dialogue", arguments)?)
+            }
+            "check_dialogue_cut" if self.dialogue_enabled() => {
+                self.check_dialogue(&decode_args("check_dialogue_cut", arguments)?)
+            }
             "search_capabilities" => {
                 let args: CapabilitySearchArgs = decode_args("search_capabilities", arguments)?;
-                let mut tools = Self::capability_tools()
+                let mut tools = self
+                    .dialogue_catalog()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
                 if self.task_control.is_some() {
                     tools.extend(task_control_tools());
@@ -1833,7 +1881,8 @@ impl KinewrightMcp {
             }
             "get_capability" => {
                 let args: CapabilityArgs = decode_args("get_capability", arguments)?;
-                let mut tools = Self::capability_tools()
+                let mut tools = self
+                    .dialogue_catalog()
                     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
                 if self.task_control.is_some() {
                     tools.extend(task_control_tools());
@@ -1842,7 +1891,10 @@ impl KinewrightMcp {
             }
             "invoke_capability" => {
                 let args: InvokeCapabilityArgs = decode_args("invoke_capability", arguments)?;
-                if !is_invocable_capability(&args.name) {
+                if !(is_invocable_capability(&args.name)
+                    || self.dialogue_enabled()
+                        && crate::dialogue_tools::TOOL_NAMES.contains(&args.name.as_str()))
+                {
                     return Ok(error_text(format!(
                         "capability {} cannot be invoked through the compact dispatcher; edit operations must be prepared and committed atomically",
                         args.name
@@ -2921,14 +2973,21 @@ impl KinewrightMcp {
         )
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep one revision-gated edit transaction together"
-    )]
     fn apply_edit_plan(
         &self,
         expected_revision: TimelineRevision,
         operations: &[Operation],
+    ) -> Result<CallToolResult, McpError> {
+        self.apply_edit_plan_observed(expected_revision, operations, || Ok(()), |_, _| {})
+    }
+
+    #[allow(clippy::too_many_lines, reason = "one revision-gated edit transaction")]
+    fn apply_edit_plan_observed(
+        &self,
+        expected_revision: TimelineRevision,
+        operations: &[Operation],
+        validate: impl FnOnce() -> Result<(), String>,
+        mut observe: impl FnMut(TimelineRevision, &Document),
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, before) = self.snapshot()?;
         if expected_revision != actual_revision {
@@ -2995,6 +3054,9 @@ impl KinewrightMcp {
         {
             return Ok(error_text(error));
         }
+        if let Err(reason) = validate() {
+            return Ok(error_text(reason));
+        }
         let apply = || {
             self.core.request(Command::DoBatchIfRevision {
                 expected: expected_revision,
@@ -3019,6 +3081,7 @@ impl KinewrightMcp {
         .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(match event {
             Event::DocumentChanged { doc, revision, .. } => {
+                observe(revision, &doc);
                 if self.publish_to_playback {
                     self.playback.set_document(Arc::clone(&doc));
                 }
@@ -8739,6 +8802,9 @@ impl KinewrightMcp {
         &self,
         requested: Option<TranscriptRangeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if self.dialogue_enabled() {
+            return self.bound_transcript(requested);
+        }
         let document = self.document()?;
         let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
             range.start..range.end
@@ -12969,7 +13035,7 @@ fn open_capabilities(tools: &[Tool], args: CapabilityArgs) -> CallToolResult {
             serde_json::json!({
                 "capability": descriptor,
                 "input_schema": tool.input_schema,
-                "invocation": if is_invocable_capability(name) {
+                "invocation": if is_invocable_capability(name) || crate::dialogue_tools::TOOL_NAMES.contains(&name.as_str()) {
                     "invoke_capability"
                 } else {
                     "prepare_edit_plan"
@@ -19175,6 +19241,7 @@ fn render_plan_outcomes(
 
 #[cfg(test)]
 mod tests {
+    include!("dialogue_tools_tests.rs");
     use super::*;
     #[test]
     fn dq1_word_search_normalises_model_spelling() {
@@ -19306,6 +19373,7 @@ mod tests {
         /// AU4 §6.1: the project-frame silence spans the planner complements
         /// into spoken spans.
         timeline_silences: Vec<TimelineSilenceSpan>,
+        timeline_words: Option<fn() -> Vec<TimelineTranscriptWord>>,
         /// AU4 §6.1 / §6.2: a scripted `Analysis::mix_levels`, so the two
         /// planners' measurement arms are pinned without a decoder.
         mix_levels: Option<MixLevelsDouble>,
@@ -19506,7 +19574,7 @@ mod tests {
             _document: &Document,
             _range: Option<std::ops::Range<TimeCode>>,
         ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
-            Ok(Vec::new())
+            Ok(self.timeline_words.map_or_else(Vec::new, |words| words()))
         }
 
         fn request_silence_detection(&self, _asset: MediaAsset) {}
@@ -36951,6 +37019,8 @@ fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String>
         .map(|name| {
             match *name {
                 "get_timeline_state" => Some(compact_get_timeline_state_tool()),
+                "cut_dialogue" | "check_dialogue_cut" => dialogue_dispatch::tools().into_iter().find(|tool|tool.name==*name),
+                "get_timeline_transcript" => inspector_tools().into_iter().find(|tool|tool.name==*name),
                 "prepare_edit_plan" => Some(task_prepare_edit_plan_tool()),
                 "commit_edit_plan" => Some(compact_commit_edit_plan_tool()),
                 "discard_edit_plan" => Some(compact_discard_edit_plan_tool()),
