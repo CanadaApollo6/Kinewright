@@ -645,4 +645,21 @@ fn open_reserves_before_reading_the_owner_record() {
         (0, 0),
         "OPEN_REFUSAL_HAS_NO_PARTIAL_LEASE"
     );
+    let pool = HistoryPool::new(PoolLimits::default());
+    let oversized = ObjectRef {
+        byte_length: Role::Candidate.persisted_shell_cap() + 1,
+        ..nonexistent
+    };
+    assert!(
+        matches!(
+            StoredOwnerRecord::read(session.store(), &oversized, &pool, Role::Candidate),
+            Err(Error::Capacity("persisted owner shell"))
+        ),
+        "OPEN_REQUESTED_ROLE_CAP_PRECEDES_RECORD_ALLOCATION"
+    );
+    assert_eq!(
+        pool.usage(Role::Candidate).unwrap(),
+        (0, 0),
+        "OVERSIZED_OPEN_HAS_NO_PARTIAL_LEASE"
+    );
 }

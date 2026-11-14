@@ -345,4 +345,14 @@ fn owner_role_policy_and_fold_frontier_follow_accepted_position_order() {
         matches!(capture.validate(), Err(Error::InvalidFrontier)),
         "FOLD_FRONTIER_POSITION_PRECEDES_RETAINED_COMMANDS"
     );
+    let target = owner.transition_target(Direction::Undo).unwrap();
+    owner
+        .approve_transition(approval().reference, Direction::Undo, target)
+        .unwrap();
+    let mut capture = owner.capture().unwrap();
+    capture.data.ledger.transitions[0].target.commands = 4;
+    assert!(
+        matches!(capture.validate(), Err(Error::InvalidLedger)),
+        "TRANSITION_EVIDENCE_CANNOT_EXCEED_ACCEPTED_POSITION"
+    );
 }

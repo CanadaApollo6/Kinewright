@@ -238,6 +238,11 @@ impl StoredOwnerRecord {
         pool: &HistoryPool,
         expected_role: Role,
     ) -> Result<ValidatedOwnerSnapshot, Error> {
+        // Bound raw ingress by the requested role before the store allocates
+        // its encoded/decoded shell, including a record claiming another role.
+        if reference.byte_length > expected_role.persisted_shell_cap() {
+            return Err(Error::Capacity("persisted owner shell"));
+        }
         let reservation = pool.admit(expected_role)?;
         let window = reservation.workspace()?;
         let record = store

@@ -228,7 +228,7 @@ fn role_measurements() {
                 matches!(
                     refusal,
                     Err(kinewright_project::operation_history::Error::History(
-                        kinewright_core::undo::Error::Capacity
+                        kinewright_core::undo::Error::DocumentCapacity
                     ))
                 ),
                 "CANDIDATE_HEAVY_REFUSED"

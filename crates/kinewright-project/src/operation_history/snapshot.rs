@@ -363,6 +363,12 @@ impl OwnerSnapshot {
             };
             if entry.target.first_key >= next
                 || entry.target.first_key.position >= history.position
+                || entry
+                    .target
+                    .first_key
+                    .position
+                    .checked_add(entry.target.commands)
+                    .is_none_or(|end| end > history.position)
                 || entry.target.commands
                     > role.bounds().decoded_history_bytes
                         / (2 * std::mem::size_of::<kinewright_core::undo::StepCommand>() as u64)
