@@ -19,7 +19,7 @@ H='writer_host::hooks_tests::tests::'
 def add(name,file,before,after,test,marker):
     r.PAIRS.append((name,[(file,before,after)],'kinewright-agent',H+'te15_b202_'+test,marker))
 for test in ['after_history','setup_publish']:
-    add('rollback-'+test,O,'if publication.is_err() && saved.is_none() {','if false && publication.is_err() && saved.is_none() {',test,'B202_FIRST_RETRY')
+    add('rollback-'+test,O,'if publication.is_err() && saved.is_none() {','if false && publication.is_err() && saved.is_none() {',test,'B202_UNPUBLISHED_ROLLED_BACK')
 add('history-base-consistency',W+'task_history.rs','if base.base_head != brief.scope.base.head {','if false && base.base_head != brief.scope.base.head {','history_base_guard','B202_MIXED_BASE_REFUSED')
 for name in ['frozen','history','legacy','base']:
     add('permanent-'+name,P,'if kind.permanent() {','if false && kind.permanent() {','permanent_'+name,'B202_PERMANENT_NO_RETRY')

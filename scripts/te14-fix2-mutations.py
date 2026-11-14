@@ -20,7 +20,7 @@ add('verification-phase','            if !started || std::time::Instant::now() >
 add('busy-retry','MediaReadStartError::Busy => refused(MEDIA_RETRY)','MediaReadStartError::Busy => refused(MEDIA_DECODE_TIMEOUT)','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_BUSY_RETRY')
 add('wait-deadline','if !started || std::time::Instant::now() >= self.deadline {','if !started || (false && std::time::Instant::now() >= self.deadline) {','te14_fix2_verification_wait_retry_then_sample','TE14_FIX2_MEDIA_WAIT_ENDS')
 for action in ('stop','pause'):
- add(action+'-wait','!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire)','false && (!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire))','te14_fix2_'+action+'_ends_wait','TE14_FIX2_MEDIA_WAIT_ENDS')
+ add(action+'-wait','|| !endpoint.media_read_live()\n            || !self.alive.load(std::sync::atomic::Ordering::Acquire)','|| false','te14_fix2_'+action+'_ends_wait','TE14_FIX2_MEDIA_WAIT_ENDS')
 s=(ROOT/C).read_text();start=s.index('pub(super) fn read_child_context');a=s.index('        for (kind, references) in [',start);b=s.index('        for (kind, reference) in [',a);end=s.index('        for chunk in bytes_rows(&serde_json::to_vec(&usage)?)',b)
 add('rejection-first',s[a:end],s[b:end]+s[a:b],'te14_fix2_rejection_precedes_bulk_records','TE14_FIX2_PROOF_FIRST')
 a=s.index('            return Ok(vec![',s.index('fn child_record_rows'));b=s.index('\n        }',a)

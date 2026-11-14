@@ -53,8 +53,8 @@ add('decode-owner', M, 'drop(host);\n                            match prepared.
 add('decode-switch-owner', M, 'drop(host);\n                            match prepared.render(&self.endpoint, &owner) {',
     'let _held_host = host;\n                            match prepared.render(&self.endpoint, &owner) {',
     'te14_fix1_decode_switch', 'TE14_FIX1_MEDIA_CONTROL_NOT_BLOCKED')
-add('media-liveness', C, '!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire)',
-    'false && (!endpoint.media_read_live() || !self.alive.load(std::sync::atomic::Ordering::Acquire))',
+add('media-liveness', C, '|| !endpoint.media_read_live()\n            || !self.alive.load(std::sync::atomic::Ordering::Acquire)',
+    '|| false',
     'te14_fix1_decode_stop', 'TE14_FIX1_MEDIA_CANCEL_OR_DEADLINE')
 add('decoder-cancel', C, 'let signal = Arc::clone(&work.cancel);',
     'let signal = Arc::new(std::sync::atomic::AtomicBool::new(false));',

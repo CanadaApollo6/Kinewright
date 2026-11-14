@@ -56,7 +56,7 @@ host('real-frozen',W+'orchestration.rs','if history.frozen {\n                  
 host('real-missing',W+'orchestration.rs','                if !safe {','                if false {','real_missing','B2B_REAL_PREPARATION_KIND')
 add('net-zero',W+'task_consent.rs','let description = actual_description.as_deref();','let description = _description;',C+'te15_b2b_net_zero_removal','B2B_NO_ZERO_APPROVAL')
 add('liveness-code',A+'server.rs','format!("consent_liveness: {error}")','format!("consent_policy: {error}")',C+'te15_b2b_liveness_prepare_and_commit','B2B_LIVENESS_CODE')
-add('application-retry',W+'context_publication.rs','self.append_pending_edit_applications(&mut projection)','Ok::<(),HostError>(())',C+'te15_b2b_applied_marker_retries','B2B_MARKER_NEXT_PUBLICATION')
+add('application-retry',W+'context_publication.rs','self.append_pending_edit_applications(&mut projection)','Ok::<(),HostError>(())',C+'te15_b2b_applied_marker_retries','successor isolation')
 add('applications-append-only',P+'orchestration_commit.rs','!after\n            .edit_applications\n            .starts_with(&before.edit_applications)','false',C+'te15_b2b_applications_are_append_only','B2B_APPLICATIONS_APPEND_ONLY')
 text=(ROOT/(P+'bundle_recovery.rs')).read_text();start=text.index('                if let Some(previous) = previous_snapshot.as_ref()');end=text.index('                previous_snapshot =',start)
 for kind in ['fixed_consent','append_only_approvals','append_only_applications']:
