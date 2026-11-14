@@ -74,6 +74,7 @@ struct Fact {
 }
 #[derive(Default, Debug)]
 struct Totals {
+    save_open_checks: usize,
     transitions: usize,
     approvals: usize,
     shortcut_exemptions: usize,
@@ -679,6 +680,7 @@ fn stream(
         .map(|case| &case.operation)
         .collect::<Vec<_>>();
     let mut random = commands::Random(0x4858_210b_0000_0000 | seed_value);
+    let mut save_random = commands::Random(0x5341_5645_0000_0000 | seed_value);
     let mut line = BTreeMap::<CommandKey, Fact>::new();
     let mut all = BTreeMap::new();
     let mut controls = BTreeMap::new();
@@ -712,6 +714,7 @@ fn stream(
         commands::initial_commands(Command::DoBatch(vec![first])).into()
     };
     for index in 0..prefix.len() + 12 {
+        let mut installed = false;
         let context = format!("kind={kind} seed={seed_value} policy={policy:?} index={index}");
         if index == 8 {
             captured = Some(Capture {
@@ -738,6 +741,7 @@ fn stream(
                 terminal = cut.terminal;
                 frontier = cut.frontier;
                 trace.push("install S".into());
+                installed = true;
             }
         } else if index % 11 == 10 {
             let current = old.export_history().unwrap();
@@ -1016,6 +1020,10 @@ fn stream(
         check_audit(
             &owner, &model, &old, &line, &all, &controls, &trace, &terminal, frontier, totals,
         );
+        if installed || save_random.next().is_multiple_of(7) {
+            super::roundtrip_tests::saved_open(&owner);
+            totals.save_open_checks += 1;
+        }
         totals.transitions += 1;
     }
 }
@@ -1056,6 +1064,8 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
     owner
         .install_snapshot(t.validate_bounded(bounds).unwrap())
         .unwrap();
+    super::roundtrip_tests::saved_open(&owner);
+    totals.save_open_checks += 1;
     old.restore_history(old_t).unwrap();
     let target = owner.transition_target(Direction::Undo).unwrap();
     let id = ObjectRef {
@@ -1070,6 +1080,8 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
     owner
         .install_snapshot(s.validate_bounded(bounds).unwrap())
         .unwrap();
+    super::roundtrip_tests::saved_open(&owner);
+    totals.save_open_checks += 1;
     old.restore_history(old_s).unwrap();
     let fate = owner.transition_fate(&id).unwrap().unwrap();
     assert_eq!(
@@ -1156,6 +1168,8 @@ fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
     owner
         .install_snapshot(t.validate_bounded(bounds).unwrap())
         .unwrap();
+    super::roundtrip_tests::saved_open(&owner);
+    totals.save_open_checks += 1;
     old.restore_history(old_t).unwrap();
     let id = ObjectRef {
         sha256: "e".repeat(64),
@@ -1173,6 +1187,8 @@ fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
     owner
         .install_snapshot(s.validate_bounded(bounds).unwrap())
         .unwrap();
+    super::roundtrip_tests::saved_open(&owner);
+    totals.save_open_checks += 1;
     old.restore_history(old_s).unwrap();
     let fate = owner.transition_fate(&id).unwrap().unwrap();
     assert_eq!(
@@ -1247,6 +1263,10 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
         "DIFFERENTIAL_UNCERTAIN_ANSWER_IS_EXERCISED"
     );
     assert!(
+        totals.save_open_checks > 0,
+        "DIFFERENTIAL_SAVE_OPEN_INVARIANT_EXERCISED"
+    );
+    assert!(
         totals.shortcut_exemptions > 0,
         "TARGET_SHORTCUT_EXEMPTION_IS_EXERCISED"
     );
@@ -1254,7 +1274,7 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
         totals.conditional_do > 0 && totals.conditional_batch > 0,
         "GENERATED_ACCEPTED_CONDITIONAL_COMMANDS"
     );
-    let artifact = serde_json::json!({"transitions":totals.transitions,"approvals":totals.approvals,"shortcut_exemptions":totals.shortcut_exemptions,"accepted_do_if_revision":totals.conditional_do,"accepted_batch_if_revision":totals.conditional_batch,"uncertain_observations":totals.uncertain,"folded_provenance_probes":totals.provenance_probes,"control_difference_observations":totals.control_difference_observations,"control_difference_witnesses":totals.control_certain_differences});
+    let artifact = serde_json::json!({"save_open_checks":totals.save_open_checks,"transitions":totals.transitions,"approvals":totals.approvals,"shortcut_exemptions":totals.shortcut_exemptions,"accepted_do_if_revision":totals.conditional_do,"accepted_batch_if_revision":totals.conditional_batch,"uncertain_observations":totals.uncertain,"folded_provenance_probes":totals.provenance_probes,"control_difference_observations":totals.control_difference_observations,"control_difference_witnesses":totals.control_certain_differences});
     let directory = kinewright_media::test_support::workspace_target_dir().join("hx-part2");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(

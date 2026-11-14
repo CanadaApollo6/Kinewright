@@ -341,6 +341,7 @@ impl OwnerSnapshot {
                 return Err(Error::InvalidLedger);
             }
             if entry.approval.targets.is_empty()
+                || entry.key.position.checked_add(1).is_none()
                 || entry.key
                     >= (CommandKey {
                         epoch: history.epoch,
@@ -362,13 +363,14 @@ impl OwnerSnapshot {
                 position: history.position,
             };
             if entry.target.first_key >= next
-                || entry.target.first_key.position >= history.position
                 || entry
                     .target
                     .first_key
                     .position
                     .checked_add(entry.target.commands)
-                    .is_none_or(|end| end > history.position)
+                    .is_none_or(|end| {
+                        entry.target.first_key.epoch == history.epoch && end > history.position
+                    })
                 || entry.target.commands
                     > role.bounds().decoded_history_bytes
                         / (2 * std::mem::size_of::<kinewright_core::undo::StepCommand>() as u64)
@@ -422,7 +424,6 @@ impl OwnerSnapshot {
         {
             return Err(Error::InvalidLedger);
         }
-        let history_position = history.position;
         let next = CommandKey {
             epoch: history.epoch,
             position: history.position,
@@ -535,7 +536,6 @@ impl OwnerSnapshot {
         }
         for entry in ledger.entries() {
             if entry.key >= next
-                || entry.key.position >= history_position
                 || (matches!(entry.fate, Fate::Applied | Fate::Redone | Fate::Undone)
                     && !seen_approvals.contains(&entry.key))
             {

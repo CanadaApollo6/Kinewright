@@ -18,6 +18,43 @@ fn session(
         crate::bundle_copy::SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
     (temp, store)
 }
+
+fn stored_older_install(case: super::super::roundtrip_tests::InstallCase) {
+    let (_temp, mut session) = session("hx-old-epoch-reopen");
+    let store = session.store_mut();
+    let bytes = b"old epoch approval";
+    let reference = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::OwnedEvidence,
+    };
+    let _pin = store
+        .admit_blob(&mut bytes.as_slice(), &reference, &[])
+        .unwrap();
+    let pool = HistoryPool::new(PoolLimits::default());
+    let owner = super::super::roundtrip_tests::older_install(&pool, case, reference);
+    let capture = owner.capture().unwrap();
+    let sealed = capture.persist(store, |_| Ok(None)).unwrap();
+    drop(capture);
+    let opened = StoredOwnerRecord::read(store, &sealed.reference, &pool, Role::Task)
+        .expect("SUCCESSFULLY_PERSISTED_HISTORY_MUST_REOPEN")
+        .open()
+        .unwrap();
+    super::super::roundtrip_tests::assert_same(&owner, &opened);
+}
+
+#[test]
+fn stored_older_snapshot_install_with_later_do_can_reopen() {
+    stored_older_install(super::super::roundtrip_tests::InstallCase::Single);
+}
+#[test]
+fn stored_two_older_snapshot_installs_with_later_do_can_reopen() {
+    stored_older_install(super::super::roundtrip_tests::InstallCase::Twice);
+}
+#[test]
+fn stored_older_snapshot_install_with_approved_undo_can_reopen() {
+    stored_older_install(super::super::roundtrip_tests::InstallCase::Undo);
+}
 #[test]
 fn compact_record_roundtrip_at_ten_thousand_commands_is_openable() {
     let (_temp, mut session) = session("hx-compact-record");
