@@ -1818,9 +1818,12 @@ mod tests {
         crate::export::export_document(&document, &output, &settings, &progress_tx, gpu.context())
             .expect("the production export path should write an 8-bit H.264 delivery");
 
-        let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start")
-            .into_legacy_fixture();
+        let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+            gpu.context(),
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("the production media engine should start")
+        .into_legacy_fixture();
         let document = Arc::new(document);
         let request = DeliveryVerificationRequest::new(
             DeliveryEncodeDepth::Eight,
@@ -2067,9 +2070,12 @@ mod tests {
             "this fixture only tests anything if the edit list really trims a frame"
         );
 
-        let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start")
-            .into_legacy_fixture();
+        let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+            gpu.context(),
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("the production media engine should start")
+        .into_legacy_fixture();
         let error = engine
             .verify_delivery_output(
                 Arc::new(document),
@@ -2261,9 +2267,12 @@ mod tests {
     fn cc6_verification_refuses_budgets_from_the_other_delivery_lane() {
         initialize_ffmpeg().expect("FFmpeg must initialize");
         let gpu = fallback_gpu();
-        let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start")
-            .into_legacy_fixture();
+        let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+            gpu.context(),
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("the production media engine should start")
+        .into_legacy_fixture();
         let directory = TempDirectory::new("cc6-verify-budget-lane");
         let absent = directory.path("never-written.mp4");
 
@@ -2331,9 +2340,12 @@ mod tests {
     fn cc6_verification_refuses_a_frame_count_the_sampler_would_have_clamped() {
         initialize_ffmpeg().expect("FFmpeg must initialize");
         let gpu = fallback_gpu();
-        let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start")
-            .into_legacy_fixture();
+        let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+            gpu.context(),
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("the production media engine should start")
+        .into_legacy_fixture();
         let directory = TempDirectory::new("cc6-verify-frame-count");
         let absent = directory.path("never-written.mp4");
         let (document, settings) = lane_settings(DeliveryEncodeDepth::Eight);

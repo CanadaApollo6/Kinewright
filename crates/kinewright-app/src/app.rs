@@ -344,6 +344,8 @@ fn premultiply_table() -> Box<[u8; 65536]> {
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
+    #[cfg(test)]
+    pub(crate) test_data_root: Option<std::path::PathBuf>,
     /// Release display leases before joining workers or dropping engine Arcs.
     pub(crate) native_display: Option<NativeDisplay>,
     pub(crate) projects: Vec<ProjectSession>,
@@ -669,6 +671,8 @@ impl KinewrightApp {
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
         let mut app = Self {
+            #[cfg(test)]
+            test_data_root: None,
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -5091,7 +5095,11 @@ pub(crate) fn run() -> eframe::Result {
                 render_state.adapter.get_info(),
             );
             let media = Arc::new(
-                FfmpegMediaEngine::new_with_gpu(gpu).expect("FFmpeg media engine must initialize"),
+                FfmpegMediaEngine::new_with_test_data_dir(
+                    gpu,
+                    kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+                )
+                .expect("FFmpeg media engine must initialize"),
             );
             let repaint_context = creation_context.egui_ctx.clone();
             media.set_event_wakeup(move || repaint_context.request_repaint());
@@ -6916,8 +6924,13 @@ pub(crate) mod in1_tests {
     /// audio supply a paced engine through `in1_harness_with_engine`.
     pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let gpu = FfmpegMediaEngine::test_gpu_context().expect("the test GPU starts");
-        let engine =
-            Arc::new(FfmpegMediaEngine::new_with_gpu(gpu).expect("the test engine starts"));
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                gpu,
+                kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .expect("the test engine starts"),
+        );
         in1_harness_with_engine(document, engine)
     }
 
@@ -6950,6 +6963,8 @@ pub(crate) mod in1_tests {
         let (_frames_tx, frames) = crossbeam_channel::unbounded();
         let (_media_tx, media_events) = crossbeam_channel::unbounded();
         let app = KinewrightApp {
+            #[cfg(test)]
+            test_data_root: Some(engine.test_data_dir().to_path_buf()),
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -12071,7 +12086,13 @@ mod in2b_tests {
         document: Document,
         project_path: Option<PathBuf>,
     ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
-        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                FfmpegMediaEngine::test_gpu_context().expect("the test GPU starts"),
+                kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .expect("the test engine starts"),
+        );
         let controls = engine.controls();
         let playback: Arc<dyn Playback> = controls.clone();
         let writer = SidecarWriter::new();
@@ -12107,6 +12128,8 @@ mod in2b_tests {
         let (_frames_tx, frames) = crossbeam_channel::unbounded();
         let (_media_tx, media_events) = crossbeam_channel::unbounded();
         let app = KinewrightApp {
+            #[cfg(test)]
+            test_data_root: Some(engine.test_data_dir().to_path_buf()),
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -15298,7 +15321,13 @@ mod in2b_tests {
             .expect("the project serialises"),
         )
         .expect("the project file writes");
-        let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                FfmpegMediaEngine::test_gpu_context().expect("the test GPU starts"),
+                kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .expect("the test engine starts"),
+        );
         let mut app = KinewrightApp::new(engine.clone(), Some(project_path));
         app.route_incidents();
         {

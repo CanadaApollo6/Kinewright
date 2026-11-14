@@ -1830,6 +1830,7 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     let transfer = app.owner.prepare_host_attachment().unwrap();
     let server = SourceServer::start(transfer.source_service.unwrap()).unwrap();
     let writer = WriterHost::start(HostConfig {
+        data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
         scheduler_settings: Some(temp.path("scheduler")),
         project: "app-c8-floor-activation".into(),
         path: None,
@@ -2004,6 +2005,7 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
         write: vec![allowed.clone()],
     };
     let writer = WriterHost::start(HostConfig {
+        data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
         scheduler_settings: Some(temp.path("scheduler")),
         project: "app-person-destination".into(),
         path: None,

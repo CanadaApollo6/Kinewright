@@ -1389,7 +1389,6 @@ pub struct HostCommandOwner {
         Vec<u8>,
         kinewright_project::storage_budget::StorageReservation,
     )>,
-    voice_data_dir: std::path::PathBuf,
     voice_jobs: BTreeMap<kinewright_project::studio_records::NoteId, voice::Job>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
@@ -1565,7 +1564,6 @@ impl HostCommandOwner {
             pending_read_pin: None,
             voice_payload: None,
             voice_jobs: BTreeMap::new(),
-            voice_data_dir: kinewright_media::default_data_dir(),
             prepared_owned_media: None,
             pending_switch: None,
             confirmed_switch: None,
@@ -2943,6 +2941,7 @@ impl HostCommandOwner {
         let worker_core = core.clone();
         let project = self.config.project.clone();
         let roots = self.config.roots.clone();
+        let data_dir = self.config.data_dir.clone();
         let history_limits = match &self.owner {
             Some(owner) => kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
                 owner.store()?.limits(),
@@ -2956,7 +2955,7 @@ impl HostCommandOwner {
                     // Media is requested only by explicit session creation, never attach/proxy.
                     // Host-scoped MCP refuses every file/media operation until it has a pinned
                     // media input/output capability; roots alone do not make a bare path safe.
-                    let media = Arc::new(LazyHostMedia::default());
+                    let media = Arc::new(LazyHostMedia::new(data_dir));
                     let server = crate::McpServer::start_host_isolated(
                         worker_core,
                         media.clone(),
@@ -3084,16 +3083,28 @@ impl HostCommandOwner {
 // The real media engine is constructed only on a media operation. Scoped MCP rejects
 // unpinned file operations before this boundary; a metadata-only scripted session needs
 // neither a GPU nor a NeMo model, just like attachment/proxy.
-#[derive(Default)]
 struct LazyHostMedia {
+    data_dir: Option<std::path::PathBuf>,
     engine: OnceLock<Result<Arc<kinewright_media::FfmpegMediaEngine>, kinewright_core::MediaError>>,
 }
 impl LazyHostMedia {
+    fn new(data_dir: Option<std::path::PathBuf>) -> Self {
+        Self {
+            data_dir,
+            engine: OnceLock::new(),
+        }
+    }
     fn get(
         &self,
     ) -> Result<&Arc<kinewright_media::FfmpegMediaEngine>, kinewright_core::MediaError> {
         self.engine
-            .get_or_init(|| kinewright_media::FfmpegMediaEngine::new().map(Arc::new))
+            .get_or_init(|| {
+                let root = self
+                    .data_dir
+                    .as_ref()
+                    .map_or_else(kinewright_media::default_data_dir, |root| Ok(root.clone()))?;
+                kinewright_media::FfmpegMediaEngine::new_with_data_dir(root).map(Arc::new)
+            })
             .as_ref()
             .map_err(Clone::clone)
     }
@@ -3409,6 +3420,15 @@ mod tests {
     #[test]
     fn s3_portable_roles_revoke_and_refuse_before_manual_write_admission() {
         let configuration = || HostConfig {
+            data_dir: Some(
+                (std::env::temp_dir().join(format!(
+                    "fixture-scheduler-{}",
+                    kinewright_media::sha256_bytes(
+                        HostAuth::generate().unwrap().bearer().as_bytes()
+                    )
+                )))
+                .with_extension("voice-data"),
+            ),
             scheduler_settings: Some(std::env::temp_dir().join(format!(
                 "fixture-scheduler-{}",
                 kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
@@ -3512,6 +3532,15 @@ mod tests {
     #[test]
     fn ordinary_attachment_and_history_use_real_authenticated_loopback() {
         let host = WriterHost::start(HostConfig {
+            data_dir: Some(
+                (std::env::temp_dir().join(format!(
+                    "fixture-scheduler-{}",
+                    kinewright_media::sha256_bytes(
+                        HostAuth::generate().unwrap().bearer().as_bytes()
+                    )
+                )))
+                .with_extension("voice-data"),
+            ),
             scheduler_settings: Some(std::env::temp_dir().join(format!(
                 "fixture-scheduler-{}",
                 kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
@@ -3569,6 +3598,15 @@ mod tests {
                 snapshot.history_sha256 = "0".repeat(64);
             }
             let result = HostCommandOwner::open(HostConfig {
+                data_dir: Some(
+                    (std::env::temp_dir().join(format!(
+                        "fixture-scheduler-{}",
+                        kinewright_media::sha256_bytes(
+                            HostAuth::generate().unwrap().bearer().as_bytes()
+                        )
+                    )))
+                    .with_extension("voice-data"),
+                ),
                 scheduler_settings: Some(std::env::temp_dir().join(format!(
                     "fixture-scheduler-{}",
                     kinewright_media::sha256_bytes(
@@ -3617,6 +3655,15 @@ mod tests {
         let mut snapshot = HostSnapshot::capture(&core).unwrap();
         snapshot.history_sha256 = "0".repeat(64);
         let mut owner = HostCommandOwner::open(HostConfig {
+            data_dir: Some(
+                (std::env::temp_dir().join(format!(
+                    "fixture-scheduler-{}",
+                    kinewright_media::sha256_bytes(
+                        HostAuth::generate().unwrap().bearer().as_bytes()
+                    )
+                )))
+                .with_extension("voice-data"),
+            ),
             scheduler_settings: Some(std::env::temp_dir().join(format!(
                 "fixture-scheduler-{}",
                 kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())

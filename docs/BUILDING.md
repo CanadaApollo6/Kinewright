@@ -244,3 +244,9 @@ OpenMP installer work remains the follow-up noted above. Recognition uses CPU
 inference on both platforms. Model files and licences, cache identity, session
 clocks and the real-model slow-tier witness are documented in
 [TRANSCRIPTION.md](TRANSCRIPTION.md).
+
+Application data (models, caches and feedback captures) is persistent:
+`$XDG_DATA_HOME/kinewright` on Linux when that variable is absolute, otherwise
+`$HOME/.local/share/kinewright`; `%LOCALAPPDATA%/Kinewright` on Windows. Linux
+creates a private user-owned 0700 root. Linked or foreign-owned roots are refused,
+and missing home configuration reports an error instead of using temporary storage.

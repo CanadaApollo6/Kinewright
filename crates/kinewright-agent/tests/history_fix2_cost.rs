@@ -90,6 +90,7 @@ fn history_fix2_startup_sample() {
         .unwrap()
     };
     let config = HostConfig {
+        data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
         project: "fix2-startup".into(),
         path: transfer.named_path,
         roots: SessionRoots {

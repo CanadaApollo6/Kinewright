@@ -1,0 +1,225 @@
+//! Private application data. Existing links are rejected before traversal.
+use kinewright_core::MediaError;
+use std::{
+    fs, io,
+    path::{Component, Path, PathBuf},
+};
+
+fn failure(reason: impl std::fmt::Display) -> MediaError {
+    MediaError::DataDirectory(reason.to_string())
+}
+fn metadata(path: &Path) -> io::Result<fs::Metadata> {
+    fs::symlink_metadata(path)
+}
+fn link(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+// Check each component rather than create_dir_all's implicit link traversal.
+// Application-owned components are created privately and checked for ownership.
+pub(crate) fn ensure_directory(root: &Path, relative: &Path) -> Result<PathBuf, MediaError> {
+    ensure_root(root)?;
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(failure("data paths require normal components"));
+        };
+        path.push(name);
+        create_private(&path)?;
+    }
+    Ok(path)
+}
+fn create_private(path: &Path) -> Result<(), MediaError> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(failure(e)),
+    }
+    let meta = metadata(path).map_err(failure)?;
+    if link(&meta) || !meta.is_dir() {
+        return Err(failure(format!(
+            "data directory must be a real directory: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        require_owner(path, meta.uid(), rustix::process::geteuid().as_raw())?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(failure)?;
+    }
+    Ok(())
+}
+#[cfg(unix)]
+fn require_owner(path: &Path, owner: u32, current: u32) -> Result<(), MediaError> {
+    if owner != current {
+        return Err(failure(format!(
+            "data directory is owned by another user: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+pub(crate) fn ensure_root(root: &Path) -> Result<(), MediaError> {
+    if !root.is_absolute() || root.file_name().is_none() {
+        return Err(failure(
+            "data root must be an absolute application directory",
+        ));
+    }
+    // Check existing parents before asking the filesystem about their children.
+    for parent in root
+        .ancestors()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        match metadata(parent) {
+            Ok(meta) if link(&meta) || !meta.is_dir() => {
+                return Err(failure("data root ancestor is not a real directory"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => create_private(parent)?,
+            Err(error) => return Err(failure(error)),
+        }
+    }
+    create_private(root)
+}
+
+fn resolve(
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    local: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, MediaError> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = local;
+        if let Some(path) = xdg.map(Path::new).filter(|p| p.is_absolute()) {
+            return Ok(path.join("kinewright"));
+        }
+        home.map(Path::new)
+            .filter(|p| p.is_absolute())
+            .map(|p| p.join(".local/share/kinewright"))
+            .ok_or_else(|| failure("HOME is unavailable; set HOME or an absolute XDG_DATA_HOME"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (xdg, home);
+        local
+            .map(Path::new)
+            .filter(|p| p.is_absolute())
+            .map(|p| p.join("Kinewright"))
+            .ok_or_else(|| failure("LOCALAPPDATA is unavailable"))
+    }
+}
+/// Resolve and create the private persistent application data root.
+/// # Errors
+/// Returns a typed data-directory error if no absolute home is available.
+pub fn default_data_dir() -> Result<PathBuf, MediaError> {
+    let root = resolve(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+    )?;
+    ensure_root(&root)?;
+    Ok(root)
+}
+
+/// Create a private child directory without traversing a linked component.
+/// # Errors
+/// Returns a typed error for an unsafe root, child path or filesystem failure.
+pub fn data_subdirectory(root: &Path, relative: &Path) -> Result<PathBuf, MediaError> {
+    ensure_directory(root, relative)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TempDirectory;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dq1_data_location_requires_an_absolute_persistent_home() {
+        use std::ffi::OsStr;
+        let path = resolve(Some(OsStr::new("/isolated/xdg")), None, None).unwrap();
+        assert_eq!(path, Path::new("/isolated/xdg/kinewright"));
+        assert_eq!(
+            resolve(
+                Some(OsStr::new("relative")),
+                Some(OsStr::new("/isolated/home")),
+                None
+            )
+            .unwrap(),
+            Path::new("/isolated/home/.local/share/kinewright")
+        );
+        assert!(matches!(
+            resolve(None, None, None),
+            Err(MediaError::DataDirectory(_))
+        ));
+        assert!(
+            resolve(
+                Some(OsStr::new("relative")),
+                Some(OsStr::new("relative")),
+                None
+            )
+            .is_err()
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dq1_private_root_and_children_are_0700_and_owned() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let temp = TempDirectory::new("dq1-data-mode");
+        let root = temp.path("private");
+        let child = ensure_directory(&root, Path::new("models/pinned/verified")).unwrap();
+        for path in [root, child] {
+            let meta = fs::symlink_metadata(path).unwrap();
+            assert_eq!(meta.mode() & 0o777, 0o700);
+            assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
+        }
+        fs::set_permissions(temp.root(), fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_root(temp.root()).unwrap();
+        assert_eq!(fs::metadata(temp.root()).unwrap().mode() & 0o777, 0o700);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dq1_private_root_refuses_a_foreign_owner() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = TempDirectory::new("dq1-foreign-owner");
+        let owner = fs::symlink_metadata(temp.root()).unwrap().uid();
+        assert!(matches!(
+            require_owner(temp.root(), owner, owner.wrapping_add(1)),
+            Err(MediaError::DataDirectory(_))
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dq1_private_root_rejects_links_and_outside_components() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let temp = TempDirectory::new("dq1-data-links");
+        let outside = TempDirectory::new("dq1-root-outside");
+        let before = fs::metadata(outside.root()).unwrap().permissions().mode();
+        symlink(outside.root(), temp.path("linked-root")).unwrap();
+        assert!(matches!(
+            ensure_root(&temp.path("linked-root")),
+            Err(MediaError::DataDirectory(_))
+        ));
+        assert_eq!(
+            fs::metadata(outside.root()).unwrap().permissions().mode(),
+            before
+        );
+        assert!(ensure_directory(temp.root(), Path::new("../outside")).is_err());
+        assert!(ensure_directory(temp.root(), Path::new("/outside")).is_err());
+    }
+}

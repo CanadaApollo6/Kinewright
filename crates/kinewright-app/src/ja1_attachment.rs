@@ -2147,6 +2147,7 @@ impl Ja1Attachment {
         .map_err(|error| BundleError::Corrupt(error.to_string()))?;
         let writer = WriterHost::start_protocol_fixture(
             HostConfig {
+                data_dir: Some(scheduler.with_extension("voice-data")),
                 scheduler_settings: Some(scheduler),
                 project: "c4-notes".into(),
                 path: transfer.named_path,

@@ -43,6 +43,9 @@ pub struct SessionRoots {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
+    /// Application data root; `None` resolves per-user storage when media is used.
+    /// Tests supply an explicit fixture root.
+    pub data_dir: Option<PathBuf>,
     pub project: String,
     pub path: Option<PathBuf>,
     pub roots: SessionRoots,

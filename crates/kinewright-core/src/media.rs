@@ -1961,6 +1961,8 @@ pub struct SourceColorRefusal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
+    #[error("application data directory: {0}")]
+    DataDirectory(String),
     #[error(
         "owned_media_admission_required: activate Studio to preview or analyse this project's owned media"
     )]
@@ -2155,6 +2157,7 @@ impl MediaError {
             | Self::Scope(_)
             | Self::NonFiniteRender { .. }
             | Self::InvalidDocument(_)
+            | Self::DataDirectory(_)
             | Self::Backend(_) => None,
         }
     }

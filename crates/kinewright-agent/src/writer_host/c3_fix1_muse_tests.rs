@@ -72,6 +72,7 @@ fn s4b_c3_fix1_unbound_crash_recovers_one_charge() {
     let identity: ExecutionIdentity = serde_json::from_value(data["identity"].clone()).unwrap();
     let scratch: std::path::PathBuf = serde_json::from_value(data["scratch"].clone()).unwrap();
     let writer = WriterHost::start(HostConfig {
+                data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
         scheduler_settings: Some(root.join("scheduler")),
         project: "hooks".into(),
         path: Some(root.join("project.kinewright")),

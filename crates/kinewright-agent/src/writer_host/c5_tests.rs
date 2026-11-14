@@ -7,6 +7,7 @@ fn s4b_c5_unsaved_without_claim_has_no_cleanup_pending() {
     let machine = temp.path("machine");
     let host = WriterHost::start_inner(
         HostConfig {
+                data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: "unsaved".into(),
             path: None,

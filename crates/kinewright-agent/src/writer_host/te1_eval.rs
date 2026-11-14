@@ -668,6 +668,7 @@ impl Studio {
         };
         let host = WriterHost::start_inner(
             HostConfig {
+                data_dir: Some((settings).with_extension("voice-data")),
                 project: "TE1 unpaid measurement".into(),
                 path: Some(path.clone()),
                 roots: SessionRoots {

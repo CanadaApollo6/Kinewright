@@ -276,9 +276,12 @@ fn cc7_target_frame(scenario: Cc7Scenario) -> TimeCode {
 
 /// The production media engine on one lane.
 fn cc7_engine(gpu: &FixtureGpu) -> crate::SessionMedia {
-    crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the production media engine should start on the fixture adapter")
-        .into_legacy_fixture()
+    crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+        gpu.context(),
+        crate::test_support::TempDirectory::new("dq1-test-engine"),
+    )
+    .expect("the production media engine should start on the fixture adapter")
+    .into_legacy_fixture()
 }
 
 /// One full-resolution managed monitor proof, asserted full-raster.

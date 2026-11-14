@@ -685,9 +685,12 @@ fn export_and_verify(
     .expect("the production export path must write the delivery lane");
     let export_seconds = started.elapsed().as_secs_f64();
 
-    let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the production media engine should start")
-        .into_legacy_fixture();
+    let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+        gpu.context(),
+        crate::test_support::TempDirectory::new("dq1-test-engine"),
+    )
+    .expect("the production media engine should start")
+    .into_legacy_fixture();
     let request = DeliveryVerificationRequest::new(depth, settings.delivery_color.clone());
     assert_eq!(request.frame_count, DELIVERY_VERIFICATION_FRAME_COUNT);
     let started = Instant::now();
@@ -1107,9 +1110,12 @@ fn assert_per_frame_full_resolution_reference(
 /// say — and would then be measuring the codec on an ungraded raster while
 /// claiming to measure the managed pipeline.
 fn assert_the_delivery_grade_clips(gpu: &FixtureGpu, document: &Arc<Document>) {
-    let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the production media engine should start")
-        .into_legacy_fixture();
+    let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+        gpu.context(),
+        crate::test_support::TempDirectory::new("dq1-test-engine"),
+    )
+    .expect("the production media engine should start")
+    .into_legacy_fixture();
     let proof = engine
         .working_proof_for_document(Arc::clone(document), TimeCode::ZERO)
         .expect("the delivery document's working proof renders");
@@ -1797,9 +1803,12 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
         .collect();
 
     // Core's own order, through the production entry point.
-    let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the production media engine should start")
-        .into_legacy_fixture();
+    let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+        gpu.context(),
+        crate::test_support::TempDirectory::new("dq1-test-engine"),
+    )
+    .expect("the production media engine should start")
+    .into_legacy_fixture();
     let contributions = kinewright_core::nodes::measure_node_contributions(
         &engine,
         &Arc::new(document.clone()),
@@ -1968,9 +1977,12 @@ fn assert_cc6_performance_evidence(gpu: &FixtureGpu, fixture: &str) {
     let source = cc6_delivery_source(&directory, size, CC6_PERFORMANCE_FRAMES);
     let document = Arc::new(cc6_delivery_document(&source, size, CC6_PERFORMANCE_FRAMES));
     let settings = cc6_delivery_settings(&document, DeliveryEncodeDepth::Eight);
-    let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the production media engine should start")
-        .into_legacy_fixture();
+    let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+        gpu.context(),
+        crate::test_support::TempDirectory::new("dq1-test-engine"),
+    )
+    .expect("the production media engine should start")
+    .into_legacy_fixture();
 
     let started = Instant::now();
     let proof = engine

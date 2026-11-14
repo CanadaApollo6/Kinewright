@@ -144,6 +144,7 @@ fn roots(path: &Path) -> SessionRoots {
 }
 fn config(path: &Path, named: Option<PathBuf>) -> HostConfig {
     HostConfig {
+        data_dir: Some((path.join("scheduler")).with_extension("voice-data")),
         scheduler_settings: Some(path.join("scheduler")),
         project: "c8-exact-originating-context".into(),
         path: named,

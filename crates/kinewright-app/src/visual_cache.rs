@@ -327,7 +327,13 @@ mod tests {
             ],
             "avi",
         );
-        let engine = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                FfmpegMediaEngine::test_gpu_context().unwrap(),
+                kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .unwrap(),
+        );
         let origin_a = MediaSourceOrigin::new_project();
         let origin_b = MediaSourceOrigin::new_project();
         let a = engine.legacy_media(

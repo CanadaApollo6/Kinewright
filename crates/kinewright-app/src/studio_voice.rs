@@ -197,6 +197,27 @@ fn upload(
     Ok(rx)
 }
 impl KinewrightApp {
+    #[cfg_attr(
+        not(test),
+        allow(
+            clippy::unused_self,
+            reason = "fixtures inject the storage root through this app instance"
+        )
+    )]
+    fn feedback_capture_directory(&self) -> Result<std::path::PathBuf, String> {
+        #[cfg(test)]
+        let root = self
+            .test_data_root
+            .as_deref()
+            .ok_or("test must supply an explicit data root")?;
+        #[cfg(not(test))]
+        let owned_root = kinewright_media::default_data_dir().map_err(|e| e.to_string())?;
+        #[cfg(not(test))]
+        let root = owned_root.as_path();
+        kinewright_media::data_subdirectory(root, std::path::Path::new("feedback-captures"))
+            .map_err(|e| e.to_string())
+    }
+
     fn keep_voice_editor(&mut self) -> Result<(), String> {
         let voice = &self.focused().studio.voice;
         let (Some(note), Some(comment)) = (voice.note.clone(), voice.comment.clone()) else {
@@ -375,7 +396,11 @@ impl KinewrightApp {
                 .ok_or("Project unavailable")?
                 .studio_context(&binding.anchor.snapshot)
                 .map_err(|e| e.to_string())?;
-            let captured = Box::new(binding.restore(&context).map_err(|e| e.to_string())?);
+            let captured = Box::new(
+                binding
+                    .restore(&context, &self.feedback_capture_directory()?)
+                    .map_err(|e| e.to_string())?,
+            );
             if let Some(descriptor) = kept.upload {
                 let log = captured.playhead_bytes().map_err(|e| e.to_string())?;
                 let reply = self.dispatch_voice_upload(
@@ -635,7 +660,7 @@ impl KinewrightApp {
         }
         let pinned = context.pin_snapshot().map_err(|e| e.to_string())?;
         let budget = CaptureReservation::reserve_context(&context).map_err(|e| e.to_string())?;
-        let directory = kinewright_media::default_data_dir().join("feedback-captures");
+        let directory = self.feedback_capture_directory()?;
         let capture = Capture::start_input(budget, input, directory, anchor, pinned)?;
         let project = self.focused().studio.feedback.keeping.project().cloned();
         let voice = &mut self.focused_mut().studio.voice;
@@ -2505,7 +2530,17 @@ mod tests {
         let _serial = VOICE_TEST
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let model = kinewright_media::default_data_dir()
+        let Some(model_data) = std::env::var_os("KINEWRIGHT_STUDIO_VOICE_MODEL_DATA_DIR") else {
+            assert!(
+                std::env::var_os("KINEWRIGHT_C9_CONTROL_REQUIRED").is_none(),
+                "C9_REAL_MODEL_REQUIRED"
+            );
+            eprintln!(
+                "NOT RUN c9_studio_real_spoken_note_edit_and_batch: set KINEWRIGHT_STUDIO_VOICE_MODEL_DATA_DIR to an isolated provisioned root"
+            );
+            return;
+        };
+        let model = std::path::PathBuf::from(model_data)
             .join("models")
             .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
             .join(kinewright_media::recognizer::ENGLISH_MODEL.files[0].name);

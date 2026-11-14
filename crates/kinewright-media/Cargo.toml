@@ -24,6 +24,7 @@ test = false
 bench = false
 
 [dependencies]
+getrandom.workspace = true
 kinewright-hash = { path = "../kinewright-hash" }
 ab_glyph.workspace = true
 cpal.workspace = true
@@ -49,6 +50,9 @@ kinewright-media = { path = ".", features = ["test-util"] }
 # MO2 R28 (final-mo2-1): the ledger probes read wgpu's own allocation
 # counters as an independent witness.
 wgpu = { workspace = true, features = ["counters"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "=0.1.11"

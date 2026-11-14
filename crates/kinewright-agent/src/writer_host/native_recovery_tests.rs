@@ -252,6 +252,7 @@ fn real_recovery(after: bool) {
         write: vec![root.clone()],
     };
     let writer = WriterHost::start(HostConfig {
+                data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
         scheduler_settings: Some(root.join("scheduler")),
         project: "hooks".into(),
         path: Some(root.join("project.kinewright")),

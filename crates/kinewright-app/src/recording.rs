@@ -1311,14 +1311,14 @@ pub(crate) mod feedback_capture {
         pub(crate) fn restore(
             &self,
             context: &kinewright_project::studio_store::FrozenContext,
+            directory: &std::path::Path,
         ) -> Result<CapturedAudio, BundleError> {
             if context.capture_project_id()? != self.project
                 || context.snapshot.descriptor.key != self.anchor.snapshot
             {
                 return Err(BundleError::HistoryChanged);
             }
-            let directory = kinewright_media::default_data_dir().join("feedback-captures");
-            if self.path.parent() != Some(directory.as_path()) {
+            if self.path.parent() != Some(directory) {
                 return Err(BundleError::Identity(
                     "capture is outside the feedback capture directory".into(),
                 ));
@@ -3259,13 +3259,22 @@ pub(crate) mod feedback_capture {
         }
         fn real_speech_control(commentary: bool) {
             use kinewright_media::{
-                default_data_dir,
                 recognizer::ENGLISH_MODEL,
                 sha256_file,
                 test_support::{SpeechClip, normalized_words, run_ffmpeg},
             };
-            let model_root = std::env::var_os("KINEWRIGHT_S3_VOICE_MODEL_DATA_DIR")
-                .map_or_else(default_data_dir, PathBuf::from);
+            let Some(model_root) =
+                std::env::var_os("KINEWRIGHT_S3_VOICE_MODEL_DATA_DIR").map(PathBuf::from)
+            else {
+                assert!(
+                    std::env::var_os("KINEWRIGHT_S3_VOICE_CONTROL_REQUIRED").is_none(),
+                    "S3_VOICE_MODEL_REQUIRED"
+                );
+                eprintln!(
+                    "NOT RUN real_speech_control: set KINEWRIGHT_S3_VOICE_MODEL_DATA_DIR to an isolated root"
+                );
+                return;
+            };
             let model = model_root
                 .join("models")
                 .join(kinewright_media::recognizer::ENGLISH_MODEL.id)

@@ -8,10 +8,7 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Mutex,
 };
 
 #[derive(Debug)]
@@ -76,6 +73,7 @@ pub enum ModelError {
     Io(io::Error),
     Download(String),
     InvalidSpec,
+    UnsafePath(PathBuf),
 }
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,6 +91,9 @@ impl std::fmt::Display for ModelError {
             Self::Io(error) => write!(f, "model file: {error}"),
             Self::Download(error) => write!(f, "model download: {error}"),
             Self::InvalidSpec => f.write_str("invalid recognition model specification"),
+            Self::UnsafePath(path) => {
+                write!(f, "refusing linked recognition path {}", path.display())
+            }
         }
     }
 }
@@ -169,14 +170,25 @@ impl VerifiedFile {
     }
 }
 fn open(path: &Path) -> Result<File, Error> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
+    refuse_links(path)?;
+    #[cfg(unix)]
+    let result = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from);
     #[cfg(windows)]
-    {
+    let result = {
         use std::os::windows::fs::OpenOptionsExt as _;
-        options.share_mode(1); // FILE_SHARE_READ: weights cannot change beneath a native mapping.
-    }
-    options.open(path).map_err(|e| {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x0020_0000) // FILE_FLAG_OPEN_REPARSE_POINT
+            .share_mode(1) // FILE_SHARE_READ: retain write/delete exclusion for mapped weights.
+            .open(path)
+    };
+    result.map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             Error::Model(ModelError::Missing)
         } else {
@@ -190,13 +202,63 @@ fn receipt_path(path: &Path, receipt_dir: &Path) -> PathBuf {
         crate::sha256::sha256_bytes(path.as_os_str().as_encoded_bytes())
     ))
 }
-static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-fn temporary(path: &Path) -> PathBuf {
-    path.with_extension(format!(
-        "part-{}-{}",
-        std::process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ))
+fn refuse_links(path: &Path) -> Result<(), Error> {
+    // Inspect parents first: symlink_metadata does not follow its final entry,
+    // but looking at a child before its parent would already traverse a link.
+    for component in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let metadata = match fs::symlink_metadata(component) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        {
+            #[cfg(windows)]
+            let linked = {
+                use std::os::windows::fs::MetadataExt as _;
+                metadata.file_attributes() & 0x400 != 0
+            };
+            #[cfg(not(windows))]
+            let linked = metadata.file_type().is_symlink();
+            if linked {
+                return Err(Error::Model(ModelError::UnsafePath(
+                    component.to_path_buf(),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+fn temporary(path: &Path) -> Result<PathBuf, Error> {
+    use std::fmt::Write as _;
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|e| io::Error::other(e.to_string()))?;
+    let mut suffix = String::from("part-");
+    for byte in random {
+        let _ = write!(&mut suffix, "{byte:02x}");
+    }
+    Ok(path.with_extension(suffix))
+}
+fn new_partial(path: &Path) -> Result<(PartialFile, File), Error> {
+    new_partial_with(|| temporary(path))
+}
+fn new_partial_with(
+    mut candidate: impl FnMut() -> Result<PathBuf, Error>,
+) -> Result<(PartialFile, File), Error> {
+    loop {
+        let path = candidate()?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((PartialFile(path), file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 struct PartialFile(PathBuf);
 impl Drop for PartialFile {
@@ -230,7 +292,13 @@ fn verify_inner(
         }));
     }
     let receipt_path = receipt_path(path, receipts);
-    let receipt = fs::read(&receipt_path)
+    refuse_links(&receipt_path)?;
+    let receipt = open(&receipt_path)
+        .and_then(|mut file| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok());
     if !receipt.is_some_and(|r| r.sha256 == spec.sha256 && r.stamp == stamp) {
@@ -245,9 +313,9 @@ fn verify_inner(
             return Err(Error::Model(ModelError::Changed));
         }
         if save_receipt {
-            fs::create_dir_all(receipts)?;
-            let part = PartialFile(temporary(&receipt_path));
-            let mut output = File::create(&part.0)?;
+            crate::data_dir::ensure_directory(receipts, Path::new(""))?;
+            refuse_links(&receipt_path)?;
+            let (part, mut output) = new_partial(&receipt_path)?;
             serde_json::to_writer(
                 &mut output,
                 &Receipt {
@@ -259,6 +327,7 @@ fn verify_inner(
             output.sync_all()?;
             drop(output);
             super::cancelled(cancel)?;
+            refuse_links(&receipt_path)?;
             fs::rename(&part.0, &receipt_path)?;
         }
     }
@@ -317,12 +386,19 @@ fn provision_with(
         .lock()
         .map_err(|_| Error::Model(ModelError::Download("installer lock poisoned".into())))?;
     super::cancelled(cancel)?;
-    if spec.files.is_empty() {
+    let normal_name = |value: &str| {
+        let mut parts = Path::new(value).components();
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+    };
+    if spec.files.is_empty()
+        || !normal_name(spec.id)
+        || spec.files.iter().any(|file| !normal_name(file.name))
+    {
         return Err(Error::Model(ModelError::InvalidSpec));
     }
     let root = data.join("models").join(spec.id);
     let receipts = root.join("verified");
-    fs::create_dir_all(&root)?;
+    crate::data_dir::ensure_directory(data, Path::new("models").join(spec.id).as_path())?;
     for file in spec.files {
         let path = root.join(file.name);
         match verify(file, &path, &receipts, cancel) {
@@ -335,8 +411,7 @@ fn provision_with(
             )) => {}
             Err(error) => return Err(error),
         }
-        let part = PartialFile(temporary(&path));
-        let mut output = File::create(&part.0)?;
+        let (part, mut output) = new_partial(&path)?;
         let mut input = download(file)?;
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut written = 0;
@@ -360,6 +435,7 @@ fn provision_with(
         drop(output);
         drop(verify_inner(file, &part.0, &receipts, cancel, false)?);
         super::cancelled(cancel)?;
+        refuse_links(&path)?;
         fs::rename(&part.0, &path)?;
         drop(verify(file, &path, &receipts, cancel)?);
     }
@@ -522,5 +598,120 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read(path).unwrap(), b"abc");
+    }
+    #[test]
+    fn dq1_model_spec_cannot_escape_the_data_root() {
+        const BAD: ModelSpec = ModelSpec {
+            files: &[ModelFile {
+                name: "../outside",
+                ..FILE
+            }],
+            ..SPEC
+        };
+        let data = TempDirectory::new("dq1-bad-spec");
+        let result = provision_with(
+            &BAD,
+            data.root(),
+            &ExportCancellation::default(),
+            |_, _| {},
+            |_| panic!("invalid spec cannot download"),
+        );
+        assert!(matches!(result, Err(Error::Model(ModelError::InvalidSpec))));
+        assert_eq!(fs::read_dir(data.root()).unwrap().count(), 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dq1_exclusive_partial_and_receipt_collisions_preserve_outside_files() {
+        use std::os::unix::fs::symlink;
+        for role in ["download", "receipt"] {
+            let data = TempDirectory::new("dq1-linked-temporary");
+            let outside = TempDirectory::new("dq1-outside");
+            let target = outside.path("irreplaceable");
+            fs::write(&target, b"irreplaceable work").unwrap();
+            let planted = data.path(&format!("{role}.part-planted"));
+            let fresh = data.path(&format!("{role}.part-fresh"));
+            symlink(&target, &planted).unwrap();
+            let mut names = [planted.as_path(), fresh.as_path()].into_iter();
+            let (guard, mut file) =
+                new_partial_with(|| Ok(names.next().expect("collision retry").to_path_buf()))
+                    .unwrap();
+            file.write_all(b"abc").unwrap();
+            drop(file);
+            assert_eq!(
+                fs::read(&target).unwrap(),
+                b"irreplaceable work",
+                "DQ1_TEMPORARY_NO_FOLLOW {role}"
+            );
+            assert_eq!(fs::read(&fresh).unwrap(), b"abc");
+            assert!(
+                fs::symlink_metadata(&planted)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            drop(guard);
+            assert!(!fresh.exists());
+            assert!(
+                fs::symlink_metadata(&planted).is_ok(),
+                "cleanup owns only the successfully created entry"
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dq1_final_model_and_receipt_links_are_refused() {
+        use std::os::unix::fs::symlink;
+        for receipt in [false, true] {
+            let data = TempDirectory::new("dq1-final-link");
+            let outside = TempDirectory::new("dq1-final-outside");
+            let target = outside.path("work");
+            fs::write(&target, b"abc").unwrap();
+            let model = path(data.root());
+            let receipts = model.parent().unwrap().join("verified");
+            fs::create_dir_all(&receipts).unwrap();
+            if receipt {
+                fs::write(&model, b"abc").unwrap();
+                symlink(&target, receipt_path(&model, &receipts)).unwrap();
+            } else {
+                symlink(&target, &model).unwrap();
+            }
+            let result = provision_with(
+                &SPEC,
+                data.root(),
+                &ExportCancellation::default(),
+                |_, _| {},
+                |_| panic!("linked installation must not download"),
+            );
+            assert!(
+                matches!(result, Err(Error::Model(ModelError::UnsafePath(_)))),
+                "{result:?}"
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"abc");
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dq1_model_directories_never_traverse_planted_links() {
+        use std::os::unix::fs::symlink;
+        for component in ["models", "models/synthetic", "models/synthetic/verified"] {
+            let data = TempDirectory::new("dq1-directory-link");
+            let outside = TempDirectory::new("dq1-directory-outside");
+            let link = data.path(component);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(outside.root(), &link).unwrap();
+            let result = provision_with(
+                &SPEC,
+                data.root(),
+                &ExportCancellation::default(),
+                |_, _| {},
+                |_| Ok(input(b"abc")),
+            );
+            assert!(result.is_err(), "linked component {component}");
+            assert_eq!(
+                fs::read_dir(outside.root()).unwrap().count(),
+                0,
+                "no writes through {component}"
+            );
+        }
     }
 }

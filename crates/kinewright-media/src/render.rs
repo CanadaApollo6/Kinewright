@@ -2628,9 +2628,12 @@ mod tests {
         blue_asset.color_description = description;
         let red_document = Arc::new(single_clip_document(red_asset));
         let blue_document = Arc::new(single_clip_document(blue_asset));
-        let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for relink identity fixture")
-            .into_legacy_fixture();
+        let engine = crate::engine::FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for relink identity fixture")
+        .into_legacy_fixture();
 
         let red_thumbnail = engine
             .thumbnail_for_document(Arc::clone(&red_document), TimeCode::ZERO, 16)

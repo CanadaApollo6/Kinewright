@@ -862,6 +862,7 @@ fn start_director(
     let stop_gate = Arc::new(super::qualification_gate::MergeStopGate::default());
     let host = WriterHost::start_inner(
         HostConfig {
+            data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: project.into(),
             path: Some(path.clone()),

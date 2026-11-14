@@ -358,10 +358,13 @@ fn end_to_end(live: bool) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if live {
-        let model = kinewright_media::default_data_dir()
-            .join("models")
-            .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
-            .join(kinewright_media::recognizer::ENGLISH_MODEL.files[0].name);
+        let model = std::path::PathBuf::from(
+            std::env::var_os("KINEWRIGHT_STUDIO_VOICE_MODEL_DATA_DIR")
+                .expect("E2E_LIVE_MODEL_REQUIRED: isolated model data root"),
+        )
+        .join("models")
+        .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
+        .join(kinewright_media::recognizer::ENGLISH_MODEL.files[0].name);
         assert_eq!(
             kinewright_media::sha256_file(&model).ok().as_deref(),
             Some(kinewright_media::recognizer::ENGLISH_MODEL.files[0].sha256),

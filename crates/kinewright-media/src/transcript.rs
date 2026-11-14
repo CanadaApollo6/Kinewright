@@ -66,6 +66,7 @@ impl Drop for TranscriptService {
 
 impl TranscriptService {
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
+        crate::data_dir::ensure_root(&data_dir)?;
         let (jobs, jobs_rx) = unbounded();
         let states = StatusReporter::new();
         let cancellations = CancellationRegistry::default();
@@ -648,14 +649,6 @@ pub fn provision_voice_model(
 }
 fn cancelled(cancel: &ExportCancellation) -> Result<(), MediaError> {
     recognizer::cancelled(cancel).map_err(Into::into)
-}
-
-#[must_use]
-pub fn default_data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map_or_else(
-        || std::env::temp_dir().join("Kinewright"),
-        |root| PathBuf::from(root).join("Kinewright"),
-    )
 }
 
 /// Bounded, CPU-only note inference. Missing or altered models require explicit preparation.

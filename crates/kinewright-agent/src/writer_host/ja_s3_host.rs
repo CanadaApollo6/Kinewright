@@ -60,6 +60,7 @@ pub(super) fn fixture() -> (
     drop(bundle);
     let host = WriterHost::start_inner(
         HostConfig {
+            data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(path),
@@ -690,6 +691,7 @@ fn s3_viewer_capabilities() {
     let old_auth = fresh.bootstrap.auth.clone();
     drop(host);
     let replacement = WriterHost::start(HostConfig {
+        data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
         scheduler_settings: Some(temp.path("scheduler")),
         project: "s3-capabilities".into(),
         path: Some(temp.path("a.kinewright")),

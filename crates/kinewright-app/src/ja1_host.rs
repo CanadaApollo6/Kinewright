@@ -38,6 +38,12 @@ pub(crate) fn test_scheduler_folder() -> PathBuf {
         .unwrap_or_else(|| DEFAULT_TEST_SCHEDULER.with(|folder| folder.root().into()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_data_dir() -> PathBuf {
+    std::env::var_os("KINEWRIGHT_STUDIO_VOICE_MODEL_DATA_DIR")
+        .map_or_else(|| test_scheduler_folder().join("voice-data"), PathBuf::from)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SwitchState {
     Complete,
@@ -310,6 +316,10 @@ impl HostAttachment {
         let launched = HostClient::launch_with_issuer(
             executable,
             HostConfig {
+                #[cfg(test)]
+                data_dir: Some(test_data_dir()),
+                #[cfg(not(test))]
+                data_dir: None,
                 // Production hosts read the person's scheduler settings folder.
                 #[cfg(test)]
                 scheduler_settings: Some(test_scheduler_folder()),

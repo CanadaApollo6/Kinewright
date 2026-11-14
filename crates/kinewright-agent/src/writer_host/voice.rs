@@ -313,6 +313,12 @@ impl HostCommandOwner {
                         .get(&note)
                         .is_some_and(|j| j.task.is_some() || j.completion.is_some())
                 {
+                    let data_dir = self
+                        .config
+                        .data_dir
+                        .as_ref()
+                        .map_or_else(kinewright_media::default_data_dir, |root| Ok(root.clone()))
+                        .map_err(|error| HostError::Protocol(error.to_string()))?;
                     let issuer = self.owner_mut()?.issue_metadata_issuer()?;
                     let envelope = self.owner()?.metadata_envelope(
                         kinewright_project::receipts::CommandId {
@@ -321,11 +327,7 @@ impl HostCommandOwner {
                         },
                     )?;
                     let key = self.owner()?.start_voice_job(&handle, &voice, 0)?;
-                    let task = match self.owner()?.spawn_voice_job(
-                        &handle,
-                        self.voice_data_dir.clone(),
-                        &key,
-                    ) {
+                    let task = match self.owner()?.spawn_voice_job(&handle, data_dir, &key) {
                         Ok(task) => task,
                         Err(error) => {
                             handle.cancel();

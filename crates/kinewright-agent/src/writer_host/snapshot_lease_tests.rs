@@ -17,6 +17,7 @@ mod tests {
         let [fixture, _] =
             kinewright_project::c0_fixtures::build_c0_fixture_pair(root.root()).unwrap();
         let host = WriterHost::start(HostConfig {
+            data_dir: Some((root.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(root.path("scheduler")),
             project: "c9-lease".into(),
             path: Some(fixture.path),
@@ -394,7 +395,7 @@ mod tests {
     )]
     fn fix2_lease_status_timeout_suspends_then_resumes_playback() {
         use kinewright_core::{Playback, TimeCode};
-        let (_root, host, key) = fixture();
+        let (root, host, key) = fixture();
         let client = host.client();
         let lease = accepted(client.request(HostCommand::LeaseSnapshot { key }).unwrap())
             .snapshot_lease
@@ -432,7 +433,7 @@ mod tests {
         let engine = Arc::new(
             kinewright_media::FfmpegMediaEngine::new_with_paced_test_audio(
                 kinewright_media::GpuContext::headless(true).unwrap(),
-                kinewright_media::default_data_dir(),
+                root.path("lease-media-data"),
             )
             .unwrap(),
         );

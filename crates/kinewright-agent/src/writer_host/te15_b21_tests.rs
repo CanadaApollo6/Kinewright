@@ -573,7 +573,7 @@ mod tests {
             Arc::default(),
             None,
         );
-        let media = Arc::new(super::super::super::LazyHostMedia::default());
+        let media = Arc::new(super::super::super::LazyHostMedia::new(host.config.data_dir.clone()));
         let server = crate::McpServer::start_task_isolated(
             manual.clone(),
             media.clone(),
@@ -700,6 +700,7 @@ mod tests {
         let issuer_auth = HostAuth::generate().unwrap();
         let host = WriterHost::start_inner(
             HostConfig {
+                data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
                 scheduler_settings: Some(temp.path("scheduler")),
                 project: "B21 reopened".into(),
                 path: Some(temp.path("project.kinewright")),

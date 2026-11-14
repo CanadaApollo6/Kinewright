@@ -28,6 +28,7 @@ fn c5_fix3_host(
     };
     let host = WriterHost::start_inner(
         HostConfig {
+                data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path("project.kinewright")),

@@ -338,6 +338,7 @@ fn finish_native_after_owner_loss(
     let root = original.parent().unwrap();
     let host = WriterHost::start_inner(
         HostConfig {
+                data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(root.join("scheduler")),
             project: "native-owner-recovery".into(),
             path: Some(original.into()),

@@ -47,6 +47,7 @@ mod tests {
         bundle.save(&core, &inputs).unwrap();
         drop(bundle);
         let host = WriterHost::start(HostConfig {
+            data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(fixture.path),
@@ -423,7 +424,13 @@ mod tests {
         let (temp, host, refs) = fixture();
         let key = snapshot(&host);
         let client = host.client();
-        host.owner.upgrade().unwrap().lock().unwrap().voice_data_dir = temp.path("no-model");
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .config
+            .data_dir = Some(temp.path("no-model"));
         for silence in [false, true] {
             let (upload, wav, log) = descriptor(&client, key.clone(), &refs, silence);
             send(&client, &upload, &wav, &log);
@@ -480,6 +487,7 @@ mod tests {
             let (client, child) = HostClient::launch(
                 &executable,
                 HostConfig {
+                    data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
                     scheduler_settings: Some(root.join("scheduler")),
                     project: "s3-capabilities".into(),
                     path: Some(root.join("c0-red.kinewright")),
@@ -614,6 +622,7 @@ mod tests {
         eprintln!("C8_ACKNOWLEDGED_BEFORE_HOST_CRASH");
         host.crash();
         let reopened = WriterHost::start(HostConfig {
+            data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(temp.path("c0-red.kinewright")),

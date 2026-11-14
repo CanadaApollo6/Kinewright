@@ -834,6 +834,7 @@ fn recover_on_open(
             // No listener, attachment, runtime or profile factory is created for
             // this owner. Its sole capability is reconciliation of this claim.
             let mut owner = HostCommandOwner::open(super::HostConfig {
+                data_dir: None,
                 scheduler_settings: None,
                 project: project.clone(),
                 path: Some(locator.clone()),

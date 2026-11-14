@@ -83,6 +83,7 @@ impl HostSession {
             write: vec![durable_test_root().into()],
         };
         let mut host = HostCommandOwner::open(HostConfig {
+            data_dir: Some((durable_test_root().join("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(durable_test_root().join("scheduler")),
             project: "c12-final-owning-host".into(),
             path: None,

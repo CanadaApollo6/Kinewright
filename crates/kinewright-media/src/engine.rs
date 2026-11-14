@@ -39,6 +39,7 @@ use crate::{
     },
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
+    data_dir::default_data_dir,
     decode::probe_path,
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
     derived_cache::CacheStats,
@@ -52,7 +53,7 @@ use crate::{
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     sha256::source_fingerprint,
     stats::Ack,
-    transcript::{TranscriptService, default_data_dir},
+    transcript::TranscriptService,
 };
 
 const WORKER_TICK: Duration = Duration::from_millis(5);
@@ -682,6 +683,9 @@ pub struct FfmpegMediaEngine {
     /// Re-review B D6: disconnects once the worker thread has finished.
     #[cfg(any(test, feature = "test-util"))]
     finished: Receiver<()>,
+    // Last: all workers release this fixture root before it is removed.
+    #[cfg(any(test, feature = "test-util"))]
+    test_data_owner: Option<crate::test_support::TempDirectory>,
 }
 
 impl FfmpegMediaEngine {
@@ -799,7 +803,7 @@ impl FfmpegMediaEngine {
     ///
     /// Returns a media error when `FFmpeg`, GPU, audio, or worker initialization fails.
     pub fn new() -> Result<Self, MediaError> {
-        Self::new_with_data_dir(default_data_dir())
+        Self::new_with_data_dir(default_data_dir()?)
     }
 
     /// Start the media engine with an explicit cache directory.
@@ -809,6 +813,25 @@ impl FfmpegMediaEngine {
     /// Returns a media error when `FFmpeg`, GPU, audio, or worker initialization fails.
     pub fn new_with_data_dir(data_dir: PathBuf) -> Result<Self, MediaError> {
         Self::new_with_gpu_and_data_dir(Self::default_gpu()?, data_dir)
+    }
+
+    /// A real engine whose explicit temporary data root outlives its workers.
+    /// # Errors
+    /// Returns the ordinary engine initialization error.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_with_test_data_dir(
+        gpu: GpuContext,
+        root: crate::test_support::TempDirectory,
+    ) -> Result<Self, MediaError> {
+        let mut engine = Self::new_with_gpu_and_data_dir(gpu, root.root().to_path_buf())?;
+        engine.test_data_owner = Some(root);
+        Ok(engine)
+    }
+    /// The explicit fixture root, for capture and model fixtures sharing this engine.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_data_dir(&self) -> &std::path::Path {
+        &self.data_dir
     }
 
     fn default_gpu() -> Result<GpuContext, MediaError> {
@@ -832,7 +855,7 @@ impl FfmpegMediaEngine {
     ///
     /// Returns a media error when `FFmpeg`, audio, or worker initialization fails.
     pub fn new_with_gpu(gpu: GpuContext) -> Result<Self, MediaError> {
-        Self::new_with_gpu_and_data_dir(gpu, default_data_dir())
+        Self::new_with_gpu_and_data_dir(gpu, default_data_dir()?)
     }
 
     /// Start the media engine with an existing GPU context and explicit cache directory.
@@ -915,6 +938,7 @@ impl FfmpegMediaEngine {
         analysis_config: DerivedAnalysisConfig,
         options: EngineOptions,
     ) -> Result<Self, MediaError> {
+        crate::data_dir::ensure_root(&data_dir)?;
         crate::initialize_ffmpeg()?;
         let data_dir_for_self = data_dir.clone();
         let (control_tx, control_rx) = unbounded();
@@ -1030,6 +1054,8 @@ impl FfmpegMediaEngine {
             monitor_gain_tenth_db,
             next_asset_id: AtomicU64::new(1),
             data_dir: data_dir_for_self,
+            #[cfg(any(test, feature = "test-util"))]
+            test_data_owner: None,
             gpu,
             export_document: Arc::new(RwLock::new(Arc::new(Document::default()))),
             lut_lattices,
@@ -3891,7 +3917,13 @@ mod tests {
 
     #[test]
     fn c2_r4_same_document_arc_rebinds_the_requesting_authority() {
-        let engine = Arc::new(FfmpegMediaEngine::new_with_gpu(fallback_gpu().context()).unwrap());
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                fallback_gpu().context(),
+                crate::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .unwrap(),
+        );
         let document = Arc::new(Document::default());
         let a = kinewright_core::MediaSourceOrigin::new_project()
             .legacy_media()
@@ -4475,9 +4507,12 @@ mod tests {
         let gpu = fallback_gpu().context();
         let media = matte_source("matte-proof-coverage");
         let document = matte_document(&media, vec![wheels_node(7, CENTERED_RECT)]);
-        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for the matte proof fixture")
-            .into_legacy_fixture();
+        let engine = FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for the matte proof fixture")
+        .into_legacy_fixture();
 
         let proof = engine
             .matte_proof_for_document(
@@ -4537,9 +4572,12 @@ mod tests {
                 wheels_node(9, CENTERED_RECT),
             ],
         );
-        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for the matte proof fixture")
-            .into_legacy_fixture();
+        let engine = FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for the matte proof fixture")
+        .into_legacy_fixture();
         let refusal = |effect: u64| {
             let error = engine
                 .matte_proof_for_document(
@@ -4598,9 +4636,12 @@ mod tests {
         let mut off = wheels_node(7, CENTERED_RECT);
         off.enabled = false;
         let document = matte_document(&media, vec![off, wheels_node(9, CENTERED_RECT)]);
-        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for the matte proof fixture")
-            .into_legacy_fixture();
+        let engine = FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for the matte proof fixture")
+        .into_legacy_fixture();
 
         let error = engine
             .matte_proof_for_document(
@@ -4646,9 +4687,12 @@ mod tests {
         let gpu = fallback_gpu().context();
         let media = matte_source("matte-proof-clip-not-visible");
         let document = matte_document(&media, vec![wheels_node(7, CENTERED_RECT)]);
-        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for the matte proof fixture")
-            .into_legacy_fixture();
+        let engine = FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for the matte proof fixture")
+        .into_legacy_fixture();
 
         let clip = &document.tracks[0].clips[0];
         let past_the_end = TimeCode(
@@ -4728,9 +4772,12 @@ mod tests {
             clips: vec![covering],
         });
         let covered_document = Arc::new(covered_document);
-        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for the matte proof fixture")
-            .into_legacy_fixture();
+        let engine = FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for the matte proof fixture")
+        .into_legacy_fixture();
 
         let plain = engine
             .monitor_proof_for_document(Arc::clone(&document), TimeCode::ZERO)
@@ -4809,9 +4856,12 @@ mod tests {
             },
         );
         let document = matte_document(&media, vec![node]);
-        let engine = FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for the matte proof fixture")
-            .into_legacy_fixture();
+        let engine = FfmpegMediaEngine::new_with_test_data_dir(
+            gpu,
+            crate::test_support::TempDirectory::new("dq1-test-engine"),
+        )
+        .expect("media engine should start for the matte proof fixture")
+        .into_legacy_fixture();
 
         let at_start = covered_indices(
             &engine

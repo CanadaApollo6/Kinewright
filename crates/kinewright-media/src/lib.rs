@@ -219,7 +219,8 @@ pub use timeline::{
     TransitionRenderParams, timeline_audio_segments, timeline_source_at, video_layers_at,
     visual_layers_at,
 };
-pub use transcript::default_data_dir;
+mod data_dir;
+pub use data_dir::{data_subdirectory, default_data_dir};
 #[cfg(any(test, feature = "test-util"))]
 pub use transcript::{TranscriptInferenceHold, provision_voice_model};
 pub use verify::{DELIVERY_REFERENCE_DENOMINATOR, EBU_R103_TOLERANCE_CODES_8BIT, NativePlaneFrame};

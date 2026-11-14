@@ -64,7 +64,13 @@ mod tests {
     fn c2_r4_equal_sources_never_reuse_another_projects_reader_authority() {
         let red = video("color=red:s=64x64:r=30");
         let blue = video("color=blue:s=64x64:r=30");
-        let fixture = MediaFixture::new(FfmpegMediaEngine::new().unwrap());
+        let fixture = MediaFixture::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                FfmpegMediaEngine::test_gpu_context().unwrap(),
+                kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .unwrap(),
+        );
         let origin = MediaSourceOrigin::new_project();
         let probe = fixture.shared().legacy_media(
             origin.legacy_media().unwrap(),

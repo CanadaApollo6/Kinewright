@@ -1719,6 +1719,7 @@ impl IncidentObservation {
             | MediaError::MixSpectrumRangeTooShort { .. }
             | MediaError::MixLoudnessRangeTooShort { .. }
             | MediaError::NonFiniteRender { .. }
+            | MediaError::DataDirectory(_)
             | MediaError::Backend(_) => {
                 let code = IncidentCode::Media(MediaIncident::BackendUnclassified);
                 Self {

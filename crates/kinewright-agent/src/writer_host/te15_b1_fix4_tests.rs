@@ -119,6 +119,7 @@ fn fix4_reopen(f: Fixture, run: &RunId) -> Fixture {
     let issuer_auth = HostAuth::generate().unwrap();
     let host = WriterHost::start_inner(
         HostConfig {
+                data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
             scheduler_settings: Some(temp.path("scheduler")),
             project: "fix4 reopened".into(),
             path: Some(temp.path("project.kinewright")),

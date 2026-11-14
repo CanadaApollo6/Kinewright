@@ -141,7 +141,13 @@ mod tests {
 
     #[test]
     fn c2_r3_activation_waits_for_in_flight_legacy_work_before_publication() {
-        let fixture = MediaFixture::new(FfmpegMediaEngine::new().unwrap());
+        let fixture = MediaFixture::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                FfmpegMediaEngine::test_gpu_context().unwrap(),
+                kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
+            )
+            .unwrap(),
+        );
         let (mut app, _) = in1_harness_with_engine(Document::default(), fixture.shared());
         app.new_project();
         app.focus_project(0);

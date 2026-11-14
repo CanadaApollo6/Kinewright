@@ -1943,7 +1943,7 @@ impl HostCommandOwner {
                 .or_insert_with(|| Arc::new(Mutex::new(previous.unwrap_or_default())))
                 .clone()
         };
-        let media = std::sync::Arc::new(super::LazyHostMedia::default());
+        let media = std::sync::Arc::new(super::LazyHostMedia::new(self.config.data_dir.clone()));
         crate::McpServer::start_task_isolated(
             core,
             media.clone(),

@@ -20,6 +20,12 @@ Licensed by NVIDIA Corporation under the
 Runtime Apache-2.0 and third-party notices are in `LICENSES/nemo-speech/`;
 model notices and the AMI test-clip attribution are in `LICENSES/`.
 
+Linux data lives in `$XDG_DATA_HOME/kinewright` when `XDG_DATA_HOME` is absolute,
+otherwise `$HOME/.local/share/kinewright`. The root is owned by the current user
+and created with mode 0700. A linked or foreign-owned root is refused. Windows
+uses `%LOCALAPPDATA%/Kinewright`. Missing home configuration is a typed error;
+there is no temporary-directory fallback or migration from old temporary data.
+
 Weights are installed under the selected data directory's
 `models/nemotron-speech-streaming-en-0.6b/`. Installation writes a partial file,
 checks its size and SHA-256, then renames it atomically. Failed and cancelled
