@@ -283,7 +283,7 @@ impl OwnerSnapshot {
         clippy::too_many_lines,
         reason = "one streaming replay validates origins, ledger, resources and lineage together"
     )]
-    fn validate_inner(
+    pub(super) fn validate_inner(
         self,
         bounds: kinewright_core::undo::RoleBounds,
     ) -> Result<ValidatedOwnerSnapshot, Error> {

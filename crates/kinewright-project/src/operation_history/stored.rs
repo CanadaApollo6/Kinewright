@@ -105,6 +105,26 @@ impl OwnerSnapshot {
         let document = store
             .admit_document(&data.history.document)
             .map_err(store_error)?;
+        let mut bindings = Vec::new();
+        for resource in &data.resources {
+            match resolve_resource(resource)? {
+                Some(reference) if binding_matches(store, resource, &reference)? => {
+                    bindings.push((resource.clone(), reference));
+                }
+                None if matches!(resource, Resource::Media { sha256: None, .. }) => {}
+                _ => return Err(Error::MissingResource),
+            }
+        }
+        let record = self.stored_record(baseline.reference, document.reference, &bindings)?;
+        store.admit_record(&record).map_err(store_error)
+    }
+    fn stored_record(
+        &self,
+        baseline: ObjectRef,
+        document: ObjectRef,
+        bindings: &[(Resource, ObjectRef)],
+    ) -> Result<StoredOwnerRecord, Error> {
+        let data = &self.data;
         let mut edges = std::collections::BTreeSet::new();
         for origin in &data.origins {
             edges.extend(origin.inputs.iter().cloned());
@@ -115,17 +135,7 @@ impl OwnerSnapshot {
         for approval in data.ledger.entries() {
             edges.insert(approval.approval.reference.clone());
         }
-        let mut bindings = Vec::new();
-        for resource in &data.resources {
-            match resolve_resource(resource)? {
-                Some(reference) if binding_matches(store, resource, &reference)? => {
-                    bindings.push((resource.clone(), reference.clone()));
-                    edges.insert(reference);
-                }
-                None if matches!(resource, Resource::Media { sha256: None, .. }) => {}
-                _ => return Err(Error::MissingResource),
-            }
-        }
+        edges.extend(bindings.iter().map(|(_, reference)| reference.clone()));
         // This serialization borrows the live command arrays. No second typed
         // payload list is made just to manufacture the compact store body.
         let history = &data.history;
@@ -140,7 +150,7 @@ impl OwnerSnapshot {
             seeds: &data.seeds,
             origins: &data.origins,
             resources: &data.resources,
-            bindings: &bindings,
+            bindings,
             ledger: &data.ledger,
             folded_approvals: &data.folded_approvals,
         })?;
@@ -158,15 +168,15 @@ impl OwnerSnapshot {
             seeds: &data.seeds,
             origins: &data.origins,
             resources: &data.resources,
-            bindings: &bindings,
+            bindings,
             ledger: &data.ledger,
             folded_approvals: &data.folded_approvals,
         })
         .map_err(|_| Error::InvalidRecord)?;
         let record = StoredOwnerRecord {
             role: data.role,
-            baseline: baseline.reference.clone(),
-            document: document.reference.clone(),
+            baseline,
+            document,
             identity: digest_text(&self.snapshot_identity()?),
             edges: edges.into_iter().collect(),
             body,
@@ -174,7 +184,7 @@ impl OwnerSnapshot {
         if super::owner::exact_size(&record)? > data.role.persisted_shell_cap() {
             return Err(Error::Capacity("persisted owner shell"));
         }
-        store.admit_record(&record).map_err(store_error)
+        Ok(record)
     }
 }
 fn binding_matches(
@@ -230,6 +240,27 @@ fn blob_matches(resource: &Resource, reference: &ObjectRef) -> bool {
         Resource::Media { .. } => false,
     }
 }
+// The native store and the portable session model share this codec and the
+// entire semantic validator. The source supplies verified document objects and
+// resource bindings; it cannot supply a validated history token.
+trait SnapshotSource {
+    fn limits(&self) -> &StorageLimits;
+    fn document(&self, reference: &ObjectRef) -> Result<kinewright_core::Document, Error>;
+    fn binding_matches(&self, resource: &Resource, reference: &ObjectRef) -> Result<bool, Error>;
+}
+impl SnapshotSource for ProjectStore {
+    fn limits(&self) -> &StorageLimits {
+        self.limits()
+    }
+    fn document(&self, reference: &ObjectRef) -> Result<kinewright_core::Document, Error> {
+        self.read_record::<kinewright_core::Document>(reference)
+            .map(crate::storage_budget::StorageReservation::take)
+            .map_err(store_error)
+    }
+    fn binding_matches(&self, resource: &Resource, reference: &ObjectRef) -> Result<bool, Error> {
+        binding_matches(self, resource, reference)
+    }
+}
 impl StoredOwnerRecord {
     /// Reserve an owner and workspace before reading or decoding its shell.
     pub fn read(
@@ -249,7 +280,13 @@ impl StoredOwnerRecord {
             .read_record::<Self>(reference)
             .map_err(store_error)?
             .take();
-        record.resolve_reserved(store, expected_role, reservation, window)
+        record.resolve_reserved(
+            store,
+            expected_role,
+            reservation,
+            window,
+            expected_role.bounds(),
+        )
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn resolve(
@@ -263,7 +300,13 @@ impl StoredOwnerRecord {
         }
         let reservation = pool.admit(self.role)?;
         let window = reservation.workspace()?;
-        self.resolve_reserved(store, expected_role, reservation, window)
+        self.resolve_reserved(
+            store,
+            expected_role,
+            reservation,
+            window,
+            expected_role.bounds(),
+        )
     }
     #[expect(
         clippy::too_many_lines,
@@ -271,10 +314,11 @@ impl StoredOwnerRecord {
     )]
     fn resolve_reserved(
         self,
-        store: &ProjectStore,
+        store: &impl SnapshotSource,
         expected_role: Role,
         reservation: super::HistoryReservation,
         window: super::Workspace,
+        bounds: kinewright_core::undo::RoleBounds,
     ) -> Result<ValidatedOwnerSnapshot, Error> {
         if self.role != expected_role {
             return Err(Error::Reservation);
@@ -289,12 +333,8 @@ impl StoredOwnerRecord {
             return Err(Error::Capacity("owner decode"));
         }
         let body = self.decode_body()?;
-        let baseline = store
-            .read_record::<kinewright_core::Document>(&self.baseline)
-            .map_err(store_error)?;
-        let document = store
-            .read_record::<kinewright_core::Document>(&self.document)
-            .map_err(store_error)?;
+        let baseline = store.document(&self.baseline)?;
+        let document = store.document(&self.document)?;
         let mut expected = std::collections::BTreeSet::new();
         for (_, inputs) in &body.origins {
             expected.extend(inputs.iter().cloned());
@@ -316,7 +356,7 @@ impl StoredOwnerRecord {
             return Err(Error::MissingResource);
         }
         for (resource, reference) in &body.bindings {
-            if !binding_matches(store, resource, reference)? {
+            if !store.binding_matches(resource, reference)? {
                 return Err(Error::MissingResource);
             }
             expected.insert(reference.clone());
@@ -351,8 +391,8 @@ impl StoredOwnerRecord {
         // Record transfers these documents to History; its current/baseline
         // pointers and subsequent cache entries share their immutable values.
         let history = Record {
-            baseline: Arc::new(baseline.take()),
-            document: Arc::new(document.take()),
+            baseline: Arc::new(baseline),
+            document: Arc::new(document),
             undo,
             redo,
             position: body.position,
@@ -382,7 +422,7 @@ impl StoredOwnerRecord {
         } = self;
         drop((raw_body, edges, baseline_edge, document_edge));
         drop(window);
-        let validated = OwnerSnapshot { data, reservation }.validate()?;
+        let validated = OwnerSnapshot { data, reservation }.validate_inner(bounds)?;
         if digest_text(&validated.identity().digest()) != identity {
             return Err(Error::IdentityMismatch);
         }
@@ -695,3 +735,7 @@ pub(super) fn assert_decode_forecast(record: &StoredOwnerRecord, bound: u64) {
         "EVERY_SAVED_OWNER_DECODE_IS_RESERVED actual={actual} bound={bound}"
     );
 }
+
+#[cfg(test)]
+#[path = "session_model.rs"]
+mod session_model;

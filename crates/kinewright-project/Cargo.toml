@@ -11,6 +11,7 @@ repository.workspace = true
 # drive them cross-crate, so they ride the same gate the app already enables
 # on core and media.
 test-util = ["kinewright-media/test-util"]
+slow-tests = []
 storage-heap-profile = []
 history-metrics = ["kinewright-core/history-metrics"]
 
