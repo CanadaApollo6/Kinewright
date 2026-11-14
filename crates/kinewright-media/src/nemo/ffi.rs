@@ -272,7 +272,7 @@ impl Drop for ResultOwner {
         unsafe { nemo_speech_asr_result_destroy(self.0.as_ptr()) };
     }
 }
-fn options() -> Result<RecognitionOptions, Error> {
+fn options(settings: super::Options) -> Result<RecognitionOptions, Error> {
     // SAFETY: the query has no input or Rust output buffer.
     let native = unsafe { nemo_speech_asr_recognition_options_size() };
     if native != size_of::<RecognitionOptions>() {
@@ -286,13 +286,13 @@ fn options() -> Result<RecognitionOptions, Error> {
     let mut options = unsafe { nemo_speech_asr_recognition_options_default() };
     options.interim_results = true;
     options.enable_word_time_offsets = true;
-    options.enable_automatic_punctuation = true;
-    options.verbatim_transcripts = true;
+    options.enable_automatic_punctuation = settings.punctuation;
+    options.verbatim_transcripts = settings.verbatim;
     Ok(options)
 }
 impl Recognizer {
-    pub(super) fn stream(&mut self) -> Result<Stream<'_>, Error> {
-        let options = options()?;
+    pub(super) fn stream(&mut self, settings: super::Options) -> Result<Stream<'_>, Error> {
+        let options = options(settings)?;
         let mut out = ptr::null_mut();
         // SAFETY: options and out live through the call; the resulting stream borrows this model.
         let status = unsafe {
@@ -457,6 +457,22 @@ mod tests {
             (7, Status::Unknown(7)),
         ] {
             assert_eq!(status_result(code).unwrap_err().status, expected);
+        }
+    }
+
+    #[test]
+    fn dq1_native_options_honour_the_identity_settings() {
+        for value in [false, true] {
+            let actual = options(super::super::Options {
+                punctuation: value,
+                verbatim: value,
+            })
+            .unwrap();
+            assert_eq!(
+                actual.enable_automatic_punctuation, value,
+                "DQ1_NATIVE_PUNCTUATION"
+            );
+            assert_eq!(actual.verbatim_transcripts, value, "DQ1_NATIVE_VERBATIM");
         }
     }
 

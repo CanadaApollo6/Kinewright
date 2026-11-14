@@ -84,13 +84,7 @@ impl Recognizer {
     /// Returns a typed CPU, ABI, file, path or native model error. This low-level
     /// operation does not replace the model's size and SHA-256 verification.
     pub fn load(model: &Path) -> Result<Self, Error> {
-        let threads = u8::try_from(
-            std::thread::available_parallelism()
-                .map_or(4, std::num::NonZeroUsize::get)
-                .min(4),
-        )
-        .unwrap_or(4);
-        Self::load_config(model, threads, 13)
+        Self::load_config(model, CPU_THREADS, 13)
     }
 
     pub(crate) fn load_config(model: &Path, threads: u8, lookahead: u8) -> Result<Self, Error> {
@@ -109,8 +103,29 @@ impl Recognizer {
             return Err(Error::EmptyModel);
         }
         Ok(Self {
-            native: ffi::Recognizer::load(model, threads, lookahead)?,
+            native: ffi::Recognizer::load(model, cpu_threads(threads), lookahead)?,
         })
+    }
+}
+
+pub(crate) const CPU_THREADS: u8 = 4;
+fn cpu_threads(requested: u8) -> u8 {
+    let requested = requested.max(1);
+    let available = std::thread::available_parallelism()
+        .map_or(usize::from(CPU_THREADS), std::num::NonZeroUsize::get);
+    u8::try_from(available.min(usize::from(requested))).unwrap_or(requested)
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Options {
+    pub punctuation: bool,
+    pub verbatim: bool,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            punctuation: true,
+            verbatim: true,
+        }
     }
 }
 
@@ -134,13 +149,15 @@ pub fn runtime_version() -> String {
 }
 
 pub(crate) use ffi::Frame;
+#[cfg(test)]
+pub(crate) use ffi::Word;
 pub(crate) struct Stream<'a> {
     native: ffi::Stream<'a>,
 }
 impl Recognizer {
-    pub(crate) fn stream(&mut self) -> Result<Stream<'_>, Error> {
+    pub(crate) fn stream(&mut self, options: Options) -> Result<Stream<'_>, Error> {
         Ok(Stream {
-            native: self.native.stream()?,
+            native: self.native.stream(options)?,
         })
     }
 }

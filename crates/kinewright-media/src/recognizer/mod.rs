@@ -16,6 +16,7 @@ pub enum Error {
     Cancelled,
     EmptyAudio,
     InvalidAudio,
+    InvalidPolicy(&'static str),
     SessionOrder(&'static str),
     Clock(&'static str),
     Model(ModelError),
@@ -32,6 +33,7 @@ impl fmt::Display for Error {
             Self::InvalidAudio => {
                 f.write_str("recognition needs finite mono audio in bounded feeds")
             }
+            Self::InvalidPolicy(reason) => write!(f, "recognition policy: {reason}"),
             Self::SessionOrder(reason) => write!(f, "recognition session order: {reason}"),
             Self::Clock(reason) => write!(f, "recognition source clock: {reason}"),
             Self::Model(e) => e.fmt(f),
@@ -67,7 +69,7 @@ impl From<Error> for kinewright_core::MediaError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PiecePolicy {
     pub target_us: u64,
@@ -110,17 +112,20 @@ impl Identity {
             runtime_version: crate::nemo::runtime_version(),
             build_key: crate::nemo::BUILD_KEY.into(),
             lookahead: 13,
-            threads: u8::try_from(
-                std::thread::available_parallelism()
-                    .map_or(4, std::num::NonZeroUsize::get)
-                    .min(4),
-            )
-            .unwrap_or(4),
+            threads: crate::nemo::CPU_THREADS,
             feed_samples: FEED_SAMPLES,
-            punctuation: true,
-            verbatim: true,
+            punctuation: crate::nemo::Options::default().punctuation,
+            verbatim: crate::nemo::Options::default().verbatim,
             piece_policy: PiecePolicy::default(),
         }
+    }
+    fn validate(&self) -> Result<(), Error> {
+        if self.feed_samples == 0 || self.feed_samples > FEED_SAMPLES {
+            return Err(Error::InvalidPolicy(
+                "feed size must be positive and within the native step bound",
+            ));
+        }
+        self.piece_policy.buffer_samples().map(|_| ())
     }
     #[must_use]
     /// # Panics
@@ -226,6 +231,7 @@ enum Phase {
 }
 struct Driver<B> {
     backend: B,
+    feed_samples: usize,
     phase: Phase,
     cancel: ExportCancellation,
     origin_us: u64,
@@ -235,9 +241,10 @@ struct Driver<B> {
     last_word_start: Option<u64>,
 }
 impl<B: Backend> Driver<B> {
-    fn new(backend: B, origin_us: u64, cancel: ExportCancellation) -> Self {
+    fn new(backend: B, origin_us: u64, cancel: ExportCancellation, feed_samples: usize) -> Self {
         Self {
             backend,
+            feed_samples,
             phase: Phase::Feeding,
             cancel,
             origin_us,
@@ -274,7 +281,7 @@ impl<B: Backend> Session for Driver<B> {
         if samples.is_empty() {
             return Err(Error::EmptyAudio);
         }
-        if samples.len() > FEED_SAMPLES || samples.iter().any(|s| !s.is_finite()) {
+        if samples.len() > self.feed_samples || samples.iter().any(|s| !s.is_finite()) {
             return Err(Error::InvalidAudio);
         }
         self.backend.feed(samples)?;
@@ -329,6 +336,8 @@ impl<B: Backend> Session for Driver<B> {
             }
             return Ok(None);
         };
+        // An offline call may take several seconds; do not publish after cancellation.
+        self.check()?;
         let native_processed = self.relocate(frame.processed_us)?;
         let end = self
             .origin_us
@@ -388,12 +397,51 @@ fn samples_us(samples: u64) -> u64 {
     samples.saturating_mul(1_000_000) / u64::from(SAMPLE_RATE)
 }
 
-struct NativeBackend<'a> {
-    stream: Option<crate::nemo::Stream<'a>>,
+// The native stream clock is cumulative across force endpoints. A private
+// stream boundary lets fast tests exercise this production conversion.
+trait NativeStream {
+    fn feed(&mut self, samples: &[f32]) -> Result<(), crate::nemo::Error>;
+    fn step(&mut self) -> Result<Option<crate::nemo::Frame>, crate::nemo::Error>;
+    fn commit(&mut self) -> Result<(), crate::nemo::Error>;
+    fn finish(&mut self) -> Result<(), crate::nemo::Error>;
+}
+impl NativeStream for crate::nemo::Stream<'_> {
+    fn feed(&mut self, samples: &[f32]) -> Result<(), crate::nemo::Error> {
+        self.feed(samples)
+    }
+    fn step(&mut self) -> Result<Option<crate::nemo::Frame>, crate::nemo::Error> {
+        self.step()
+    }
+    fn commit(&mut self) -> Result<(), crate::nemo::Error> {
+        self.commit()
+    }
+    fn finish(&mut self) -> Result<(), crate::nemo::Error> {
+        self.finish()
+    }
+}
+struct NativeBackend<S> {
+    stream: Option<S>,
     epoch_us: u64,
     pending: Option<u64>,
 }
-impl Backend for NativeBackend<'_> {
+impl<S: NativeStream> NativeBackend<S> {
+    fn open(
+        identity: &Identity,
+        open: impl FnOnce(crate::nemo::Options) -> Result<S, Error>,
+    ) -> Result<Self, Error> {
+        identity.validate()?;
+        let stream = open(crate::nemo::Options {
+            punctuation: identity.punctuation,
+            verbatim: identity.verbatim,
+        })?;
+        Ok(Self {
+            stream: Some(stream),
+            epoch_us: 0,
+            pending: None,
+        })
+    }
+}
+impl<S: NativeStream> Backend for NativeBackend<S> {
     fn feed(&mut self, samples: &[f32]) -> Result<(), Error> {
         self.stream
             .as_mut()
@@ -453,6 +501,16 @@ impl Backend for NativeBackend<'_> {
     }
 }
 
+// The checked file and the backend-opening operation share this boundary;
+// the fast tier can prove that an invalidated file never opens a session.
+fn checked_session<S>(
+    verified: &model::VerifiedFile,
+    open: impl FnOnce() -> Result<S, Error>,
+) -> Result<S, Error> {
+    verified.check()?;
+    open()
+}
+
 pub struct BuiltinRecognizer {
     native: crate::nemo::Recognizer,
     identity: Identity,
@@ -468,6 +526,7 @@ impl BuiltinRecognizer {
         cancel: &ExportCancellation,
         identity: Identity,
     ) -> Result<Self, Error> {
+        identity.validate()?;
         let verified = model::verify(&ENGLISH_MODEL.files[0], path, receipts, cancel)?;
         let native = crate::nemo::Recognizer::load_config(
             verified.path(),
@@ -495,17 +554,16 @@ impl Recognizer for BuiltinRecognizer {
         cancel: ExportCancellation,
     ) -> Result<Box<dyn Session + '_>, Error> {
         cancelled(&cancel)?;
-        self.verified.check()?;
-        let stream = self.native.stream()?;
-        Ok(Box::new(Driver::new(
-            NativeBackend {
-                stream: Some(stream),
-                epoch_us: 0,
-                pending: None,
-            },
-            origin_us,
-            cancel,
-        )))
+        let feed_samples = self.identity.feed_samples;
+        checked_session(&self.verified, || {
+            let backend = NativeBackend::open(&self.identity, |options| {
+                self.native.stream(options).map_err(Into::into)
+            })?;
+            Ok(
+                Box::new(Driver::new(backend, origin_us, cancel, feed_samples))
+                    as Box<dyn Session + '_>,
+            )
+        })
     }
 }
 

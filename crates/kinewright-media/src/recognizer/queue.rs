@@ -126,10 +126,13 @@ pub(crate) fn drive(
     mut progress: impl FnMut(u64),
     commits: bool,
 ) -> Result<Recognition, Error> {
+    recognizer.identity().validate()?;
+    let policy = recognizer.identity().piece_policy;
+    let feed_samples = recognizer.identity().feed_samples;
+    let window_samples = policy.buffer_samples()?;
     let mut session = recognizer.session(0, cancel.clone())?;
     let mut words = Vec::new();
     let mut window = Vec::new();
-    let window_samples = 65 * usize::try_from(SAMPLE_RATE).unwrap_or(16_000);
     let mut eof = false;
     let mut fed = 0_u64;
     loop {
@@ -143,11 +146,11 @@ pub(crate) fn drive(
             break;
         }
         let cut = if commits && !eof {
-            pause::quiet_point(&window)
+            pause::quiet_point(&window, &policy)?
         } else {
             window.len()
         };
-        for samples in window[..cut].chunks(FEED_SAMPLES) {
+        for samples in window[..cut].chunks(feed_samples) {
             session.feed(samples)?;
             drain(session.as_mut(), &mut words, &mut progress)?;
         }
