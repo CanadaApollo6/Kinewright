@@ -124,10 +124,33 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
 }
 
 fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
+    struct FailureContext {
+        seed: u64,
+        attempt: u64,
+        length: u64,
+    }
+    impl Drop for FailureContext {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                eprintln!(
+                    "HX_SESSION_MODEL_FAILURE seed={} attempt={} random_attempts={}",
+                    self.seed, self.attempt, self.length
+                );
+            }
+        }
+    }
+    // Attempt zero is the primer; length + 1 is final drain/collection.
+    let mut context = FailureContext {
+        seed,
+        attempt: 0,
+        length,
+    };
+    let started = std::time::Instant::now();
     let mut session = Session::new(S::default());
     prime_redo_payload(&mut session, seed);
     let mut state = seed;
     for index in 0..length {
+        context.attempt = index + 1;
         let id = seed * (length + 1) + index;
         let choice = random(&mut state);
         let input = message(&mut session, id, choice);
@@ -157,22 +180,32 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
         }
         session.assert_acknowledged();
     }
+    context.attempt = length + 1;
     session.drain(false, false);
     session.collect();
-    eprintln!("HX_SESSION_SEED_COMPLETE {seed}");
+    eprintln!(
+        "HX_SESSION_SEED_COMPLETE seed={seed} random_attempts={length} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     session.coverage
 }
 
 pub(super) fn run<S: ModelStore>(seeds: u64, length: u64) {
-    let cases: Vec<_> = if seeds > 8 {
+    run_range::<S>(1, seeds, length);
+}
+
+pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
+    let started = std::time::Instant::now();
+    let seeds = last - first + 1;
+    let cases: Vec<_> = if length >= 1024 {
         // Cases share no replicas, store, pool or mutable oracle. Keep the
         // complete corpus while using the existing four-thread test budget.
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
                 .map(|lane| {
                     scope.spawn(move || {
-                        (1..=seeds)
-                            .filter(|seed| (seed - 1) % 4 == lane)
+                        (first..=last)
+                            .filter(|seed| (seed - first) % 4 == lane)
                             .map(|seed| (seed, run_seed::<S>(seed, length)))
                             .collect::<Vec<_>>()
                     })
@@ -184,7 +217,7 @@ pub(super) fn run<S: ModelStore>(seeds: u64, length: u64) {
                 .collect()
         })
     } else {
-        (1..=seeds)
+        (first..=last)
             .map(|seed| (seed, run_seed::<S>(seed, length)))
             .collect()
     };
@@ -199,7 +232,7 @@ pub(super) fn run<S: ModelStore>(seeds: u64, length: u64) {
     }
     assert_eq!(
         completed,
-        (1..=seeds).collect(),
+        (first..=last).collect(),
         "SESSION_COMPLETE_CORPUS_WAS_EXECUTED"
     );
     for (name, count) in [
@@ -226,9 +259,10 @@ pub(super) fn run<S: ModelStore>(seeds: u64, length: u64) {
         assert!(count > 0, "SESSION_GRAMMAR_REACHES_{name}");
     }
     println!(
-        "HX_SESSION_MODEL seeds={seeds} random_attempts={} primed_transitions={} folds={} restart={} lost_ack={} prepublication_crash={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={}",
+        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} restart={} lost_ack={} prepublication_crash={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={}",
         seeds * length,
         seeds * 2,
+        started.elapsed().as_millis(),
         totals.folds,
         totals.restarts,
         totals.lost_acks,

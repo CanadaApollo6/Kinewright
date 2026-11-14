@@ -630,8 +630,143 @@ fn generated_sessions_preserve_acknowledgements_and_reachable_states() {
     not(feature = "slow-tests"),
     ignore = "slow tier: cargo test --features slow-tests"
 )]
-fn long_generated_sessions_preserve_acknowledgements_and_reachable_states() {
-    stream::run::<MemoryStore>(64, 1024);
+fn long_generated_sessions_seeds_01_04() {
+    stream::run_range::<MemoryStore>(1, 4, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_05_08() {
+    stream::run_range::<MemoryStore>(5, 8, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_09_12() {
+    stream::run_range::<MemoryStore>(9, 12, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_13_16() {
+    stream::run_range::<MemoryStore>(13, 16, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_17_20() {
+    stream::run_range::<MemoryStore>(17, 20, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_21_24() {
+    stream::run_range::<MemoryStore>(21, 24, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_25_28() {
+    stream::run_range::<MemoryStore>(25, 28, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_29_32() {
+    stream::run_range::<MemoryStore>(29, 32, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_33_36() {
+    stream::run_range::<MemoryStore>(33, 36, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_37_40() {
+    stream::run_range::<MemoryStore>(37, 40, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_41_44() {
+    stream::run_range::<MemoryStore>(41, 44, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_45_48() {
+    stream::run_range::<MemoryStore>(45, 48, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_49_52() {
+    stream::run_range::<MemoryStore>(49, 52, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_53_56() {
+    stream::run_range::<MemoryStore>(53, 56, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_57_60() {
+    stream::run_range::<MemoryStore>(57, 60, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_61_64() {
+    stream::run_range::<MemoryStore>(61, 64, 1024);
 }
 #[test]
 #[cfg(target_os = "linux")]
