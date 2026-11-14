@@ -152,94 +152,12 @@ impl InvestigatorSettings {
     }
 }
 
-/// Which platform's settings path to resolve (T10's three rows).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InvestigatorConfigPlatform {
-    Windows,
-    Macos,
-    Unix,
-}
-
-/// Resolve the settings path from explicit environment values.
-///
-/// Pure over its inputs so the item-39 test pins all three of T10's rows on
-/// any host: `appdata` is `%APPDATA%`, `xdg_config_home` is
-/// `$XDG_CONFIG_HOME`, `home` is `$HOME`. Callers pass `None` for an unset (or
-/// empty) variable. Returns the path and whether it is durable — the
-/// `temp_dir` fallback is not, and the settings card says so (§2.1 rule 1).
-#[must_use]
-pub(crate) fn resolve_investigator_config_path(
-    platform: InvestigatorConfigPlatform,
-    appdata: Option<&Path>,
-    xdg_config_home: Option<&Path>,
-    home: Option<&Path>,
-) -> (PathBuf, bool) {
-    let fallback = || {
-        (
-            std::env::temp_dir()
-                .join("Kinewright")
-                .join("investigator.json"),
-            false,
-        )
-    };
-    match platform {
-        InvestigatorConfigPlatform::Windows => appdata.map_or_else(fallback, |dir| {
-            (dir.join("Kinewright").join("investigator.json"), true)
-        }),
-        InvestigatorConfigPlatform::Macos => home.map_or_else(fallback, |dir| {
-            (
-                dir.join("Library")
-                    .join("Application Support")
-                    .join("Kinewright")
-                    .join("investigator.json"),
-                true,
-            )
-        }),
-        InvestigatorConfigPlatform::Unix => {
-            if let Some(dir) = xdg_config_home {
-                (dir.join("Kinewright").join("investigator.json"), true)
-            } else if let Some(dir) = home {
-                (
-                    dir.join(".config")
-                        .join("Kinewright")
-                        .join("investigator.json"),
-                    true,
-                )
-            } else {
-                fallback()
-            }
-        }
-    }
-}
-
-fn env_path(name: &str) -> Option<PathBuf> {
-    let value = std::env::var_os(name)?;
-    if value.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(value))
-}
-
-/// The production settings path: this host's platform with the real
-/// environment (§2.1 rule 1).
-#[must_use]
-pub(crate) fn investigator_config_path() -> (PathBuf, bool) {
-    let platform = if cfg!(windows) {
-        InvestigatorConfigPlatform::Windows
-    } else if cfg!(target_os = "macos") {
-        InvestigatorConfigPlatform::Macos
-    } else {
-        InvestigatorConfigPlatform::Unix
-    };
-    let appdata = env_path("APPDATA");
-    let xdg_config_home = env_path("XDG_CONFIG_HOME");
-    let home = env_path("HOME");
-    resolve_investigator_config_path(
-        platform,
-        appdata.as_deref(),
-        xdg_config_home.as_deref(),
-        home.as_deref(),
-    )
+/// Investigator settings share the media engine's resolved application root.
+pub(crate) fn investigator_config_path(
+    data_dir: &Path,
+) -> Result<PathBuf, kinewright_core::MediaError> {
+    kinewright_media::data_subdirectory(data_dir, Path::new(""))
+        .map(|root| root.join("investigator.json"))
 }
 
 /// Resolve the working directory passed to a harness session (§3.3 rule 18).
@@ -274,8 +192,8 @@ pub(crate) struct SettingsLoad {
     pub(crate) problem: Option<SettingsLoadProblem>,
 }
 
-/// Read settings only when the resolved path is durable. A temporary fallback
-/// is deliberately an in-memory-only run (§2.1 rule 1, review fix F5).
+/// Read settings only when storage is available. An unavailable directory
+/// leaves the run in memory (§2.1 rule 1, review fix F5).
 pub(crate) fn load_investigator_settings_for_run(path: &Path, durable: bool) -> SettingsLoad {
     if durable {
         load_investigator_settings_from(path)
@@ -297,8 +215,8 @@ pub(crate) fn apply_settings_load(app: &mut KinewrightApp, load: SettingsLoad) {
 }
 
 /// Install settings and remember whether this process may persist them. A
-/// temporary resolver fallback is a deliberately non-durable run: it starts
-/// from defaults and never reads or writes the fallback file (§2.1 rule 1,
+/// storage failure leaves a deliberately non-durable run: it starts
+/// from defaults and never reads or writes a settings file (§2.1 rule 1,
 /// review fix F5).
 pub(crate) fn apply_settings_load_for_run(
     app: &mut KinewrightApp,
@@ -401,9 +319,8 @@ pub(crate) fn save_investigator_settings_to(
     Ok(())
 }
 
-/// Persist settings for a run only when its path is durable. The fallback path
-/// is intentionally a no-op, so an old temporary file cannot re-enable the
-/// investigator on a later run (review fix F5).
+/// Persist settings only when startup storage was available. An in-memory run
+/// never writes a settings file.
 pub(crate) fn save_investigator_settings_for_run(
     path: &Path,
     durable: bool,
@@ -1847,9 +1764,14 @@ impl KinewrightApp {
             .investigator
             .as_ref()
             .is_some_and(|session| session.settings_durable);
-        let (path, resolved_durable) = investigator_config_path();
-        if let Err(error) =
-            save_investigator_settings_for_run(&path, durable && resolved_durable, &settings)
+        let result = if durable {
+            investigator_config_path(&self.data_dir)
+                .map_err(std::io::Error::other)
+                .and_then(|path| save_investigator_settings_for_run(&path, true, &settings))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result
             && should_report_settings_write_failure()
         {
             self.note_label(
@@ -2972,12 +2894,11 @@ mod tests {
         let path = temporary.path("fallback.json");
         let original = br#"{"version":1,"enabled":true}"#;
         fs::write(&path, original).expect("the fallback fixture writes");
-        let (_, durable) =
-            resolve_investigator_config_path(InvestigatorConfigPlatform::Unix, None, None, None);
-        assert!(
-            !durable,
-            "the injected no-environment resolution is non-durable"
-        );
+        assert!(matches!(
+            investigator_config_path(Path::new("relative")),
+            Err(kinewright_core::MediaError::DataDirectory(_))
+        ));
+        let durable = false;
         let loaded = load_investigator_settings_for_run(&path, durable);
         assert!(
             !loaded.settings.enabled,
@@ -3110,83 +3031,17 @@ mod tests {
         crate::app::in1_tests::in1_shutdown(&mut app);
     }
 
-    /// IN2 §9.1 item 39: the config path resolves per platform and reports
-    /// durability.
     #[test]
-    fn in2_the_config_path_resolves_per_platform_and_reports_durability() {
-        use std::path::Path;
-
-        let xdg = Path::new("/tmp/in2-xdg");
-        let home = Path::new("/tmp/in2-home");
-        let appdata = Path::new("C:\\Users\\in2\\AppData\\Roaming");
-
-        // With `XDG_CONFIG_HOME` set: the first of T10's three rows.
-        let (path, durable) = resolve_investigator_config_path(
-            InvestigatorConfigPlatform::Unix,
-            None,
-            Some(xdg),
-            Some(home),
-        );
-        assert_eq!(path, xdg.join("Kinewright").join("investigator.json"));
-        assert!(durable);
-
-        // Unset-with-`HOME`: the second row.
-        let (path, durable) = resolve_investigator_config_path(
-            InvestigatorConfigPlatform::Unix,
-            None,
-            None,
-            Some(home),
-        );
-        assert_eq!(
-            path,
-            home.join(".config")
-                .join("Kinewright")
-                .join("investigator.json")
-        );
-        assert!(durable);
-
-        // Both unset: the fallback, and only it is not durable.
-        let (path, durable) =
-            resolve_investigator_config_path(InvestigatorConfigPlatform::Unix, None, None, None);
-        assert_eq!(
-            path,
-            std::env::temp_dir()
-                .join("Kinewright")
-                .join("investigator.json")
-        );
-        assert!(!durable, "only the fallback is not durable");
-
-        // The Windows row, with and without `%APPDATA%`.
-        let (path, durable) = resolve_investigator_config_path(
-            InvestigatorConfigPlatform::Windows,
-            Some(appdata),
-            None,
-            None,
-        );
-        assert_eq!(path, appdata.join("Kinewright").join("investigator.json"));
-        assert!(durable);
-        let (_, durable) =
-            resolve_investigator_config_path(InvestigatorConfigPlatform::Windows, None, None, None);
-        assert!(!durable);
-
-        // The macOS row, with and without `$HOME`.
-        let (path, durable) = resolve_investigator_config_path(
-            InvestigatorConfigPlatform::Macos,
-            None,
-            None,
-            Some(home),
-        );
-        assert_eq!(
-            path,
-            home.join("Library")
-                .join("Application Support")
-                .join("Kinewright")
-                .join("investigator.json")
-        );
-        assert!(durable);
-        let (_, durable) =
-            resolve_investigator_config_path(InvestigatorConfigPlatform::Macos, None, None, None);
-        assert!(!durable);
+    fn in2_the_config_path_uses_the_application_root() {
+        let temp = TempDirectory::new("in2-settings-root");
+        let root = kinewright_media::data_subdirectory(temp.root(), Path::new("data")).unwrap();
+        let path = investigator_config_path(&root).unwrap();
+        assert_eq!(path, root.join("investigator.json"));
+        assert!(!path.exists());
+        assert!(matches!(
+            investigator_config_path(Path::new("relative")),
+            Err(kinewright_core::MediaError::DataDirectory(_))
+        ));
     }
 
     /// The once-per-session write-failure gate fires exactly once.

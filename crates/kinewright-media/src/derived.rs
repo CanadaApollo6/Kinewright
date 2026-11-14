@@ -20,8 +20,8 @@ use crate::{
     cache::FrameCache,
     decode::VideoDecoder,
     derived_cache::{
-        CacheStats, CancellationRegistry, ContentHashes, JsonCache, StatusReporter, cache_root,
-        clear_cache_root, inventory_cache_root, spawn_worker,
+        CacheDirectory, CacheStats, CancellationRegistry, ContentHashes, JsonCache, StatusReporter,
+        cache_root, spawn_worker,
     },
 };
 
@@ -97,7 +97,7 @@ pub(crate) struct DerivedAnalysisService {
     scene_cancellations: CancellationRegistry,
     beat_cancellations: CancellationRegistry,
     config: DerivedAnalysisConfig,
-    root: PathBuf,
+    root: CacheDirectory,
 }
 
 impl Drop for DerivedAnalysisService {
@@ -117,7 +117,7 @@ impl DerivedAnalysisService {
         let silence_cancellations = CancellationRegistry::default();
         let scene_cancellations = CancellationRegistry::default();
         let beat_cancellations = CancellationRegistry::default();
-        let root = cache_root(data_dir, "derived-analysis", CACHE_VERSION);
+        let root = cache_root(data_dir, "derived-analysis", CACHE_VERSION)?;
         let mut worker = DerivedAnalysisWorker::new(
             root.clone(),
             silence_states.clone(),
@@ -294,11 +294,11 @@ impl DerivedAnalysisService {
     }
 
     pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
-        inventory_cache_root(&self.root)
+        self.root.inventory()
     }
 
     pub(crate) fn clear_cache(&self) -> Result<CacheStats, MediaError> {
-        clear_cache_root(&self.root)
+        self.root.clear()
     }
 
     pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
@@ -396,7 +396,7 @@ enum Job {
 }
 
 struct DerivedAnalysisWorker {
-    root: PathBuf,
+    root: CacheDirectory,
     silence_states: StatusReporter<SilenceStatus>,
     scene_states: StatusReporter<SceneStatus>,
     beat_states: StatusReporter<BeatStatus>,
@@ -408,7 +408,7 @@ struct DerivedAnalysisWorker {
 
 impl DerivedAnalysisWorker {
     fn new(
-        root: PathBuf,
+        root: CacheDirectory,
         silence_states: StatusReporter<SilenceStatus>,
         scene_states: StatusReporter<SceneStatus>,
         beat_states: StatusReporter<BeatStatus>,
@@ -511,7 +511,7 @@ impl DerivedAnalysisWorker {
             .update(&asset.path, SilenceStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         check_cancelled(cancellation)?;
-        let store = SilenceStore::new(self.root.join("silences"), config);
+        let store = SilenceStore::new(self.root.child("silences")?, config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             check_cancelled(cancellation)?;
             cached.asset = asset.id;
@@ -570,7 +570,7 @@ impl DerivedAnalysisWorker {
         self.scene_states.update(&asset.path, SceneStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         check_cancelled(cancellation)?;
-        let store = SceneStore::new(self.root.join("scenes"), config);
+        let store = SceneStore::new(self.root.child("scenes")?, config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             check_cancelled(cancellation)?;
             cached.asset = asset.id;
@@ -610,7 +610,7 @@ impl DerivedAnalysisWorker {
         self.beat_states.update(&asset.path, BeatStatus::Hashing);
         let hash = self.content_hash(&asset.path)?;
         check_cancelled(cancellation)?;
-        let store = BeatStore::new(self.root.join("beats"), config);
+        let store = BeatStore::new(self.root.child("beats")?, config);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             check_cancelled(cancellation)?;
             cached.asset = asset.id;
@@ -1296,7 +1296,7 @@ struct SilenceStore {
 }
 
 impl SilenceStore {
-    fn new(root: PathBuf, config: SilenceDetectionConfig) -> Self {
+    fn new(root: CacheDirectory, config: SilenceDetectionConfig) -> Self {
         Self {
             cache: JsonCache::new(root, CACHE_VERSION, "silence"),
             config,
@@ -1357,7 +1357,7 @@ struct SceneStore {
 }
 
 impl SceneStore {
-    fn new(root: PathBuf, config: SceneDetectionConfig) -> Self {
+    fn new(root: CacheDirectory, config: SceneDetectionConfig) -> Self {
         Self {
             cache: JsonCache::new(root, CACHE_VERSION, "scene"),
             config,
@@ -1410,7 +1410,7 @@ struct BeatStore {
 }
 
 impl BeatStore {
-    fn new(root: PathBuf, config: BeatDetectionConfig) -> Self {
+    fn new(root: CacheDirectory, config: BeatDetectionConfig) -> Self {
         Self {
             cache: JsonCache::new(root, CACHE_VERSION, "beat"),
             config,
@@ -1656,8 +1656,10 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn derived_caches_round_trip_and_ignore_corruption() {
         let directory = TempDirectory::new("derived-cache");
-        let silence_store =
-            SilenceStore::new(directory.path("silence"), SilenceDetectionConfig::default());
+        let silence_store = SilenceStore::new(
+            CacheDirectory::new(directory.root(), Path::new("silence")).unwrap(),
+            SilenceDetectionConfig::default(),
+        );
         let silence = AssetSilences {
             asset: AssetId(1),
             content_sha256: "a".repeat(64),
@@ -1693,7 +1695,10 @@ mod tests {
                 .is_none()
         );
 
-        let scene_store = SceneStore::new(directory.path("scene"), SceneDetectionConfig::default());
+        let scene_store = SceneStore::new(
+            CacheDirectory::new(directory.root(), Path::new("scene")).unwrap(),
+            SceneDetectionConfig::default(),
+        );
         let scenes = AssetSceneChanges {
             asset: AssetId(2),
             content_sha256: "b".repeat(64),
@@ -1730,7 +1735,10 @@ mod tests {
                 .is_none()
         );
 
-        let beat_store = BeatStore::new(directory.path("beat"), BeatDetectionConfig::default());
+        let beat_store = BeatStore::new(
+            CacheDirectory::new(directory.root(), Path::new("beat")).unwrap(),
+            BeatDetectionConfig::default(),
+        );
         let beats = AssetBeats {
             asset: AssetId(3),
             content_sha256: "c".repeat(64),

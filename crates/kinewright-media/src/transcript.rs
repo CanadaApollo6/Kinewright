@@ -16,7 +16,9 @@ use kinewright_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    derived_cache::{CancellationRegistry, JsonCache, StatusReporter, cache_root, spawn_worker},
+    derived_cache::{
+        CacheDirectory, CancellationRegistry, JsonCache, StatusReporter, cache_root, spawn_worker,
+    },
     sha256::sha256_file,
 };
 
@@ -49,7 +51,7 @@ use requests::{Recipe, Requests};
 pub(crate) struct TranscriptService {
     jobs: crate::worker::OwnedWorker<crate::locator::LocatorJob<TranscriptJob>>,
     requests: Requests,
-    root: PathBuf,
+    root: CacheDirectory,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
 }
@@ -69,8 +71,8 @@ impl TranscriptService {
         let data_dir = crate::data_dir::ensure_root(data_dir)?;
         let (jobs, jobs_rx) = unbounded();
         let requests = Requests::new();
-        let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
-        let mut worker = TranscriptWorker::new(data_dir, requests.clone());
+        let root = cache_root(&data_dir, "transcripts", CACHE_VERSION)?;
+        let mut worker = TranscriptWorker::new(data_dir, root.clone(), requests.clone());
         #[cfg(any(test, feature = "test-util"))]
         let inference_gate = Arc::clone(&worker.inference_gate);
         let jobs = spawn_worker(
@@ -164,13 +166,13 @@ impl TranscriptService {
         self.requests.register(path, transcript);
     }
     pub(crate) fn cache_stats(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
-        crate::derived_cache::inventory_cache_root(&self.root)
+        self.root.inventory()
     }
     pub(crate) fn cache_root(&self) -> &Path {
-        &self.root
+        self.root.path()
     }
     pub(crate) fn clear_cache(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
-        crate::derived_cache::clear_cache_root(&self.root)
+        self.root.clear()
     }
     pub(crate) fn timeline_words(
         &self,
@@ -191,9 +193,9 @@ struct TranscriptWorker {
     inference_gate: InferenceGate,
 }
 impl TranscriptWorker {
-    fn new(data_dir: PathBuf, requests: Requests) -> Self {
+    fn new(data_dir: PathBuf, root: CacheDirectory, requests: Requests) -> Self {
         Self {
-            store: TranscriptStore::new(cache_root(&data_dir, "transcripts", CACHE_VERSION)),
+            store: TranscriptStore::new(root),
             data_dir,
             requests,
             #[cfg(any(test, feature = "test-util"))]
@@ -524,7 +526,7 @@ struct TranscriptStore {
     cache: JsonCache,
 }
 impl TranscriptStore {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: CacheDirectory) -> Self {
         Self {
             cache: JsonCache::new(root, CACHE_VERSION, "transcript"),
         }
@@ -626,7 +628,7 @@ pub(crate) fn transcribe_voice_wav(
     if samples.iter().all(|sample| sample.abs() < 0.001) {
         return Ok(VoiceTranscript::NoSpeech);
     }
-    let store = TranscriptStore::new(cache_root(data_dir, "voice-transcripts", CACHE_VERSION));
+    let store = TranscriptStore::new(cache_root(data_dir, "voice-transcripts", CACHE_VERSION)?);
     let fps = Rational::new(1_000_000, 1).expect("positive rate");
     let frames = TimeCode(i64::try_from(duration).map_err(|e| MediaError::Backend(e.to_string()))?);
     let identity = Identity::english();
@@ -746,7 +748,7 @@ mod tests {
     #[test]
     fn dq1_exact_cache_round_trip_and_recipe_misses() {
         let data = TempDirectory::new("dq1-cache");
-        let store = TranscriptStore::new(data.root().into());
+        let store = TranscriptStore::new(CacheDirectory::new(data.root(), Path::new("")).unwrap());
         let entry = stored(&crate::sha256::sha256_bytes(b"same audio"));
         store.save(&entry, &ExportCancellation::default()).unwrap();
         let loaded = store
@@ -848,7 +850,7 @@ mod tests {
     #[test]
     fn dq1_cancelled_recognition_leaves_no_cache_entry() {
         let data = TempDirectory::new("dq1-cancel-cache");
-        let store = TranscriptStore::new(data.root().into());
+        let store = TranscriptStore::new(CacheDirectory::new(data.root(), Path::new("")).unwrap());
         let entry = stored("cancelled");
         let cancel = ExportCancellation::default();
         let result = recognizer::tests::interrupted_recognition(&cancel).map(|recognition| {

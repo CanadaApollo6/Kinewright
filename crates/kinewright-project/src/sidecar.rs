@@ -524,7 +524,7 @@ fn write_batch(
             } else {
                 acquired = crate::lockfile::acquire_gui_project_lock(
                     &path.with_extension("kinewright"),
-                    &crate::default_recovery_directory(),
+                    Path::new(""), // GUI lock acquisition does not scan recovery journals.
                 )
                 .map_err(io::Error::other)?
                 .handle;

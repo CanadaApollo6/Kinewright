@@ -246,7 +246,8 @@ inference on both platforms. Model files and licences, cache identity, session
 clocks and the real-model slow-tier witnesses are documented in
 [TRANSCRIPTION.md](TRANSCRIPTION.md).
 
-Application data (models, caches and feedback captures) is persistent:
+Models, media caches, recordings, investigator settings, recovery journals and
+feedback captures use the persistent application data root:
 `$XDG_DATA_HOME/kinewright` on Linux when that variable is absolute, otherwise
 `$HOME/.local/share/kinewright`; `%LOCALAPPDATA%/Kinewright` on Windows. Linux
 creates a private user-owned 0700 root. Linked or foreign-owned roots are refused,
@@ -258,3 +259,11 @@ The containing directory is trusted; Kinewright defends the root and its childre
 On Linux, missing parents are created 0700 and existing parents keep their modes;
 the application data root and its child directories must belong to the user and are
 made 0700, including existing directories.
+
+Recovery journals use `recovery/`, recordings use `recordings/<project>/`, and
+investigator settings use `investigator.json` under that root. The app reuses the
+media engine's resolved root. Missing storage stops a recording with a readable
+error; unavailable investigator storage keeps settings in memory with a notice.
+Cache reads, writes, inventory and clear check their original root and every
+created directory component again, including after a family directory is replaced.
+No data is read or migrated from the former temporary locations.

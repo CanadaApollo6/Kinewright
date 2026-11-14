@@ -14,8 +14,47 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::sha256::sha256_file;
 
-pub(crate) fn cache_root(data_dir: &Path, family: &str, version: u32) -> PathBuf {
-    data_dir.join(family).join(format!("v{version}"))
+/// A cache keeps the application boundary, including across later reads/writes.
+#[derive(Clone)]
+pub(crate) struct CacheDirectory {
+    data_root: PathBuf,
+    relative: PathBuf,
+    path: PathBuf,
+}
+impl CacheDirectory {
+    pub(crate) fn new(data_root: &Path, relative: &Path) -> Result<Self, MediaError> {
+        let data_root = crate::data_dir::ensure_root(data_root)?;
+        let path = crate::data_dir::data_subdirectory(&data_root, relative)?;
+        Ok(Self {
+            data_root,
+            relative: relative.to_path_buf(),
+            path,
+        })
+    }
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn child(&self, name: &str) -> Result<Self, MediaError> {
+        Self::new(&self.data_root, &self.relative.join(name))
+    }
+    pub(crate) fn check(&self) -> Result<(), MediaError> {
+        crate::data_dir::data_subdirectory(&self.data_root, &self.relative).map(|_| ())
+    }
+    pub(crate) fn inventory(&self) -> Result<CacheStats, MediaError> {
+        self.check()?;
+        inventory_cache_root(&self.path)
+    }
+    pub(crate) fn clear(&self) -> Result<CacheStats, MediaError> {
+        self.check()?;
+        clear_cache_root(&self.path)
+    }
+}
+pub(crate) fn cache_root(
+    data_dir: &Path,
+    family: &str,
+    version: u32,
+) -> Result<CacheDirectory, MediaError> {
+    CacheDirectory::new(data_dir, &Path::new(family).join(format!("v{version}")))
 }
 
 pub(crate) fn spawn_worker<J, F>(
@@ -364,7 +403,7 @@ struct Versioned<S> {
 }
 
 pub(crate) struct JsonCache {
-    root: PathBuf,
+    root: CacheDirectory,
     version: u32,
     label: &'static str,
     write_label: &'static str,
@@ -372,7 +411,7 @@ pub(crate) struct JsonCache {
 }
 
 impl JsonCache {
-    pub(crate) fn new(root: PathBuf, version: u32, label: &'static str) -> Self {
+    pub(crate) fn new(root: CacheDirectory, version: u32, label: &'static str) -> Self {
         Self {
             root,
             version,
@@ -393,11 +432,11 @@ impl JsonCache {
     }
 
     pub(crate) fn root(&self) -> &Path {
-        &self.root
+        self.root.path()
     }
 
     pub(crate) fn path_for(&self, content_sha256: &str, config_key: &str) -> PathBuf {
-        cache_path(&self.root, content_sha256, config_key, "json")
+        cache_path(self.root.path(), content_sha256, config_key, "json")
     }
 
     pub(crate) fn load<S, P>(
@@ -408,6 +447,7 @@ impl JsonCache {
     where
         S: DeserializeOwned,
     {
+        self.root.check()?;
         let Some(bytes) = read_cache(path, self.label)? else {
             return Ok(None);
         };
@@ -421,7 +461,7 @@ impl JsonCache {
     }
 
     pub(crate) fn save<S: Serialize>(&self, path: &Path, stored: &S) -> Result<(), MediaError> {
-        create_cache_dir(&self.root, self.label)?;
+        self.root.check()?;
         let bytes = serde_json::to_vec(&Versioned {
             version: self.version,
             stored,
@@ -448,10 +488,6 @@ pub(crate) fn read_cache(path: &Path, label: &str) -> Result<Option<Vec<u8>>, Me
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(cache_error(&format!("read {label}"), &error)),
     }
-}
-
-pub(crate) fn create_cache_dir(root: &Path, label: &str) -> Result<(), MediaError> {
-    fs::create_dir_all(root).map_err(|error| cache_error(&format!("create {label}"), &error))
 }
 
 pub(crate) fn atomic_write(
@@ -643,5 +679,62 @@ mod tests {
         let root = directory.path("does-not-exist/v1");
         assert_eq!(inventory_cache_root(&root).unwrap(), CacheStats::default());
         assert_eq!(clear_cache_root(&root).unwrap(), CacheStats::default());
+    }
+    #[test]
+    fn persistent_cache_refuses_links_at_creation_and_after_its_family_is_replaced() {
+        let temp = crate::test_support::TempDirectory::new("cache-boundary");
+        let outside = crate::test_support::TempDirectory::new("cache-boundary-outside");
+        let data = crate::data_dir::ensure_root(temp.path("data")).unwrap();
+        crate::data_dir::directory_link(outside.root(), &data.join("transcripts"));
+        assert!(
+            matches!(
+                cache_root(&data, "transcripts", 4),
+                Err(MediaError::DataDirectory(_))
+            ),
+            "DATA_ROOT_CACHE_LINK_REFUSED_AT_CREATION"
+        );
+        assert_eq!(fs::read_dir(outside.root()).unwrap().count(), 0);
+        // Remove only the fixture's junction/link, never its target.
+        #[cfg(unix)]
+        fs::remove_file(data.join("transcripts")).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(data.join("transcripts")).unwrap();
+        let directory = cache_root(&data, "transcripts", 4).unwrap();
+        let cache = JsonCache::new(directory.clone(), 4, "fixture");
+        let path = cache.path_for("content", "");
+        cache
+            .save(&path, &serde_json::json!({"payload":"inside"}))
+            .unwrap();
+        fs::remove_dir_all(data.join("transcripts")).unwrap();
+        fs::create_dir(outside.path("v4")).unwrap();
+        let outside_file = outside.path("v4/content.json");
+        let original = br#"{"version":4,"payload":"outside"}"#;
+        fs::write(&outside_file, original).unwrap();
+        crate::data_dir::directory_link(outside.root(), &data.join("transcripts"));
+        let load = cache.load::<serde_json::Value, _>(&path, Some);
+        assert!(
+            matches!(load, Err(MediaError::DataDirectory(_))),
+            "DATA_ROOT_CACHE_ORIGINAL_BOUNDARY_ON_READ"
+        );
+        assert!(
+            matches!(
+                cache.save(&path, &serde_json::json!({"payload":"bad"})),
+                Err(MediaError::DataDirectory(_))
+            ),
+            "DATA_ROOT_CACHE_ORIGINAL_BOUNDARY_ON_WRITE"
+        );
+        assert!(matches!(
+            directory.inventory(),
+            Err(MediaError::DataDirectory(_))
+        ));
+        assert!(matches!(
+            directory.clear(),
+            Err(MediaError::DataDirectory(_))
+        ));
+        assert_eq!(
+            fs::read(&outside_file).unwrap(),
+            original,
+            "DATA_ROOT_CACHE_OUTSIDE_BYTES_UNCHANGED"
+        );
     }
 }

@@ -827,10 +827,9 @@ impl FfmpegMediaEngine {
         engine.test_data_owner = Some(root);
         Ok(engine)
     }
-    /// The explicit fixture root, for capture and model fixtures sharing this engine.
-    #[cfg(any(test, feature = "test-util"))]
+    /// The resolved application data root used by this engine.
     #[must_use]
-    pub fn test_data_dir(&self) -> &std::path::Path {
+    pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
     }
 

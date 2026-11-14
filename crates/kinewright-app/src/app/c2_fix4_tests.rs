@@ -100,6 +100,7 @@ mod tests {
                 &SidecarMode::None,
                 None,
                 None,
+                &app.data_dir,
             )
             .unwrap(),
         );

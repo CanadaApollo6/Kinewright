@@ -94,7 +94,7 @@ fn refuse_loaded_sidecar(
     } else {
         acquired = crate::lockfile::acquire_gui_project_lock(
             project,
-            &crate::default_recovery_directory(),
+            Path::new(""), // GUI lock acquisition does not scan recovery journals.
         )
         .map_err(std::io::Error::other)?
         .handle;

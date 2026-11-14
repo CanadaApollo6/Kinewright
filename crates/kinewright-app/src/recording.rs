@@ -798,20 +798,16 @@ fn ffmpeg_cli_names() -> &'static [&'static str] {
 }
 
 /// Recordings are user-visible files, grouped by a filesystem-safe project name.
-fn recordings_directory(project_name: &str) -> PathBuf {
-    recordings_root().join(sanitize_recordings_folder(project_name))
+fn recordings_directory(
+    data_dir: &Path,
+    project_name: &str,
+) -> Result<PathBuf, kinewright_core::MediaError> {
+    let root = recordings_root(data_dir)?;
+    kinewright_media::data_subdirectory(&root, Path::new(&sanitize_recordings_folder(project_name)))
 }
 
-fn recordings_root() -> PathBuf {
-    let home = if cfg!(windows) {
-        std::env::var_os("USERPROFILE")
-    } else {
-        std::env::var_os("HOME")
-    };
-    home.map_or_else(
-        || std::env::temp_dir().join("Kinewright"),
-        |home| PathBuf::from(home).join("Videos").join("Kinewright"),
-    )
+fn recordings_root(data_dir: &Path) -> Result<PathBuf, kinewright_core::MediaError> {
+    kinewright_media::data_subdirectory(data_dir, Path::new("recordings"))
 }
 
 fn sanitize_recordings_folder(project_name: &str) -> String {
@@ -922,7 +918,7 @@ impl KinewrightApp {
         let mut open = self.record_dialog.open;
         let mut start = false;
         let devices = self.record_dialog.devices.clone();
-        let recording_directory = recordings_directory(&self.project_name());
+        let recording_directory = recordings_directory(&self.data_dir, &self.project_name());
         egui::Window::new("Record")
             .open(&mut open)
             .resizable(false)
@@ -1026,13 +1022,16 @@ impl KinewrightApp {
                         ui.end_row();
                     });
                 ui.add_space(space::ONE);
+                let destination = match &recording_directory {
+                    Ok(directory) => format!(
+                        "Saves to {} and lands on the timeline when you stop.",
+                        directory.display()
+                    ),
+                    Err(error) => format!("Recording storage is unavailable: {error}"),
+                };
                 ui.colored_label(
                     color::TEXT_MUTED,
-                    egui::RichText::new(format!(
-                        "Saves to {} and lands on the timeline when you stop.",
-                        recording_directory.display()
-                    ))
-                    .size(type_size::CAPTION),
+                    egui::RichText::new(destination).size(type_size::CAPTION),
                 );
                 ui.add_space(space::TWO);
                 let ready = match self.record_dialog.source {
@@ -1042,7 +1041,7 @@ impl KinewrightApp {
                 };
                 if ui
                     .add_enabled(
-                        ready,
+                        ready && recording_directory.is_ok(),
                         egui::Button::image_and_text(
                             Icon::Record.image(size::ICON_MD).tint(color::STATUS_DANGER),
                             "Start recording",
@@ -1081,7 +1080,13 @@ impl KinewrightApp {
                 RecordingMode::Voice { microphone }
             }
         };
-        let directory = recordings_directory(&self.project_name());
+        let directory = match recordings_directory(&self.data_dir, &self.project_name()) {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.note_recording_failure(error.to_string());
+                return;
+            }
+        };
         match start_recording(&mode, &directory) {
             Ok(active) => {
                 self.status = format!("Recording {}…", active.label.to_lowercase());
@@ -3809,8 +3814,16 @@ dummy: Immediate exit requested"#;
         );
         assert_eq!(sanitize_recordings_folder("..."), "Project");
         assert_eq!(sanitize_recordings_folder("con"), "_con");
+        let temp = kinewright_media::test_support::TempDirectory::new("recording-root");
+        let root = kinewright_media::data_subdirectory(temp.root(), Path::new("data")).unwrap();
+        let directory = recordings_directory(&root, "Project: 2").unwrap();
+        assert_eq!(directory.parent().unwrap(), root.join("recordings"));
+        assert!(matches!(
+            recordings_root(Path::new("relative")),
+            Err(kinewright_core::MediaError::DataDirectory(_))
+        ));
         assert_eq!(
-            recordings_directory("Project: 2").file_name(),
+            directory.file_name(),
             Some(std::ffi::OsStr::new("Project_ 2"))
         );
     }

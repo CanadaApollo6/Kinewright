@@ -28,7 +28,9 @@ no language detection. Its 713,975,456-byte Q8 GGUF is pinned to NVIDIA revision
 The file, attribution and [CC-BY-4.0 licence](https://creativecommons.org/licenses/by/4.0/)
 are described in `recognizer::PARAKEET_MODEL` and `LICENSES/NVIDIA-models-NOTICE.txt`.
 
-Linux data lives in `$XDG_DATA_HOME/kinewright` when `XDG_DATA_HOME` is absolute,
+Models, media caches, recordings, investigator settings, recovery journals and
+feedback captures share one root. Linux data lives in `$XDG_DATA_HOME/kinewright`
+when `XDG_DATA_HOME` is absolute,
 otherwise `$HOME/.local/share/kinewright`. The root is owned by the current user
 and created with mode 0700. A linked or foreign-owned root is refused. Windows
 uses `%LOCALAPPDATA%/Kinewright`. Missing home configuration is a typed error;
@@ -129,3 +131,11 @@ The containing directory is trusted; Kinewright defends the root and its childre
 On Linux, missing parents are created 0700 and existing parents keep their modes;
 the application data root and its child directories must belong to the user and are
 made 0700, including existing directories.
+
+Recovery journals use `recovery/`, recordings use `recordings/<project>/`, and
+investigator settings use `investigator.json` under that root. The app reuses the
+media engine's resolved root. Missing storage stops a recording with a readable
+error; unavailable investigator storage keeps settings in memory with a notice.
+Cache reads, writes, inventory and clear check their original root and every
+created directory component again, including after a family directory is replaced.
+No data is read or migrated from the former temporary locations.

@@ -197,25 +197,12 @@ fn upload(
     Ok(rx)
 }
 impl KinewrightApp {
-    #[cfg_attr(
-        not(test),
-        allow(
-            clippy::unused_self,
-            reason = "fixtures inject the storage root through this app instance"
-        )
-    )]
     fn feedback_capture_directory(&self) -> Result<std::path::PathBuf, String> {
-        #[cfg(test)]
-        let root = self
-            .test_data_root
-            .as_deref()
-            .ok_or("test must supply an explicit data root")?;
-        #[cfg(not(test))]
-        let owned_root = kinewright_media::default_data_dir().map_err(|e| e.to_string())?;
-        #[cfg(not(test))]
-        let root = owned_root.as_path();
-        kinewright_media::data_subdirectory(root, std::path::Path::new("feedback-captures"))
-            .map_err(|e| e.to_string())
+        kinewright_media::data_subdirectory(
+            &self.data_dir,
+            std::path::Path::new("feedback-captures"),
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn keep_voice_editor(&mut self) -> Result<(), String> {

@@ -344,8 +344,7 @@ fn premultiply_table() -> Box<[u8; 65536]> {
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
-    #[cfg(test)]
-    pub(crate) test_data_root: Option<std::path::PathBuf>,
+    pub(crate) data_dir: PathBuf,
     /// Release display leases before joining workers or dropping engine Arcs.
     pub(crate) native_display: Option<NativeDisplay>,
     pub(crate) projects: Vec<ProjectSession>,
@@ -557,7 +556,8 @@ pub(crate) struct KinewrightApp {
 impl KinewrightApp {
     // Construction keeps all channel subscriptions and coupled UI state initialization together.
     #[allow(clippy::too_many_lines)]
-    fn new(media: Arc<FfmpegMediaEngine>, startup_path: Option<PathBuf>) -> Self {
+    fn new(media: Arc<FfmpegMediaEngine>, startup_path: Option<PathBuf>) -> std::io::Result<Self> {
+        let data_dir = media.data_dir().to_path_buf();
         let mut load_error = None;
         let mut source_admission = kinewright_project::bundle::BundleWriteAdmission::new_document();
         let (name, document, project_path, project_digest) = match startup_path {
@@ -632,8 +632,9 @@ impl KinewrightApp {
             &sidecar_mode,
             Some(Arc::clone(&sidecar_writer)),
             None,
+            &data_dir,
         )
-        .expect("startup project session must be valid");
+        .map_err(std::io::Error::other)?;
         project.studio.mode = crate::studio::Mode::Studio;
         if project_path.is_some() {
             project.saved_document = Some(Arc::clone(&project.document));
@@ -658,7 +659,7 @@ impl KinewrightApp {
         // and `devin auth status` is a network round trip, so an unreachable
         // endpoint held the first frame with no window to show for it.
         let (harness_update_tx, harness_update_rx) = crossbeam_channel::unbounded();
-        let harness_update_rx = if screenshotting {
+        let harness_update_rx = if screenshotting || cfg!(test) {
             None
         } else {
             std::thread::Builder::new()
@@ -671,8 +672,7 @@ impl KinewrightApp {
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
         let mut app = Self {
-            #[cfg(test)]
-            test_data_root: None,
+            data_dir,
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -821,11 +821,17 @@ impl KinewrightApp {
         // The investigator settings file is read once at startup (IN2 §2.1
         // rule 6); a malformed file opens one incident and is left alone
         // until the person changes a setting (rule 3).
-        let (settings_path, settings_durable) = crate::investigator::investigator_config_path();
-        let settings_load = crate::investigator::load_investigator_settings_for_run(
-            &settings_path,
-            settings_durable,
-        );
+        let settings_path = crate::investigator::investigator_config_path(&app.data_dir);
+        let settings_durable = settings_path.is_ok();
+        let settings_load = match settings_path {
+            Ok(path) => crate::investigator::load_investigator_settings_for_run(&path, true),
+            Err(error) => crate::investigator::SettingsLoad {
+                settings: crate::investigator::InvestigatorSettings::default(),
+                problem: Some(crate::investigator::SettingsLoadProblem::Unreadable(
+                    error.to_string(),
+                )),
+            },
+        };
         crate::investigator::apply_settings_load_for_run(&mut app, settings_load, settings_durable);
         let opened_path = app.focused().project_path.clone();
         if let Some(observation) = load_error {
@@ -872,7 +878,7 @@ impl KinewrightApp {
         if !app.focused().source_admission.is_studio() {
             app.queue_media_status_checks_for_project(0);
         }
-        app
+        Ok(app)
     }
 
     pub(crate) fn focused(&self) -> &ProjectSession {
@@ -969,7 +975,7 @@ impl KinewrightApp {
                     )
                 } else {
                     kinewright_project::editing_session::Ja1EditingSession::new(
-                        &crate::recovery::directory(),
+                        &crate::recovery::directory(&self.data_dir).map_err(|e| e.to_string())?,
                         &session.core,
                         kinewright_project::storage_budget::StorageLimits::default(),
                     )
@@ -1380,6 +1386,7 @@ impl KinewrightApp {
             sidecar_mode,
             Some(writer),
             refuse_rename,
+            &self.data_dir,
         )?;
         // The investigator settings are app-wide: a new project inherits the
         // focused copy rather than re-reading the file. Mutes stay
@@ -5103,7 +5110,7 @@ pub(crate) fn run() -> eframe::Result {
                 premultiply: premultiply_table(),
                 repaint: Arc::new(move || repaint_context.request_repaint()),
             });
-            let mut app = KinewrightApp::new(media, startup);
+            let mut app = KinewrightApp::new(media, startup)?;
             app.native_display = Some(NativeDisplay {
                 session: display,
                 renderer: render_state.clone(),
@@ -6912,6 +6919,38 @@ pub(crate) mod in1_tests {
         }
     }
 
+    #[test]
+    fn persistent_startup_settings_use_the_engine_root() {
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_test_data_dir(
+                FfmpegMediaEngine::test_gpu_context().unwrap(),
+                kinewright_media::test_support::TempDirectory::new("startup-private-settings"),
+            )
+            .unwrap(),
+        );
+        let settings = crate::investigator::InvestigatorSettings {
+            enabled: true,
+            budgets: crate::investigator::InvestigatorBudgets {
+                max_turns: 43,
+                max_tokens: 54_321,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::investigator::save_investigator_settings_to(
+            &engine.data_dir().join("investigator.json"),
+            &settings,
+        )
+        .unwrap();
+        let mut app = KinewrightApp::new(Arc::clone(&engine), None).unwrap();
+        assert_eq!(app.data_dir, engine.data_dir());
+        let loaded = &app.focused().investigator.as_ref().unwrap().settings;
+        assert!(loaded.enabled);
+        assert_eq!(loaded.budgets.max_turns, 43, "APP_SETTINGS_USE_ENGINE_ROOT");
+        assert_eq!(loaded.budgets.max_tokens, 54_321);
+        in1_shutdown(&mut app);
+    }
+
     /// The smallest real app that can tick: one project session on a real
     /// `Core` actor, a real engine behind the trait arcs, and default UI
     /// state everywhere else. There is no window or model. Tests that play
@@ -6945,6 +6984,7 @@ pub(crate) mod in1_tests {
             &SidecarMode::None,
             None,
             None,
+            engine.data_dir(),
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -6957,8 +6997,7 @@ pub(crate) mod in1_tests {
         let (_frames_tx, frames) = crossbeam_channel::unbounded();
         let (_media_tx, media_events) = crossbeam_channel::unbounded();
         let app = KinewrightApp {
-            #[cfg(test)]
-            test_data_root: Some(engine.test_data_dir().to_path_buf()),
+            data_dir: engine.data_dir().to_path_buf(),
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -10277,6 +10316,7 @@ pub(crate) mod in1_tests {
             &SidecarMode::None,
             None,
             None,
+            &app.data_dir,
         )
         .expect("the second IN2 project builds");
         app.projects.push(project);
@@ -12110,6 +12150,7 @@ mod in2b_tests {
             &mode,
             Some(Arc::clone(&writer)),
             None,
+            engine.data_dir(),
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -12122,8 +12163,7 @@ mod in2b_tests {
         let (_frames_tx, frames) = crossbeam_channel::unbounded();
         let (_media_tx, media_events) = crossbeam_channel::unbounded();
         let app = KinewrightApp {
-            #[cfg(test)]
-            test_data_root: Some(engine.test_data_dir().to_path_buf()),
+            data_dir: engine.data_dir().to_path_buf(),
             projects: vec![project],
             focused_project: 0,
             next_project_id: 2,
@@ -12502,6 +12542,7 @@ mod in2b_tests {
             },
             Some(writer),
             None,
+            &app.data_dir,
         )
         .expect("the reopen builds");
         let report = reopened
@@ -15322,7 +15363,7 @@ mod in2b_tests {
             )
             .expect("the test engine starts"),
         );
-        let mut app = KinewrightApp::new(engine.clone(), Some(project_path));
+        let mut app = KinewrightApp::new(engine.clone(), Some(project_path)).unwrap();
         app.route_incidents();
         {
             let log = app

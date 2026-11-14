@@ -15,9 +15,8 @@ use crate::{
     audio::decode_audio_peaks,
     decode::thumbnail,
     derived_cache::{
-        CacheStats, ContentHashes, JsonCache, TempFileStyle, atomic_write, cache_path, cache_root,
-        clear_cache_root, create_cache_dir, inventory_cache_root, read_cache, spawn_worker,
-        trim_cache,
+        CacheDirectory, CacheStats, ContentHashes, JsonCache, TempFileStyle, atomic_write,
+        cache_path, cache_root, read_cache, spawn_worker, trim_cache,
     },
 };
 
@@ -43,7 +42,7 @@ pub(crate) struct VisualAssetService {
     jobs: crate::worker::OwnedWorker<VisualJob>,
     results: Mutex<VisualAuthorities>,
     in_flight: VisualInFlight,
-    root: PathBuf,
+    root: CacheDirectory,
 }
 
 impl VisualAssetService {
@@ -51,7 +50,7 @@ impl VisualAssetService {
         let (jobs, jobs_rx) = bounded(JOB_CAPACITY);
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let worker_in_flight = Arc::clone(&in_flight);
-        let root = cache_root(data_dir, "visual-assets", CACHE_VERSION);
+        let root = cache_root(data_dir, "visual-assets", CACHE_VERSION)?;
         let mut worker = VisualAssetWorker::new(root.clone(), worker_in_flight);
         let jobs = spawn_worker(
             "kinewright-visual-assets",
@@ -141,11 +140,11 @@ impl VisualAssetService {
     }
 
     pub(crate) fn cache_stats(&self) -> Result<CacheStats, MediaError> {
-        inventory_cache_root(&self.root)
+        self.root.inventory()
     }
 
     pub(crate) fn clear_cache(&self) -> Result<CacheStats, MediaError> {
-        clear_cache_root(&self.root)
+        self.root.clear()
     }
 
     fn request(&self, grant: kinewright_core::LegacyMediaGrant, job: Job) -> bool {
@@ -241,13 +240,13 @@ enum JobKey {
 }
 
 struct VisualAssetWorker {
-    root: PathBuf,
+    root: CacheDirectory,
     in_flight: VisualInFlight,
     hashes: ContentHashes,
 }
 
 impl VisualAssetWorker {
-    fn new(root: PathBuf, in_flight: VisualInFlight) -> Self {
+    fn new(root: CacheDirectory, in_flight: VisualInFlight) -> Self {
         Self {
             root,
             in_flight,
@@ -359,7 +358,7 @@ impl VisualAssetWorker {
         request_generation: u64,
     ) -> Result<VisualAssetResult, MediaError> {
         let hash = self.content_hash(&asset.path)?;
-        let store = WaveformStore::new(self.root.join("waveforms"));
+        let store = WaveformStore::new(self.root.child("waveforms")?);
         if let Some(mut cached) = store.load(&hash, asset.fps, asset.duration)? {
             cached.asset = asset.id;
             cached.path.clone_from(&asset.path);
@@ -396,7 +395,7 @@ impl VisualAssetWorker {
         request_generation: u64,
     ) -> Result<VisualAssetResult, MediaError> {
         let hash = self.content_hash(&asset.path)?;
-        let store = ThumbnailStore::new(self.root.join("thumbnails"));
+        let store = ThumbnailStore::new(self.root.child("thumbnails")?);
         let image =
             if let Some(cached) = store.load(&hash, asset.fps, key.source_at, key.max_width)? {
                 cached
@@ -423,7 +422,7 @@ struct WaveformStore {
 }
 
 impl WaveformStore {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: CacheDirectory) -> Self {
         Self {
             cache: JsonCache::new(root, CACHE_VERSION, "waveform")
                 .with_write_options("visual asset", TempFileStyle::ReplaceExtension),
@@ -465,11 +464,11 @@ struct StoredWaveform {
 }
 
 struct ThumbnailStore {
-    root: PathBuf,
+    root: CacheDirectory,
 }
 
 impl ThumbnailStore {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: CacheDirectory) -> Self {
         Self { root }
     }
 
@@ -480,6 +479,7 @@ impl ThumbnailStore {
         source_at: TimeCode,
         max_width: u32,
     ) -> Result<Option<RgbaImage>, MediaError> {
+        self.root.check()?;
         let Some(bytes) = read_cache(&self.path_for(hash, fps, source_at, max_width), "thumbnail")?
         else {
             return Ok(None);
@@ -495,7 +495,7 @@ impl ThumbnailStore {
         max_width: u32,
         image: &RgbaImage,
     ) -> Result<(), MediaError> {
-        create_cache_dir(&self.root, "thumbnail")?;
+        self.root.check()?;
         let bytes = encode_thumbnail_cache(image)?;
         atomic_write(
             &self.path_for(hash, fps, source_at, max_width),
@@ -503,13 +503,13 @@ impl ThumbnailStore {
             "visual asset",
             TempFileStyle::ReplaceExtension,
         )?;
-        trim_cache(&self.root, MAX_THUMBNAIL_FILES, MAX_THUMBNAIL_BYTES)?;
+        trim_cache(self.root.path(), MAX_THUMBNAIL_FILES, MAX_THUMBNAIL_BYTES)?;
         Ok(())
     }
 
     fn path_for(&self, hash: &str, fps: Rational, source_at: TimeCode, max_width: u32) -> PathBuf {
         cache_path(
-            &self.root,
+            self.root.path(),
             hash,
             &format!(
                 "-{}-{}-{}-{max_width}",
@@ -563,6 +563,10 @@ fn decode_thumbnail_cache(bytes: &[u8]) -> Option<RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+    fn cache_directory(root: &Path) -> CacheDirectory {
+        CacheDirectory::new(root, Path::new("")).unwrap()
+    }
+
     use std::fs;
 
     use super::*;
@@ -607,7 +611,7 @@ mod tests {
     #[test]
     fn c6b_thumbnail_cache_misses_when_fps_changes() {
         let directory = TempDirectory::new("c6b-thumbnail-recipe");
-        let store = ThumbnailStore::new(directory.root().into());
+        let store = ThumbnailStore::new(cache_directory(directory.root()));
         let image = RgbaImage {
             width: 1,
             height: 1,
@@ -640,7 +644,7 @@ mod tests {
             jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::default(),
-            root: directory.root().into(),
+            root: cache_directory(directory.root()),
         };
         let a = kinewright_core::MediaSourceOrigin::new_project()
             .legacy_media()
@@ -659,8 +663,10 @@ mod tests {
             !service.request_waveform(asset(1), 1, a.clone()),
             "C6A_RETIRED_REPLY_REFUSES_DUPLICATE_UNTIL_COMPLETION"
         );
-        let mut worker =
-            VisualAssetWorker::new(directory.root().into(), Arc::clone(&service.in_flight));
+        let mut worker = VisualAssetWorker::new(
+            cache_directory(directory.root()),
+            Arc::clone(&service.in_flight),
+        );
         assert!(worker.handle_scoped(pending));
         assert!(
             old.try_recv().is_ok(),
@@ -686,7 +692,7 @@ mod tests {
             jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::default(),
-            root: directory.root().into(),
+            root: cache_directory(directory.root()),
         };
         let a = kinewright_core::MediaSourceOrigin::new_project()
             .legacy_media()
@@ -696,8 +702,10 @@ mod tests {
             .unwrap();
         let a_results = service.results(&a);
         let b_results = service.results(&b);
-        let mut worker =
-            VisualAssetWorker::new(directory.root().into(), Arc::clone(&service.in_flight));
+        let mut worker = VisualAssetWorker::new(
+            cache_directory(directory.root()),
+            Arc::clone(&service.in_flight),
+        );
         for generation in 0..RESULT_CAPACITY as u64 {
             assert!(service.request_waveform(asset(1), generation, a.clone()));
             assert!(worker.handle_scoped(receiver.recv().unwrap()));
@@ -729,12 +737,13 @@ mod tests {
 
     #[test]
     fn c2_r4_equal_visual_jobs_and_results_are_partitioned_by_authority() {
+        let cache_data = TempDirectory::new("visual-cache-state");
         let (jobs, jobs_rx) = bounded(4);
         let service = VisualAssetService {
             jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::default(),
-            root: PathBuf::new(),
+            root: cache_directory(cache_data.root()),
         };
         let a = kinewright_core::MediaSourceOrigin::new_project()
             .legacy_media()
@@ -783,7 +792,8 @@ mod tests {
         origin.revoke_legacy_media();
         let (reply, receiver) = bounded(1);
         drop(receiver);
-        let mut worker = VisualAssetWorker::new(PathBuf::new(), Arc::default());
+        let cache_data = TempDirectory::new("visual-worker-state");
+        let mut worker = VisualAssetWorker::new(cache_directory(cache_data.root()), Arc::default());
         let job = Job::Waveform {
             asset: asset(1),
             request_generation: 1,
@@ -796,13 +806,14 @@ mod tests {
 
     #[test]
     fn a_full_job_queue_is_reported_without_leaking_in_flight_keys() {
+        let cache_data = TempDirectory::new("visual-cache-state");
         let (jobs, _jobs_rx) = bounded(1);
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let service = VisualAssetService {
             jobs: crate::worker::OwnedWorker::inline(jobs),
             results: Mutex::default(),
             in_flight: Arc::clone(&in_flight),
-            root: PathBuf::from("visual-assets/v1"),
+            root: cache_directory(cache_data.root()),
         };
 
         let grant = kinewright_core::MediaSourceOrigin::new_project()
@@ -854,7 +865,7 @@ mod tests {
     #[test]
     fn waveform_cache_round_trips_and_rebinds_asset() {
         let directory = TempDirectory::new("waveform-cache");
-        let store = WaveformStore::new(directory.root().to_path_buf());
+        let store = WaveformStore::new(cache_directory(directory.root()));
         let source = waveform("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         store.save(&source).unwrap();
 
@@ -876,7 +887,7 @@ mod tests {
     #[test]
     fn waveform_cache_rejects_metadata_mismatch() {
         let directory = TempDirectory::new("waveform-mismatch");
-        let store = WaveformStore::new(directory.root().to_path_buf());
+        let store = WaveformStore::new(cache_directory(directory.root()));
         let source = waveform("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         store.save(&source).unwrap();
 

@@ -622,14 +622,20 @@ impl KinewrightApp {
             self.commit_investigator_settings();
         }
         // The non-durable-path notice (§2.1 rule 1).
-        let (path, durable) = investigator_config_path();
-        if !durable {
+        let path = investigator_config_path(&self.data_dir);
+        let durable = self
+            .focused()
+            .investigator
+            .as_ref()
+            .is_some_and(|session| session.settings_durable);
+        if !durable || path.is_err() {
+            let reason = path.err().map_or_else(
+                || "storage was unavailable at startup; restart after it is available".to_owned(),
+                |error| error.to_string(),
+            );
             ui.colored_label(
                 color::TEXT_MUTED,
-                format!(
-                    "Settings will not persist: no config directory was found, using {}.",
-                    path.display()
-                ),
+                format!("Settings stay in memory: {reason}."),
             );
         }
         // The focused project's mutes, each removable (§2.4 rule 14).

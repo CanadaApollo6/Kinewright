@@ -1,7 +1,6 @@
 //! Crash recovery for the operation spine.
 //!
-//! Journals live under `%LOCALAPPDATA%/Kinewright/recovery/` (with the system
-//! temporary directory as a fallback when `LOCALAPPDATA` is unavailable),
+//! Journals live under the application's persistent data root in `recovery/`,
 //! ONE FILE PER PROJECT: saved projects journal to a name derived from their
 //! path (`<stem>-<fnv64>.journal`, stable across builds so a crashed project
 //! finds its journal again), unsaved projects to `unsaved-N.journal`. Each
@@ -40,9 +39,7 @@ use kinewright_core::{
 };
 #[cfg(test)]
 use kinewright_project::canonical_project_identity;
-use kinewright_project::{
-    JOURNAL_MAGIC as MAGIC, allocate_journal_path, default_recovery_directory,
-};
+use kinewright_project::{JOURNAL_MAGIC as MAGIC, allocate_journal_path};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, type_size};
@@ -73,12 +70,12 @@ pub(crate) fn with_ja_directory<T>(directory: PathBuf, run: impl FnOnce() -> T) 
 }
 
 /// Use the same recovery root for the GUI recorder and Studio activation.
-pub(crate) fn directory() -> PathBuf {
+pub(crate) fn directory(data_dir: &Path) -> Result<PathBuf, kinewright_core::MediaError> {
     #[cfg(test)]
     if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
-        return directory;
+        return Ok(directory);
     }
-    default_recovery_directory()
+    kinewright_project::recovery::recovery_directory(data_dir)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -760,6 +757,8 @@ pub(crate) struct Recovery {
     recorder: Option<Recorder>,
     pending: Vec<PendingJournal>,
     runtime_error: Arc<Mutex<Option<String>>>,
+    #[cfg(test)]
+    test_data_owner: Option<kinewright_media::test_support::TempDirectory>,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -796,17 +795,39 @@ impl Recovery {
             recorder: None,
             pending: vec![],
             runtime_error: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_data_owner: None,
         }
     }
 
-    pub(crate) fn start(core: &Core, project_path: Option<&Path>) -> Self {
-        Self::start_in(directory(), core, project_path)
+    pub(crate) fn start(
+        data_dir: &Path,
+        core: &Core,
+        project_path: Option<&Path>,
+    ) -> Result<Self, kinewright_core::MediaError> {
+        Ok(Self::start_in(directory(data_dir)?, core, project_path))
     }
 
     /// Start a per-project recorder without repeating the process-startup
     /// recovery scan. Only the startup session owns restore decisions.
-    pub(crate) fn start_attached(core: &Core, project_path: Option<&Path>) -> Self {
-        Self::start_attached_in(directory(), core, project_path)
+    pub(crate) fn start_attached(
+        data_dir: &Path,
+        core: &Core,
+        project_path: Option<&Path>,
+    ) -> Result<Self, kinewright_core::MediaError> {
+        Ok(Self::start_attached_in(
+            directory(data_dir)?,
+            core,
+            project_path,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_test_data(&mut self, owner: kinewright_media::test_support::TempDirectory) {
+        let root = kinewright_media::data_subdirectory(owner.root(), Path::new(""))
+            .expect("the fixture data root resolves");
+        assert!(self.directory.starts_with(root));
+        self.test_data_owner = Some(owner);
     }
 
     #[cfg(test)]
@@ -858,6 +879,8 @@ impl Recovery {
             recorder: None,
             pending,
             runtime_error,
+            #[cfg(test)]
+            test_data_owner: None,
         };
         recovery.attach(core, project_path);
         recovery
@@ -2251,6 +2274,7 @@ mod tests {
             recorder: None,
             pending: Vec::new(),
             runtime_error: Arc::new(Mutex::new(None)),
+            test_data_owner: None,
         };
         let pending = |state| PendingJournal {
             directory: None,

@@ -390,4 +390,60 @@ mod tests {
             "DQ1_EXISTING_PARENT_UNCHANGED"
         );
     }
+    #[test]
+    fn dq1_default_root_uses_private_environment_and_never_temporary_fallback() {
+        const CHILD: &str = "KINEWRIGHT_DATA_ROOT_CHILD";
+        if let Some(mode) = std::env::var_os(CHILD) {
+            let temporary = std::env::temp_dir();
+            assert_eq!(fs::read_dir(&temporary).unwrap().count(), 0);
+            if mode == "missing" {
+                assert!(
+                    matches!(default_data_dir(), Err(MediaError::DataDirectory(_))),
+                    "DQ1_NO_TEMPORARY_DATA_FALLBACK"
+                );
+            } else {
+                let base = PathBuf::from(std::env::var_os("KINEWRIGHT_ROOT_INPUT").unwrap());
+                let root = default_data_dir().unwrap();
+                let name = if cfg!(target_os = "linux") {
+                    "kinewright"
+                } else {
+                    "Kinewright"
+                };
+                assert_eq!(
+                    root,
+                    compatible_path(fs::canonicalize(base).unwrap().join(name))
+                );
+            }
+            assert_eq!(
+                fs::read_dir(&temporary).unwrap().count(),
+                0,
+                "DQ1_NO_APPLICATION_DATA_IN_TEMP"
+            );
+            return;
+        }
+        let fixture = TempDirectory::new("dq1-root-environment");
+        let temporary = fixture.path("temporary");
+        fs::create_dir(&temporary).unwrap();
+        let base = fixture.path("data-home");
+        for mode in ["present", "missing"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "data_dir::tests::dq1_default_root_uses_private_environment_and_never_temporary_fallback", "--test-threads=1"])
+                .env(CHILD, mode).env("KINEWRIGHT_ROOT_INPUT", &base)
+                .env("TMPDIR", &temporary).env("TEMP", &temporary).env("TMP", &temporary)
+                .env_remove("HOME").env_remove("XDG_DATA_HOME").env_remove("LOCALAPPDATA");
+            if mode == "present" {
+                child.env("XDG_DATA_HOME", &base).env("LOCALAPPDATA", &base);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed;"),
+                "DQ1_ROOT_ENVIRONMENT_CHILD {mode}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read_dir(&temporary).unwrap().count(), 0);
+        }
+    }
 }

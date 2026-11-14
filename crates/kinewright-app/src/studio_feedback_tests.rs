@@ -1491,24 +1491,23 @@ fn s3_fix2_recovery_follows_identity() {
         "C3F2_MISMATCH_INTACT"
     );
 
-    // With LOCALAPPDATA unset, the real location is per-user state, never temp.
-    let temp_dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-    match kinewright_project::feedback_state_directory() {
-        Ok(directory) => {
-            assert!(
-                !directory.starts_with(&temp_dir),
-                "C3F2_NEVER_TEMP {directory:?}"
-            );
-            if std::env::var_os("LOCALAPPDATA").is_none() {
-                assert!(
-                    directory.ends_with("kinewright/feedback"),
-                    "C3F2_USER_STATE {directory:?}"
-                );
-            }
-            eprintln!("C3F2 state folder: {}", directory.display());
-        }
-        Err(why) => eprintln!("C3F2 state folder refused: {why}"),
-    }
+    // Drive the persistent-state rule with private inputs, never the person's
+    // actual state directory or process environment.
+    let roots = TempDirectory::new_in(&workspace_target_dir(), "private-feedback-roots");
+    let base = roots.path("state");
+    let temporary = roots.path("temporary");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&temporary).unwrap();
+    let directory = kinewright_project::feedback_state_directory_with(
+        |name| (name == "LOCALAPPDATA").then(|| base.as_os_str().to_owned()),
+        &temporary,
+    )
+    .unwrap();
+    assert_eq!(directory, base.join("Kinewright/feedback"));
+    assert!(
+        !directory.starts_with(&temporary),
+        "C3F2_NEVER_TEMP {directory:?}"
+    );
 }
 
 /// Fix 2 invariant 2: kept notes that cannot be read refuse every send. Nothing

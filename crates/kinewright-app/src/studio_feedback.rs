@@ -1560,9 +1560,12 @@ impl Feedback {
     )]
     fn state_directory(&self) -> Result<PathBuf, String> {
         #[cfg(test)]
-        if let Some(directory) = &self.directory_override {
-            return Ok(directory.clone());
+        {
+            self.directory_override
+                .clone()
+                .ok_or_else(|| "test must supply an explicit feedback state directory".to_owned())
         }
+        #[cfg(not(test))]
         kinewright_project::feedback_state_directory()
     }
     /// Write the kept state now. Settles pixel digests first, so the kept proofs

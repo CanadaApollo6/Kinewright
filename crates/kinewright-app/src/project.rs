@@ -356,6 +356,7 @@ impl ProjectSession {
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
         refuse_rename: Option<&RefuseRename>,
+        data_dir: &Path,
     ) -> Result<Self, String> {
         let name = name.into();
         let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
@@ -377,9 +378,19 @@ impl ProjectSession {
         let recovery = if !writable {
             Recovery::read_only()
         } else if id == 1 {
-            Recovery::start(&core, io_project_path)
+            Recovery::start(data_dir, &core, io_project_path).map_err(|e| e.to_string())?
         } else {
-            Recovery::start_attached(&core, io_project_path)
+            Recovery::start_attached(data_dir, &core, io_project_path).map_err(|e| e.to_string())?
+        };
+        let studio = crate::studio::Studio::default();
+        #[cfg(test)]
+        let studio = {
+            let mut studio = studio;
+            studio.feedback.directory_override = Some(
+                kinewright_media::data_subdirectory(data_dir, Path::new("feedback-state"))
+                    .map_err(|error| error.to_string())?,
+            );
+            studio
         };
         let document = Arc::new(document);
         let writer_identity = recovery
@@ -435,7 +446,7 @@ impl ProjectSession {
             media_retirement: source_admission.legacy_media(),
             source_admission,
             media_backend,
-            studio: crate::studio::Studio::default(),
+            studio,
             ja1: None,
             checkpoint_recovery: None,
             ja1_activation: None,
@@ -2137,10 +2148,11 @@ mod tests {
     /// through the exact struct the app polls. Id 2 takes the attached
     /// recovery path (no process-startup scan).
     fn dirty_test_session(document: Document) -> ProjectSession {
+        let data_root = TempDirectory::new("dirty-session-data");
         let playback: Arc<dyn Playback> = Arc::new(StubMedia);
         let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
-        ProjectSession::create(
+        let mut session = ProjectSession::create(
             2,
             "dirty-test",
             document,
@@ -2154,8 +2166,11 @@ mod tests {
             &SidecarMode::None,
             None,
             None,
+            data_root.root(),
         )
-        .expect("the dirty-test session builds")
+        .expect("the dirty-test session builds");
+        session.recovery.hold_test_data(data_root);
+        session
     }
 
     fn shutdown_test_session(session: &mut ProjectSession) {
@@ -2350,10 +2365,11 @@ mod tests {
     /// A session on a project file with the digest-gated load, behind the stub
     /// media backends. Each caller shuts its session down.
     fn sidecar_session(id: u64, path: &Path) -> ProjectSession {
+        let data_root = TempDirectory::new("sidecar-session-data");
         let playback: Arc<dyn Playback> = Arc::new(StubMedia);
         let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
-        ProjectSession::create(
+        let mut session = ProjectSession::create(
             id,
             "sidecar-test",
             Document::default(),
@@ -2369,8 +2385,11 @@ mod tests {
             },
             None,
             None,
+            data_root.root(),
         )
-        .expect("the sidecar-test session builds")
+        .expect("the sidecar-test session builds");
+        session.recovery.hold_test_data(data_root);
+        session
     }
 
     fn sorted_entries(directory: &Path) -> Vec<String> {
@@ -2757,6 +2776,7 @@ mod tests {
         let playback: Arc<dyn Playback> = Arc::new(StubMedia);
         let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        let data_root = TempDirectory::new("refuse-session-data");
         let mut session = ProjectSession::create(
             31,
             "refuse-test",
@@ -2773,8 +2793,10 @@ mod tests {
             },
             None,
             Some(&failing),
+            data_root.root(),
         )
         .expect("the session builds");
+        session.recovery.hold_test_data(data_root);
         assert!(
             session.sidecar_suspended,
             "a failed refuse suspends the session"

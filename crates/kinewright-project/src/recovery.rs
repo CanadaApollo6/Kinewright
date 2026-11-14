@@ -17,11 +17,19 @@ use crate::project::canonical_project_identity;
 /// The recovery-journal magic, shared with the app's writer/inspector.
 pub const JOURNAL_MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL\n";
 
-pub fn default_recovery_directory() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map_or_else(std::env::temp_dir, PathBuf::from)
-        .join("Kinewright")
-        .join("recovery")
+/// The recovery journal directory under the persistent application data root.
+/// # Errors
+/// Returns the typed data-directory error when no root is available or safe.
+pub fn default_recovery_directory() -> Result<PathBuf, kinewright_core::MediaError> {
+    let data_dir = kinewright_media::default_data_dir()?;
+    recovery_directory(&data_dir)
+}
+
+/// Resolve recovery storage for an explicitly supplied application root.
+/// # Errors
+/// Refuses unsafe directory components and filesystem failures.
+pub fn recovery_directory(data_dir: &Path) -> Result<PathBuf, kinewright_core::MediaError> {
+    kinewright_media::data_subdirectory(data_dir, Path::new("recovery"))
 }
 
 /// Where Studio feedback recovery state lives (S3 C3 fix 2): persistent
