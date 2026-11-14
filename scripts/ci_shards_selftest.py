@@ -38,6 +38,81 @@ def log(binary, names):
 
 
 class Sharding(unittest.TestCase):
+    def test_project_slow_cases_are_isolated_but_fast_keeps_one_batch(self):
+        entries = [entry for entry in st.read_manifest() if entry[0] == "kinewright_project"]
+        self.assertEqual(len(entries), 16)
+        names = [entry[1] for entry in entries]
+        compiled = {"rust-suites": {"kinewright_project": {
+            "binary-path": "/target/debug/deps/kinewright_project-0123456789abcdef",
+            "cwd": "/repo", "testcases": {name: {"ignored": True} for name in names}}}}
+        fast = cs.plan(compiled, "fast", 8)
+        fast_units = [unit for shard in fast["shards"] for unit in shard]
+        self.assertEqual(len(fast_units), 1)
+        self.assertTrue(fast_units[0]["full"])
+        self.assertFalse(fast_units[0]["isolated"])
+        self.assertEqual(fast_units[0]["tests"], sorted(names))
+        for test in compiled["rust-suites"]["kinewright_project"]["testcases"].values():
+            test["ignored"] = False
+        with mock.patch.object(st, "read_manifest", return_value=entries):
+            slow = cs.plan(compiled, "slow", 8)
+        slow_units = [unit for shard in slow["shards"] for unit in shard]
+        self.assertEqual(len(slow_units), len(names), "PROJECT_SLOW_TESTS_HAVE_SEPARATE_PROCESSES")
+        self.assertEqual(sorted(unit["tests"][0] for unit in slow_units), sorted(names))
+        self.assertTrue(all(unit["isolated"] and not unit["full"] for unit in slow_units))
+        self.assertTrue(all(len(unit["tests"]) == 1 and unit["timeout_seconds"] == 600 for unit in slow_units))
+        self.assertGreater(sum(bool(shard) for shard in slow["shards"]), 1)
+
+    def test_manifest_slow_plan_spreads_project_cases_and_stays_balanced(self):
+        for os_name in ("linux", "windows"):
+            with self.subTest(os_name=os_name), mock.patch.object(st, "host_os", return_value=os_name):
+                entries = [entry for entry in st.read_manifest()
+                           if not entry[3].endswith("-only") or entry[3] == os_name + "-only"]
+                suites = {}
+                for binary, name, _, _ in entries:
+                    suite = suites.setdefault(binary, {
+                        "binary-path": f"/target/debug/deps/{binary}-0123456789abcdef",
+                        "cwd": "/repo", "testcases": {}})
+                    suite["testcases"][name] = {"ignored": False}
+                data = cs.plan({"rust-suites": suites}, "slow", 8)
+                project = [(i, unit) for i, shard in enumerate(data["shards"]) for unit in shard
+                           if data["suites"][unit["suite"]]["label"] == "kinewright_project"]
+                self.assertEqual(len(project), 16)
+                self.assertTrue(all(len(unit["tests"]) == 1 and unit["isolated"] for _, unit in project))
+                self.assertGreater(len({index for index, _ in project}), 1, "PROJECT_CORPUS_USES_MULTIPLE_SHARDS")
+                self.assertTrue(all(0 < unit["estimate"] < 600 for _, unit in project))
+                self.assertTrue(all(unit["timeout_seconds"] == 600 for _, unit in project))
+                self.assertLessEqual(max(data["estimated_seconds"]) - min(data["estimated_seconds"]), 60,
+                                     "SLOW_SHARD_PREDICTIONS_STAY_WITHIN_A_MINUTE")
+                app = [unit for shard in data["shards"] for unit in shard
+                       if data["suites"][unit["suite"]]["label"] == "kinewright_app"]
+                self.assertEqual(len(app), 1)
+                self.assertFalse(app[0]["isolated"], "APP_TEST_ORDER_STAYS_IN_ONE_PROCESS")
+
+    def test_app_batch_finishes_before_slow_project_processes_on_its_runner(self):
+        entries = [("kinewright_app", "app", "source", "any"),
+                   ("kinewright_project", "project", "source", "any")]
+        suites = {binary: {"binary-path": f"/target/debug/deps/{binary}-0123456789abcdef",
+                           "cwd": "/repo", "testcases": {name: {"ignored": False}}}
+                  for binary, name, _, _ in entries}
+        with mock.patch.object(st, "read_manifest", return_value=entries):
+            data = cs.plan({"rust-suites": suites}, "slow", 1)
+        app_finished = threading.Event()
+
+        def execute(plan, unit, number, index, directory):
+            binary = plan["suites"][unit["suite"]]["label"]
+            if binary == "kinewright_app":
+                app_finished.set()
+            else:
+                self.assertTrue(app_finished.is_set(), "PROJECT_STARTS_AFTER_THE_APP_BATCH")
+            return {"log": f"unit-{number}.log", "code": 0, "seconds": 0.01,
+                    "binary": binary, "tests": unit["tests"]}
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(cs, "execute_unit", side_effect=execute), \
+             contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temp)
+            cs.save(root / "plan.json", data)
+            cs.run_shard(root / "plan.json", 0, root / "results")
+
     def test_linux_only_host_hooks_match_windows_slow_and_fast_accounting(self):
         # The parent module is absent on Windows, independently of cfg_attr's
         # choice to ignore a compiled test in the fast tier.
