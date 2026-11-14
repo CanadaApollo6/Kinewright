@@ -333,3 +333,54 @@ fn sparse_fold_scratch_refusal_does_not_mutate_the_source() {
     );
     check(&owner);
 }
+
+#[test]
+fn origin_array_spare_capacity_stays_charged_after_redo_discard() {
+    let doc = document();
+    let track = doc.tracks[0].id;
+    let mut owner = make(doc, Role::Ordinary.bounds());
+    for n in 0..256 {
+        owner
+            .execute(edit(track, n), origin(2 + n), vec![], None)
+            .unwrap();
+    }
+    for n in 0..255 {
+        owner
+            .execute(Command::Undo, origin(1000 + n), vec![], None)
+            .unwrap();
+    }
+    owner
+        .execute(edit(track, 256), origin(2000), vec![], None)
+        .unwrap();
+    assert_eq!(owner.origins.0.len(), 2);
+    let array =
+        (owner.origins.0.capacity() * std::mem::size_of::<super::owner::LiveOrigin>()) as u64;
+    assert!(
+        owner.owner_bytes() >= array,
+        "OWNER_BOUND_COUNTS_ORIGIN_ARRAY_SPARE_CAPACITY: bound={} array={array}",
+        owner.owner_bytes()
+    );
+    check(&owner);
+}
+
+#[test]
+fn an_empty_fold_releases_the_origin_array_without_copying() {
+    let doc = document();
+    let track = doc.tracks[0].id;
+    let mut owner = make(
+        doc,
+        RoleBounds {
+            step_cap: 0,
+            ..Role::Ordinary.bounds()
+        },
+    );
+    owner
+        .execute(edit(track, 0), origin(2), vec![], None)
+        .unwrap();
+    assert_eq!(
+        owner.origins.0.capacity(),
+        0,
+        "EMPTY_ORIGIN_ARRAY_RELEASED_WITHOUT_COPY"
+    );
+    check(&owner);
+}

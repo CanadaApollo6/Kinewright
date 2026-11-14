@@ -3,6 +3,12 @@ use super::*;
 use kinewright_core::{Command, Operation, TrackId, undo::RetentionPolicy};
 
 pub(super) fn saved_open(owner: &OwnerHistory) {
+    assert!(
+        owner.owner_bytes()
+            >= (owner.origins.0.capacity() * std::mem::size_of::<super::owner::LiveOrigin>())
+                as u64,
+        "SAVED_OWNER_BOUND_COUNTS_ORIGIN_ARRAY_CAPACITY"
+    );
     if let Some(state) = &owner.fold {
         state.assert_matches(
             &owner.seeds,

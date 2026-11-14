@@ -195,6 +195,43 @@ pub(super) struct LiveOrigin {
 #[derive(Debug, Default)]
 pub(super) struct Origins(pub VecDeque<LiveOrigin>);
 impl Origins {
+    fn spare_bytes(capacity: usize, len: usize) -> Result<u64, Error> {
+        // Each live origin already pays for two inline slots. Charge the
+        // retained array above that allowance after a large fold/discard.
+        (capacity as u64)
+            .saturating_sub((len as u64).saturating_mul(2))
+            .checked_mul(std::mem::size_of::<LiveOrigin>() as u64)
+            .ok_or(Error::Capacity("owner metadata"))
+    }
+    fn planned_spare(&self, effects: &Effects) -> Result<(u64, u64), Error> {
+        let before_fold = self
+            .0
+            .len()
+            .checked_sub(effects.discarded.len())
+            .and_then(|n| n.checked_add(1))
+            .ok_or(Error::InvalidOrigin)?;
+        let after_fold = before_fold
+            .checked_sub(effects.folded.len())
+            .ok_or(Error::InvalidOrigin)?;
+        let capacity = if after_fold == 0 {
+            0
+        } else if before_fold > self.0.capacity() {
+            // VecDeque's amortized growth doubles; this non-byte element
+            // has a minimum allocation of four slots. No compaction copy.
+            self.0
+                .capacity()
+                .checked_mul(2)
+                .ok_or(Error::Capacity("owner metadata"))?
+                .max(before_fold)
+                .max(4)
+        } else {
+            self.0.capacity()
+        };
+        Ok((
+            Self::spare_bytes(self.0.capacity(), self.0.len())?,
+            Self::spare_bytes(capacity, after_fold)?,
+        ))
+    }
     pub fn get(&self, key: &CommandKey) -> Option<&LiveOrigin> {
         origin_lookups(1);
         self.0
@@ -491,6 +528,10 @@ impl OwnerHistory {
                 resources.remove(&origin.resources);
             }
         }
+        if origins.0.is_empty() {
+            // Releasing an empty buffer copies no retained origin.
+            origins.0 = VecDeque::new();
+        }
         if let Some(patch) = plan.fold {
             patch.commit(
                 fold.as_mut().expect("prepared folding role"),
@@ -647,6 +688,11 @@ fn prepare(
             .checked_sub(released)
             .ok_or(Error::InvalidOrigin)?;
     }
+    let (old_spare, next_spare) = origins.planned_spare(event.effects)?;
+    owner_bytes = owner_bytes
+        .checked_sub(old_spare)
+        .and_then(|n| n.checked_add(next_spare))
+        .ok_or(Error::Capacity("owner metadata"))?;
     let mut folded_approval_updates = Vec::new();
     let (fold_next, baseline_bytes, baseline_decode) = if event.effects.folded.is_empty() {
         (None, old_baseline, old_baseline_decode)
