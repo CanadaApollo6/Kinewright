@@ -217,10 +217,12 @@ fn directory_path(root: &Path) -> Result<PathBuf, Error> {
             error.into()
         }
     })?;
-    Ok(parent.join(
-        absolute
-            .file_name()
-            .ok_or(Error::Model(ModelError::InvalidSpec))?,
+    Ok(crate::data_dir::compatible_path(
+        parent.join(
+            absolute
+                .file_name()
+                .ok_or(Error::Model(ModelError::InvalidSpec))?,
+        ),
     ))
 }
 fn refuse_links(root: &Path, path: &Path) -> Result<(), Error> {
@@ -831,7 +833,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             root,
-            fs::canonicalize(real.join("share/kinewright/models/synthetic")).unwrap()
+            crate::data_dir::compatible_path(
+                fs::canonicalize(real.join("share/kinewright/models/synthetic")).unwrap()
+            )
         );
         assert_eq!(fs::read(root.join(FILE.name)).unwrap(), b"abc");
         provision_with(

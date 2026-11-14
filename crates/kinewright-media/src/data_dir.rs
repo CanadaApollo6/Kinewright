@@ -8,6 +8,18 @@ use std::{
 fn failure(reason: impl std::fmt::Display) -> MediaError {
     MediaError::DataDirectory(reason.to_string())
 }
+// Native libraries and displayed paths need the ordinary Windows spelling when
+// it can name the same file. Keep verbatim paths where simplification is unsafe.
+pub(crate) fn compatible_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let simplified = dunce::simplified(&path);
+        if simplified != path {
+            return simplified.to_path_buf();
+        }
+    }
+    path
+}
 fn metadata(path: &Path) -> io::Result<fs::Metadata> {
     fs::symlink_metadata(path)
 }
@@ -36,7 +48,10 @@ pub(crate) fn ensure_directory(root: &Path, relative: &Path) -> Result<PathBuf, 
     Ok(path)
 }
 fn create_private(path: &Path) -> Result<(), MediaError> {
+    #[cfg(unix)]
     let mut builder = fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
@@ -92,9 +107,11 @@ pub(crate) fn ensure_root(root: impl AsRef<Path>) -> Result<PathBuf, MediaError>
         builder.mode(0o700);
     }
     builder.create(parent).map_err(failure)?;
-    let root = fs::canonicalize(parent).map_err(failure)?.join(
-        root.file_name()
-            .ok_or_else(|| failure("data root needs a name"))?,
+    let root = compatible_path(
+        fs::canonicalize(parent).map_err(failure)?.join(
+            root.file_name()
+                .ok_or_else(|| failure("data root needs a name"))?,
+        ),
     );
     create_private(&root)?;
     Ok(root)
@@ -261,7 +278,7 @@ mod tests {
         let resolved = ensure_root(&chosen).unwrap();
         assert_eq!(
             resolved,
-            fs::canonicalize(&parent).unwrap().join("kinewright"),
+            compatible_path(fs::canonicalize(&parent).unwrap().join("kinewright")),
             "DQ1_LINKED_GRANDPARENT_ALLOWED"
         );
         let child = ensure_directory(&chosen, Path::new("captures")).unwrap();
@@ -294,5 +311,39 @@ mod tests {
             "DQ1_LINKED_CHILD_REFUSED"
         );
         assert_eq!(fs::read_dir(outside.root()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dq1_windows_ordinary_data_root_has_no_verbatim_prefix() {
+        let temp = TempDirectory::new("dq1-plain-root");
+        let root = ensure_root(temp.path("kinewright")).unwrap();
+        assert!(root.is_absolute());
+        assert!(
+            !root.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "DQ1_WINDOWS_PLAIN_DATA_ROOT: {}",
+            root.display()
+        );
+        assert_eq!(
+            fs::canonicalize(&root).unwrap(),
+            fs::canonicalize(temp.path("kinewright")).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dq1_windows_keeps_verbatim_paths_when_plain_spelling_is_invalid() {
+        assert_eq!(
+            compatible_path(PathBuf::from(r"\\?\C:\Users\person\kinewright")),
+            Path::new(r"C:\Users\person\kinewright")
+        );
+        for path in [
+            PathBuf::from(r"\\?\C:\Users\person\trailing."),
+            PathBuf::from(r"\\?\C:\Users\person\NUL"),
+            PathBuf::from(r"\\?\UNC\server\share\kinewright"),
+            PathBuf::from(format!(r"\\?\C:\{}", "a".repeat(260))),
+        ] {
+            assert_eq!(compatible_path(path.clone()), path);
+        }
     }
 }

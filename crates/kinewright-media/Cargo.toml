@@ -55,6 +55,7 @@ wgpu = { workspace = true, features = ["counters"] }
 rustix = { workspace = true, features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
+dunce = "=1.0.5"
 winapi-util = "=0.1.11"
 
 # Follow ../kinewright-hash/Cargo.toml: deny permits the local native FFI allowance;
