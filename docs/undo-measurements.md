@@ -62,6 +62,8 @@ The stated within-lane sample-range comparison holds in all five lanes:
 
 That does not establish equal latency distributions. Five-run median bands are **0.228779–0.233651** versus **0.237982–0.249927 ms**; median-of-medians rises from 0.229770 to 0.246545 ms (**7.3008%**). Treat strict flatness as unproven, despite meeting the explicit within-lane range criterion and every paired 1.5× ceiling. History-side phase counts are identical at both depths. Counts alone do not attribute the remaining drift to the kernel or allocator. Incremental kernel validation is outside this turn and was not attempted.
 
+The one-copy rule covers work added by history and owner accounting. Existing whole-document kernel validation, duration and identity passes remain unchanged and are counted separately; incremental kernel validation is a later job after the switch.
+
 ## Phase counters and the warm-path guard
 
 Counts below are totals for each measured phase, identical in all five new lanes. Counter snapshots and correctness queries are outside the timed regions. `document_bytes_serialised` counts only history exact document measurements; total bytes also include operation charging, digests, records and shared payload serialization. A zero document-byte count does not imply zero payload encoding. Counters count calls, not CPU time, allocations or bytes read by kernel passes.
@@ -169,7 +171,7 @@ The driver runs five strict old/new pairs, with a 600-second timeout per lane an
 
 ### Fixture and host
 
-The fixture has 400 clips, 400 effects and 3,200 keyframes. Clip 1 has 16 effects (the existing maximum), clips 2–385 have one effect, and clips 386–400 have none. Each effect has eight keyframes. Copy attributes transfers 16 effects / 128 keyframes to clip 400. Ripple delete removes clip 1 and moves the other 399 clips. Live document charge is 3,301,441 bytes; JSON is 245,233 bytes. `Step`, `StepCommand` and `Operation` are respectively 80, 72 and 160 bytes on this build.
+The fixture has 400 clips, 400 effects and 3,200 keyframes. Clip 1 has 16 effects (the existing maximum), clips 2–385 have one effect, and clips 386–400 have none. Each effect has eight keyframes. Copy attributes transfers 16 effects / 128 keyframes to clip 400. Ripple delete removes clip 1 and moves the other 399 clips. Live document charge is 3,301,441 bytes; JSON is 245,233 bytes. At the accepted performance revision `75dc1dad`, the benchmark prints `Step`, `StepCommand` and `Operation` sizes of 120, 72 and 160 bytes; 80 bytes is `StepCharge`.
 
 Host: Intel Core i5-13600K, 20 logical CPUs; Linux 7.2.15-2-omarchy; rustc 1.99.1. Measurement interval: 2026-11-14 01:27:15–01:32:20 UTC. The sum of lane wall times is 302.623 seconds. One-minute load ranged 7.35–7.75. Every lane had external CPU contamination: Whisper used 348–395% CPU, Python 99–104%, and another worktree's Agent test 81–97%; PipeWire, T3 and Brave also crossed the driver's 20% flag occasionally. Start/end snapshots include both cumulative `ps` CPU and sampled instantaneous top processes. The RTX 3090 stayed in P2, graphics clocks 1815–1875 MHz, memory 9501 MHz. This benchmark uses no GPU. No other process was stopped, and no quiet-machine run is claimed.
 

@@ -34,6 +34,7 @@ fn assert_state(
     fates: &BTreeMap<(u64, u64), Fate>,
     context: &str,
 ) {
+    assert_bound(history.document(), history.document_bound(), context);
     assert_eq!(**history.document(), model.document(), "DOCUMENT {context}");
     assert_eq!(**history.baseline(), model.baseline, "BASELINE {context}");
     assert_eq!(
@@ -90,6 +91,20 @@ fn assert_state(
             }
         }
     }
+}
+fn assert_bound(document: &Document, bound: kinewright_core::undo::Charge, context: &str) {
+    let encoded = serde_json::to_vec(document).unwrap().len() as u64;
+    let capacity = kinewright_core::undo::document_capacity_bytes(document).unwrap();
+    assert!(
+        bound.encoded >= encoded,
+        "EVERY_TRANSITION_ENCODED_BOUND {context}: {} < {encoded}",
+        bound.encoded
+    );
+    assert!(
+        bound.decoded >= capacity,
+        "EVERY_TRANSITION_LIVE_BOUND {context}: {} < {capacity}",
+        bound.decoded
+    );
 }
 fn identities(document: &mut Document, operations: &[Operation]) -> Vec<OperationIdentityEffect> {
     let mut result = vec![];
@@ -201,6 +216,10 @@ fn outcome(expected: &Result<usize, Refusal>, actual: &Result<Effects, Error>, c
         _ => panic!("OUTCOME {context}: {expected:?} != {actual:?}"),
     }
 }
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep each seeded transition, restore and cache/query check in one chronological stream"
+)]
 fn differential(seeds: u64, length: usize) {
     let cases = oracle::operation_cases();
     let operations: Vec<_> = cases.values().map(|c| &c.operation).collect();
@@ -296,6 +315,18 @@ fn differential(seeds: u64, length: usize) {
                         }
                         if random.next().is_multiple_of(7) {
                             history.drop_cache();
+                            assert_state(&history, &model, &fates, &context);
+                        }
+                        if random.next().is_multiple_of(5) {
+                            let depth = random.index(history.undo().len() + 1);
+                            let (document, bound) =
+                                history.boundary_document_with_bound(depth).unwrap();
+                            assert_eq!(
+                                *document,
+                                model.at_depth(depth),
+                                "BOUNDARY_QUERY_DOCUMENT {context}"
+                            );
+                            assert_bound(&document, bound, &format!("boundary {depth} {context}"));
                             assert_state(&history, &model, &fates, &context);
                         }
                     }
@@ -529,6 +560,162 @@ fn record_fixture() -> History {
     history.execute(Command::Do(lock(false))).unwrap();
     history.execute(Command::Undo).unwrap();
     history
+}
+
+#[test]
+fn replay_and_redo_bounds_cover_actual_allocations() {
+    let mut history =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(10_000, 0)).unwrap();
+    let mut marker = marker_document().markers.remove(0);
+    marker.label = "x".repeat(1024);
+    for command in [
+        Command::Do(Operation::AddMarker { marker }),
+        Command::Do(lock(false)),
+    ] {
+        history.execute(command).unwrap();
+        assert_bound(
+            history.document(),
+            history.document_bound(),
+            "forward growth",
+        );
+    }
+    history.drop_cache();
+    history.execute(Command::Undo).unwrap();
+    assert_bound(history.document(), history.document_bound(), "cold replay");
+    let (document, bound) = history.boundary_document_with_bound(1).unwrap();
+    assert_bound(&document, bound, "boundary query");
+    history.execute(Command::Undo).unwrap();
+    assert_bound(history.document(), history.document_bound(), "baseline");
+    history.execute(Command::Redo).unwrap();
+    assert_bound(history.document(), history.document_bound(), "Redo growth");
+}
+
+#[test]
+fn reserved_path_capacity_exceeds_the_literal_live_cap() {
+    let mut document = oracle::operation_cases()
+        .remove("SetClipSpeed")
+        .unwrap()
+        .document;
+    let mut path = std::path::PathBuf::with_capacity(1 << 20);
+    path.push("clip.mov");
+    document.media_pool[0].path = path;
+    let limits = RoleBounds {
+        document_live_bytes: 512 << 10,
+        ..bounds(10_000, 0)
+    };
+    assert!(
+        matches!(
+            History::new(document, RetentionPolicy::Fold, limits),
+            Err(Error::DocumentCapacity)
+        ),
+        "RESERVED_PATH_CAPACITY_REFUSED"
+    );
+}
+
+#[test]
+fn populated_install_replaces_all_cached_boundaries() {
+    let mut destination =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(10_000, 4)).unwrap();
+    for value in [false, true, false] {
+        destination.execute(Command::Do(lock(value))).unwrap();
+    }
+    assert!(!destination.cache_depths().is_empty());
+    let mut source =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(10_000, 4)).unwrap();
+    let mut marker = marker_document().markers.remove(0);
+    marker.label = "installed".into();
+    source
+        .execute(Command::Do(Operation::AddMarker { marker }))
+        .unwrap();
+    source.execute(Command::Do(lock(false))).unwrap();
+    let mut expected =
+        History::new(Document::default(), RetentionPolicy::Fold, source.bounds()).unwrap();
+    expected
+        .install_snapshot(source.record().validate(source.bounds()).unwrap())
+        .unwrap();
+    destination
+        .install_snapshot(source.record().validate(source.bounds()).unwrap())
+        .unwrap();
+    for command in [
+        Command::Undo,
+        Command::Redo,
+        Command::Undo,
+        Command::Undo,
+        Command::Redo,
+        Command::Redo,
+    ] {
+        destination.execute(command.clone()).unwrap();
+        expected.execute(command).unwrap();
+        assert_eq!(
+            destination.document(),
+            expected.document(),
+            "INSTALL_REPLACED_CACHE_DOCUMENT"
+        );
+        assert_eq!(
+            destination.snapshot_identity().unwrap(),
+            expected.snapshot_identity().unwrap(),
+            "INSTALL_FULL_STATE"
+        );
+        assert_bound(
+            destination.document(),
+            destination.document_bound(),
+            "populated install transition",
+        );
+        for depth in 0..=destination.undo().len() {
+            let (document, bound) = destination.boundary_document_with_bound(depth).unwrap();
+            assert_eq!(
+                document,
+                expected.boundary_document(depth).unwrap(),
+                "INSTALL_REPLACED_CACHE_BOUNDARY"
+            );
+            assert_bound(&document, bound, "populated install boundary");
+        }
+    }
+}
+
+#[test]
+fn open_refuses_wrong_digest_and_duplicate_command_identity() {
+    let source = record_fixture();
+    let mut value = serde_json::to_value(source.record()).unwrap();
+    let byte = value["undo"][0]["commands"][0]["payload_digest"][0]
+        .as_u64()
+        .unwrap();
+    value["undo"][0]["commands"][0]["payload_digest"][0] = serde_json::json!(byte ^ 1);
+    let record = serde_json::from_value(value).unwrap();
+    refused_open(
+        &record,
+        source.bounds(),
+        Error::InvalidMetadata,
+        "PAYLOAD_DIGEST_MISMATCH_REFUSED",
+    );
+    let mut value = serde_json::to_value(source.record()).unwrap();
+    value["redo"][0]["commands"][0]["id"] = value["undo"][0]["commands"][0]["id"].take();
+    value["redo"][0]["commands"][0]["position"] = serde_json::json!(0);
+    // Restore the original first ID after moving the value into the duplicate.
+    value["undo"][0]["commands"][0]["id"] = serde_json::json!({"epoch":0,"position":0});
+    let record = serde_json::from_value(value).unwrap();
+    refused_open(
+        &record,
+        source.bounds(),
+        Error::InvalidMetadata,
+        "DUPLICATE_COMMAND_ID_REFUSED",
+    );
+}
+
+#[test]
+fn open_refuses_backwards_command_epochs() {
+    let source = record_fixture();
+    let mut value = serde_json::to_value(source.record()).unwrap();
+    value["epoch"] = serde_json::json!(2);
+    value["undo"][0]["commands"][0]["id"]["epoch"] = serde_json::json!(2);
+    value["redo"][0]["commands"][0]["id"]["epoch"] = serde_json::json!(1);
+    let record = serde_json::from_value(value).unwrap();
+    refused_open(
+        &record,
+        source.bounds(),
+        Error::InvalidMetadata,
+        "COMMAND_EPOCH_CHRONOLOGY",
+    );
 }
 fn refused_open(
     record: &kinewright_core::undo::Record,
@@ -1162,9 +1349,11 @@ fn every_growing_kind_reaches_the_document_limit() {
                 history.document_bound().encoded >= after_bytes,
                 "EVERY_KIND_RUNNING_BOUND {kind} prefix={prefix}"
             );
-            let exact = History::new(after, RetentionPolicy::Fold, bounds(1 << 20, 0))
-                .unwrap()
-                .document_bound();
+            let exact = kinewright_core::undo::Charge {
+                encoded: after_bytes,
+                decoded: kinewright_core::undo::document_capacity_bytes(history.document())
+                    .unwrap(),
+            };
             assert!(
                 history.document_bound().decoded >= exact.decoded,
                 "EVERY_KIND_LIVE_BOUND {kind} prefix={prefix}"

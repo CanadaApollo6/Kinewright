@@ -1,5 +1,8 @@
 //! Diagnostic counters outside history state and record identity.
 //! Enable history-metrics for kernel and shared-payload serialization counters.
+//! The one-copy/zero-measurement rule concerns work added by history. The
+//! operation kernel still validates, recomputes duration and observes identity
+//! over whole documents; these existing passes stay separate in the counters.
 use std::cell::Cell;
 #[cfg(feature = "history-metrics")]
 use std::sync::atomic::{AtomicU64, Ordering};

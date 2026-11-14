@@ -178,6 +178,12 @@ pub enum PreparedError<E> {
     History(Error),
     Owner(E),
 }
+
+/// Explicit whole-document capacity accounting for validation and diagnostics.
+/// It measures the supplied allocation directly, without a compacting copy.
+pub fn document_capacity_bytes(document: &Document) -> Result<u64, Error> {
+    capacity::document_bytes(document)
+}
 impl<E> From<Error> for PreparedError<E> {
     fn from(error: Error) -> Self {
         Self::History(error)
@@ -799,10 +805,25 @@ impl History {
         Ok(effects)
     }
     pub fn boundary_document(&mut self, depth: usize) -> Result<Arc<Document>, Error> {
+        self.boundary_document_with_bound(depth)
+            .map(|(document, _)| document)
+    }
+    pub fn boundary_document_with_bound(
+        &mut self,
+        depth: usize,
+    ) -> Result<(Arc<Document>, Charge), Error> {
         if depth > self.undo.len() {
             return Err(Error::InvalidDepth);
         }
-        self.replay_to(depth).map(|(document, _)| document)
+        self.replay_to(depth).map(|(document, bound)| {
+            (
+                document,
+                Charge {
+                    encoded: bound.encoded,
+                    decoded: bound.live,
+                },
+            )
+        })
     }
     fn replay_to(&mut self, depth: usize) -> Result<(Arc<Document>, DocumentBound), Error> {
         if depth == self.undo.len() {
@@ -1070,4 +1091,35 @@ fn digest<T: Serialize + ?Sized>(value: &T) -> Result<[u8; 32], Error> {
     let mut writer = Writer(kinewright_hash::Sha256::new());
     serde_json::to_writer(&mut writer, value).map_err(|_| Error::Encoding)?;
     Ok(writer.0.finalize())
+}
+
+#[cfg(test)]
+mod charge_tests {
+    use super::*;
+    #[test]
+    fn map_heavy_payload_uses_the_typed_capacity_floor() {
+        let mut cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/support/history_operation_cases.json"
+        ))
+        .unwrap();
+        let mut operation: Operation =
+            serde_json::from_value(cases["AddEffect"]["operation"].take()).unwrap();
+        let Operation::AddEffect { effect, .. } = &mut operation else {
+            panic!("effect fixture")
+        };
+        effect.parameters = (0..50)
+            .map(|n| (format!("parameter_{n:02}"), crate::ParamValue::Integer(n)))
+            .collect();
+        let structural = crate::history_size::operation_owned_bytes(&operation).unwrap();
+        let typed = operation.heap().unwrap();
+        assert!(
+            typed > structural,
+            "MAP_HEAVY_TYPED_WITNESS {typed} <= {structural}"
+        );
+        let charge = operation_charge(std::slice::from_ref(&operation)).unwrap();
+        assert!(
+            charge.decoded >= std::mem::size_of::<Operation>() as u64 + typed,
+            "MAP_PAYLOAD_TYPED_CAPACITY_FLOOR"
+        );
+    }
 }

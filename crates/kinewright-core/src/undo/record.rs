@@ -84,6 +84,7 @@ impl Record {
         }
         let mut keys = BTreeSet::new();
         let mut position = None;
+        let mut previous_key = None;
         let mut undo_charge = Charge::default();
         let mut redo_charge = Charge::default();
         let undo_depth = self.undo.len();
@@ -104,11 +105,13 @@ impl Record {
                     || command.id.epoch > self.epoch
                     || !keys.insert(command.id)
                     || position.is_some_and(|old| command.position <= old)
+                    || previous_key.is_some_and(|old| command.id <= old)
                     || digest_operations(&command.operations)? != command.payload_digest
                 {
                     return Err(Error::InvalidMetadata);
                 }
                 position = Some(command.position);
+                previous_key = Some(command.id);
                 let mut command_charge = operation_charge(&command.operations)?;
                 command_charge.decoded = command_charge
                     .decoded
