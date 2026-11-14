@@ -1,5 +1,5 @@
 name: Native CI dependencies
-description: Restore pinned FFmpeg and cached Linux native dependencies.
+description: Restore pinned FFmpeg, NeMo-Speech and cached Linux native dependencies.
 runs:
   using: composite
   steps:
@@ -73,3 +73,42 @@ runs:
       with:
         path: ~/apt-archives
         key: apt-${{ steps.image.outputs.key }}-${{ steps.apt-install.outcome == 'success' && 'complete' || 'partial' }}-${{ steps.apt-collect.outputs.digest }}
+
+    - name: Locate shared NeMo cache
+      shell: bash
+      run: echo "KINEWRIGHT_NEMO_CACHE=$RUNNER_TEMP/nemo-speech" >> "$GITHUB_ENV"
+    - name: Read Linux NeMo build key
+      if: runner.os == 'Linux'
+      id: nemo-linux
+      shell: bash
+      run: |
+        key=$(nice -n 19 python3 -I scripts/nemo_speech.py --print-key)
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+    - name: Read MSVC NeMo build key
+      if: runner.os == 'Windows'
+      id: nemo-windows
+      shell: pwsh
+      run: |
+        $key = & .\scripts\setup-ffmpeg.ps1 -NemoCacheKeyOnly
+        if ($LASTEXITCODE -ne 0) { throw 'NeMo cache key failed' }
+        "key=$key" >> $env:GITHUB_OUTPUT
+    - name: Restore built NeMo SDK by pins, patches, compiler and settings
+      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+      with:
+        key: nemo-${{ runner.os }}-${{ steps.nemo-linux.outputs.key || steps.nemo-windows.outputs.key }}
+        path: |
+          ${{ runner.temp }}/nemo-speech/*/.build-key
+          ${{ runner.temp }}/nemo-speech/*/bin
+          ${{ runner.temp }}/nemo-speech/*/lib
+          ${{ runner.temp }}/nemo-speech/*/include
+          ${{ runner.temp }}/nemo-speech/*/share
+    - name: Provision Linux shared libraries
+      if: runner.os == 'Linux'
+      shell: bash
+      run: source scripts/setup-ffmpeg.sh
+    - name: Provision MSVC shared libraries
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
+        if ($LASTEXITCODE -ne 0) { throw 'Native provisioning failed' }

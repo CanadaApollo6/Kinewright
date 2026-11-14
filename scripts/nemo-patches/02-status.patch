@@ -1,0 +1,84 @@
+# Expose per-recognizer status control without redirecting process stderr; sized defaults check the hand-written ABI.
+--- a/include/nemo_speech/asr.h
++++ b/include/nemo_speech/asr.h
+@@ -179,6 +179,7 @@
+     const nemo_speech_asr_diar_config* diar;
+     const nemo_speech_asr_batching_config* batching;
+     const nemo_speech_asr_salm_config* salm;  // NULL = not SALM
++    bool log_status;  // false silences recognizer status lines
+ } nemo_speech_asr_recognizer_config;
+ 
+ // ---- Per-request options ----
+@@ -227,6 +228,14 @@
+ // Returns sizeof(config); writes defaults only when capacity matches exactly.
+ NEMO_SPEECH_ASR_API size_t nemo_speech_asr_backend_config_default(nemo_speech_asr_backend_config* out, size_t capacity);
+ 
++
++// Returns sizeof(config); writes defaults only when capacity matches exactly.
++NEMO_SPEECH_ASR_API size_t nemo_speech_asr_model_config_default(nemo_speech_asr_model_config* out, size_t capacity);
++NEMO_SPEECH_ASR_API size_t nemo_speech_asr_streaming_config_default(nemo_speech_asr_streaming_config* out, size_t capacity);
++NEMO_SPEECH_ASR_API size_t nemo_speech_asr_recognizer_config_default(nemo_speech_asr_recognizer_config* out, size_t capacity);
++
++NEMO_SPEECH_ASR_API size_t nemo_speech_asr_recognition_options_size(void);
++
+ // ---- Recognizer ----
+ 
+ NEMO_SPEECH_ASR_API nemo_speech_asr_status nemo_speech_asr_create(
+--- a/src/asr/c_api.cpp
++++ b/src/asr/c_api.cpp
+@@ -68,6 +68,8 @@
+     asr_core::RecognizerConfig cfg;  // library defaults
+     if (!c)
+         return cfg;
++    if (HAS_FIELD(c, nemo_speech_asr_recognizer_config, log_status))
++        cfg.log_status = c->log_status;
+     if (HAS_FIELD(c, nemo_speech_asr_recognizer_config, backend) && c->backend) {
+         const auto* b = c->backend;
+         if (HAS_FIELD(b, nemo_speech_asr_backend_config, gpu))
+@@ -284,6 +286,46 @@
+ }  // namespace
+ 
+ extern "C" {
++
++size_t
++nemo_speech_asr_recognition_options_size(void) {
++    return nemo_speech_asr_recognition_options_default().size;
++}
++
++
++size_t
++nemo_speech_asr_model_config_default(nemo_speech_asr_model_config* out, size_t capacity) {
++    if (out && capacity == sizeof(*out)) {
++        std::memset(out, 0, sizeof(*out));
++        out->size = sizeof(*out);
++    }
++    return sizeof(nemo_speech_asr_model_config);
++}
++
++size_t
++nemo_speech_asr_streaming_config_default(nemo_speech_asr_streaming_config* out, size_t capacity) {
++    if (out && capacity == sizeof(*out)) {
++        std::memset(out, 0, sizeof(*out));
++        out->size = sizeof(*out);
++        out->chunk_size = asr_core::StreamingConfig{}.chunk_size;
++        out->ctc_left_padding = asr_core::StreamingConfig{}.ctc_left_padding;
++        out->ctc_right_padding = asr_core::StreamingConfig{}.ctc_right_padding;
++        out->rnnt_right_context = asr_core::StreamingConfig{}.rnnt_right_context;
++    }
++    return sizeof(nemo_speech_asr_streaming_config);
++}
++
++size_t
++nemo_speech_asr_recognizer_config_default(nemo_speech_asr_recognizer_config* out, size_t capacity) {
++    if (out && capacity == sizeof(*out)) {
++        std::memset(out, 0, sizeof(*out));
++        out->size = sizeof(*out);
++        out->log_status = true;
++    }
++    return sizeof(nemo_speech_asr_recognizer_config);
++}
++
++
+ 
+ size_t
+ nemo_speech_asr_backend_config_default(nemo_speech_asr_backend_config* out, size_t capacity) {

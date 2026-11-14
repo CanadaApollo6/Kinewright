@@ -4,6 +4,8 @@
 # AW1 F8: the ledger script must stay LF (bash), and the errata doc with it.
 *.sh text eol=lf
 *.md text eol=lf
+# Unified-diff context lines contain a required leading space.
+scripts/nemo-patches/*.patch text eol=lf whitespace=-blank-at-eol
 docs/PF1-PINS*.json text eol=lf
 docs/reports/pf1-s4/example/** text eol=lf
 # Job A S0/S1/S2: harness fixtures are byte-exact, hashed inputs (byte_length +

@@ -1,0 +1,53 @@
+# Kinewright needs bounded CPU threads; append after explicit original padding.
+--- a/include/nemo_speech/asr.h
++++ b/include/nemo_speech/asr.h
+@@ -63,6 +63,8 @@
+ typedef struct nemo_speech_asr_backend_config {
+     size_t size;
+     int32_t gpu;  // -1 = CPU
++    int32_t reserved;  // Do not reuse the original ABI padding.
++    int32_t threads;  // 0 = library default
+ } nemo_speech_asr_backend_config;
+ 
+ typedef struct nemo_speech_asr_model_config {
+@@ -221,6 +223,10 @@
+ nemo_speech_asr_recognition_options_default(void);
+ NEMO_SPEECH_ASR_API nemo_speech_asr_salm_config nemo_speech_asr_salm_config_default(void);
+ 
++
++// Returns sizeof(config); writes defaults only when capacity matches exactly.
++NEMO_SPEECH_ASR_API size_t nemo_speech_asr_backend_config_default(nemo_speech_asr_backend_config* out, size_t capacity);
++
+ // ---- Recognizer ----
+ 
+ NEMO_SPEECH_ASR_API nemo_speech_asr_status nemo_speech_asr_create(
+--- a/src/asr/c_api.cpp
++++ b/src/asr/c_api.cpp
+@@ -72,6 +72,8 @@
+         const auto* b = c->backend;
+         if (HAS_FIELD(b, nemo_speech_asr_backend_config, gpu))
+             cfg.backend.gpu = b->gpu;
++        if (HAS_FIELD(b, nemo_speech_asr_backend_config, threads) && b->threads > 0)
++            cfg.backend.threads = b->threads;
+     }
+     if (HAS_FIELD(c, nemo_speech_asr_recognizer_config, model) && c->model) {
+         const auto* m = c->model;
+@@ -282,6 +284,18 @@
+ }  // namespace
+ 
+ extern "C" {
++
++size_t
++nemo_speech_asr_backend_config_default(nemo_speech_asr_backend_config* out, size_t capacity) {
++    if (out && capacity == sizeof(*out)) {
++        std::memset(out, 0, sizeof(*out));
++        out->size = sizeof(*out);
++        out->gpu = -1;
++    }
++    return sizeof(nemo_speech_asr_backend_config);
++}
++
++
+ 
+ nemo_speech_asr_recognition_options
+ nemo_speech_asr_recognition_options_default(void) {

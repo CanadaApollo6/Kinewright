@@ -21,6 +21,7 @@ mod locator;
 mod loudness;
 mod lut;
 mod lut_store;
+pub mod nemo;
 pub mod owned_io;
 mod unscoped;
 

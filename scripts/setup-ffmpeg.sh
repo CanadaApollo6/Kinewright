@@ -72,13 +72,13 @@ if [[ -f "$marker" ]]; then
 fi
 
 if [[ "$installed_hash" != "$FFMPEG_SHA256" ]]; then
-    python3 "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
+    nice -n 19 python3 -I "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
     rm -rf "$ffmpeg_root"
     mkdir -p "$ffmpeg_root"
     tar -xJf "$archive" -C "$ffmpeg_root" --strip-components=1
     printf '%s' "$FFMPEG_SHA256" > "$marker"
 elif [[ -f "$archive" ]]; then
-    python3 "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
+    nice -n 19 python3 -I "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
 fi
 
 pkg_config_path="$ffmpeg_root/lib/pkgconfig"
@@ -102,6 +102,8 @@ export FFMPEG_DIR="$ffmpeg_root"
 export PATH="$ffmpeg_bin${PATH:+:$PATH}"
 export LD_LIBRARY_PATH="$ffmpeg_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+source "$script_dir/setup-nemo-speech.sh" || { return 1 2>/dev/null || exit 1; }
+
 # Native crates such as alsa-sys can publish /usr/lib as a global Cargo linker
 # search path. On rolling distributions that ship a newer FFmpeg ABI, that path
 # may otherwise win over ffmpeg-sys-next's pinned search path even though its
@@ -117,6 +119,7 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     {
         echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
         echo "FFMPEG_DIR=$FFMPEG_DIR"
+        echo "KINEWRIGHT_NEMO_DIR=$KINEWRIGHT_NEMO_DIR"
         echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
         echo "RUSTFLAGS=$RUSTFLAGS"
         echo "PATH=$PATH"

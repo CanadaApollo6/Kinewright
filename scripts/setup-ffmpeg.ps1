@@ -2,7 +2,8 @@
 param(
     [ValidateRange(0.1, 1024)]
     [double]$BuildCacheLimitGiB = 6,
-    [switch]$SkipBuildCachePrune
+    [switch]$SkipBuildCachePrune,
+    [switch]$NemoCacheKeyOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +23,7 @@ $libclangRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'libclang')
 $archiveCache = if ($env:KINEWRIGHT_FFMPEG_ARCHIVE_CACHE) { $env:KINEWRIGHT_FFMPEG_ARCHIVE_CACHE } else { Join-Path $thirdParty 'ffmpeg-archives' }
 $archive = [System.IO.Path]::GetFullPath((Join-Path $archiveCache "$FfmpegSha256.zip"))
 
-if (-not $SkipBuildCachePrune) {
+if (-not $SkipBuildCachePrune -and -not $NemoCacheKeyOnly) {
     & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaximumGiB $BuildCacheLimitGiB
 }
 
@@ -78,6 +79,12 @@ foreach ($line in (& $env:ComSpec /d /c $vcvarsCommand)) {
 $env:Path = "$vcvarsPath;$originalPath"
 if (-not $vcvarsPath -or -not $env:INCLUDE -or -not $env:LIB) {
     throw "Failed to import the MSVC build environment from $vcvars"
+}
+
+if ($NemoCacheKeyOnly) {
+    & $python.Source -I (Join-Path $PSScriptRoot 'nemo_speech.py') --print-key
+    if ($LASTEXITCODE -ne 0) { throw 'NeMo cache key failed.' }
+    return
 }
 
 New-Item -ItemType Directory -Path $thirdParty -Force | Out-Null
@@ -166,6 +173,8 @@ $env:LIBCLANG_PATH = $libclang.DirectoryName
 $env:FFMPEG_DIR = $ffmpegRoot
 $env:Path = "$ffmpegBin;$pkgConfigBin;$env:Path"
 $env:BINDGEN_EXTRA_CLANG_ARGS = (($env:INCLUDE -split ';' | Where-Object { $_ }) | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
+
+& (Join-Path $PSScriptRoot 'setup-nemo-speech.ps1')
 
 $codecVersion = & $pkgConfig --modversion libavcodec
 if ($LASTEXITCODE -ne 0) {

@@ -1,0 +1,5 @@
+{
+  "nemo": {"url": "https://github.com/NVIDIA/NeMo-Speech.cpp.git", "commit": "20999cc921d2b14aa58708f61756a8b2e787ba20"},
+  "llama": {"url": "https://github.com/ggml-org/llama.cpp.git", "commit": "bd4f514db14d87fded667787a7a963bfbaa98e89"},
+  "sentencepiece": {"url": "https://github.com/google/sentencepiece.git", "commit": "31646a467d2051eb904e0b45de3a73e91fe1c1e3"}
+}
