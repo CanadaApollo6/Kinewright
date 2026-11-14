@@ -150,6 +150,12 @@ pub(super) fn reservation(
                 .saturating_add(256),
             live: 0,
         },
+        // Keep this conservative fallback until growth observations include
+        // enclosing Vec capacities and implicit clip/automation fan-out. A
+        // touched-clip payload alone misses an allocation when a full track's
+        // clip array doubles. Looking up every affected clip here would add a
+        // document walk. The transition-capacity guards cover the fallback;
+        // smaller growth terms need maintained maxima or kernel observations.
         O::RelinkAsset { .. }
         | O::SetAssetBin { .. }
         | O::AddClip { .. }
@@ -198,4 +204,48 @@ pub(super) fn reservation(
         .ok_or(Error::Capacity)?;
     budget.check_known(working).map_err(|_| Error::Capacity)?;
     Ok(growth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn touched_clip_payload_misses_full_track_array_growth() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/support/history_operation_cases.json"
+        ))
+        .unwrap();
+        let mut document: Document =
+            serde_json::from_value(cases["SplitClip"]["document"].clone()).unwrap();
+        let template = document.tracks[0].clips[0].clone();
+        document.tracks[0].clips = (0..4)
+            .map(|index| {
+                let mut clip = template.clone();
+                clip.id = crate::ClipId(index + 1);
+                clip.effects.clear();
+                clip.timeline_start = crate::TimeCode(i64::try_from(index).unwrap() * 100);
+                clip
+            })
+            .collect();
+        document.tracks[0].clips.shrink_to_fit();
+        document.recompute_duration().unwrap();
+        let before = capacity::document_bytes(&document).unwrap();
+        let clip_payload = document.tracks[0].clips[0].heap().unwrap();
+        let enclosing_growth = array_growth(&document.tracks[0].clips);
+        O::SplitClip {
+            clip: crate::ClipId(1),
+            at: crate::TimeCode(20),
+        }
+        .apply(&mut document)
+        .unwrap();
+        let after = capacity::document_bytes(&document).unwrap();
+        assert!(
+            after - before > 2 * clip_payload,
+            "TOUCHED_PAYLOAD_MISSES_ENCLOSING_ARRAY"
+        );
+        assert!(
+            enclosing_growth >= 4 * std::mem::size_of::<crate::Clip>() as u64,
+            "FULL_TRACK_ARRAY_GROWTH"
+        );
+    }
 }

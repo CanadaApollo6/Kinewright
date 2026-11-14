@@ -52,15 +52,19 @@ pub struct Envelope {
 pub struct PoolLimits {
     pub retained: [u64; 3],
     pub peak: [u64; 3],
+    pub workspace: u64,
 }
 impl Default for PoolLimits {
     fn default() -> Self {
         Self {
             retained: [128 << 20, 328 << 20, 16 << 20],
-            peak: [160 << 20, 392 << 20, 80 << 20],
+            peak: [160 << 20, 392 << 20, 32 << 20],
+            workspace: 64 << 20,
         }
     }
 }
+// R sums to 472 MiB across roles. A shared 64 MiB workspace window keeps
+// simultaneous histories below 536 MiB, rather than summing per-role peaks.
 #[derive(Debug, Default)]
 struct Usage {
     retained: [u64; 3],
@@ -151,6 +155,16 @@ impl HistoryReservation {
         self.bytes = bytes;
         Ok(())
     }
+    pub fn capture(&self) -> Result<Self, Error> {
+        HistoryPool {
+            shared: Arc::clone(&self.shared),
+        }
+        .admit(self.role)
+    }
+    #[must_use]
+    pub fn shares_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
     pub fn workspace(&self) -> Result<Workspace, Error> {
         let bytes = self.role.envelope().workspace;
         let i = self.role.index();
@@ -158,6 +172,15 @@ impl HistoryReservation {
         let next = usage.workspace[i]
             .checked_add(bytes)
             .ok_or(Error::Reservation)?;
+        let shared = usage
+            .workspace
+            .iter()
+            .try_fold(bytes, |total, value| total.checked_add(*value))
+            .ok_or(Error::Reservation)?;
+        if shared > self.shared.limits.workspace {
+            return Err(Error::Reservation);
+        }
+
         if next
             .checked_add(usage.retained[i])
             .is_none_or(|n| n > self.shared.limits.peak[i])

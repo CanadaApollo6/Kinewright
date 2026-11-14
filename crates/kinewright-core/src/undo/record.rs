@@ -203,7 +203,6 @@ fn validate_step(
     bounds: RoleBounds,
     input: u64,
 ) -> Result<(), Error> {
-    let before = *size;
     let mut summary = super::StepCharge {
         operations: step.charge.operations,
         key_bytes: step.charge.key_bytes,
@@ -216,7 +215,6 @@ fn validate_step(
         let effects = super::apply(document, size, &command.operations, bounds, &mut budget)?;
         summary = super::replay_charge(summary, &budget, effects.len(), bounds, input)?;
     }
-    summary.before = before;
     summary.after = *size;
     summary.validated = true;
     step.charge = summary;

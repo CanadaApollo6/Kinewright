@@ -39,3 +39,7 @@ workspace = true
 [[example]]
 name = "undo_bench"
 required-features = ["history-metrics"]
+
+[[example]]
+name = "undo_clip_probe"
+required-features = ["history-metrics"]

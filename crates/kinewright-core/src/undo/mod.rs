@@ -68,7 +68,7 @@ impl RoleBounds {
         operation_bytes: 64 << 10,
         step_cap: 512,
         checkpoint_documents: 0,
-        replay_workspace: 64 << 20,
+        replay_workspace: 16 << 20,
         document_live_bytes: 512 << 10,
         document_bytes: 64 << 10,
         decoded_history_bytes: 512 << 10,
@@ -115,7 +115,6 @@ pub(crate) struct StepCharge {
     effects_bytes: u64,
     replay_peak: u64,
     key_bytes: u64,
-    before: DocumentBound,
     after: DocumentBound,
     validated: bool,
 }
@@ -604,11 +603,6 @@ impl History {
         let mut summary =
             replay_charge(top, &budget, identities.len(), self.bounds, owner_workspace)?;
         summary.operations = top.operations.add(charge)?;
-        summary.before = if extends {
-            top.before
-        } else {
-            self.document_bound
-        };
         summary.after = candidate_bound;
         summary.validated = true;
         summary.key_bytes = key_bytes;
@@ -999,7 +993,6 @@ fn replay_charge(
             .checked_add(effects)
             .ok_or(Error::Capacity)?,
         replay_peak,
-        before: previous.before,
         after: previous.after,
         validated: previous.validated,
     })

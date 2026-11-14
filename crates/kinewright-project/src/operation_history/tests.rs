@@ -232,6 +232,7 @@ fn role_reservations_are_atomic_and_released() {
     let pool = HistoryPool::new(PoolLimits {
         retained: [0, envelope.retained, 0],
         peak: [0, envelope.retained + envelope.workspace, 0],
+        workspace: envelope.workspace,
     });
     let mut reservation = pool.reserve(Role::Task, envelope.retained - 1).unwrap();
     reservation.grow_to(envelope.retained).unwrap();
@@ -266,6 +267,7 @@ fn role_reservations_are_atomic_and_released() {
     let empty = HistoryPool::new(PoolLimits {
         retained: [0; 3],
         peak: [0; 3],
+        workspace: 0,
     });
     assert!(matches!(
         OwnerHistory::new(
@@ -281,6 +283,40 @@ fn role_reservations_are_atomic_and_released() {
         Err(Error::Reservation)
     ));
     assert!(!called, "REFUSAL_PRECEDES_DOCUMENT_ALLOCATION");
+}
+#[test]
+fn candidate_workspace_and_shared_peak_have_their_own_arithmetic() {
+    let role = Role::Candidate.envelope();
+    assert_eq!(role.retained, 2 << 20, "CANDIDATE_RETAINED_ENVELOPE");
+    assert_eq!(role.workspace, 16 << 20, "CANDIDATE_WORKSPACE_ENVELOPE");
+    let max_ops = (512_u64 << 10) / std::mem::size_of::<Operation>() as u64;
+    let observations = max_ops
+        * 4
+        * (std::mem::size_of::<kinewright_core::OperationIdentityEffect>() as u64
+            + std::mem::size_of::<kinewright_core::undo::CommandEffects>() as u64
+            + 4 * 16);
+    // Eight D kernel workspace, O+A stored input, two A owner scratch,
+    // inline observations and 64 KiB fixed headers; leave ten percent slack.
+    let subtotal = (4 << 20) + (1 << 20) + (1 << 20) + observations + (64 << 10);
+    assert!(
+        subtotal * 11 / 10 < role.workspace,
+        "CANDIDATE_WORKSPACE_ARITHMETIC"
+    );
+    let pool = HistoryPool::new(PoolLimits::default());
+    let task = pool.admit(Role::Task).unwrap();
+    let candidate = pool.admit(Role::Candidate).unwrap();
+    let window = task.workspace().unwrap();
+    assert!(
+        matches!(candidate.workspace(), Err(Error::Reservation)),
+        "SHARED_WORKSPACE_WINDOW"
+    );
+    assert_eq!(
+        pool.usage(Role::Candidate).unwrap(),
+        (role.retained, 0),
+        "SHARED_WINDOW_REFUSAL_ATOMIC"
+    );
+    drop(window);
+    assert!(candidate.workspace().is_ok());
 }
 #[test]
 fn folding_advances_seeds_and_resources() {
