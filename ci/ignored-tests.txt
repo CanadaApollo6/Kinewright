@@ -231,3 +231,4 @@ kinewright_media recognizer::real::dq1_real_ami_short_keeps_um_and_known_words c
 kinewright_media recognizer::real::dq1_real_ami8_whole_equals_pause_commits crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model and KINEWRIGHT_ASR_AMI8 fixture
 
 kinewright_media recognizer::real::dq1_real_ami30_bounded_memory_and_cancel crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model and KINEWRIGHT_ASR_AMI30; memory and cancellation measurement
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_medium_run_keeps_approvals_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # 128-approval full-tail qualification exceeds the 600-second slow process deadline

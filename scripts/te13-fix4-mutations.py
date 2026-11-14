@@ -46,8 +46,8 @@ add('live-retry-still-continues', M,
     'if host.resolve_task_mcp(&self.auth, &self.endpoint).is_ok() {', 'if false {',
     'te13_fix1_live_failure_blocks_and_same_finish_clears_stale_cache', 'TE13_FIX1_PERMANENT_BLOCK')
 add('committed-metadata-replay', P,
-    'if lookup != ReceiptLookup::Absent {\n            return Ok(lookup);\n        }\n        if self.unsettled',
-    'if false {\n            return Ok(lookup);\n        }\n        if self.unsettled',
+    'if lookup != ReceiptLookup::Absent {\n            return Ok(MetadataPublicationOutcome::Committed(lookup));\n        }\n        if self.unsettled',
+    'if false {\n            return Ok(MetadataPublicationOutcome::Committed(lookup));\n        }\n        if self.unsettled',
     'te13_fix4_committed_note_replay_reads_original_receipt_during_completion', 'TE13_FIX4_COMMITTED_NOTE_REPLAY')
 add('truthful-fallback', C,
     'needs recovery. Stop this run and wait for cleanup, then check Studio recovery and rescue for available work.',
