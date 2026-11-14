@@ -3,6 +3,17 @@ use super::*;
 use kinewright_core::{Command, Operation, TrackId, undo::RetentionPolicy};
 
 pub(super) fn saved_open(owner: &OwnerHistory) {
+    if let Some(state) = &owner.fold {
+        state.assert_matches(
+            &owner.seeds,
+            owner.history().baseline(),
+            &owner.resources.baseline,
+        );
+    }
+    let OwnerSnapshot { data, reservation } = owner.capture().unwrap();
+    let wire = super::stored::codec_tests::encoded(&OwnerSnapshot { data, reservation });
+    let shell: super::StoredOwnerRecord = serde_json::from_slice(&wire).unwrap();
+    super::stored::assert_decode_forecast(&shell, owner.decode_bound);
     let OwnerSnapshot { data, reservation } = owner.capture().unwrap();
     let bytes = serde_json::to_vec(&data).unwrap();
     drop(data);

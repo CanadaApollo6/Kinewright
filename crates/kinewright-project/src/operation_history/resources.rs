@@ -30,6 +30,7 @@ pub struct Resources {
 impl Resources {
     #[must_use]
     pub fn document(document: &Document) -> BTreeSet<Resource> {
+        super::owner::resource_document_scans(1);
         let mut result: BTreeSet<_> = document
             .media_pool
             .iter()

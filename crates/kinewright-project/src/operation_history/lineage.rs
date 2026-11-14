@@ -10,11 +10,35 @@ pub struct CreationOrigin {
     pub branch: BranchId,
     pub batch: BatchId,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lineage {
     pub occurrences: BTreeMap<ClipId, OccurrenceId>,
     pub split_ancestry: Vec<(OccurrenceId, OccurrenceId, Clip)>,
+}
+impl Serialize for Lineage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            occurrences: &'a BTreeMap<ClipId, OccurrenceId>,
+            split_ancestry: &'a [(OccurrenceId, OccurrenceId, Clip)],
+        }
+        super::owner::lineage_encodings(1);
+        Wire {
+            occurrences: &self.occurrences,
+            split_ancestry: &self.split_ancestry,
+        }
+        .serialize(s)
+    }
+}
+impl Clone for Lineage {
+    fn clone(&self) -> Self {
+        super::owner::seed_map_copies(1);
+        Self {
+            occurrences: self.occurrences.clone(),
+            split_ancestry: self.split_ancestry.clone(),
+        }
+    }
 }
 impl Lineage {
     #[must_use]
@@ -83,6 +107,7 @@ impl Lineage {
         Ok(())
     }
     pub(super) fn prune(&mut self) {
+        super::owner::seed_prune_scans(1);
         let mut reachable: BTreeSet<_> = self.occurrences.values().cloned().collect();
         loop {
             let before = reachable.len();
@@ -99,6 +124,7 @@ impl Lineage {
             .retain(|(child, _, _)| reachable.contains(child));
     }
     pub(super) fn verify(&self, document: &Document) -> Result<(), Error> {
+        super::owner::seed_verify_scans(1);
         let expected: BTreeSet<_> = document
             .tracks
             .iter()
@@ -151,6 +177,7 @@ fn occurrence(origin: &CreationOrigin, result_ordinal: u64) -> OccurrenceId {
 
 impl Lineage {
     pub(super) fn capacity_bytes(&self) -> Result<u64, Error> {
+        super::owner::seed_capacity_scans(1);
         let mut bytes = 4096_u64;
         let node = (11 * std::mem::size_of::<(ClipId, OccurrenceId)>() + 128) as u64;
         bytes = bytes

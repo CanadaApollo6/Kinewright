@@ -23,8 +23,22 @@ pub struct OwnerCounters {
     pub payload_bytes_serialised: u64,
     pub owner_identity_hashes: u64,
     pub owner_identity_bytes_serialised: u64,
+    pub seed_map_copies: u64,
+    pub seed_capacity_scans: u64,
+    pub seed_prune_scans: u64,
+    pub seed_verify_scans: u64,
+    pub resource_document_scans: u64,
+    pub lineage_encodings: u64,
+    pub payload_encodings: u64,
+    pub folded_commands: u64,
+    pub origin_lookups: u64,
+    pub ledger_entries: u64,
+    pub folded_seed_ids: u64,
+    pub folded_ancestry: u64,
+    pub folded_resource_ids: u64,
+    pub folded_payload_references: u64,
 }
-thread_local! { static COUNTERS:Cell<OwnerCounters>=const { Cell::new(OwnerCounters { document_scans:0,exact_measurements:0,payload_operations:0,payload_bytes_serialised:0,owner_identity_hashes:0,owner_identity_bytes_serialised:0 }) }; }
+thread_local! { static COUNTERS:Cell<OwnerCounters>=const { Cell::new(OwnerCounters { document_scans:0,exact_measurements:0,payload_operations:0,payload_bytes_serialised:0,owner_identity_hashes:0,owner_identity_bytes_serialised:0,seed_map_copies:0,seed_capacity_scans:0,seed_prune_scans:0,seed_verify_scans:0,resource_document_scans:0,lineage_encodings:0,payload_encodings:0,folded_commands:0,origin_lookups:0,ledger_entries:0,folded_seed_ids:0,folded_ancestry:0,folded_resource_ids:0,folded_payload_references:0 }) }; }
 impl OwnerCounters {
     #[must_use]
     pub fn read() -> Self {
@@ -40,9 +54,95 @@ impl OwnerCounters {
             owner_identity_hashes: self.owner_identity_hashes - old.owner_identity_hashes,
             owner_identity_bytes_serialised: self.owner_identity_bytes_serialised
                 - old.owner_identity_bytes_serialised,
+            seed_map_copies: self.seed_map_copies - old.seed_map_copies,
+            seed_capacity_scans: self.seed_capacity_scans - old.seed_capacity_scans,
+            seed_prune_scans: self.seed_prune_scans - old.seed_prune_scans,
+            seed_verify_scans: self.seed_verify_scans - old.seed_verify_scans,
+            resource_document_scans: self.resource_document_scans - old.resource_document_scans,
+            lineage_encodings: self.lineage_encodings - old.lineage_encodings,
+            payload_encodings: self.payload_encodings - old.payload_encodings,
+            folded_commands: self.folded_commands - old.folded_commands,
+            origin_lookups: self.origin_lookups - old.origin_lookups,
+            ledger_entries: self.ledger_entries - old.ledger_entries,
+            folded_seed_ids: self.folded_seed_ids - old.folded_seed_ids,
+            folded_ancestry: self.folded_ancestry - old.folded_ancestry,
+            folded_resource_ids: self.folded_resource_ids - old.folded_resource_ids,
+            folded_payload_references: self.folded_payload_references
+                - old.folded_payload_references,
         }
     }
 }
+pub(super) fn seed_map_copies(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.seed_map_copies += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn seed_capacity_scans(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.seed_capacity_scans += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn seed_prune_scans(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.seed_prune_scans += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn seed_verify_scans(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.seed_verify_scans += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn resource_document_scans(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.resource_document_scans += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn lineage_encodings(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.lineage_encodings += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn payload_encodings(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.payload_encodings += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn folded_commands(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.folded_commands += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn origin_lookups(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.origin_lookups += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn ledger_entries(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.ledger_entries += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn folded_seed_ids(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.folded_seed_ids += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn folded_ancestry(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.folded_ancestry += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn folded_resource_ids(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.folded_resource_ids += amount;
+    COUNTERS.set(c);
+}
+pub(super) fn folded_payload_references(amount: u64) {
+    let mut c = COUNTERS.get();
+    c.folded_payload_references += amount;
+    COUNTERS.set(c);
+}
+
 pub(super) fn identity_started() {
     let mut c = COUNTERS.get();
     c.owner_identity_hashes += 1;
@@ -96,6 +196,7 @@ pub(super) struct LiveOrigin {
 pub(super) struct Origins(pub VecDeque<LiveOrigin>);
 impl Origins {
     pub fn get(&self, key: &CommandKey) -> Option<&LiveOrigin> {
+        origin_lookups(1);
         self.0
             .binary_search_by_key(&key.position, |v| v.origin.key.position)
             .ok()
@@ -106,6 +207,7 @@ impl Origins {
         self.0.push_back(origin);
     }
     pub fn remove(&mut self, key: &CommandKey) -> Option<LiveOrigin> {
+        origin_lookups(1);
         let index = self
             .0
             .binary_search_by_key(&key.position, |v| v.origin.key.position)
@@ -122,6 +224,7 @@ pub struct OwnerHistory {
     pub(super) ledger: ApprovalLedger,
     pub(super) folded_approvals: super::ledger::FoldedApprovals,
     pub(super) seeds: Lineage,
+    pub(super) fold: Option<super::fold::FoldState>,
     pub(super) resources: Resources,
     pub(super) origins: Origins,
     pub(super) owner_bytes: u64,
@@ -153,8 +256,7 @@ impl OwnerBoundary {
 struct Plan {
     origin: LiveOrigin,
     approval: Option<Approval>,
-    seeds: Option<Lineage>,
-    baseline_resources: Option<BTreeSet<Resource>>,
+    fold: Option<super::fold::FoldPatch>,
     owner_bytes: u64,
     baseline_bytes: u64,
     decode_bound: u64,
@@ -220,15 +322,30 @@ impl OwnerHistory {
         let seeds = Lineage::seed(document, seed);
         scan();
         let resources = Resources::new(document);
-        let baseline_bytes = baseline_charge(&seeds, &resources.baseline)?;
+        let fold = if role == Role::Ordinary {
+            Some(super::fold::FoldState::new(
+                &seeds,
+                document,
+                role.envelope().workspace,
+            )?)
+        } else {
+            None
+        };
+        let (baseline_bytes, baseline_decode) = if let Some(state) = &fold {
+            state.costs()?
+        } else {
+            (
+                baseline_charge(&seeds, &resources.baseline)?,
+                super::stored::baseline_decode_charge(
+                    &seeds,
+                    resources.baseline.len(),
+                    role.envelope().workspace,
+                )?,
+            )
+        };
         if baseline_bytes > role.envelope().owners {
             return Err(Error::Capacity("owner metadata"));
         }
-        let baseline_decode = super::stored::baseline_decode_charge(
-            &seeds,
-            resources.baseline.len(),
-            role.envelope().workspace,
-        )?;
         if baseline_decode > role.envelope().workspace {
             return Err(Error::Capacity("owner decode"));
         }
@@ -237,6 +354,7 @@ impl OwnerHistory {
             ledger: ApprovalLedger::default(),
             folded_approvals: std::collections::BTreeMap::default(),
             seeds,
+            fold,
             resources,
             origins: Origins::default(),
             owner_bytes: baseline_bytes,
@@ -261,8 +379,11 @@ impl OwnerHistory {
         &self.resources
     }
     #[must_use]
-    pub fn seeds(&self) -> &Lineage {
-        &self.seeds
+    pub fn seeds(&self) -> Lineage {
+        self.fold.as_ref().map_or_else(
+            || self.seeds.clone(),
+            |state| state.materialize(&self.seeds),
+        )
     }
     #[must_use]
     pub const fn owner_bytes(&self) -> u64 {
@@ -270,7 +391,8 @@ impl OwnerHistory {
     }
     #[allow(
         clippy::too_many_lines,
-        reason = "one preparation/commit transaction keeps Core and owner refusal atomic"
+        clippy::missing_panics_doc,
+        reason = "one atomic transaction; the private prepared plan guarantees its folding role exists"
     )]
     pub fn execute(
         &mut self,
@@ -313,6 +435,7 @@ impl OwnerHistory {
             ledger,
             folded_approvals,
             seeds,
+            fold,
             resources,
             origins,
             owner_bytes,
@@ -323,8 +446,10 @@ impl OwnerHistory {
             terminal_facts,
             reservation,
         } = self;
-        let (effects, plan) =
-            core.execute_prepared(command, reservation.role().envelope().owners * 2, |event| {
+        let (effects, plan) = core.execute_prepared(
+            command,
+            reservation.role().envelope().owners * if fold.is_some() { 3 } else { 2 },
+            |event| {
                 prepare(
                     &event,
                     creation,
@@ -332,6 +457,7 @@ impl OwnerHistory {
                     approval,
                     ledger,
                     seeds,
+                    fold.as_ref(),
                     origins,
                     *owner_bytes,
                     *baseline_bytes,
@@ -342,7 +468,8 @@ impl OwnerHistory {
                     new_key_decode,
                     *fold_frontier,
                 )
-            })?;
+            },
+        )?;
         if let Some(approval) = plan.approval {
             ledger.insert(
                 plan.origin.origin.key,
@@ -364,11 +491,12 @@ impl OwnerHistory {
                 resources.remove(&origin.resources);
             }
         }
-        if let Some(seeds_next) = plan.seeds {
-            *seeds = seeds_next;
-        }
-        if let Some(baseline) = plan.baseline_resources {
-            resources.baseline = baseline;
+        if let Some(patch) = plan.fold {
+            patch.commit(
+                fold.as_mut().expect("prepared folding role"),
+                seeds,
+                resources,
+            );
         }
         *owner_bytes = plan.owner_bytes;
         *baseline_bytes = plan.baseline_bytes;
@@ -394,7 +522,7 @@ impl OwnerHistory {
         let _workspace = self.reservation.workspace()?;
         // The query owns an independent occurrence map while the baseline
         // remains immutable. Only the returned boundary survives this replay.
-        let mut lineage = self.seeds.clone();
+        let mut lineage = self.seeds();
         let document = self.core.visit_boundary(
             depth,
             self.reservation.role().envelope().owners * 2,
@@ -433,6 +561,7 @@ fn prepare(
     mut approval: Option<Approval>,
     ledger: &ApprovalLedger,
     seeds: &Lineage,
+    fold: Option<&super::fold::FoldState>,
     origins: &Origins,
     mut owner_bytes: u64,
     old_baseline: u64,
@@ -444,6 +573,7 @@ fn prepare(
     mut fold_frontier: Option<CommandKey>,
 ) -> Result<Plan, Error> {
     let key = event.effects.accepted;
+    folded_commands(event.effects.folded.len() as u64);
     if let Some(approval) = &mut approval {
         approval.targets.sort_unstable();
         if approval.targets.windows(2).any(|w| w[0] == w[1]) {
@@ -504,18 +634,11 @@ fn prepare(
         .copied()
         .chain(event.effects.folded.iter().map(|c| c.key))
     {
-        let released = if removed == key {
-            charge
+        let (released, released_decode) = if removed == key {
+            (charge, decode_charge)
         } else {
-            origins.get(&removed).ok_or(Error::InvalidOrigin)?.charge
-        };
-        let released_decode = if removed == key {
-            decode_charge
-        } else {
-            origins
-                .get(&removed)
-                .ok_or(Error::InvalidOrigin)?
-                .decode_charge
+            let prior = origins.get(&removed).ok_or(Error::InvalidOrigin)?;
+            (prior.charge, prior.decode_charge)
         };
         decode_bound = decode_bound
             .checked_sub(released_decode)
@@ -524,105 +647,89 @@ fn prepare(
             .checked_sub(released)
             .ok_or(Error::InvalidOrigin)?;
     }
-    let (seeds_next, baseline_resources, baseline_bytes, baseline_decode) =
-        if let Some(document) = event.folded_baseline {
-            // A fold already walks and installs this long-lived baseline. Metadata
-            // is staged here so refusal cannot partially advance its seeds.
-            let mut next = seeds.clone();
-            for command in &event.effects.folded {
-                let creation = if command.key == key {
-                    &origin.creation
-                } else {
-                    &origins
-                        .get(&command.key)
-                        .ok_or(Error::InvalidOrigin)?
-                        .origin
-                        .creation
-                };
-                next.apply_bounded(creation, &command.identities, role.envelope().owners)?;
+    let mut folded_approval_updates = Vec::new();
+    let (fold_next, baseline_bytes, baseline_decode) = if event.effects.folded.is_empty() {
+        (None, old_baseline, old_baseline_decode)
+    } else {
+        let state = fold.ok_or(Error::InvalidPolicy)?;
+        let mut patch =
+            super::fold::FoldPatch::new(state, role.envelope().owners, role.envelope().workspace);
+        let mut root = None;
+        let mut prefix = kinewright_core::undo::StepEvidenceBuilder::new();
+        let mut count = 0;
+        for (command, effects) in event.folded_commands().zip(&event.effects.folded) {
+            if command.key != effects.key {
+                return Err(Error::InvalidOrigin);
             }
-            next.prune();
-            scan();
-            next.verify(document)?;
-            scan();
-            let resources = Resources::document(document);
-            let bytes = baseline_charge(&next, &resources)?;
-            owner_bytes = owner_bytes
-                .checked_sub(old_baseline)
-                .and_then(|n| n.checked_add(bytes))
-                .ok_or(Error::Capacity("owner metadata"))?;
-            let decode = super::stored::baseline_decode_charge(
-                &next,
-                resources.len(),
-                role.envelope().workspace,
+            let (creation, payload_refs) = if command.key == key {
+                (&origin.creation, payload.len())
+            } else {
+                let prior = origins.get(&command.key).ok_or(Error::InvalidOrigin)?;
+                if prior.origin.payload_digest != command.payload_digest {
+                    return Err(Error::InvalidOrigin);
+                }
+                (&prior.origin.creation, prior.resources.len())
+            };
+            folded_payload_references(payload_refs as u64);
+            patch.apply(
+                state,
+                seeds,
+                creation,
+                command.operations,
+                &effects.identities,
             )?;
-            decode_bound = decode_bound
-                .checked_sub(old_baseline_decode)
-                .and_then(|v| v.checked_add(decode))
-                .ok_or(Error::Capacity("owner decode"))?;
-            (Some(next), Some(resources), bytes, decode)
-        } else {
-            (None, None, old_baseline, old_baseline_decode)
-        };
+            if root != Some(command.step_first) {
+                prefix = kinewright_core::undo::StepEvidenceBuilder::new();
+                root = Some(command.step_first);
+            }
+            prefix
+                .push(command.key, command.payload_digest)
+                .ok_or(Error::InvalidOrigin)?;
+            if (command.key == key && approval.is_some())
+                || ledger
+                    .get_exact(command.key, command.payload_digest)
+                    .is_some()
+            {
+                folded_approval_updates.push((
+                    command.key,
+                    super::ledger::FoldedApproval {
+                        payload_digest: command.payload_digest,
+                        prefix: prefix.evidence().ok_or(Error::InvalidOrigin)?,
+                    },
+                ));
+            }
+            count += 1;
+        }
+        if count != event.effects.folded.len() {
+            return Err(Error::InvalidOrigin);
+        }
+        let (bytes, decode) = patch.finish(state, seeds)?;
+        owner_bytes = owner_bytes
+            .checked_sub(old_baseline)
+            .and_then(|n| n.checked_add(bytes))
+            .ok_or(Error::Capacity("owner metadata"))?;
+        decode_bound = decode_bound
+            .checked_sub(old_baseline_decode)
+            .and_then(|n| n.checked_add(decode))
+            .ok_or(Error::Capacity("owner decode"))?;
+        (Some(patch), bytes, decode)
+    };
     if decode_bound > role.envelope().workspace {
         return Err(Error::Capacity("owner decode"));
     }
     if owner_bytes > role.envelope().owners {
         return Err(Error::Capacity("owner metadata"));
     }
-    let mut folded_approval_updates = Vec::new();
-    for folded in &event.effects.folded {
-        let digest = if folded.key == key && approval.is_some() {
-            Some(event.payload_digest)
-        } else {
-            ledger.get(folded.key).map(|entry| entry.payload_digest)
-        };
-        if let Some(payload_digest) = digest {
-            let root = if folded.key == key {
-                event.step_first
-            } else {
-                origins
-                    .get(&folded.key)
-                    .ok_or(Error::InvalidOrigin)?
-                    .step_first
-            };
-            let start = origins
-                .0
-                .binary_search_by_key(&root.position, |row| row.origin.key.position)
-                .unwrap_or_else(|index| index);
-            let prefix =
-                kinewright_core::undo::StepEvidence::from_commands(
-                    origins
-                        .0
-                        .iter()
-                        .skip(start)
-                        .take_while(|row| row.step_first == root && row.origin.key <= folded.key)
-                        .map(|row| (row.origin.key, row.origin.payload_digest))
-                        .chain(std::iter::once((key, event.payload_digest)).filter(
-                            |(current, _)| event.step_first == root && *current <= folded.key,
-                        )),
-                )
-                .ok_or(Error::InvalidOrigin)?;
-            folded_approval_updates.push((
-                folded.key,
-                super::ledger::FoldedApproval {
-                    payload_digest,
-                    prefix,
-                },
-            ));
-        }
-    }
     let mut terminal_updates = Vec::new();
     if !event.effects.folded.is_empty() || !event.effects.discarded.is_empty() {
-        for entry in ledger.transition_entries() {
-            let key = entry.target.first_key;
-            let folded = event
-                .effects
-                .folded
-                .iter()
-                .any(|command| command.key == key);
-            let discarded = event.effects.discarded.contains(&key);
-            if folded || discarded {
+        for (key, folded) in event
+            .effects
+            .folded
+            .iter()
+            .map(|c| (c.key, true))
+            .chain(event.effects.discarded.iter().map(|key| (*key, false)))
+        {
+            for entry in ledger.for_step(key) {
                 let presence = if super::transition::prefix_matches(entry.target, origins) {
                     if folded {
                         super::transition::TerminalPresence::Folded
@@ -654,8 +761,7 @@ fn prepare(
             step_first: event.step_first,
         },
         approval,
-        seeds: seeds_next,
-        baseline_resources,
+        fold: fold_next,
         owner_bytes,
         baseline_bytes,
         decode_bound,
@@ -694,7 +800,7 @@ pub(super) fn approval_charge(approval: &Approval) -> Result<u64, Error> {
     // Covers both the live ledger node and its eventual folded-proof node.
     // The key repeats its digest so folded sibling approvals stay distinct.
     // Baseline's fixed headers cover the two initially sparse BTree roots.
-    1024_u64
+    1280_u64
         .checked_add((approval.targets.capacity() * std::mem::size_of::<RemovedTarget>()) as u64)
         .and_then(|n| n.checked_add(approval.reference.sha256.capacity() as u64))
         .ok_or(Error::Capacity("approval size"))

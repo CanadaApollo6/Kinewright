@@ -121,24 +121,55 @@ pub struct StepEvidence {
 impl StepEvidence {
     /// Hash keys and payload digests in order. No operation or document is copied.
     #[must_use]
-    pub fn from_commands(
-        mut commands: impl Iterator<Item = (CommandKey, [u8; 32])>,
-    ) -> Option<Self> {
-        let (first_key, first_digest) = commands.next()?;
+    pub fn from_commands(commands: impl Iterator<Item = (CommandKey, [u8; 32])>) -> Option<Self> {
+        let mut prefix = StepEvidenceBuilder::new();
+        for (key, digest) in commands {
+            prefix.push(key, digest)?;
+        }
+        prefix.evidence()
+    }
+}
+/// One streaming encoder for all prefixes of a folded step.
+pub struct StepEvidenceBuilder {
+    first: Option<(CommandKey, [u8; 32])>,
+    commands: u64,
+    digest: kinewright_hash::Sha256,
+}
+impl Default for StepEvidenceBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl StepEvidenceBuilder {
+    #[must_use]
+    pub fn new() -> Self {
         let mut digest = kinewright_hash::Sha256::new();
         digest.update(b"Kinewright step commands\0");
-        let mut count = 0_u64;
-        for (key, payload) in std::iter::once((first_key, first_digest)).chain(commands) {
-            digest.update(&key.epoch.to_le_bytes());
-            digest.update(&key.position.to_le_bytes());
-            digest.update(&payload);
-            count += 1;
+        Self {
+            first: None,
+            commands: 0,
+            digest,
         }
-        digest.update(&count.to_le_bytes());
-        Some(Self {
+    }
+    pub fn push(&mut self, key: CommandKey, payload: [u8; 32]) -> Option<()> {
+        self.commands = self.commands.checked_add(1)?;
+        self.first.get_or_insert((key, payload));
+        self.digest.update(&key.epoch.to_le_bytes());
+        self.digest.update(&key.position.to_le_bytes());
+        self.digest.update(&payload);
+        Some(())
+    }
+    #[must_use]
+    pub fn evidence(&self) -> Option<StepEvidence> {
+        let (first_key, first_digest) = self.first?;
+        // Finalize this prefix independently, then continue the same command
+        // stream for the next approval; the fixed hash state owns no payload.
+        let mut digest = self.digest.clone();
+        digest.update(&self.commands.to_le_bytes());
+        Some(StepEvidence {
             first_key,
             first_digest,
-            commands: count,
+            commands: self.commands,
             digest: digest.finalize(),
         })
     }
@@ -229,7 +260,38 @@ pub struct EditEvent<'a> {
     pub operations: &'a [Operation],
     pub payload_digest: [u8; 32],
     pub step_first: CommandKey,
-    pub folded_baseline: Option<&'a Document>,
+    folded_steps: &'a std::collections::VecDeque<Step>,
+    folded_old_steps: usize,
+    folded_new: bool,
+}
+pub struct FoldedCommand<'a> {
+    pub key: CommandKey,
+    pub payload_digest: [u8; 32],
+    pub operations: &'a [Operation],
+    pub step_first: CommandKey,
+}
+impl EditEvent<'_> {
+    /// Borrow exactly the folded prefix, never copy an operation for the owner.
+    pub fn folded_commands(&self) -> impl Iterator<Item = FoldedCommand<'_>> {
+        self.folded_steps
+            .iter()
+            .take(self.folded_old_steps)
+            .flat_map(|step| {
+                let first = step.commands[0].id;
+                step.commands.iter().map(move |command| FoldedCommand {
+                    key: command.id,
+                    payload_digest: command.payload_digest,
+                    operations: &command.operations,
+                    step_first: first,
+                })
+            })
+            .chain(self.folded_new.then_some(FoldedCommand {
+                key: self.effects.accepted,
+                payload_digest: self.payload_digest,
+                operations: self.operations,
+                step_first: self.step_first,
+            }))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -746,13 +808,9 @@ impl History {
             } else {
                 accepted
             },
-            folded_baseline: if fold_new {
-                Some(&candidate)
-            } else {
-                folded_baseline
-                    .as_ref()
-                    .map(|(document, _)| document.as_ref())
-            },
+            folded_steps: &self.undo,
+            folded_old_steps: folded_count - usize::from(fold_new),
+            folded_new: fold_new,
         })
         .map_err(PreparedError::Owner)?;
         // Both the executor and its owner have finished all fallible preparation.

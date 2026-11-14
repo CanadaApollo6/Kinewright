@@ -364,7 +364,8 @@ fn fixed_do_charge_covers_the_digest_index_and_fold_fact() {
         * (size_of::<(kinewright_core::undo::CommandKey, [u8; 32])>()
             + size_of::<ApprovalEntry>()
             + size_of::<kinewright_core::undo::CommandKey>()
-            + size_of::<super::ledger::FoldedApproval>())
+            + size_of::<super::ledger::FoldedApproval>()
+            + size_of::<super::ledger::ReferenceKey>())
         + 64;
     let heap = a.reference.sha256.capacity() + a.targets.capacity() * size_of::<RemovedTarget>();
     assert!(

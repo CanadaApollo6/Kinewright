@@ -1,0 +1,21 @@
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-4492ddab-ddc6f77f95db0f24/crates/kinewright-project)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.98s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_project-b9cef42ee480bbd9)
+
+running 1 test
+
+thread 'operation_history::fold_tests::a_fold_touches_only_its_step_with_unrelated_seeds_resources_and_approvals' (1138994) panicked at crates/kinewright-project/src/operation_history/fold_tests.rs:46:5:
+assertion `left == right` failed: FOLD_DOES_NOT_COPY_SEEDS
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test operation_history::fold_tests::a_fold_touches_only_its_step_with_unrelated_seeds_resources_and_approvals ... FAILED
+
+failures:
+
+failures:
+    operation_history::fold_tests::a_fold_touches_only_its_step_with_unrelated_seeds_resources_and_approvals
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 291 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p kinewright-project --lib`

@@ -19,6 +19,7 @@ pub struct ValidatedOwnerSnapshot {
     folded_approvals: super::ledger::FoldedApprovals,
     ledger: ApprovalLedger,
     seeds: Lineage,
+    fold: Option<super::fold::FoldState>,
     resources: Resources,
     origins: Origins,
     owner_bytes: u64,
@@ -40,6 +41,7 @@ impl ValidatedOwnerSnapshot {
             ledger: self.ledger,
             folded_approvals: self.folded_approvals,
             seeds: self.seeds,
+            fold: self.fold,
             resources: self.resources,
             origins: self.origins,
             owner_bytes: self.owner_bytes,
@@ -78,7 +80,7 @@ impl OwnerHistory {
             fold_frontier: self.fold_frontier,
             terminal_facts: self.terminal_facts.clone(),
             history: self.core.record(),
-            seeds: self.seeds.clone(),
+            seeds: self.seeds(),
             origins: self.origins.0.iter().map(|v| v.origin.clone()).collect(),
             resources: self.resources.values().cloned().collect(),
             ledger: self.ledger.clone(),
@@ -188,6 +190,7 @@ impl OwnerHistory {
                 snapshot.ledger.transitions.push(entry.clone());
             }
         }
+        snapshot.ledger.rebuild_indices();
         if !snapshot.ledger.references_unique() {
             return Err(Error::InvalidLedger);
         }
@@ -241,6 +244,7 @@ impl OwnerHistory {
         self.ledger = snapshot.ledger;
         self.folded_approvals = snapshot.folded_approvals;
         self.seeds = snapshot.seeds;
+        self.fold = snapshot.fold;
         self.resources = snapshot.resources;
         self.origins = snapshot.origins;
         self.owner_bytes = snapshot.owner_bytes;
@@ -297,6 +301,7 @@ impl OwnerSnapshot {
             mut ledger,
             folded_approvals,
         } = data;
+        ledger.rebuild_indices();
         if !ledger.references_unique()
             || ledger
                 .commands
@@ -332,13 +337,28 @@ impl OwnerSnapshot {
             baseline: baseline_resources,
             counts: BTreeMap::default(),
         };
-        let baseline_bytes = baseline_charge(&seeds, &resources.baseline)?;
+        let fold = if role == Role::Ordinary {
+            Some(super::fold::FoldState::new(
+                &seeds,
+                &history.baseline,
+                role.envelope().workspace,
+            )?)
+        } else {
+            None
+        };
+        let (baseline_bytes, baseline_decode) = if let Some(state) = &fold {
+            state.costs()?
+        } else {
+            (
+                baseline_charge(&seeds, &resources.baseline)?,
+                super::stored::baseline_decode_charge(
+                    &seeds,
+                    resources.baseline.len(),
+                    role.envelope().workspace,
+                )?,
+            )
+        };
         let mut owner_bytes = baseline_bytes;
-        let baseline_decode = super::stored::baseline_decode_charge(
-            &seeds,
-            resources.baseline.len(),
-            role.envelope().workspace,
-        )?;
         let key_charges = history
             .undo
             .iter()
@@ -614,6 +634,7 @@ impl OwnerSnapshot {
             folded_approvals,
             ledger,
             seeds,
+            fold,
             resources,
             origins: live_origins,
             owner_bytes,

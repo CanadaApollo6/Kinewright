@@ -613,39 +613,52 @@ pub(super) fn fragment_charge(
     let value = ((None::<&str>, &commands), (creation, inputs));
     payload_decode_charge(&value, workspace / 4)
 }
-fn payload_decode_charge(value: &impl Serialize, limit: u64) -> Result<u64, Error> {
-    struct Counter {
-        bytes: u64,
+pub(super) fn payload_charge(value: &impl Serialize, limit: u64) -> Result<(u64, u64), Error> {
+    struct Limited {
+        bytes: Vec<u8>,
         limit: u64,
     }
-    impl std::io::Write for Counter {
+    impl std::io::Write for Limited {
         fn write(&mut self, value: &[u8]) -> std::io::Result<usize> {
-            self.bytes = self
-                .bytes
+            if (self.bytes.len() as u64)
                 .checked_add(value.len() as u64)
-                .filter(|bytes| *bytes <= self.limit)
-                .ok_or_else(|| std::io::Error::other("wire capacity"))?;
+                .is_none_or(|n| n > self.limit)
+            {
+                return Err(std::io::Error::other("wire capacity"));
+            }
+            self.bytes.extend_from_slice(value);
             Ok(value.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    let mut counter = Counter { bytes: 0, limit };
-    serde_json::to_writer(&mut counter, value).map_err(|_| Error::Capacity("owner decode"))?;
-    let bytes = serde_json::to_vec(value).map_err(|_| Error::InvalidRecord)?;
-    super::owner::payload_serialized(counter.bytes * 2);
-    kinewright_core::undo::payload_memory_bound(&bytes)?
-        .checked_add(bytes.len() as u64)
-        .ok_or(Error::Capacity("owner decode"))
+    // A Vec's geometric spare capacity is at most twice the admitted input.
+    // limit is W/4, leaving W/2 for this temporary encoding; it is dropped
+    // before Core's candidate or a retained ancestry payload is allocated.
+    let mut out = Limited {
+        bytes: Vec::new(),
+        limit,
+    };
+    super::owner::payload_encodings(1);
+    serde_json::to_writer(&mut out, value).map_err(|_| Error::Capacity("owner decode"))?;
+    let encoded = out.bytes.len() as u64;
+    super::owner::payload_serialized(encoded);
+    let decoded = kinewright_core::undo::payload_memory_bound(&out.bytes)?
+        .checked_add(encoded)
+        .ok_or(Error::Capacity("owner decode"))?;
+    Ok((encoded, decoded))
+}
+fn payload_decode_charge(value: &impl Serialize, limit: u64) -> Result<u64, Error> {
+    payload_charge(value, limit).map(|(_, decoded)| decoded)
 }
 pub(super) fn baseline_decode_charge(
     lineage: &super::Lineage,
     resources: usize,
     workspace: u64,
 ) -> Result<u64, Error> {
-    // One exact aggregate walk at construction/open/fold, alongside the other
-    // baseline walks. Ordinary commands never visit this map.
+    // NeverFold roles measure at construction/open. Folding roles keep cached
+    // point charges instead; commands never encode the full seed map.
     super::owner::exact_size(lineage)?;
     payload_decode_charge(lineage, workspace / 4)?
         .checked_add(resources as u64 * 4096 + 8192)
@@ -671,4 +684,14 @@ mod tests;
 
 #[cfg(test)]
 #[path = "stored_codec_tests.rs"]
-mod codec_tests;
+pub(super) mod codec_tests;
+
+#[cfg(test)]
+pub(super) fn assert_decode_forecast(record: &StoredOwnerRecord, bound: u64) {
+    let bytes = record.body.get().as_bytes();
+    let actual = kinewright_core::undo::payload_memory_bound(bytes).unwrap() + bytes.len() as u64;
+    assert!(
+        actual <= bound,
+        "EVERY_SAVED_OWNER_DECODE_IS_RESERVED actual={actual} bound={bound}"
+    );
+}

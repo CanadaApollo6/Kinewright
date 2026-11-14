@@ -280,10 +280,58 @@ fn role_measurements() {
     }
     println!("{}", serde_json::Value::Object(rows));
 }
-#[expect(
-    clippy::too_many_lines,
-    reason = "one benchmark lane keeps the fixture, executor and ordered measurement stream together"
-)]
+fn fold_counters(checkpoints: usize) {
+    let mut bounds = limits(checkpoints);
+    bounds.operation_bytes = 500;
+    let mut engine = Engine::new("new", fixture::heavy(), bounds);
+    engine.attach_approval();
+    for index in 0..32 {
+        engine.execute(edit(index));
+    }
+    let before = PhaseCounters::read();
+    let owner_before = OwnerCounters::read();
+    engine.execute(edit(32));
+    println!(
+        "{}",
+        serde_json::json!({"fixture_json_bytes":245_233,"plain_fold":{"core":PhaseCounters::read().since(before),"owner":OwnerCounters::read().since(owner_before)}})
+    );
+    let Engine::New(attached) = &mut engine else {
+        unreachable!()
+    };
+    for index in 0..32 {
+        let mut id = approval_ref();
+        id.sha256 = format!("{index:064x}");
+        let target = attached
+            .owner
+            .transition_target(kinewright_project::operation_history::Direction::Undo)
+            .unwrap();
+        attached
+            .owner
+            .approve_transition(
+                id,
+                kinewright_project::operation_history::Direction::Undo,
+                target,
+            )
+            .unwrap();
+        let key = attached.owner.history().position();
+        attached
+            .owner
+            .execute(Command::Redo, origin(key.epoch, key.position), vec![], None)
+            .unwrap();
+        let key = attached.owner.history().position();
+        attached
+            .owner
+            .execute(edit(index), origin(key.epoch, key.position), vec![], None)
+            .unwrap();
+    }
+    let before = PhaseCounters::read();
+    let owner_before = OwnerCounters::read();
+    engine.execute(edit(33));
+    println!(
+        "{}",
+        serde_json::json!({"populated_ledger_fold":{"core":PhaseCounters::read().since(before),"owner":OwnerCounters::read().since(owner_before)}})
+    );
+}
 
 fn identity_measurements(checkpoints: usize) {
     let mut engine = Engine::new("new", fixture::heavy(), limits(checkpoints));
@@ -333,10 +381,18 @@ fn identity_measurements(checkpoints: usize) {
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one benchmark lane keeps the fixture, executor and ordered measurement stream together"
+)]
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let side = args.get(1).expect("old or new");
     let checkpoints = args.get(2).map_or(4, |s| s.parse().unwrap());
+    if side == "fold-counters" {
+        fold_counters(checkpoints);
+        return;
+    }
     if side == "identity" {
         identity_measurements(checkpoints);
         return;

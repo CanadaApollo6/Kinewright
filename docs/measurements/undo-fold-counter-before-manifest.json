@@ -1,0 +1,7 @@
+{
+  "base": "40c21849",
+  "binary": "target/hx-part2/bin/fold-before-40c21849-6e04669d69ff8c89a5e58b43e78c32876d48ebf01a1574f153dbfacd4a97670b",
+  "sha256": "6e04669d69ff8c89a5e58b43e78c32876d48ebf01a1574f153dbfacd4a97670b",
+  "source_patch": "undo-fold-counter-before.patch",
+  "exit": 0
+}

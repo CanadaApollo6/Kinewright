@@ -1,4 +1,5 @@
 use super::Error;
+use crate::bundle_records::{ObjectRef, RecordKind};
 use kinewright_core::{
     ClipId, TrackId,
     undo::{CommandKey, Effects},
@@ -57,6 +58,18 @@ impl ApprovalEntry {
 pub struct ApprovalLedger {
     pub(super) commands: BTreeMap<(CommandKey, [u8; 32]), ApprovalEntry>,
     pub(super) transitions: Vec<super::transition::TransitionApproval>,
+    used: std::collections::BTreeSet<ReferenceKey>,
+    by_step: BTreeMap<CommandKey, Vec<usize>>,
+}
+// An exact fixed-size routing key avoids duplicating consent strings in the
+// admission index. It preserves the ObjectRef's spelling, length and kind.
+pub(super) type ReferenceKey = ([u8; 64], u64, RecordKind);
+fn reference_key(reference: &ObjectRef) -> Option<ReferenceKey> {
+    Some((
+        reference.sha256.as_bytes().try_into().ok()?,
+        reference.byte_length,
+        reference.record_kind,
+    ))
 }
 impl Serialize for ApprovalLedger {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -102,10 +115,12 @@ impl<'de> Deserialize<'de> for ApprovalLedger {
                 return Err(serde::de::Error::custom("duplicate approval command"));
             }
         }
-        let ledger = Self {
+        let mut ledger = Self {
             commands: result,
             transitions,
+            ..Self::default()
         };
+        ledger.rebuild_indices();
         if !ledger.references_unique() {
             return Err(serde::de::Error::custom("duplicate approval reference"));
         }
@@ -113,6 +128,42 @@ impl<'de> Deserialize<'de> for ApprovalLedger {
     }
 }
 impl ApprovalLedger {
+    pub(super) fn rebuild_indices(&mut self) {
+        self.used.clear();
+        self.by_step.clear();
+        for entry in self.commands.values() {
+            if let Some(key) = reference_key(&entry.approval.reference) {
+                self.used.insert(key);
+            }
+        }
+        for index in 0..self.transitions.len() {
+            self.index_transition(index);
+        }
+    }
+    pub(super) fn index_transition(&mut self, index: usize) {
+        let entry = &self.transitions[index];
+        if let Some(key) = reference_key(&entry.id) {
+            self.used.insert(key);
+        }
+        self.by_step
+            .entry(entry.target.first_key)
+            .or_default()
+            .push(index);
+    }
+    pub(super) fn reference_used(&self, id: &ObjectRef) -> bool {
+        reference_key(id).is_some_and(|key| self.used.contains(&key))
+    }
+    pub(super) fn for_step(
+        &self,
+        key: CommandKey,
+    ) -> impl Iterator<Item = &super::transition::TransitionApproval> {
+        self.by_step
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .map(|index| &self.transitions[*index])
+            .inspect(|_| super::owner::ledger_entries(1))
+    }
     pub(super) fn references_unique(&self) -> bool {
         let mut seen = std::collections::BTreeSet::new();
         self.entries()
@@ -131,10 +182,14 @@ impl ApprovalLedger {
     pub fn transition_entries(
         &self,
     ) -> impl Iterator<Item = &super::transition::TransitionApproval> {
-        self.transitions.iter()
+        self.transitions
+            .iter()
+            .inspect(|_| super::owner::ledger_entries(1))
     }
     pub fn entries(&self) -> impl Iterator<Item = &ApprovalEntry> {
-        self.commands.values()
+        self.commands
+            .values()
+            .inspect(|_| super::owner::ledger_entries(1))
     }
     #[must_use]
     /// Convenience for an unambiguous key. A reader with a consent binding
@@ -166,19 +221,15 @@ impl ApprovalLedger {
             .next()
             .is_some()
             || approval.targets.is_empty()
-            || self
-                .entries()
-                .any(|entry| entry.approval.reference == approval.reference)
-            || self
-                .transitions
-                .iter()
-                .any(|entry| entry.id == approval.reference)
+            || self.reference_used(&approval.reference)
         {
             return Err(Error::InvalidLedger);
         }
         Ok(())
     }
     pub(super) fn insert(&mut self, key: CommandKey, digest: [u8; 32], approval: Approval) {
+        self.used
+            .insert(reference_key(&approval.reference).expect("admitted consent reference"));
         self.commands.insert(
             (key, digest),
             ApprovalEntry {

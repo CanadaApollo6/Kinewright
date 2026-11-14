@@ -159,12 +159,7 @@ impl OwnerHistory {
         if self.ledger.len() >= crate::orchestration_records::ITEM_LIMIT {
             return Err(Error::Capacity("approval count"));
         }
-        if self.ledger.transitions.iter().any(|entry| entry.id == id)
-            || self
-                .ledger
-                .entries()
-                .any(|entry| entry.approval.reference == id)
-        {
+        if self.ledger.reference_used(&id) {
             return Err(Error::InvalidLedger);
         }
         let bytes = transition_charge(&id)?;
@@ -194,6 +189,8 @@ impl OwnerHistory {
             direction,
             target: expected,
         });
+        self.ledger
+            .index_transition(self.ledger.transitions.len() - 1);
         Ok(effects)
     }
     pub fn transition_fate(&self, id: &ObjectRef) -> Result<Option<TransitionFate>, Error> {
@@ -231,7 +228,9 @@ impl OwnerHistory {
 }
 pub(super) const TRANSITION_DECODE: u64 = 16_384;
 pub(super) fn transition_charge(id: &ObjectRef) -> Result<u64, Error> {
-    1024_u64
+    // Three inline slots cover the transition array, terminal fact, exact
+    // reference index, per-step index and its small Vec's spare capacity.
+    1280_u64
         .checked_add(id.sha256.capacity() as u64)
         .ok_or(Error::Capacity("owner metadata"))
 }
@@ -245,7 +244,7 @@ pub(super) fn prefix_matches(target: StepEvidence, origins: &super::owner::Origi
     let Ok(count) = usize::try_from(target.commands) else {
         return false;
     };
-    let mut rows = origins.0.iter().skip(index).take(count);
+    let mut rows = origins.0.range(index..).take(count);
     let Some(first) = rows.next() else {
         return false;
     };

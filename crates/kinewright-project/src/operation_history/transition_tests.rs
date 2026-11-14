@@ -421,6 +421,7 @@ fn transition_entries_share_the_256_approval_cap_and_have_fixed_evidence() {
     let pool = HistoryPool::new(PoolLimits::default());
     let mut history = owner(&pool, false, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
+    let before_approvals = history.owner_bytes();
     for value in 1..=256 {
         approved(
             &mut history,
@@ -437,8 +438,13 @@ fn transition_entries_share_the_256_approval_cap_and_have_fixed_evidence() {
         std::mem::size_of::<TransitionApproval>() <= 160,
         "FIXED_TRANSITION_ENTRY_LAYOUT"
     );
+    assert_eq!(
+        history.owner_bytes() - before_approvals,
+        344_064,
+        "TRANSITION_256_LITERAL_INDEXED_CHARGE"
+    );
     assert!(
-        history.owner_bytes() <= 300 << 10,
+        history.owner_bytes() <= 352 << 10,
         "TRANSITION_256_LIVE_BYTES"
     );
     assert_eq!(
@@ -707,5 +713,26 @@ fn folded_do_fact_does_not_turn_a_nonprefix_transition_into_holds() {
         dest.transition_counts().unwrap().holds,
         0,
         "NONPREFIX_FOLD_NEVER_COUNTS_AS_HOLDS"
+    );
+}
+
+#[test]
+fn fixed_transition_charge_covers_both_routing_indexes_and_terminal_fact() {
+    use std::mem::size_of;
+    let id = id(1);
+    let inline = 3
+        * (size_of::<TransitionApproval>()
+            + size_of::<(
+                kinewright_core::undo::StepEvidence,
+                super::transition::TerminalPresence,
+            )>()
+            + size_of::<super::ledger::ReferenceKey>()
+            + size_of::<(kinewright_core::undo::CommandKey, Vec<usize>)>())
+        + 64
+        + 4 * size_of::<usize>();
+    assert!(
+        super::transition::transition_charge(&id).unwrap()
+            >= (inline + id.sha256.capacity()) as u64,
+        "TRANSITION_CHARGE_COVERS_ROUTING_INDEXES_AND_TERMINAL_FACT"
     );
 }

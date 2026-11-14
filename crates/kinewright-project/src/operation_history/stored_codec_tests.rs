@@ -16,7 +16,7 @@ fn owner() -> OwnerHistory {
     .unwrap()
 }
 
-fn encoded(snapshot: &OwnerSnapshot) -> Vec<u8> {
+pub(in crate::operation_history) fn encoded(snapshot: &OwnerSnapshot) -> Vec<u8> {
     let data = &snapshot.data;
     let history = &data.history;
     let body = serde_json::value::to_raw_value(&BorrowedBody {
