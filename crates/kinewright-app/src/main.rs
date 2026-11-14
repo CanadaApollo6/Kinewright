@@ -51,5 +51,14 @@ mod transport;
 mod visual_cache;
 
 fn main() -> eframe::Result {
-    app::run()
+    let result = app::run();
+    if let Err(error) = &result {
+        rfd::MessageDialog::new()
+            .set_title("Kinewright could not start")
+            .set_description(error.to_string())
+            .set_level(rfd::MessageLevel::Error)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+    result
 }

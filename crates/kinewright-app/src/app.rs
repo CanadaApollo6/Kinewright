@@ -5094,13 +5094,7 @@ pub(crate) fn run() -> eframe::Result {
                 render_state.queue.clone(),
                 render_state.adapter.get_info(),
             );
-            let media = Arc::new(
-                FfmpegMediaEngine::new_with_test_data_dir(
-                    gpu,
-                    kinewright_media::test_support::TempDirectory::new("dq1-test-engine"),
-                )
-                .expect("FFmpeg media engine must initialize"),
-            );
+            let media = Arc::new(FfmpegMediaEngine::new_with_gpu(gpu)?);
             let repaint_context = creation_context.egui_ctx.clone();
             media.set_event_wakeup(move || repaint_context.request_repaint());
             let startup = std::env::args().nth(1).map(PathBuf::from);
