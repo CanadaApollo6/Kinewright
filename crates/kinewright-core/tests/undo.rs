@@ -1399,3 +1399,35 @@ fn atomic_copy_preserves_capacity_for_trusted_replay() {
         "ADMITTED_REDO_RECORD_REOPENS"
     );
 }
+
+#[test]
+fn admitted_redo_and_fold_reuse_their_validated_reservations() {
+    let mut history =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(93, 4)).unwrap();
+    history.execute(Command::Do(lock(false))).unwrap();
+    history.execute(Command::Do(lock(true))).unwrap();
+    let before = kinewright_core::undo::PhaseCounters::read();
+    let effects = history.execute(Command::Do(lock(true))).unwrap();
+    let count = kinewright_core::undo::PhaseCounters::read().since(before);
+    assert_eq!(effects.folded.len(), 1, "ONE_VALIDATED_FOLD");
+    assert_eq!(count.operation_reservations, 1, "FOLD_USES_VALIDATED_STEP");
+    history.execute(Command::Undo).unwrap();
+    let before = kinewright_core::undo::PhaseCounters::read();
+    history.execute(Command::Redo).unwrap();
+    let count = kinewright_core::undo::PhaseCounters::read().since(before);
+    assert_eq!(count.operation_reservations, 0, "REDO_USES_VALIDATED_STEP");
+    assert_eq!(count.exact_measurements, 0, "REDO_NO_EXACT_MEASUREMENT");
+    assert_eq!(count.document_copies, 1, "REDO_ONE_ATOMIC_COPY");
+    let mut limits = bounds(93, 4);
+    limits.step_cap = 0;
+    let mut zero = History::new(literal_document(), RetentionPolicy::Fold, limits).unwrap();
+    let before = kinewright_core::undo::PhaseCounters::read();
+    zero.execute(Command::Do(lock(false))).unwrap();
+    assert_eq!(
+        kinewright_core::undo::PhaseCounters::read()
+            .since(before)
+            .document_copies,
+        1,
+        "ZERO_CAP_NO_UNUSED_BASELINE_COPY"
+    );
+}

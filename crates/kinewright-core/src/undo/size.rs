@@ -64,6 +64,7 @@ pub(super) fn reservation(
     size: DocumentBound,
     budget: &mut ReplayBudget,
 ) -> Result<DocumentBound, Error> {
+    metrics::reservation();
     let copied =
         crate::history_size::operation_copy_bytes_with(document, operation, Some(size.live))
             .map_err(|_| Error::Capacity)?;

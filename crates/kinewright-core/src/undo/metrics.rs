@@ -8,13 +8,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct PhaseCounters {
     pub document_copies: u64,
     pub exact_measurements: u64,
+    pub operation_reservations: u64,
     pub document_bytes_serialised: u64,
     pub bytes_serialised: u64,
     pub kernel_validation_passes: u64,
     pub kernel_duration_passes: u64,
     pub kernel_identity_passes: u64,
 }
-thread_local! {static HISTORY:Cell<PhaseCounters>=const{Cell::new(PhaseCounters{document_copies:0,exact_measurements:0,document_bytes_serialised:0,bytes_serialised:0,kernel_validation_passes:0,kernel_duration_passes:0,kernel_identity_passes:0})};}
+thread_local! {static HISTORY:Cell<PhaseCounters>=const{Cell::new(PhaseCounters{document_copies:0,exact_measurements:0,operation_reservations:0,document_bytes_serialised:0,bytes_serialised:0,kernel_validation_passes:0,kernel_duration_passes:0,kernel_identity_passes:0})};}
 #[cfg(feature = "history-metrics")]
 static VALIDATION: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "history-metrics")]
@@ -42,6 +43,7 @@ impl PhaseCounters {
         Self {
             document_copies: self.document_copies - earlier.document_copies,
             exact_measurements: self.exact_measurements - earlier.exact_measurements,
+            operation_reservations: self.operation_reservations - earlier.operation_reservations,
             document_bytes_serialised: self.document_bytes_serialised
                 - earlier.document_bytes_serialised,
             bytes_serialised: self.bytes_serialised - earlier.bytes_serialised,
@@ -84,4 +86,10 @@ pub(super) fn serialized(bytes: u64) {
 #[cfg(feature = "history-metrics")]
 pub(crate) fn payload_serialized(bytes: u64) {
     PAYLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+}
+
+pub(super) fn reservation() {
+    let mut n = HISTORY.get();
+    n.operation_reservations += 1;
+    HISTORY.set(n);
 }

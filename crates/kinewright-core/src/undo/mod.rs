@@ -519,7 +519,9 @@ impl History {
         });
         let mut folded_count = 0;
         let mut folded_baseline = None;
-        if retained.encoded > self.bounds.operation_bytes || steps > self.bounds.step_cap {
+        if (retained.encoded > self.bounds.operation_bytes || steps > self.bounds.step_cap)
+            && !self.undo.is_empty()
+        {
             budget
                 .set_document_charge(candidate_bound.live)
                 .map_err(|_| Error::Capacity)?;
@@ -527,30 +529,24 @@ impl History {
                 .check_known(self.baseline_bound.live)
                 .map_err(|_| Error::Capacity)?;
             let mut baseline = capacity::copy_document(&self.baseline);
-            let mut baseline_bound = self.baseline_bound;
             for step in &self.undo {
                 if retained.encoded <= self.bounds.operation_bytes && steps <= self.bounds.step_cap
                 {
                     break;
                 }
-                for command in &step.commands {
-                    let identities = replay_observed(
-                        &mut baseline,
-                        &mut baseline_bound,
-                        &command.operations,
-                        self.bounds,
-                        &mut budget,
-                    )?;
-                    effects.folded.push(CommandEffects {
-                        key: command.id,
-                        identities,
-                    });
-                }
+                effects
+                    .folded
+                    .extend(replay_step(&mut baseline, step, &mut budget, true)?);
+                // Prior folded effects remain owned by the transaction while
+                // the next validated step is replayed.
+                budget
+                    .reserve_input(step.charge.effects_bytes)
+                    .map_err(|_| Error::Capacity)?;
                 retained.subtract(step.charge.operations);
                 steps -= 1;
                 folded_count += 1;
             }
-            baseline_bound = DocumentBound::measure(&baseline, self.bounds)?;
+            let baseline_bound = DocumentBound::measure(&baseline, self.bounds)?;
             folded_baseline = Some((Arc::new(baseline), baseline_bound));
         }
         let fold_new = steps > self.bounds.step_cap;
@@ -886,15 +882,6 @@ fn apply(
     budget: &mut ReplayBudget,
 ) -> Result<Vec<OperationIdentityEffect>, Error> {
     apply_mode(document, size, operations, bounds, budget, true)
-}
-fn replay_observed(
-    document: &mut Document,
-    size: &mut DocumentBound,
-    operations: &[Operation],
-    bounds: RoleBounds,
-    budget: &mut ReplayBudget,
-) -> Result<Vec<OperationIdentityEffect>, Error> {
-    apply(document, size, operations, bounds, budget)
 }
 fn replay_step(
     document: &mut Document,

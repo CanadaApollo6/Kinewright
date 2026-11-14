@@ -96,7 +96,7 @@ thread_local! {static PHASES:std::cell::RefCell<BTreeMap<String,serde_json::Valu
 fn phase(name: &str, before: PhaseCounters, commands: u64) {
     let count = PhaseCounters::read().since(before);
     PHASES.with_borrow_mut(|phases|{
-        let row=phases.entry(name.to_string()).or_insert_with(||serde_json::json!({"commands":0,"document_copies":0,"exact_measurements":0,"document_bytes_serialised":0,"bytes_serialised":0,"kernel_validation_passes":0,"kernel_duration_passes":0,"kernel_identity_passes":0}));
+        let row=phases.entry(name.to_string()).or_insert_with(||serde_json::json!({"commands":0,"document_copies":0,"exact_measurements":0,"operation_reservations":0,"document_bytes_serialised":0,"bytes_serialised":0,"kernel_validation_passes":0,"kernel_duration_passes":0,"kernel_identity_passes":0}));
         row["commands"]=serde_json::json!(row["commands"].as_u64().unwrap()+commands);
         for (key,value) in serde_json::to_value(count).unwrap().as_object().unwrap(){row[key]=serde_json::json!(row[key].as_u64().unwrap()+value.as_u64().unwrap());}
     });
