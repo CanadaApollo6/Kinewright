@@ -213,3 +213,4 @@ kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::test
 history_model seeded_commands_match_core_and_i1_long crates/kinewright-core/tests/history_model.rs any # HX H1 longer seeded differential replay and stack invariant audit
 undo differential_long crates/kinewright-core/tests/undo.rs any # Longer bounded undo executor differential across operation kinds and cache modes
 undo task_profile_accepts_two_thousand_cuts crates/kinewright-core/tests/undo.rs any # Task profile admits 2000 real cuts within the existing native envelope
+kinewright_app ja1_attachment::tests::s2h_lost_save_floor_stays_frozen_until_exact_publisher_result crates/kinewright-app/src/ja1_attachment_tests.rs linux-only # Real 12,000-edit Save floor; lost reply stays frozen until exact publisher result

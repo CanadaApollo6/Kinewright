@@ -21,6 +21,7 @@ mod ja_harness;
 mod joined_thread;
 mod keys;
 mod look_browser_ui;
+mod manual_edits;
 mod matte_overlay_ui;
 mod media_access;
 mod media_bin;

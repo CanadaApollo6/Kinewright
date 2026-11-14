@@ -44,6 +44,13 @@ enum SwitchState {
     Pending,
 }
 
+#[cfg_attr(
+    all(test, target_os = "linux"),
+    allow(
+        clippy::struct_excessive_bools,
+        reason = "The fourth flag is a test-only publication gate; production state is unchanged"
+    )
+)]
 pub(super) struct HostAttachment {
     issuer: Option<kinewright_agent::writer_host::HostIssuer>,
     hook_inflight: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
@@ -81,7 +88,11 @@ pub(super) struct HostAttachment {
     heartbeat: Option<StatusLane>,
     last_heartbeat: Instant,
     pub manual: Option<super::ManualProducerGate>,
+    // UI commands and notices outlive a replaceable manual lease during recovery.
+    pub(super) edits: crate::manual_edits::ManualEdits,
     manual_client: String,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) manual_publication_hold: bool,
     manual_inflight:
         Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
 }
@@ -400,7 +411,10 @@ impl HostAttachment {
             last_heartbeat: Instant::now(),
             manual: None,
             manual_client,
+            #[cfg(all(test, target_os = "linux"))]
+            manual_publication_hold: false,
             manual_inflight: None,
+            edits: crate::manual_edits::ManualEdits::default(),
         })
     }
 
@@ -471,7 +485,10 @@ impl HostAttachment {
             .as_str()
             .ok_or(BundleError::HistoryChanged)?
             .to_owned(),
+            #[cfg(all(test, target_os = "linux"))]
+            manual_publication_hold: false,
             manual_inflight: None,
+            edits: crate::manual_edits::ManualEdits::default(),
         })
     }
 
@@ -605,7 +622,7 @@ impl HostAttachment {
         Ok(())
     }
     pub fn accept_manual_ack(
-        &self,
+        &mut self,
         reply: &HostReply,
         owner: &Ja1EditingSession,
     ) -> Result<(), BundleError> {
@@ -618,6 +635,7 @@ impl HostAttachment {
                     .permit,
                 reply.manual_ack.clone(),
             )?;
+            self.edits.acknowledged();
         }
         Ok(())
     }
@@ -771,6 +789,9 @@ impl HostAttachment {
         if needs_cut && self.cut.is_none() {
             self.cut = Some(owner.freeze_host_cut()?);
         }
+        if self.read_only() {
+            self.edits.abandon_unaccepted();
+        }
         if !retry_original {
             self.drain_manual(owner)?;
         }
@@ -806,7 +827,8 @@ impl HostAttachment {
             })
         };
         let command = match action {
-            Action::StudioVersions
+            Action::DismissManualNotice
+            | Action::StudioVersions
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)
             | Action::StudioEditCopy(_) => {
@@ -952,7 +974,6 @@ impl HostAttachment {
             || self.cut.is_some()
             || self.status.frozen
             || self.status.choice.is_some()
-            || self.pending_count() >= kinewright_core::MANUAL_COMMANDS
     }
 
     pub fn manual_save_required(&self) -> bool {
@@ -970,6 +991,15 @@ impl HostAttachment {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<Option<HostReply>, BundleError> {
+        self.edits.collect_ready();
+        // Do not put a UI query behind this frame's pure-Core acceptance work.
+        if self.edits.attempt_running() {
+            return Ok(None);
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if self.manual_publication_hold {
+            return Ok(None);
+        }
         if self
             .hook_inflight
             .as_ref()
@@ -1182,7 +1212,17 @@ impl HostAttachment {
     #[allow(clippy::too_many_lines)]
     pub fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let pending = self.pending_count();
+        let pending = if self.edits.attempt_running() {
+            0
+        } else {
+            self.pending_count()
+        };
+        if self.edits.notice().is_none()
+            && !self.read_only()
+            && let Some(message) = self.edits.message()
+        {
+            ui.label(message);
+        }
         if pending > 0 {
             ui.label(format!("{pending} manual edits pending durable save. Preview is local; these edits are not Saved yet."));
         }

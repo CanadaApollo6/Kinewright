@@ -102,6 +102,16 @@ struct State {
 }
 pub struct ProtocolFixture(Arc<State>);
 impl ProtocolFixture {
+    /// Failed-test escape hatch, beyond the 60-second transport and controller cleanup.
+    pub const RELEASE_GUARD: Duration = super::super::HOST_REQUEST_TIMEOUT.saturating_mul(3);
+    /// Observe the control response before the startup timeout could wake a broken waiter.
+    pub const CONTROL_GUARD: Duration = Duration::from_secs(30);
+
+    #[must_use]
+    pub fn barriers_healthy(&self) -> bool {
+        !self.0.recovery.is_poisoned() && !self.0.status_gate.is_poisoned()
+    }
+
     #[must_use]
     pub fn new(root: &Path, mode: ProtocolFixtureMode) -> Self {
         Self::with_connector(root, mode, "scripted", None)
@@ -286,7 +296,7 @@ impl ProtocolFixture {
                     status.status_changed.notify_all();
                     let (state, _) = status
                         .status_changed
-                        .wait_timeout_while(state, Duration::from_secs(10), |state| !state.1)
+                        .wait_timeout_while(state, Self::RELEASE_GUARD, |state| !state.1)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     assert!(state.1, "C7_BUSY_STATUS_RELEASED");
                 }
@@ -348,25 +358,40 @@ impl ProtocolFixture {
                     || (matches!(phase, super::RecoveryPhase::BeforeIngress)
                         && recovery.hold_startup_ingress.load(Ordering::Acquire));
                 if held {
-                    let bit = recovery_bit(phase);
-                    let (state, timeout) = recovery
-                        .recovery_changed
-                        .wait_timeout_while(state, Duration::from_secs(5), |state| {
-                            state.1 & bit == 0
-                        })
-                        .unwrap();
-                    assert!(
-                        !timeout.timed_out() || state.1 & bit != 0,
-                        "C7_RECOVERY_RELEASE_BOUNDED"
-                    );
-                    if matches!(
-                        recovery.mode,
-                        ProtocolFixtureMode::RecoveryFailsOnce
-                            | ProtocolFixtureMode::RecoveryPanicsOnce
-                    ) {
-                        let mut state = state;
-                        state.1 &= !bit;
-                    }
+                    // A test hold must not prevent the HTTP control which releases it from running.
+                    tokio::task::block_in_place(|| {
+                        let bit = recovery_bit(phase);
+                        let began = Instant::now();
+                        let (state, timeout) = recovery
+                            .recovery_changed
+                            .wait_timeout_while(state, Self::RELEASE_GUARD, |state| {
+                                state.1 & bit == 0
+                            })
+                            .unwrap();
+                        eprintln!(
+                            "C7_RECOVERY_HOLD {}",
+                            serde_json::json!({
+                                "phase": recovery_name(phase), "root": &recovery.root,
+                                "hold_us": began.elapsed().as_micros(),
+                                "released": state.1 & bit != 0,
+                                "timed_out": timeout.timed_out(),
+                            })
+                        );
+                        assert!(
+                            !timeout.timed_out() || state.1 & bit != 0,
+                            "C7_RECOVERY_RELEASE_BOUNDED phase={} elapsed={:?}",
+                            recovery_name(phase),
+                            began.elapsed()
+                        );
+                        if matches!(
+                            recovery.mode,
+                            ProtocolFixtureMode::RecoveryFailsOnce
+                                | ProtocolFixtureMode::RecoveryPanicsOnce
+                        ) {
+                            let mut state = state;
+                            state.1 &= !bit;
+                        }
+                    });
                 }
             })),
             profiles: Some(Arc::new(Factory(self.0.clone()))),
@@ -419,6 +444,24 @@ impl ProtocolFixture {
         }
     }
 }
+const _: () = assert!(
+    ProtocolFixture::CONTROL_GUARD.as_millis()
+        < super::super::HOST_STARTUP_WAIT_TIMEOUT.as_millis(),
+    "a startup timeout must not satisfy the shutdown-wake witness"
+);
+
+fn recovery_name(phase: super::RecoveryPhase) -> &'static str {
+    match phase {
+        super::RecoveryPhase::Entered => "Entered",
+        super::RecoveryPhase::Queued => "Queued",
+        super::RecoveryPhase::Completed => "Completed",
+        super::RecoveryPhase::BeforeIngress => "BeforeIngress",
+        super::RecoveryPhase::Restored => "Restored",
+        super::RecoveryPhase::Dispatch => "Dispatch",
+        super::RecoveryPhase::Waiting => "Waiting",
+        super::RecoveryPhase::ControlDispatch => "ControlDispatch",
+    }
+}
 fn recovery_bit(phase: super::RecoveryPhase) -> u8 {
     match phase {
         super::RecoveryPhase::Entered => 1,
@@ -455,6 +498,7 @@ fn target_dir() -> PathBuf {
         parent.into()
     }
 }
+
 fn child() -> io::Result<PathBuf> {
     static CHILD: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     static BUILD: Mutex<()> = Mutex::new(());
@@ -628,4 +672,39 @@ pub(crate) fn recovery_barrier() -> io::Result<()> {
         std::thread::sleep(Duration::from_millis(5));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c7_fixture_hold_leaves_the_runtime_available() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c7-fixture-scheduler",
+        );
+        let fixture = ProtocolFixture::new(temp.root(), ProtocolFixtureMode::Dormant);
+        fixture.hold_startup_ingress();
+        let witness = fixture.ports().recovery_witness.unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let held =
+            runtime.spawn(async move { witness(super::super::RecoveryPhase::BeforeIngress) });
+        assert!(fixture.wait_recovery(
+            super::super::RecoveryPhase::BeforeIngress,
+            ProtocolFixture::RELEASE_GUARD
+        ));
+        // This control can release the hold only if the fixture gives its worker core back.
+        let control = runtime.spawn(async move { fixture.release() });
+        let held_result = runtime.block_on(held);
+        runtime.block_on(control).unwrap();
+        assert!(
+            held_result.is_ok(),
+            "C7_FIXTURE_WORKER_AVAILABLE {held_result:?}"
+        );
+    }
 }

@@ -68,6 +68,7 @@ impl PreparedView {
 }
 
 pub(crate) enum Action {
+    DismissManualNotice,
     StudioVersions,
     StudioManualPlayback(Arc<Document>),
     StudioSelect(kinewright_project::studio_records::SnapshotKey),
@@ -99,6 +100,41 @@ pub(crate) enum Action {
     OpenCapture(PathBuf),
 }
 impl Action {
+    /// Recovery and rescue controls must remain reachable when a value cannot be accepted.
+    pub(crate) fn waits_for_manual_values(&self) -> bool {
+        match self {
+            Self::StudioManualPlayback(_)
+            | Self::StudioEditCopy(_)
+            | Self::ImportMedia(_)
+            | Self::ChangeMediaInterpretation(_)
+            | Self::Save
+            | Self::ConfirmSuccessorSave
+            | Self::SaveAs(_)
+            | Self::FirstSave(_)
+            | Self::PreviewRecovery(_)
+            | Self::PreviewRetirement(_)
+            | Self::PreviewForget
+            | Self::PreviewRelease(_) => true,
+            Self::DismissManualNotice
+            | Self::StudioVersions
+            | Self::StudioSelect(_)
+            | Self::Retry
+            | Self::OpenRecovery
+            | Self::Abandon
+            | Self::PreviewRescue
+            | Self::ConsentTrim
+            | Self::ConsentOmission
+            | Self::RescueTo(_)
+            | Self::Cancel
+            | Self::RemoveBranch
+            | Self::Forget
+            | Self::Reconcile(_)
+            | Self::Release
+            | Self::SaveSession(_)
+            | Self::CloseSession(_)
+            | Self::OpenCapture(_) => false,
+        }
+    }
     /// Whether this action keeps the project's identity and session, so it may
     /// run while a spoken note is recording. Anything else can move the
     /// project (Save As, recovery, rescue, a retried switch, a Save that
@@ -106,7 +142,8 @@ impl Action {
     pub(crate) fn keeps_identity(&self) -> bool {
         matches!(
             self,
-            Self::StudioVersions
+            Self::DismissManualNotice
+                | Self::StudioVersions
                 | Self::StudioManualPlayback(_)
                 | Self::StudioSelect(_)
                 | Self::ImportMedia(_)
@@ -148,11 +185,6 @@ pub(crate) struct ManualProducerGate {
     actor: kinewright_core::ActorIdentity,
     permit: kinewright_core::ManualPermit,
 }
-impl ManualProducerGate {
-    pub fn send(&self, command: Command) -> Result<(), kinewright_core::CoreDisconnected> {
-        self.permit.send(command)
-    }
-}
 
 #[allow(
     clippy::struct_excessive_bools,
@@ -187,11 +219,17 @@ pub(crate) struct Ja1Attachment {
     candidates: Vec<BranchId>,
     destinations: Vec<(PathBuf, PublicationState)>,
     frozen: bool,
+    /// Presentation priority comes from the typed reply, never from guessing its text.
+    host_reply_failed: bool,
     pub panel_open: bool,
     retention_lost: bool,
     originating_context: Arc<std::sync::atomic::AtomicBool>,
     snapshot_readers: host_snapshot::SnapshotReaders,
     host: Option<host::HostAttachment>,
+    #[cfg(all(test, target_os = "linux"))]
+    before_manual_playback: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(all(test, target_os = "linux"))]
+    before_host_reply: Option<fn(&mut kinewright_agent::writer_host::HostReply)>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fixture_host: Option<kinewright_agent::writer_host::WriterHost>,
     host_history_digest: std::cell::RefCell<
@@ -239,11 +277,16 @@ impl Ja1Attachment {
             candidates: vec![],
             destinations: vec![],
             frozen: false,
+            host_reply_failed: false,
             panel_open: true,
             retention_lost: false,
             originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             snapshot_readers: host_snapshot::SnapshotReaders::new()?,
             host: None,
+            #[cfg(all(test, target_os = "linux"))]
+            before_manual_playback: None,
+            #[cfg(all(test, target_os = "linux"))]
+            before_host_reply: None,
             #[cfg(all(test, target_os = "linux"))]
             fixture_host: None,
             host_history_digest: std::cell::RefCell::new(None),
@@ -282,6 +325,9 @@ impl Ja1Attachment {
         self.destinations = self.owner.retained_destinations().unwrap_or_default();
     }
     pub fn is_dirty(&self) -> bool {
+        if self.manual_edits_pending() {
+            return true;
+        }
         if self.retention_lost {
             return true;
         }
@@ -332,6 +378,9 @@ impl Ja1Attachment {
 
     pub fn destination_change(&self) -> Result<(), BundleError> {
         self.require_retention()?;
+        if self.manual_edits_pending() {
+            return Err(BundleError::Unsettled);
+        }
         if let Some(host) = &self.host {
             if let Some(disclosure) = &host.status.destination_change {
                 return Err(BundleError::Identity(disclosure.clone()));
@@ -348,6 +397,9 @@ impl Ja1Attachment {
         }
         if let Some(host) = &self.host {
             let mut text = host.status.close_disclosure.clone();
+            if self.manual_edits_pending() {
+                text.push_str(" A hand edit's final value is still waiting to be applied. It is kept only in this window and is not Saved. Cancel keeps this project open so the edit can finish. Discard closes the project and can lose its unsaved work, including this value.");
+            }
             if host.pending_count() > 0 {
                 text.push_str(" Manual edits are still waiting for a durable acknowledgement. Closing can discard this pending work; it is not Saved.");
             }
@@ -373,7 +425,25 @@ impl Ja1Attachment {
         reason = "one attachment action dispatch and result boundary"
     )]
     pub fn apply(&mut self, action: Action) -> Result<(), BundleError> {
+        #[cfg(all(test, target_os = "linux"))]
+        if matches!(action, Action::StudioManualPlayback(_))
+            && let Some(hook) = self.before_manual_playback.take()
+        {
+            hook();
+        }
+        if matches!(action, Action::DismissManualNotice) {
+            if let Some(host) = &mut self.host {
+                host.edits.dismiss_notice();
+            }
+            return Ok(());
+        }
+        self.stop_unaccepted_if_unavailable();
         self.require_retention()?;
+        if self.manual_pending_blocks(&action) {
+            self.message = crate::manual_edits::PENDING_WORDS.into();
+            return Err(BundleError::Unsettled);
+        }
+        self.end_manual_gestures();
         match &action {
             Action::StudioManualPlayback(document) => {
                 // A failure is reported once, with the scope it tried: an
@@ -484,7 +554,9 @@ impl Ja1Attachment {
             };
         }
         if self.host.is_some() {
-            return self.apply_host(action);
+            let result = self.apply_host(action);
+            self.stop_unaccepted_if_unavailable();
+            return result;
         }
         let result = self.apply_inner(action);
         if let Err(error) = &result {
@@ -532,10 +604,12 @@ impl Ja1Attachment {
         // The catch surrounds the borrowed operation: unwind cannot drop this owner.
         let _ = self.owner.host_lost();
         self.retention_lost = true;
+        self.host_reply_failed = true;
         self.frozen = true;
         self.choice = None;
         self.message = RETENTION_LOST_TEXT.into();
         self.panel_open = true;
+        self.stop_unaccepted_if_unavailable();
     }
 
     pub fn launch_host(
@@ -600,6 +674,7 @@ impl Ja1Attachment {
         let view = match outcome {
             Ok(view) => view,
             Err(error) => {
+                self.host_reply_failed = true;
                 if self
                     .host
                     .as_ref()
@@ -641,11 +716,99 @@ impl Ja1Attachment {
         }
     }
 
-    pub fn send_manual(&self, command: Command) -> Result<(), kinewright_core::CoreDisconnected> {
-        if let Some(gate) = self.host.as_ref().and_then(|host| host.manual.as_ref()) {
-            gate.send(command)
+    pub fn send_manual(
+        &mut self,
+        command: Command,
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
+        self.send_manual_value(command, None)
+    }
+
+    pub(crate) fn send_manual_value(
+        &mut self,
+        command: Command,
+        unchanged_at: Option<kinewright_core::TimelineRevision>,
+    ) -> Result<(), crate::manual_edits::ManualSendError> {
+        if let Some(host) = self.host.as_mut()
+            && let Some(gate) = host.manual.as_ref()
+        {
+            if let Some(revision) = unchanged_at {
+                host.edits
+                    .submit_value(command, Some(revision), &gate.permit)
+            } else {
+                host.edits.submit(command, &gate.permit)
+            }
         } else {
-            self.owner.core().send(command)
+            self.owner.core().send(command).map_err(Into::into)
+        }
+    }
+    pub(crate) fn desired_solid_color(
+        &self,
+        clip: kinewright_core::ClipId,
+    ) -> Option<kinewright_core::SolidColor> {
+        self.host
+            .as_ref()
+            .and_then(|host| host.edits.desired_solid_color(clip))
+    }
+    pub(crate) fn manual_edits_pending(&self) -> bool {
+        self.host.as_ref().is_some_and(|host| host.edits.pending())
+    }
+    pub(crate) fn manual_pending_blocks(&self, action: &Action) -> bool {
+        !self.read_only() && action.waits_for_manual_values() && self.manual_edits_pending()
+    }
+    pub(crate) fn manual_edit_message(&self) -> Option<&str> {
+        let edits = &self.host.as_ref()?.edits;
+        if let Some(notice) = edits.notice() {
+            Some(notice)
+        } else if self.read_only() || self.host_reply_failed {
+            None
+        } else {
+            edits.message()
+        }
+    }
+    pub(crate) fn manual_edit_status(&self) -> Option<String> {
+        if self.host_reply_failed && self.host.is_some() && self.manual_edit_message().is_none() {
+            return Some(self.message.clone());
+        }
+        let message = self.manual_edit_message()?;
+        Some(if self.read_only() || self.host_reply_failed {
+            format!("{} {message}", self.message)
+        } else {
+            message.into()
+        })
+    }
+    pub(crate) fn manual_persistent_status(&self) -> Option<String> {
+        let host = self.host.as_ref()?;
+        if self.host_reply_failed || host.edits.notice().is_some() {
+            self.manual_edit_status()
+        } else {
+            None
+        }
+    }
+    fn stop_unaccepted_if_unavailable(&mut self) {
+        if self.read_only()
+            && let Some(host) = &mut self.host
+        {
+            host.edits.abandon_unaccepted();
+        }
+    }
+    pub(crate) fn end_manual_gestures(&mut self) {
+        if let Some(host) = &mut self.host {
+            host.edits.end_gestures();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn settle_manual_for_test(&mut self) {
+        self.end_manual_gestures();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self.manual_edits_pending() {
+            let host = self.host.as_mut().unwrap();
+            host.edits.collect_ready();
+            host.edits.start_next(&host.manual.as_ref().unwrap().permit);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "MANUAL_ACCEPTANCE_BOUND"
+            );
+            std::thread::yield_now();
         }
     }
     #[cfg(test)]
@@ -844,8 +1007,33 @@ impl Ja1Attachment {
         match result {
             Ok(()) => Ok(()),
             Err(error) => {
-                if !known_refusal {
-                    self.host_request_failed(&error);
+                let manual_refusal = match &error {
+                    BundleError::CoreMutationRefused(reason)
+                        if matches!(
+                            reason,
+                            kinewright_core::CoreMutationRefusal::ManualBackpressure
+                                | kinewright_core::CoreMutationRefusal::ManualInputRequired
+                                | kinewright_core::CoreMutationRefusal::ManualHistoryCapacity
+                        ) && self.host.as_ref().is_some_and(|host| !host.read_only()) =>
+                    {
+                        Some(*reason)
+                    }
+                    _ => None,
+                };
+                if let Some(reason) = manual_refusal {
+                    // The hand-off is installed and Core definitively refused the edit.
+                    self.host_reply_failed = false;
+                    self.message = reason.to_string();
+                    self.host
+                        .as_mut()
+                        .expect("attached host")
+                        .edits
+                        .record_refusal(reason);
+                } else {
+                    self.host_reply_failed = true;
+                    if !known_refusal {
+                        self.host_request_failed(&error);
+                    }
                 }
                 Err(error)
             }
@@ -853,6 +1041,7 @@ impl Ja1Attachment {
     }
 
     fn host_request_failed(&mut self, error: &BundleError) {
+        self.host_reply_failed = true;
         let host = self.host.as_mut().expect("attached host");
         if host.confirmed_lost() || self.owner.host_retention_lost() {
             self.operation_panicked();
@@ -867,6 +1056,7 @@ impl Ja1Attachment {
         host.cut = Some(cut);
         host.unknown_operation = true;
         host.status.frozen = true;
+        host.edits.abandon_unaccepted();
         self.frozen = true;
         self.panel_open = true;
         self.message = format!(
@@ -882,6 +1072,11 @@ impl Ja1Attachment {
         &mut self,
         mut reply: kinewright_agent::writer_host::HostReply,
     ) -> Result<(), BundleError> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(hook) = self.before_host_reply.take() {
+            hook(&mut reply);
+        }
+        self.host_reply_failed = reply.error.is_some();
         if !reply.status.retention_proven
             || reply
                 .error
@@ -920,19 +1115,31 @@ impl Ja1Attachment {
             });
             host.cut = None;
             host.accept_status(reply.status);
-            host.manual
+            self.frozen = false;
+            host.edits.dismiss_notice();
+            // This authority-installation step already runs on the action worker. Its fresh
+            // permit has no pending prefix: confirm the local installation before announcing it.
+            let event = host
+                .manual
                 .as_ref()
                 .ok_or(BundleError::HistoryChanged)?
-                .send(Command::Do(media_edit.unwrap_or_else(|| {
+                .permit
+                .request(Command::Do(media_edit.unwrap_or_else(|| {
                     kinewright_core::Operation::AddAsset {
                         asset: asset.clone(),
                     }
                 })))
                 .map_err(|_| BundleError::HistoryChanged)?;
+            match event {
+                Event::DocumentChanged { .. } => {}
+                Event::MutationRefused { reason, .. } => {
+                    return Err(BundleError::CoreMutationRefused(reason));
+                }
+                _ => return Err(BundleError::HistoryChanged),
+            }
             if is_import {
                 self.imported_media = Some(asset.id);
             }
-            self.frozen = false;
             self.message = if is_import {
                 format!("Imported {}. Saving is pending.", asset.name)
             } else {
@@ -992,7 +1199,10 @@ impl Ja1Attachment {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
         }
-        let manual_failed = reply.error.is_some() && host.pending_count() > 0;
+        let manual_failed = reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "manual_lease" || host.pending_count() > 0);
         if manual_failed && host.cut.is_none() {
             host.cut = Some(self.owner.freeze_host_cut()?);
         }
@@ -1086,6 +1296,7 @@ impl Ja1Attachment {
     }
 
     pub fn poll_host(&mut self) -> bool {
+        self.stop_unaccepted_if_unavailable();
         if self.retention_lost || self.host.is_none() {
             return false;
         }
@@ -1094,7 +1305,7 @@ impl Ja1Attachment {
             .as_mut()
             .expect("attached host")
             .poll(&mut self.owner);
-        match result {
+        let changed = match result {
             Ok(Some(reply)) => {
                 let _ = self
                     .accept_host_reply(reply)
@@ -1119,7 +1330,15 @@ impl Ja1Attachment {
                 }
                 true
             }
+        };
+        self.stop_unaccepted_if_unavailable();
+        if let Some(host) = &mut self.host
+            && !host.read_only()
+            && let Some(gate) = &host.manual
+        {
+            host.edits.start_next(&gate.permit);
         }
+        changed
     }
 
     /// Finish source persistence and request Shutdown without joining native owners.
@@ -1199,7 +1418,8 @@ impl Ja1Attachment {
     #[allow(clippy::too_many_lines)]
     fn apply_inner(&mut self, action: Action) -> Result<(), BundleError> {
         match action {
-            Action::StudioVersions
+            Action::DismissManualNotice
+            | Action::StudioVersions
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)
             | Action::StudioEditCopy(_) => {
@@ -1607,6 +1827,12 @@ impl Ja1Attachment {
     pub fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.label(&self.message);
+        if let Some(message) = self.host.as_ref().and_then(|host| host.edits.notice()) {
+            ui.label(message);
+            if ui.button("Dismiss edit notice").clicked() {
+                return Some(Action::DismissManualNotice);
+            }
+        }
         if self.retention_lost {
             ui.label("Queries and history export remain available. Close this editing context explicitly to end retention.");
             return None;
@@ -1972,3 +2198,7 @@ impl Ja1Attachment {
         host.manual = None;
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "manual_value_tests.rs"]
+mod manual_value_tests;

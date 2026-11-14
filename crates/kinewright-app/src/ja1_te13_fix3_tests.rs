@@ -164,6 +164,7 @@ fn te13_fix3_fork_removed_studio(hosted: bool) {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     app.apply(Action::Save).unwrap();
     let fork = LoadedBundle::read(&path)
         .unwrap()

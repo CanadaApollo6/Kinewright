@@ -80,6 +80,7 @@ fn s3_fix1_lost_first_commit(colour: bool) {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     let expected = app.owner.core().export_history().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !app.read_only() && std::time::Instant::now() < deadline {
@@ -158,6 +159,7 @@ fn s3_owned_colour_reply_loss_preserves_prior_interpretation_for_undo() {
         expected
     );
     app.send_manual(Command::Undo).unwrap();
+    app.settle_manual_for_test();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while (app.is_dirty() || app.owner.core().export_history().unwrap().document != before.document)
         && std::time::Instant::now() < deadline
@@ -1625,7 +1627,7 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
         .retention_probe()
         .unwrap();
     let usage = app.owner.source().unwrap().store().usage_handle();
-    edit_attachment(&app, false);
+    edit_attachment(&mut app, false);
     let unsaved = core.export_history().unwrap();
     assert!(app.is_dirty());
     // The next save must admit this larger exact cut even if transport then fails.
@@ -1923,7 +1925,7 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     app.apply(Action::FirstSave(temp.path("host-a.kinewright")))
         .unwrap();
     for value in [true, false, true] {
-        edit_attachment(&app, value);
+        edit_attachment(&mut app, value);
         app.apply(Action::Save).unwrap();
     }
     let target = app
@@ -2059,7 +2061,7 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     assert!(!refused.exists());
     assert!(admission::tree(&other).is_empty());
 
-    edit_attachment(&app, true);
+    edit_attachment(&mut app, true);
     let second = other.join("person-picked.kinewright");
     app.apply(Action::SaveAs(second.clone())).unwrap();
     assert_eq!(app.project_path().as_deref(), Some(second.as_path()));
@@ -2156,12 +2158,13 @@ fn g05l_live_coalesced_preview_precedes_disk_ack() {
 }
 
 #[cfg(target_os = "linux")]
-fn edit_attachment(app: &Ja1Attachment, locked: bool) {
+fn edit_attachment(app: &mut Ja1Attachment, locked: bool) {
     app.send_manual(Command::Do(Operation::SetTrackSyncLock {
         track: TrackId(1),
         locked,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     assert_eq!(
         app.owner.core().export_history().unwrap().document.tracks[0].sync_lock,
         locked
@@ -2253,6 +2256,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     for command in commands {
         assert!(app.read_only());
         app.send_manual(command.clone()).unwrap();
+        app.settle_manual_for_test();
         assert!(
             matches!(
                 gate.request(command.clone()).unwrap(),
@@ -2800,11 +2804,13 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     app.send_manual(Command::Do(Operation::SetTrackSyncLock {
         track: TrackId(1),
         locked: true,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     let expected = app.owner.core().export_history().unwrap();
     let actor = app.owner.core().actor_identity();
     let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
@@ -2905,6 +2911,7 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     let expected = app.owner.core().export_history().unwrap();
     // Drain the acknowledgement before losing the later Save response.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -3057,6 +3064,10 @@ fn s2h_lost_save_as_and_preview_replies_replay_original_results() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
@@ -3611,6 +3622,7 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     let manual = app.owner.core().export_history().unwrap();
     let path = app.project_path().unwrap();
     let manual_branch = LoadedBundle::read(&path)
@@ -3648,6 +3660,7 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
         locked: true,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     app.apply(Action::Save).unwrap();
     assert!(!app.read_only(), "TE13_FIX1_STUDIO_CONTINUES_EDITING");
     assert!(app.close());
@@ -3773,6 +3786,7 @@ fn te13_fix2_reviewed_studio(hosted: bool) {
         locked: false,
     }))
     .unwrap();
+    app.settle_manual_for_test();
     app.apply(Action::Save).unwrap();
     let expected = app.owner.core().export_history().unwrap();
     let path = app.project_path().unwrap();
