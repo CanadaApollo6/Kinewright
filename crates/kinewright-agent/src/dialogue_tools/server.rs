@@ -75,10 +75,17 @@ impl KinewrightMcp {
             .dialogue_provider()
             .and_then(|provider| dialogue::check(&doc, args, provider.as_ref()));
         Ok(match result {
-            Ok(check) => reply(
-                serde_json::json!({"revision":revision,"check":check}),
-                false,
-            ),
+            Ok(check) => {
+                let mut result = reply(
+                    serde_json::json!({"revision":revision,"check":check}),
+                    false,
+                );
+                dialogue::bound_check(
+                    &mut result,
+                    matches!(args.detail, dialogue::CheckDetail::All),
+                );
+                result
+            }
             Err(reason) => refused(&reason),
         })
     }
@@ -106,12 +113,13 @@ impl KinewrightMcp {
             args.expected_revision,
             &plan.operations,
             || {
+                let current = self.dialogue_provider().map_err(|e| e.to_string())?;
                 for (id, value) in &plan.bindings {
                     let asset = before
                         .asset(*id)
                         .ok_or_else(|| "dialogue asset disappeared".to_string())?;
                     let now =
-                        dialogue::bound(provider.as_ref(), asset).map_err(|e| e.to_string())?;
+                        dialogue::bound(current.as_ref(), asset).map_err(|e| e.to_string())?;
                     if now.binding() != value.binding() {
                         return Err(Refusal::BindingChanged.to_string());
                     }
@@ -119,9 +127,24 @@ impl KinewrightMcp {
                 Ok(())
             },
             |new_revision, doc| {
+                let retained: Vec<_> = plan
+                    .changes
+                    .positions
+                    .iter()
+                    .map(|(&track, positions)| {
+                        let positions: Vec<_> = positions.iter().copied().collect();
+                        match dialogue::check_created(doc, track, &positions, &plan.bindings) {
+                            Ok(check) => serde_json::json!({"track":track.0,"check":check}),
+                            Err(reason) => {
+                                serde_json::json!({"track":track.0,"not_checked":reason})
+                            }
+                        }
+                    })
+                    .collect();
                 checked = Some((
                     new_revision,
                     dialogue::check_created(doc, plan.track, &plan.created, &plan.bindings),
+                    retained,
                 ));
             },
         )?;
@@ -139,14 +162,14 @@ impl KinewrightMcp {
         }
         // The observer receives Core's committed document, before any later edit
         // can replace the live snapshot. A failed readback never lies about apply.
-        let (revision, check) = checked.expect("successful edit has a committed event");
+        let (revision, check, retained) = checked.expect("successful edit has a committed event");
         Ok(match check {
             Ok(joins) => reply(
-                serde_json::json!({"status":"applied","from_revision":args.expected_revision,"revision":revision,"removals":plan.outcomes,"joins":joins}),
+                serde_json::json!({"status":"applied","from_revision":args.expected_revision,"revision":revision,"removals":plan.outcomes,"joins":joins,"retained_edges":retained,"extent_changes":plan.changes}),
                 false,
             ),
             Err(reason) => reply(
-                serde_json::json!({"status":"applied","from_revision":args.expected_revision,"revision":revision,"removals":plan.outcomes,"check_failed":reason}),
+                serde_json::json!({"status":"applied","from_revision":args.expected_revision,"revision":revision,"removals":plan.outcomes,"check_failed":reason,"retained_edges":retained,"extent_changes":plan.changes}),
                 false,
             ),
         })

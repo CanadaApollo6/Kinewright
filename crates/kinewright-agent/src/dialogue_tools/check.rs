@@ -30,6 +30,7 @@ pub(crate) struct Segment {
 #[derive(Debug, Serialize)]
 pub(crate) struct NotChecked {
     pub clip: u64,
+    pub range: [TimeCode; 2],
     #[serde(flatten)]
     pub reason: Refusal,
 }
@@ -64,6 +65,7 @@ pub(crate) struct PlayedSpan {
     pub asset: kinewright_core::AssetId,
     pub project: std::ops::Range<TimeCode>,
     pub source: AudibleSpan,
+    pub proven: bool,
 }
 
 pub(crate) fn spans(doc: &Document) -> Result<Vec<PlayedSpan>, Refusal> {
@@ -83,12 +85,24 @@ pub(crate) fn spans(doc: &Document) -> Result<Vec<PlayedSpan>, Refusal> {
                 doc.fps,
             )
             .map_err(|e| request(e.to_string()))?;
+            let proven = doc
+                .tracks
+                .iter()
+                .find(|t| t.id == s.track)
+                .and_then(|t| {
+                    let index = t
+                        .clips
+                        .partition_point(|c| c.timeline_start <= s.project.start);
+                    index.checked_sub(1).and_then(|i| t.clips.get(i))
+                })
+                .is_some_and(|c| c.id == s.clip && c.timeline_start == s.project.start);
             Ok(PlayedSpan {
                 clip: s.clip,
                 track: s.track,
                 asset: s.asset,
                 project: s.project,
                 source,
+                proven,
             })
         })
         .collect()
@@ -122,14 +136,36 @@ pub(crate) fn check(
     let mut not_checked = Vec::new();
     for c in &track.clips {
         if c.content.is_media() && c.speed_percent != 100 {
+            let range = [c.timeline_start, clip_end(doc, c)?];
+            if args
+                .range
+                .is_some_and(|r| r[1] <= range[0] || range[1] <= r[0])
+            {
+                continue;
+            }
             not_checked.push(NotChecked {
                 clip: c.id.0,
+                range,
                 reason: Refusal::Retimed { clip: c.id.0 },
             });
         }
     }
     let mut pieces = Vec::new();
     for s in selected {
+        if args
+            .range
+            .is_some_and(|r| r[1] <= s.project.start || s.project.end <= r[0])
+        {
+            continue;
+        }
+        if !s.proven {
+            not_checked.push(NotChecked {
+                clip: s.clip.0,
+                range: [s.project.start, s.project.end],
+                reason: Refusal::UnprovenSegment { clip: s.clip.0 },
+            });
+            continue;
+        }
         if all.iter().any(|other| {
             other.track == s.track
                 && other.clip != s.clip
@@ -138,6 +174,7 @@ pub(crate) fn check(
         }) {
             not_checked.push(NotChecked {
                 clip: s.clip.0,
+                range: [s.project.start, s.project.end],
                 reason: request("overlapping dialogue clips are not a linear cut"),
             });
             continue;
@@ -178,6 +215,7 @@ pub(crate) fn check(
             )),
             Err(reason) => not_checked.push(NotChecked {
                 clip: s.clip.0,
+                range: [s.project.start, s.project.end],
                 reason,
             }),
         }
@@ -337,6 +375,9 @@ pub(crate) fn check_created(
         }
         let mut kept = Vec::new();
         for s in [out, inn].into_iter().flatten() {
+            if !s.proven {
+                return Err(Refusal::UnprovenSegment { clip: s.clip.0 });
+            }
             let id = RecordingId(s.asset.0);
             let v = values.get(&s.asset).ok_or(Refusal::NotMeasured)?;
             recordings.entry(id).or_insert_with(|| Recording {

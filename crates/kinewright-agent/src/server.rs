@@ -2986,7 +2986,7 @@ impl KinewrightMcp {
         &self,
         expected_revision: TimelineRevision,
         operations: &[Operation],
-        validate: impl FnOnce() -> Result<(), String>,
+        validate: impl Fn() -> Result<(), String>,
         mut observe: impl FnMut(TimelineRevision, &Document),
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, before) = self.snapshot()?;
@@ -3030,6 +3030,9 @@ impl KinewrightMcp {
         }
         if let Err(error) = self.check_batch_history(operations) {
             return Ok(error_text(error));
+        }
+        if let Err(reason) = validate() {
+            return Ok(error_text(reason));
         }
         let confirmation = plan_confirmation_description(&before, operations);
         if self.task_control.is_none()

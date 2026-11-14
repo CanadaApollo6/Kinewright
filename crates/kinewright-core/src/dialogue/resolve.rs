@@ -120,6 +120,8 @@ pub enum RefusalReason {
     WordRange,
     #[error("no following word names a pause to trim")]
     NoFollowingWord,
+    #[error("more than one measured pause separates these word addresses; choose a narrower cut")]
+    AmbiguousPause,
     #[error("the recording contains no measured quiet pause; no edge was guessed")]
     NoQuietEvidence,
     #[error("no measured quiet or sufficiently deep dip brackets this word boundary")]
@@ -585,44 +587,51 @@ impl Dialogue {
         if self.gaps.is_empty() {
             return Err(self.refuse(RefusalReason::NoQuietEvidence, before.end_micros));
         }
-        if after.start_micros.saturating_sub(before.end_micros) <= leave {
-            return Err(self.refuse(RefusalReason::NothingToTrim, before.end_micros));
+        // Word starts locate the exchange; measured run bounds determine its
+        // air. A stretched ASR end must not hide the silence inside that word.
+        let mut runs: Vec<Span> = Vec::new();
+        for &run in &self.gaps {
+            if run.start_micros < before.start_micros
+                || run.start_micros >= after.start_micros
+                || run.duration() < 2 * self.settings.quiet_margin_micros
+            {
+                continue;
+            }
+            if let Some(last) = runs
+                .last_mut()
+                .filter(|last| run.start_micros <= last.end_micros)
+            {
+                last.end_micros = last.end_micros.max(run.end_micros);
+            } else {
+                runs.push(run);
+            }
+        }
+        if !runs.is_empty() && runs.iter().all(|run| run.duration() <= leave) {
+            return Err(self.refuse(RefusalReason::NothingToTrim, before.start_micros));
+        }
+        if runs.len() > 1 {
+            return Err(self.refuse(RefusalReason::AmbiguousPause, before.start_micros));
+        }
+        let run = runs
+            .first()
+            .copied()
+            .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, before.start_micros))?;
+        if run.duration() <= leave {
+            return Err(self.refuse(RefusalReason::NothingToTrim, run.start_micros));
         }
         let total = self.settings.air_after_micros + self.settings.air_before_micros;
         let share = u64::try_from(
             u128::from(leave) * u128::from(self.settings.air_after_micros) / u128::from(total),
         )
-        .map_err(|_| self.refuse(RefusalReason::TimeOverflow, 0))?;
-        let start = before
-            .end_micros
-            .checked_add(share)
-            .ok_or_else(|| self.refuse(RefusalReason::TimeOverflow, before.end_micros))?;
-        let end = after
+        .map_err(|_| self.refuse(RefusalReason::TimeOverflow, run.start_micros))?;
+        let start = run
             .start_micros
+            .checked_add(share)
+            .ok_or_else(|| self.refuse(RefusalReason::TimeOverflow, run.start_micros))?;
+        let end = run
+            .end_micros
             .checked_sub(leave - share)
-            .ok_or_else(|| self.refuse(RefusalReason::NothingToTrim, after.start_micros))?;
-        let mut first = None;
-        let mut last = None;
-        for &run in &self.gaps {
-            if run.end_micros
-                <= before
-                    .end_micros
-                    .saturating_sub(self.settings.kept_slack_micros)
-                || run.start_micros
-                    >= after
-                        .start_micros
-                        .saturating_add(self.settings.kept_slack_micros)
-                || run.duration() < 2 * self.settings.quiet_margin_micros
-            {
-                continue;
-            }
-            if first.is_none_or(|old: Span| run.start_micros < old.start_micros) {
-                first = Some(run);
-            }
-            if last.is_none_or(|old: Span| run.end_micros > old.end_micros) {
-                last = Some(run);
-            }
-        }
+            .ok_or_else(|| self.refuse(RefusalReason::NothingToTrim, run.end_micros))?;
         let place = |run: Option<Span>, at: u64, side| {
             let run = run.ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, at))?;
             let margin = self.settings.quiet_margin_micros;
@@ -634,8 +643,8 @@ impl Dialogue {
             )
             .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, at))
         };
-        let a = place(first, start, AudibleSide::Out)?;
-        let b = place(last, end, AudibleSide::In)?;
+        let a = place(Some(run), start, AudibleSide::Out)?;
+        let b = place(Some(run), end, AudibleSide::In)?;
         if b.at_micros.saturating_sub(a.at_micros) < self.settings.minimum_pause_cut_micros {
             return Err(self.refuse(RefusalReason::NothingToTrim, a.at_micros));
         }

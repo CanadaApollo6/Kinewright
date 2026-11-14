@@ -1,7 +1,10 @@
 //! Bound dialogue evidence and the (not yet served) measured dialogue tools.
+mod budget;
 mod check;
 mod cut;
-pub(crate) use check::{CheckArgs, check, check_created, spans};
+mod retention;
+pub(crate) use budget::bound as bound_check;
+pub(crate) use check::{CheckArgs, Detail as CheckDetail, check, check_created, spans};
 pub(crate) use cut::{CutArgs, plan};
 use kinewright_core::{
     MediaAsset,
@@ -164,14 +167,32 @@ pub enum Refusal {
     Retimed { clip: u64 },
     #[error("clip {clip} is unavailable or not audible dialogue")]
     Clip { clip: u64 },
+    #[error("clip {clip} has an unproven enabled-run origin; renderer conformance is required")]
+    UnprovenSegment { clip: u64 },
+    #[error("clip {clip}: {why}; {lost_micros} microseconds would be lost")]
+    UnselectedAudio {
+        clip: u64,
+        lost_micros: u64,
+        why: String,
+    },
+    #[error(
+        "heard removal is {actual_micros} microseconds; at least {minimum_micros} are required"
+    )]
+    MinimumCut {
+        actual_micros: u64,
+        minimum_micros: u64,
+    },
     #[error("word address is outside the current bound recording")]
     Word,
     #[error("the recording's bound words/profile changed; read its transcript again")]
     BindingChanged,
     #[error("timeline revision changed before resolving dialogue")]
     Revision,
-    #[error("invalid dialogue request: {why}")]
-    Request { why: String },
+    #[error("invalid dialogue request: {why:.128}")]
+    Request {
+        #[serde(serialize_with = "serialize_reason")]
+        why: String,
+    },
     #[error("acoustic guard refused at {at_us} microseconds: {reason}")]
     Acoustic {
         reason: String,
@@ -182,15 +203,7 @@ pub enum Refusal {
 
 impl From<kinewright_core::dialogue::Refusal> for Refusal {
     fn from(refusal: kinewright_core::dialogue::Refusal) -> Self {
-        let mut reason = refusal.reason.to_string();
-        if reason.len() > 128 {
-            let mut end = 125;
-            while !reason.is_char_boundary(end) {
-                end -= 1;
-            }
-            reason.truncate(end);
-            reason.push_str("...");
-        }
+        let reason = short_reason(refusal.reason.to_string());
         Self::Acoustic {
             reason,
             at_us: refusal.at_micros,
@@ -215,7 +228,9 @@ pub(crate) fn bound(
     Ok(value)
 }
 pub(crate) fn request(why: impl Into<String>) -> Refusal {
-    Refusal::Request { why: why.into() }
+    Refusal::Request {
+        why: short_reason(why.into()),
+    }
 }
 pub(crate) fn clip_end(
     doc: &kinewright_core::Document,
@@ -241,4 +256,61 @@ pub(crate) fn cached<K: Ord>(
         return Ok(Arc::clone(value));
     }
     bound(provider, asset)
+}
+
+fn reason_cut(text: &str) -> usize {
+    if text.len() <= 128 {
+        return text.len();
+    }
+    let mut end = 125;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+fn short_reason(mut text: String) -> String {
+    if text.len() > 128 {
+        text.truncate(reason_cut(&text));
+        text.push_str("...");
+    }
+    text
+}
+fn serialize_reason<S: serde::Serializer>(text: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    if text.len() <= 128 {
+        return serializer.serialize_str(text);
+    }
+    // Only the bounded wire prefix is copied, not an arbitrary provider error.
+    let mut short = String::from(&text[..reason_cut(text)]);
+    short.push_str("...");
+    serializer.serialize_str(&short)
+}
+
+#[cfg(test)]
+pub(crate) mod cost {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static TRIALS: AtomicU64 = AtomicU64::new(0);
+    static OPERATIONS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) fn begin() {
+        assert!(!ACTIVE.swap(true, Ordering::Relaxed));
+        TRIALS.store(0, Ordering::Relaxed);
+        OPERATIONS.store(0, Ordering::Relaxed);
+    }
+    pub(crate) fn trial() {
+        if ACTIVE.load(Ordering::Relaxed) {
+            TRIALS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn operation() {
+        if ACTIVE.load(Ordering::Relaxed) {
+            OPERATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn end() -> [u64; 2] {
+        ACTIVE.store(false, Ordering::Relaxed);
+        [
+            TRIALS.load(Ordering::Relaxed),
+            OPERATIONS.load(Ordering::Relaxed),
+        ]
+    }
 }

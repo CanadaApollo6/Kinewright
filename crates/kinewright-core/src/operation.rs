@@ -533,6 +533,16 @@ impl Operation {
     pub fn apply(&self, doc: &mut Document) -> Result<(), OpError> {
         <Self as ApplyOp>::apply(self, doc)
     }
+
+    /// Validate every intermediate state without copying an unpublished scratch.
+    /// Never use this on live state: on error the caller must discard `candidate`.
+    ///
+    /// # Errors
+    /// Returns the same validation failure as a one-operation atomic batch, but
+    /// the failed candidate may contain a partial edit and must not be published.
+    pub fn apply_to_unpublished(&self, candidate: &mut Document) -> Result<(), BatchError> {
+        apply_batch_unpublished(candidate, std::slice::from_ref(self), false).map(|_| ())
+    }
 }
 
 /// Validate and apply an ordered edit plan without exposing partial state.
