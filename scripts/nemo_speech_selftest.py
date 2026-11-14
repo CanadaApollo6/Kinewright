@@ -1,5 +1,10 @@
 """SDK cache witnesses without network, builds, models or listening sockets."""
+import contextlib
 import importlib.util
+import io
+import os
+import stat
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -38,6 +43,50 @@ class InstalledSdk(unittest.TestCase):
         self.assertFalse(any((self.root / directory).exists() for directory in nemo.BUILD_TREES))
         self.assertEqual({path.name for path in self.root.iterdir()}, {'.build-key', 'lib', 'bin', 'include', 'share'})
         nemo.provision(self.root, 'key')  # Reuse needs neither a fetch nor CMake.
+
+    def test_readonly_git_pack_is_removed_after_success(self):
+        pack = self.root / 'src/.git/objects/pack/source.idx'
+        pack.parent.mkdir(parents=True)
+        pack.write_bytes(b'pinned pack')
+        pack.chmod(stat.S_IREAD)
+        # Windows rejects unlink before chmod; POSIX also runs this same tree witness.
+        nemo.provision(self.root, 'key')
+        self.assertFalse((self.root / 'src').exists())
+        self.assertTrue(nemo.sdk_complete(self.root, 'key'))
+
+    def test_permission_retry_makes_the_file_writable(self):
+        file = self.root / 'readonly'
+        file.write_bytes(b'pack')
+        file.chmod(stat.S_IREAD)
+        calls = []
+        def retry(path):
+            self.assertTrue(os.stat(path).st_mode & stat.S_IWRITE)
+            calls.append(path)
+            os.unlink(path)
+        nemo.retry_readonly(retry, file, (PermissionError, PermissionError('read only'), None))
+        self.assertEqual(calls, [file])
+        self.assertFalse(file.exists())
+
+    def test_leftover_cleanup_warns_without_invalidating_complete_sdk(self):
+        (self.root / 'src').mkdir()
+        output = io.StringIO()
+        with patch.object(nemo, 'remove_tree', side_effect=PermissionError('busy file')), contextlib.redirect_stderr(output):
+            nemo.provision(self.root, 'key')
+        self.assertIn('Warning: could not remove NeMo build tree', output.getvalue())
+        self.assertTrue(nemo.sdk_complete(self.root, 'key'))
+
+    def test_fetch_enables_long_paths_before_checkout_and_propagates_failure(self):
+        calls = []
+        def git(args):
+            calls.append(args)
+            if 'checkout' in args:
+                raise subprocess.CalledProcessError(1, args)
+        with patch.object(nemo, 'run', side_effect=git), self.assertRaises(subprocess.CalledProcessError):
+            nemo.fetch(self.root / 'checkout', {'url': 'official', 'commit': 'pin'})
+        config = next(i for i, args in enumerate(calls) if 'core.longpaths' in args)
+        checkout = next(i for i, args in enumerate(calls) if 'checkout' in args)
+        self.assertLess(config, checkout)
+        self.assertEqual(calls[config][-2:], ['core.longpaths', 'true'])
 
     def test_missing_runtime_dependency_or_notice_refuses_completeness(self):
         for file in ('lib/libnemo_speech_asr.so', 'bin/nemo_speech_asr.dll',

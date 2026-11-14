@@ -74,6 +74,10 @@ runs:
         path: ~/apt-archives
         key: apt-${{ steps.image.outputs.key }}-${{ steps.apt-install.outcome == 'success' && 'complete' || 'partial' }}-${{ steps.apt-collect.outputs.digest }}
 
+    - name: Verify NeMo SDK cleanup on this runner
+      shell: bash
+      run: python -I -B scripts/nemo_speech_selftest.py
+
     - name: Locate shared NeMo cache
       shell: bash
       run: echo "KINEWRIGHT_NEMO_CACHE=$RUNNER_TEMP/nemo-speech" >> "$GITHUB_ENV"

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -81,9 +82,11 @@ def cache_lock(path):
 
 def fetch(path, pin):
     if path.exists():
-        shutil.rmtree(path)
+        remove_tree(path)
     path.mkdir(parents=True)
     run(['git', 'init', '--quiet', path])
+    # Git for Windows must check out the complete pinned tree, including long UI paths.
+    run(['git', '-C', path, 'config', 'core.longpaths', 'true'])
     run(['git', '-C', path, 'remote', 'add', 'origin', pin['url']])
     run(['git', '-C', path, 'fetch', '--depth=1', 'origin', pin['commit']])
     run(['git', '-C', path, 'checkout', '--quiet', '--detach', 'FETCH_HEAD'])
@@ -95,10 +98,27 @@ def fetch(path, pin):
 BUILD_TREES = ('src', 'sentencepiece-src', 'sentencepiece-build', 'build', 'deps')
 
 
+def retry_readonly(function, path, exc_info):
+    error = exc_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    function(path)
+
+
+def remove_tree(path):
+    # onerror works on all supported Python versions, including CI's Python 3.13.
+    shutil.rmtree(path, onerror=retry_readonly)
+
+
 def discard_build_trees(root):
+    # Called only after sdk_complete: leftovers cannot invalidate a usable SDK.
     for directory in BUILD_TREES:
         if (root / directory).exists():
-            shutil.rmtree(root / directory)
+            try:
+                remove_tree(root / directory)
+            except OSError as error:
+                print(f'Warning: could not remove NeMo build tree {root / directory}: {error}', file=sys.stderr)
 
 
 def preserve_sentencepiece_notices(root):

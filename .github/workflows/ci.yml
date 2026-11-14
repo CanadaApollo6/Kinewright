@@ -182,6 +182,7 @@ jobs:
         with:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
+        timeout-minutes: 8
       - name: Read EN model pin from the application spec (Linux)
         if: runner.os == 'Linux'
         id: model-linux
