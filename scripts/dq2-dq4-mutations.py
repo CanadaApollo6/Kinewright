@@ -28,6 +28,14 @@ PAIRS = {
         'dialogue::tests::dialogue_two_dip_edges_refuse_a_word_from_running_speech',
         'DQ2_TWO_DIPS_REFUSED',
     ),
+    'precision-recall': (
+        'crates/kinewright-agent/src/cut_score/mod.rs',
+        'precision: Ratio::new(tp, tp + fp),\n            recall: Ratio::new(tp, tp + missed),',
+        'precision: Ratio::new(tp, tp + missed),\n            recall: Ratio::new(tp, tp + fp),',
+        'kinewright-agent',
+        'cut_score::tests::cut_score_precision_recall_are_not_swapped',
+        'DQ4_PRECISION_RECALL_NOT_SWAPPED',
+    ),
 }
 
 

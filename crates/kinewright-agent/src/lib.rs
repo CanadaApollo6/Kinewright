@@ -49,6 +49,8 @@ mod color_scopes;
 mod color_status;
 mod copilot;
 mod cursor;
+#[cfg(feature = "eval-harness")]
+pub mod cut_score;
 mod detection_probe;
 mod drivers;
 mod durable_branch;
