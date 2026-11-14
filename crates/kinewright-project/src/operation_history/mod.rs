@@ -103,3 +103,6 @@ mod identity_tests;
 
 #[cfg(test)]
 mod fold_tests;
+
+#[cfg(test)]
+mod install_review_tests;

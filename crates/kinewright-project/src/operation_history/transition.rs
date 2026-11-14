@@ -308,43 +308,13 @@ pub(super) fn validate_entries(
     folded_commands: &super::ledger::FoldedApprovals,
     frontier: Option<CommandKey>,
 ) -> Result<(), Error> {
-    let mut known = BTreeMap::<_, std::collections::BTreeSet<_>>::new();
-    for entry in ledger.entries() {
-        known
-            .entry(entry.key)
-            .or_default()
-            .insert(entry.payload_digest);
-    }
-    let mut targets = BTreeMap::new();
-    let mut folded_roots = BTreeMap::new();
-    for fact in folded_commands.values() {
-        if folded_roots
-            .insert(fact.prefix.first_key, fact.prefix.first_digest)
-            .is_some_and(|old| old != fact.prefix.first_digest)
-        {
-            return Err(Error::InvalidLedger);
-        }
-    }
     for entry in ledger.transition_entries() {
         if entry.target.commands == 0 {
             return Err(Error::InvalidLedger);
         }
-        if (targets
-            .insert(entry.target.first_key, entry.target.first_digest)
-            .is_some_and(|old| old != entry.target.first_digest))
-            || known
-                .get(&entry.target.first_key)
-                .is_some_and(|digests| !digests.contains(&entry.target.first_digest))
-            || folded_roots
-                .get(&entry.target.first_key)
-                .is_some_and(|digest| *digest != entry.target.first_digest)
-            || folded_commands
-                .get(&entry.target.first_key)
-                .is_some_and(|fact| fact.payload_digest != entry.target.first_digest)
-        {
-            return Err(Error::CommandConflict);
-        }
-        // Reading derives the answer; it never accepts a stored fate flag.
+        // Historical sibling targets may share a key with different digests.
+        // Presence rejects conflicting retained commands and derives absent
+        // targets from the selected snapshot's exact evidence.
         let _ = presence(
             entry.target,
             undo,

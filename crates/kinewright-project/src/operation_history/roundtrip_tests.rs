@@ -16,7 +16,9 @@ pub(super) fn saved_open(owner: &OwnerHistory) {
             &owner.resources.baseline,
         );
     }
-    let OwnerSnapshot { data, reservation } = owner.capture().unwrap();
+    let captured = owner.capture().unwrap();
+    let before_save = captured.snapshot_identity().unwrap();
+    let OwnerSnapshot { data, reservation } = captured;
     let wire = super::stored::codec_tests::encoded(&OwnerSnapshot { data, reservation });
     let shell: super::StoredOwnerRecord = serde_json::from_slice(&wire).unwrap();
     super::stored::assert_decode_forecast(&shell, owner.decode_bound);
@@ -29,6 +31,11 @@ pub(super) fn saved_open(owner: &OwnerHistory) {
         .expect("WHAT_CAN_BE_SAVED_CAN_BE_OPENED")
         .open()
         .unwrap();
+    assert_eq!(
+        opened.capture().unwrap().snapshot_identity().unwrap(),
+        before_save,
+        "SAVED_IDENTITY_SURVIVES_OPEN"
+    );
     assert_same(owner, &opened);
 }
 

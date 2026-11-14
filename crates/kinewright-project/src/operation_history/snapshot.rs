@@ -608,6 +608,9 @@ impl OwnerSnapshot {
         if !raw_origins.is_empty() {
             return Err(Error::InvalidOrigin);
         }
+        if !resources.values().eq(recorded_resources.iter()) {
+            return Err(Error::InvalidResource);
+        }
         for entry in ledger.entries() {
             if entry.key >= next
                 || live_origins

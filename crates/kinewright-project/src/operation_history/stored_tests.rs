@@ -809,3 +809,86 @@ fn stored_owner_shell_identity_mismatch_is_typed_and_atomic() {
         "IDENTITY_MISMATCH_LEAVES_OWNER_UNCHANGED"
     );
 }
+
+#[test]
+fn stored_folded_sibling_transition_approvals_survive_repeated_installs() {
+    use super::super::install_review_tests as fixture;
+    let (_temp, mut session) = session("hx-sibling-transition-installs");
+    let mut guards = Vec::new();
+    for line in 0..2 {
+        for transition in [false, true] {
+            let bytes = fixture::consent_bytes(line, transition);
+            guards.push(
+                session
+                    .store_mut()
+                    .admit_blob(
+                        &mut bytes.as_slice(),
+                        &fixture::consent(line, transition),
+                        &[],
+                    )
+                    .unwrap(),
+            );
+        }
+    }
+    let pool = HistoryPool::new(PoolLimits::default());
+    let captures = fixture::sibling_captures(&pool);
+    let mut owner = fixture::make(&pool);
+    for selected in [0_usize, 1, 0, 1] {
+        fixture::install_line(&mut owner, &pool, &captures[selected], selected as u64);
+        let snapshot = owner.capture().unwrap();
+        let before = snapshot.snapshot_identity().unwrap();
+        let stored = snapshot.persist(session.store_mut(), |_| Ok(None)).unwrap();
+        drop(snapshot);
+        let opened =
+            StoredOwnerRecord::read(session.store(), &stored.reference, &pool, Role::Ordinary)
+                .unwrap()
+                .open()
+                .unwrap();
+        assert_eq!(
+            opened.capture().unwrap().snapshot_identity().unwrap(),
+            before,
+            "STORED_SIBLING_IDENTITY_SURVIVES_OPEN"
+        );
+        super::super::roundtrip_tests::assert_same(&owner, &opened);
+    }
+}
+#[test]
+fn stored_surplus_resources_are_refused_before_open() {
+    let (_temp, mut session) = session("hx-surplus-resource-refusal");
+    let pool = HistoryPool::new(PoolLimits::default());
+    let owner = OwnerHistory::new(
+        &pool,
+        Role::Task,
+        RetentionPolicy::NeverFold,
+        &origin(1),
+        || Ok(document()),
+    )
+    .unwrap();
+    let before = owner.capture().unwrap().snapshot_identity().unwrap();
+    let mut captured = owner.capture().unwrap();
+    captured.data.resources.insert(Resource::Media {
+        asset: 999,
+        sha256: None,
+        byte_len: None,
+    });
+    let stored = captured.persist(session.store_mut(), |_| Ok(None)).unwrap();
+    drop(captured);
+    let usage = pool.usage(Role::Task).unwrap();
+    assert!(
+        matches!(
+            StoredOwnerRecord::read(session.store(), &stored.reference, &pool, Role::Task),
+            Err(super::super::Error::InvalidResource)
+        ),
+        "STORED_SURPLUS_RESOURCES_REFUSED"
+    );
+    assert_eq!(
+        pool.usage(Role::Task).unwrap(),
+        usage,
+        "SURPLUS_READ_RELEASES_ITS_LEASE"
+    );
+    assert_eq!(
+        owner.capture().unwrap().snapshot_identity().unwrap(),
+        before,
+        "SURPLUS_READ_LEAVES_DESTINATION_UNCHANGED"
+    );
+}
