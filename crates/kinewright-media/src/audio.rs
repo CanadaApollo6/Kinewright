@@ -3822,6 +3822,32 @@ pub(crate) fn test_certified_mix_samples(
     .map(Option::unwrap_or_default)
 }
 
+/// Keep the full enabled run's clock while cueing inside it. A seek is a
+/// sample offset, not a new edit quantised onto a source-frame boundary.
+struct AudioSampleSpan {
+    project_start: u64,
+    project_end: u64,
+    source_start: u64,
+    source_end: u64,
+}
+fn audio_segment_samples(
+    segment: &crate::timeline::TimelineAudioSegment,
+    source_rate: Rational,
+    project_rate: Rational,
+    decode_from: TimeCode,
+    output_rate: u32,
+) -> AudioSampleSpan {
+    let run_start = frame_to_samples(segment.project.start, output_rate, project_rate);
+    let project_start = run_start.max(frame_to_samples(decode_from, output_rate, project_rate));
+    AudioSampleSpan {
+        project_start,
+        project_end: frame_to_samples(segment.project.end, output_rate, project_rate),
+        source_start: frame_to_samples(segment.source.start, output_rate, source_rate)
+            .saturating_add(project_start.saturating_sub(run_start)),
+        source_end: frame_to_samples(segment.source.end, output_rate, source_rate),
+    }
+}
+
 impl AudioMixer {
     #[cfg(test)]
     fn open(
@@ -3855,26 +3881,26 @@ impl AudioMixer {
         } else {
             project_from
         };
-        let segments = timeline_audio_segments(document, decode_from..project_end)?;
+        if decode_from < TimeCode::ZERO || project_end <= decode_from {
+            return Err(MediaError::Backend(format!(
+                "timeline audio range must be non-empty and non-negative: {}..{}",
+                decode_from.0, project_end.0
+            )));
+        }
+        let segments = timeline_audio_segments(document, TimeCode::ZERO..project_end)?;
         let mut sources = Vec::with_capacity(segments.len());
         for segment in segments {
+            if segment.project.end <= decode_from {
+                continue;
+            }
             let clip = document.clip(segment.clip).ok_or_else(|| {
                 MediaError::Backend(format!("timeline clip {} disappeared", segment.clip))
             })?;
             let asset = document.asset(segment.asset).ok_or_else(|| {
                 MediaError::Backend(format!("timeline asset {} disappeared", segment.asset))
             })?;
-            let clip_project_start =
-                frame_to_samples(clip.timeline_start, output_rate, document.fps);
-            let project_sample_start =
-                frame_to_samples(segment.project.start, output_rate, document.fps);
-            let project_sample_end =
-                frame_to_samples(segment.project.end, output_rate, document.fps);
-            let source_clip_start =
-                frame_to_samples(clip.source_range.start, output_rate, asset.fps);
-            let source_sample_end = frame_to_samples(clip.source_range.end, output_rate, asset.fps);
-            let source_sample_start = source_clip_start
-                .saturating_add(project_sample_start.saturating_sub(clip_project_start));
+            let samples =
+                audio_segment_samples(&segment, asset.fps, document.fps, decode_from, output_rate);
             let clip_duration = document
                 .clip_duration(clip)
                 .map_err(|error| MediaError::Backend(error.to_string()))?;
@@ -3886,12 +3912,12 @@ impl AudioMixer {
                 certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,
                 output_rate,
                 output_channels,
-                source_sample_start,
-                source_sample_end,
-                project_sample_start,
-                project_sample_end,
+                source_sample_start: samples.source_start,
+                source_sample_end: samples.source_end,
+                project_sample_start: samples.project_start,
+                project_sample_end: samples.project_end,
                 shaping: ClipAudioShaping::new(clip, clip_duration, output_rate, document.fps),
-                next_project_sample: project_sample_start,
+                next_project_sample: samples.project_start,
                 next_channel: 0,
                 decoder: None,
                 opened: false,
@@ -3980,9 +4006,14 @@ impl AudioMixer {
     fn update_clip_shaping(&mut self, document: &Document) -> bool {
         let output_rate = self.output_rate;
         let project_end = document.duration;
-        let Ok(segments) = timeline_audio_segments(document, self.decode_from..project_end) else {
+        if project_end <= self.decode_from {
+            return false;
+        }
+        let Ok(mut segments) = timeline_audio_segments(document, TimeCode::ZERO..project_end)
+        else {
             return false;
         };
+        segments.retain(|segment| segment.project.end > self.decode_from);
         if segments.len() != self.sources.len() {
             return false;
         }
@@ -4000,21 +4031,17 @@ impl AudioMixer {
             if asset.path != source.path {
                 return false;
             }
-            let clip_project_start =
-                frame_to_samples(clip.timeline_start, output_rate, document.fps);
-            let project_sample_start =
-                frame_to_samples(segment.project.start, output_rate, document.fps);
-            let project_sample_end =
-                frame_to_samples(segment.project.end, output_rate, document.fps);
-            let source_clip_start =
-                frame_to_samples(clip.source_range.start, output_rate, asset.fps);
-            let source_sample_end = frame_to_samples(clip.source_range.end, output_rate, asset.fps);
-            let source_sample_start = source_clip_start
-                .saturating_add(project_sample_start.saturating_sub(clip_project_start));
-            if project_sample_start != source.project_sample_start
-                || project_sample_end != source.project_sample_end
-                || source_sample_start != source.source_sample_start
-                || source_sample_end != source.source_sample_end
+            let samples = audio_segment_samples(
+                segment,
+                asset.fps,
+                document.fps,
+                self.decode_from,
+                output_rate,
+            );
+            if samples.project_start != source.project_sample_start
+                || samples.project_end != source.project_sample_end
+                || samples.source_start != source.source_sample_start
+                || samples.source_end != source.source_sample_end
             {
                 return false;
             }
@@ -4832,9 +4859,13 @@ impl AudioDecoder {
         )
         .unwrap_or(i64::MAX)
         .saturating_add(stream_timestamp_to_global(stream_start, stream_time_base));
-        input
-            .seek(target_us, ..target_us)
-            .map_err(|error| media_error(path, "audio seek failed", error))?;
+        // A zero seek can discard codec preroll (including AAC's first
+        // overlap frame). Opening at the beginning must decode those packets.
+        if target_sample != 0 {
+            input
+                .seek(target_us, ..target_us)
+                .map_err(|error| media_error(path, "audio seek failed", error))?;
+        }
         Ok(Self {
             legacy_media: crate::locator::capture(),
             path: path.to_path_buf(),
@@ -12256,3 +12287,7 @@ mod tests {
         assert_eq!(retargeted.direct_switch_remaining, retargeted.window - 2);
     }
 }
+
+#[cfg(test)]
+#[path = "audio/clock_conformance.rs"]
+mod clock_conformance;

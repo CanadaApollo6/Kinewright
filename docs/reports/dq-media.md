@@ -26,7 +26,7 @@ contract/version. The contract reads Core's actual hop and the detector's actual
 rate, frame size and threshold. A fast invariant checks the recorded detector
 version against the exact Cargo dependency pin. The cache lives beneath the
 existing derived-analysis family at
-`derived-analysis/v1/sound-profiles/v1/`; its inventory and scoped clear include
+`derived-analysis/v1/sound-profiles/v2/`; its inventory and scoped clear include
 profiles without changing the public cache-family schema. No cache migration is
 provided. A transcript cache hit measures a missing profile without loading a
 model. Media without a completed content identity is not measured.
@@ -123,3 +123,85 @@ isolated shipping checks and slow-test lint pass. The local final gate log is
 `target/dq-media/m1-final/summary.log`. The earlier prototype full gate also passed;
 cache-family integration and the file-driver witness were then checked again in
 full. No public transcript DTO or model-visible tool definition changes in M1.
+
+## M2
+
+The mixer now takes the source in-point from the canonical enabled run. A seek
+adds the exact elapsed output samples to that in-point, without quantising a new
+source-frame edit. Live shaping updates use the same bounds. This fixes the
+reported 69,040 versus 67,200 source-sample start (1,840 samples) while preserving
+ordinary seeks inside mixed-rate clips. Invalid playback windows stay refused.
+
+Eight generated-PCM cases run through the production export and live mixer:
+equal rates with a nonzero timeline start; 25 in 24; 30000/1001 in 30 with a
+fractional-sample in-point; 60 in 30; nonzero source in-point; project padding
+beyond stored source; an enabled run beginning inside a clip; and a middle seek.
+Core `audible_span` supplies the independent clock oracle. Export pre-encode and
+live PCM marker support must agree within one stereo output frame at 48 kHz,
+with no extra marker read into padding. Both the product decoder and an
+independent linear FFmpeg decode check the written AAC markers within one sample.
+AAC ringing is not mistaken for an edit offset. No physical audio device opens;
+video export uses only the software Vulkan/WARP adapter.
+
+The first baseline caught the enabled-run PCM mismatch. A separate short-export
+failure exposed discarded AAC preroll: the linear decoder retained sample 211 at
+0.3256361 while the product's unconditional zero seek reduced it to 0.012923014
+and put its strongest residual at sample 812. Opening at zero now preserves the
+initial packets. The short-export test passes without reducing its marker
+threshold. Word/voice caches advance to v5 and profiles to v2 to invalidate old
+decoded inputs; no cache migration or compatibility path is added. Core required
+no correction. The NTSC fixture was corrected to Core's nearest-rounded 60-frame
+document length, rather than an assumed 61.
+
+Three deliberate wrong changes were caught and fully reverted:
+
+| Wrong change | Test | Failure |
+| --- | --- | --- |
+| Quantise seek offset onto source frames | `dq_media_clock_seek_inside_clip` | wrong PCM marker support |
+| Ignore stored source end | `dq_media_clock_stored_source_padding` | two live markers instead of one |
+| Restore zero seek | `dq_media_clock_stored_source_padding` | product decode loses marker 211 |
+
+The restored focused suite passes 18 tests (three explicit on-demand benchmarks
+remain ignored). The mixed-rate split seam remains outside this work. M3–M5 and
+the dialogue-tool switch are untouched.
+
+### M2 validation and checkpoint 1
+
+The final full media gate passed 1,310 tests with 83 ignored: 1,277 unit tests
+in 1,089.01 s and 33 integration/doc tests. Including compilation and process
+startup, the media command took 1,138 s. The media build took 4 s; workspace
+all-target clippy took 24 s; formatting passed. Workspace build (36 s) and
+workspace test compilation (73 s) passed.
+
+All three shipping builds ran separately, without workspace feature unification:
+
+| Command | Build time, s |
+| --- | ---: |
+| `cargo build -p kinewright-agent --no-default-features --lib` | 25 |
+| `cargo build -p kinewright-app --no-default-features --bin kinewright-app` | 26 |
+| `cargo build -p kinewright-agent --no-default-features --bin kinewright` | 1 |
+
+The corresponding isolated checks passed too. Windows media library/test
+cross-compilation with `cargo xwin check` passed in 13 s. Windows execution was
+not run locally; it remains a CI result.
+
+After rebuilding the fixture host with `eval-harness`, 78 targeted agent tests
+and 115 app tests passed. These include the separate public-API compiler probe,
+protocol child, native invocation, version probe, full-reply-pipe cleanup,
+studio runtime, admission/guardian/usage, voice, lease, dialogue and cut-score
+checks; and app transcript, voice, feedback capture, manual values, C4/C7 feedback
+and process-exit checks. Equipped/on-demand tests retain their normal ignores
+(55 agent, three app). Every targeted command was checked for a nonempty result.
+
+CI script self-tests passed: slow-test harness 52, NeMo provisioning nine,
+Linux dependencies 13 and sharding 24. Slow-test lint and actionlint passed.
+The slow-test harness emitted its existing nonfatal unclosed-file warning;
+dependency self-tests deliberately exercised refused and timed-out connections.
+No model was downloaded by tests. The final gate and mutation logs are under
+`target/dq-media/m2/`. Recorded target sizes stayed below 40 GB and finished at
+36.761 GB; `target/dq1/` was preserved, with over 420 GiB free on disk.
+
+All launched build/test processes finished before this checkpoint. No push was
+performed. M0 and M1 are `5c59a5f0` and `dc59b49d`; M2 is the commit containing
+this section. M3 still needs the short status-bearing not-measured refusal
+described above, including its protected callers. No such caller was edited.

@@ -373,7 +373,7 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     kinewright_media::sound_profile::SoundProfileCache::new(engine.data_dir()).unwrap();
     let profile_path = engine
         .data_dir()
-        .join("derived-analysis/v1/sound-profiles/v1/fixture.json");
+        .join("derived-analysis/v1/sound-profiles/v2/fixture.json");
     std::fs::write(&profile_path, b"source-profile").unwrap();
     let inventory = engine.cache_inventory();
     assert_eq!(inventory.families.len(), 5);
@@ -385,7 +385,7 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     assert!(visual.supported);
     assert_eq!(visual.file_count, 1);
     assert_eq!(visual.bytes, 12);
-    let transcript_root = engine.data_dir().join("transcripts/v4");
+    let transcript_root = engine.data_dir().join("transcripts/v5");
     let transcripts = inventory
         .families
         .iter()

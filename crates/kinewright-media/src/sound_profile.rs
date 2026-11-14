@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::derived_cache::JsonCache;
 
 // Bump for any change to source sampling, hop arithmetic, detector or threshold.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const EARSHOT_VERSION: &str = "1.2.2";
 const DETECTOR_RATE: u32 = 16_000;
 const DETECTOR_SAMPLES: usize = 256;

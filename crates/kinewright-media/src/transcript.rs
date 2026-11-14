@@ -22,7 +22,8 @@ use crate::{
     sha256::sha256_file,
 };
 
-const CACHE_VERSION: u32 = 4;
+// Zero-start decode retains codec preroll; older word results must be recomputed.
+const CACHE_VERSION: u32 = 5;
 use crate::recognizer::{self, ENGLISH_MODEL, Identity, Recognition};
 #[cfg(any(test, feature = "test-util"))]
 type InferenceGate = Arc<std::sync::Mutex<Option<(Sender<()>, crossbeam_channel::Receiver<()>)>>>;

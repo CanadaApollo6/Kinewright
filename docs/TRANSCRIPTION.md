@@ -91,7 +91,7 @@ again before its result is published.
 ## Cache and voice notes
 
 Exact microsecond recognition and its timing source are stored under
-`transcripts/v4` and `voice-transcripts/v4`. Keys include source SHA-256, frame
+`transcripts/v5` and `voice-transcripts/v5`. Keys include source SHA-256, frame
 rate, duration, language request and the full recogniser identity: model id and
 file hash, runtime version, native build key, threads, lookahead, feed size,
 punctuation/verbatim settings and pause policy. The identity records the fixed
@@ -161,7 +161,7 @@ interval ends at the real recording duration. An unavailable or failed detector
 is `NoVoiceInformation`, never a profile claiming no voice. Job cancellation,
 panics and status use the transcript worker's existing boundaries.
 
-Profiles live under `derived-analysis/v1/sound-profiles/v1/` in the application
+Profiles live under `derived-analysis/v1/sound-profiles/v2/` in the application
 data root. The existing derived-analysis inventory and scoped clear include them. Their keys
 include the content SHA-256 and byte length, selected audio stream, source-level
 measurement version, Core hop, detector version, rate, frame size and threshold.
@@ -174,3 +174,7 @@ The implementation holds hop output, voice intervals, one decoded frame and a
 256-sample detector carry, rather than the recording's PCM. Earshot's network is
 built into its pinned Rust crate, with no separate model download. Its MIT licence
 is included in [LICENSES/earshot-MIT.txt](../LICENSES/earshot-MIT.txt).
+
+Opening audio at source zero preserves the codec's initial packets, including AAC
+preroll. Word caches use version 5 and sound profiles version 2 so results from
+the former zero-seek decoder are recomputed.
