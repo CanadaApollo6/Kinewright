@@ -129,6 +129,7 @@ fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
 #[derive(Clone, Copy)]
 enum C5eSize {
     Maximal,
+    Medium,
     Small,
     SendsOnly,
 }
@@ -136,31 +137,32 @@ impl C5eSize {
     fn clocks(self) -> u64 {
         match self {
             Self::Maximal => 720,
-            Self::Small | Self::SendsOnly => 3,
+            Self::Medium | Self::Small | Self::SendsOnly => 3,
         }
     }
     fn tasks(self) -> usize {
         match self {
             Self::Maximal | Self::SendsOnly => 8,
-            Self::Small => 2,
+            Self::Medium | Self::Small => 2,
         }
     }
     fn rounds(self) -> usize {
         match self {
             Self::Maximal | Self::SendsOnly => 3,
-            Self::Small => 2,
+            Self::Medium | Self::Small => 2,
         }
     }
     fn approvals(self) -> usize {
         match self {
             Self::Maximal => 256,
+            Self::Medium => 128,
             Self::SendsOnly => 0,
             Self::Small => 4,
         }
     }
     fn sends(self, task: usize) -> usize {
         match self {
-            Self::Small => 4,
+            Self::Medium | Self::Small => 4,
             Self::Maximal | Self::SendsOnly if task == 7 => 80,
             Self::Maximal | Self::SendsOnly if task == 6 => 6,
             Self::Maximal | Self::SendsOnly => 7,
@@ -491,6 +493,11 @@ fn c5e_approval_edits(
 #[ignore = "on-demand: maximal six-hour durable run"]
 fn s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded() {
     c5e_run(C5eSize::Maximal);
+}
+#[test]
+#[ignore = "on-demand: 128-cycle durable tail exceeds the slow lane process deadline"]
+fn s4b_c5e_medium_run_keeps_approvals_stop_and_recovery_bounded() {
+    c5e_run(C5eSize::Medium);
 }
 #[test]
 #[ignore = "on-demand: retained zero-approval 128-send storage measurement"]
