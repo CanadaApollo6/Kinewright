@@ -2,6 +2,8 @@
 //! their current audit, lineage, resource and stored-history implementations.
 #![allow(clippy::missing_errors_doc)]
 
+mod identity;
+pub use identity::SnapshotIdentity;
 mod ledger;
 mod lineage;
 mod owner;
@@ -94,3 +96,6 @@ mod review_tests;
 
 #[cfg(test)]
 mod do_uncertainty_tests;
+
+#[cfg(test)]
+mod identity_tests;

@@ -265,6 +265,10 @@ impl StoredOwnerRecord {
         let window = reservation.workspace()?;
         self.resolve_reserved(store, expected_role, reservation, window)
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded decode validates graph, owner semantics and identity before returning the install token"
+    )]
     fn resolve_reserved(
         self,
         store: &ProjectStore,
@@ -355,9 +359,6 @@ impl StoredOwnerRecord {
             epoch: body.epoch,
             policy: body.policy,
         };
-        if digest_text(&history.snapshot_identity()?) != self.identity {
-            return Err(Error::IdentityMismatch);
-        }
         let data = SnapshotData {
             role: self.role,
             fold_frontier: body.fold_frontier,
@@ -371,9 +372,21 @@ impl StoredOwnerRecord {
         };
         // Drop the raw store body before semantic replay; only the final typed
         // stacks and bounded owner scratch coexist with the replay document.
-        drop(self);
+        let Self {
+            identity,
+            body: raw_body,
+            edges,
+            baseline: baseline_edge,
+            document: document_edge,
+            ..
+        } = self;
+        drop((raw_body, edges, baseline_edge, document_edge));
         drop(window);
-        OwnerSnapshot { data, reservation }.validate()
+        let validated = OwnerSnapshot { data, reservation }.validate()?;
+        if digest_text(&validated.identity().digest()) != identity {
+            return Err(Error::IdentityMismatch);
+        }
+        Ok(validated)
     }
     fn decode_body(&self) -> Result<Body, Error> {
         serde_json::from_str(self.body.get()).map_err(|_| Error::InvalidRecord)

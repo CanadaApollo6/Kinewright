@@ -83,6 +83,7 @@ fn compact_record_roundtrip_at_ten_thousand_commands_is_openable() {
     }
     let expected = owner.history().snapshot_identity().unwrap();
     let capture = owner.capture().unwrap();
+    let expected_owner = capture.snapshot_identity().unwrap();
     let sealed = capture.persist(store, |_| Ok(None)).unwrap();
     let record = store
         .read_record::<StoredOwnerRecord>(&sealed.reference)
@@ -90,8 +91,8 @@ fn compact_record_roundtrip_at_ten_thousand_commands_is_openable() {
         .take();
     assert_eq!(
         record.identity,
-        digest_text(&expected),
-        "STORED_CORE_CANONICAL_IDENTITY"
+        digest_text(&expected_owner),
+        "STORED_COMBINED_CORE_OWNER_IDENTITY"
     );
     let actual = kinewright_core::undo::payload_memory_bound(record.body.get().as_bytes()).unwrap()
         + record.body.get().len() as u64;
@@ -118,7 +119,12 @@ fn compact_record_roundtrip_at_ten_thousand_commands_is_openable() {
     assert_eq!(
         opened.history().snapshot_identity().unwrap(),
         expected,
-        "STORED_OPEN_IDENTITY"
+        "STORED_OPEN_CORE_IDENTITY"
+    );
+    assert_eq!(
+        opened.capture().unwrap().snapshot_identity().unwrap(),
+        expected_owner,
+        "STORED_OPEN_COMPLETE_IDENTITY"
     );
     assert_eq!(
         opened.history().document(),
@@ -288,6 +294,10 @@ fn redo_payload_owns_a_real_blob_through_collection_and_open() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real import proves hashed ownership, refuses an unhashed binding, then collects and reopens the graph"
+)]
 fn media_binding_owns_its_manifest_and_chunk_table() {
     let (_temp, mut session) = session("hx-media-context");
     let length = 9600_u32;
@@ -315,6 +325,28 @@ fn media_binding_owns_its_manifest_and_chunk_table() {
             None,
         )
         .unwrap();
+    assert_eq!(
+        asset.source_fingerprint.content_sha256.as_deref(),
+        Some(entry.object.sha256.as_str()),
+        "OWNED_HISTORY_MEDIA_ALWAYS_HAS_ITS_HASH"
+    );
+    assert_eq!(
+        asset.source_fingerprint.byte_len,
+        Some(entry.object.byte_length),
+        "OWNED_HISTORY_MEDIA_ALWAYS_HAS_ITS_LENGTH"
+    );
+    assert!(
+        entry.matches_media_asset(&asset),
+        "IMPORTED_ASSET_HAS_OWNED_IDENTITY"
+    );
+    // These histories independently own different document fingerprints.
+    let mut unhashed_asset = asset.clone();
+    unhashed_asset.source_fingerprint.content_sha256 = None;
+    assert!(
+        !entry.matches_media_asset(&unhashed_asset),
+        "UNHASHED_ASSET_CANNOT_NAME_OWNED_MEDIA"
+    );
+    unhashed_asset.source_fingerprint.byte_len = None;
     let table = entry.chunk_table_ref().unwrap().clone();
     let media = entry.object.clone();
     let manifest = crate::owned_inputs::OwnedInputManifest {
@@ -326,6 +358,37 @@ fn media_binding_owns_its_manifest_and_chunk_table() {
     let context = session.admit_inputs(&manifest).unwrap();
     let context_ref = context.reference.clone();
     let pool = HistoryPool::new(PoolLimits::default());
+    {
+        let mut external = document();
+        external.media_pool.push(unhashed_asset);
+        let external = OwnerHistory::new(
+            &pool,
+            Role::Task,
+            RetentionPolicy::NeverFold,
+            &origin(1),
+            || Ok(external),
+        )
+        .unwrap();
+        let capture = external.capture().unwrap();
+        assert_eq!(
+            capture
+                .persist(session.store_mut(), |_| Ok(Some(context_ref.clone())))
+                .err(),
+            Some(Error::MissingResource),
+            "UNHASHED_HISTORY_CANNOT_BIND_AN_OWNED_CONTEXT"
+        );
+        let sealed = capture.persist(session.store_mut(), |_| Ok(None)).unwrap();
+        let closure = session
+            .store()
+            .closure(std::slice::from_ref(&sealed.reference))
+            .unwrap();
+        assert!(
+            !closure.contains(&context_ref)
+                && !closure.contains(&table)
+                && !closure.contains(&media),
+            "UNHASHED_LOCATOR_HAS_NO_OWNED_MEDIA_EDGE"
+        );
+    }
     let mut doc = document();
     doc.media_pool.push(asset);
     let owner = OwnerHistory::new(
@@ -698,5 +761,51 @@ fn open_reserves_before_reading_the_owner_record() {
         pool.usage(Role::Candidate).unwrap(),
         (0, 0),
         "OVERSIZED_OPEN_HAS_NO_PARTIAL_LEASE"
+    );
+}
+
+#[test]
+fn stored_owner_shell_identity_mismatch_is_typed_and_atomic() {
+    let (_temp, mut session) = session("hx-owner-shell-identity");
+    let pool = HistoryPool::new(PoolLimits::default());
+    let owner = OwnerHistory::new(
+        &pool,
+        Role::Task,
+        RetentionPolicy::NeverFold,
+        &origin(1),
+        || Ok(document()),
+    )
+    .unwrap();
+    let capture = owner.capture().unwrap();
+    let expected = capture.snapshot_identity().unwrap();
+    let sealed = capture.persist(session.store_mut(), |_| Ok(None)).unwrap();
+    let mut record = session
+        .store()
+        .read_record::<StoredOwnerRecord>(&sealed.reference)
+        .unwrap()
+        .take();
+    record.identity.replace_range(
+        0..1,
+        if record.identity.starts_with('a') {
+            "b"
+        } else {
+            "a"
+        },
+    );
+    let usage = pool.usage(Role::Task).unwrap();
+    assert_eq!(
+        record.resolve(session.store(), &pool, Role::Task).err(),
+        Some(Error::IdentityMismatch),
+        "STORED_OWNER_SHELL_IDENTITY_MISMATCH"
+    );
+    assert_eq!(
+        pool.usage(Role::Task).unwrap(),
+        usage,
+        "IDENTITY_MISMATCH_RELEASES_RESERVATION"
+    );
+    assert_eq!(
+        owner.capture().unwrap().snapshot_identity().unwrap(),
+        expected,
+        "IDENTITY_MISMATCH_LEAVES_OWNER_UNCHANGED"
     );
 }

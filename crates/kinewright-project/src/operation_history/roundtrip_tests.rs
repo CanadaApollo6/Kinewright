@@ -26,6 +26,12 @@ pub(super) fn assert_same(owner: &OwnerHistory, opened: &OwnerHistory) {
         owner.history().snapshot_identity().unwrap(),
         "SAVED_OPEN_BOTH_STACKS_AND_COUNTERS"
     );
+    let expected_identity = owner.capture().unwrap().snapshot_identity().unwrap();
+    let opened_identity = opened.capture().unwrap().snapshot_identity().unwrap();
+    assert_eq!(
+        opened_identity, expected_identity,
+        "SAVED_OPEN_COMPLETE_OWNER_IDENTITY"
+    );
     assert_eq!(opened.ledger(), owner.ledger(), "SAVED_OPEN_COMMAND_LEDGER");
     assert_eq!(
         opened.transition_counts().unwrap(),
@@ -168,7 +174,11 @@ fn historic_approval_positions_still_refuse_overflow() {
     let mut snapshot = owner.capture().unwrap();
     let (_, mut entry) = snapshot.data.ledger.commands.pop_first().unwrap();
     entry.key.position = u64::MAX;
-    snapshot.data.ledger.commands.insert(entry.key, entry);
+    snapshot
+        .data
+        .ledger
+        .commands
+        .insert((entry.key, entry.payload_digest), entry);
     assert_eq!(
         snapshot.validate().err(),
         Some(Error::InvalidLedger),

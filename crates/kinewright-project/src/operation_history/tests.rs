@@ -251,6 +251,10 @@ fn warm_owner_edit_has_no_document_or_exact_work() {
             .unwrap();
         let owner = OwnerCounters::read().since(owner_before);
         let core = PhaseCounters::read().since(core_before);
+        assert_eq!(
+            owner.owner_identity_hashes, 0,
+            "NO_WARM_OWNER_IDENTITY_HASH"
+        );
         assert_eq!(owner.document_scans, 0, "NO_WARM_OWNER_DOCUMENT_WORK");
         assert_eq!(
             owner.exact_measurements, 0,

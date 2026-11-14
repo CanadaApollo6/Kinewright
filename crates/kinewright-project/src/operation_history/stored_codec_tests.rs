@@ -197,3 +197,21 @@ fn malformed_stored_bytes_are_refused_without_a_store() {
         "PORTABLE_TRUNCATED_SHELL_CHARGE_REFUSED"
     );
 }
+
+#[test]
+fn unhashed_media_is_not_an_owned_blob_binding() {
+    let resource = Resource::Media {
+        asset: 1,
+        sha256: None,
+        byte_len: Some(1),
+    };
+    let blob = ObjectRef {
+        sha256: "a".repeat(64),
+        byte_length: 1,
+        record_kind: RecordKind::OwnedMedia,
+    };
+    assert!(
+        !blob_matches(&resource, &blob),
+        "PORTABLE_UNHASHED_MEDIA_IS_NOT_AN_OWNED_BINDING"
+    );
+}

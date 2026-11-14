@@ -55,12 +55,12 @@ impl ApprovalEntry {
 }
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ApprovalLedger {
-    pub(super) commands: BTreeMap<CommandKey, ApprovalEntry>,
+    pub(super) commands: BTreeMap<(CommandKey, [u8; 32]), ApprovalEntry>,
     pub(super) transitions: Vec<super::transition::TransitionApproval>,
 }
 impl Serialize for ApprovalLedger {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        struct Commands<'a>(&'a BTreeMap<CommandKey, ApprovalEntry>);
+        struct Commands<'a>(&'a BTreeMap<(CommandKey, [u8; 32]), ApprovalEntry>);
         impl Serialize for Commands<'_> {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 s.collect_seq(self.0.values())
@@ -95,7 +95,10 @@ impl<'de> Deserialize<'de> for ApprovalLedger {
         }
         let mut result = BTreeMap::new();
         for entry in commands {
-            if result.insert(entry.key, entry).is_some() {
+            if result
+                .insert((entry.key, entry.payload_digest), entry)
+                .is_some()
+            {
                 return Err(serde::de::Error::custom("duplicate approval command"));
             }
         }
@@ -134,8 +137,20 @@ impl ApprovalLedger {
         self.commands.values()
     }
     #[must_use]
+    /// Convenience for an unambiguous key. A reader with a consent binding
+    /// uses `get_exact`: separate folded sibling payloads may share the key.
     pub fn get(&self, key: CommandKey) -> Option<&ApprovalEntry> {
-        self.commands.get(&key)
+        let mut entries = self.commands.range((key, [0; 32])..=(key, [u8::MAX; 32]));
+        let (_, entry) = entries.next()?;
+        entries.next().is_none().then_some(entry)
+    }
+    #[must_use]
+    pub fn get_exact(&self, key: CommandKey, digest: [u8; 32]) -> Option<&ApprovalEntry> {
+        self.commands.get(&(key, digest))
+    }
+    fn unique_mut(&mut self, key: CommandKey) -> Option<&mut ApprovalEntry> {
+        let digest = self.get(key)?.payload_digest;
+        self.commands.get_mut(&(key, digest))
     }
     pub(super) fn admit(&self, approval: &Approval, key: CommandKey) -> Result<(), Error> {
         approval
@@ -145,7 +160,11 @@ impl ApprovalLedger {
         if self.len() >= crate::orchestration_records::ITEM_LIMIT {
             return Err(Error::Capacity("approval count"));
         }
-        if self.commands.contains_key(&key)
+        if self
+            .commands
+            .range((key, [0; 32])..=(key, [u8::MAX; 32]))
+            .next()
+            .is_some()
             || approval.targets.is_empty()
             || self
                 .entries()
@@ -161,7 +180,7 @@ impl ApprovalLedger {
     }
     pub(super) fn insert(&mut self, key: CommandKey, digest: [u8; 32], approval: Approval) {
         self.commands.insert(
-            key,
+            (key, digest),
             ApprovalEntry {
                 key,
                 payload_digest: digest,
@@ -172,8 +191,11 @@ impl ApprovalLedger {
         );
     }
     pub(super) fn observe(&mut self, event: &Effects) {
+        // Install/open refuse any retained command whose key conflicts with an
+        // approval digest. Thus a Core movement can only name one entry;
+        // ambiguous sibling keys are absent/folded and cannot be moved by Core.
         for key in &event.to_undo {
-            if let Some(entry) = self.commands.get_mut(key) {
+            if let Some(entry) = self.unique_mut(*key) {
                 entry.fate = if *key == event.accepted {
                     Fate::Applied
                 } else {
@@ -182,17 +204,17 @@ impl ApprovalLedger {
             }
         }
         for key in &event.to_redo {
-            if let Some(entry) = self.commands.get_mut(key) {
+            if let Some(entry) = self.unique_mut(*key) {
                 entry.fate = Fate::Undone;
             }
         }
         for command in &event.folded {
-            if let Some(entry) = self.commands.get_mut(&command.key) {
+            if let Some(entry) = self.unique_mut(command.key) {
                 entry.fate = Fate::Folded;
             }
         }
         for key in &event.discarded {
-            if let Some(entry) = self.commands.get_mut(key) {
+            if let Some(entry) = self.unique_mut(*key) {
                 entry.fate = Fate::Discarded;
             }
         }

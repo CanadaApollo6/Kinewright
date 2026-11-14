@@ -14,6 +14,7 @@ pub struct OwnerSnapshot {
     pub(super) reservation: super::HistoryReservation,
 }
 pub struct ValidatedOwnerSnapshot {
+    identity: super::SnapshotIdentity,
     core: kinewright_core::undo::ValidatedSnapshot,
     folded_approvals: super::ledger::FoldedApprovals,
     ledger: ApprovalLedger,
@@ -29,6 +30,10 @@ pub struct ValidatedOwnerSnapshot {
     reservation: super::HistoryReservation,
 }
 impl ValidatedOwnerSnapshot {
+    #[must_use]
+    pub const fn identity(&self) -> super::SnapshotIdentity {
+        self.identity
+    }
     pub fn open(self) -> Result<OwnerHistory, Error> {
         Ok(OwnerHistory {
             core: self.core.into_history()?,
@@ -120,10 +125,7 @@ impl OwnerHistory {
             {
                 return Err(Error::CommandConflict);
             }
-            if let Some(new) = snapshot.ledger.get(entry.key) {
-                if new.payload_digest != entry.payload_digest {
-                    return Err(Error::CommandConflict);
-                }
+            if let Some(new) = snapshot.ledger.get_exact(entry.key, entry.payload_digest) {
                 if new.approval != entry.approval {
                     return Err(Error::InvalidLedger);
                 }
@@ -148,7 +150,10 @@ impl OwnerHistory {
                     .owner_bytes
                     .checked_add(approval_charge(&old.approval)?)
                     .ok_or(Error::Capacity("owner metadata"))?;
-                snapshot.ledger.commands.insert(old.key, old);
+                snapshot
+                    .ledger
+                    .commands
+                    .insert((old.key, old.payload_digest), old);
             }
         }
         for entry in &self.ledger.transitions {
@@ -196,7 +201,10 @@ impl OwnerHistory {
             snapshot.fold_frontier,
         )?;
         for entry in snapshot.ledger.commands.values_mut() {
-            let previous = self.ledger.get(entry.key).map(|old| old.fate);
+            let previous = self
+                .ledger
+                .get_exact(entry.key, entry.payload_digest)
+                .map(|old| old.fate);
             entry.fate = if let Some(command) = snapshot.origins.get(&entry.key) {
                 if entry.payload_digest != command.origin.payload_digest {
                     return Err(Error::CommandConflict);
@@ -210,14 +218,12 @@ impl OwnerHistory {
                 } else {
                     Fate::Undone
                 }
-            } else if snapshot
-                .folded_approvals
-                .get(&entry.key)
-                .is_some_and(|proof| proof.payload_digest == entry.payload_digest)
-            {
-                Fate::Folded
-            } else if snapshot.folded_approvals.contains_key(&entry.key) {
-                Fate::Discarded
+            } else if let Some(fact) = snapshot.folded_approvals.get(&entry.key) {
+                if fact.payload_digest == entry.payload_digest {
+                    Fate::Folded
+                } else {
+                    Fate::Discarded
+                }
             } else {
                 entry.fate
             };
@@ -248,8 +254,15 @@ impl OwnerHistory {
     }
 }
 impl OwnerSnapshot {
+    /// Capture/Save/install protocol boundary only. Execute never hashes owner state.
+    pub fn owner_digest(&self) -> Result<[u8; 32], Error> {
+        self.data.owner_digest()
+    }
+    pub fn identity(&self) -> Result<super::SnapshotIdentity, Error> {
+        self.data.identity()
+    }
     pub fn snapshot_identity(&self) -> Result<[u8; 32], Error> {
-        Ok(self.data.history.snapshot_identity()?)
+        Ok(self.identity()?.digest())
     }
     pub fn validate(self) -> Result<ValidatedOwnerSnapshot, Error> {
         let bounds = self.reservation.role().bounds();
@@ -271,6 +284,7 @@ impl OwnerSnapshot {
         bounds: kinewright_core::undo::RoleBounds,
     ) -> Result<ValidatedOwnerSnapshot, Error> {
         let Self { data, reservation } = self;
+        let identity = data.identity()?;
         let _workspace = reservation.workspace()?;
         let SnapshotData {
             role,
@@ -283,7 +297,12 @@ impl OwnerSnapshot {
             mut ledger,
             folded_approvals,
         } = data;
-        if !ledger.references_unique() {
+        if !ledger.references_unique()
+            || ledger
+                .commands
+                .iter()
+                .any(|((key, digest), entry)| entry.key != *key || entry.payload_digest != *digest)
+        {
             return Err(Error::InvalidLedger);
         }
         if role != reservation.role() {
@@ -423,22 +442,37 @@ impl OwnerSnapshot {
         if ledger.len() > crate::orchestration_records::ITEM_LIMIT
             || folded_approvals.iter().any(|(key, proof)| {
                 first.is_some_and(|first| *key >= first)
-                    || ledger.get(*key).is_none_or(|entry| {
-                        !proof.valid_for(*key, entry.payload_digest)
-                            || entry.fate != Fate::Folded
-                            || fold_frontier.is_none_or(|frontier| {
-                                *key >= frontier || key.position >= frontier.position
-                            })
-                    })
-            })
-            || ledger.entries().any(|entry| {
-                entry.fate == Fate::Folded
-                    && folded_approvals
-                        .get(&entry.key)
-                        .is_none_or(|proof| proof.payload_digest != entry.payload_digest)
+                    || ledger
+                        .get_exact(*key, proof.payload_digest)
+                        .is_none_or(|entry| {
+                            !proof.valid_for(*key, entry.payload_digest)
+                                || entry.fate != Fate::Folded
+                                || fold_frontier.is_none_or(|frontier| {
+                                    *key >= frontier || key.position >= frontier.position
+                                })
+                        })
             })
         {
             return Err(Error::InvalidLedger);
+        }
+        for entry in ledger.entries() {
+            match folded_approvals
+                .get(&entry.key)
+                .map(|fact| fact.payload_digest)
+            {
+                Some(digest)
+                    if entry.fate
+                        != if digest == entry.payload_digest {
+                            Fate::Folded
+                        } else {
+                            Fate::Discarded
+                        } =>
+                {
+                    return Err(Error::InvalidLedger);
+                }
+                None if entry.fate == Fate::Folded => return Err(Error::InvalidLedger),
+                _ => {}
+            }
         }
         let next = CommandKey {
             epoch: history.epoch,
@@ -503,8 +537,12 @@ impl OwnerSnapshot {
                     if owner_bytes > role.envelope().owners {
                         return Err(Error::Capacity("owner metadata"));
                     }
-                    if let Some(entry) = ledger.commands.get_mut(&command.id) {
-                        if entry.payload_digest != command.payload_digest
+                    if let Some(entry) = ledger
+                        .commands
+                        .get_mut(&(command.id, command.payload_digest))
+                    {
+                        if entry.key != command.id
+                            || entry.payload_digest != command.payload_digest
                             || !super::ledger::targets_removed(
                                 &entry.approval,
                                 &command.operations,
@@ -515,7 +553,7 @@ impl OwnerSnapshot {
                         {
                             return Err(Error::InvalidLedger);
                         }
-                        seen_approvals.insert(entry.key);
+                        seen_approvals.insert((entry.key, entry.payload_digest));
                     }
                     resources.add(&payload);
                     lineage.apply_occurrences(&origin.creation, effects)?;
@@ -552,8 +590,11 @@ impl OwnerSnapshot {
         }
         for entry in ledger.entries() {
             if entry.key >= next
+                || live_origins
+                    .get(&entry.key)
+                    .is_some_and(|origin| origin.origin.payload_digest != entry.payload_digest)
                 || (matches!(entry.fate, Fate::Applied | Fate::Redone | Fate::Undone)
-                    && !seen_approvals.contains(&entry.key))
+                    && !seen_approvals.contains(&(entry.key, entry.payload_digest)))
             {
                 return Err(Error::InvalidLedger);
             }
@@ -568,6 +609,7 @@ impl OwnerSnapshot {
             fold_frontier,
         )?;
         Ok(ValidatedOwnerSnapshot {
+            identity,
             core: validated,
             folded_approvals,
             ledger,

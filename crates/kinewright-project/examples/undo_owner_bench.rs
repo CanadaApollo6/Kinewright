@@ -284,10 +284,63 @@ fn role_measurements() {
     clippy::too_many_lines,
     reason = "one benchmark lane keeps the fixture, executor and ordered measurement stream together"
 )]
+
+fn identity_measurements(checkpoints: usize) {
+    let mut engine = Engine::new("new", fixture::heavy(), limits(checkpoints));
+    engine.attach_approval();
+    for index in 0..2000 {
+        engine.execute(edit(index));
+    }
+    let Engine::New(attached) = engine else {
+        unreachable!()
+    };
+    let captured = attached.owner.capture().unwrap();
+    let expected = captured.identity().unwrap();
+    let mut samples = BTreeMap::<&str, Vec<f64>>::new();
+    let mut phases = BTreeMap::<&str, serde_json::Value>::new();
+    for pass in 0..5 {
+        let order = if pass % 2 == 0 {
+            ["core", "owner", "combined"]
+        } else {
+            ["combined", "owner", "core"]
+        };
+        for name in order {
+            let before = PhaseCounters::read();
+            let owner_before = OwnerCounters::read();
+            let start = Instant::now();
+            let actual = match name {
+                "core" => attached.owner.history().snapshot_identity().unwrap(),
+                "owner" => captured.owner_digest().unwrap(),
+                _ => captured.snapshot_identity().unwrap(),
+            };
+            let elapsed = start.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(
+                std::hint::black_box(actual),
+                match name {
+                    "core" => expected.core,
+                    "owner" => expected.owner,
+                    _ => expected.digest(),
+                },
+                "IDENTITY_MEASUREMENT_DID_THE_WORK"
+            );
+            samples.entry(name).or_default().push(elapsed);
+            phases.insert(name, serde_json::json!({"core":PhaseCounters::read().since(before),"owner":OwnerCounters::read().since(owner_before)}));
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({"steps":2000,"fixture_json_bytes":serde_json::to_vec(&fixture::heavy()).unwrap().len(),"samples_ms":samples,"phase_counters":phases})
+    );
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let side = args.get(1).expect("old or new");
     let checkpoints = args.get(2).map_or(4, |s| s.parse().unwrap());
+    if side == "identity" {
+        identity_measurements(checkpoints);
+        return;
+    }
     if side == "roles" {
         role_measurements();
         return;

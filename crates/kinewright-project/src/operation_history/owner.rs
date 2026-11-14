@@ -21,8 +21,10 @@ pub struct OwnerCounters {
     pub exact_measurements: u64,
     pub payload_operations: u64,
     pub payload_bytes_serialised: u64,
+    pub owner_identity_hashes: u64,
+    pub owner_identity_bytes_serialised: u64,
 }
-thread_local! { static COUNTERS:Cell<OwnerCounters>=const { Cell::new(OwnerCounters { document_scans:0,exact_measurements:0,payload_operations:0,payload_bytes_serialised:0 }) }; }
+thread_local! { static COUNTERS:Cell<OwnerCounters>=const { Cell::new(OwnerCounters { document_scans:0,exact_measurements:0,payload_operations:0,payload_bytes_serialised:0,owner_identity_hashes:0,owner_identity_bytes_serialised:0 }) }; }
 impl OwnerCounters {
     #[must_use]
     pub fn read() -> Self {
@@ -35,8 +37,21 @@ impl OwnerCounters {
             exact_measurements: self.exact_measurements - old.exact_measurements,
             payload_operations: self.payload_operations - old.payload_operations,
             payload_bytes_serialised: self.payload_bytes_serialised - old.payload_bytes_serialised,
+            owner_identity_hashes: self.owner_identity_hashes - old.owner_identity_hashes,
+            owner_identity_bytes_serialised: self.owner_identity_bytes_serialised
+                - old.owner_identity_bytes_serialised,
         }
     }
+}
+pub(super) fn identity_started() {
+    let mut c = COUNTERS.get();
+    c.owner_identity_hashes += 1;
+    COUNTERS.set(c);
+}
+pub(super) fn identity_serialized(bytes: u64) {
+    let mut c = COUNTERS.get();
+    c.owner_identity_bytes_serialised += bytes;
+    COUNTERS.set(c);
 }
 pub(super) fn payload_serialized(bytes: u64) {
     let mut c = COUNTERS.get();
@@ -677,8 +692,9 @@ pub(super) fn origin_charge(
 }
 pub(super) fn approval_charge(approval: &Approval) -> Result<u64, Error> {
     // Covers both the live ledger node and its eventual folded-proof node.
+    // The key repeats its digest so folded sibling approvals stay distinct.
     // Baseline's fixed headers cover the two initially sparse BTree roots.
-    768_u64
+    1024_u64
         .checked_add((approval.targets.capacity() * std::mem::size_of::<RemovedTarget>()) as u64)
         .and_then(|n| n.checked_add(approval.reference.sha256.capacity() as u64))
         .ok_or(Error::Capacity("approval size"))
