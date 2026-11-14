@@ -2459,6 +2459,11 @@ pub(crate) mod record_sealed {
 /// Only production record types can use the typed-record ingress.
 pub trait BundleRecord: record_sealed::Sealed + Serialize + serde::de::DeserializeOwned {
     const KIND: RecordKind;
+    /// Decoded allocation preflight for this type. Compact raw bodies override
+    /// node inflation; existing record types keep their current accounting.
+    fn decoded_bound(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleError> {
+        preflight_record(bytes, limits)
+    }
     fn run_history_limit(&self, _store: &ProjectStore) -> Result<Option<u64>, BundleError> {
         Ok(None)
     }
@@ -2858,7 +2863,7 @@ impl ProjectStore {
             // same (fixed) limits; preflighting them again would repeat that pass exactly.
             Some(checked) => checked.charge,
             None => {
-                preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?
+                T::decoded_bound(&bytes, self.limits()).map_err(|error| self.run_error(error))?
             }
         };
         drop(preflight);
@@ -2956,7 +2961,7 @@ impl ProjectStore {
             false,
             cleanup_only,
         )?;
-        let decoded = preflight_record(&bytes, self.limits())?;
+        let decoded = T::decoded_bound(&bytes, self.limits())?;
         let decoded = if T::KIND == RecordKind::Lineage {
             decoded
                 .checked_add(crate::lineage_journal::decode_live_bound(&bytes)?)

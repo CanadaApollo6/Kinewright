@@ -745,6 +745,54 @@ mod tests {
     }
 }
 
+/// Test adapter calls the actual old target test and retained-batch walk.
+/// The generator supplies complete kept-cut coverage for its selected line.
+#[cfg(test)]
+pub(crate) fn owner_differential_proof(
+    history: &kinewright_core::HistorySnapshot,
+    position: Option<usize>,
+    operations: Option<&[kinewright_core::Operation]>,
+    targets: &[crate::operation_history::RemovedTarget],
+    covered: bool,
+) -> crate::operation_history::ApprovalAnswer {
+    use crate::operation_history::{ApprovalAnswer, RemovedTarget};
+    if !covered {
+        return ApprovalAnswer::Missing;
+    }
+    let targets = targets
+        .iter()
+        .map(|target| match target {
+            RemovedTarget::Clip(clip) => RemovedObject::Clip {
+                clip: *clip,
+                track: TrackId(0),
+            },
+            RemovedTarget::Track(track) => RemovedObject::Track { track: *track },
+        })
+        .collect::<Vec<_>>();
+    if !targets
+        .iter()
+        .any(|target| target.present_in(&history.document))
+    {
+        return ApprovalAnswer::Kept;
+    }
+    let Some(position) = position else {
+        return ApprovalAnswer::Uncertain;
+    };
+    let identity = serde_json::json!("1".repeat(32));
+    let mut record:ApprovalRecord=serde_json::from_value(serde_json::json!({"kind":"approval","binding":{"project":identity,"run":identity,"task":identity,"attempt":identity,"endpoint":identity,"owner_epoch":0,"history_epoch":identity,"history_position":position,"turn":{"task":identity,"attempt":identity,"session":identity,"ordinal":0,"owner_epoch":0,"expected_head":identity,"purpose":"Work"},"revision":0,"batch_sha256":"0".repeat(64),"description":"oracle"},"consent":{"sha256":"1".repeat(64),"byte_length":1,"record_kind":"owned_evidence"},"digest":"2".repeat(64),"removed_clips":0,"removed_tracks":0,"targets":[]})).unwrap();
+    record.targets = targets;
+    if let Some(operations) = operations {
+        record.binding.batch_sha256 = kinewright_media::sha256_bytes(
+            &serde_json::to_vec(&serde_json::json!({"Batch":operations})).unwrap(),
+        );
+    }
+    match retained_batch_proof(history, &record) {
+        RemovalProof::Kept => ApprovalAnswer::Kept,
+        RemovalProof::Missing => ApprovalAnswer::Missing,
+        RemovalProof::Uncertain => ApprovalAnswer::Uncertain,
+    }
+}
+
 #[cfg(test)]
 mod compact_position_tests {
     use super::CapturedHistory;

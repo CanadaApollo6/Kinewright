@@ -1,0 +1,45 @@
+{
+  "accepted_batch_if_revision": 284,
+  "accepted_do_if_revision": 272,
+  "approvals": 27,
+  "control_difference_observations": 54,
+  "control_difference_witnesses": {
+    "Redo/Discarded/old=Kept": [
+      "DoBatch([AddTrack { track: Track { id: TrackId(82), kind: Video, sync_lock: false, clips: [] } }]) approval=false",
+      "Undo approval=true",
+      "Redo approval=false",
+      "DoBatch([RemoveTrack { track: TrackId(82) }]) approval=true",
+      "Undo approval=false",
+      "Redo approval=true",
+      "Undo approval=false",
+      "DoBatch([RemoveTrack { track: TrackId(82) }]) approval=true"
+    ],
+    "Redo/Holds/old=Missing": [
+      "approve Do C=RemoveTrack81",
+      "Undo C; capture T",
+      "Redo C",
+      "Do marker folds C; capture S before Redo approval",
+      "install T",
+      "approve Redo C",
+      "install S; matching Do prefix proof survives"
+    ],
+    "Undo/Reversed/old=Kept": [
+      "DoBatch([AddTrack { track: Track { id: TrackId(82), kind: Video, sync_lock: false, clips: [] } }]) approval=false",
+      "Undo approval=true",
+      "Redo approval=false",
+      "DoBatch([RemoveTrack { track: TrackId(82) }]) approval=true"
+    ],
+    "Undo/Uncertain(MissingFoldProvenance)/old=Missing": [
+      "Do C=AddTrack82",
+      "capture T",
+      "Do marker folds C; capture S before approval",
+      "install T",
+      "approve Undo C",
+      "install S"
+    ]
+  },
+  "folded_provenance_probes": 2,
+  "shortcut_exemptions": 48,
+  "transitions": 6480,
+  "uncertain_observations": 1
+}

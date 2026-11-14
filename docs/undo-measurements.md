@@ -268,3 +268,23 @@ No full workspace test suite, Windows build, hosted CI, GUI or GPU qualification
 The model, event effects, immutable original command IDs, atomic folds, typed snapshot token and canonical record identity are implemented. The fixed-cache design trades bounded retention for occasional prefix replay; the measured costs and edit-depth drift make an unconditional constant-latency claim too strong. Role envelopes remain proposals until the owner layer accounts for all endpoints, captures and ledgers.
 
 Part 2 needs to implement the audit ledger, lineage seeds and resource ownership from events; qualify persisted graph/reference sizes and cumulative role reservations; migrate GUI-to-writer snapshot transport/install fencing; define recorder ownership; and move existing readers before deleting old history. The module supplies accepted/moved/discarded/folded command keys, identity effects, boundary queries, a validated record install, canonical digest and optional recorder. It deliberately does not yet supply those owner-layer systems or durable receipt/publication fencing.
+
+## Part 1 review follow-ups during H2a part 2
+
+Guard commit `2a5c59a7` adds encoded and actual-capacity assertions after every differential transition and boundary query, plus populated installation, reserved-path, typed map-payload, digest, duplicate-key and backwards-epoch cases. Nine reverted wrong changes each failed a named assertion; their names and logs are recorded in the part 2 report. Command keys now increase strictly while walking Undo then reversed Redo.
+
+Profile commit `a3f36da9` removes the unused `StepCharge.before`. The fixed probe prints `Step = 104`, `StepCommand = 72`, `Operation = 160`, `Clip = 240`, identity effect = 312 and command effects = 40 bytes on this build. The historical 120-byte Step quoted above belongs to the accepted performance build before that deletion.
+
+The candidate workspace is now 16 MiB. At O = 512 KiB and 160 bytes per inline operation, at most 3,276 operations fit before other charges. Four identity-observation slots per operation, each including 312 + 40 + 4 × 16 bytes, reserve 5,451,264 bytes. Add kernel workspace 8D = 4 MiB, stored-shell input O+2A+8 KiB = 1.5 MiB + 8 KiB, owner scratch 2A = 1 MiB and 64 KiB headers: 12,340,736 bytes (11.769 MiB). Ten percent slack gives 12.946 MiB; round up to 16 MiB. Payload-heavy/coalesced cases must also pass their actual recorded-peak admission. R = 2D + O + A = 2 MiB; peak = 18 MiB. The shared pool sums retained caps 128 + 328 + 16 = 472 MiB and allows at most 64 MiB of concurrent workspace across roles, for 536 MiB total structural envelope.
+
+Clip-growth tightening is deferred under the review's explicit fallback. A touched clip's payload does not include a full enclosing clip array doubling, or implicit clip/automation fan-out. The new witness `touched_clip_payload_misses_full_track_array_growth` exercises a four-slot full track which splits to five clips. A sound smaller scalar bound needs maintained capacity maxima or kernel observations; another history-side clip search would add a whole-document traversal. The conservative formulas and their exact-measurement cost remain. The 67-kind bound matrix passes after this change.
+
+Five strict alternating before/after release pairs use the same 400-clip fixture, depth 2,000 and identical copy, ripple and split work; no owned build/test overlapped the run. The before binary is production tree `2a5c59a7` plus the benchmark-only probe, SHA-256 `f3041a0e7cfadc7e144576d9958b52c0d9692f4731249f2c23d0d9d3eec02776`; after is production tree `a3f36da9`, SHA-256 `4bc42ab6d6e67bd08fb78379386d08c383b015dd72975db50ac25e151341bfff`. The latter build differs from the committed probe only by a lint annotation. All ten lanes exited zero. [Raw clip pairs](measurements/undo-review-clip-a3f36da9.json.gz) contain start/end machine observations, counters and document assertions.
+
+| Same-fixture lane (ms) | Before median [range] | After median [range] | History phases after |
+| --- | ---: | ---: | --- |
+| Copy attributes | 1.204 [1.194, 1.212] | 1.212 [1.209, 1.289] | 1 copy, 1 exact, 253,207 document bytes |
+| Ripple delete | 1.095 [1.088, 1.099] | 1.098 [1.089, 1.114] | 1 copy, 1 exact, 237,147 document bytes |
+| Split | 1.256 [1.245, 1.288] | 1.255 [1.252, 1.277] | 1 copy, 1 exact, 253,367 document bytes |
+
+There is no measured speedup. Each command retains two kernel validation passes, one duration pass and two identity passes, counted separately from history work. Kernel passes remain unchanged; incremental kernel validation is a later job after the switch.

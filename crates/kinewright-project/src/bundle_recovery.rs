@@ -264,6 +264,14 @@ pub(crate) fn decode<T: DeserializeOwned>(
         false,
         u64::MAX,
     )?;
+    if kind == RecordKind::OperationHistory {
+        let charge = crate::operation_history::stored::compact_decode_charge(bytes)?;
+        drop(scratch);
+        let (value, _shadow) = decoded_reservations(charge, kind, usage, limits)?;
+        let record =
+            serde_json::from_slice(bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        return Ok(value.hold(record));
+    }
     let wire_charge = crate::store::preflight_record(bytes, limits)?;
     let charge = if kind == RecordKind::Lineage {
         wire_charge
@@ -931,6 +939,9 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             }
             RecordKind::History => {
                 let _value = admit!(crate::history_record::HistoryRecord);
+            }
+            RecordKind::OperationHistory => {
+                let _value = admit!(crate::operation_history::StoredOwnerRecord);
             }
             RecordKind::BranchCheckpoint => {
                 checkpoints.insert(reference.sha256.clone(), admit!(BranchCheckpoint));

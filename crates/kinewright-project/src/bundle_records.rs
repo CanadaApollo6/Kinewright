@@ -33,6 +33,11 @@ macro_rules! identity {
                 }
                 Ok(Self(encoded))
             }
+            /// Actual owned storage, including vacant reserved bytes.
+            #[must_use]
+            pub fn allocated_capacity(&self) -> usize {
+                self.0.capacity()
+            }
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
@@ -51,6 +56,7 @@ identity!(SessionId);
 pub enum RecordKind {
     Document,
     History,
+    OperationHistory,
     BranchCheckpoint,
     BranchIndex,
     RootCheckpoint,
@@ -99,6 +105,7 @@ impl RecordKind {
             self,
             Self::Document
                 | Self::History
+                | Self::OperationHistory
                 | Self::BranchCheckpoint
                 | Self::BranchIndex
                 | Self::RootCheckpoint

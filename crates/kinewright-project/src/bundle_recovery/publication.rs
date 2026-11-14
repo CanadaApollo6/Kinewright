@@ -562,6 +562,9 @@ pub(super) fn validate(
             RecordKind::History => {
                 payload!(HistoryRecord);
             }
+            RecordKind::OperationHistory => {
+                payload!(crate::operation_history::StoredOwnerRecord);
+            }
             RecordKind::Lineage => {
                 payload!(LineageRecord);
             }

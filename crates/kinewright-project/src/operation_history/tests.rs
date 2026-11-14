@@ -4,13 +4,13 @@ use kinewright_core::{
     undo::{History, PhaseCounters, RetentionPolicy, RoleBounds},
 };
 
-fn origin(value: u64) -> CreationOrigin {
+pub(super) fn origin(value: u64) -> CreationOrigin {
     CreationOrigin {
         branch: serde_json::from_str(&format!("\"{:032x}\"", 1)).unwrap(),
         batch: serde_json::from_str(&format!("\"{value:032x}\"")).unwrap(),
     }
 }
-fn document() -> Document {
+pub(super) fn document() -> Document {
     Document {
         tracks: vec![Track {
             id: TrackId(81),
@@ -31,10 +31,10 @@ fn owner() -> OwnerHistory {
     )
     .unwrap()
 }
-fn remove() -> Command {
+pub(super) fn remove() -> Command {
     Command::DoBatch(vec![Operation::RemoveTrack { track: TrackId(81) }])
 }
-fn approval() -> Approval {
+pub(super) fn approval() -> Approval {
     Approval {
         reference: crate::bundle_records::ObjectRef {
             sha256: "a".repeat(64),
@@ -186,28 +186,62 @@ fn owner_refusal_is_inside_the_document_transaction() {
 }
 #[test]
 fn warm_owner_edit_has_no_document_or_exact_work() {
-    let mut history = owner();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../kinewright-core/tests/support/history_operation_cases.json"
+    ))
+    .unwrap();
+    let document: Document =
+        serde_json::from_value(cases["DeleteClip"]["document"].clone()).unwrap();
+    let track = document.tracks[0].id;
+    let clip = document.tracks[0].clips[0].id;
+    let mut history = OwnerHistory::new(
+        &HistoryPool::new(PoolLimits::default()),
+        Role::Ordinary,
+        RetentionPolicy::Fold,
+        &origin(1),
+        || Ok(document),
+    )
+    .unwrap();
+    let mut approved = approval();
+    approved.targets = vec![RemovedTarget::Clip(clip)];
+    history
+        .execute(
+            Command::DoBatch(vec![Operation::DeleteClip { clip }]),
+            origin(2),
+            vec![],
+            Some(approved),
+        )
+        .unwrap();
+    history
+        .execute(Command::Undo, origin(3), vec![], None)
+        .unwrap();
     history
         .execute(
             Command::Do(Operation::SetTrackSyncLock {
-                track: TrackId(81),
+                track,
                 locked: true,
             }),
-            origin(2),
+            origin(4),
             vec![],
             None,
         )
         .unwrap();
+    assert!(
+        history.ledger().entries().count() > 0
+            && !history.seeds().occurrences.is_empty()
+            && history.resources().values().count() > 0,
+        "WARM_OWNER_NONEMPTY_ATTACHMENTS"
+    );
     for n in 0..64 {
         let owner_before = OwnerCounters::read();
         let core_before = PhaseCounters::read();
         history
             .execute(
                 Command::Do(Operation::SetTrackSyncLock {
-                    track: TrackId(81),
+                    track,
                     locked: n % 2 == 0,
                 }),
-                origin(3 + n),
+                origin(5 + n),
                 vec![],
                 None,
             )
@@ -295,9 +329,10 @@ fn candidate_workspace_and_shared_peak_have_their_own_arithmetic() {
         * (std::mem::size_of::<kinewright_core::OperationIdentityEffect>() as u64
             + std::mem::size_of::<kinewright_core::undo::CommandEffects>() as u64
             + 4 * 16);
-    // Eight D kernel workspace, O+A stored input, two A owner scratch,
+    // Eight D kernel workspace, O+2A+8 KiB stored input, two A owner scratch,
     // inline observations and 64 KiB fixed headers; leave ten percent slack.
-    let subtotal = (4 << 20) + (1 << 20) + (1 << 20) + observations + (64 << 10);
+    let subtotal =
+        (4 << 20) + Role::Candidate.persisted_shell_cap() + (1 << 20) + observations + (64 << 10);
     assert!(
         subtotal * 11 / 10 < role.workspace,
         "CANDIDATE_WORKSPACE_ARITHMETIC"
@@ -369,10 +404,12 @@ fn folding_advances_seeds_and_resources() {
             .any(|id| id.creation_batch_id == origin(2).batch),
         "FOLD_ADVANCES_OCCURRENCE_SEEDS"
     );
-    let (baseline, lineage) = owner.boundary(0).unwrap();
-    lineage.verify(&baseline).unwrap();
-    let (current, lineage) = owner.boundary(1).unwrap();
-    lineage.verify(&current).unwrap();
+    let boundary = owner.boundary(0).unwrap();
+    let (baseline, lineage) = (&boundary.document, &boundary.lineage);
+    lineage.verify(baseline).unwrap();
+    let boundary = owner.boundary(1).unwrap();
+    let (current, lineage) = (&boundary.document, &boundary.lineage);
+    lineage.verify(current).unwrap();
 }
 
 #[test]
@@ -442,12 +479,101 @@ fn resources_include_payloads_in_the_live_redo_tail() {
         );
     }
     for depth in 0..=1 {
-        let (document, _) = owner.boundary(depth).unwrap();
-        for resource in Resources::document(&document) {
+        let boundary = owner.boundary(depth).unwrap();
+        let document = boundary.document();
+        for resource in Resources::document(document) {
             assert!(
                 owner.resources().contains(&resource),
                 "EVERY_REACHABLE_RESOURCE"
             );
         }
+    }
+}
+
+#[test]
+fn recreation_is_bounded_evidence_and_never_resurrects_a_discarded_approval() {
+    let mut history = owner();
+    let key = history
+        .execute(remove(), origin(2), vec![], Some(approval()))
+        .unwrap()
+        .accepted;
+    history
+        .execute(
+            Command::Do(Operation::AddTrack {
+                track: document().tracks.remove(0),
+            }),
+            origin(3),
+            vec![],
+            None,
+        )
+        .unwrap();
+    assert!(
+        history.ledger().get(key).unwrap().recreated,
+        "RECREATION_COMES_FROM_LATER_IDENTITY_EFFECTS"
+    );
+    history
+        .execute(Command::Undo, origin(4), vec![], None)
+        .unwrap();
+    history
+        .execute(Command::Undo, origin(5), vec![], None)
+        .unwrap();
+    assert_eq!(
+        history.ledger().get(key).unwrap().answer(),
+        ApprovalAnswer::Uncertain,
+        "UNDONE_RECREATION_STAYS_UNCERTAIN"
+    );
+    history
+        .execute(
+            Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(81),
+                locked: true,
+            }),
+            origin(6),
+            vec![],
+            None,
+        )
+        .unwrap();
+    let entry = history.ledger().get(key).unwrap();
+    assert!(entry.recreated, "RECREATION_EVIDENCE_IS_ONE_STICKY_BIT");
+    assert_eq!(
+        entry.answer(),
+        ApprovalAnswer::Missing,
+        "DISCARDED_RECREATION_NEVER_RESURRECTS_APPROVAL"
+    );
+}
+
+#[test]
+fn empty_owner_batch_precedes_workspace_capacity() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let mut owner = OwnerHistory::new(
+        &pool,
+        Role::Task,
+        RetentionPolicy::NeverFold,
+        &origin(1),
+        || Ok(document()),
+    )
+    .unwrap();
+    let blocker = pool.admit(Role::Task).unwrap();
+    let _window = blocker.workspace().unwrap();
+    let before = owner.history().snapshot_identity().unwrap();
+    for command in [
+        Command::DoBatch(vec![]),
+        Command::DoBatchCoalesced {
+            operations: vec![],
+            coalesce_key: "drag".into(),
+        },
+    ] {
+        assert_eq!(
+            owner.execute(command, origin(2), vec![], None),
+            Err(Error::History(kinewright_core::undo::Error::Batch(
+                kinewright_core::BatchError::Empty
+            ))),
+            "OWNER_EMPTY_PRECEDES_SHARED_CAPACITY"
+        );
+        assert_eq!(
+            owner.history().snapshot_identity().unwrap(),
+            before,
+            "OWNER_EMPTY_REFUSAL_UNCHANGED"
+        );
     }
 }

@@ -109,6 +109,40 @@ pub struct StepCommand {
     pub payload_digest: [u8; 32],
     pub operations: Box<[Operation]>,
 }
+/// Fixed-size identity of an exact command prefix, independent of its payload allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepEvidence {
+    pub first_key: CommandKey,
+    pub first_digest: [u8; 32],
+    pub commands: u64,
+    pub digest: [u8; 32],
+}
+impl StepEvidence {
+    /// Hash keys and payload digests in order. No operation or document is copied.
+    #[must_use]
+    pub fn from_commands(
+        mut commands: impl Iterator<Item = (CommandKey, [u8; 32])>,
+    ) -> Option<Self> {
+        let (first_key, first_digest) = commands.next()?;
+        let mut digest = kinewright_hash::Sha256::new();
+        digest.update(b"Kinewright step commands\0");
+        let mut count = 0_u64;
+        for (key, payload) in std::iter::once((first_key, first_digest)).chain(commands) {
+            digest.update(&key.epoch.to_le_bytes());
+            digest.update(&key.position.to_le_bytes());
+            digest.update(&payload);
+            count += 1;
+        }
+        digest.update(&count.to_le_bytes());
+        Some(Self {
+            first_key,
+            first_digest,
+            commands: count,
+            digest: digest.finalize(),
+        })
+    }
+}
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StepCharge {
     operations: Charge,
@@ -128,6 +162,31 @@ pub struct Step {
     pub(crate) charge: StepCharge,
 }
 impl Step {
+    #[must_use]
+    pub fn evidence(&self) -> Option<StepEvidence> {
+        self.prefix_evidence(self.commands.len())
+    }
+    #[must_use]
+    pub fn prefix_evidence(&self, count: usize) -> Option<StepEvidence> {
+        if count > self.commands.len() {
+            return None;
+        }
+        StepEvidence::from_commands(
+            self.commands
+                .iter()
+                .take(count)
+                .map(|command| (command.id, command.payload_digest)),
+        )
+    }
+    /// Build untrusted wire data. Only Record validation grants a replay proof.
+    #[must_use]
+    pub fn unvalidated(commands: Vec<StepCommand>, coalesce_key: Option<Box<str>>) -> Self {
+        Self {
+            commands,
+            coalesce_key,
+            charge: StepCharge::default(),
+        }
+    }
     #[must_use]
     pub fn commands(&self) -> &[StepCommand] {
         &self.commands
@@ -169,6 +228,7 @@ pub struct EditEvent<'a> {
     pub effects: &'a Effects,
     pub operations: &'a [Operation],
     pub payload_digest: [u8; 32],
+    pub step_first: CommandKey,
     pub folded_baseline: Option<&'a Document>,
 }
 
@@ -681,6 +741,11 @@ impl History {
             effects: &effects,
             operations: &operations,
             payload_digest: digest,
+            step_first: if extends {
+                self.undo.back().unwrap().commands[0].id
+            } else {
+                accepted
+            },
             folded_baseline: if fold_new {
                 Some(&candidate)
             } else {
@@ -1084,6 +1149,18 @@ fn digest<T: Serialize + ?Sized>(value: &T) -> Result<[u8; 32], Error> {
     let mut writer = Writer(kinewright_hash::Sha256::new());
     serde_json::to_writer(&mut writer, value).map_err(|_| Error::Encoding)?;
     Ok(writer.0.finalize())
+}
+
+/// Capacity of a borrowed clip, including vacant payload storage.
+pub fn clip_capacity_bytes(clip: &crate::Clip) -> Result<u64, Error> {
+    use capacity::Heap as _;
+    clip.heap()?
+        .checked_add(std::mem::size_of::<crate::Clip>() as u64)
+        .ok_or(Error::Capacity)
+}
+/// Allocation preflight for untrusted owner bodies before typed decoding.
+pub fn payload_memory_bound(bytes: &[u8]) -> Result<u64, Error> {
+    crate::history_size::payload_memory_bound(bytes).map_err(|_| Error::Capacity)
 }
 
 #[cfg(test)]

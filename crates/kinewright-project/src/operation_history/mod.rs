@@ -7,11 +7,19 @@ mod lineage;
 mod owner;
 mod reservation;
 mod resources;
+mod snapshot;
+mod transition;
+pub use transition::{
+    Direction, TransitionApproval, TransitionCounts, TransitionFate, Uncertainty,
+};
+pub(crate) mod stored;
 pub use ledger::{Approval, ApprovalAnswer, ApprovalEntry, ApprovalLedger, Fate, RemovedTarget};
 pub use lineage::{CreationOrigin, Lineage};
-pub use owner::{OwnerCounters, OwnerHistory};
+pub use owner::{OwnerBoundary, OwnerCounters, OwnerHistory};
 pub use reservation::{Envelope, HistoryPool, HistoryReservation, PoolLimits, Role, Workspace};
 pub use resources::{Resource, Resources};
+pub use snapshot::{OwnerSnapshot, ValidatedOwnerSnapshot};
+pub use stored::StoredOwnerRecord;
 
 use kinewright_core::undo::{CommandKey, PreparedError};
 use serde::{Deserialize, Serialize};
@@ -21,6 +29,11 @@ pub enum Error {
     History(kinewright_core::undo::Error),
     Capacity(&'static str),
     InvalidLedger,
+    CommandConflict,
+    InvalidFrontier,
+    InvalidPolicy,
+    NoTargetStep,
+    StaleTransition,
     InvalidOrigin,
     InvalidSeeds,
     MissingResource,
@@ -63,3 +76,12 @@ pub struct CommandOrigin {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod snapshot_tests;
+
+#[cfg(test)]
+mod transition_tests;
+
+#[cfg(test)]
+mod differential;

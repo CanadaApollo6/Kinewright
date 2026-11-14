@@ -48,10 +48,25 @@ impl Record {
             return Err(Error::Capacity);
         }
         let record: Self = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRecord)?;
-        record.validate_with_input(bounds, input)
+        record.validate_with_input(bounds, input, &mut |_, _, _, _| Ok(()))
     }
     pub fn validate(self, bounds: RoleBounds) -> Result<ValidatedSnapshot, Error> {
-        self.validate_with_input(bounds, 0)
+        self.validate_with_input(bounds, 0, &mut |_, _, _, _| Ok(()))
+    }
+    /// Owner validation observes the same untrusted semantic replay. The extra
+    /// input is admitted inside this workspace before any operation executes.
+    pub fn validate_observed(
+        self,
+        bounds: RoleBounds,
+        input: u64,
+        mut observer: impl FnMut(
+            &super::StepCommand,
+            &[crate::OperationIdentityEffect],
+            &Document,
+            bool,
+        ) -> Result<(), Error>,
+    ) -> Result<ValidatedSnapshot, Error> {
+        self.validate_with_input(bounds, input, &mut observer)
     }
     #[expect(
         clippy::too_many_lines,
@@ -61,6 +76,7 @@ impl Record {
         mut self,
         bounds: RoleBounds,
         input: u64,
+        observer: &mut ReplayObserver<'_>,
     ) -> Result<ValidatedSnapshot, Error> {
         self.baseline.validate().map_err(Error::InvalidDocument)?;
         self.document.validate().map_err(Error::InvalidDocument)?;
@@ -158,12 +174,19 @@ impl Record {
         let mut document = super::capacity::copy_document(&self.baseline);
         let mut document_bound = baseline_bound;
         for step in &mut self.undo {
-            validate_step(&mut document, &mut document_bound, step, bounds, input).map_err(
-                |error| match error {
-                    Error::Batch(error) => Error::InvalidUndo(error),
-                    other => other,
-                },
-            )?;
+            validate_step(
+                &mut document,
+                &mut document_bound,
+                step,
+                bounds,
+                input,
+                false,
+                observer,
+            )
+            .map_err(|error| match error {
+                Error::Batch(error) => Error::InvalidUndo(error),
+                other => other,
+            })?;
         }
         if document != *self.document {
             return Err(Error::DocumentMismatch);
@@ -177,12 +200,19 @@ impl Record {
             let mut redone = super::capacity::copy_document(&self.document);
             let mut redone_bound = document_bound;
             for step in self.redo.iter_mut().rev() {
-                validate_step(&mut redone, &mut redone_bound, step, bounds, input).map_err(
-                    |error| match error {
-                        Error::Batch(e) => Error::InvalidRedo(e),
-                        other => other,
-                    },
-                )?;
+                validate_step(
+                    &mut redone,
+                    &mut redone_bound,
+                    step,
+                    bounds,
+                    input,
+                    true,
+                    observer,
+                )
+                .map_err(|error| match error {
+                    Error::Batch(e) => Error::InvalidRedo(e),
+                    other => other,
+                })?;
             }
             DocumentBound::measure(&redone, bounds)?;
         }
@@ -196,12 +226,21 @@ impl Record {
         })
     }
 }
+type ReplayObserver<'a> = dyn FnMut(
+        &super::StepCommand,
+        &[crate::OperationIdentityEffect],
+        &Document,
+        bool,
+    ) -> Result<(), Error>
+    + 'a;
 fn validate_step(
     document: &mut Document,
     size: &mut DocumentBound,
     step: &mut Step,
     bounds: RoleBounds,
     input: u64,
+    is_redo: bool,
+    observer: &mut ReplayObserver<'_>,
 ) -> Result<(), Error> {
     let mut summary = super::StepCharge {
         operations: step.charge.operations,
@@ -213,6 +252,7 @@ fn validate_step(
             ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
         budget.reserve_input(input).map_err(|_| Error::Capacity)?;
         let effects = super::apply(document, size, &command.operations, bounds, &mut budget)?;
+        observer(command, &effects, document, is_redo)?;
         summary = super::replay_charge(summary, &budget, effects.len(), bounds, input)?;
     }
     summary.after = *size;
@@ -295,5 +335,75 @@ impl Serialize for History {
         record.serialize_field("epoch", &self.epoch)?;
         record.serialize_field("policy", &self.policy)?;
         record.end()
+    }
+}
+
+impl ValidatedSnapshot {
+    #[must_use]
+    pub const fn undo(&self) -> &std::collections::VecDeque<Step> {
+        &self.record.undo
+    }
+    #[must_use]
+    pub fn redo(&self) -> &[Step] {
+        &self.record.redo
+    }
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.record.epoch
+    }
+    #[must_use]
+    pub fn command_in_undo(&self, key: CommandKey) -> Option<bool> {
+        if self
+            .record
+            .undo
+            .iter()
+            .flat_map(super::Step::commands)
+            .any(|c| c.id == key)
+        {
+            Some(true)
+        } else if self
+            .record
+            .redo
+            .iter()
+            .flat_map(super::Step::commands)
+            .any(|c| c.id == key)
+        {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    /// Open a validated capture without inventing a snapshot-install epoch.
+    pub fn into_history(self) -> Result<History, Error> {
+        let cache = Cache::new(
+            self.bounds.checkpoint_documents,
+            self.bounds.decoded_history_bytes,
+        )?;
+        let Record {
+            baseline,
+            document,
+            undo,
+            redo,
+            position,
+            epoch,
+            policy,
+        } = self.record;
+        Ok(History {
+            baseline,
+            baseline_bound: self.baseline_bound,
+            document,
+            document_bound: self.document_bound,
+            undo,
+            redo,
+            position,
+            epoch,
+            policy,
+            bounds: self.bounds,
+            undo_charge: self.undo_charge,
+            redo_charge: self.redo_charge,
+            cache,
+            recorder: None,
+            recorder_bytes: 0,
+        })
     }
 }

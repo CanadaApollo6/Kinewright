@@ -18,6 +18,13 @@ impl Role {
         }
     }
     #[must_use]
+    pub const fn policy(self) -> kinewright_core::undo::RetentionPolicy {
+        match self {
+            Self::Ordinary => kinewright_core::undo::RetentionPolicy::Fold,
+            Self::Task | Self::Candidate => kinewright_core::undo::RetentionPolicy::NeverFold,
+        }
+    }
+    #[must_use]
     pub const fn bounds(self) -> RoleBounds {
         match self {
             Self::Ordinary => RoleBounds::ORDINARY,
