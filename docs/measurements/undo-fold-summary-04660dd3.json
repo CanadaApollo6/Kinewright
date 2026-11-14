@@ -1,0 +1,573 @@
+{
+  "metrics": {
+    "edit_1000_ms": {
+      "old": {
+        "median": 0.43039299999999997,
+        "min": 0.394486,
+        "max": 0.702937
+      },
+      "new": {
+        "median": 0.243721,
+        "min": 0.24216,
+        "max": 0.24456599999999998
+      },
+      "ratios": [
+        0.617819136800799,
+        0.6053046645153388,
+        0.3479202261369084,
+        0.3480388455736019,
+        0.5640774826728131
+      ],
+      "within_1_5": 5
+    },
+    "edit_10000_ms": {
+      "old": {
+        "median": 0.393809,
+        "min": 0.387484,
+        "max": 0.42619100000000004
+      },
+      "new": {
+        "median": 0.26743900000000004,
+        "min": 0.264026,
+        "max": 0.4394
+      },
+      "ratios": [
+        0.678500431101753,
+        0.6901936596091711,
+        1.079230342239317,
+        0.6343188851946662,
+        0.6704417623771929
+      ],
+      "within_1_5": 5
+    },
+    "gesture_apply_ms": {
+      "old": {
+        "median": 32.705101,
+        "min": 30.959948,
+        "max": 38.273802
+      },
+      "new": {
+        "median": 34.192959,
+        "min": 28.807259000000002,
+        "max": 41.093813
+      },
+      "ratios": [
+        0.9235297907159321,
+        0.8808185304182367,
+        1.0996594823918278,
+        1.2398925217833054,
+        0.8933776424928989
+      ],
+      "within_1_5": 5
+    },
+    "gesture_redo_ms": {
+      "old": {
+        "median": 0.002574,
+        "min": 0.001495,
+        "max": 0.012697
+      },
+      "new": {
+        "median": 17.648998,
+        "min": 17.531226,
+        "max": 20.203424000000002
+      }
+    },
+    "fold_ms": {
+      "old": {
+        "median": 0.4123,
+        "min": 0.387889,
+        "max": 0.6947099999999999
+      },
+      "new": {
+        "median": 1.461177,
+        "min": 1.38304,
+        "max": 1.478116
+      }
+    },
+    "open_ms": {
+      "old": {
+        "median": 74.001954,
+        "min": 72.957728,
+        "max": 78.036284
+      },
+      "new": {
+        "median": 312.772872,
+        "min": 306.983581,
+        "max": 369.104939
+      }
+    },
+    "cold_undo_ms": {
+      "new": {
+        "median": 284.918682,
+        "min": 271.109305,
+        "max": 319.262573
+      }
+    },
+    "walk_p95_ms": {
+      "old": {
+        "median": 0.003212,
+        "min": 0.002713,
+        "max": 0.009689
+      },
+      "new": {
+        "median": 6.0808290000000005,
+        "min": 6.005903,
+        "max": 8.21036
+      }
+    },
+    "walk_worst_ms": {
+      "old": {
+        "median": 0.131428,
+        "min": 0.06154400000000001,
+        "max": 0.92338
+      },
+      "new": {
+        "median": 314.174066,
+        "min": 290.559759,
+        "max": 335.480393
+      }
+    },
+    "copy_ms": {
+      "old": {
+        "median": 0.292263,
+        "min": 0.283714,
+        "max": 0.486168
+      },
+      "new": {
+        "median": 1.325689,
+        "min": 1.273118,
+        "max": 1.8396350000000001
+      }
+    },
+    "ripple_ms": {
+      "old": {
+        "median": 0.285362,
+        "min": 0.275147,
+        "max": 1.235925
+      },
+      "new": {
+        "median": 1.145054,
+        "min": 1.123523,
+        "max": 1.4058300000000001
+      }
+    }
+  },
+  "fold_samples": {
+    "below_2": 160,
+    "total": 160,
+    "worst": 1.881181
+  },
+  "depth_ranges_overlap": 5,
+  "contaminated_lanes": 10,
+  "load_ranges": [
+    {
+      "status": 0,
+      "output": "13:49:42 up 4 days, 22:51,  1 user,  load average: 3.71, 4.33, 6.00"
+    },
+    {
+      "status": 0,
+      "output": "13:49:50 up 4 days, 22:51,  1 user,  load average: 3.89, 4.36, 6.00"
+    },
+    {
+      "status": 0,
+      "output": "13:50:06 up 4 days, 22:51,  1 user,  load average: 4.04, 4.37, 5.97"
+    },
+    {
+      "status": 0,
+      "output": "13:50:14 up 4 days, 22:52,  1 user,  load average: 3.96, 4.34, 5.95"
+    },
+    {
+      "status": 0,
+      "output": "13:50:29 up 4 days, 22:52,  1 user,  load average: 4.34, 4.41, 5.94"
+    },
+    {
+      "status": 0,
+      "output": "13:50:38 up 4 days, 22:52,  1 user,  load average: 4.75, 4.49, 5.95"
+    },
+    {
+      "status": 0,
+      "output": "13:50:56 up 4 days, 22:52,  1 user,  load average: 8.04, 5.26, 6.18"
+    },
+    {
+      "status": 0,
+      "output": "13:51:06 up 4 days, 22:52,  1 user,  load average: 9.13, 5.59, 6.28"
+    },
+    {
+      "status": 0,
+      "output": "13:51:22 up 4 days, 22:53,  1 user,  load average: 8.21, 5.56, 6.25"
+    },
+    {
+      "status": 0,
+      "output": "13:51:31 up 4 days, 22:53,  1 user,  load average: 7.96, 5.55, 6.25"
+    }
+  ],
+  "counter_per_command": {
+    "cold_undo": {
+      "bytes_serialised": 735717.0,
+      "document_bytes_serialised": 735717.0,
+      "document_copies": 4.0,
+      "exact_measurements": 3.0,
+      "kernel_duration_passes": 1999.0,
+      "kernel_identity_passes": 0.0,
+      "kernel_validation_passes": 3998.0,
+      "operation_reservations": 0.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 0.0,
+      "owner_payload_encodings": 0.0,
+      "owner_payload_operations": 0.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "copy": {
+      "bytes_serialised": 253569.0,
+      "document_bytes_serialised": 253207.0,
+      "document_copies": 1.0,
+      "exact_measurements": 1.0,
+      "kernel_duration_passes": 1.0,
+      "kernel_identity_passes": 2.0,
+      "kernel_validation_passes": 2.0,
+      "operation_reservations": 1.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 240.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 308.0,
+      "owner_payload_encodings": 1.0,
+      "owner_payload_operations": 1.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "edit_1000": {
+      "bytes_serialised": 188.0,
+      "document_bytes_serialised": 0.0,
+      "document_copies": 1.0,
+      "exact_measurements": 0.0,
+      "kernel_duration_passes": 1.0,
+      "kernel_identity_passes": 2.0,
+      "kernel_validation_passes": 2.0,
+      "operation_reservations": 1.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 264.5,
+      "owner_payload_encodings": 1.0,
+      "owner_payload_operations": 1.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "edit_10000": {
+      "bytes_serialised": 188.0,
+      "document_bytes_serialised": 0.0,
+      "document_copies": 1.0,
+      "exact_measurements": 0.0,
+      "kernel_duration_passes": 1.0,
+      "kernel_identity_passes": 2.0,
+      "kernel_validation_passes": 2.0,
+      "operation_reservations": 1.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 264.5,
+      "owner_payload_encodings": 1.0,
+      "owner_payload_operations": 1.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "fold": {
+      "bytes_serialised": 245430.0,
+      "document_bytes_serialised": 245242.0,
+      "document_copies": 2.0,
+      "exact_measurements": 1.0,
+      "kernel_duration_passes": 2.0,
+      "kernel_identity_passes": 4.0,
+      "kernel_validation_passes": 4.0,
+      "operation_reservations": 1.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 1.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 3.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 264.5,
+      "owner_payload_encodings": 1.0,
+      "owner_payload_operations": 1.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "gesture_apply": {
+      "bytes_serialised": 188.13333333333333,
+      "document_bytes_serialised": 0.0,
+      "document_copies": 1.0,
+      "exact_measurements": 0.0,
+      "kernel_duration_passes": 1.0,
+      "kernel_identity_passes": 2.0,
+      "kernel_validation_passes": 2.0,
+      "operation_reservations": 1.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 280.5,
+      "owner_payload_encodings": 2.0,
+      "owner_payload_operations": 1.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "gesture_redo": {
+      "bytes_serialised": 0.0,
+      "document_bytes_serialised": 0.0,
+      "document_copies": 1.0,
+      "exact_measurements": 0.0,
+      "kernel_duration_passes": 120.0,
+      "kernel_identity_passes": 240.0,
+      "kernel_validation_passes": 240.0,
+      "operation_reservations": 0.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 0.0,
+      "owner_payload_encodings": 0.0,
+      "owner_payload_operations": 0.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "gesture_undo": {
+      "bytes_serialised": 0.0,
+      "document_bytes_serialised": 0.0,
+      "document_copies": 0.0,
+      "exact_measurements": 0.0,
+      "kernel_duration_passes": 0.0,
+      "kernel_identity_passes": 0.0,
+      "kernel_validation_passes": 0.0,
+      "operation_reservations": 0.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 0.0,
+      "owner_payload_encodings": 0.0,
+      "owner_payload_operations": 0.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "open": {
+      "bytes_serialised": 2072043.0,
+      "document_bytes_serialised": 735699.0,
+      "document_copies": 1.0,
+      "exact_measurements": 3.0,
+      "kernel_duration_passes": 2000.0,
+      "kernel_identity_passes": 4000.0,
+      "kernel_validation_passes": 4004.0,
+      "operation_reservations": 2000.0,
+      "owner_document_scans": 4.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 6.0,
+      "owner_lineage_encodings": 1.0,
+      "owner_origin_lookups": 1.0,
+      "owner_owner_identity_bytes_serialised": 617307.0,
+      "owner_owner_identity_hashes": 1.0,
+      "owner_payload_bytes_serialised": 583182.0,
+      "owner_payload_encodings": 2400.0,
+      "owner_payload_operations": 0.0,
+      "owner_resource_document_scans": 2.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 2.0
+    },
+    "ripple": {
+      "bytes_serialised": 237304.0,
+      "document_bytes_serialised": 237147.0,
+      "document_copies": 1.0,
+      "exact_measurements": 1.0,
+      "kernel_duration_passes": 1.0,
+      "kernel_identity_passes": 2.0,
+      "kernel_validation_passes": 2.0,
+      "operation_reservations": 1.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 2.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 249.0,
+      "owner_payload_encodings": 1.0,
+      "owner_payload_operations": 1.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "single_undo": {
+      "bytes_serialised": 0.0,
+      "document_bytes_serialised": 0.0,
+      "document_copies": 0.0,
+      "exact_measurements": 0.0,
+      "kernel_duration_passes": 0.0,
+      "kernel_identity_passes": 0.0,
+      "kernel_validation_passes": 0.0,
+      "operation_reservations": 0.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 0.0,
+      "owner_payload_encodings": 0.0,
+      "owner_payload_operations": 0.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    },
+    "walk": {
+      "bytes_serialised": 160633.24,
+      "document_bytes_serialised": 160633.24,
+      "document_copies": 0.9985,
+      "exact_measurements": 0.655,
+      "kernel_duration_passes": 35.732,
+      "kernel_identity_passes": 0.0,
+      "kernel_validation_passes": 71.464,
+      "operation_reservations": 0.0,
+      "owner_document_scans": 0.0,
+      "owner_exact_measurements": 0.0,
+      "owner_folded_ancestry": 0.0,
+      "owner_folded_commands": 0.0,
+      "owner_folded_payload_references": 0.0,
+      "owner_folded_resource_ids": 0.0,
+      "owner_folded_seed_ids": 0.0,
+      "owner_ledger_entries": 0.0,
+      "owner_lineage_encodings": 0.0,
+      "owner_origin_lookups": 0.0,
+      "owner_owner_identity_bytes_serialised": 0.0,
+      "owner_owner_identity_hashes": 0.0,
+      "owner_payload_bytes_serialised": 0.0,
+      "owner_payload_encodings": 0.0,
+      "owner_payload_operations": 0.0,
+      "owner_resource_document_scans": 0.0,
+      "owner_seed_capacity_scans": 0.0,
+      "owner_seed_map_copies": 0.0,
+      "owner_seed_prune_scans": 0.0,
+      "owner_seed_verify_scans": 0.0
+    }
+  },
+  "stored_metrics": {
+    "stored_bytes": 510875.0,
+    "stored_command_bytes": 255.4375,
+    "stored_decode_charge_bytes": 515483.0,
+    "retained_charge_bytes": 8982538.0,
+    "retained_rss_total_bytes": 16072704.0
+  }
+}

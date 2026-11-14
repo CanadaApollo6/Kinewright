@@ -346,3 +346,60 @@ Candidate W arithmetic is in the review-follow-up section above: 12,340,736 byte
 
 Candidate's heavy fixture fails with typed `DocumentCapacity`; no candidate-heavy success is claimed. The ordinary timing lane including its nonempty ledger charges 8,857,562 bytes. Process RSS medians are 1,550,184,448 old versus 15,577,088 owner; startup-relative increases 1,540,767,744 versus 6,144,000. Structural charges and RSS are distinct measurements.
 <!-- hx-owner-qualification:end -->
+
+## Fold preparation after review
+
+Source `04660dd3`, including sparse folding and the retained-origins capacity correction. The historical owner table above is retained. The same 400-clip / 400-effect / 3,200-keyframe fixture encodes to 245,233 bytes, with 3,301,441 capacity-counted live bytes. The timed release binary is SHA-256 `23613ec94b3bff02276b6a145f9e11b52d212cae867b4776457c0a225cc77c23`; [manifest](measurements/undo-fold-after-manifest.json), [raw five alternating pairs](measurements/undo-fold-04660dd3.json.gz), [summary](measurements/undo-fold-summary-04660dd3.json).
+
+Run 2026-11-14T18:49:42Z–2026-11-14T18:51:46Z; one-minute load 3.71–9.13. All ten lanes sampled external activity above 20% CPU. No owned build/test overlapped timing; no quiet-lane wait, fixture change or timing repeat was used. The counters-only probe preceded these pairs. Identity hashing was measured separately after the paired run. Kernel validation, duration and identity passes stay unchanged; the counters describe work added by history/ownership separately from those kernel passes.
+
+Milliseconds: median of five lane summaries [minimum, maximum]. “Prior owner” is historical, not a paired before/after experiment. The current Core and owner columns are paired.
+
+| Lane | Prior owner median | Current paired Core | Current owner | Target / result |
+| --- | ---: | ---: | ---: | --- |
+| Hand edit, 1,000 | 0.245 | 0.430 [0.394, 0.703] | 0.244 [0.242, 0.245] | ≤1.5× Core: 5/5 |
+| Hand edit, 10,000 | 0.273 | 0.394 [0.387, 0.426] | 0.267 [0.264, 0.439] | ≤1.5× Core: 5/5 |
+| 120-batch apply | 31.968 | 32.705 [30.960, 38.274] | 34.193 [28.807, 41.094] | ≤1.5× Core: 5/5 |
+| Gesture Redo | 17.685 | 0.003 [0.001, 0.013] | 17.649 [17.531, 20.203] | <50: 5/5 |
+| Edit at fold bound | 1.733 | 0.412 [0.388, 0.695] | 1.461 [1.383, 1.478] | <2: 160/160; worst 1.881 |
+| Validated open, 2,000 | 307.028 | 74.002 [72.958, 78.036] | 312.773 [306.984, 369.105] | <1,000: 5/5 |
+| Cold Undo | 269.587 | N/A | 284.919 [271.109, 319.263] | Miss: +5.69% vs historical median |
+| Walk p95 | 6.902 | 0.003 [0.003, 0.010] | 6.081 [6.006, 8.210] | <100: 5/5 |
+| Walk worst | 329.129 | 0.131 [0.062, 0.923] | 314.174 [290.560, 335.480] | <1,000: 5/5 |
+| Copy attributes | 1.334 | 0.292 [0.284, 0.486] | 1.326 [1.273, 1.840] | Measured; no new timing target |
+| Ripple deletion | 1.146 | 0.285 [0.275, 1.236] | 1.145 [1.124, 1.406] | Measured; no new timing target |
+
+All five owner edit-depth sample ranges overlap. The five gesture pairs are within 1.5× their own Core controls; owner document scans and aggregate measurements are zero throughout the gesture. No document-proportional owner work was found behind the previous 1.60× outlier.
+
+Folding improves from 123/160 below 2 ms (worst 2.847) to 160/160 (worst 1.881181). The median moves from 1.733 to 1.461177 ms; the paired Core control moves from 0.418 to 0.412300 ms. Cold Undo misses its no-regression target: 284.918682 versus historical 269.587 ms (+5.69%); the historical range was 259.096–482.095 and the current range is 271.109–319.263. These noncontemporaneous ranges do not establish causation. No kernel validation was replaced or further timing selected. Old open remains an expected bounded-transport refusal, so its 74.002 ms is not a successful-open comparison.
+
+### Where the fold work went
+
+[Before counter probe](measurements/undo-fold-counters-before.jsonl) and [after](measurements/undo-fold-counters-after.jsonl), same fixture and 500-byte folding bound, one unmeasured command per probe. The populated variant has 32 transition approvals. Counters pin work independently of timing.
+
+| Owner work per fold | Before | After |
+| --- | ---: | ---: |
+| Document scans / aggregate exact measurements | 2 / 2 | 0 / 0 |
+| Full seed-map copies | 1 | 0 |
+| Capacity / prune / verify seed traversals | 2 / 1 / 1 | 0 / 0 / 0 |
+| Baseline resource scans | 1 | 0 |
+| Full lineage encodings | 4 | 0 |
+| Payload encodings / payload bytes serialized | 4 / 108,168 | 1 / 265 |
+| Origin lookups | 4 | 3 |
+| Ledger entries visited, populated variant | 32 | 1 (related approval) |
+
+The remaining fold work in Core is two document copies, one exact baseline measurement, four kernel validation passes, two duration passes and four identity passes. Its control edit does not fold at the new module's 500-byte bound. Counters identify the removed traversals; they do not assign wall-clock milliseconds to each individual traversal. The owner now stages only affected identities, causal ancestor chains and resource contributors; cached point charges replace aggregate measurements. Independent generator checks cover real lineage capacity, encoding, decode, resources and ancestor counts. `FOLD_DOES_NOT_COPY_SEEDS` fails when a full seed-map copy is reintroduced. The heavy/unrelated-baseline guard also pins zero unrelated approval/resource/seed visits.
+
+A warm hand edit still performs one candidate copy, zero exact document measurements, zero owner document scans, one owner payload encoding and zero owner identity hashes. Kernel passes per edit remain 2 validation / 1 duration / 2 identity. The operation kernel's passes are outside the history-side one-copy ruling. Spare ancestry/origins array capacity remains charged; empty buffers are released without copying. The sparse patch is admitted within A, point encoding takes at most A/2, and Core reserves 3A = 15 MiB inside the existing Ordinary W = 32 MiB. No envelope changed.
+
+### Identity and role costs
+
+- Core hash: 4.673 ms [4.592, 4.771].
+- Owner hash: 2.581 ms [2.551, 2.652].
+- Combined hash: 7.187 ms [7.164, 7.257].
+
+These are hash-only costs on the 2,000-step heavy fixture, excluding capture allocation. The owner digest walks 617,307 semantic-owner bytes once; Core walks 1,053,344 bytes. Combined hashing does both, with zero document copies/exact measurements. [All samples and counters](measurements/undo-owner-identity-04660dd3.json). Capture/open checks compare this complete identity; command guards require zero owner hashes.
+
+The 2,000-command shell is 510,875 bytes (255.4375/command), decode/store charge 515,483 bytes. The measured attached history charges 8,982,538 bytes. [Role profiles](measurements/undo-owner-roles-04660dd3.json): Ordinary 8,980,762 retained bytes / 1,433,200 owner bytes; Task 8,856,298 / 1,308,736; Candidate 341,824 / 194,624 for the small 400-command fixture (heavy is refused). The Ordinary derived indexes add 124,464 charged bytes relative to Task's immutable baseline on this fixture.
+
+Task's unchanged arithmetic is R = (2 + 4) × 4 + 8 + 4 = 36 MiB < 41 MiB native retained cap; W = 64 MiB, peak 100 MiB. Do entries charge 1,280 + target/ref capacity (normally 1,360); transition entries charge 1,280 + ref capacity (normally 1,344), sharing the 256 cap. The 256-Do calculation is 358,000 owner bytes = 348,160 approvals + 9,024 baseline + 464 live origin + 352 retained spare; the record is unchanged at 130,576 bytes and its decode forecast at 4,467,720. The 256-transition literal delta is 344,064 bytes. Candidate remains R = 2 MiB, W = 16 MiB with its own earlier 12.946 MiB subtotal-plus-slack derivation.
