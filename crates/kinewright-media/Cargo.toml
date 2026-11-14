@@ -16,6 +16,13 @@ test-util = ["kinewright-core/test-util"]
 # feature, which CI's slow tier and a full local run enable.
 slow-tests = []
 
+[[bin]]
+name = "nemo-load-probe"
+path = "tests/fixtures/nemo_load_probe.rs"
+required-features = ["test-util"]
+test = false
+bench = false
+
 [dependencies]
 kinewright-hash = { path = "../kinewright-hash" }
 ab_glyph.workspace = true

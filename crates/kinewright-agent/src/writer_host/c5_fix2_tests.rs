@@ -190,8 +190,13 @@ fn c5_fix2_compile_probe(
             .arg("--extern")
             .arg(format!("{library}={}", path.display()));
     }
-    if let Ok(ffmpeg) = std::env::var("FFMPEG_DIR") {
-        command.arg("-L").arg(format!("native={ffmpeg}/lib"));
+    for variable in ["FFMPEG_DIR", "KINEWRIGHT_NEMO_DIR"] {
+        if let Some(root) = std::env::var_os(variable) {
+            command.arg("-L").arg(format!(
+                "native={}",
+                std::path::PathBuf::from(root).join("lib").display()
+            ));
+        }
     }
     let mut paths = std::collections::BTreeSet::new();
     c5_fix2_native_paths(&deps.parent().unwrap().join("build"), &mut paths);
