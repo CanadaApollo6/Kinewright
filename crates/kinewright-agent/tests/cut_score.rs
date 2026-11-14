@@ -151,6 +151,7 @@ fn cut_score_cli_typed_cannot_score_for_speed_and_wrong_recording() {
     assert_eq!(result["error"]["refusal"]["reason"], "recording_mismatch");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cut_score_cli_scores_supported_studio_save_without_writing() {
     use kinewright_project::{

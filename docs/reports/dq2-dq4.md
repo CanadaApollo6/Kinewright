@@ -80,3 +80,22 @@ Final evidence: Core dialogue **33 passed / 0 failed / 0 ignored**, scorer **26/
 Each pair checks the mutated file's complete SHA-256 and the whole checkout diff after restoration. The first exclusive-end run failed at `unwrap_err` before its marker was printed; the unchanged refusal expectation now uses a named `expect_err`, and the qualified rerun above fails there with frame 38 incorrectly admitted at the exclusive endpoint. The earlier run is retained as `exclusive-dip-end-first-*`, not counted twice. `maximum-cardinality` reproduces the old 3-versus-4 mismatch exactly.
 
 NOT RUN: repeated-utterance refinement (GLM F3, reason above), real audio extraction/listening/rendering, agent-facing integration, providers, paid/dry launches, Windows, full Agent/App/Media/Project runtime suites. The reference repository was never executed. Target cleanup preserved all evidence: 33 GiB before, 7.1 GiB immediately after removing old build output, 29 GiB after these gates. DQ3 remains separately backed up until its own commit.
+
+
+## Windows CLI fixture scope (2026-11-14)
+
+The Studio-save CLI fixture now compiles only on Linux: it activates a durable
+`ProjectBundle`, which Windows does not provide. Its imports and snapshot helper
+already live inside that function. The other three CLI tests remain portable;
+no product or CLI behaviour changed. New dialogue dispatch tests will use pure
+Core documents and literal measurement providers; any durable-store fixture
+will be Linux-only.
+
+Gates: full Agent tests **1,706 passed / 0 failed / 165 ignored**, including
+four doc tests; workspace all-targets clippy with `-D warnings`, fmt and
+slow-test lint passed. The shard self-tests passed **23/23**. The shard runner's
+actual compiled-inventory/executed-result comparison passed for all four Linux
+CLI tests, with no missing or extra row. No slow/ignored manifest entry names
+these fast tests, so no exact-coverage list changed. The Windows MSVC
+`cargo xwin check -p kinewright-agent --test cut_score` passed; Windows execution
+remains CI-only. Evidence: `target/dq-tools/ci-*` (untracked).
