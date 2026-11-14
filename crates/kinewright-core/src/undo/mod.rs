@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
 
 mod cache;
+mod capacity;
+pub mod metrics;
+mod size;
+use capacity::Heap;
+pub use metrics::PhaseCounters;
+use size::DocumentBound;
 mod record;
 use cache::Cache;
 pub use record::{Record, ValidatedSnapshot};
@@ -45,17 +51,17 @@ impl RoleBounds {
         replay_workspace: 32 << 20,
         document_live_bytes: 7 << 19,
         document_bytes: 512 << 10,
-        decoded_history_bytes: 5 << 20,
+        decoded_history_bytes: 6 << 20,
     };
     /// Proposed task profile: `NeverFold`. Below the current 41 MiB resident cap.
     pub const TASK: Self = Self {
-        operation_bytes: 24 << 10,
-        step_cap: 1024,
+        operation_bytes: 256 << 10,
+        step_cap: 4096,
         checkpoint_documents: 4,
         replay_workspace: 64 << 20,
         document_live_bytes: 4 << 20,
-        document_bytes: 256 << 10,
-        decoded_history_bytes: 512 << 10,
+        document_bytes: 2 << 20,
+        decoded_history_bytes: 8 << 20,
     };
     /// Proposed candidate profile: `NeverFold`, within the current 2 MiB cap.
     pub const CANDIDATE: Self = Self {
@@ -109,6 +115,9 @@ pub(crate) struct StepCharge {
     effects_bytes: u64,
     replay_peak: u64,
     key_bytes: u64,
+    before: DocumentBound,
+    after: DocumentBound,
+    validated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,7 +213,9 @@ pub enum Error {
 pub struct History {
     // Baseline/current are shared with immutable captures and cache entries, never mutated through Arc.
     baseline: Arc<Document>,
+    baseline_bound: DocumentBound,
     document: Arc<Document>,
+    document_bound: DocumentBound,
     undo: VecDeque<Step>,
     redo: Vec<Step>,
     position: u64,
@@ -230,19 +241,13 @@ impl History {
                 error,
             })
         })?;
-        check_document_value(&document, bounds)?;
-        let mut budget =
-            ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
-        budget.check_clone(&document).map_err(|_| Error::Capacity)?;
-        // The immutable baseline/current share compact owned storage. A caller's
-        // nested Vec/String headroom does not become retained history memory.
-        let compact = document.clone();
-        drop(document);
-        check_document(&compact, bounds)?;
-        let document = Arc::new(compact);
+        let document_bound = DocumentBound::measure(&document, bounds)?;
+        let document = Arc::new(document);
         Ok(Self {
             baseline: Arc::clone(&document),
+            baseline_bound: document_bound,
             document,
+            document_bound,
             undo: VecDeque::new(),
             redo: Vec::new(),
             position: 0,
@@ -296,6 +301,13 @@ impl History {
         }
     }
     #[must_use]
+    pub const fn document_bound(&self) -> Charge {
+        Charge {
+            encoded: self.document_bound.encoded,
+            decoded: self.document_bound.live,
+        }
+    }
+    #[must_use]
     pub const fn bounds(&self) -> RoleBounds {
         self.bounds
     }
@@ -332,10 +344,7 @@ impl History {
             + self.cache.storage_bytes();
         for document in documents {
             total = total
-                .checked_add(
-                    crate::history_size::document_live_bytes(document)
-                        .map_err(|_| Error::Capacity)?,
-                )
+                .checked_add(capacity::document_bytes(document)?)
                 .ok_or(Error::Capacity)?;
         }
         for step in self.undo.iter().chain(&self.redo) {
@@ -441,10 +450,6 @@ impl History {
             return Err(Error::HistoryFull);
         }
         let mut charge = operation_charge(&operations)?;
-        let normalization_bytes = charge
-            .decoded
-            .checked_mul(1 + u64::from(self.recorder.is_some()))
-            .ok_or(Error::Capacity)?;
         let recorder_bytes = if self.recorder.is_some() {
             self.recorder_bytes
                 .checked_add(charge.decoded)
@@ -484,21 +489,26 @@ impl History {
         let mut budget =
             ReplayBudget::workspace(self.bounds.replay_workspace).map_err(|_| Error::Capacity)?;
         budget
-            .reserve_input(normalization_bytes)
+            .check_known(self.document_bound.live)
             .map_err(|_| Error::Capacity)?;
-        // Retained operations own compact nested Vec/String allocations. Moving
-        // caller payloads directly could retain arbitrary spare capacity that
-        // the shared structural estimator intentionally does not count.
-        let normalized = operations.clone();
-        drop(operations);
-        let operations = normalized;
-        budget
-            .check_clone(&self.document)
-            .map_err(|_| Error::Capacity)?;
-        let mut candidate = (*self.document).clone();
-        let identities = apply(&mut candidate, &operations, self.bounds, &mut budget)?;
+        let mut candidate = capacity::copy_document(&self.document);
+        let mut candidate_bound = self.document_bound;
+        let identities = apply(
+            &mut candidate,
+            &mut candidate_bound,
+            &operations,
+            self.bounds,
+            &mut budget,
+        )?;
         let mut summary = replay_charge(top, &budget, identities.len(), self.bounds, 0)?;
         summary.operations = top.operations.add(charge)?;
+        summary.before = if extends {
+            top.before
+        } else {
+            self.document_bound
+        };
+        summary.after = candidate_bound;
+        summary.validated = true;
         summary.key_bytes = key_bytes;
         let accepted = self.position();
         let digest = digest_operations(&operations)?;
@@ -511,15 +521,13 @@ impl History {
         let mut folded_baseline = None;
         if retained.encoded > self.bounds.operation_bytes || steps > self.bounds.step_cap {
             budget
-                .set_document_charge(
-                    crate::history_size::document_live_bytes(&candidate)
-                        .map_err(|_| Error::Capacity)?,
-                )
+                .set_document_charge(candidate_bound.live)
                 .map_err(|_| Error::Capacity)?;
             budget
-                .check_clone(&self.baseline)
+                .check_known(self.baseline_bound.live)
                 .map_err(|_| Error::Capacity)?;
-            let mut baseline = (*self.baseline).clone();
+            let mut baseline = capacity::copy_document(&self.baseline);
+            let mut baseline_bound = self.baseline_bound;
             for step in &self.undo {
                 if retained.encoded <= self.bounds.operation_bytes && steps <= self.bounds.step_cap
                 {
@@ -528,6 +536,7 @@ impl History {
                 for command in &step.commands {
                     let identities = replay_observed(
                         &mut baseline,
+                        &mut baseline_bound,
                         &command.operations,
                         self.bounds,
                         &mut budget,
@@ -541,10 +550,13 @@ impl History {
                 steps -= 1;
                 folded_count += 1;
             }
-            folded_baseline = Some(Arc::new(baseline));
+            baseline_bound = DocumentBound::measure(&baseline, self.bounds)?;
+            folded_baseline = Some((Arc::new(baseline), baseline_bound));
         }
         let fold_new = steps > self.bounds.step_cap;
         if fold_new {
+            candidate_bound = DocumentBound::measure(&candidate, self.bounds)?;
+            summary.after = candidate_bound;
             retained.subtract(charge);
             folded_count += 1;
             // Current and baseline consumers receive independent identity observations.
@@ -605,16 +617,22 @@ impl History {
             old_depth
         });
         self.cache.fold(folded_count);
-        if let Some(baseline) = folded_baseline {
+        if let Some((baseline, bound)) = folded_baseline {
             self.baseline = baseline;
+            self.baseline_bound = bound;
         }
         if !extends && !fold_new {
-            self.cache
-                .insert(self.undo.len() - 1, Arc::clone(&self.document));
+            self.cache.insert(
+                self.undo.len() - 1,
+                Arc::clone(&self.document),
+                self.document_bound,
+            );
         }
         self.document = Arc::new(candidate);
+        self.document_bound = candidate_bound;
         if fold_new {
             self.baseline = Arc::clone(&self.document);
+            self.baseline_bound = candidate_bound;
         }
         self.undo_charge = retained;
         self.position += 1;
@@ -625,7 +643,7 @@ impl History {
         let mut effects = Effects::new(self.position());
         if !self.undo.is_empty() {
             let target = self.undo.len() - 1;
-            let document = self.replay_to(target)?;
+            let (document, bound) = self.replay_to(target)?;
             let mut step = self.undo.pop_back().unwrap();
             effects.to_redo.extend(step.keys());
             self.undo_charge.subtract(step.charge.operations);
@@ -639,6 +657,7 @@ impl History {
             }
             self.redo.push(step);
             self.document = document;
+            self.document_bound = bound;
         }
         self.position += 1;
         Ok(effects)
@@ -649,17 +668,11 @@ impl History {
             let mut budget = ReplayBudget::workspace(self.bounds.replay_workspace)
                 .map_err(|_| Error::Capacity)?;
             budget
-                .check_clone(&self.document)
+                .check_prevalidated_peak(step.charge.replay_peak)
                 .map_err(|_| Error::Capacity)?;
-            let mut document = (*self.document).clone();
-            for command in &step.commands {
-                let identities =
-                    replay_observed(&mut document, &command.operations, self.bounds, &mut budget)?;
-                effects.applied.push(CommandEffects {
-                    key: command.id,
-                    identities,
-                });
-            }
+            let mut document = capacity::copy_document(&self.document);
+            effects.applied = replay_step(&mut document, step, &mut budget, true)?;
+            let bound = step.charge.after;
             let mut step = self.redo.pop().unwrap();
             effects.to_undo.extend(step.keys());
             self.redo_charge.subtract(step.charge.operations);
@@ -668,10 +681,14 @@ impl History {
                 .add(step.charge.operations)
                 .expect("unchanged total");
             step.coalesce_key = None;
-            self.cache
-                .insert(self.undo.len(), Arc::clone(&self.document));
+            self.cache.insert(
+                self.undo.len(),
+                Arc::clone(&self.document),
+                self.document_bound,
+            );
             self.undo.push_back(step);
             self.document = Arc::new(document);
+            self.document_bound = bound;
         }
         self.position += 1;
         Ok(effects)
@@ -680,19 +697,22 @@ impl History {
         if depth > self.undo.len() {
             return Err(Error::InvalidDepth);
         }
-        self.replay_to(depth)
+        self.replay_to(depth).map(|(document, _)| document)
     }
-    fn replay_to(&mut self, depth: usize) -> Result<Arc<Document>, Error> {
+    fn replay_to(&mut self, depth: usize) -> Result<(Arc<Document>, DocumentBound), Error> {
         if depth == self.undo.len() {
-            return Ok(Arc::clone(&self.document));
+            return Ok((Arc::clone(&self.document), self.document_bound));
         }
         if depth == 0 {
-            return Ok(Arc::clone(&self.baseline));
+            return Ok((Arc::clone(&self.baseline), self.baseline_bound));
         }
         if let Some(document) = self.cache.exact(depth) {
             return Ok(document);
         }
-        let (start, source) = self.cache.nearest(depth).unwrap_or((0, &self.baseline));
+        let (start, source, source_bound) =
+            self.cache
+                .nearest(depth)
+                .unwrap_or((0, &self.baseline, self.baseline_bound));
         let warm = self.cache.warm_depths(start, depth);
         // Cache planning owns its temporary snapshots until the entire replay
         // succeeds. A tight workspace retries without warming; cache policy
@@ -705,40 +725,49 @@ impl History {
                     (warm.len() * 2 * std::mem::size_of::<(usize, Arc<Document>)>()) as u64,
                 )
                 .map_err(|_| Error::Capacity)?;
-            budget.check_clone(source).map_err(|_| Error::Capacity)?;
-            let mut document = (**source).clone();
+            budget
+                .check_known(source_bound.live)
+                .map_err(|_| Error::Capacity)?;
+            let mut document = capacity::copy_document(source);
             let mut checkpoints = Vec::new();
             let mut held = 0_u64;
             for (index, step) in self.undo.iter().enumerate().take(depth).skip(start) {
-                replay_step(&mut document, step, &mut budget)?;
+                replay_step(&mut document, step, &mut budget, false)?;
                 let boundary = index + 1;
                 if warm.contains(&boundary) {
-                    let bytes = crate::history_size::document_live_bytes(&document)
-                        .map_err(|_| Error::Capacity)?;
+                    let bound = DocumentBound::measure(&document, self.bounds)?;
+                    let bytes = bound.live;
                     held = held.checked_add(bytes).ok_or(Error::Capacity)?;
                     budget
                         .set_document_charge(held)
                         .map_err(|_| Error::Capacity)?;
-                    budget.check_clone(&document).map_err(|_| Error::Capacity)?;
+                    budget
+                        .check_known(bound.live)
+                        .map_err(|_| Error::Capacity)?;
                     // The scratch remains mutable. This copy belongs only to
                     // the prospective cache, and is committed after success.
-                    checkpoints.push((boundary, Arc::new(document.clone())));
+                    checkpoints.push((
+                        boundary,
+                        Arc::new(capacity::copy_document(&document)),
+                        bound,
+                    ));
                 }
             }
-            Ok((Arc::new(document), checkpoints))
+            let bound = self.undo[depth - 1].charge.after;
+            Ok((Arc::new(document), bound, checkpoints))
         };
         let result = rebuild(&warm);
-        let (document, checkpoints) = if matches!(&result, Err(Error::Capacity)) && !warm.is_empty()
-        {
-            rebuild(&[])?
-        } else {
-            result?
-        };
-        for (boundary, checkpoint) in checkpoints {
-            self.cache.insert_warm(boundary, checkpoint);
+        let (document, bound, checkpoints) =
+            if matches!(&result, Err(Error::Capacity)) && !warm.is_empty() {
+                rebuild(&[])?
+            } else {
+                result?
+            };
+        for (boundary, checkpoint, bound) in checkpoints {
+            self.cache.insert_warm(boundary, checkpoint, bound);
         }
-        self.cache.insert_replayed(depth, &document);
-        Ok(document)
+        self.cache.insert_replayed(depth, &document, bound);
+        Ok((document, bound))
     }
 }
 
@@ -748,28 +777,9 @@ fn close_key(step: &mut Step) -> u64 {
     step.charge.operations.decoded -= released;
     released
 }
-fn check_document_value(document: &Document, bounds: RoleBounds) -> Result<(), Error> {
-    if encoded_bytes(document)? > bounds.document_bytes
-        || crate::history_size::document_bytes(document, true).map_err(|_| Error::Capacity)?
-            > bounds.document_live_bytes
-    {
-        return Err(Error::DocumentCapacity);
-    }
-    Ok(())
-}
-fn check_document(document: &Document, bounds: RoleBounds) -> Result<(), Error> {
-    if encoded_bytes(document)? > bounds.document_bytes {
-        return Err(Error::DocumentCapacity);
-    }
-    if crate::history_size::document_live_bytes(document).map_err(|_| Error::Capacity)?
-        > bounds.document_live_bytes
-    {
-        return Err(Error::DocumentCapacity);
-    }
-    Ok(())
-}
 fn apply_mode(
     document: &mut Document,
+    size: &mut DocumentBound,
     operations: &[Operation],
     bounds: RoleBounds,
     budget: &mut ReplayBudget,
@@ -785,21 +795,17 @@ fn apply_mode(
     }
     let mut identities = Vec::with_capacity(if observe { operations.len() } else { 0 });
     for (index, operation) in operations.iter().enumerate() {
-        let observed = if observe {
-            crate::operation::apply_batch_observed_replay(
+        let growth = size::reservation(document, operation, *size, budget)?;
+        let effects = if observe {
+            crate::operation::apply_batch_observed_in_place(
                 document,
                 std::slice::from_ref(operation),
-                budget,
             )
         } else {
-            crate::operation::apply_batch_replay(document, std::slice::from_ref(operation), budget)
+            crate::operation::apply_batch_prevalidated(document, std::slice::from_ref(operation))
                 .map(|()| Vec::new())
         }
         .map_err(|error| match error {
-            BatchError::OperationFailed {
-                error: crate::OpError::HistoryReplayCapacity,
-                ..
-            } => Error::Capacity,
             BatchError::OperationFailed { error, .. } => {
                 Error::Batch(BatchError::OperationFailed {
                     op_number: index + 1,
@@ -808,8 +814,13 @@ fn apply_mode(
             }
             BatchError::Empty => unreachable!(),
         })?;
-        check_document(document, bounds)?;
-        identities.extend(observed);
+        size.grow(growth, document, bounds)?;
+        for effect in &effects {
+            budget
+                .retain_identity(effect)
+                .map_err(|_| Error::Capacity)?;
+        }
+        identities.extend(effects);
     }
     Ok(identities)
 }
@@ -846,14 +857,9 @@ fn replay_charge(
     let effects = effects
         .checked_add(effects.div_ceil(10))
         .ok_or(Error::Capacity)?;
-    let extra_document = bounds
-        .document_live_bytes
-        .checked_add(bounds.document_live_bytes.div_ceil(10))
-        .ok_or(Error::Capacity)?;
     let replay_peak = previous
         .effects_bytes
         .checked_add(peak)
-        .and_then(|value| value.checked_add(extra_document))
         .ok_or(Error::Capacity)?
         .max(previous.replay_peak);
     if replay_peak > bounds.replay_workspace {
@@ -867,57 +873,53 @@ fn replay_charge(
             .checked_add(effects)
             .ok_or(Error::Capacity)?,
         replay_peak,
+        before: previous.before,
+        after: previous.after,
+        validated: previous.validated,
     })
 }
 fn apply(
     document: &mut Document,
+    size: &mut DocumentBound,
     operations: &[Operation],
     bounds: RoleBounds,
     budget: &mut ReplayBudget,
 ) -> Result<Vec<OperationIdentityEffect>, Error> {
-    apply_mode(document, operations, bounds, budget, true)
-}
-fn canonical_workspace(document: &mut Document, budget: &mut ReplayBudget) -> Result<(), Error> {
-    let held = budget.document_charge();
-    let source = crate::history_size::document_live_bytes(document).map_err(|_| Error::Capacity)?;
-    budget
-        .set_document_charge(held.checked_add(source).ok_or(Error::Capacity)?)
-        .map_err(|_| Error::Capacity)?;
-    budget.check_clone(document).map_err(|_| Error::Capacity)?;
-    // Every accepted command originally received a fresh scratch allocation. Reproduce that
-    // allocation shape so retained Vec capacity cannot make replay exceed admission bounds.
-    *document = document.clone();
-    budget
-        .set_document_charge(held)
-        .map_err(|_| Error::Capacity)
+    apply_mode(document, size, operations, bounds, budget, true)
 }
 fn replay_observed(
     document: &mut Document,
+    size: &mut DocumentBound,
     operations: &[Operation],
     bounds: RoleBounds,
     budget: &mut ReplayBudget,
 ) -> Result<Vec<OperationIdentityEffect>, Error> {
-    canonical_workspace(document, budget)?;
-    apply(document, operations, bounds, budget)
+    apply(document, size, operations, bounds, budget)
 }
 fn replay_step(
     document: &mut Document,
     step: &Step,
     budget: &mut ReplayBudget,
-) -> Result<(), Error> {
-    // Step and its peak can enter History only through bounded admission or
-    // record validation. Both paths check every intermediate document. Cache
-    // sources are immutable results of those same operations under these bounds.
+    observe: bool,
+) -> Result<Vec<CommandEffects>, Error> {
+    assert!(step.charge.validated, "VALIDATED_REDO_ONLY");
     budget
         .check_prevalidated_peak(step.charge.replay_peak)
         .map_err(|_| Error::Capacity)?;
+    let mut effects = Vec::new();
     for command in &step.commands {
-        // Match admission's compact per-command scratch allocation. The private
-        // peak already includes this extra document; no structural rescan is needed.
-        *document = document.clone();
-        crate::operation::apply_batch_prevalidated(document, &command.operations)?;
+        if observe {
+            let identities =
+                crate::operation::apply_batch_observed_in_place(document, &command.operations)?;
+            effects.push(CommandEffects {
+                key: command.id,
+                identities,
+            });
+        } else {
+            crate::operation::apply_batch_prevalidated(document, &command.operations)?;
+        }
     }
-    Ok(())
+    Ok(effects)
 }
 fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
     operations
@@ -928,7 +930,8 @@ fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
                 decoded: (std::mem::size_of::<Operation>() as u64)
                     .checked_add(
                         crate::history_size::operation_owned_bytes(operation)
-                            .map_err(|_| Error::Capacity)?,
+                            .map_err(|_| Error::Capacity)?
+                            .max(operation.heap()?),
                     )
                     .ok_or(Error::Capacity)?,
             })
@@ -938,6 +941,7 @@ fn encoded_bytes<T: Serialize + ?Sized>(value: &T) -> Result<u64, Error> {
     struct Counter(u64);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            metrics::serialized(bytes.len() as u64);
             self.0 = self
                 .0
                 .checked_add(bytes.len() as u64)
@@ -959,6 +963,7 @@ fn digest<T: Serialize + ?Sized>(value: &T) -> Result<[u8; 32], Error> {
     struct Writer(kinewright_hash::Sha256);
     impl std::io::Write for Writer {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            metrics::serialized(bytes.len() as u64);
             self.0.update(bytes);
             Ok(bytes.len())
         }

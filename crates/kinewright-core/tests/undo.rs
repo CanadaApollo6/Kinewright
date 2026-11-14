@@ -841,7 +841,10 @@ fn optional_warming_cannot_refuse_a_valid_replay() {
             color_token: 0,
         })
         .collect();
-    let live = kinewright_core::history_size::document_live_bytes(&document).unwrap();
+    let live = History::new(document.clone(), RetentionPolicy::Fold, bounds(32_000, 16))
+        .unwrap()
+        .document_bound()
+        .decoded;
     let mut limits = bounds(32_000, 16);
     limits.step_cap = 512;
     limits.document_live_bytes = 2 * live;
@@ -870,7 +873,7 @@ fn optional_warming_cannot_refuse_a_valid_replay() {
 }
 
 #[test]
-fn retained_payloads_do_not_keep_callers_spare_allocations() {
+fn retained_payload_capacity_is_charged_without_copying() {
     let mut label = String::with_capacity(1 << 20);
     label.push_str("marker");
     let mut history =
@@ -891,8 +894,8 @@ fn retained_payloads_do_not_keep_callers_spare_allocations() {
         panic!("marker")
     };
     assert!(
-        marker.label.capacity() <= 12,
-        "NORMALIZED_PAYLOAD_ALLOCATION"
+        marker.label.capacity() >= 1 << 20 && history.charge().decoded >= 1 << 20,
+        "PAYLOAD_CAPACITY_CHARGED"
     );
 }
 
@@ -962,19 +965,21 @@ fn marker_document() -> Document {
     document
 }
 #[test]
-fn initial_documents_do_not_retain_spare_nested_allocations() {
+fn initial_document_spare_capacity_is_charged() {
     let mut document = marker_document();
     document.markers[0].label.reserve(1 << 20);
     let mut limits = bounds(1000, 4);
     limits.document_live_bytes = 64 << 10;
-    let history = History::new(document, RetentionPolicy::Fold, limits).unwrap();
     assert!(
-        history.baseline().markers[0].label.capacity() <= 12,
-        "HISTORY_DOCUMENT_ALLOCATION"
+        matches!(
+            History::new(document, RetentionPolicy::Fold, limits),
+            Err(Error::DocumentCapacity)
+        ),
+        "INITIAL_CAPACITY_REFUSED_WITHOUT_COPY"
     );
 }
 #[test]
-fn typed_snapshot_baselines_do_not_retain_spare_nested_allocations() {
+fn typed_snapshot_baseline_spare_capacity_is_charged() {
     let mut limits = bounds(1000, 4);
     limits.document_live_bytes = 64 << 10;
     let history = History::new(marker_document(), RetentionPolicy::Fold, limits).unwrap();
@@ -983,19 +988,21 @@ fn typed_snapshot_baselines_do_not_retain_spare_nested_allocations() {
     let mut baseline = (**history.baseline()).clone();
     baseline.markers[0].label.reserve(1 << 20);
     record.baseline = std::sync::Arc::new(baseline);
-    let mut target =
+    let target =
         History::new(Document::default(), RetentionPolicy::Fold, history.bounds()).unwrap();
-    target
-        .install_snapshot(record.validate(history.bounds()).unwrap())
-        .unwrap();
+    let before = target.clone();
     assert!(
-        target.baseline().markers[0].label.capacity() <= 12,
-        "SNAPSHOT_BASELINE_ALLOCATION"
+        matches!(
+            record.validate(history.bounds()),
+            Err(Error::DocumentCapacity)
+        ),
+        "SNAPSHOT_BASELINE_CAPACITY_CHARGED"
     );
+    assert_eq!(target, before, "SNAPSHOT_CAPACITY_REFUSAL_ATOMIC");
 }
 
 #[test]
-fn typed_snapshot_payloads_do_not_retain_spare_nested_allocations() {
+fn typed_snapshot_payload_spare_capacity_is_charged() {
     let mut source =
         History::new(literal_document(), RetentionPolicy::Fold, bounds(1000, 4)).unwrap();
     source
@@ -1024,5 +1031,371 @@ fn typed_snapshot_payloads_do_not_retain_spare_nested_allocations() {
     let Operation::AddMarker { marker } = &target.undo()[0].commands()[0].operations[0] else {
         panic!("marker")
     };
-    assert!(marker.label.capacity() <= 12, "SNAPSHOT_PAYLOAD_ALLOCATION");
+    assert!(
+        marker.label.capacity() >= 1 << 20 && target.charge().decoded >= 1 << 20,
+        "SNAPSHOT_PAYLOAD_CAPACITY_CHARGED"
+    );
+}
+
+#[test]
+fn warm_ordinary_edit_has_one_copy_and_no_measurement() {
+    let mut history = History::new(
+        literal_document(),
+        RetentionPolicy::Fold,
+        RoleBounds::ORDINARY,
+    )
+    .unwrap();
+    for n in 0..64 {
+        history.execute(Command::Do(lock(n % 2 == 0))).unwrap();
+    }
+    for n in 0..64 {
+        let before = kinewright_core::undo::PhaseCounters::read();
+        history.execute(Command::Do(lock(n % 2 == 0))).unwrap();
+        let count = kinewright_core::undo::PhaseCounters::read().since(before);
+        assert_eq!(count.document_copies, 1, "ONE_ATOMIC_DOCUMENT_COPY");
+        assert_eq!(count.exact_measurements, 0, "NO_WARM_EXACT_MEASUREMENT");
+        assert_eq!(
+            count.document_bytes_serialised, 0,
+            "NO_WARM_DOCUMENT_SERIALIZATION"
+        );
+    }
+}
+
+fn growing_witness(mut case: oracle::OperationCase) -> oracle::OperationCase {
+    // Choose a growing witness where the original fixture clears or
+    // shortens a value. Pure removals are checked by the bound invariant.
+    match &mut case.operation {
+        Operation::MoveMarker { to, .. } => *to = kinewright_core::TimeCode(1_000_000),
+        Operation::SetAudioMaster { master } => {
+            case.document.audio_mix.master = kinewright_core::AudioMaster::default();
+            master.gain_tenth_db = 100;
+        }
+        Operation::SetEffectKeyframes { curve, .. } => {
+            curve.keyframes = (0..32)
+                .map(|at| kinewright_core::Keyframe {
+                    at: kinewright_core::TimeCode(at),
+                    value: 0,
+                    interpolation: kinewright_core::KeyframeInterpolation::Linear,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                })
+                .collect();
+        }
+        Operation::SetMarkerParam { name, value, .. } => {
+            *name = "label".into();
+            *value = kinewright_core::ParamValue::Text("x".repeat(256));
+        }
+        Operation::SetTitleParam { value, .. } => {
+            *value = kinewright_core::ParamValue::Text("x".repeat(256));
+        }
+        Operation::SetPanLaw { law } => {
+            case.document.audio_mix.pan_law = kinewright_core::PanLaw::Balance;
+            *law = kinewright_core::PanLaw::ConstantPower;
+        }
+        Operation::SetTrackSyncLock { track, locked } => {
+            case.document
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == *track)
+                .unwrap()
+                .sync_lock = true;
+            *locked = false;
+        }
+        Operation::TrimClip { new_source, .. } => {
+            new_source.start = kinewright_core::TimeCode(10);
+            new_source.end = kinewright_core::TimeCode(60);
+        }
+        Operation::RemoveEffectKeyframe { name, .. } => {
+            let effect = &mut case.document.tracks[0].clips[0].effects[0];
+            effect.parameters.clear();
+            effect
+                .keyframes
+                .get_mut(name)
+                .unwrap()
+                .keyframes
+                .truncate(1);
+            effect
+                .keyframes
+                .get_mut(name)
+                .unwrap()
+                .keyframes
+                .shrink_to_fit();
+        }
+        _ => {}
+    }
+    case
+}
+
+#[test]
+fn every_growing_kind_reaches_the_document_limit() {
+    let mut growing = BTreeSet::new();
+    for (kind, case) in oracle::operation_cases() {
+        let case = growing_witness(case);
+        let mut document = case.document;
+        for prefix in 0..4 {
+            let mut after = document.clone();
+            case.operation.apply(&mut after).unwrap();
+            let before_bytes = serde_json::to_vec(&document).unwrap().len() as u64;
+            let after_bytes = serde_json::to_vec(&after).unwrap().len() as u64;
+            let mut limits = bounds(1 << 20, 0);
+            let mut history =
+                History::new(document.clone(), RetentionPolicy::Fold, limits).unwrap();
+            history
+                .execute(Command::Do(case.operation.clone()))
+                .unwrap();
+            if after_bytes > before_bytes {
+                growing.insert(kind.clone());
+                limits.document_bytes = after_bytes - 1;
+                let mut capped =
+                    History::new(document.clone(), RetentionPolicy::Fold, limits).unwrap();
+                let before = capped.clone();
+                assert!(
+                    matches!(
+                        capped.execute(Command::Do(case.operation.clone())),
+                        Err(Error::DocumentCapacity)
+                    ),
+                    "EVERY_GROWING_KIND_LIMIT {kind} prefix={prefix}"
+                );
+                assert_eq!(capped, before, "GROWING_LIMIT_ATOMIC {kind}");
+            }
+            assert!(
+                history.document_bound().encoded >= after_bytes,
+                "EVERY_KIND_RUNNING_BOUND {kind} prefix={prefix}"
+            );
+            let exact = History::new(after, RetentionPolicy::Fold, bounds(1 << 20, 0))
+                .unwrap()
+                .document_bound();
+            assert!(
+                history.document_bound().decoded >= exact.decoded,
+                "EVERY_KIND_LIVE_BOUND {kind} prefix={prefix}"
+            );
+            let before_live =
+                History::new(document.clone(), RetentionPolicy::Fold, bounds(1 << 20, 0))
+                    .unwrap()
+                    .document_bound()
+                    .decoded;
+            if exact.decoded > before_live {
+                growing.insert(kind.clone());
+                let mut live_limits = bounds(1 << 20, 0);
+                live_limits.document_live_bytes = exact.decoded - 1;
+                let mut capped =
+                    History::new(document.clone(), RetentionPolicy::Fold, live_limits).unwrap();
+                let before = capped.clone();
+                assert!(
+                    matches!(
+                        capped.execute(Command::Do(case.operation.clone())),
+                        Err(Error::DocumentCapacity)
+                    ),
+                    "EVERY_GROWING_KIND_LIVE_LIMIT {kind} prefix={prefix}"
+                );
+                assert_eq!(capped, before, "GROWING_LIVE_LIMIT_ATOMIC {kind}");
+            }
+            document.markers.push(kinewright_core::Marker {
+                id: kinewright_core::MarkerId(1_000_000 + prefix),
+                position: kinewright_core::TimeCode(0),
+                label: "padding towards the limit".repeat(8),
+                color_token: 0,
+            });
+            document.markers.sort_by_key(|m| (m.position, m.id));
+        }
+    }
+    eprintln!("GROWING_KIND_COVERAGE {} {growing:?}", growing.len());
+    let non_growing: BTreeSet<_> = [
+        "ClearEffectKeyframes",
+        "DeleteClip",
+        "RemoveAudioBus",
+        "RemoveBin",
+        "RemoveEffect",
+        "RemoveEffectKeyframe",
+        "RemoveLutAsset",
+        "RemoveMarker",
+        "RemoveStringOut",
+        "RemoveSyncGroup",
+        "RemoveTrack",
+        "RemoveTransition",
+        "RippleDeleteClip",
+        "UnlinkClips",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let expected: BTreeSet<_> = oracle::operation_cases()
+        .into_keys()
+        .filter(|k| !non_growing.contains(k))
+        .collect();
+    assert_eq!(growing, expected, "EVERY_GROWING_KIND_COVERED");
+}
+
+#[test]
+fn task_profile_accepts_two_thousand_ordinary_commands() {
+    let mut history = History::new(
+        literal_document(),
+        RetentionPolicy::NeverFold,
+        RoleBounds::TASK,
+    )
+    .unwrap();
+    for n in 0..2000 {
+        history.execute(Command::Do(lock(n % 2 == 0))).unwrap();
+    }
+    assert_eq!(history.undo().len(), 2000, "TASK_2000_COMMANDS");
+    assert!(history.charge().encoded <= 256 << 10, "TASK_OPERATION_CAP");
+    history.execute(Command::Undo).unwrap();
+    history.execute(Command::Redo).unwrap();
+}
+
+#[test]
+fn malformed_redo_cannot_acquire_a_runtime_proof() {
+    let mut source =
+        History::new(literal_document(), RetentionPolicy::Fold, bounds(1000, 4)).unwrap();
+    source
+        .execute(Command::Do(Operation::RemoveMarker {
+            marker: kinewright_core::MarkerId(999),
+        }))
+        .unwrap_err();
+    source.execute(Command::Do(lock(false))).unwrap();
+    source.execute(Command::Undo).unwrap();
+    let mut value = serde_json::to_value(source.record()).unwrap();
+    value["redo"][0]["commands"][0]["operations"][0] =
+        serde_json::to_value(Operation::RemoveMarker {
+            marker: kinewright_core::MarkerId(999),
+        })
+        .unwrap();
+    let operations: Vec<Operation> =
+        serde_json::from_value(value["redo"][0]["commands"][0]["operations"].clone()).unwrap();
+    let bytes = serde_json::to_vec(&operations).unwrap();
+    value["redo"][0]["commands"][0]["payload_digest"] = serde_json::to_value({
+        let mut hash = kinewright_hash::Sha256::new();
+        hash.update(&bytes);
+        hash.finalize()
+    })
+    .unwrap();
+    let record: kinewright_core::undo::Record = serde_json::from_value(value).unwrap();
+    assert!(
+        matches!(record.validate(source.bounds()), Err(Error::InvalidRedo(_))),
+        "UNTRUSTED_REDO_VALIDATED_BEFORE_TRUST"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn task_profile_accepts_two_thousand_cuts() {
+    let mut case = oracle::operation_cases().remove("SplitClip").unwrap();
+    let mut clip = case.document.tracks[0].clips[0].clone();
+    clip.id = kinewright_core::ClipId(1);
+    clip.timeline_start = kinewright_core::TimeCode(0);
+    clip.source_range = kinewright_core::TimeCode(0)..kinewright_core::TimeCode(10_000);
+    clip.effects.clear();
+    case.document.media_pool.retain(|a| a.id == clip.asset);
+    case.document.media_pool[0].duration = kinewright_core::TimeCode(10_000);
+    case.document.tracks.truncate(1);
+    case.document.tracks[0].clips = vec![clip];
+    case.document.duration = kinewright_core::TimeCode(10_000);
+    let mut history =
+        History::new(case.document, RetentionPolicy::NeverFold, RoleBounds::TASK).unwrap();
+    for n in 0..2000 {
+        history
+            .execute(Command::Do(Operation::SplitClip {
+                clip: kinewright_core::ClipId(n + 1),
+                at: kinewright_core::TimeCode(i64::try_from(n).unwrap() + 1),
+            }))
+            .unwrap();
+    }
+    assert_eq!(history.undo().len(), 2000, "TASK_2000_CUTS");
+    assert_eq!(
+        history.document().tracks[0].clips.len(),
+        2001,
+        "TASK_CUTS_APPLIED"
+    );
+    assert!(
+        history.charge().encoded <= 256 << 10,
+        "TASK_CUTS_OPERATION_CAP"
+    );
+    assert!(
+        history.retained_live_bound().unwrap() < 41 << 20,
+        "TASK_NATIVE_CAP"
+    );
+    history.execute(Command::Undo).unwrap();
+    history.execute(Command::Redo).unwrap();
+}
+
+#[test]
+fn atomic_copy_preserves_capacity_for_trusted_replay() {
+    let case = oracle::operation_cases().remove("SplitClip").unwrap();
+    let mut document = case.document;
+    let mut template = document.tracks[0].clips[0].clone();
+    template.source_range = kinewright_core::TimeCode(0)..kinewright_core::TimeCode(1);
+    template.effects.clear();
+    template.audio_gain_curve = None;
+    template.enabled_curve = None;
+    template.transition_in = None;
+    template.link = None;
+    let asset = template.asset;
+    let mut track = document.tracks[0].clone();
+    track.id = kinewright_core::TrackId(1);
+    track.clips = (0..100)
+        .map(|n| {
+            let mut clip = template.clone();
+            clip.id = kinewright_core::ClipId(n + 1);
+            clip.timeline_start = kinewright_core::TimeCode(i64::try_from(n).unwrap());
+            clip
+        })
+        .collect();
+    let mut empty = track.clone();
+    empty.id = kinewright_core::TrackId(2);
+    empty.clips.clear();
+    empty.clips.shrink_to_fit();
+    document.tracks = vec![track, empty];
+    document.markers.clear();
+    document.duration = kinewright_core::TimeCode(100);
+    let mut limits = bounds(1 << 20, 4);
+    limits.document_live_bytes = History::new(document.clone(), RetentionPolicy::Fold, limits)
+        .unwrap()
+        .document_bound()
+        .decoded
+        * 3
+        / 2;
+    let mut history = History::new(document, RetentionPolicy::Fold, limits).unwrap();
+    for id in 1..100 {
+        history
+            .execute(Command::DoBatchCoalesced {
+                operations: vec![Operation::DeleteClip {
+                    clip: kinewright_core::ClipId(id),
+                }],
+                coalesce_key: "capacity-walk".into(),
+            })
+            .unwrap();
+    }
+    assert!(
+        history.document().tracks[0].clips.capacity() >= 100,
+        "ATOMIC_COPY_PRESERVES_CAPACITY"
+    );
+    let operations = (0..100)
+        .map(|n| Operation::AddClip {
+            track: kinewright_core::TrackId(2),
+            asset,
+            at: kinewright_core::TimeCode(n),
+            source: kinewright_core::TimeCode(0)..kinewright_core::TimeCode(1),
+        })
+        .collect();
+    let before = history.clone();
+    assert!(
+        matches!(
+            history.execute(Command::DoBatchCoalesced {
+                operations,
+                coalesce_key: "capacity-walk".into()
+            }),
+            Err(Error::DocumentCapacity)
+        ),
+        "CAPACITY_LIMIT_BEFORE_TRUSTED_REDO"
+    );
+    assert_eq!(history, before, "CAPACITY_REFUSAL_ATOMIC");
+    history.execute(Command::Undo).unwrap();
+    history.execute(Command::Redo).unwrap();
+    assert!(
+        history.record().validate(limits).is_ok(),
+        "ADMITTED_REDO_RECORD_REOPENS"
+    );
 }

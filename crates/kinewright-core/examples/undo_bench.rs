@@ -5,7 +5,7 @@
 //! Paired raw-Core / operation-history measurements. No media files or GUI are opened.
 #[path = "../tests/support/undo_fixture.rs"]
 mod fixture;
-use kinewright_core::undo::{History, Record, RetentionPolicy, RoleBounds};
+use kinewright_core::undo::{History, PhaseCounters, Record, RetentionPolicy, RoleBounds};
 use kinewright_core::{Command, Core, Document, Event, Operation, Query, QueryResult, TrackId};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
@@ -92,10 +92,22 @@ fn edit(index: u64) -> Command {
         locked: index % 2 == 1,
     })
 }
-fn timed(engine: &mut Engine, command: Command) -> f64 {
+thread_local! {static PHASES:std::cell::RefCell<BTreeMap<String,serde_json::Value>>=const{std::cell::RefCell::new(BTreeMap::new())};}
+fn phase(name: &str, before: PhaseCounters, commands: u64) {
+    let count = PhaseCounters::read().since(before);
+    PHASES.with_borrow_mut(|phases|{
+        let row=phases.entry(name.to_string()).or_insert_with(||serde_json::json!({"commands":0,"document_copies":0,"exact_measurements":0,"document_bytes_serialised":0,"bytes_serialised":0,"kernel_validation_passes":0,"kernel_duration_passes":0,"kernel_identity_passes":0}));
+        row["commands"]=serde_json::json!(row["commands"].as_u64().unwrap()+commands);
+        for (key,value) in serde_json::to_value(count).unwrap().as_object().unwrap(){row[key]=serde_json::json!(row[key].as_u64().unwrap()+value.as_u64().unwrap());}
+    });
+}
+fn timed(engine: &mut Engine, command: Command, name: &str) -> f64 {
+    let before = PhaseCounters::read();
     let start = Instant::now();
     engine.execute(command);
-    start.elapsed().as_secs_f64() * 1000.0
+    let elapsed = start.elapsed().as_secs_f64() * 1000.;
+    phase(name, before, 1);
+    elapsed
 }
 fn quantile(samples: &[f64], percent: usize) -> f64 {
     let mut sorted = samples.to_vec();
@@ -151,7 +163,7 @@ fn main() {
     rows.insert("fixture_json_bytes".into(), fixture_json as f64);
     let mut single = vec![];
     for _ in 0..32 {
-        single.push(timed(&mut engine, Command::Undo));
+        single.push(timed(&mut engine, Command::Undo, "single_undo"));
         engine.execute(Command::Redo);
     }
     rows.insert("single_undo_ms".into(), quantile(&single, 50));
@@ -161,9 +173,11 @@ fn main() {
         Engine::Old(core) => {
             let captured = core.export_history().unwrap();
             let transport = kinewright_core::HistoryTransport::capture(&captured).unwrap();
+            let counters = PhaseCounters::read();
             let start = Instant::now();
             let opened = transport.resolve_verified();
             rows.insert("open_ms".into(), start.elapsed().as_secs_f64() * 1000.0);
+            phase("open", counters, 1);
             assert!(
                 matches!(opened, Err(kinewright_core::HistoryError::Capacity)),
                 "old bounded transport at 2000 heavy steps"
@@ -172,6 +186,7 @@ fn main() {
         }
         Engine::New(history) => {
             let bytes = history.record().encode().unwrap();
+            let counters = PhaseCounters::read();
             let start = Instant::now();
             let snapshot = Record::decode(&bytes, limits(checkpoints)).unwrap();
             let mut opened = History::new(
@@ -182,13 +197,16 @@ fn main() {
             .unwrap();
             opened.install_snapshot(snapshot).unwrap();
             rows.insert("open_ms".into(), start.elapsed().as_secs_f64() * 1000.0);
+            phase("open", counters, 1);
             assert_eq!(opened.document(), history.document());
+            let counters = PhaseCounters::read();
             let start = Instant::now();
             std::hint::black_box(opened.execute(Command::Undo).unwrap());
             rows.insert(
                 "cold_undo_ms".into(),
                 start.elapsed().as_secs_f64() * 1000.0,
             );
+            phase("cold_undo", counters, 1);
             assert_eq!(opened.undo().len(), 1999, "COLD_UNDO_DEPTH");
             assert!(!opened.document().tracks[0].sync_lock, "COLD_UNDO_DOCUMENT");
         }
@@ -200,6 +218,7 @@ fn main() {
         }],
         coalesce_key: "120-frame-drag".into(),
     };
+    let counters = PhaseCounters::read();
     let start = Instant::now();
     for index in 0..120 {
         engine.execute(gesture(index));
@@ -208,12 +227,19 @@ fn main() {
         "gesture_apply_ms".into(),
         start.elapsed().as_secs_f64() * 1000.0,
     );
+    phase("gesture_apply", counters, 120);
     assert_eq!(engine.depth(), 2001);
     assert_eq!(engine.top_operation_count(), 120);
     assert!(!engine.document().tracks[0].sync_lock);
-    rows.insert("gesture_undo_ms".into(), timed(&mut engine, Command::Undo));
+    rows.insert(
+        "gesture_undo_ms".into(),
+        timed(&mut engine, Command::Undo, "gesture_undo"),
+    );
     assert!(engine.document().tracks[0].sync_lock);
-    rows.insert("gesture_redo_ms".into(), timed(&mut engine, Command::Redo));
+    rows.insert(
+        "gesture_redo_ms".into(),
+        timed(&mut engine, Command::Redo, "gesture_redo"),
+    );
     assert!(!engine.document().tracks[0].sync_lock);
     engine.execute(Command::Undo);
     let copy = Command::Do(Operation::CopyClipAttributes {
@@ -222,7 +248,7 @@ fn main() {
         names: None,
         include_keyframes: true,
     });
-    rows.insert("copy_ms".into(), timed(&mut engine, copy));
+    rows.insert("copy_ms".into(), timed(&mut engine, copy, "copy"));
     let copied = engine.document();
     assert_eq!(copied.tracks[0].clips[399].effects.len(), 16);
     assert_eq!(
@@ -239,7 +265,7 @@ fn main() {
     let ripple = Command::Do(Operation::RippleDeleteClip {
         clip: kinewright_core::ClipId(1),
     });
-    rows.insert("ripple_ms".into(), timed(&mut engine, ripple));
+    rows.insert("ripple_ms".into(), timed(&mut engine, ripple, "ripple"));
     let rippled = engine.document();
     assert_eq!(rippled.tracks[0].clips.len(), 399);
     assert_eq!(rippled.tracks[0].clips[0].id, kinewright_core::ClipId(2));
@@ -257,7 +283,7 @@ fn main() {
     assert_eq!(engine.document().tracks[0].clips.len(), 400);
     let mut walk = vec![];
     for index in 0..2000 {
-        walk.push(timed(&mut engine, Command::Undo));
+        walk.push(timed(&mut engine, Command::Undo, "walk"));
         assert_eq!(
             engine.document().tracks[0].sync_lock,
             index % 2 == 1,
@@ -279,7 +305,7 @@ fn main() {
         }
         let mut times = vec![];
         for _ in 0..32 {
-            times.push(timed(&mut large, edit(count)));
+            times.push(timed(&mut large, edit(count), &format!("edit_{target}")));
             count += 1;
         }
         assert_eq!(large.document().tracks[0].sync_lock, (count - 1) % 2 == 1);
@@ -299,7 +325,7 @@ fn main() {
     }
     let mut fold = vec![];
     for index in 32..64 {
-        fold.push(timed(&mut folded, edit(index)));
+        fold.push(timed(&mut folded, edit(index), "fold"));
         if let Engine::New(history) = &folded {
             assert_eq!(
                 history.baseline().tracks[0].sync_lock,
@@ -315,8 +341,23 @@ fn main() {
     }
     rows.insert("fold_ms".into(), quantile(&fold, 50));
     samples.insert("fold_ms".into(), fold);
+    let phases = PHASES.with_borrow(Clone::clone);
+    if side == "new" {
+        for name in ["edit_1000", "edit_10000", "gesture_apply"] {
+            let p = &phases[name];
+            assert_eq!(p["document_copies"], p["commands"], "BENCH_ONE_COPY {name}");
+            assert_eq!(
+                p["exact_measurements"], 0,
+                "BENCH_NO_EXACT_MEASUREMENT {name}"
+            );
+            assert_eq!(
+                p["document_bytes_serialised"], 0,
+                "BENCH_NO_DOCUMENT_SERIALIZATION {name}"
+            );
+        }
+    }
     println!(
         "{}",
-        serde_json::json!({"side":side,"checkpoints":checkpoints,"metrics":rows,"samples":samples,"expected_old_open_refusal":open_refused,"errors":0})
+        serde_json::json!({"history_counters_available":side=="new","phases":phases,"side":side,"checkpoints":checkpoints,"metrics":rows,"samples":samples,"expected_old_open_refusal":open_refused,"errors":0})
     );
 }

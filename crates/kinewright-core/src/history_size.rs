@@ -19,6 +19,8 @@ fn allocation<T>(capacity: usize) -> Result<u64, HistoryError> {
 }
 fn payload(value: &impl Serialize) -> Result<u64, HistoryError> {
     let bytes = serde_json::to_vec(value).map_err(|_| HistoryError::Encoding)?;
+    #[cfg(feature = "history-metrics")]
+    crate::undo::metrics::payload_serialized(bytes.len() as u64);
     payload_memory_bound(&bytes)
 }
 
@@ -750,6 +752,9 @@ impl ReplayBudget {
         ])?)
     }
 
+    pub(crate) fn check_known(&mut self, bytes: u64) -> Result<(), HistoryError> {
+        self.check(bytes)
+    }
     pub(crate) fn retain_identity(
         &mut self,
         identity: &crate::OperationIdentityEffect,
@@ -808,22 +813,45 @@ fn operation_copy_bytes(
     document: &Document,
     operation: &crate::Operation,
 ) -> Result<u64, HistoryError> {
+    operation_copy_bytes_with(document, operation, None)
+}
+#[allow(
+    clippy::too_many_lines,
+    reason = "every operation kind declares its prior-state copies in one exhaustive match"
+)]
+pub(crate) fn operation_copy_bytes_with(
+    document: &Document,
+    operation: &crate::Operation,
+    known_live: Option<u64>,
+) -> Result<u64, HistoryError> {
     use crate::Operation;
     let clip = |id| {
+        if let Some(live) = known_live {
+            return Ok(live);
+        }
         document.clip(id).map_or(Ok(0), |c| {
             sum([size_of::<Clip>() as u64, clip_payload(c, true)?])
         })
     };
     match operation {
-        Operation::RelinkAsset { asset, .. } => document
-            .tracks
-            .iter()
-            .flat_map(|track| &track.clips)
-            .filter(|source| source.asset == *asset)
-            .try_fold(0, |largest, source| {
-                clip(source.id).map(|bytes| largest.max(bytes))
-            }),
+        Operation::RelinkAsset { asset, .. } => {
+            if let Some(live) = known_live {
+                Ok(live)
+            } else {
+                document
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.clips)
+                    .filter(|source| source.asset == *asset)
+                    .try_fold(0, |largest, source| {
+                        clip(source.id).map(|bytes| largest.max(bytes))
+                    })
+            }
+        }
         Operation::SetTrackMix { track, .. } | Operation::SetTrackAutomation { track, .. } => {
+            if let Some(live) = known_live {
+                return Ok(live);
+            }
             document
                 .audio_mix
                 .tracks
@@ -861,7 +889,8 @@ fn operation_copy_bytes(
         | Operation::SlideClip { .. }
         | Operation::RippleInsertGap { .. }
         | Operation::RippleDeleteClip { .. }
-        | Operation::SetAssetColorDescription { .. } => document_live_bytes(document)?
+        | Operation::SetAssetColorDescription { .. } => known_live
+            .map_or_else(|| document_live_bytes(document), Ok)?
             .checked_mul(4)
             .ok_or(HistoryError::Capacity),
         Operation::AddAsset { .. }

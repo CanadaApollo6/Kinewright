@@ -571,15 +571,6 @@ pub(crate) fn apply_batch_prevalidated(
     apply_batch_unpublished(candidate, operations, false).map(|_| ())
 }
 
-/// Bounded streaming replay when the caller does not retain identity observations.
-pub(crate) fn apply_batch_replay(
-    candidate: &mut Document,
-    operations: &[Operation],
-    budget: &mut crate::history_size::ReplayBudget,
-) -> Result<(), BatchError> {
-    apply_batch_checked(candidate, operations, false, Some(budget)).map(|_| ())
-}
-
 pub(crate) fn apply_batch_observed_replay(
     candidate: &mut Document,
     operations: &[Operation],
@@ -676,6 +667,8 @@ fn apply_batch_checked(
 }
 
 fn clip_identities(doc: &Document) -> std::collections::BTreeSet<ClipId> {
+    #[cfg(feature = "history-metrics")]
+    crate::undo::metrics::identity();
     doc.tracks
         .iter()
         .flat_map(|t| t.clips.iter().map(|c| c.id))
@@ -5198,6 +5191,8 @@ fn validate_track_compatibility(asset: &MediaAsset, track: &crate::Track) -> Res
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
+    #[cfg(feature = "history-metrics")]
+    crate::undo::metrics::validation();
     if !doc.fps.is_valid() {
         return Err(OpError::InvalidProjectRate);
     }

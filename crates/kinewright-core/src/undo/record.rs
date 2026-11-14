@@ -1,6 +1,6 @@
 use super::{
-    Cache, Charge, CommandKey, Error, History, RetentionPolicy, RoleBounds, Step, check_document,
-    check_document_value, digest_operations, operation_charge,
+    Cache, Charge, CommandKey, DocumentBound, Error, History, RetentionPolicy, RoleBounds, Step,
+    digest_operations, operation_charge,
 };
 use crate::{Document, history_size::ReplayBudget};
 use serde::{Deserialize, Serialize};
@@ -26,10 +26,14 @@ pub struct ValidatedSnapshot {
     bounds: RoleBounds,
     undo_charge: Charge,
     redo_charge: Charge,
+    baseline_bound: DocumentBound,
+    document_bound: DocumentBound,
 }
 impl Record {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        serde_json::to_vec(self).map_err(|_| Error::Encoding)
+        let bytes = serde_json::to_vec(self).map_err(|_| Error::Encoding)?;
+        super::metrics::serialized(bytes.len() as u64);
+        Ok(bytes)
     }
     pub fn snapshot_identity(&self) -> Result<[u8; 32], Error> {
         super::digest(self)
@@ -60,8 +64,8 @@ impl Record {
     ) -> Result<ValidatedSnapshot, Error> {
         self.baseline.validate().map_err(Error::InvalidDocument)?;
         self.document.validate().map_err(Error::InvalidDocument)?;
-        check_document_value(&self.baseline, bounds)?;
-        check_document_value(&self.document, bounds)?;
+        let baseline_bound = DocumentBound::measure(&self.baseline, bounds)?;
+        DocumentBound::measure(&self.document, bounds)?;
         if self
             .undo
             .len()
@@ -136,93 +140,82 @@ impl Record {
         if self.redo.iter().any(|step| step.coalesce_key.is_some()) {
             return Err(Error::InvalidMetadata);
         }
-        // Typed deserializers may transfer nested String/Vec headroom. Retain
-        // compact payloads just as edit admission does; reserve each temporary
-        // copy before allocating it, alongside raw decode input when present.
+        // Every untrusted record loses its runtime proof before replay, even
+        // when a typed capture originally came from a live History.
         for step in self.undo.iter_mut().chain(&mut self.redo) {
-            for command in &mut step.commands {
-                let mut normalization = ReplayBudget::workspace(bounds.replay_workspace)
-                    .map_err(|_| Error::Capacity)?;
-                normalization
-                    .reserve_input(input)
-                    .map_err(|_| Error::Capacity)?;
-                normalization
-                    .reserve_input(operation_charge(&command.operations)?.decoded)
-                    .map_err(|_| Error::Capacity)?;
-                let compact = command.operations.clone();
-                command.operations = compact;
-            }
+            step.charge.validated = false;
         }
         drop(keys);
         let mut budget =
             ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
         budget.reserve_input(input).map_err(|_| Error::Capacity)?;
         budget
-            .check_clone(&self.baseline)
+            .check_known(baseline_bound.live)
             .map_err(|_| Error::Capacity)?;
-        // Typed records can carry spare nested allocations too. Normalize the
-        // retained baseline; the saved current is replaced by replay below.
-        self.baseline = Arc::new((*self.baseline).clone());
-        check_document(&self.baseline, bounds)?;
-        budget
-            .check_clone(&self.baseline)
-            .map_err(|_| Error::Capacity)?;
-        let mut document = (*self.baseline).clone();
+        let mut document = super::capacity::copy_document(&self.baseline);
+        let mut document_bound = baseline_bound;
         for step in &mut self.undo {
-            validate_step(&mut document, step, bounds, input).map_err(|error| match error {
-                Error::Batch(error) => Error::InvalidUndo(error),
-                other => other,
-            })?;
+            validate_step(&mut document, &mut document_bound, step, bounds, input).map_err(
+                |error| match error {
+                    Error::Batch(error) => Error::InvalidUndo(error),
+                    other => other,
+                },
+            )?;
         }
         if document != *self.document {
             return Err(Error::DocumentMismatch);
         }
-        // Reuse the equal replay allocation in the validated snapshot, rather than a
-        // decoded Vec allocation whose spare capacity differs from ordinary execution.
+        document_bound = DocumentBound::measure(&document, bounds)?;
         self.document = Arc::new(document);
-        budget
-            .check_clone(&self.document)
-            .map_err(|_| Error::Capacity)?;
-        let mut redone = (*self.document).clone();
-        for step in self.redo.iter_mut().rev() {
-            validate_step(&mut redone, step, bounds, input).map_err(|error| match error {
-                Error::Batch(error) => Error::InvalidRedo(error),
-                other => other,
-            })?;
+        if !self.redo.is_empty() {
+            budget
+                .check_known(document_bound.live)
+                .map_err(|_| Error::Capacity)?;
+            let mut redone = super::capacity::copy_document(&self.document);
+            let mut redone_bound = document_bound;
+            for step in self.redo.iter_mut().rev() {
+                validate_step(&mut redone, &mut redone_bound, step, bounds, input).map_err(
+                    |error| match error {
+                        Error::Batch(e) => Error::InvalidRedo(e),
+                        other => other,
+                    },
+                )?;
+            }
+            DocumentBound::measure(&redone, bounds)?;
         }
         Ok(ValidatedSnapshot {
             record: self,
             bounds,
             undo_charge,
             redo_charge,
+            baseline_bound,
+            document_bound,
         })
     }
 }
 fn validate_step(
     document: &mut Document,
+    size: &mut DocumentBound,
     step: &mut Step,
     bounds: RoleBounds,
     input: u64,
 ) -> Result<(), Error> {
+    let before = *size;
     let mut summary = super::StepCharge {
         operations: step.charge.operations,
         key_bytes: step.charge.key_bytes,
-        ..super::StepCharge::default()
+        ..Default::default()
     };
     for command in &step.commands {
-        let mut allocation =
-            ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
-        allocation
-            .reserve_input(input)
-            .map_err(|_| Error::Capacity)?;
-        super::canonical_workspace(document, &mut allocation)?;
         let mut budget =
             ReplayBudget::workspace(bounds.replay_workspace).map_err(|_| Error::Capacity)?;
         budget.reserve_input(input).map_err(|_| Error::Capacity)?;
-        budget.check_clone(document).map_err(|_| Error::Capacity)?;
-        let effects = super::apply(document, &command.operations, bounds, &mut budget)?;
+        let effects = super::apply(document, size, &command.operations, bounds, &mut budget)?;
         summary = super::replay_charge(summary, &budget, effects.len(), bounds, input)?;
     }
+    summary.before = before;
+    summary.after = *size;
+    summary.validated = true;
     step.charge = summary;
     Ok(())
 }
@@ -273,7 +266,9 @@ impl History {
             ..
         } = snapshot.record;
         self.baseline = baseline;
+        self.baseline_bound = snapshot.baseline_bound;
         self.document = document;
+        self.document_bound = snapshot.document_bound;
         self.undo = undo;
         self.redo = redo;
         self.position = position;

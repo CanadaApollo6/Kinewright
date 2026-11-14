@@ -1,4 +1,4 @@
-use super::Error;
+use super::{DocumentBound, Error};
 use crate::Document;
 use std::sync::Arc;
 
@@ -6,6 +6,7 @@ use std::sync::Arc;
 struct Point {
     depth: usize,
     document: Arc<Document>,
+    bound: DocumentBound,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Cache {
@@ -38,21 +39,21 @@ impl Cache {
     pub fn storage_bytes(&self) -> u64 {
         (self.points.capacity() * std::mem::size_of::<Option<Point>>()) as u64
     }
-    pub fn exact(&self, depth: usize) -> Option<Arc<Document>> {
+    pub fn exact(&self, depth: usize) -> Option<(Arc<Document>, DocumentBound)> {
         // A cached pointer is shared with the history's current document or a capture.
         self.points
             .iter()
             .flatten()
             .find(|p| p.depth == depth)
-            .map(|p| Arc::clone(&p.document))
+            .map(|p| (Arc::clone(&p.document), p.bound))
     }
-    pub fn nearest(&self, depth: usize) -> Option<(usize, &Arc<Document>)> {
+    pub fn nearest(&self, depth: usize) -> Option<(usize, &Arc<Document>, DocumentBound)> {
         self.points
             .iter()
             .flatten()
             .filter(|p| p.depth <= depth)
             .max_by_key(|p| p.depth)
-            .map(|p| (p.depth, &p.document))
+            .map(|p| (p.depth, &p.document, p.bound))
     }
     fn grid_slots(&self) -> usize {
         self.points.len().saturating_sub(1) / 2
@@ -62,7 +63,7 @@ impl Cache {
         let count = self.points.len().saturating_sub(start + 1);
         (count > 0).then(|| start + (depth.trailing_zeros() as usize).min(count - 1))
     }
-    pub fn insert(&mut self, depth: usize, document: Arc<Document>) {
+    pub fn insert(&mut self, depth: usize, document: Arc<Document>, bound: DocumentBound) {
         if depth == 0 || self.points.is_empty() {
             return;
         }
@@ -72,17 +73,23 @@ impl Cache {
         if grid > 0 && depth.is_multiple_of(32) {
             self.points[(depth / 32) % grid] = Some(Point {
                 depth,
+                bound,
                 document: Arc::clone(&document),
             });
         }
         if let Some(slot) = self.replay_slot(depth) {
             self.points[slot] = Some(Point {
                 depth,
+                bound,
                 document: Arc::clone(&document),
             });
         }
         let top = self.points.len() - 1;
-        self.points[top] = Some(Point { depth, document });
+        self.points[top] = Some(Point {
+            depth,
+            document,
+            bound,
+        });
     }
     // Plan only the final survivor in each near slot. Replay creates those
     // documents as it passes their boundaries; no intermediate snapshots survive.
@@ -102,7 +109,12 @@ impl Cache {
         selected.dedup();
         selected
     }
-    pub fn insert_replayed(&mut self, depth: usize, document: &Arc<Document>) {
+    pub fn insert_replayed(
+        &mut self,
+        depth: usize,
+        document: &Arc<Document>,
+        bound: DocumentBound,
+    ) {
         if self.points.is_empty() || depth == 0 {
             return;
         }
@@ -110,22 +122,28 @@ impl Cache {
         if grid > 0 && depth.is_multiple_of(32) {
             self.points[(depth / 32) % grid] = Some(Point {
                 depth,
+                bound,
                 document: Arc::clone(document),
             });
         }
         // Preserve the dedicated pre-top pointer across on-demand queries.
         // Warmed points behind the cursor service a continuing Undo walk.
     }
-    pub fn insert_warm(&mut self, depth: usize, document: Arc<Document>) {
+    pub fn insert_warm(&mut self, depth: usize, document: Arc<Document>, bound: DocumentBound) {
         let grid = self.grid_slots();
         if grid > 0 && depth.is_multiple_of(32) {
             self.points[(depth / 32) % grid] = Some(Point {
                 depth,
+                bound,
                 document: Arc::clone(&document),
             });
         }
         if let Some(slot) = self.replay_slot(depth) {
-            self.points[slot] = Some(Point { depth, document });
+            self.points[slot] = Some(Point {
+                depth,
+                document,
+                bound,
+            });
         }
     }
     pub fn truncate(&mut self, depth: usize) {

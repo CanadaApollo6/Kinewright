@@ -1680,6 +1680,8 @@ impl Document {
     /// agent-authored write that keys past the end and make the
     /// `Audio{Bus,Master}KeyframeOutsideProject` raises unreachable.
     pub(crate) fn recompute_duration(&mut self) -> Result<(), OpError> {
+        #[cfg(feature = "history-metrics")]
+        crate::undo::metrics::duration();
         let previous = self.duration;
         let mut duration = TimeCode::ZERO;
         for clip in self.tracks.iter().flat_map(|track| &track.clips) {
