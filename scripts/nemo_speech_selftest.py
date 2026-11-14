@@ -88,6 +88,19 @@ class InstalledSdk(unittest.TestCase):
         self.assertLess(config, checkout)
         self.assertEqual(calls[config][-2:], ['core.longpaths', 'true'])
 
+    def test_incomplete_checkout_cannot_reach_a_build(self):
+        def git(args):
+            if 'diff-files' in args:
+                raise subprocess.CalledProcessError(1, args)
+        with patch.object(nemo, 'run', side_effect=git), patch.object(nemo.subprocess, 'check_output', return_value='pin\n'), self.assertRaises(subprocess.CalledProcessError):
+            nemo.fetch(self.root / 'incomplete', {'url': 'official', 'commit': 'pin'})
+
+    def test_missing_build_tools_name_the_missing_tool_before_using_compilers(self):
+        for tool in ('cmake', 'ninja'):
+            with self.subTest(tool=tool), patch.object(nemo.shutil, 'which', side_effect=lambda name: None if name == tool else '/unused/tool'), patch.object(nemo.subprocess, 'run', side_effect=AssertionError('compiler must not run')):
+                with self.assertRaisesRegex(RuntimeError, f'NeMo requires {tool} on PATH'):
+                    nemo.build_key()
+
     def test_missing_runtime_dependency_or_notice_refuses_completeness(self):
         for file in ('lib/libnemo_speech_asr.so', 'bin/nemo_speech_asr.dll',
                      'share/licenses/nemo-speech/third_party/sentencepiece/LICENSE'):

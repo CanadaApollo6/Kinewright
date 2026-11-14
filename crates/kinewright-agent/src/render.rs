@@ -614,17 +614,18 @@ pub fn render_asset_transcript(asset: AssetId, status: &TranscriptStatus) -> Str
         TranscriptStatus::Queued => format!("asset {asset} transcript status=queued"),
         TranscriptStatus::Hashing => format!("asset {asset} transcript status=hashing"),
         TranscriptStatus::DownloadingModel {
+            model_name,
             downloaded_bytes,
             total_bytes,
         } => total_bytes.map_or_else(
             || {
                 format!(
-                    "asset {asset} transcript status=downloading-model bytes={downloaded_bytes}"
+                    "asset {asset} transcript status=downloading-model model={model_name:?} bytes={downloaded_bytes}"
                 )
             },
             |total| {
                 format!(
-                    "asset {asset} transcript status=downloading-model bytes={downloaded_bytes}/{total}"
+                    "asset {asset} transcript status=downloading-model model={model_name:?} bytes={downloaded_bytes}/{total}"
                 )
             },
         ),

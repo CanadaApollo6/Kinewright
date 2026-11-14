@@ -279,7 +279,7 @@ pub(crate) fn identity_mutations() -> [fn(&mut Identity); 14] {
         |v| v.file_sha256.push('x'),
         |v| v.runtime_version.push('x'),
         |v| v.build_key.push('x'),
-        |v| v.lookahead -= 1,
+        |v| v.lookahead = Some(12),
         |v| v.threads = if v.threads == 1 { 2 } else { 1 },
         |v| v.feed_samples -= 1,
         |v| v.punctuation = false,
@@ -603,4 +603,136 @@ fn dq1_cancel_during_a_backend_call_discards_the_result() {
         matches!(session.step(), Err(Error::Cancelled)),
         "no publication after an in-flight call was cancelled"
     );
+}
+
+#[test]
+fn dq1_language_rule_has_no_detection_and_selects_the_pinned_identity() {
+    for language in [
+        None,
+        Some(""),
+        Some(" en "),
+        Some("EN-us"),
+        Some("en_GB"),
+        Some("English"),
+    ] {
+        let model = model_for_language(language);
+        assert_eq!(model.id, ENGLISH_MODEL.id);
+        assert_eq!(Identity::for_model(model).lookahead, Some(13));
+    }
+    for language in ["fr", "de", "ja", "auto"] {
+        let model = model_for_language(Some(language));
+        assert_eq!(model.id, PARAKEET_MODEL.id);
+        let identity = Identity::for_model(model);
+        assert_eq!(identity.lookahead, None);
+        assert_ne!(identity.cache_key(), Identity::english().cache_key());
+    }
+}
+
+#[test]
+fn dq1_offline_session_defers_inference_and_keeps_one_source_clock() {
+    let calls = std::cell::Cell::new(0);
+    let native = |samples: &[f32]| {
+        calls.set(calls.get() + 1);
+        assert_eq!(samples.len(), 1600);
+        Ok(crate::nemo::Frame {
+            final_result: true,
+            text: "Word.".into(),
+            words: vec![crate::nemo::Word {
+                text: "Word.".into(),
+                start_us: 10_000,
+                end_us: 90_000,
+            }],
+            audio_processed_us: 100_000,
+        })
+    };
+    let backend = offline::Offline::new(native, &PiecePolicy::default()).unwrap();
+    let mut session = Driver::new(
+        backend,
+        5_000_000,
+        ExportCancellation::default(),
+        FEED_SAMPLES,
+    );
+    session.feed(&[0.0; 1600]).unwrap();
+    assert!(session.step().unwrap().is_none());
+    assert_eq!(calls.get(), 0, "DQ1_OFFLINE_DEFERRED");
+    session.commit_at(5_100_000).unwrap();
+    assert_eq!(calls.get(), 0);
+    assert!(session.feed(&[0.0]).is_err());
+    let Some(Update::Committed {
+        words,
+        audio_processed_us,
+    }) = session.step().unwrap()
+    else {
+        panic!("missing first final")
+    };
+    assert_eq!((words[0].start_us, words[0].end_us), (5_010_000, 5_090_000));
+    assert_eq!(audio_processed_us, 5_100_000);
+    session.feed(&[0.0; 1600]).unwrap();
+    assert!(session.step().unwrap().is_none());
+    session.commit_at(5_200_000).unwrap();
+    let Some(Update::Committed {
+        words,
+        audio_processed_us,
+    }) = session.step().unwrap()
+    else {
+        panic!("missing second final")
+    };
+    assert_eq!(
+        (words[0].start_us, words[0].end_us),
+        (5_110_000, 5_190_000),
+        "DQ1_OFFLINE_SOURCE_CLOCK"
+    );
+    assert_eq!(audio_processed_us, 5_200_000);
+    session.finish().unwrap();
+    let Some(Update::Committed {
+        words,
+        audio_processed_us,
+    }) = session.step().unwrap()
+    else {
+        panic!("missing empty finish")
+    };
+    assert!(words.is_empty());
+    assert_eq!(audio_processed_us, 5_200_000);
+    assert_eq!(
+        calls.get(),
+        2,
+        "empty finish must not invoke native inference"
+    );
+    assert!(session.step().unwrap().is_none());
+}
+
+#[test]
+fn dq1_offline_piece_storage_is_bounded_by_the_policy() {
+    let policy = PiecePolicy {
+        target_us: 100_000,
+        search_us: 10_000,
+        ..PiecePolicy::default()
+    };
+    let mut backend = offline::Offline::new(
+        |_| -> Result<crate::nemo::Frame, Error> { panic!("no inference before commit") },
+        &policy,
+    )
+    .unwrap();
+    backend
+        .feed(&vec![0.0; policy.buffer_samples().unwrap()])
+        .unwrap();
+    assert!(matches!(backend.feed(&[0.0]), Err(Error::SessionOrder(_))));
+    backend.close();
+    assert!(backend.feed(&[0.0]).is_err());
+}
+
+#[test]
+fn dq1_model_word_normalization_preserves_unicode() {
+    assert_eq!(
+        kinewright_core::normalize_transcript_word("ÜBER,"),
+        "über",
+        "DQ1_UNICODE_WORD_TEXT"
+    );
+    assert_eq!(
+        kinewright_core::normalize_transcript_word("日本語。"),
+        "日本語"
+    );
+    for filler in ["Um,", "UM.", "Uh!", "Erm,"] {
+        assert!(kinewright_core::is_filler_word(filler), "{filler}");
+    }
 }

@@ -93,6 +93,30 @@ impl<S> StatusReporter<S> {
         }
     }
 
+    pub(crate) fn read<R>(&self, path: &Path, inspect: impl FnOnce(Option<&S>) -> R) -> Option<R> {
+        let states = self.states.read().ok()?;
+        Some(inspect(states.get(&MediaPath::current(path))))
+    }
+    pub(crate) fn change<R>(
+        &self,
+        path: &Path,
+        change: impl FnOnce(Option<S>) -> (Option<S>, R),
+    ) -> Option<R> {
+        let mut states = self.states.write().ok()?;
+        let key = MediaPath::current(path);
+        let previous = states.remove(&key);
+        let (next, result) = change(previous);
+        if let Some(next) = next {
+            if states.len() >= 4096
+                && let Some(oldest) = states.keys().next().cloned()
+            {
+                states.remove(&oldest);
+            }
+            states.insert(key, next);
+        }
+        Some(result)
+    }
+
     pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
         if let Ok(mut states) = self.states.write() {
             states.retain(|key, _| key.authority != Some(authority));
@@ -133,6 +157,17 @@ impl CancellationRegistry {
         }
         let cancellation = ExportCancellation::default();
         active.insert(MediaPath::current(path), cancellation.clone());
+        Some(cancellation)
+    }
+
+    pub(crate) fn replace(&self, path: &Path) -> Option<ExportCancellation> {
+        let mut active = self.active.lock().ok()?;
+        let key = MediaPath::current(path);
+        if let Some(previous) = active.get(&key) {
+            previous.cancel();
+        }
+        let cancellation = ExportCancellation::default();
+        active.insert(key, cancellation.clone());
         Some(cancellation)
     }
 

@@ -9,6 +9,11 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- DQ1 S3 selects Parakeet TDT v3 for other language hints and keeps English as
+  the default, with no language detection. Offline pieces share the streaming
+  session clock and measured pause policy. Queued job panics now return errors
+  and allow later work to run. Model downloads use exclusive temporary files;
+  Linux data uses a private persistent user directory.
 - DQ1 S2 replaces the previous speech backend with pinned, CPU-only
   NeMo-Speech.cpp and NVIDIA Nemotron Speech Streaming EN 0.6B. Asset and voice
   transcription share queued sessions, pause commits, exact source microseconds

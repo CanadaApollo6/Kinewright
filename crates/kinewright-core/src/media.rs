@@ -1668,6 +1668,7 @@ pub enum TranscriptStatus {
     Queued,
     Hashing,
     DownloadingModel {
+        model_name: String,
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
     },
@@ -2793,6 +2794,7 @@ fn transcript_job_status(asset: AssetId, status: TranscriptStatus) -> AnalysisJo
         TranscriptStatus::DownloadingModel {
             downloaded_bytes,
             total_bytes,
+            ..
         } => job(
             asset,
             AnalysisKind::Transcript,

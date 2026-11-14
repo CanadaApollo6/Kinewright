@@ -216,8 +216,8 @@ jobs:
           set -euo pipefail
           model_dir=$(target/debug/nemo-load-probe provision "$RUNNER_TEMP/asr-models")
           export KINEWRIGHT_ASR_MODEL_DIR="$model_dir"
-          cargo test -p kinewright-media --lib recognizer::real::dq1_real_ami_short_keeps_um_and_known_words -- --exact --ignored --nocapture --test-threads=1 | tee recognition.log
-          nice -n 19 python3 -I -c 'from pathlib import Path; assert "test result: ok. 1 passed; 0 failed; 0 ignored;" in Path("recognition.log").read_text()'
+          cargo test -p kinewright-media --lib recognizer::real::dq1_real_ami_short_ -- --ignored --nocapture --test-threads=1 | tee recognition.log
+          nice -n 19 python3 -I -c 'from pathlib import Path; assert "test result: ok. 2 passed; 0 failed; 0 ignored;" in Path("recognition.log").read_text()'
       - name: Verify or download EN and recognise the committed AMI clip (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -226,9 +226,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native setup failed' }
           $env:KINEWRIGHT_ASR_MODEL_DIR = & .\target\debug\nemo-load-probe.exe provision (Join-Path $env:RUNNER_TEMP 'asr-models')
           if ($LASTEXITCODE -ne 0) { throw 'Model installation failed' }
-          cargo test -p kinewright-media --lib recognizer::real::dq1_real_ami_short_keeps_um_and_known_words -- --exact --ignored --nocapture --test-threads=1 | Tee-Object recognition.log
+          cargo test -p kinewright-media --lib recognizer::real::dq1_real_ami_short_ -- --ignored --nocapture --test-threads=1 | Tee-Object recognition.log
           if ($LASTEXITCODE -ne 0) { throw 'Real EN recognition failed' }
-          if ((Get-Content recognition.log -Raw) -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') { throw 'Expected exactly one real recognition test' }
+          if ((Get-Content recognition.log -Raw) -notmatch 'test result: ok\. 2 passed; 0 failed; 0 ignored;') { throw 'Expected exactly two real recognition tests' }
 
   result:
     name: CI result

@@ -16,4 +16,4 @@ Model source: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 Pinned revision: 541d1f99c6b0c3cd0b11a95167540bb8edefd82b
 File: parakeet-tdt-0.6b-v3.q8_0.gguf
 SHA-256: e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e
-Attribution and model specification are retained for the DQ1 S3 offline adapter.
+Kinewright uses these unmodified weights for offline recognition of non-English language hints.

@@ -96,10 +96,14 @@ runs:
         $key = & .\scripts\setup-ffmpeg.ps1 -NemoCacheKeyOnly
         if ($LASTEXITCODE -ne 0) { throw 'NeMo cache key failed' }
         "key=$key" >> $env:GITHUB_OUTPUT
+    - name: Read NeMo runner image identity
+      id: nemo-image
+      shell: bash
+      run: echo "key=$RUNNER_ARCH-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
     - name: Restore built NeMo SDK by pins, patches, compiler and settings
       uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
       with:
-        key: nemo-${{ runner.os }}-${{ steps.nemo-linux.outputs.key || steps.nemo-windows.outputs.key }}
+        key: nemo-${{ runner.os }}-${{ steps.nemo-image.outputs.key }}-${{ steps.nemo-linux.outputs.key || steps.nemo-windows.outputs.key }}
         path: |
           ${{ runner.temp }}/nemo-speech/*/.build-key
           ${{ runner.temp }}/nemo-speech/*/bin

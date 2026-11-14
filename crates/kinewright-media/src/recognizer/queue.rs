@@ -11,34 +11,69 @@ use std::{
     sync::OnceLock,
 };
 
-type Completion = Box<dyn FnOnce() + Send>;
-type Work<C> = Box<dyn FnOnce(&mut Option<C>) -> Completion + Send>;
-fn run<C>(receiver: &Receiver<Work<C>>) {
+// One owned recognizer per built-in model during a queued batch. The
+// resolver owns the old value so invalidation needs no copied native handles.
+struct Models<C> {
+    values: std::collections::BTreeMap<&'static str, C>,
+}
+impl<C> Models<C> {
+    fn new() -> Self {
+        Self {
+            values: std::collections::BTreeMap::new(),
+        }
+    }
+    fn resolve(
+        &mut self,
+        key: &'static str,
+        resolve: impl FnOnce(Option<C>) -> Result<C, Error>,
+    ) -> Result<&mut C, Error> {
+        let next = resolve(self.values.remove(key))?;
+        Ok(self.values.entry(key).or_insert(next))
+    }
+}
+
+type Task<C, R> = Box<dyn FnOnce(&mut Option<C>) -> Result<R, Error> + Send>;
+struct Work<C, R> {
+    task: Task<C, R>,
+    complete: Box<dyn FnOnce(Result<R, Error>) + Send>,
+}
+fn run<C, R>(receiver: &Receiver<Work<C, R>>) {
     while let Ok(mut work) = receiver.recv() {
         let mut current = None;
         loop {
-            let complete = work(&mut current);
+            let Work { task, complete } = work;
+            // A failed operation's context is discarded before any further job.
+            let result = if let Ok(result) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task(&mut current)))
+            {
+                result
+            } else {
+                drop(current.take());
+                Err(Error::WorkerPanicked)
+            };
             match receiver.try_recv() {
                 Ok(next) => {
-                    complete();
+                    complete(result);
                     work = next;
                 }
                 Err(TryRecvError::Empty) => {
                     drop(current.take());
-                    complete();
+                    complete(result);
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     drop(current.take());
-                    complete();
+                    complete(result);
                     return;
                 }
             }
         }
     }
 }
-fn sender() -> Result<&'static Sender<Work<BuiltinRecognizer>>, Error> {
-    static QUEUE: OnceLock<Result<Sender<Work<BuiltinRecognizer>>, String>> = OnceLock::new();
+
+type ModelWork = Work<Models<BuiltinRecognizer>, Recognized>;
+fn sender() -> Result<&'static Sender<ModelWork>, Error> {
+    static QUEUE: OnceLock<Result<Sender<ModelWork>, String>> = OnceLock::new();
     QUEUE
         .get_or_init(|| {
             let (send, receive) = bounded(1);
@@ -68,41 +103,47 @@ pub(crate) fn queued(
     let grant = crate::locator::capture();
     let (send, receive) = bounded(1);
     sender()?
-        .send(Box::new(move |current| {
-            let operation = || -> Result<Recognized, Error> {
-                let _authority = grant.as_ref().map(crate::locator::LocatorAuthority::enter);
-                let _access = crate::locator::enter_retained(grant.as_ref())?;
-                cancelled(&cancel)?;
-                if current.as_ref().is_some_and(|loaded| {
-                    loaded.identity() != &identity
-                        || loaded.verified.path() != path
-                        || loaded.verified.check().is_err()
-                }) {
-                    *current = None;
-                }
-                if current.is_none() {
-                    *current = Some(BuiltinRecognizer::load_identity(
-                        &path,
-                        &receipts,
-                        &cancel,
-                        identity,
-                        Some(&data_root),
-                    )?);
-                }
-                let loaded = current.as_mut().ok_or(Error::QueueClosed)?;
-                let recognition = work(loaded)?;
-                cancelled(&cancel)?;
-                // The cache result owns this identity after the queued model is released.
-                Ok(Recognized {
-                    identity: loaded.identity().clone(),
-                    recognition,
-                })
-            };
-            let result = operation();
-            Box::new(move || {
+        .send(Work {
+            task: Box::new(move |current| {
+                let operation = || -> Result<Recognized, Error> {
+                    let _authority = grant.as_ref().map(crate::locator::LocatorAuthority::enter);
+                    let _access = crate::locator::enter_retained(grant.as_ref())?;
+                    cancelled(&cancel)?;
+                    let spec = identity.model()?;
+                    let models = current.get_or_insert_with(Models::new);
+                    let loaded = models.resolve(spec.id, |previous| match previous {
+                        Some(loaded)
+                            if loaded.identity() == &identity
+                                && loaded.verified.path() == path
+                                && loaded.verified.check().is_ok() =>
+                        {
+                            Ok(loaded)
+                        }
+                        previous => {
+                            drop(previous);
+                            BuiltinRecognizer::load_identity(
+                                &path,
+                                &receipts,
+                                &cancel,
+                                identity,
+                                Some(&data_root),
+                            )
+                        }
+                    })?;
+                    let recognition = work(loaded)?;
+                    cancelled(&cancel)?;
+                    // The cache result owns this identity after the queued model is released.
+                    Ok(Recognized {
+                        identity: loaded.identity().clone(),
+                        recognition,
+                    })
+                };
+                operation()
+            }),
+            complete: Box::new(move |result| {
                 let _ = send.send(result);
-            })
-        }))
+            }),
+        })
         .map_err(|_| Error::QueueClosed)?;
     receive.recv().map_err(|_| Error::QueueClosed)?
 }
@@ -192,7 +233,7 @@ pub(crate) fn file(
     let request_cancel = cancel.clone();
     queued(
         data_root.to_path_buf(),
-        model_root.join(super::ENGLISH_MODEL.files[0].name),
+        model_root.join(identity.model()?.files[0].name),
         model_root.join("verified"),
         cancel,
         identity,
@@ -227,7 +268,7 @@ pub(crate) fn samples(
     let request_cancel = cancel.clone();
     queued(
         data_root.to_path_buf(),
-        model_root.join(super::ENGLISH_MODEL.files[0].name),
+        model_root.join(identity.model()?.files[0].name),
         model_root.join("verified"),
         cancel,
         identity,
@@ -260,46 +301,144 @@ mod tests {
     }
     impl Drop for Context {
         fn drop(&mut self) {
-            self.dropped.send(()).unwrap();
+            let _ = self.dropped.send(());
         }
     }
     #[test]
     fn dq1_queued_job_waits_reuses_model_and_releases_before_idle_reply() {
-        let (send, receive) = bounded::<Work<Context>>(1);
+        let (send, receive) = bounded::<Work<Context, ()>>(1);
         let worker = std::thread::spawn(move || run(&receive));
         let (arrived, arrival) = bounded(0);
         let (release, released) = bounded(0);
         let (second, second_started) = bounded(1);
         let (done, completed) = bounded(0);
         let (dropped, drop_observed) = bounded(1);
-        send.send(Box::new(move |current| {
-            assert!(current.is_none());
-            *current = Some(Context { dropped });
-            arrived.send(()).unwrap();
-            released.recv().unwrap();
-            Box::new(|| {})
-        }))
+        send.send(Work {
+            task: Box::new(move |current| {
+                assert!(current.is_none());
+                *current = Some(Context { dropped });
+                arrived.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            }),
+            complete: Box::new(|result| result.unwrap()),
+        })
         .unwrap();
         arrival.recv().unwrap();
-        send.send(Box::new(move |current| {
-            assert!(current.is_some(), "queued model must be reused");
-            second.send(()).unwrap();
-            Box::new(move || {
+        send.send(Work {
+            task: Box::new(move |current| {
+                assert!(current.is_some(), "queued model must be reused");
+                second.send(()).unwrap();
+                Ok(())
+            }),
+            complete: Box::new(move |result| {
+                result.unwrap();
                 done.send(()).unwrap();
-            })
-        }))
+            }),
+        })
         .unwrap();
-        assert!(
-            matches!(second_started.try_recv(), Err(TryRecvError::Empty)),
-            "second job cannot start while first is held"
-        );
+        assert!(matches!(
+            second_started.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
         release.send(()).unwrap();
         second_started.recv().unwrap();
         completed.recv().unwrap();
         drop_observed
             .try_recv()
-            .expect("idle model released before result delivery");
+            .expect("idle context released before result delivery");
         drop(send);
         worker.join().unwrap();
+    }
+    #[test]
+    fn dq1_panicked_job_and_its_queued_successor_both_get_answers() {
+        let (send, receive) = bounded::<Work<Context, &'static str>>(1);
+        let worker = std::thread::spawn(move || run(&receive));
+        let (arrived, arrival) = bounded(0);
+        let (release, released) = bounded(0);
+        let (dropped, drop_observed) = bounded(1);
+        let (first, first_reply) = bounded(1);
+        let (second, second_reply) = bounded(1);
+        send.send(Work {
+            task: Box::new(move |current| {
+                *current = Some(Context { dropped });
+                arrived.send(()).unwrap();
+                released.recv().unwrap();
+                // Resume a genuine Rust unwind without the global panic hook's output
+                // interleaving libtest's result line in the isolated CI harness.
+                std::panic::resume_unwind(Box::new("injected recognition panic"))
+            }),
+            complete: Box::new(move |result| {
+                let _ = first.send(result);
+            }),
+        })
+        .unwrap();
+        arrival.recv().unwrap();
+        send.send(Work {
+            task: Box::new(move |current| {
+                assert!(current.is_none(), "DQ1_PANIC_DISCARDS_MODEL");
+                drop_observed
+                    .try_recv()
+                    .expect("failed model dropped before successor starts");
+                Ok("successor ran")
+            }),
+            complete: Box::new(move |result| {
+                let _ = second.send(result);
+            }),
+        })
+        .unwrap();
+        assert!(matches!(second_reply.try_recv(), Err(TryRecvError::Empty)));
+        release.send(()).unwrap();
+        assert!(
+            matches!(first_reply.recv().unwrap(), Err(Error::WorkerPanicked)),
+            "DQ1_PANIC_TYPED_REPLY"
+        );
+        assert_eq!(
+            second_reply.recv().unwrap().unwrap(),
+            "successor ran",
+            "DQ1_PANIC_QUEUED_REPLY"
+        );
+        let (third, third_reply) = bounded(1);
+        send.send(Work {
+            task: Box::new(|_| Ok("worker remains alive")),
+            complete: Box::new(move |result| {
+                let _ = third.send(result);
+            }),
+        })
+        .unwrap();
+        assert_eq!(third_reply.recv().unwrap().unwrap(), "worker remains alive");
+        drop(send);
+        worker.join().unwrap();
+    }
+    #[test]
+    fn dq1_queued_models_reuse_each_model_independently() {
+        let mut models = Models::new();
+        let mut loads = 0;
+        for model in ["english", "parakeet", "english"] {
+            let loaded = models
+                .resolve(model, |previous| {
+                    if let Some(previous) = previous {
+                        Ok(previous)
+                    } else {
+                        loads += 1;
+                        Ok(model)
+                    }
+                })
+                .unwrap();
+            assert_eq!(*loaded, model);
+        }
+        assert_eq!(loads, 2, "DQ1_ONE_LOADED_RECOGNIZER_PER_MODEL");
+        models
+            .resolve("english", |previous| {
+                assert_eq!(previous, Some("english"));
+                Ok("replacement")
+            })
+            .unwrap();
+        let parakeet = models
+            .resolve("parakeet", |previous| {
+                Ok(previous.expect("other model remains loaded"))
+            })
+            .unwrap();
+        assert_eq!(*parakeet, "parakeet");
     }
 }

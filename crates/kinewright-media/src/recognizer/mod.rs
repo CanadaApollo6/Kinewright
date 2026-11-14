@@ -1,6 +1,7 @@
 //! Local recognition sessions. Word clocks use integer source microseconds.
 #![allow(clippy::missing_errors_doc)]
 pub(crate) mod model;
+mod offline;
 mod pause;
 pub(crate) mod queue;
 use kinewright_core::ExportCancellation;
@@ -23,7 +24,7 @@ pub enum Error {
     Native(crate::nemo::Error),
     Decode(kinewright_core::MediaError),
     QueueClosed,
-    UnsupportedLanguage,
+    WorkerPanicked,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -40,7 +41,7 @@ impl fmt::Display for Error {
             Self::Native(e) => e.fmt(f),
             Self::Decode(e) => e.fmt(f),
             Self::QueueClosed => f.write_str("recognition worker stopped"),
-            Self::UnsupportedLanguage => f.write_str("this recognition backend supports English"),
+            Self::WorkerPanicked => f.write_str("recognition job panicked; retry the request"),
         }
     }
 }
@@ -66,6 +67,21 @@ impl From<Error> for kinewright_core::MediaError {
         } else {
             Self::Backend(e.to_string())
         }
+    }
+}
+
+pub(crate) fn model_for_language(language: Option<&str>) -> &'static ModelSpec {
+    let language = language.unwrap_or("").trim();
+    if language.is_empty()
+        || language.eq_ignore_ascii_case("english")
+        || language
+            .split(['-', '_'])
+            .next()
+            .is_some_and(|part| part.eq_ignore_ascii_case("en"))
+    {
+        &ENGLISH_MODEL
+    } else {
+        &PARAKEET_MODEL
     }
 }
 
@@ -96,7 +112,7 @@ pub struct Identity {
     pub file_sha256: String,
     pub runtime_version: String,
     pub build_key: String,
-    pub lookahead: u8,
+    pub lookahead: Option<u8>,
     pub threads: u8,
     pub feed_samples: usize,
     pub punctuation: bool,
@@ -106,18 +122,29 @@ pub struct Identity {
 impl Identity {
     #[must_use]
     pub fn english() -> Self {
+        Self::for_model(&ENGLISH_MODEL)
+    }
+    pub(crate) fn for_model(model: &ModelSpec) -> Self {
         Self {
-            model_id: ENGLISH_MODEL.id.into(),
-            file_sha256: ENGLISH_MODEL.files[0].sha256.into(),
+            model_id: model.id.into(),
+            file_sha256: model.files[0].sha256.into(),
             runtime_version: crate::nemo::runtime_version(),
             build_key: crate::nemo::BUILD_KEY.into(),
-            lookahead: 13,
+            lookahead: model.streaming.then_some(13),
             threads: crate::nemo::CPU_THREADS,
             feed_samples: FEED_SAMPLES,
             punctuation: crate::nemo::Options::default().punctuation,
             verbatim: crate::nemo::Options::default().verbatim,
             piece_policy: PiecePolicy::default(),
         }
+    }
+    fn model(&self) -> Result<&'static ModelSpec, Error> {
+        for model in [&ENGLISH_MODEL, &PARAKEET_MODEL] {
+            if self.model_id == model.id && self.file_sha256 == model.files[0].sha256 {
+                return Ok(model);
+            }
+        }
+        Err(Error::Model(ModelError::InvalidSpec))
     }
     fn validate(&self) -> Result<(), Error> {
         if self.feed_samples == 0 || self.feed_samples > FEED_SAMPLES {
@@ -518,7 +545,21 @@ pub struct BuiltinRecognizer {
 }
 impl BuiltinRecognizer {
     pub fn load(path: &Path, receipts: &Path, cancel: &ExportCancellation) -> Result<Self, Error> {
-        Self::load_identity(path, receipts, cancel, Identity::english(), None)
+        Self::load_for_language(path, receipts, cancel, None)
+    }
+    pub fn load_for_language(
+        path: &Path,
+        receipts: &Path,
+        cancel: &ExportCancellation,
+        language: Option<&str>,
+    ) -> Result<Self, Error> {
+        Self::load_identity(
+            path,
+            receipts,
+            cancel,
+            Identity::for_model(model_for_language(language)),
+            None,
+        )
     }
     fn load_identity(
         path: &Path,
@@ -528,9 +569,10 @@ impl BuiltinRecognizer {
         data_root: Option<&Path>,
     ) -> Result<Self, Error> {
         identity.validate()?;
+        let spec = identity.model()?;
         let verified = match data_root {
-            Some(root) => model::verify_at(root, &ENGLISH_MODEL.files[0], path, receipts, cancel)?,
-            None => model::verify(&ENGLISH_MODEL.files[0], path, receipts, cancel)?,
+            Some(root) => model::verify_at(root, &spec.files[0], path, receipts, cancel)?,
+            None => model::verify(&spec.files[0], path, receipts, cancel)?,
         };
         let native = crate::nemo::Recognizer::load_config(
             verified.path(),
@@ -550,7 +592,7 @@ impl Recognizer for BuiltinRecognizer {
         &self.identity
     }
     fn supports_streaming(&self) -> bool {
-        true
+        self.identity.lookahead.is_some()
     }
     fn session(
         &mut self,
@@ -558,15 +600,34 @@ impl Recognizer for BuiltinRecognizer {
         cancel: ExportCancellation,
     ) -> Result<Box<dyn Session + '_>, Error> {
         cancelled(&cancel)?;
+        self.identity.validate()?;
         let feed_samples = self.identity.feed_samples;
+        let policy = self.identity.piece_policy;
+        let streaming = self.supports_streaming();
         checked_session(&self.verified, || {
-            let backend = NativeBackend::open(&self.identity, |options| {
-                self.native.stream(options).map_err(Into::into)
-            })?;
-            Ok(
-                Box::new(Driver::new(backend, origin_us, cancel, feed_samples))
-                    as Box<dyn Session + '_>,
-            )
+            if streaming {
+                let backend = NativeBackend::open(&self.identity, |options| {
+                    self.native.stream(options).map_err(Into::into)
+                })?;
+                Ok(
+                    Box::new(Driver::new(backend, origin_us, cancel, feed_samples))
+                        as Box<dyn Session + '_>,
+                )
+            } else {
+                let native = &mut self.native;
+                let options = crate::nemo::Options {
+                    punctuation: self.identity.punctuation,
+                    verbatim: self.identity.verbatim,
+                };
+                let backend = offline::Offline::new(
+                    move |samples| native.recognize(samples, options).map_err(Into::into),
+                    &policy,
+                )?;
+                Ok(
+                    Box::new(Driver::new(backend, origin_us, cancel, feed_samples))
+                        as Box<dyn Session + '_>,
+                )
+            }
         })
     }
 }

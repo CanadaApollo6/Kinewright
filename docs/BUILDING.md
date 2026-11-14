@@ -229,7 +229,8 @@ The existing setup command also provisions NeMo-Speech.cpp v0.3.0 from commit
 commit hash from its official GitHub repository, and detached `HEAD` is checked
 against that pin. CMake builds against the
 prepared dependency prefix without fetching anything. The SDK cache key includes
-pins, patches, compiler and build settings; only `lib`, `bin`, `include`, `share`
+pins, patches, compiler and build settings; CI additionally keys by runner image.
+Missing CMake or Ninja is reported before compilation. Only `lib`, `bin`, `include`, `share`
 and `.build-key` remain after installation. Cargo's media `build.rs` only links.
 
 The CPU build uses `GGML_NATIVE=OFF`; it requires AVX2, FMA, F16C, BMI2 and SSE4.2.
@@ -242,7 +243,7 @@ Packaging copies both NeMo shared libraries and the notices under `LICENSES/`.
 Linux additionally requires the system OpenMP runtime (`libgomp.so.1`). Windows
 OpenMP installer work remains the follow-up noted above. Recognition uses CPU
 inference on both platforms. Model files and licences, cache identity, session
-clocks and the real-model slow-tier witness are documented in
+clocks and the real-model slow-tier witnesses are documented in
 [TRANSCRIPTION.md](TRANSCRIPTION.md).
 
 Application data (models, caches and feedback captures) is persistent:

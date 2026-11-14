@@ -58,3 +58,9 @@ There are no long-running services, databases, or dev servers — Kinewright is 
 desktop GUI binary. The only "server" is an in-process, ephemeral, localhost MCP
 endpoint the app starts for agent sessions. Launching the GUI needs a display
 (`DISPLAY` is typically set on this VM).
+
+Recognition uses Nemotron Speech Streaming EN when no language or English is
+requested, otherwise Parakeet TDT v3 offline on pause-delimited pieces. No language
+detection runs. Both models use the same session interface and exact source clock.
+Real-model tests use explicit model roots; tests must never discover the person's
+application data. See `docs/TRANSCRIPTION.md`.

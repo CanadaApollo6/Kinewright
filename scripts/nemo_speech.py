@@ -32,6 +32,12 @@ def build(args):
 
 
 def build_key():
+    tools = []
+    for name in ('cmake', 'ninja'):
+        executable = shutil.which(name)
+        if executable is None:
+            raise RuntimeError(f'NeMo requires {name} on PATH')
+        tools.append(Path(executable))
     compiler = os.environ.get('CXX', 'cl' if WINDOWS else 'c++')
     result = subprocess.run([compiler] + ([] if WINDOWS else ['--version']),
                             capture_output=True, check=False)
@@ -41,8 +47,8 @@ def build_key():
     digest.update(result.stdout + result.stderr)
     for name in ('CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS'):
         digest.update(name.encode() + b'=' + os.environ.get(name, '').encode())
-    for name in ('cmake', 'ninja'):
-        digest.update(Path(shutil.which(name)).read_bytes())
+    for executable in tools:
+        digest.update(executable.read_bytes())
     for path in sorted([SCRIPTS / 'nemo-speech-pins.json', SCRIPTS / 'nemo-speech.cmake',
                         SCRIPTS / 'nemo_speech.py', SCRIPTS / 'setup-nemo-speech.sh',
                         SCRIPTS / 'setup-nemo-speech.ps1', *SCRIPTS.glob('nemo-patches/*.patch')]):
@@ -93,6 +99,8 @@ def fetch(path, pin):
     actual = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
     if actual != pin['commit']:
         raise RuntimeError(f'Source pin mismatch: {path}: {actual}')
+    # A checkout with omitted tracked files must not reach CMake.
+    run(['git', '-C', path, 'diff-files', '--quiet', '--'])
 
 
 BUILD_TREES = ('src', 'sentencepiece-src', 'sentencepiece-build', 'build', 'deps')
@@ -207,4 +215,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (RuntimeError, FileNotFoundError) as error:
+        sys.exit(f'NeMo provisioning: {error}')

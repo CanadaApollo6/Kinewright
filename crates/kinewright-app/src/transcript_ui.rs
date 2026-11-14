@@ -145,6 +145,7 @@ impl KinewrightApp {
                 Self::running_transcript_label(ui, "Hashing media…", None);
             }
             TranscriptStatus::DownloadingModel {
+                model_name,
                 downloaded_bytes,
                 total_bytes,
             } => {
@@ -155,14 +156,14 @@ impl KinewrightApp {
                     || {
                         format!(
                             "Downloading {}… {} MiB",
-                            kinewright_media::recognizer::ENGLISH_MODEL.name,
+                            model_name,
                             downloaded_bytes / 1_048_576
                         )
                     },
                     |total| {
                         format!(
                             "Downloading {}… {} / {} MiB",
-                            kinewright_media::recognizer::ENGLISH_MODEL.name,
+                            model_name,
                             downloaded_bytes / 1_048_576,
                             total / 1_048_576
                         )

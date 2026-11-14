@@ -43,35 +43,34 @@ impl TranscriptInferenceHold {
     }
 }
 
+mod requests;
+use requests::{Recipe, Requests};
+
 pub(crate) struct TranscriptService {
     jobs: crate::worker::OwnedWorker<crate::locator::LocatorJob<TranscriptJob>>,
-    states: StatusReporter<TranscriptStatus>,
-    cancellations: CancellationRegistry,
+    requests: Requests,
     root: PathBuf,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
 }
-
 struct TranscriptJob {
     asset: MediaAsset,
-    language: Option<String>,
+    model: &'static recognizer::ModelSpec,
+    recipe: Recipe,
     cancellation: ExportCancellation,
 }
-
 impl Drop for TranscriptService {
     fn drop(&mut self) {
-        self.cancellations.shutdown();
+        self.requests.shutdown();
     }
 }
-
 impl TranscriptService {
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
         let data_dir = crate::data_dir::ensure_root(data_dir)?;
         let (jobs, jobs_rx) = unbounded();
-        let states = StatusReporter::new();
-        let cancellations = CancellationRegistry::default();
+        let requests = Requests::new();
         let root = cache_root(&data_dir, "transcripts", CACHE_VERSION);
-        let mut worker = TranscriptWorker::new(data_dir, states.clone(), cancellations.clone());
+        let mut worker = TranscriptWorker::new(data_dir, requests.clone());
         #[cfg(any(test, feature = "test-util"))]
         let inference_gate = Arc::clone(&worker.inference_gate);
         let jobs = spawn_worker(
@@ -83,10 +82,8 @@ impl TranscriptService {
                     &mut worker,
                     |worker, job| worker.handle(&job),
                     |worker, job, error| {
-                        worker.update(&job.asset.path, TranscriptStatus::Failed(error.to_string()));
-                        worker
-                            .cancellations
-                            .finish(&job.asset.path, &job.cancellation);
+                        worker.update(&job, TranscriptStatus::Failed(error.to_string()));
+                        worker.requests.finish(&job.asset.path, &job.cancellation);
                         true
                     },
                 )
@@ -94,14 +91,12 @@ impl TranscriptService {
         )?;
         Ok(Self {
             jobs,
-            states,
-            cancellations,
+            requests,
             root,
             #[cfg(any(test, feature = "test-util"))]
             inference_gate,
         })
     }
-
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn hold_inference(&self) -> TranscriptInferenceHold {
         let (arrived, arrival) = crossbeam_channel::bounded(1);
@@ -112,7 +107,6 @@ impl TranscriptService {
             _release: release,
         }
     }
-
     pub(crate) fn request(
         &self,
         asset: MediaAsset,
@@ -121,27 +115,17 @@ impl TranscriptService {
     ) {
         let _authority = crate::locator::LocatorAuthority::enter(&grant);
         if !matches!(asset.kind, MediaKind::Audio | MediaKind::AudioVideo) {
-            self.update(&asset.path, TranscriptStatus::NoSpeech);
+            self.requests.no_audio(&asset.path);
             return;
         }
-        let should_queue = self.states.should_queue(&asset.path, |status| {
-            matches!(
-                status,
-                TranscriptStatus::Queued
-                    | TranscriptStatus::Hashing
-                    | TranscriptStatus::DownloadingModel { .. }
-                    | TranscriptStatus::Transcribing { .. }
-                    | TranscriptStatus::Ready(_)
-                    | TranscriptStatus::NoSpeech
-            )
-        });
-        if !should_queue {
-            return;
-        }
-        let Some(cancellation) = self.cancellations.start(&asset.path) else {
+        let model = recognizer::model_for_language(language.as_deref());
+        let recipe = Recipe {
+            identity: Identity::for_model(model),
+            language,
+        };
+        let Some(cancellation) = self.requests.admit(&asset.path, &recipe) else {
             return;
         };
-        self.update(&asset.path, TranscriptStatus::Queued);
         let path = asset.path.clone();
         if self
             .jobs
@@ -149,57 +133,45 @@ impl TranscriptService {
                 grant,
                 TranscriptJob {
                     asset,
-                    language,
+                    model,
+                    recipe,
                     cancellation: cancellation.clone(),
                 },
             ))
             .is_err()
         {
-            self.cancellations.finish(&path, &cancellation);
-            self.update(
+            self.requests.update(
                 &path,
-                TranscriptStatus::Failed("transcript worker stopped".to_owned()),
+                &cancellation,
+                TranscriptStatus::Failed("transcript worker stopped".into()),
             );
+            self.requests.finish(&path, &cancellation);
         }
     }
-
     pub(crate) fn status(&self, path: &Path) -> TranscriptStatus {
-        self.states.get_or(path, TranscriptStatus::NotRequested)
+        self.requests.status(path)
     }
-
     pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
-        self.cancellations.retire(authority);
-        self.states.retire(authority);
+        self.requests.retire(authority);
     }
-
     pub(crate) fn cancel_all(&self) {
-        self.cancellations.cancel_all();
+        self.requests.cancel_all();
     }
-
     pub(crate) fn cancel(&self, path: &Path) -> bool {
-        let cancelled = self.cancellations.cancel(path);
-        if cancelled {
-            self.update(path, TranscriptStatus::Cancelled);
-        }
-        cancelled
+        self.requests.cancel(path)
     }
-
     pub(crate) fn register(&self, path: &Path, transcript: AssetTranscript) {
-        self.update(path, TranscriptStatus::Ready(Arc::new(transcript)));
+        self.requests.register(path, transcript);
     }
-
     pub(crate) fn cache_stats(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
         crate::derived_cache::inventory_cache_root(&self.root)
     }
-
     pub(crate) fn cache_root(&self) -> &Path {
         &self.root
     }
-
     pub(crate) fn clear_cache(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
         crate::derived_cache::clear_cache_root(&self.root)
     }
-
     pub(crate) fn timeline_words(
         &self,
         document: &Document,
@@ -210,92 +182,74 @@ impl TranscriptService {
             _ => None,
         })
     }
-
-    fn update(&self, path: &Path, status: TranscriptStatus) {
-        self.states.update(path, status);
-    }
 }
-
 struct TranscriptWorker {
     data_dir: PathBuf,
-    states: StatusReporter<TranscriptStatus>,
+    requests: Requests,
     store: TranscriptStore,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
-    cancellations: CancellationRegistry,
 }
-
 impl TranscriptWorker {
-    fn new(
-        data_dir: PathBuf,
-        states: StatusReporter<TranscriptStatus>,
-        cancellations: CancellationRegistry,
-    ) -> Self {
+    fn new(data_dir: PathBuf, requests: Requests) -> Self {
         Self {
             store: TranscriptStore::new(cache_root(&data_dir, "transcripts", CACHE_VERSION)),
             data_dir,
-            states,
+            requests,
             #[cfg(any(test, feature = "test-util"))]
             inference_gate: Arc::default(),
-            cancellations,
         }
     }
-
     fn handle(&mut self, job: &TranscriptJob) -> bool {
-        if let Err(error) =
-            self.transcribe_asset(&job.asset, job.language.as_deref(), &job.cancellation)
-        {
-            let status = if error == MediaError::Cancelled {
-                TranscriptStatus::Cancelled
-            } else {
-                TranscriptStatus::Failed(error.to_string())
-            };
-            self.update(&job.asset.path, status);
+        if let Err(error) = self.transcribe_asset(job) {
+            self.update(
+                job,
+                if error == MediaError::Cancelled {
+                    TranscriptStatus::Cancelled
+                } else {
+                    TranscriptStatus::Failed(error.to_string())
+                },
+            );
         }
-        self.cancellations
-            .finish(&job.asset.path, &job.cancellation);
+        self.requests.finish(&job.asset.path, &job.cancellation);
         true
     }
-
-    fn transcribe_asset(
-        &mut self,
-        asset: &MediaAsset,
-        language: Option<&str>,
-        cancellation: &ExportCancellation,
-    ) -> Result<(), MediaError> {
+    fn transcribe_asset(&mut self, job: &TranscriptJob) -> Result<(), MediaError> {
+        let asset = &job.asset;
+        let cancellation = &job.cancellation;
+        let language = job.recipe.language.as_deref();
+        let identity = &job.recipe.identity;
         cancelled(cancellation)?;
-        self.update(&asset.path, TranscriptStatus::Hashing);
+        self.update(job, TranscriptStatus::Hashing);
         let content_sha256 = sha256_file(&asset.path)?;
         cancelled(cancellation)?;
-        let identity = Identity::english();
-        if language.is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("en")) {
-            return Err(recognizer::Error::UnsupportedLanguage.into());
-        }
         if let Some(cached) = self.store.load(
             &content_sha256,
-            &identity,
+            identity,
             asset.fps,
             asset.duration,
             language,
         )? {
             cancelled(cancellation)?;
-            self.finish(&asset.path, cached.into_asset(asset.id)?);
+            self.finish(job, cached.into_asset(asset.id)?);
             return Ok(());
         }
-
         #[cfg(any(test, feature = "test-util"))]
         self.hold_before_inference(asset, cancellation)?;
-
-        let states = self.states.clone();
+        let requests = self.requests.clone();
         let asset_path = asset.path.clone();
+        let request_cancel = cancellation.clone();
+        let model = job.model;
         let model_root = recognizer::provision(
-            &ENGLISH_MODEL,
+            model,
             &self.data_dir,
             cancellation,
             move |downloaded_bytes, total_bytes| {
-                states.update(
+                requests.update(
                     &asset_path,
+                    &request_cancel,
                     TranscriptStatus::DownloadingModel {
+                        model_name: model.name.into(),
                         downloaded_bytes,
                         total_bytes,
                     },
@@ -304,14 +258,17 @@ impl TranscriptWorker {
         )
         .map_err(MediaError::from)?;
         self.update(
-            &asset.path,
+            job,
             TranscriptStatus::Transcribing {
                 progress_percent: 0,
             },
         );
-        let states = self.states.clone();
+        let requests = self.requests.clone();
         let asset_path = asset.path.clone();
+        let request_cancel = cancellation.clone();
         let source_us = source_duration_us(asset.duration, asset.fps)?;
+        // The queued loaded model can outlive this job while another request
+        // waits, so it retains an owned copy of the frozen request identity.
         let recognized = recognizer::queue::file(
             &self.data_dir,
             &model_root,
@@ -319,14 +276,15 @@ impl TranscriptWorker {
             asset.duration,
             asset.fps,
             cancellation.clone(),
-            identity,
+            identity.clone(),
             move |processed| {
                 let progress_percent =
                     u8::try_from(processed.saturating_mul(100) / source_us.max(1))
                         .unwrap_or(100)
                         .min(100);
-                states.update(
+                requests.update(
                     &asset_path,
+                    &request_cancel,
                     TranscriptStatus::Transcribing { progress_percent },
                 );
             },
@@ -342,10 +300,9 @@ impl TranscriptWorker {
         });
         let stored = self.store.save_completed(completed, cancellation)?;
         cancelled(cancellation)?;
-        self.finish(&asset.path, stored.into_asset(asset.id)?);
+        self.finish(job, stored.into_asset(asset.id)?);
         Ok(())
     }
-
     #[cfg(any(test, feature = "test-util"))]
     fn hold_before_inference(
         &self,
@@ -375,17 +332,19 @@ impl TranscriptWorker {
         }
         Ok(())
     }
-
-    fn finish(&self, path: &Path, transcript: AssetTranscript) {
-        if transcript.words.is_empty() {
-            self.update(path, TranscriptStatus::NoSpeech);
-        } else {
-            self.update(path, TranscriptStatus::Ready(Arc::new(transcript)));
-        }
+    fn finish(&self, job: &TranscriptJob, transcript: AssetTranscript) {
+        self.update(
+            job,
+            if transcript.words.is_empty() {
+                TranscriptStatus::NoSpeech
+            } else {
+                TranscriptStatus::Ready(Arc::new(transcript))
+            },
+        );
     }
-
-    fn update(&self, path: &Path, status: TranscriptStatus) {
-        self.states.update(path, status);
+    fn update(&self, job: &TranscriptJob, status: TranscriptStatus) {
+        self.requests
+            .update(&job.asset.path, &job.cancellation, status);
     }
 }
 

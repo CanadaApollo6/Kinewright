@@ -107,17 +107,20 @@ pub(super) fn check_abi() -> Result<(), Error> {
 
 pub(super) struct Recognizer(NonNull<Handle>);
 impl Recognizer {
-    pub(super) fn load(path: &Path, threads: u8, lookahead: u8) -> Result<Self, Error> {
+    pub(super) fn load(path: &Path, threads: u8, lookahead: Option<u8>) -> Result<Self, Error> {
         let path = CString::new(path.to_str().ok_or(Error::InvalidPath)?)
             .map_err(|_| Error::InvalidPath)?;
         let (mut backend, mut model, mut streaming, mut config) = configs()?;
         backend.gpu = -1;
         backend.threads = i32::from(threads);
         model.path = path.as_ptr();
-        streaming.rnnt_right_context = i32::from(lookahead);
         config.backend = &raw const backend;
         config.model = &raw const model;
-        config.streaming = &raw const streaming;
+        config.streaming = ptr::null();
+        if let Some(lookahead) = lookahead {
+            streaming.rnnt_right_context = i32::from(lookahead);
+            config.streaming = &raw const streaming;
+        }
         config.log_status = false;
         let mut out = ptr::null_mut();
         // SAFETY: all config pointers stay live during create, which copies their data; out is writable.
@@ -211,6 +214,14 @@ struct ResultHandle {
 }
 // SAFETY: signatures match the pinned asr.h; handles stay owned by their wrappers.
 unsafe extern "C" {
+    fn nemo_speech_asr_recognize_f32(
+        recognizer: *mut Handle,
+        options: *const RecognitionOptions,
+        samples: *const f32,
+        count: usize,
+        sample_rate: i32,
+        result: *mut *mut ResultHandle,
+    ) -> i32;
     fn nemo_speech_asr_streaming_recognize(
         recognizer: *mut Handle,
         options: *const RecognitionOptions,
@@ -268,7 +279,7 @@ pub(super) struct Stream<'a> {
 struct ResultOwner(NonNull<ResultHandle>);
 impl Drop for ResultOwner {
     fn drop(&mut self) {
-        // SAFETY: next transferred exactly one result; only this owner destroys it.
+        // SAFETY: the successful C call transferred exactly one result; only this owner destroys it.
         unsafe { nemo_speech_asr_result_destroy(self.0.as_ptr()) };
     }
 }
@@ -289,6 +300,36 @@ fn options(settings: super::Options) -> Result<RecognitionOptions, Error> {
     options.enable_automatic_punctuation = settings.punctuation;
     options.verbatim_transcripts = settings.verbatim;
     Ok(options)
+}
+impl Recognizer {
+    pub(super) fn recognize(
+        &mut self,
+        samples: &[f32],
+        settings: super::Options,
+    ) -> Result<Frame, Error> {
+        let mut options = options(settings)?;
+        options.interim_results = false;
+        let mut out = ptr::null_mut();
+        // SAFETY: the model, options and sample slice live through this synchronous call; out is writable.
+        let status = unsafe {
+            nemo_speech_asr_recognize_f32(
+                self.0.as_ptr(),
+                &raw const options,
+                samples.as_ptr(),
+                samples.len(),
+                16_000,
+                &raw mut out,
+            )
+        };
+        status_result(status).map_err(Error::Native)?;
+        let result = NonNull::new(out).map(ResultOwner).ok_or_else(|| {
+            Error::Native(NativeError {
+                status: Status::Runtime,
+                message: "offline recognition succeeded without a result".into(),
+            })
+        })?;
+        read_result(&result)
+    }
 }
 impl Recognizer {
     pub(super) fn stream(&mut self, settings: super::Options) -> Result<Stream<'_>, Error> {
@@ -342,37 +383,39 @@ impl Stream<'_> {
         let Some(result) = NonNull::new(out).map(ResultOwner) else {
             return Ok(None);
         };
-        let pointer = result.0.as_ptr();
-        // SAFETY: all accessors borrow this result, whose owner lives through the copied data.
-        let (final_result, processed, text, count) = unsafe {
-            (
-                nemo_speech_asr_result_is_final(pointer),
-                nemo_speech_asr_result_audio_processed(pointer),
-                result_text(nemo_speech_asr_result_transcript(pointer, 0))?,
-                nemo_speech_asr_result_word_count(pointer, 0),
-            )
-        };
-        let mut words = Vec::with_capacity(count);
-        for index in 0..count {
-            // SAFETY: index is in the accessor-reported top-alternative word range; data are copied before drop.
-            let word = unsafe {
-                Word {
-                    text: result_text(nemo_speech_asr_result_word_text(pointer, 0, index))?,
-                    start_us: i64::from(nemo_speech_asr_result_word_start_time(pointer, 0, index))
-                        * 1000,
-                    end_us: i64::from(nemo_speech_asr_result_word_end_time(pointer, 0, index))
-                        * 1000,
-                }
-            };
-            words.push(word);
-        }
-        Ok(Some(Frame {
-            final_result,
-            audio_processed_us: processed_us(processed)?,
-            text,
-            words,
-        }))
+        read_result(&result).map(Some)
     }
+}
+fn read_result(result: &ResultOwner) -> Result<Frame, Error> {
+    let pointer = result.0.as_ptr();
+    // SAFETY: all accessors borrow this result, whose owner lives through the copied data.
+    let (final_result, processed, text, count) = unsafe {
+        (
+            nemo_speech_asr_result_is_final(pointer),
+            nemo_speech_asr_result_audio_processed(pointer),
+            result_text(nemo_speech_asr_result_transcript(pointer, 0))?,
+            nemo_speech_asr_result_word_count(pointer, 0),
+        )
+    };
+    let mut words = Vec::with_capacity(count);
+    for index in 0..count {
+        // SAFETY: index is in the accessor-reported top-alternative word range; data are copied before drop.
+        let word = unsafe {
+            Word {
+                text: result_text(nemo_speech_asr_result_word_text(pointer, 0, index))?,
+                start_us: i64::from(nemo_speech_asr_result_word_start_time(pointer, 0, index))
+                    * 1000,
+                end_us: i64::from(nemo_speech_asr_result_word_end_time(pointer, 0, index)) * 1000,
+            }
+        };
+        words.push(word);
+    }
+    Ok(Frame {
+        final_result,
+        audio_processed_us: processed_us(processed)?,
+        text,
+        words,
+    })
 }
 fn result_text(pointer: *const c_char) -> Result<String, Error> {
     if pointer.is_null() {

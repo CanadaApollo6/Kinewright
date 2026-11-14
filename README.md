@@ -27,7 +27,7 @@ Kinewright is a **native desktop** video editor written in Rust — the same fas
 - **Not a video generator.** Models never create footage here. They edit footage *you shot*. The source of truth is your media plus an inspectable edit log — never model output.
 - **Bring your own subscription.** Kinewright drives the agent CLIs already installed on your machine (Claude Code, Codex CLI, Cursor Agent, Muse, OpenCode, Qwen Code, Kimi, Kiro, Devin, or Copilot). No API keys to paste, no account, no server, no markup. The CLI handles auth; Kinewright never sees a credential.
 - **Human/agent parity by construction.** Every Kinewright mutation — human or agent — is an `Operation` flowing through one core actor. The agent's editing tools are *generated from the operation set*, so it receives the same validated, undoable editing vocabulary as the GUI.
-- **Edit by transcript.** Local NVIDIA Nemotron Speech Streaming EN transcription (CPU, one-time model download) gives the agent token-duration word timestamps. These times lag sound; measured cut boundaries are a separate step.
+- **Edit by transcript.** Local NVIDIA Nemotron Speech Streaming EN and Parakeet transcription (CPU, one-time model download) gives the agent token-duration word timestamps. These times lag sound; measured cut boundaries are a separate step.
 - **Free forever.** GPLv3. No paid tier, no telemetry, no plans to monetize.
 
 ## Features
@@ -136,7 +136,7 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the bui
 
 ## License
 
-[GPL-3.0-only](LICENSE). Kinewright bundles a GPL build of [FFmpeg](https://ffmpeg.org/) (which is why the GPL is a feature here, not a constraint), the [Inter](https://rsms.me/inter/) and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) typefaces (SIL OFL 1.1), and the Apache-2.0 [NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp) runtime. It downloads NVIDIA Nemotron Speech Streaming EN weights under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) on first use; see [transcription assets](docs/TRANSCRIPTION.md) and [licence notices](LICENSES/NVIDIA-models-NOTICE.txt).
+[GPL-3.0-only](LICENSE). Kinewright bundles a GPL build of [FFmpeg](https://ffmpeg.org/) (which is why the GPL is a feature here, not a constraint), the [Inter](https://rsms.me/inter/) and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) typefaces (SIL OFL 1.1), and the Apache-2.0 [NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp) runtime. It downloads NVIDIA Nemotron Speech Streaming EN weights under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) on first use, or Parakeet TDT v3 weights under CC-BY-4.0 for other language hints; see [transcription assets](docs/TRANSCRIPTION.md) and [licence notices](LICENSES/NVIDIA-models-NOTICE.txt).
 
 ---
 

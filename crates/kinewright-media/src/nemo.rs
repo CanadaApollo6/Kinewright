@@ -84,10 +84,14 @@ impl Recognizer {
     /// Returns a typed CPU, ABI, file, path or native model error. This low-level
     /// operation does not replace the model's size and SHA-256 verification.
     pub fn load(model: &Path) -> Result<Self, Error> {
-        Self::load_config(model, CPU_THREADS, 13)
+        Self::load_config(model, CPU_THREADS, Some(13))
     }
 
-    pub(crate) fn load_config(model: &Path, threads: u8, lookahead: u8) -> Result<Self, Error> {
+    pub(crate) fn load_config(
+        model: &Path,
+        threads: u8,
+        lookahead: Option<u8>,
+    ) -> Result<Self, Error> {
         check_cpu()?;
         let metadata = fs::metadata(model).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -153,6 +157,11 @@ pub(crate) use ffi::Frame;
 pub(crate) use ffi::Word;
 pub(crate) struct Stream<'a> {
     native: ffi::Stream<'a>,
+}
+impl Recognizer {
+    pub(crate) fn recognize(&mut self, samples: &[f32], options: Options) -> Result<Frame, Error> {
+        self.native.recognize(samples, options)
+    }
 }
 impl Recognizer {
     pub(crate) fn stream(&mut self, options: Options) -> Result<Stream<'_>, Error> {
