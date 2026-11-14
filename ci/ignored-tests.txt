@@ -237,3 +237,7 @@ kinewright_media recognizer::real::dq1_real_ami_short_repeated_crosses_commit cr
 kinewright_media recognizer::real::dq1_real_parakeet_ami_short_keeps_um_and_known_words crates/kinewright-media/src/recognizer/real.rs any on-demand # on-demand: pinned Parakeet model; set KINEWRIGHT_PARAKEET_MODEL_DIR
 kinewright_media recognizer::real::dq1_real_parakeet_ami8_measurements crates/kinewright-media/src/recognizer/real.rs any on-demand # on-demand: pinned Parakeet model and KINEWRIGHT_ASR_AMI8 fixture
 kinewright_media recognizer::real::dq1_real_parakeet_ami30_bounded_memory crates/kinewright-media/src/recognizer/real.rs any on-demand # on-demand: pinned Parakeet model and KINEWRIGHT_ASR_AMI30; memory measurement
+
+kinewright_media sound_profile::tests::dq_media_measurement_file_benchmark crates/kinewright-media/src/sound_profile.rs any on-demand # explicit fixture/output paths; recognition benchmark also needs pinned EN model
+kinewright_media sound_profile::pass_comparison::dq_media_decode_pass_comparison crates/kinewright-media/src/sound_profile.rs any on-demand # explicit fixture/output paths; recognition benchmark also needs pinned EN model
+kinewright_media sound_profile::recognition_benchmark::dq_media_recognition_and_measurement_benchmark crates/kinewright-media/src/sound_profile.rs any on-demand # explicit fixture/output paths; recognition benchmark also needs pinned EN model

@@ -370,6 +370,11 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     let engine = FfmpegMediaEngine::new_with_data_dir(directory.root().to_path_buf())
         .unwrap()
         .into_legacy_fixture();
+    kinewright_media::sound_profile::SoundProfileCache::new(engine.data_dir()).unwrap();
+    let profile_path = engine
+        .data_dir()
+        .join("derived-analysis/v1/sound-profiles/v1/fixture.json");
+    std::fs::write(&profile_path, b"source-profile").unwrap();
     let inventory = engine.cache_inventory();
     assert_eq!(inventory.families.len(), 5);
     let visual = inventory
@@ -395,6 +400,33 @@ fn cache_inventory_is_honest_and_scoped_clear_is_idempotent() {
     assert!(!proxy.supported);
     assert_eq!(proxy.file_count, 0);
     assert!(proxy.note.as_deref().unwrap().contains("not supported"));
+
+    let analysis = inventory
+        .families
+        .iter()
+        .find(|family| family.family == MediaCacheFamily::DerivedAnalysis)
+        .unwrap();
+    assert_eq!(
+        analysis.file_count, 1,
+        "sound profiles must be included in cache inventory"
+    );
+    assert_eq!(analysis.bytes, 14);
+    let analysis_clear = engine
+        .clear_cache(MediaCacheFamily::DerivedAnalysis)
+        .unwrap();
+    assert_eq!(analysis_clear.removed_file_count, 1);
+    assert_eq!(analysis_clear.removed_bytes, 14);
+    assert!(
+        !profile_path.exists(),
+        "scoped analysis clear must remove sound profiles"
+    );
+    assert_eq!(
+        engine
+            .clear_cache(MediaCacheFamily::DerivedAnalysis)
+            .unwrap()
+            .removed_file_count,
+        0
+    );
 
     let cleared = engine.clear_cache(MediaCacheFamily::VisualAssets).unwrap();
     assert_eq!(cleared.removed_file_count, 1);

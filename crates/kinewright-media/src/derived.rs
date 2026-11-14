@@ -26,6 +26,11 @@ use crate::{
 };
 
 const CACHE_VERSION: u32 = 1;
+
+pub(crate) fn cache_directory(data_dir: &Path) -> Result<CacheDirectory, MediaError> {
+    cache_root(data_dir, "derived-analysis", CACHE_VERSION)
+}
+
 const ANALYSIS_SAMPLE_RATE: u32 = 48_000;
 const SCENE_WINDOW_FRAMES: i64 = 32;
 /// Speech-oriented silence threshold. -35 dBFS tracks perceived dialogue
@@ -117,7 +122,7 @@ impl DerivedAnalysisService {
         let silence_cancellations = CancellationRegistry::default();
         let scene_cancellations = CancellationRegistry::default();
         let beat_cancellations = CancellationRegistry::default();
-        let root = cache_root(data_dir, "derived-analysis", CACHE_VERSION)?;
+        let root = cache_directory(data_dir)?;
         let mut worker = DerivedAnalysisWorker::new(
             root.clone(),
             silence_states.clone(),

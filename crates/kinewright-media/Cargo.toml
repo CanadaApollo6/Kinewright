@@ -29,6 +29,7 @@ kinewright-hash = { path = "../kinewright-hash" }
 ab_glyph.workspace = true
 cpal.workspace = true
 crossbeam-channel.workspace = true
+earshot = "=1.2.2"
 ffmpeg-next.workspace = true
 half = { workspace = true, features = ["bytemuck"] }
 bytemuck.workspace = true

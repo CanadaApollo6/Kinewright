@@ -4748,6 +4748,17 @@ where
     failed
 }
 
+pub(crate) fn selected_audio_stream(
+    input: &ffmpeg::format::context::Input,
+    path: &Path,
+) -> Result<usize, MediaError> {
+    input
+        .streams()
+        .best(ffmpeg::media::Type::Audio)
+        .map(|stream| stream.index())
+        .ok_or_else(|| MediaError::Backend(format!("media {} has no audio stream", path.display())))
+}
+
 pub(crate) struct AudioDecoder {
     legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     path: PathBuf,
@@ -4796,13 +4807,10 @@ impl AudioDecoder {
         } else {
             crate::owned_io::DecodeInput::Legacy(media_input(path)?)
         };
+        let stream_index = selected_audio_stream(&input, path)?;
         let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Audio)
-            .ok_or_else(|| {
-                MediaError::Backend(format!("media {} has no audio stream", path.display()))
-            })?;
-        let stream_index = stream.index();
+            .stream(stream_index)
+            .expect("selected audio stream exists");
         let stream_time_base = stream.time_base();
         let stream_start = normalized_start(stream.start_time());
         ensure_decoder(&stream, "audio", path)?;
@@ -4861,16 +4869,32 @@ impl AudioDecoder {
     }
     #[cfg(test)]
     pub(crate) fn receive_certified_buffered(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
-        self.receive_frame()
+        self.receive_frame_with(&mut |_| Ok(()))
     }
     pub(crate) fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+        self.next_chunk_with(&mut |_| Ok(()))
+    }
+    pub(crate) fn next_measured_chunk(
+        &mut self,
+        measurement: &mut crate::sound_profile::Measurement,
+    ) -> Result<Option<Vec<f32>>, MediaError> {
+        let chunk = self.next_chunk_with(&mut |frame| measurement.source(frame))?;
+        if let Some(samples) = &chunk {
+            measurement.mono(samples);
+        }
+        Ok(chunk)
+    }
+    pub(crate) fn next_chunk_with(
+        &mut self,
+        observe: &mut impl FnMut(&ffmpeg::frame::Audio) -> Result<(), MediaError>,
+    ) -> Result<Option<Vec<f32>>, MediaError> {
         let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
         loop {
             self.input.check()?;
             if self.finished {
                 return Ok(None);
             }
-            if let Some(chunk) = self.receive_frame()?
+            if let Some(chunk) = self.receive_frame_with(observe)?
                 && !chunk.is_empty()
             {
                 return Ok(Some(chunk));
@@ -4901,7 +4925,10 @@ impl AudioDecoder {
 
     // FFmpeg frame receipt, resampling, and clipping form one ordered state transition.
     #[allow(clippy::too_many_lines)]
-    fn receive_frame(&mut self) -> Result<Option<Vec<f32>>, MediaError> {
+    fn receive_frame_with(
+        &mut self,
+        observe: &mut impl FnMut(&ffmpeg::frame::Audio) -> Result<(), MediaError>,
+    ) -> Result<Option<Vec<f32>>, MediaError> {
         let mut decoded = ffmpeg::frame::Audio::empty();
         let received = self.decoder.receive_frame(&mut decoded);
         if received.is_err() {
@@ -4916,6 +4943,7 @@ impl AudioDecoder {
             decoded_layout = ffmpeg::ChannelLayout::default(i32::from(decoded.channels()));
             decoded.set_channel_layout(decoded_layout);
         }
+        observe(&decoded)?;
         let decoded_rate = decoded.rate();
         if self.resampler.is_none() {
             let output_layout =

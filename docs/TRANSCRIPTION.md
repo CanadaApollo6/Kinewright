@@ -148,3 +148,29 @@ error; unavailable investigator storage keeps settings in memory with a notice.
 Cache reads, writes, inventory and clear check their original root and every
 created directory component again, including after a family directory is replaced.
 No data is read or migrated from the former temporary locations.
+
+## Acoustic evidence
+
+For media with a completed content identity, the transcript background job also
+builds a Core `SoundProfile`. It streams every source-rate sample and channel
+through `ProfileBuilder` for 10 ms peak and RMS hops, before downmixing. Earshot
+1.2.2 receives the decoder's same 16 kHz mono chunks as recognition, in 256-sample
+frames. A score greater than 0.5 marks that frame as voiced; every overlapping
+profile hop is voiced. Only the detector's final frame is zero-padded, and its
+interval ends at the real recording duration. An unavailable or failed detector
+is `NoVoiceInformation`, never a profile claiming no voice. Job cancellation,
+panics and status use the transcript worker's existing boundaries.
+
+Profiles live under `derived-analysis/v1/sound-profiles/v1/` in the application
+data root. The existing derived-analysis inventory and scoped clear include them. Their keys
+include the content SHA-256 and byte length, selected audio stream, source-level
+measurement version, Core hop, detector version, rate, frame size and threshold.
+They contain no recogniser identity. A transcript cache hit fills a missing
+profile without loading a model; switching recognition models reuses the profile.
+Media without a completed content hash is not measured. The stream selector is
+shared with recognition, export and the live mixer.
+
+The implementation holds hop output, voice intervals, one decoded frame and a
+256-sample detector carry, rather than the recording's PCM. Earshot's network is
+built into its pinned Rust crate, with no separate model download. Its MIT licence
+is included in [LICENSES/earshot-MIT.txt](../LICENSES/earshot-MIT.txt).

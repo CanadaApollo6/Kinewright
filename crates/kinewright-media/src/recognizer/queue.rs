@@ -235,6 +235,7 @@ pub(crate) fn file(
     fps: kinewright_core::Rational,
     cancel: ExportCancellation,
     identity: Identity,
+    profile: Option<crate::sound_profile::ProfileTarget>,
     progress: impl FnMut(u64) + Send + 'static,
 ) -> Result<Recognized, Error> {
     let request_cancel = cancel.clone();
@@ -246,23 +247,59 @@ pub(crate) fn file(
         identity,
         move |recognizer| {
             let end = crate::clock::frame_to_samples(frames, SAMPLE_RATE, fps);
-            let mut decoder = crate::audio::AudioDecoder::open(&path, SAMPLE_RATE, 1, 0, end)?;
-            drive(
-                recognizer,
-                &request_cancel,
-                |window| {
-                    if let Some(chunk) = decoder.next_chunk()? {
-                        window.extend(chunk);
-                        Ok(true)
-                    } else {
-                        Ok(false)
-                    }
-                },
-                progress,
-                true,
-            )
+            drive_file(recognizer, &path, end, &request_cancel, profile, progress)
         },
     )
+}
+
+fn drive_file(
+    recognizer: &mut dyn Recognizer,
+    path: &Path,
+    end: u64,
+    cancel: &ExportCancellation,
+    profile: Option<crate::sound_profile::ProfileTarget>,
+    progress: impl FnMut(u64),
+) -> Result<Recognition, Error> {
+    let mut decoder = crate::audio::AudioDecoder::open(
+        path,
+        SAMPLE_RATE,
+        1,
+        0,
+        if profile.is_some() { u64::MAX } else { end },
+    )?;
+    let mut measurement = profile
+        .as_ref()
+        .map(|_| crate::sound_profile::Measurement::new());
+    let mut remaining = end;
+    let recognition = drive(
+        recognizer,
+        cancel,
+        |window| {
+            let chunk = if let Some(measurement) = &mut measurement {
+                decoder.next_measured_chunk(measurement)?
+            } else {
+                decoder.next_chunk()?
+            };
+            if let Some(chunk) = chunk {
+                // The profile covers the real stream; recognition keeps its
+                // existing frame-bounded input contract.
+                let take = usize::try_from(remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(chunk.len());
+                window.extend_from_slice(&chunk[..take]);
+                remaining -= u64::try_from(take).expect("decoded chunk length");
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        },
+        progress,
+        true,
+    )?;
+    if let (Some(target), Some(measurement)) = (profile, measurement) {
+        target.save(measurement.finish()?, cancel)?;
+    }
+    Ok(recognition)
 }
 
 pub(crate) fn samples(
@@ -605,5 +642,103 @@ mod tests {
             drop(send);
             worker.join().unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+    struct RecordedAudio {
+        identity: Identity,
+        fed: Vec<f32>,
+        finished: bool,
+    }
+    impl Recognizer for RecordedAudio {
+        fn identity(&self) -> &Identity {
+            &self.identity
+        }
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+        fn session(
+            &mut self,
+            _: u64,
+            _: ExportCancellation,
+        ) -> Result<Box<dyn Session + '_>, Error> {
+            Ok(Box::new(self))
+        }
+    }
+    impl Session for &mut RecordedAudio {
+        fn feed(&mut self, samples: &[f32]) -> Result<(), Error> {
+            self.fed.extend_from_slice(samples);
+            Ok(())
+        }
+        fn commit_at(&mut self, _: u64) -> Result<(), Error> {
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<(), Error> {
+            self.finished = true;
+            Ok(())
+        }
+        fn step(&mut self) -> Result<Option<Update>, Error> {
+            Ok(None)
+        }
+    }
+    #[test]
+    fn dq_media_file_job_preserves_bounded_asr_pcm_and_caches_the_whole_source() {
+        use crate::sound_profile::{
+            ProfileIdentity, ProfileTarget, SoundMeasurement, SoundProfileCache,
+        };
+        use crate::test_support::{GeneratedMedia, TempDirectory, wav_f32};
+        crate::initialize_ffmpeg().unwrap();
+        let samples: Vec<f32> = (0..3200)
+            .map(|i| if i % 17 < 8 { 0.125 } else { -0.125 })
+            .collect();
+        let source = GeneratedMedia::from_bytes(
+            "dq-media-file-driver",
+            "wav",
+            &wav_f32(&samples, 16_000, 1),
+        );
+        let data = TempDirectory::new("dq-media-file-driver-root");
+        let fingerprint = kinewright_core::MediaSourceFingerprint {
+            content_sha256: Some(crate::sha256::sha256_file(source.path()).unwrap()),
+            byte_len: Some(std::fs::metadata(source.path()).unwrap().len()),
+        };
+        let target = ProfileTarget {
+            cache: SoundProfileCache::new(data.root()).unwrap(),
+            identity: ProfileIdentity::new(&fingerprint, 0).unwrap(),
+        };
+        let mut backend = RecordedAudio {
+            identity: Identity::english(),
+            fed: Vec::new(),
+            finished: false,
+        };
+        drive_file(
+            &mut backend,
+            source.path(),
+            1600,
+            &ExportCancellation::default(),
+            Some(target),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(backend.fed, samples[..1600], "DQ_MEDIA_ASR_PCM_AND_BOUND");
+        assert!(
+            backend.finished,
+            "recognizer must finish before cache publication"
+        );
+        let cache = SoundProfileCache::new(data.root()).unwrap();
+        let measured = cache
+            .load(&ProfileIdentity::new(&fingerprint, 0).unwrap())
+            .unwrap();
+        let Some(SoundMeasurement::Measured { profile }) = measured else {
+            panic!("DQ_MEDIA_FILE_JOB_PROFILE_PUBLICATION")
+        };
+        assert_eq!(
+            profile.duration_micros(),
+            200_000,
+            "DQ_MEDIA_PROFILE_WHOLE_SOURCE"
+        );
+        assert_eq!(profile.len(), 20);
     }
 }

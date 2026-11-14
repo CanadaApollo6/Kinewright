@@ -245,6 +245,7 @@ impl TranscriptWorker {
         self.update(job, TranscriptStatus::Hashing);
         let content_sha256 = sha256_file(&asset.path)?;
         cancelled(cancellation)?;
+        let profile_target = self.profile_target(asset, &content_sha256)?;
         if let Some(cached) = self.store.load(
             &content_sha256,
             identity,
@@ -252,6 +253,16 @@ impl TranscriptWorker {
             asset.duration,
             language,
         )? {
+            if let Some(target) = profile_target {
+                self.update(
+                    job,
+                    TranscriptStatus::Transcribing {
+                        progress_percent: 0,
+                    },
+                );
+                let measurement = crate::sound_profile::measure_file(&asset.path, cancellation)?;
+                target.save(measurement, cancellation)?;
+            }
             cancelled(cancellation)?;
             self.finish(job, cached.into_asset(asset.id)?);
             return Ok(());
@@ -296,6 +307,7 @@ impl TranscriptWorker {
             asset.fps,
             cancellation.clone(),
             identity.clone(),
+            profile_target,
             move |processed| {
                 let progress_percent =
                     u8::try_from(processed.saturating_mul(100) / source_us.max(1))
@@ -321,6 +333,39 @@ impl TranscriptWorker {
         cancelled(cancellation)?;
         self.finish(job, stored.into_asset(asset.id)?);
         Ok(())
+    }
+    fn profile_target(
+        &self,
+        asset: &MediaAsset,
+        content: &str,
+    ) -> Result<Option<crate::sound_profile::ProfileTarget>, MediaError> {
+        use crate::sound_profile::{ProfileIdentity, ProfileTarget, SoundProfileCache};
+        if !asset.source_fingerprint.is_verified() {
+            return Ok(None);
+        }
+        if asset.source_fingerprint.content_sha256.as_deref() != Some(content)
+            || asset.source_fingerprint.byte_len
+                != Some(
+                    std::fs::metadata(&asset.path)
+                        .map_err(|e| MediaError::Backend(e.to_string()))?
+                        .len(),
+                )
+        {
+            return Err(MediaError::Backend(
+                "source content no longer matches its identity; re-import it before measurement"
+                    .into(),
+            ));
+        }
+        let stream = crate::sound_profile::audio_stream(&asset.path)?;
+        let Some(identity) = ProfileIdentity::new(&asset.source_fingerprint, stream) else {
+            return Ok(None);
+        };
+        let cache = SoundProfileCache::new(&self.data_dir)?;
+        Ok(if cache.load(&identity)?.is_some() {
+            None
+        } else {
+            Some(ProfileTarget { cache, identity })
+        })
     }
     #[cfg(any(test, feature = "test-util"))]
     fn hold_before_inference(
@@ -1286,5 +1331,102 @@ mod tests {
                 "words must skip {content:?} over a still"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+    #[test]
+    fn dq_media_transcript_hit_fills_only_the_missing_profile_in_its_job() {
+        use crate::sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache};
+        use crate::test_support::{GeneratedMedia, TempDirectory, wav_f32};
+        crate::initialize_ffmpeg().unwrap();
+        let audio = GeneratedMedia::from_bytes(
+            "dq-media-transcript-profile",
+            "wav",
+            &wav_f32(&vec![0.125; 3200], 16_000, 1),
+        );
+        let data = TempDirectory::new("dq-media-transcript-profile-root");
+        let content = sha256_file(audio.path()).unwrap();
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: audio.path().into(),
+            name: "measured".into(),
+            duration: TimeCode(5),
+            fps: Rational::new(25, 1).unwrap(),
+            kind: MediaKind::Audio,
+            resolution: None,
+            source_fingerprint: kinewright_core::MediaSourceFingerprint {
+                content_sha256: Some(content.clone()),
+                byte_len: Some(std::fs::metadata(audio.path()).unwrap().len()),
+            },
+            color_description: kinewright_core::ColorDescription::default(),
+            assumed_from: None,
+        };
+        let requests = Requests::new();
+        let recipe = Recipe {
+            identity: Identity::english(),
+            language: None,
+        };
+        let cancellation = requests.admit(&asset.path, &recipe).unwrap();
+        let job = TranscriptJob {
+            asset,
+            model: &ENGLISH_MODEL,
+            recipe,
+            cancellation,
+        };
+        let mut worker = TranscriptWorker::new(
+            data.root().into(),
+            cache_root(data.root(), "transcripts", CACHE_VERSION).unwrap(),
+            requests,
+        );
+        worker
+            .store
+            .save_completed(
+                Ok(StoredTranscript {
+                    content_sha256: content,
+                    identity: Identity::english(),
+                    source_fps: job.asset.fps,
+                    source_frames: job.asset.duration,
+                    language: None,
+                    recognition: Recognition {
+                        timing_source: recognizer::TimingSource::TokenDurationsLagged,
+                        words: Vec::new(),
+                    },
+                }),
+                &job.cancellation,
+            )
+            .unwrap();
+        let key = ProfileIdentity::new(&job.asset.source_fingerprint, 0).unwrap();
+        let cache = SoundProfileCache::new(data.root()).unwrap();
+        assert!(cache.load(&key).unwrap().is_none());
+        // A regression into inference fails before provisioning, so even a
+        // broken cache-hit path cannot download a model in this fast test.
+        let (arrived, arrival) = crossbeam_channel::bounded(1);
+        let (release, released) = crossbeam_channel::bounded(1);
+        drop(release);
+        *worker.inference_gate.lock().unwrap() = Some((arrived, released));
+        worker.transcribe_asset(&job).unwrap();
+        assert!(matches!(
+            arrival.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty)
+        ));
+        let Some(SoundMeasurement::Measured { profile }) = cache.load(&key).unwrap() else {
+            panic!("transcript job must also publish its profile")
+        };
+        assert_eq!(profile.duration_micros(), 200_000);
+        assert!(
+            profile
+                .hops()
+                .all(|hop| (hop.rms_dbfs_hundredths + 1806).abs() <= 1)
+        );
+        assert!(
+            worker
+                .profile_target(&job.asset, &sha256_file(audio.path()).unwrap())
+                .unwrap()
+                .is_none(),
+            "a model change cannot request level remeasurement"
+        );
     }
 }

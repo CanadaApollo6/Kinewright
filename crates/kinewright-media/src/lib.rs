@@ -40,6 +40,7 @@ mod room_tone_store;
 mod s4_d13;
 mod sched;
 mod sha256;
+pub mod sound_profile;
 mod spectrum;
 mod stats;
 mod timeline;
