@@ -30,6 +30,7 @@ mod color;
 mod color_qc;
 mod creator;
 mod delivery;
+pub mod dialogue;
 mod editorial;
 mod effect;
 mod history;
