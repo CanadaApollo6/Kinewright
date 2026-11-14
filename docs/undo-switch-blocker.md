@@ -1,4 +1,12 @@
-# H2b merge-budget conflict
+# H2b merge-budget boundaries
+
+Ruling 5 authorizes replacing the separately sized profiles below with
+merge-compatible profiles and one document limit. The new qualification is in
+[Merge-path size qualification](undo-merge-limits.md). Its fixed-envelope
+option exceeds the ruling's 768 MiB total, before workspace or captures, so the
+product switch remains paused at that newer memory boundary. The original
+diagnostic below is retained as the first required acceptance case when that
+boundary is resolved; its current profiles and refusal are unchanged.
 
 The switch is paused before product callers move. Decision 6 of the H2b brief requires a delta Core's growth bound to fit its merge path; the earlier performance ruling requires room for at least 2,000 ordinary task commands. The accepted Task and Candidate profiles do not satisfy both requirements.
 
@@ -14,7 +22,7 @@ The portable diagnostic creates a one-track document, accepts 2,000 alternating 
 
 The encoded requirement alone exceeds Candidate's cap. The Task decoded figure includes its separate command/step overheads and is not presented as the merged batch's decoded charge. The diagnostic also prints the legacy actor's live estimate; it exceeds the old Candidate cap, so this is not a claim that the old native merger accepted this case.
 
-The failing assertion is `ADMITTED_TASK_DELTA_MUST_FIT_CANDIDATE_MERGE_PATH`. Both profiles are unchanged. Raising Candidate's component limits, rebudgeting its fixed 2 MiB retained envelope, lowering Task's admitted growth, or introducing delta compaction needs a ruling against the existing constraints before implementation proceeds.
+The failing assertion is `ADMITTED_TASK_DELTA_MUST_FIT_CANDIDATE_MERGE_PATH`. Both profiles are unchanged. Ruling 5 supplies the authority to raise their component limits while preserving Task room; the new qualification determines how that affects reservations.
 
 The source is [the diagnostic](measurements/undo-switch-task-candidate-probe.rs). To reproduce from the repository root, copy it temporarily to `crates/kinewright-project/examples/hx_task_candidate_probe.rs`, source `scripts/setup-ffmpeg.sh`, and run:
 
