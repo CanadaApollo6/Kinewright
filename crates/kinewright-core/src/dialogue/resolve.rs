@@ -10,6 +10,20 @@ pub enum AudibleSide {
     Out,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WordBoundary {
+    Start,
+    End,
+}
+/// The deepest word-timing intrusion at a measured dip, without copied text.
+/// This measurement is not permission to use the edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DipIntrusion {
+    pub word: usize,
+    pub boundary: WordBoundary,
+    pub micros: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CutRequest {
     RemoveWords {
@@ -49,6 +63,7 @@ pub enum EdgePlacement {
         dip_run: Span,
         rms_dbfs_hundredths: i16,
         shift: Shift,
+        intrusion: Option<DipIntrusion>,
     },
     SourceBoundary {
         at_start: bool,
@@ -115,6 +130,13 @@ pub enum RefusalReason {
     NotForward,
     #[error("the pause is already too short to leave the requested duration")]
     NothingToTrim,
+    #[error(
+        "measured word removal is {actual_micros} microseconds; at least {minimum_micros} are required"
+    )]
+    WordCutTooShort {
+        actual_micros: u64,
+        minimum_micros: u64,
+    },
     #[error("edge intersects sounding word #{index} {text:?}")]
     SoundingWord { index: usize, text: String },
     #[error("edge intersects sounding untranscribed audio")]
@@ -180,8 +202,8 @@ impl Dialogue {
         }
     }
     /// Guard a newly audible source edge, including sound omitted by the transcript.
-    /// Measured long quiet overrides stretched word timings. A deep instantaneous
-    /// dip is explicitly distinct from a pause, as in Scarlet's clip-edge guard.
+    /// Measured long quiet overrides stretched word timings. Inside a word,
+    /// a deep dip is usable only within the configured boundary reach.
     ///
     /// # Errors
     /// Returns a named sounding word, untranscribed sound, or missing measurement,
@@ -198,17 +220,20 @@ impl Dialogue {
             .profile
             .index_at(n, d)
             .ok_or_else(|| self.refuse(RefusalReason::Unmeasured, at))?;
-        if self.quiet_at_ratio(n, d)
-            || self
-                .profile
-                .hop(index)
-                .expect("validated index")
-                .rms_dbfs_hundredths
-                <= self.settings.dip_dbfs_hundredths
-        {
+        if self.quiet_at_ratio(n, d) {
             return Ok(());
         }
-        if let Some((index, word)) = self.interior_word(n, d) {
+        let dip = self
+            .profile
+            .hop(index)
+            .expect("validated index")
+            .rms_dbfs_hundredths
+            <= self.settings.dip_dbfs_hundredths;
+        if let Some((index, _, depth)) = self.deepest_intrusion(n, d) {
+            if dip && depth <= u128::from(self.settings.dip_reach_micros) * d {
+                return Ok(());
+            }
+            let word = &self.words[index];
             // The error owns the named word so it can outlive the analysis.
             return Err(self.refuse(
                 RefusalReason::SoundingWord {
@@ -218,7 +243,63 @@ impl Dialogue {
                 at,
             ));
         }
+        if dip {
+            return Ok(());
+        }
         Err(self.refuse(RefusalReason::UntranscribedSound, at))
+    }
+    fn deepest_intrusion(&self, n: u128, d: u128) -> Option<(usize, WordBoundary, u128)> {
+        let first = self
+            .words
+            .partition_point(|w| u128::from(w.end_micros) * d <= n);
+        self.words[first..]
+            .iter()
+            .enumerate()
+            .take_while(|(_, w)| u128::from(w.start_micros) * d < n)
+            .filter(|(_, w)| {
+                w.is_spoken()
+                    && u128::from(
+                        w.start_micros
+                            .saturating_add(self.settings.word_margin_micros),
+                    ) * d
+                        < n
+                    && n < u128::from(
+                        w.end_micros
+                            .saturating_sub(self.settings.word_margin_micros),
+                    ) * d
+            })
+            .map(|(i, w)| {
+                let from_start = n - u128::from(w.start_micros) * d;
+                let from_end = u128::from(w.end_micros) * d - n;
+                if from_start <= from_end {
+                    (first + i, WordBoundary::Start, from_start)
+                } else {
+                    (first + i, WordBoundary::End, from_end)
+                }
+            })
+            .max_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.cmp(&a.0)))
+    }
+    /// Measure a dip's word-timing intrusion at an integer source instant.
+    /// The guard independently decides whether it is usable. With overlapping
+    /// words the deepest intrusion wins; a quiet stretched timing can also be
+    /// reported without changing the guard's trusted-quiet rule.
+    #[must_use]
+    pub fn dip_intrusion(&self, at_micros: u64) -> Option<DipIntrusion> {
+        let n = u128::from(at_micros);
+        if at_micros == 0 || at_micros == self.profile.duration_micros() {
+            return None;
+        }
+        let index = self.profile.index_at(n, 1)?;
+        if self.profile.hop(index)?.rms_dbfs_hundredths > self.settings.dip_dbfs_hundredths {
+            return None;
+        }
+        let (word, boundary, depth) = self.deepest_intrusion(n, 1)?;
+        Some(DipIntrusion {
+            word,
+            boundary,
+            // Denominator one bounds depth by the u64 source duration.
+            micros: u64::try_from(depth).ok()?,
+        })
     }
     fn boundary(&self, start: bool) -> ResolvedEdge {
         let at = if start {
@@ -360,12 +441,21 @@ impl Dialogue {
         if let Some(edge) = best {
             return Ok(edge);
         }
-        let from = a.max(lo.min(hi).saturating_sub(self.settings.kept_slack_micros));
-        let to = b.min(lo.max(hi).saturating_add(self.settings.kept_slack_micros));
-        if let Some((at, index, db)) = self
-            .extreme(from, to, false)
-            .filter(|(_, _, db)| *db <= self.settings.dip_dbfs_hundredths)
-        {
+        let from = a.max(if start {
+            kept.end_micros
+                .saturating_sub(self.settings.dip_reach_micros)
+        } else {
+            lo.min(hi).saturating_sub(self.settings.kept_slack_micros)
+        });
+        let to = b.min(if start {
+            lo.max(hi).saturating_add(self.settings.kept_slack_micros)
+        } else {
+            kept.start_micros
+                .saturating_add(self.settings.dip_reach_micros)
+        });
+        if let Some((at, index, db)) = self.extreme(from, to, false).filter(|(at, _, db)| {
+            *db <= self.settings.dip_dbfs_hundredths && self.guard(*at, side).is_ok()
+        }) {
             let hop = self.profile.span(index);
             let dip_run = self
                 .dips
@@ -381,6 +471,7 @@ impl Dialogue {
                     dip_run,
                     rms_dbfs_hundredths: db,
                     shift: Shift::between(nominal, at),
+                    intrusion: self.dip_intrusion(at),
                 },
                 support: Support {
                     start: dip_run.start_micros.max(from),
@@ -448,6 +539,17 @@ impl Dialogue {
         }
         if start.at_micros >= end.at_micros {
             return Err(self.refuse(RefusalReason::NotForward, start.at_micros));
+        }
+        if matches!(request, CutRequest::RemoveWords { .. })
+            && end.at_micros - start.at_micros < self.settings.minimum_word_cut_micros
+        {
+            return Err(self.refuse(
+                RefusalReason::WordCutTooShort {
+                    actual_micros: end.at_micros - start.at_micros,
+                    minimum_micros: self.settings.minimum_word_cut_micros,
+                },
+                start.at_micros,
+            ));
         }
         self.guard(start.at_micros, start.side)?;
         self.guard(end.at_micros, end.side)?;

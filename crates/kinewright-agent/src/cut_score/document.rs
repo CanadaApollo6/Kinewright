@@ -16,6 +16,7 @@ fn source_micros(frame: TimeCode, fps: Rational) -> Result<u64, CannotScore> {
 /// Snapshot one named asset's contiguous, enabled, speed-one dialogue track.
 /// Does not read media or treat the project-file digest as recording identity.
 /// Other tracks are outside the selected dialogue score, not acoustic evidence.
+/// The caller names the dialogue track; its kind is not otherwise restricted.
 ///
 /// # Errors
 /// Refuses invalid documents, unverified sources, speed changes, mixed sources,
@@ -47,7 +48,22 @@ pub fn candidate_from_document(
     }
     // The DTO has source ranges, not a rendered mix. Refuse processing whose
     // audible result cannot be inferred from those ranges alone.
-    if !document.audio_mix.is_empty() {
+    let mix = &document.audio_mix;
+    let selected = mix.tracks.iter().find(|m| m.track == track_id);
+    let solo_excludes_selected =
+        mix.tracks.iter().any(|m| m.solo) && !selected.is_some_and(|m| m.solo);
+    if !mix.master.is_neutral()
+        || !mix.pan_law.is_balance()
+        || solo_excludes_selected
+        || selected.is_some_and(|m| {
+            m.mute
+                || m.gain_tenth_db != 0
+                || m.pan_percent != 0
+                || m.gain_curve.is_some()
+                || m.pan_curve.is_some()
+        })
+        || mix.buses.iter().any(|bus| bus.tracks.contains(&track_id))
+    {
         return Err(shape("audio mix processing or routing is not supported"));
     }
     let mut at = TimeCode::ZERO;

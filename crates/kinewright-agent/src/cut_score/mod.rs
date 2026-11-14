@@ -4,6 +4,7 @@
 
 mod document;
 mod intervals;
+mod matching;
 mod metrics;
 mod pacing;
 

@@ -150,3 +150,138 @@ fn cut_score_cli_typed_cannot_score_for_speed_and_wrong_recording() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["error"]["refusal"]["reason"], "recording_mismatch");
 }
+
+#[test]
+fn cut_score_cli_scores_supported_studio_save_without_writing() {
+    use kinewright_project::{
+        bundle::{BundleWriteAdmission, ProjectBundle},
+        owned_inputs::OwnedInputManifest,
+    };
+    fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn visit(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, out);
+                } else {
+                    out.insert(
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        visit(root, root, &mut out);
+        out
+    }
+    let temp = TempDirectory::new("dq4-studio");
+    let path = temp.path("studio.kinewright");
+    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    // A real small WAV is admitted only while creating the Studio fixture.
+    let samples = [0_u8; 9_600];
+    let mut bytes = Vec::new();
+    bytes.extend(b"RIFF");
+    bytes.extend(9_636_u32.to_le_bytes());
+    bytes.extend(b"WAVEfmt ");
+    bytes.extend(16_u32.to_le_bytes());
+    bytes.extend(1_u16.to_le_bytes());
+    bytes.extend(1_u16.to_le_bytes());
+    bytes.extend(48_000_u32.to_le_bytes());
+    bytes.extend(96_000_u32.to_le_bytes());
+    bytes.extend(2_u16.to_le_bytes());
+    bytes.extend(16_u16.to_le_bytes());
+    bytes.extend(b"data");
+    bytes.extend(9_600_u32.to_le_bytes());
+    bytes.extend(samples);
+    let (asset, entry, pins) = bundle
+        .store_mut()
+        .unwrap()
+        .import_media(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            AssetId(1),
+            &temp.path("absent.wav"),
+            None,
+        )
+        .unwrap();
+    let mut doc = document();
+    doc.duration = asset.duration;
+    doc.tracks[0].clips[0].source_range.end = asset.duration;
+    doc.media_pool[0] = asset;
+    let manifest = OwnedInputManifest {
+        project_id: Some(bundle.project_id().to_owned()),
+        session_id: None,
+        owner_epoch: bundle.store().owner_epoch(),
+        entries: vec![entry],
+    };
+    let inputs = bundle.admit_inputs(&manifest).unwrap().reference;
+    let core = kinewright_core::Core::spawn(doc).unwrap();
+    bundle.save(&core, &inputs).unwrap();
+    drop(pins);
+    drop(bundle);
+    drop(core);
+    assert!(BundleWriteAdmission::read(&path).unwrap().is_studio());
+    let case_path = temp.path("case.json");
+    let mut studio_case = case();
+    studio_case.recording_sha256 = manifest.entries.into_iter().next().unwrap().object.sha256;
+    studio_case.duration_micros = 100_000;
+    studio_case.reference_kept = vec![SourceRange {
+        start_micros: 0,
+        end_micros: 100_000,
+    }];
+    std::fs::write(&case_path, serde_json::to_vec(&studio_case).unwrap()).unwrap();
+    // Snapshot fixture bytes to prove that this real Studio read changes none.
+    let before = snapshot(temp.root());
+    let output = Command::new(env!("CARGO_BIN_EXE_kinewright-cut-score"))
+        .arg("--case")
+        .arg(&case_path)
+        .arg("--project")
+        .arg(&path)
+        .args(["--asset-id", "1", "--track-id", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "scored");
+    assert_eq!(result["score"]["reference_equivalent"], true);
+    assert_eq!(snapshot(temp.root()), before);
+}
+
+#[test]
+fn cut_score_cli_uses_exit_one_for_usage_read_and_json_errors() {
+    let temp = TempDirectory::new("dq4-errors");
+    for args in [vec![], vec!["--unknown"]] {
+        let result = Command::new(env!("CARGO_BIN_EXE_kinewright-cut-score"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+    }
+    let case_path = temp.path("case.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-cut-score"))
+        .arg("--case")
+        .arg(&case_path)
+        .arg("--ranges")
+        .arg(temp.path("ranges.json"))
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    std::fs::write(&case_path, b"{not json}").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-cut-score"))
+        .arg("--case")
+        .arg(&case_path)
+        .arg("--ranges")
+        .arg(temp.path("ranges.json"))
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+}

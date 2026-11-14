@@ -82,13 +82,15 @@ pub(super) fn total(ranges: &[SourceRange]) -> u128 {
         .sum()
 }
 
+/// One joined playback occurrence must retain at least half. Neither disjoint
+/// slivers nor repeated small fragments can add up to a retained word.
 pub(super) fn kept_word(start: u64, end: u64, kept: &[SourceRange]) -> bool {
     let r = SourceRange {
         start_micros: start,
         end_micros: end,
     };
-    let covered: u128 = kept.iter().map(|&k| u128::from(overlap(r, k))).sum();
-    covered * 2 >= u128::from(end - start)
+    kept.iter()
+        .any(|&k| u128::from(overlap(r, k)) * 2 >= u128::from(end - start))
 }
 
 pub(super) fn quantile(values: &[u64], numerator: u32, denominator: u32) -> Option<Ratio> {

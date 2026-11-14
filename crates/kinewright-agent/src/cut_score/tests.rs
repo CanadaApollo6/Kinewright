@@ -215,7 +215,7 @@ fn cut_score_edge_tolerances_distinguish_19_21_99_101_ms() {
 }
 
 #[test]
-fn cut_score_edges_are_nearest_first_one_to_one_and_same_side() {
+fn cut_score_single_reference_chooses_nearest_on_same_side() {
     // Scarlet: "matches each edge once, nearest first, on the same side".
     use super::metrics::{Edge, EdgeSide, match_edges};
     let c = [
@@ -646,4 +646,277 @@ fn cut_score_json_is_strict_and_reports_integer_exact_pairs() {
     assert_eq!(encoded["removed_words"]["precision"]["denominator"], 6);
     assert_eq!(encoded["removed_words"]["precision"]["display"], "0.667");
     assert!(encoded["time_to_first_change_micros"].is_null());
+}
+
+#[test]
+fn cut_score_competing_neighbors_maximize_matches_before_error() {
+    // Astra: the closer candidate used to lose a match to the greedy choice.
+    let mut case = fixture();
+    case.duration_micros = 2_000_000;
+    case.words = vec![
+        word("finish", 800_000, 1_000_000),
+        word("it", 1_110_000, 1_150_000),
+        word("now", 1_400_000, 1_800_000),
+    ];
+    case.reference_kept = vec![
+        range(0, 1_000_000),
+        range(1_110_000, 1_150_000),
+        range(1_400_000, 2_000_000),
+    ];
+    let a = measured(
+        &case,
+        vec![
+            range(0, 1_090_000),
+            range(1_110_000, 1_240_000),
+            range(1_400_000, 2_000_000),
+        ],
+    );
+    let b = measured(
+        &case,
+        vec![
+            range(0, 905_000),
+            range(1_110_000, 1_245_000),
+            range(1_400_000, 2_000_000),
+        ],
+    );
+    assert_eq!(
+        a.edges.within[1].reference_share.numerator, 4,
+        "DQ4_EDGE_ASSIGNMENT_MAX_CARDINALITY"
+    );
+    assert_eq!(b.edges.within[1].reference_share.numerator, 4);
+    assert_eq!(a.edges.matches.len(), 4);
+    assert_eq!(
+        a.edges
+            .p90_abs_error_micros
+            .as_ref()
+            .unwrap()
+            .display
+            .as_deref(),
+        Some("90000.000")
+    );
+    assert_eq!(
+        b.edges
+            .p90_abs_error_micros
+            .as_ref()
+            .unwrap()
+            .display
+            .as_deref(),
+        Some("95000.000")
+    );
+    for r in [&a, &b] {
+        assert!(
+            r.edges
+                .within
+                .windows(2)
+                .all(|w| w[0].removal.true_positive <= w[1].removal.true_positive)
+        );
+        let t = &r.edges.within[1];
+        assert_eq!(
+            (
+                t.removal.true_positive,
+                t.removal.false_positive,
+                t.removal.false_negative
+            ),
+            (4, 0, 0)
+        );
+    }
+}
+
+#[test]
+fn cut_score_tolerance_boundaries_include_20_100_and_1000_ms() {
+    let mut case = fixture();
+    case.reference_kept = vec![range(0, 4_000_000)];
+    for (offset, n20, n100) in [(20_000, 1, 1), (100_000, 0, 1), (1_000_000, 0, 0)] {
+        let s = measured(&case, vec![range(0, 4_000_000 + offset)]);
+        assert_eq!(
+            (
+                s.edges.within[0].reference_share.numerator,
+                s.edges.within[1].reference_share.numerator
+            ),
+            (n20, n100),
+            "DQ4_TOLERANCES_ARE_INCLUSIVE"
+        );
+        assert_eq!(s.edges.matches.len(), 1, "DQ4_WIDEST_WINDOW_IS_INCLUSIVE");
+    }
+    let s = asymmetric();
+    assert_eq!(
+        (
+            s.edges.within[0].removal.true_positive,
+            s.edges.within[0].removal.false_positive,
+            s.edges.within[0].removal.false_negative
+        ),
+        (3, 3, 1)
+    );
+    assert_eq!(
+        (
+            s.edges.within[1].removal.true_positive,
+            s.edges.within[1].removal.false_positive,
+            s.edges.within[1].removal.false_negative
+        ),
+        (4, 2, 0)
+    );
+}
+
+#[test]
+fn cut_score_half_word_occurrences_agree_with_pacing() {
+    let mut case = fixture();
+    case.words = vec![word("hello", 0, 1_000_000)];
+    case.reference_kept = vec![range(0, 1_000_000)];
+    for kept in [
+        vec![range(0, 500_000)],
+        vec![range(500_000, 1_000_000)],
+        vec![range(0, 250_000), range(250_000, 500_000)],
+    ] {
+        let s = measured(&case, kept);
+        assert_eq!(s.removed_words.false_positive, 0);
+        assert_eq!(s.pacing.played_words, 1);
+    }
+    for kept in [
+        vec![range(450_000, 550_000)],
+        vec![range(0, 250_000), range(750_000, 1_000_000)],
+        vec![range(450_000, 550_000), range(450_000, 550_000)],
+    ] {
+        let s = measured(&case, kept);
+        assert_eq!(s.removed_words.false_positive, 1);
+        assert_eq!(s.pacing.played_words, 0);
+    }
+    let repeated = measured(&case, vec![range(0, 500_000), range(0, 500_000)]);
+    assert_eq!(repeated.pacing.played_words, 2);
+    assert_eq!(repeated.removed_words.false_positive, 0);
+}
+
+#[test]
+fn cut_score_only_selected_track_mix_blocks_and_generated_content_refuses() {
+    use kinewright_core::{AudioBus, AudioBusId, ClipContent, SolidColor, TrackMix};
+    let mut d = document();
+    d.tracks.push(Track {
+        id: TrackId(2),
+        kind: TrackKind::Audio,
+        sync_lock: true,
+        clips: vec![],
+    });
+    d.audio_mix.buses.push(AudioBus {
+        id: AudioBusId(1),
+        name: "music".into(),
+        tracks: vec![TrackId(2)],
+        gain_tenth_db: -30,
+        gain_curve: None,
+        effects: vec![],
+        ducking_sidechain_tracks: vec![],
+    });
+    assert!(candidate_from_document(&d, AssetId(1), TrackId(1)).is_ok());
+    d.audio_mix.tracks.push(TrackMix {
+        gain_tenth_db: -20,
+        ..TrackMix::neutral(TrackId(2))
+    });
+    assert!(candidate_from_document(&d, AssetId(1), TrackId(1)).is_ok());
+    d.audio_mix.tracks.insert(
+        0,
+        TrackMix {
+            gain_tenth_db: -20,
+            ..TrackMix::neutral(TrackId(1))
+        },
+    );
+    assert!(matches!(
+        candidate_from_document(&d, AssetId(1), TrackId(1)),
+        Err(CannotScore::TrackShape { .. })
+    ));
+    d.audio_mix.tracks.remove(0);
+    d.audio_mix.tracks[0].solo = true;
+    assert!(matches!(
+        candidate_from_document(&d, AssetId(1), TrackId(1)),
+        Err(CannotScore::TrackShape { .. })
+    ));
+    d.audio_mix.tracks[0].solo = false;
+    d.audio_mix.buses[0].tracks = vec![TrackId(1)];
+    assert!(matches!(
+        candidate_from_document(&d, AssetId(1), TrackId(1)),
+        Err(CannotScore::TrackShape { .. })
+    ));
+    let mut d = document();
+    d.tracks[0].kind = TrackKind::Video;
+    d.tracks[0].clips[0].content = ClipContent::Solid(SolidColor::default());
+    assert_eq!(
+        candidate_from_document(&d, AssetId(1), TrackId(1)),
+        Err(CannotScore::TrackShape {
+            detail: "dialogue track contains another source or generated content"
+        })
+    );
+}
+
+#[test]
+fn cut_score_sentence_closers_keep_quoted_lines_separate() {
+    let mut case = fixture();
+    case.words = vec![
+        word("One.\"", 0, 100_000),
+        word("Two?]", 200_000, 300_000),
+        word("Three!)", 400_000, 500_000),
+    ];
+    case.reference_kept = vec![range(0, 1_000_000)];
+    let s = measured(&case, vec![]);
+    assert_eq!(s.required_lines.required, 3);
+    assert_eq!(s.required_lines.missing.len(), 3);
+    assert_eq!(s.required_lines.missing[0].text, "One.\"");
+}
+
+#[test]
+fn cut_score_ordered_assignment_agrees_with_exhaustive_small_cases() {
+    use super::metrics::{Edge, EdgeSide, match_edges};
+    fn brute(c: &[u64], r: &[u64], window: u64) -> (usize, u128) {
+        if c.is_empty() || r.is_empty() {
+            return (0, 0);
+        }
+        let a = brute(&c[1..], r, window);
+        let b = brute(c, &r[1..], window);
+        let better = |a: (usize, u128), b: (usize, u128)| {
+            if a.0 > b.0 || a.0 == b.0 && a.1 < b.1 {
+                a
+            } else {
+                b
+            }
+        };
+        let mut best = better(a, b);
+        if c[0].abs_diff(r[0]) <= window {
+            let tail = brute(&c[1..], &r[1..], window);
+            best = better(best, (tail.0 + 1, tail.1 + u128::from(c[0].abs_diff(r[0]))));
+        }
+        best
+    }
+    for seed in 0..128_u64 {
+        let mut c = vec![
+            (seed % 7) * 100_000,
+            ((seed / 3) % 7) * 100_000,
+            ((seed / 11) % 7) * 100_000,
+        ];
+        let mut r = vec![
+            ((seed / 5) % 7) * 100_000,
+            ((seed / 13) % 7) * 100_000,
+            ((seed / 17) % 7) * 100_000,
+        ];
+        let edges = |v: &[u64]| {
+            v.iter()
+                .map(|&t| Edge {
+                    at_micros: t,
+                    side: EdgeSide::Out,
+                })
+                .collect::<Vec<_>>()
+        };
+        for window in [0, 100_000, 300_000] {
+            let matches = match_edges(&edges(&c), &edges(&r), window);
+            let actual = (
+                matches.len(),
+                matches
+                    .iter()
+                    .map(|m| m.error_micros.unsigned_abs())
+                    .sum::<u128>(),
+            );
+            c.sort_unstable();
+            r.sort_unstable();
+            assert_eq!(actual, brute(&c, &r, window));
+            assert_eq!(
+                super::matching::match_count(&edges(&c), &edges(&r), window),
+                actual.0
+            );
+        }
+    }
 }

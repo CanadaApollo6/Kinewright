@@ -1,5 +1,5 @@
 // Derived from Scarlet packages/mcp/src/dialogue-join.ts at 2cbab542; see LICENSES/scarlet-MIT.txt.
-use super::{Dialogue, Hop, Refusal, RefusalReason, ResolvedEdge};
+use super::{AudibleSide, Dialogue, Hop, Refusal, RefusalReason, ResolvedEdge};
 use crate::{Rational, TimeCode};
 use serde::Serialize;
 
@@ -44,7 +44,13 @@ impl Dialogue {
         if first > last {
             return Err(self.refuse(RefusalReason::NoFrameInRun, edge.at_micros));
         }
-        let nearest = (u128::from(edge.at_micros) * n + scale / 2) / scale;
+        let position = u128::from(edge.at_micros) * n;
+        let lower = position / scale;
+        let remainder = position % scale;
+        let nearest = lower
+            + u128::from(
+                remainder * 2 > scale || remainder * 2 == scale && edge.side == AudibleSide::Out,
+            );
         let selected = nearest.clamp(first, last);
         let frame = i64::try_from(selected)
             .map_err(|_| self.refuse(RefusalReason::TimeOverflow, edge.at_micros))?;

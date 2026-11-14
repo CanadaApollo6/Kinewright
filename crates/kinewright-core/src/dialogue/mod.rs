@@ -13,8 +13,8 @@ pub use evidence::{Dialogue, Sound};
 pub use frame::FramedEdge;
 pub use profile::{DEFAULT_HOP_MICROS, Hop, LEVEL_FLOOR, ProfileError, SoundProfile};
 pub use resolve::{
-    AudibleSide, CutRequest, EdgePlacement, Refusal, RefusalReason, ResolvedCut, ResolvedEdge,
-    Shift, pad_edge,
+    AudibleSide, CutRequest, DipIntrusion, EdgePlacement, Refusal, RefusalReason, ResolvedCut,
+    ResolvedEdge, Shift, WordBoundary, pad_edge,
 };
 
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,8 @@ pub struct Settings {
     pub air_before_micros: u64,
     pub snap_limit_micros: u64,
     pub dip_dbfs_hundredths: i16,
+    pub dip_reach_micros: u64,
+    pub minimum_word_cut_micros: u64,
     pub in_word_gap_micros: u64,
     pub valley_pause_micros: u64,
     pub quiet_margin_micros: u64,
@@ -97,6 +99,8 @@ impl Default for Settings {
             air_before_micros: 100_000,
             snap_limit_micros: 120_000,
             dip_dbfs_hundredths: -5_500,
+            dip_reach_micros: 50_000,
+            minimum_word_cut_micros: 100_000,
             in_word_gap_micros: 100_000,
             valley_pause_micros: 100_000,
             quiet_margin_micros: 30_000,
@@ -106,7 +110,7 @@ impl Default for Settings {
             minimum_pause_cut_micros: 40_000,
             // Conservative centidB floors of Scarlet's amplitude thresholds:
             // RMS .01 / peak .05 and RMS .002 / peak .012 respectively.
-            quiet_rms_max: -4_000,
+            quiet_rms_max: -4_001,
             quiet_peak_max: -2_603,
             valley_rms_max: -5_398,
             valley_peak_max: -3_842,

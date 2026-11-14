@@ -97,9 +97,28 @@ fn run(args: impl Iterator<Item = OsString>) -> Result<Score, Failure> {
         if !options.is_empty() {
             return Err(arguments(USAGE));
         }
-        let (document, _, _) = kinewright_project::load_document(&path)
-            .map_err(|cause| Failure::Project { path, cause })?;
-        candidate_from_document(&document, asset, track)
+        let admission = match kinewright_project::bundle::BundleWriteAdmission::read(&path) {
+            Ok(admission) => admission,
+            Err(error) => {
+                return Err(Failure::Project {
+                    path,
+                    cause: error.to_string(),
+                });
+            }
+        };
+        if let Err(error) = admission.require_supported() {
+            return Err(Failure::Project {
+                path,
+                cause: error.to_string(),
+            });
+        }
+        let document = admission
+            .inspection_document()
+            .ok_or_else(|| Failure::Project {
+                path,
+                cause: "supported admission has no inspection document".into(),
+            })?;
+        candidate_from_document(document, asset, track)
             .map_err(|refusal| Failure::CannotScore { refusal })?
     };
     score(&case, &candidate, &ScoreSettings::default())
@@ -136,11 +155,16 @@ fn main() -> ExitCode {
             }
         }
         Err(error) => {
+            let code = if matches!(&error, Failure::CannotScore { .. }) {
+                2
+            } else {
+                1
+            };
             print_json(&Refused {
                 status: "cannot_score",
                 error,
             });
-            ExitCode::from(2)
+            ExitCode::from(code)
         }
     }
 }

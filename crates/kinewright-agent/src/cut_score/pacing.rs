@@ -56,8 +56,11 @@ fn played_words(words: &[Word], pieces: &[SourceRange]) -> Result<Vec<PlayedWord
     let mut offset = 0_u64;
     for (piece, range) in pieces.iter().enumerate() {
         for (word, w) in words.iter().enumerate() {
-            let middle = u64::midpoint(w.start_micros, w.end_micros);
-            if range.start_micros <= middle && middle < range.end_micros {
+            if super::intervals::kept_word(
+                w.start_micros,
+                w.end_micros,
+                std::slice::from_ref(range),
+            ) {
                 played.push(PlayedWord {
                     word,
                     piece,

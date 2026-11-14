@@ -95,33 +95,7 @@ fn edges(kept: &[SourceRange], duration: u64) -> Vec<Edge> {
     out
 }
 
-pub(super) fn match_edges(candidate: &[Edge], reference: &[Edge], window: u64) -> Vec<EdgeMatch> {
-    let mut possible = Vec::new();
-    for (i, c) in candidate.iter().enumerate() {
-        for (j, r) in reference.iter().enumerate() {
-            if c.side == r.side && c.at_micros.abs_diff(r.at_micros) <= window {
-                possible.push((c.at_micros.abs_diff(r.at_micros), i, j));
-            }
-        }
-    }
-    possible.sort_unstable();
-    let mut used_candidate = vec![false; candidate.len()];
-    let mut used_reference = vec![false; reference.len()];
-    let mut out = Vec::new();
-    for (_, i, j) in possible {
-        if used_candidate[i] || used_reference[j] {
-            continue;
-        }
-        used_candidate[i] = true;
-        used_reference[j] = true;
-        out.push(EdgeMatch {
-            candidate_index: i,
-            reference_index: j,
-            error_micros: i128::from(candidate[i].at_micros) - i128::from(reference[j].at_micros),
-        });
-    }
-    out
-}
+pub(super) use super::matching::match_edges;
 
 fn compare_edges(
     candidate: &[SourceRange],
@@ -135,7 +109,7 @@ fn compare_edges(
         .edge_tolerances_micros
         .iter()
         .map(|&tolerance| {
-            let matched = match_edges(&candidate, &reference, tolerance).len() as u128;
+            let matched = super::matching::match_count(&candidate, &reference, tolerance) as u128;
             EdgeTolerance {
                 tolerance_micros: tolerance,
                 reference_share: Ratio::new(matched, reference.len() as u128),
@@ -277,8 +251,8 @@ pub fn score(
             .map(|w| intervals::kept_word(w.start_micros, w.end_micros, kept))
             .collect()
     };
-    let candidate_labels = labels(&candidate_coverage);
-    let reference_labels = labels(&reference_coverage);
+    let candidate_labels = labels(&candidate_pieces);
+    let reference_labels = labels(&reference_pieces);
     let (mut tp, mut fp, mut missed) = (0_u128, 0_u128, 0_u128);
     for (&c, &r) in candidate_labels.iter().zip(&reference_labels) {
         match (c, r) {
