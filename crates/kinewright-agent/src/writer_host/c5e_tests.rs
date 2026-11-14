@@ -1680,3 +1680,295 @@ fn c5e_seeded_history_boundary(
     }
     eprintln!("C5_C3_BOUNDARY all_256_fit=true");
 }
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "expiry, independent Freeze and Stop must retain the same accepted edit through reopen"
+)]
+fn s4b_c5e_expired_authority_keeps_accepted_work_and_stops() {
+    let mut document = Document::default();
+    kinewright_core::apply_batch(
+        &mut document,
+        &[
+            kinewright_core::Operation::AddTrack {
+                track: kinewright_core::Track {
+                    id: kinewright_core::TrackId(81),
+                    kind: kinewright_core::TrackKind::Video,
+                    sync_lock: false,
+                    clips: vec![],
+                },
+            },
+            kinewright_core::Operation::AddSolidClip {
+                track: kinewright_core::TrackId(81),
+                timeline_start: kinewright_core::TimeCode(0),
+                duration: kinewright_core::TimeCode(10),
+                color: kinewright_core::SolidColor::default(),
+            },
+        ],
+    )
+    .unwrap();
+    let mut f = Fixture::with_document(false, document);
+    f.host.runtime.stop();
+    let host = f.host.owner.upgrade().unwrap();
+    let manual = host.lock().unwrap().core().export_history().unwrap();
+    f.brief.scope =
+        crate::orchestration::policy::director_scope(&manual.document, f.brief.scope.base.clone())
+            .unwrap();
+    let (run, parent, director) = c4_director(&f);
+    let run_auth = f.producer(&run);
+    let mut brief = f.brief.clone();
+    brief.role = Role::Editor;
+    director.accepted(
+        "assign_task",
+        OrchestrationCommand::AssignTask(Box::new(AssignTask {
+            run: run.clone(),
+            parent: parent.task.clone(),
+            brief,
+        })),
+    );
+    let task = f.projection(&run).tasks[1].id.clone();
+    let (first, client, endpoint, core) = c4_reserve_task(&f, &run, &task);
+    history_turn(&f, &first, &client, &endpoint, 1, true);
+    let editor = C4Mcp::new(&f, &run, &task);
+    let revision = grant_test_revision(&core);
+    let plan = editor.raw(
+        "prepare_edit_plan",
+        serde_json::json!({
+        "expected_revision":revision,"operations":[{"op":"delete_clip","clip":1}]}),
+    );
+    assert_eq!(plan.is_error, Some(false), "C5E_EXPIRY_PREPARE {plan:?}");
+    let applied = editor.raw(
+        "commit_edit_plan",
+        serde_json::json!({
+        "expected_revision":revision,"plan_id":plan.structured_content.unwrap()["plan_id"]}),
+    );
+    assert_eq!(
+        applied.is_error,
+        Some(false),
+        "C5E_EXPIRY_APPLIED {applied:?}"
+    );
+    let accepted = core.export_history().unwrap();
+    assert!(accepted.document.clip(kinewright_core::ClipId(1)).is_none());
+    history_turn(&f, &first, &client, &endpoint, 1, false);
+    drop(editor);
+    let claim_root = f.temp.path("c5e-expiry-machine");
+    let mut claim = crate::execution_claim::MachineClaim::acquire_fixture(
+        &claim_root,
+        parent.project.as_str(),
+        run.0.as_str(),
+    )
+    .unwrap();
+    // Continue the real accepted checkpoint into a short-lived attempt. This
+    // keeps edit latency out of the expiry ordering, without changing any clock.
+    crate::effect_pump::reconcile_attempt(&host, &mut claim, &run_auth, &first).unwrap();
+    let (attempt, client, endpoint, continued) =
+        c4_reserve_task_with_ttl(&f, &run, &task, Duration::from_secs(10));
+    assert_eq!(
+        continued.export_history().unwrap(),
+        accepted,
+        "C5E_EXPIRY_CONTINUED_EXACT"
+    );
+    history_turn(&f, &attempt, &client, &endpoint, 1, true);
+    let editor = C4Mcp::new(&f, &run, &task);
+    let finish = te13_control(&editor, &task, &continued);
+    let expires = endpoint.authority().expires_at;
+    while let Some(remaining) = expires.checked_duration_since(Instant::now()) {
+        std::thread::park_timeout(remaining);
+    }
+    let before = f.projection(&run);
+    let before_history_id = continued.history_change_id().unwrap();
+    let before_accounting = spending_record(&f, &run);
+    for (name, arguments, words) in [
+        (
+            "task_status",
+            serde_json::json!({}),
+            "task_authority_expired: task authority expired",
+        ),
+        (
+            "undo_task_edit",
+            serde_json::json!({"expected_revision":grant_test_revision(&continued)}),
+            "consent_liveness: task_authority_expired: task authority expired",
+        ),
+        (
+            "finish_task",
+            finish,
+            "task_authority_expired: task authority expired",
+        ),
+    ] {
+        let reply = editor.wire(name, arguments);
+        assert_eq!(
+            reply.is_error,
+            Some(true),
+            "C5E_EXPIRY_TYPED_REFUSAL {name} {reply:?}"
+        );
+        assert_eq!(
+            reply.structured_content,
+            Some(serde_json::json!({
+                "version":crate::orchestration::task_manifest::VERSION,
+                "receipt":null,
+                "outcome":{
+                    "content":[{"type":"text","text":words}],
+                    "is_error":true
+                },
+                "state":{
+                    "project":parent.project,"run":run,"phase":before.phase,
+                    "outcome":before.outcome,"sequence":before.sequence,
+                    "task":task,"task_state":before.tasks[1].state
+                }
+            })),
+            "C5E_EXPIRY_TYPED_REFUSAL {name} {reply:?}"
+        );
+    }
+    assert_eq!(
+        continued.export_history().unwrap(),
+        accepted,
+        "C5E_EXPIRY_ACCEPTED_HISTORY"
+    );
+    assert_eq!(
+        continued.history_change_id().unwrap(),
+        before_history_id,
+        "C5E_EXPIRY_HISTORY_REVISION"
+    );
+    // Refused MCP calls add durable refusal/size observations. Exclude only
+    // that accounting reference when comparing the command projection.
+    let mut before_command = serde_json::to_value(&before).unwrap();
+    let mut after_command = serde_json::to_value(f.projection(&run)).unwrap();
+    assert!(
+        before_command
+            .as_object_mut()
+            .unwrap()
+            .remove("usage")
+            .is_some()
+    );
+    assert!(
+        after_command
+            .as_object_mut()
+            .unwrap()
+            .remove("usage")
+            .is_some()
+    );
+    assert_eq!(after_command, before_command, "C5E_EXPIRY_NO_TRANSITION");
+    let after_accounting = spending_record(&f, &run);
+    let old_task = before_accounting
+        .tasks
+        .iter()
+        .find(|row| row.task == task.0);
+    assert_eq!(
+        after_accounting.tasks.len(),
+        before_accounting.tasks.len() + usize::from(old_task.is_none())
+    );
+    for new in &after_accounting.tasks {
+        if let Some(old) = before_accounting
+            .tasks
+            .iter()
+            .find(|old| old.task == new.task)
+        {
+            assert_eq!(new.sends, old.sends, "C5E_EXPIRY_NO_SEND");
+            assert_eq!(new.usage, old.usage, "C5E_EXPIRY_NO_PROVIDER_USAGE");
+            assert_eq!(new.providers, old.providers);
+            assert_eq!(new.totals, old.totals, "C5E_EXPIRY_TOTALS_KEPT");
+        } else {
+            // A refusal lazily creates this previously uncharged task's row.
+            assert_eq!(new.task, task.0);
+            assert!(
+                new.sends.is_empty() && new.usage.is_empty() && new.providers.is_empty(),
+                "C5E_EXPIRY_NO_SEND"
+            );
+            assert_eq!(new.totals.token_lower_bound, 0);
+        }
+    }
+    let new_task = after_accounting
+        .tasks
+        .iter()
+        .find(|row| row.task == task.0)
+        .unwrap();
+    for name in ["task_status", "undo_task_edit", "finish_task"] {
+        let count = |row: &kinewright_project::orchestration_accounting::TaskAccounting| {
+            row.refusals.iter().filter(|refusal| refusal.tool == name
+                && refusal.code == kinewright_project::orchestration_accounting::ToolRefusalCode::NotAdmitted)
+                .map(|refusal| refusal.count).sum::<u32>()
+        };
+        assert_eq!(
+            count(new_task),
+            old_task.map_or(0, count) + 1,
+            "C5E_EXPIRY_REFUSAL_COUNT {name}"
+        );
+    }
+    let summary = host.lock().unwrap().edit_approval_summary(&before);
+    assert!(
+        summary.approvals.len() == 1
+            && summary.approvals[0].applied
+            && summary.missing.is_empty()
+            && summary.uncertain.is_empty(),
+        "C5E_EXPIRY_AUDIT_KEPT {summary:?}"
+    );
+    director.accepted(
+        "freeze_task",
+        OrchestrationCommand::FreezeTask(task.clone()),
+    );
+    assert_eq!(
+        c5e_history(&f, &run, &task),
+        accepted,
+        "C5E_EXPIRY_FREEZE_EXACT"
+    );
+    let frozen_state = f.projection(&run);
+    assert!(
+        host.lock()
+            .unwrap()
+            .saved_task_history(&frozen_state, &task)
+            .unwrap()
+            .unwrap()
+            .frozen,
+        "C5E_EXPIRY_FROZEN"
+    );
+    te13_fix1_stop_host(&f.host, &run);
+    for execution in [&attempt, &parent] {
+        crate::effect_pump::reconcile_attempt(&host, &mut claim, &run_auth, execution).unwrap();
+    }
+    claim.finish().unwrap();
+    let state = f.projection(&run);
+    assert_eq!(state.phase, RunPhase::Finished, "C5E_EXPIRY_TERMINAL");
+    assert_eq!(state.cleanup, RunCleanup::Settled, "C5E_EXPIRY_CLEANUP");
+    assert!(
+        matches!(&state.outcome, RunOutcome::Cancelled(detail) if detail.code == "stopped_by_person")
+    );
+    host.lock()
+        .unwrap()
+        .owner_mut()
+        .unwrap()
+        .verify_retained_run_after_collection(&run)
+        .unwrap();
+    drop(editor);
+    drop(director);
+    drop(host);
+    let f = c4_restart(f, &claim_root);
+    assert_eq!(f.projection(&run), state, "C5E_EXPIRY_REOPEN_PROJECTION");
+    assert_eq!(
+        c5e_history(&f, &run, &task),
+        accepted,
+        "C5E_EXPIRY_REOPEN_HISTORY"
+    );
+    let host = f.host.owner.upgrade().unwrap();
+    let owner = host.lock().unwrap();
+    assert_eq!(
+        owner.core().export_history().unwrap(),
+        manual,
+        "C5E_EXPIRY_REOPEN_MANUAL"
+    );
+    let summary = owner.edit_approval_summary(&state);
+    assert!(
+        summary.approvals.len() == 1
+            && summary.approvals[0].applied
+            && summary.missing.is_empty()
+            && summary.uncertain.is_empty(),
+        "C5E_EXPIRY_REOPEN_AUDIT {summary:?}"
+    );
+    eprintln!(
+        "C5E_AUTHORITY_EXPIRY typed_refusal=true accepted_work=true finish=refused director_freeze=true stop=true cleanup=settled collection=true reopen_exact=true"
+    );
+}
