@@ -1,5 +1,7 @@
 # Operation-history qualification (H2a)
 
+Owner qualification is appended below: hand edits/open pass, while strict folding and one gesture-apply pair miss their ceilings. Both raw owner runs are retained; shipping readers still use the old history.
+
 The performance revision meets every explicit timing ceiling on the same heavy fixture in five alternating release pairs. An ordinary edit now adds one document copy and no exact document measurement; the existing kernel passes remain unchanged. Strict depth flatness remains unproven: the 32-sample ranges overlap in all five lanes, but the ranges of lane medians are disjoint, with a 7.3% increase from 1,000 to 10,000 steps. Old history remains in use in every product path.
 
 ## Performance revision and reproduction
@@ -288,3 +290,59 @@ Five strict alternating before/after release pairs use the same 400-clip fixture
 | Split | 1.256 [1.245, 1.288] | 1.255 [1.252, 1.277] | 1 copy, 1 exact, 253,367 document bytes |
 
 There is no measured speedup. Each command retains two kernel validation passes, one duration pass and two identity passes, counted separately from history work. Kernel passes remain unchanged; incremental kernel validation is a later job after the switch.
+
+<!-- hx-owner-qualification:start -->
+## Owner qualification (H2a part 2)
+
+Measured production source `41171a3ba37fca24a8e52d0f07cc7ab737140b9a`. Binary SHA-256 `9b75633724c4325dbe5b210588ed27ccd2fd12409e6353b4e87199226d10d03f`. [Complete raw pairs](measurements/undo-owner-41171a3b.json.gz) (gzip SHA-256 `01f19d0778f21968ddd458662cfafca882e912788a22041c47b07ab7cc21bc91`); [role measurements](measurements/undo-owner-roles-41171a3b.json); [interactive comparison](measurements/undo-owner-performance.html).
+
+All ten lanes exited zero with no unexpected errors. Both sides use the unchanged heavy fixture (400 clips, 400 effects, 3,200 keyframes; JSON 245,233 bytes), identical commands and the same five alternating release-pair method. An identical DeleteClip400/Undo prelude leaves a nonempty approval ledger on the new side; seeds and a media reference are present. The fold lane uses that same fixture and prelude, with the original 500-byte operation budget. Old history remains in every shipping caller. This measures standalone execution and store open, not writer/GUI latency.
+
+UTC 2026-11-14T10:25:40Z–2026-11-14T10:27:51Z; total lane wall time 129.430 s. One-minute load 7.29–9.06; 10/10 lanes sampled external work above 20% CPU. Peaks by process name: brave 23.6%, cc1plus 99.4%, pipewire 49.9%, python 104.0%, rustc 215.0%, t3code 54.0%. Raw metadata includes top-five instantaneous CPU samples and RTX 3090 clocks/states. No owned build or test overlapped timing; no process was stopped or quiet lane selected. Kernel validation, duration and identity passes remain unchanged and are counted separately from history/owner work.
+
+Milliseconds: median of five lane summaries [minimum, maximum]. The bare-history column is accepted part 1, historical and unpaired. Old open is an expected transport capacity refusal, not a successful open comparison. New open includes reading the stored shell and both document objects, ownership checks, identity verification and full semantic validation. Encoding/staging is outside the open clock, as encoding was outside part 1's open clock.
+
+| Measurement (ms) | Accepted bare history | Paired Core | Owner attached | Target |
+| --- | ---: | ---: | ---: | --- |
+| Hand edit, 1,000 | 0.230 | 0.394 [0.387, 0.404] | 0.245 [0.240, 0.271] | ≤1.5× paired Core: 5/5 |
+| Hand edit, 10,000 | 0.247 | 0.401 [0.395, 0.746] | 0.273 [0.257, 0.464] | ≤1.5× paired Core: 5/5 |
+| 120-batch gesture apply | 26.837 | 28.530 [28.143, 29.327] | 31.968 [28.228, 45.882] | ≤1.5× paired Core: 4/5 |
+| Gesture Redo | 15.997 | 0.002 [0.001, 0.002] | 17.685 [16.871, 21.443] | <50: 5/5 |
+| Edit at fold bound | 1.382 | 0.418 [0.405, 0.738] | 1.733 [1.630, 2.549] | <2: 123/160 samples; worst 2.847 |
+| Validated open, 2,000 | 282.018 | 72.304 [71.495, 72.676] | 307.028 [289.176, 570.982] | <1,000: 5/5 |
+| Cold Undo after open | 252.951 | N/A | 269.587 [259.096, 482.095] | Historical comparison, not paired |
+| Walk p95 | 5.692 | 0.003 [0.002, 0.005] | 6.902 [5.946, 9.146] | <100: 5/5 |
+| Walk worst | 252.904 | 0.069 [0.016, 0.165] | 329.129 [266.612, 472.708] | <1,000: 5/5 |
+
+The folding ceiling is missed: 123/160 observations are below 2 ms, global worst 2.847044 ms. Cold Undo's median is 1.066× the historical accepted 252.951 ms; this is not a contemporaneous causal comparison. Edit-depth sample ranges overlap in 4/5 lanes; strict depth flatness is not claimed. No kernel validation work was replaced. Timing does not establish which kernel pass dominates.
+
+The first owner qualification at `9405a998` is also retained: [raw run](measurements/undo-owner-9405a998.json.gz), timed binary `a0b9ac80548cc4f4dd9a87e48aa8d8955e6b06a85afc25e85ffe9b4b09e5b8ad`, 09:44:19–09:46:33 UTC. It had 125/160 folds below 2 ms (worst 2.755154), fold median 1.579 [1.569, 2.249], open 290.421 [284.741, 777.980], and cold Undo 260.936 [256.292, 485.880]. All ten lanes sampled external activity; load 7.31–16.81 and ffmpeg peaked at 1,254.45% CPU. The current requalification follows an expected-role ingress cap/counter-evidence guard and a benchmark-only candidate error-variant correction. The fixture, timing targets and paired method were not tuned; the earlier misses are not discarded.
+
+Warm edits at both depths perform one candidate document copy, zero exact document measurements, zero document bytes serialized by the document-size meter, zero owner document scans and zero owner aggregate measurements. In the measured lane each edit serializes 188 Core payload bytes plus 529 owner payload bytes; these encode only the command's own operations/origin and reserve its future decode. Existing kernel passes are 2 validation, 1 duration and 2 identity per command. Tests assert the one-copy/zero-measurement property with a nonempty ledger, lineage and resources. Fold deliberately walks the new baseline; its per-command counters are 2 document copies / 1 Core exact measurement / 2 owner document scans / 2 owner aggregate measurements. These are history/owner counters, not a claim that the kernel avoids whole-document work.
+
+The 2,000-command shell is 510,893 bytes (255.4465/command); the store charges 515,501 (257.7505/command), 0.902% above encoding. Baseline/current document objects are separate graph edges. The old approximate 2,400 decoded bytes for a 154-byte command is the brief's reference, not a contemporaneous identical-record measurement.
+
+### Role and persisted bounds
+
+Let D be capacity-counted live document bytes, K cached documents, O decoded Core operations/step storage and A owner storage. R=(2+K)D+O+A; peak=R+W. Shared-store caches, input-manifest decode and media I/O keep their existing store budgets; this history pool is not an overall application RSS cap. Resource trees have separate store content budgets. The history-JSON graph caps below mean the shell plus its two document objects, excluding external media/LUT/font trees.
+
+| Role / policy | D; K; O; A; W (MiB) | Retained / peak | Encoded body / shell / history JSON graph cap |
+| --- | --- | --- | --- |
+| Ordinary / Fold | 3.5; 4; 6; 5; 32 | 6×3.5+6+5=32 / 64 MiB | 11 MiB / 16 MiB+8 KiB / 17 MiB+8 KiB |
+| Task / NeverFold | 4; 4; 8; 4; 64 | 6×4+8+4=36 / 100 MiB | 12 MiB / 16 MiB+8 KiB / 20 MiB+8 KiB |
+| Candidate / NeverFold | .5; 0; .5; .5; 16 | 2×.5+.5+.5=2 / 18 MiB | 1 MiB / 1.5 MiB+8 KiB / 1.625 MiB+8 KiB |
+
+Body cap=O+A; shell cap=O+2A+8 KiB; history-JSON graph cap=shell+2J, where document JSON cap J is .5 / 2 / .0625 MiB. The requested role's shell cap is checked before store ingress allocation, even when a record claims a different role. Actual replay/decode admission still applies. These are new-kind caps; old persisted limits and callers are untouched.
+
+Task retains 256 distinct approve/delete/Undo consents in one test: owner charge 226,576 bytes, total history charge 229,000, shell 135,184 and future decode reserve 4,467,720, all inside A=4 MiB, R=36 MiB (<41 MiB native retained cap), shell 16 MiB+8 KiB and W=64 MiB. Each Do precharges 768 bytes plus target/id capacity, including its eventual fixed folded-prefix fact. Each transition precharges 1,024 plus id capacity (normally 1,088): 256×1,088=278,528 bytes; decode 256×16,384=4 MiB. Do and transition entries share the same 256 cap. The full maximal-fixture run remains an H2b exit test.
+
+Candidate W arithmetic is in the review-follow-up section above: 12,340,736 bytes subtotal, 12.946 MiB with ten percent slack, rounded to 16 MiB. Its retained envelope remains 2 MiB. The shared pool admits retained totals 128+328+16=472 MiB and one 64 MiB aggregate workspace window, 536 MiB for history holders/scratch. Captures and boundary results retain independent leases. Admission, one byte over, release on drop, shared-window contention and pre-allocation refusal are tested.
+
+| Role | Measured commands / fixture | Retained charge (bytes) | R / peak |
+| --- | --- | ---: | --- |
+| Ordinary | 2000; heavy | 8,856,298 | 32 / 64 MiB |
+| Task | 2000; heavy | 8,856,298 | 36 / 100 MiB |
+| Candidate | 400; small (heavy refused) | 341,824 | 2 / 18 MiB |
+
+Candidate's heavy fixture fails with typed `DocumentCapacity`; no candidate-heavy success is claimed. The ordinary timing lane including its nonempty ledger charges 8,857,562 bytes. Process RSS medians are 1,550,184,448 old versus 15,577,088 owner; startup-relative increases 1,540,767,744 versus 6,144,000. Structural charges and RSS are distinct measurements.
+<!-- hx-owner-qualification:end -->
