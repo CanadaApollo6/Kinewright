@@ -18,6 +18,7 @@ pub mod history_record;
 mod history_save;
 mod history_size;
 mod lineage_journal;
+pub mod operation_history;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
 #[cfg(feature = "test-util")]

@@ -1,0 +1,15 @@
+# Owner records beside operation history
+
+H2a part 2 adds one owner facade in kinewright-project. Product readers continue using the existing records. The facade owns the Core history, approval ledger, baseline occurrence seeds, per-command origins and resource references. A role reservation precedes construction and covers its retained envelope; replay takes a separate workspace lease.
+
+Callers provide a stable creation origin and optional approval when submitting an edit. Core prepares its atomic edit and reports effects before committing. The owner prepares its fallible metadata update from that event and the command payload. Both commit together. Undo, Redo and close change bounded command fates; they do not scan a document. Snapshot installation accepts only a validated owner snapshot and starts a new epoch without changing retained command keys.
+
+Two shapes were considered. Keeping owner state outside the executor with a post-edit callback leaves a successful document mutation exposed when metadata refuses. Copying the entire owner state before each edit would repair atomicity but add document-sized lineage work. The chosen shape uses a preparation hook at the executor's existing transaction boundary and commits a bounded delta. Whole baseline metadata is rebuilt only at fold/install boundaries.
+
+Lineage keeps one baseline seed map and stable origins attached to command identities. A boundary query replays document operations and lineage effects together from that baseline. No map per Undo/Redo boundary is retained. Resource references come from the baseline and each command's own payload. Reference counts permit dropping a payload only when it is discarded or transferred into an exactly scanned folded baseline. Independent immutable captures retain their own graph edges and reservation.
+
+The stored owner record has baseline/current document edges, compact stack bytes, origins, seeds, resources and the approval ledger. Its snapshot identity is Core's canonical digest. The store object's content hash additionally binds owner metadata; it is not substituted for snapshot identity. Typed owner validation hooks run in Core's existing streaming validation pass.
+
+The audit differential follows command fate. On 2026-11-13 the user exempted only the old target-satisfaction shortcut: a different command can make today's audit report an earlier discarded approval kept. Tests must explicitly recognize that cause, count it and require a nonzero count. No second approval-satisfaction answer is added. H2b receives an inventory of readers consuming that old answer.
+
+Owner preparation and lineage-query scratch are charged inside Core's replay workspace, not added on top of its peak. The owner reserves twice A before Core copies/applies; recorded step peaks exclude that temporary reservation. Thus retained R plus one admitted W still bounds the transaction. Fixed full-role leases make ordinary growth local; multiple histories, captures and simultaneous workspaces still share the role-wide ledger.

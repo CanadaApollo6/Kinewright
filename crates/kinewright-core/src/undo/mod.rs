@@ -163,6 +163,26 @@ pub struct Effects {
     pub folded: Vec<CommandEffects>,
     pub applied: Vec<CommandEffects>,
 }
+
+/// Borrowed transaction evidence. The owner prepares its fallible metadata before
+/// the executor commits, without capturing another document or operation list.
+pub struct EditEvent<'a> {
+    pub effects: &'a Effects,
+    pub operations: &'a [Operation],
+    pub payload_digest: [u8; 32],
+    pub folded_baseline: Option<&'a Document>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PreparedError<E> {
+    History(Error),
+    Owner(E),
+}
+impl<E> From<Error> for PreparedError<E> {
+    fn from(error: Error) -> Self {
+        Self::History(error)
+    }
+}
 impl Effects {
     fn new(accepted: CommandKey) -> Self {
         Self {
@@ -404,13 +424,85 @@ impl History {
         self.position.checked_add(1).ok_or(Error::CounterExhausted)
     }
 
+    fn edit(&mut self, operations: Vec<Operation>, key: Option<String>) -> Result<Effects, Error> {
+        match self.edit_prepared(
+            operations,
+            key,
+            0,
+            |_| Ok::<_, std::convert::Infallible>(()),
+        ) {
+            Ok((effects, ())) => Ok(effects),
+            Err(PreparedError::History(error)) => Err(error),
+            Err(PreparedError::Owner(never)) => match never {},
+        }
+    }
+
+    /// Atomically prepare an owner's metadata for an edit. Undo/Redo and close
+    /// report allocation-free fate moves through the existing effects API.
+    pub fn execute_prepared<P, E>(
+        &mut self,
+        command: Command,
+        owner_workspace: u64,
+        prepare: impl FnOnce(EditEvent<'_>) -> Result<P, E>,
+    ) -> Result<(Effects, P), PreparedError<E>> {
+        self.next_position()?;
+        match command {
+            Command::Do(operation) => {
+                self.edit_prepared(vec![operation], None, owner_workspace, prepare)
+            }
+            Command::DoBatch(operations) => {
+                self.edit_prepared(operations, None, owner_workspace, prepare)
+            }
+            Command::DoBatchCoalesced {
+                operations,
+                coalesce_key,
+            } => self.edit_prepared(operations, Some(coalesce_key), owner_workspace, prepare),
+            _ => Err(PreparedError::History(Error::UnsupportedCommand)),
+        }
+    }
+
+    /// Rebuild one reachable document and its owner's lineage in one replay.
+    /// The caller retains only its baseline seeds, never a map per boundary.
+    pub fn visit_boundary<E>(
+        &self,
+        depth: usize,
+        owner_workspace: u64,
+        mut visit: impl FnMut(&StepCommand, &[OperationIdentityEffect]) -> Result<(), E>,
+    ) -> Result<Arc<Document>, PreparedError<E>> {
+        if depth > self.undo.len() + self.redo.len() {
+            return Err(Error::InvalidDepth.into());
+        }
+        let mut budget =
+            ReplayBudget::workspace(self.bounds.replay_workspace).map_err(|_| Error::Capacity)?;
+        budget
+            .reserve_input(owner_workspace)
+            .map_err(|_| Error::Capacity)?;
+        budget
+            .check_known(self.baseline_bound.live)
+            .map_err(|_| Error::Capacity)?;
+        let mut document = capacity::copy_document(&self.baseline);
+        for step in self.undo.iter().chain(self.redo.iter().rev()).take(depth) {
+            let effects = replay_step(&mut document, step, &mut budget, true)?;
+            for (command, effect) in step.commands.iter().zip(effects) {
+                visit(command, &effect.identities).map_err(PreparedError::Owner)?;
+            }
+        }
+        Ok(Arc::new(document))
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one atomic edit plans all folds before committing any state"
     )]
-    fn edit(&mut self, operations: Vec<Operation>, key: Option<String>) -> Result<Effects, Error> {
+    fn edit_prepared<P, E>(
+        &mut self,
+        operations: Vec<Operation>,
+        key: Option<String>,
+        owner_workspace: u64,
+        prepare: impl FnOnce(EditEvent<'_>) -> Result<P, E>,
+    ) -> Result<(Effects, P), PreparedError<E>> {
         if operations.is_empty() {
-            return Err(Error::Batch(BatchError::Empty));
+            return Err(Error::Batch(BatchError::Empty).into());
         }
         let old_depth = self.undo.len();
         let extends = key.is_some()
@@ -435,7 +527,7 @@ impl History {
             .ok_or(Error::Capacity)?
             > self.bounds.operation_bytes
         {
-            return Err(Error::StepTooLarge);
+            return Err(Error::StepTooLarge.into());
         }
         let mut steps = self.undo.len() + usize::from(!extends);
         if self.policy == RetentionPolicy::NeverFold
@@ -447,7 +539,7 @@ impl History {
                 > self.bounds.operation_bytes
                 || steps > self.bounds.step_cap)
         {
-            return Err(Error::HistoryFull);
+            return Err(Error::HistoryFull.into());
         }
         let mut charge = operation_charge(&operations)?;
         let recorder_bytes = if self.recorder.is_some() {
@@ -483,11 +575,14 @@ impl History {
             .ok_or(Error::Capacity)?
             > self.bounds.decoded_history_bytes
         {
-            return Err(Error::Capacity);
+            return Err(Error::Capacity.into());
         }
         let mut retained = self.undo_charge.add(charge)?;
         let mut budget =
             ReplayBudget::workspace(self.bounds.replay_workspace).map_err(|_| Error::Capacity)?;
+        budget
+            .reserve_input(owner_workspace)
+            .map_err(|_| Error::Capacity)?;
         budget
             .check_known(self.document_bound.live)
             .map_err(|_| Error::Capacity)?;
@@ -500,7 +595,8 @@ impl History {
             self.bounds,
             &mut budget,
         )?;
-        let mut summary = replay_charge(top, &budget, identities.len(), self.bounds, 0)?;
+        let mut summary =
+            replay_charge(top, &budget, identities.len(), self.bounds, owner_workspace)?;
         summary.operations = top.operations.add(charge)?;
         summary.before = if extends {
             top.before
@@ -567,7 +663,7 @@ impl History {
             .ok_or(Error::Capacity)?
             > self.bounds.decoded_history_bytes
         {
-            return Err(Error::Capacity);
+            return Err(Error::Capacity.into());
         }
         // Returning discarded keys is part of this transaction's workspace too.
         for step in &self.redo {
@@ -577,11 +673,24 @@ impl History {
                 )
                 .map_err(|_| Error::Capacity)?;
         }
-        // Everything fallible happens above; commit metadata, documents and cache together.
         effects
             .discarded
             .extend(self.redo.iter().flat_map(Step::keys));
         effects.to_undo.push(accepted);
+        let prepared = prepare(EditEvent {
+            effects: &effects,
+            operations: &operations,
+            payload_digest: digest,
+            folded_baseline: if fold_new {
+                Some(&candidate)
+            } else {
+                folded_baseline
+                    .as_ref()
+                    .map(|(document, _)| document.as_ref())
+            },
+        })
+        .map_err(PreparedError::Owner)?;
+        // Both the executor and its owner have finished all fallible preparation.
         if let Some(recorder) = &mut self.recorder {
             recorder.extend(operations.iter().cloned());
             self.recorder_bytes = recorder_bytes;
@@ -632,7 +741,7 @@ impl History {
         }
         self.undo_charge = retained;
         self.position += 1;
-        Ok(effects)
+        Ok((effects, prepared))
     }
 
     fn undo_step(&mut self) -> Result<Effects, Error> {
