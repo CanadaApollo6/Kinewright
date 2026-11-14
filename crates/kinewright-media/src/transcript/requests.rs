@@ -12,17 +12,24 @@ pub(super) struct Recipe {
 }
 enum Entry {
     Registered(TranscriptStatus),
+    Rejected(TranscriptStatus),
     Requested {
         recipe: Recipe,
         cancellation: ExportCancellation,
         status: TranscriptStatus,
+        active: bool,
     },
 }
 impl Entry {
     fn status(&self) -> &TranscriptStatus {
         match self {
-            Self::Registered(status) | Self::Requested { status, .. } => status,
+            Self::Registered(status) | Self::Rejected(status) | Self::Requested { status, .. } => {
+                status
+            }
         }
+    }
+    fn evictable(&self) -> bool {
+        !matches!(self, Self::Requested { active: true, .. })
     }
 }
 #[derive(Clone)]
@@ -39,7 +46,7 @@ impl Requests {
     }
     pub fn admit(&self, path: &Path, recipe: &Recipe) -> Option<ExportCancellation> {
         self.states
-            .change(path, |previous| {
+            .change(path, Entry::evictable, |previous| {
                 let blocks = match &previous {
                     Some(Entry::Registered(_)) => true,
                     Some(Entry::Requested {
@@ -70,6 +77,7 @@ impl Requests {
                         recipe: recipe.clone(),
                         cancellation: cancellation.clone(),
                         status: TranscriptStatus::Queued,
+                        active: true,
                     }),
                     Some(cancellation),
                 )
@@ -77,34 +85,37 @@ impl Requests {
             .flatten()
     }
     pub fn update(&self, path: &Path, cancellation: &ExportCancellation, status: TranscriptStatus) {
-        self.states.change(path, |previous| match previous {
-            Some(Entry::Requested {
-                recipe,
-                cancellation: current,
-                ..
-            }) if &current == cancellation => {
-                // Cancellation suppresses late success/progress, while an explicit
-                // failure still explains a refused job to the person.
-                let status = if current.is_cancelled()
-                    && !matches!(
-                        &status,
-                        TranscriptStatus::Failed(_) | TranscriptStatus::Cancelled
-                    ) {
-                    TranscriptStatus::Cancelled
-                } else {
-                    status
-                };
-                (
-                    Some(Entry::Requested {
-                        recipe,
-                        cancellation: current,
-                        status,
-                    }),
-                    (),
-                )
-            }
-            previous => (previous, ()),
-        });
+        self.states
+            .change(path, Entry::evictable, |previous| match previous {
+                Some(Entry::Requested {
+                    recipe,
+                    cancellation: current,
+                    active,
+                    ..
+                }) if &current == cancellation => {
+                    // Cancellation suppresses late success/progress, while an explicit
+                    // failure still explains a refused job to the person.
+                    let status = if current.is_cancelled()
+                        && !matches!(
+                            &status,
+                            TranscriptStatus::Failed(_) | TranscriptStatus::Cancelled
+                        ) {
+                        TranscriptStatus::Cancelled
+                    } else {
+                        status
+                    };
+                    (
+                        Some(Entry::Requested {
+                            recipe,
+                            cancellation: current,
+                            status,
+                            active,
+                        }),
+                        (),
+                    )
+                }
+                previous => (previous, ()),
+            });
     }
     pub fn status(&self, path: &Path) -> TranscriptStatus {
         self.states
@@ -122,18 +133,31 @@ impl Requests {
         self.register_status(path, TranscriptStatus::NoSpeech);
     }
     fn register_status(&self, path: &Path, status: TranscriptStatus) {
-        self.states.change(path, |_| {
+        self.states.change(path, Entry::evictable, |_| {
             self.cancellations.cancel(path);
             (Some(Entry::Registered(status)), ())
         });
     }
+    pub fn reject(&self, path: &Path, error: &crate::recognizer::Error) {
+        self.states.change(path, Entry::evictable, |previous| {
+            if matches!(previous, Some(Entry::Registered(_))) {
+                return (previous, ());
+            }
+            self.cancellations.cancel(path);
+            (
+                Some(Entry::Rejected(TranscriptStatus::Failed(error.to_string()))),
+                (),
+            )
+        });
+    }
     pub fn cancel(&self, path: &Path) -> bool {
         self.states
-            .change(path, |previous| match previous {
+            .change(path, Entry::evictable, |previous| match previous {
                 Some(Entry::Requested {
                     recipe,
                     cancellation,
                     status,
+                    active,
                 }) => {
                     let cancelled = self.cancellations.cancel(path);
                     let status = if cancelled {
@@ -146,6 +170,7 @@ impl Requests {
                             recipe,
                             cancellation,
                             status,
+                            active,
                         }),
                         cancelled,
                     )
@@ -155,7 +180,19 @@ impl Requests {
             .unwrap_or(false)
     }
     pub fn finish(&self, path: &Path, cancellation: &ExportCancellation) {
-        self.cancellations.finish(path, cancellation);
+        self.states.change(path, Entry::evictable, |mut previous| {
+            if let Some(Entry::Requested {
+                cancellation: current,
+                active,
+                ..
+            }) = &mut previous
+                && current == cancellation
+            {
+                *active = false;
+            }
+            self.cancellations.finish(path, cancellation);
+            (previous, ())
+        });
     }
     pub fn cancel_all(&self) {
         self.cancellations.cancel_all();
@@ -175,7 +212,7 @@ mod tests {
     use kinewright_core::{AssetId, Rational};
     fn recipe(language: Option<&str>) -> Recipe {
         Recipe {
-            identity: Identity::for_model(recognizer::model_for_language(language)),
+            identity: Identity::for_model(recognizer::model_for_language(language).unwrap()),
             language: language.map(str::to_owned),
         }
     }
@@ -256,5 +293,85 @@ mod tests {
             matches!(requests.status(path), TranscriptStatus::Cancelled),
             "DQ1_CANCELLED_JOB_CANNOT_PUBLISH_SUCCESS"
         );
+    }
+    #[test]
+    fn dq1_live_request_completion_survives_status_capacity_pressure() {
+        let requests = Requests::new();
+        let recipe = recipe(None);
+        let entries = (0..4097)
+            .map(|index| {
+                let path = std::path::PathBuf::from(format!("live-{index}.wav"));
+                let token = requests.admit(&path, &recipe).unwrap();
+                (path, token)
+            })
+            .collect::<Vec<_>>();
+        for (path, token) in &entries {
+            assert!(!token.is_cancelled());
+            assert!(
+                matches!(requests.status(path), TranscriptStatus::Queued),
+                "DQ1_LIVE_STATUS_NOT_EVICTED"
+            );
+        }
+        requests.update(&entries[0].0, &entries[0].1, ready());
+        requests.finish(&entries[0].0, &entries[0].1);
+        assert!(
+            matches!(requests.status(&entries[0].0), TranscriptStatus::Ready(_)),
+            "DQ1_LIVE_COMPLETION_RETAINED"
+        );
+        let terminal = (0..4097)
+            .map(|index| std::path::PathBuf::from(format!("finished-{index}.wav")))
+            .collect::<Vec<_>>();
+        for path in &terminal {
+            requests.no_audio(path);
+        }
+        assert!(
+            terminal
+                .iter()
+                .filter(|path| matches!(requests.status(path), TranscriptStatus::NoSpeech))
+                .count()
+                <= 4096
+        );
+        for (path, _) in entries.iter().skip(1) {
+            assert!(
+                matches!(requests.status(path), TranscriptStatus::Queued),
+                "DQ1_TERMINAL_EVICTION_SKIPS_LIVE"
+            );
+        }
+        requests.update(&entries[1].0, &entries[1].1, ready());
+        requests.finish(&entries[1].0, &entries[1].1);
+        assert!(
+            matches!(requests.status(&entries[1].0), TranscriptStatus::Ready(_)),
+            "DQ1_LIVE_COMPLETION_RETAINED"
+        );
+        requests.update(Path::new("unknown.wav"), &entries[1].1, ready());
+        assert!(
+            matches!(
+                requests.status(Path::new("unknown.wav")),
+                TranscriptStatus::NotRequested
+            ),
+            "DQ1_UNKNOWN_TOKEN_CANNOT_PUBLISH"
+        );
+    }
+    #[test]
+    fn dq1_failed_request_is_admitted_again_and_old_updates_are_ignored() {
+        let requests = Requests::new();
+        let path = Path::new("retry.wav");
+        let recipe = recipe(None);
+        let old = requests.admit(path, &recipe).unwrap();
+        requests.update(
+            path,
+            &old,
+            TranscriptStatus::Failed("temporary failure".into()),
+        );
+        requests.finish(path, &old);
+        let current = requests
+            .admit(path, &recipe)
+            .expect("DQ1_FAILED_REQUEST_CAN_RETRY");
+        assert_ne!(current, old);
+        requests.update(path, &old, ready());
+        assert!(matches!(requests.status(path), TranscriptStatus::Queued));
+        requests.update(path, &current, ready());
+        requests.finish(path, &current);
+        assert!(matches!(requests.status(path), TranscriptStatus::Ready(_)));
     }
 }

@@ -11,24 +11,36 @@ use std::{
     sync::OnceLock,
 };
 
-// One owned recognizer per built-in model during a queued batch. The
-// resolver owns the old value so invalidation needs no copied native handles.
+// Taking the slot drops the previous model before a replacement is loaded.
 struct Models<C> {
-    values: std::collections::BTreeMap<&'static str, C>,
+    value: Option<(&'static str, C)>,
 }
 impl<C> Models<C> {
     fn new() -> Self {
-        Self {
-            values: std::collections::BTreeMap::new(),
-        }
+        Self { value: None }
     }
     fn resolve(
         &mut self,
         key: &'static str,
-        resolve: impl FnOnce(Option<C>) -> Result<C, Error>,
-    ) -> Result<&mut C, Error> {
-        let next = resolve(self.values.remove(key))?;
-        Ok(self.values.entry(key).or_insert(next))
+        identity: &Identity,
+        valid: impl FnOnce(&C) -> bool,
+        load: impl FnOnce() -> Result<C, Error>,
+    ) -> Result<&mut C, Error>
+    where
+        C: Recognizer,
+    {
+        let next = match self.value.take() {
+            Some((previous_key, loaded))
+                if previous_key == key && loaded.identity() == identity && valid(&loaded) =>
+            {
+                loaded
+            }
+            previous => {
+                drop(previous);
+                load()?
+            }
+        };
+        Ok(&mut self.value.insert((key, next)).1)
     }
 }
 
@@ -111,25 +123,20 @@ pub(crate) fn queued(
                     cancelled(&cancel)?;
                     let spec = identity.model()?;
                     let models = current.get_or_insert_with(Models::new);
-                    let loaded = models.resolve(spec.id, |previous| match previous {
-                        Some(loaded)
-                            if loaded.identity() == &identity
-                                && loaded.verified.path() == path
-                                && loaded.verified.check().is_ok() =>
-                        {
-                            Ok(loaded)
-                        }
-                        previous => {
-                            drop(previous);
+                    let loaded = models.resolve(
+                        spec.id,
+                        &identity,
+                        |loaded| loaded.verified.path() == path && loaded.verified.check().is_ok(),
+                        || {
                             BuiltinRecognizer::load_identity(
                                 &path,
                                 &receipts,
                                 &cancel,
-                                identity,
+                                identity.clone(),
                                 Some(&data_root),
                             )
-                        }
-                    })?;
+                        },
+                    )?;
                     let recognition = work(loaded)?;
                     cancelled(&cancel)?;
                     // The cache result owns this identity after the queued model is released.
@@ -410,35 +417,193 @@ mod tests {
         drop(send);
         worker.join().unwrap();
     }
-    #[test]
-    fn dq1_queued_models_reuse_each_model_independently() {
-        let mut models = Models::new();
-        let mut loads = 0;
-        for model in ["english", "parakeet", "english"] {
-            let loaded = models
-                .resolve(model, |previous| {
-                    if let Some(previous) = previous {
-                        Ok(previous)
-                    } else {
-                        loads += 1;
-                        Ok(model)
-                    }
-                })
-                .unwrap();
-            assert_eq!(*loaded, model);
+    struct TrackedModel {
+        identity: Identity,
+        live: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl TrackedModel {
+        fn load(identity: Identity, live: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            assert_eq!(
+                live.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "DQ1_MODEL_DROP_BEFORE_LOAD"
+            );
+            live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Self {
+                identity,
+                live: std::sync::Arc::clone(live),
+            }
         }
-        assert_eq!(loads, 2, "DQ1_ONE_LOADED_RECOGNIZER_PER_MODEL");
+    }
+    impl Drop for TrackedModel {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl Recognizer for TrackedModel {
+        fn identity(&self) -> &Identity {
+            &self.identity
+        }
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+        fn session(
+            &mut self,
+            _: u64,
+            _: ExportCancellation,
+        ) -> Result<Box<dyn Session + '_>, Error> {
+            Err(Error::SessionOrder("model residency fixture"))
+        }
+    }
+    #[test]
+    fn dq1_queued_model_switch_drops_before_loading_and_before_idle_reply() {
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (send, receive) = bounded::<Work<Models<TrackedModel>, ()>>(1);
+        let worker = std::thread::spawn(move || run(&receive));
+        let (arrived, arrival) = bounded(0);
+        let (release, released) = bounded(0);
+        let (first, first_reply) = bounded(1);
+        let (second, second_reply) = bounded(1);
+        let first_live = std::sync::Arc::clone(&live);
+        send.send(Work {
+            task: Box::new(move |current| {
+                let identity = Identity::english();
+                current.get_or_insert_with(Models::new).resolve(
+                    "english",
+                    &identity,
+                    |_| true,
+                    || Ok(TrackedModel::load(identity.clone(), &first_live)),
+                )?;
+                arrived.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            }),
+            complete: Box::new(move |r| {
+                first.send(r).unwrap();
+            }),
+        })
+        .unwrap();
+        arrival.recv().unwrap();
+        let second_live = std::sync::Arc::clone(&live);
+        send.send(Work {
+            task: Box::new(move |current| {
+                let identity = Identity::for_model(&super::super::PARAKEET_MODEL);
+                current.as_mut().unwrap().resolve(
+                    "parakeet",
+                    &identity,
+                    |_| true,
+                    || Ok(TrackedModel::load(identity.clone(), &second_live)),
+                )?;
+                assert_eq!(
+                    second_live.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "DQ1_ONE_RESIDENT_MODEL"
+                );
+                Ok(())
+            }),
+            complete: Box::new(move |r| {
+                second.send(r).unwrap();
+            }),
+        })
+        .unwrap();
+        release.send(()).unwrap();
+        first_reply.recv().unwrap().unwrap();
+        second_reply.recv().unwrap().unwrap();
+        assert_eq!(
+            live.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "DQ1_IDLE_RELEASE_BEFORE_REPLY"
+        );
+        drop(send);
+        worker.join().unwrap();
+    }
+    #[test]
+    fn dq1_loaded_model_identity_change_reloads_the_same_id() {
+        let live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut models = Models::new();
+        let first = Identity::english();
         models
-            .resolve("english", |previous| {
-                assert_eq!(previous, Some("english"));
-                Ok("replacement")
+            .resolve(
+                "english",
+                &first,
+                |_| true,
+                || Ok(TrackedModel::load(first.clone(), &live)),
+            )
+            .unwrap();
+        models
+            .resolve(
+                "english",
+                &first,
+                |_| true,
+                || panic!("same identity should reuse"),
+            )
+            .unwrap();
+        let mut second = first.clone();
+        second.lookahead = Some(7);
+        let mut loaded = false;
+        let result = models
+            .resolve(
+                "english",
+                &second,
+                |_| true,
+                || {
+                    loaded = true;
+                    Ok(TrackedModel::load(second.clone(), &live))
+                },
+            )
+            .unwrap();
+        assert_eq!(result.identity(), &second, "DQ1_CHANGED_IDENTITY_RELOADS");
+        assert!(loaded, "DQ1_CHANGED_IDENTITY_LOAD_CALLED");
+    }
+    #[test]
+    fn dq1_error_and_cancel_answer_their_requester_and_run_the_successor() {
+        for cancelled in [false, true] {
+            let (send, receive) = bounded::<Work<(), &'static str>>(1);
+            let worker = std::thread::spawn(move || run(&receive));
+            let (arrived, arrival) = bounded(0);
+            let (release, released) = bounded(0);
+            let (first, first_reply) = bounded(1);
+            let (second, second_reply) = bounded(1);
+            send.send(Work {
+                task: Box::new(move |_| {
+                    arrived.send(()).unwrap();
+                    released.recv().unwrap();
+                    Err(if cancelled {
+                        Error::Cancelled
+                    } else {
+                        Error::InvalidAudio
+                    })
+                }),
+                complete: Box::new(move |r| {
+                    first.send(r).unwrap();
+                }),
             })
             .unwrap();
-        let parakeet = models
-            .resolve("parakeet", |previous| {
-                Ok(previous.expect("other model remains loaded"))
+            arrival.recv().unwrap();
+            send.send(Work {
+                task: Box::new(|_| Ok("successor")),
+                complete: Box::new(move |r| {
+                    second.send(r).unwrap();
+                }),
             })
             .unwrap();
-        assert_eq!(*parakeet, "parakeet");
+            assert!(matches!(second_reply.try_recv(), Err(TryRecvError::Empty)));
+            release.send(()).unwrap();
+            let first = first_reply.recv().expect("DQ1_JOB_OWNS_ERROR_REPLY");
+            assert!(
+                matches!(
+                    (&first, cancelled),
+                    (Err(Error::Cancelled), true) | (Err(Error::InvalidAudio), false)
+                ),
+                "DQ1_JOB_OWNS_ERROR_REPLY"
+            );
+            assert_eq!(
+                second_reply.recv().unwrap().unwrap(),
+                "successor",
+                "DQ1_ERROR_SUCCESSOR_REPLY"
+            );
+            drop(send);
+            worker.join().unwrap();
+        }
     }
 }

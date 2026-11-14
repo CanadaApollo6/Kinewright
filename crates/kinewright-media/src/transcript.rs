@@ -80,15 +80,7 @@ impl TranscriptService {
             "transcript",
             (jobs, jobs_rx),
             move |job: crate::locator::LocatorJob<TranscriptJob>| {
-                job.run(
-                    &mut worker,
-                    |worker, job| worker.handle(&job),
-                    |worker, job, error| {
-                        worker.update(&job, TranscriptStatus::Failed(error.to_string()));
-                        worker.requests.finish(&job.asset.path, &job.cancellation);
-                        true
-                    },
-                )
+                worker.dispatch(job, TranscriptWorker::transcribe_asset)
             },
         )?;
         Ok(Self {
@@ -120,7 +112,13 @@ impl TranscriptService {
             self.requests.no_audio(&asset.path);
             return;
         }
-        let model = recognizer::model_for_language(language.as_deref());
+        let model = match recognizer::model_for_language(language.as_deref()) {
+            Ok(model) => model,
+            Err(error) => {
+                self.requests.reject(&asset.path, &error);
+                return;
+            }
+        };
         let recipe = Recipe {
             identity: Identity::for_model(model),
             language,
@@ -202,8 +200,30 @@ impl TranscriptWorker {
             inference_gate: Arc::default(),
         }
     }
-    fn handle(&mut self, job: &TranscriptJob) -> bool {
-        if let Err(error) = self.transcribe_asset(job) {
+    fn dispatch(
+        &mut self,
+        job: crate::locator::LocatorJob<TranscriptJob>,
+        transcribe: impl FnOnce(&mut Self, &TranscriptJob) -> Result<(), MediaError>,
+    ) -> bool {
+        job.run(
+            self,
+            |worker, job| worker.handle(&job, transcribe),
+            |worker, job, error| {
+                worker.update(&job, TranscriptStatus::Failed(error.to_string()));
+                worker.requests.finish(&job.asset.path, &job.cancellation);
+                true
+            },
+        )
+    }
+    fn handle(
+        &mut self,
+        job: &TranscriptJob,
+        transcribe: impl FnOnce(&mut Self, &TranscriptJob) -> Result<(), MediaError>,
+    ) -> bool {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transcribe(self, job)))
+                .unwrap_or_else(|_| Err(recognizer::Error::WorkerPanicked.into()));
+        if let Err(error) = result {
             self.update(
                 job,
                 if error == MediaError::Cancelled {
@@ -238,18 +258,15 @@ impl TranscriptWorker {
         }
         #[cfg(any(test, feature = "test-util"))]
         self.hold_before_inference(asset, cancellation)?;
-        let requests = self.requests.clone();
-        let asset_path = asset.path.clone();
-        let request_cancel = cancellation.clone();
         let model = job.model;
         let model_root = recognizer::provision(
             model,
             &self.data_dir,
             cancellation,
-            move |downloaded_bytes, total_bytes| {
-                requests.update(
-                    &asset_path,
-                    &request_cancel,
+            |downloaded_bytes, total_bytes| {
+                self.requests.update(
+                    &asset.path,
+                    cancellation,
                     TranscriptStatus::DownloadingModel {
                         model_name: model.name.into(),
                         downloaded_bytes,
@@ -714,6 +731,160 @@ mod tests {
     use crate::test_support::TempDirectory;
     use std::fs;
 
+    fn worker_job(requests: &Requests, path: &Path, id: u64) -> TranscriptJob {
+        let recipe = Recipe {
+            identity: Identity::english(),
+            language: None,
+        };
+        TranscriptJob {
+            asset: MediaAsset {
+                id: AssetId(id),
+                name: "fixture".into(),
+                path: path.to_path_buf(),
+                kind: MediaKind::Audio,
+                duration: TimeCode(25),
+                fps: Rational::new(25, 1).unwrap(),
+                resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            },
+            model: &ENGLISH_MODEL,
+            cancellation: requests.admit(path, &recipe).unwrap(),
+            recipe,
+        }
+    }
+    fn empty_transcript(job: &TranscriptJob) -> AssetTranscript {
+        AssetTranscript {
+            asset: job.asset.id,
+            content_sha256: "0".repeat(64),
+            source_fps: job.asset.fps,
+            words: vec![],
+        }
+    }
+    #[test]
+    fn dq1_empty_words_finish_as_no_speech() {
+        let root = TempDirectory::new("dq1-empty-completion");
+        let requests = Requests::new();
+        let job = worker_job(&requests, Path::new("empty.wav"), 1);
+        let worker = TranscriptWorker::new(
+            root.root().into(),
+            cache_root(root.root(), "transcripts", CACHE_VERSION).unwrap(),
+            requests.clone(),
+        );
+        worker.finish(&job, empty_transcript(&job));
+        assert!(
+            matches!(requests.status(&job.asset.path), TranscriptStatus::NoSpeech),
+            "DQ1_EMPTY_WORDS_ARE_NO_SPEECH"
+        );
+    }
+    #[test]
+    fn dq1_transcript_worker_panic_fails_its_job_and_serves_queued_successor() {
+        let root = TempDirectory::new("dq1-transcript-panic");
+        let grant = crate::locator::fixture_grant();
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        let requests = Requests::new();
+        let first = worker_job(&requests, Path::new("panics.wav"), 1);
+        let second = worker_job(&requests, Path::new("successor.wav"), 2);
+        let first_path = first.asset.path.clone();
+        let second_path = second.asset.path.clone();
+        let first_token = first.cancellation.clone();
+        let mut worker = TranscriptWorker::new(
+            root.root().into(),
+            cache_root(root.root(), "transcripts", CACHE_VERSION).unwrap(),
+            requests.clone(),
+        );
+        let (arrived, arrival) = crossbeam_channel::bounded(0);
+        let (release, released) = crossbeam_channel::bounded(0);
+        let (done, completed) = crossbeam_channel::bounded(2);
+        let jobs = crossbeam_channel::unbounded();
+        let queue = spawn_worker("dq1-transcript-panic", "fixture", jobs, move |job| {
+            let result = worker.dispatch(job, |worker, job| {
+                if job.asset.id == AssetId(1) {
+                    arrived.send(()).unwrap();
+                    released.recv().unwrap();
+                    std::panic::resume_unwind(Box::new("injected transcript panic"));
+                }
+                worker.finish(job, empty_transcript(job));
+                Ok(())
+            });
+            done.send(()).unwrap();
+            result
+        })
+        .unwrap();
+        queue
+            .send(crate::locator::LocatorJob::new(grant.clone(), first))
+            .unwrap();
+        arrival.recv().unwrap();
+        queue
+            .send(crate::locator::LocatorJob::new(grant, second))
+            .unwrap();
+        assert!(matches!(
+            requests.status(&second_path),
+            TranscriptStatus::Queued
+        ));
+        release.send(()).unwrap();
+        for _ in 0..2 {
+            completed
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("DQ1_TRANSCRIPT_PANIC_SUCCESSOR_REPLY");
+        }
+        assert!(
+            matches!(requests.status(&first_path), TranscriptStatus::Failed(reason) if reason == recognizer::Error::WorkerPanicked.to_string()),
+            "DQ1_TRANSCRIPT_PANIC_TYPED_FAILURE"
+        );
+        assert!(
+            matches!(requests.status(&second_path), TranscriptStatus::NoSpeech),
+            "DQ1_TRANSCRIPT_PANIC_SUCCESSOR_FINISHES"
+        );
+        assert!(!requests.cancel(&first_path));
+        assert!(
+            requests
+                .admit(
+                    &first_path,
+                    &Recipe {
+                        identity: Identity::english(),
+                        language: None
+                    }
+                )
+                .is_some(),
+            "DQ1_PANICKED_TRANSCRIPT_CAN_RETRY"
+        );
+        requests.update(&first_path, &first_token, TranscriptStatus::NoSpeech);
+        assert!(matches!(
+            requests.status(&first_path),
+            TranscriptStatus::Queued
+        ));
+        drop(queue);
+    }
+    #[test]
+    fn dq1_unsupported_language_never_queues_or_downloads_and_can_retry() {
+        let root = TempDirectory::new("dq1-language-refusal");
+        let service = TranscriptService::new(root.root().into()).unwrap();
+        let grant = crate::locator::fixture_grant();
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        let requests = Requests::new();
+        let job = worker_job(&requests, Path::new("missing.wav"), 1);
+        service.request(job.asset.clone(), Some("ja".into()), grant.clone());
+        assert!(
+            matches!(service.status(&job.asset.path), TranscriptStatus::Failed(reason) if reason == "language not supported: ja")
+        );
+        assert!(
+            !root.path("models").exists(),
+            "DQ1_UNSUPPORTED_LANGUAGE_NEVER_PROVISIONS"
+        );
+        let recipe = Recipe {
+            identity: Identity::english(),
+            language: None,
+        };
+        assert!(service.requests.admit(&job.asset.path, &recipe).is_some());
+        service.register(&job.asset.path, empty_transcript(&job));
+        service.request(job.asset.clone(), Some("ko".into()), grant);
+        assert!(
+            matches!(service.status(&job.asset.path), TranscriptStatus::Ready(_)),
+            "DQ1_LANGUAGE_REFUSAL_PRESERVES_AUTHORED"
+        );
+    }
     fn fixture_transcript(asset: AssetId, hash: &str, fps: Rational) -> AssetTranscript {
         AssetTranscript {
             asset,

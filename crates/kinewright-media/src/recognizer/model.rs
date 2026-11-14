@@ -27,6 +27,7 @@ pub struct ModelSpec {
     pub notice: &'static str,
     pub files: &'static [ModelFile],
     pub streaming: bool,
+    pub languages: &'static [&'static str],
 }
 
 pub const ENGLISH_MODEL: ModelSpec = ModelSpec {
@@ -36,6 +37,7 @@ pub const ENGLISH_MODEL: ModelSpec = ModelSpec {
     licence_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
     notice: "Licensed by NVIDIA Corporation under the NVIDIA Open Model License",
     streaming: true,
+    languages: &["en"],
     files: &[ModelFile {
         name: "nemotron-speech-streaming-en-0.6b.q8_0.gguf",
         url: "https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b/resolve/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf",
@@ -50,6 +52,11 @@ pub const PARAKEET_MODEL: ModelSpec = ModelSpec {
     licence_url: "https://creativecommons.org/licenses/by/4.0/",
     notice: "Parakeet TDT 0.6B v3 by NVIDIA, licensed under CC BY 4.0.",
     streaming: false,
+    // Language metadata in the same pinned model card as the GGUF below.
+    languages: &[
+        "en", "es", "fr", "de", "bg", "hr", "cs", "da", "nl", "et", "fi", "el", "hu", "it", "lv",
+        "lt", "mt", "pl", "pt", "ro", "sk", "sl", "sv", "ru", "uk",
+    ],
     files: &[ModelFile {
         name: "parakeet-tdt-0.6b-v3.q8_0.gguf",
         url: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf",
@@ -561,6 +568,7 @@ mod tests {
         licence_url: "",
         notice: "",
         streaming: true,
+        languages: &["en"],
         files: &[FILE],
     };
     fn input(bytes: &'static [u8]) -> Box<dyn Read> {

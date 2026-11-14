@@ -614,13 +614,21 @@ fn dq1_language_rule_has_no_detection_and_selects_the_pinned_identity() {
         Some("EN-us"),
         Some("en_GB"),
         Some("English"),
+        Some("eng"),
+        Some("ENG-us"),
+        Some("English_GB"),
     ] {
-        let model = model_for_language(language);
+        let model = model_for_language(language).unwrap();
         assert_eq!(model.id, ENGLISH_MODEL.id);
         assert_eq!(Identity::for_model(model).lookahead, Some(13));
     }
-    for language in ["fr", "de", "ja", "auto"] {
-        let model = model_for_language(Some(language));
+    for language in PARAKEET_MODEL
+        .languages
+        .iter()
+        .copied()
+        .filter(|code| *code != "en")
+    {
+        let model = model_for_language(Some(language)).unwrap();
         assert_eq!(model.id, PARAKEET_MODEL.id);
         let identity = Identity::for_model(model);
         assert_eq!(identity.lookahead, None);
@@ -735,4 +743,165 @@ fn dq1_model_word_normalization_preserves_unicode() {
     for filler in ["Um,", "UM.", "Uh!", "Erm,"] {
         assert!(kinewright_core::is_filler_word(filler), "{filler}");
     }
+}
+
+#[test]
+fn dq1_offline_trailing_silence_fractional_sample_and_empty_finish() {
+    let calls = std::cell::Cell::new(0);
+    let native = |samples: &[f32]| {
+        calls.set(calls.get() + 1);
+        assert_eq!(samples.len(), 1601);
+        Ok(crate::nemo::Frame {
+            final_result: true,
+            text: "word".into(),
+            words: vec![crate::nemo::Word {
+                text: "word".into(),
+                start_us: 1000,
+                end_us: 2000,
+            }],
+            audio_processed_us: 2000,
+        })
+    };
+    let mut s = Driver::new(
+        offline::Offline::new(native, &PiecePolicy::default()).unwrap(),
+        7,
+        ExportCancellation::default(),
+        FEED_SAMPLES,
+    );
+    s.feed(&[0.; 1601]).unwrap();
+    assert!(s.commit_at(100_070).is_err()); // not the floor of the fed sample boundary
+    s.commit_at(100_069).unwrap();
+    let Some(Update::Committed { words, .. }) = s.step().unwrap() else {
+        panic!()
+    };
+    assert_eq!((words[0].start_us, words[0].end_us), (1007, 2007));
+    assert!(s.step().unwrap().is_none());
+    s.feed(&[0.; 1601]).unwrap();
+    s.commit_at(200_132).unwrap();
+    let Some(Update::Committed { words, .. }) = s.step().unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        (words[0].start_us, words[0].end_us),
+        (101_069, 102_069),
+        "DQ1_OFFLINE_EXACT_FED_ORIGIN"
+    );
+    s.finish().unwrap();
+    let Some(Update::Committed {
+        words,
+        audio_processed_us,
+    }) = s.step().unwrap()
+    else {
+        panic!()
+    };
+    assert!(words.is_empty());
+    assert_eq!(audio_processed_us, 200_132);
+    assert_eq!(calls.get(), 2);
+    assert!(s.step().unwrap().is_none());
+}
+
+#[test]
+fn dq1_offline_driver_preserves_every_audio_sample() {
+    fn marker(index: usize) -> f32 {
+        f32::from_bits(0x3f00_0000 + u32::try_from(index).unwrap())
+    }
+    struct Probe {
+        identity: Identity,
+        lengths: Vec<usize>,
+        consumed: usize,
+    }
+    impl Recognizer for Probe {
+        fn identity(&self) -> &Identity {
+            &self.identity
+        }
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+        fn session(
+            &mut self,
+            origin: u64,
+            cancel: ExportCancellation,
+        ) -> Result<Box<dyn Session + '_>, Error> {
+            let lengths = &mut self.lengths;
+            let consumed = &mut self.consumed;
+            let native = move |samples: &[f32]| {
+                assert!(samples.len() <= 65 * 16000);
+                for (i, sample) in samples.iter().enumerate() {
+                    assert_eq!(*sample, marker(*consumed + i), "DQ1_OFFLINE_AUDIO_CONTENT");
+                }
+                *consumed += samples.len();
+                lengths.push(samples.len());
+                Ok(crate::nemo::Frame {
+                    final_result: true,
+                    text: String::new(),
+                    words: vec![],
+                    audio_processed_us: 0,
+                })
+            };
+            Ok(Box::new(Driver::new(
+                offline::Offline::new(native, &self.identity.piece_policy)?,
+                origin,
+                cancel,
+                FEED_SAMPLES,
+            )))
+        }
+    }
+    let mut model = Probe {
+        identity: Identity::for_model(&PARAKEET_MODEL),
+        lengths: vec![],
+        consumed: 0,
+    };
+    let total = 180 * 16000 + 1;
+    let mut cursor = 0;
+    let mut progress = vec![];
+    queue::drive(
+        &mut model,
+        &ExportCancellation::default(),
+        |window| {
+            let end = (cursor + 2591).min(total);
+            window.extend((cursor..end).map(marker));
+            let more = end != cursor;
+            cursor = end;
+            Ok(more)
+        },
+        |us| progress.push(us),
+        true,
+    )
+    .unwrap();
+    assert_eq!(model.consumed, total);
+    assert!(model.lengths.len() >= 3);
+    assert!(model.lengths.iter().all(|n| *n <= 65 * 16000));
+    assert!(progress.windows(2).all(|p| p[0] <= p[1]));
+    assert_eq!(progress.last(), Some(&180_000_062));
+}
+
+#[test]
+fn dq1_unsupported_language_is_typed_and_never_guessed() {
+    for code in [
+        "zh", "ja", "ko", "auto", "engg", "French", "en.US", "en/US", "en US", "en–US", "fr:FR",
+        "en-", "-en",
+    ] {
+        let error = model_for_language(Some(code)).unwrap_err();
+        assert!(
+            matches!(&error, Error::UnsupportedLanguage(value) if value == code),
+            "DQ1_UNSUPPORTED_LANGUAGE_TYPED {code}"
+        );
+        assert_eq!(error.to_string(), format!("language not supported: {code}"));
+        assert!(matches!(
+            BuiltinRecognizer::load_for_language(
+                Path::new("missing"),
+                Path::new("missing"),
+                &ExportCancellation::default(),
+                Some(code)
+            ),
+            Err(Error::UnsupportedLanguage(_))
+        ));
+    }
+    for code in ["FR-fr", "de_DE", "uK-UA", "es-419"] {
+        assert_eq!(
+            model_for_language(Some(code)).unwrap().id,
+            PARAKEET_MODEL.id
+        );
+    }
+    assert_eq!(PARAKEET_MODEL.languages.len(), 25);
 }

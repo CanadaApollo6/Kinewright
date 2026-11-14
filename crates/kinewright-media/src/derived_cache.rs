@@ -139,6 +139,7 @@ impl<S> StatusReporter<S> {
     pub(crate) fn change<R>(
         &self,
         path: &Path,
+        evictable: impl Fn(&S) -> bool,
         change: impl FnOnce(Option<S>) -> (Option<S>, R),
     ) -> Option<R> {
         let mut states = self.states.write().ok()?;
@@ -146,8 +147,12 @@ impl<S> StatusReporter<S> {
         let previous = states.remove(&key);
         let (next, result) = change(previous);
         if let Some(next) = next {
-            if states.len() >= 4096
-                && let Some(oldest) = states.keys().next().cloned()
+            if evictable(&next)
+                && states.values().filter(|value| evictable(value)).count() >= 4096
+                && let Some(oldest) = states
+                    .iter()
+                    .find(|(_, value)| evictable(value))
+                    .map(|(key, _)| key.clone())
             {
                 states.remove(&oldest);
             }

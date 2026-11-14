@@ -60,7 +60,8 @@ endpoint the app starts for agent sessions. Launching the GUI needs a display
 (`DISPLAY` is typically set on this VM).
 
 Recognition uses Nemotron Speech Streaming EN when no language or English is
-requested, otherwise Parakeet TDT v3 offline on pause-delimited pieces. No language
+requested, otherwise Parakeet TDT v3 offline on pause-delimited pieces for its
+supported language codes. Unsupported hints return a typed error. No language
 detection runs. Both models use the same session interface and exact source clock.
 Real-model tests use explicit model roots; tests must never discover the person's
 application data. See `docs/TRANSCRIPTION.md`.

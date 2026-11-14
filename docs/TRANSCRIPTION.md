@@ -8,7 +8,7 @@ are required. Unsupported CPUs receive a typed error before model creation.
 
 ## Model and licence
 
-No language hint, an empty hint, or English (`en`, including regional tags) uses
+No language hint, an empty hint, or English (`en`, `eng`, `english`, including regional tags) uses
 **NVIDIA Nemotron Speech Streaming EN 0.6B**. First-use asset
 transcription downloads its 699,872,960-byte Q8 GGUF from NVIDIA's Hugging Face
 repository, revision `ebe59e5a817142986528bbbee5dba8db7b38ed50`.
@@ -21,8 +21,13 @@ Licensed by NVIDIA Corporation under the
 Runtime Apache-2.0 and third-party notices are in `LICENSES/nemo-speech/`;
 model notices and the AMI test-clip attribution are in `LICENSES/`.
 
-Any other language hint uses **NVIDIA Parakeet TDT 0.6B v3**, offline. There is
-no language detection. Its 713,975,456-byte Q8 GGUF is pinned to NVIDIA revision
+A supported non-English language hint uses **NVIDIA Parakeet TDT 0.6B v3**, offline.
+Its [pinned model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/blob/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/README.md)
+lists `en`, `es`, `fr`, `de`, `bg`, `hr`, `cs`, `da`, `nl`, `et`, `fi`, `el`, `hu`,
+`it`, `lv`, `lt`, `mt`, `pl`, `pt`, `ro`, `sk`, `sl`, `sv`, `ru` and `uk`.
+The primary subtag is compared without ASCII case after splitting on `-` or `_`.
+Other separators and unsupported codes return `UnsupportedLanguage` before any
+download or inference. No language detection runs. Its 713,975,456-byte Q8 GGUF is pinned to NVIDIA revision
 `541d1f99c6b0c3cd0b11a95167540bb8edefd82b`, SHA-256
 `e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e`.
 The file, attribution and [CC-BY-4.0 licence](https://creativecommons.org/licenses/by/4.0/)
@@ -70,10 +75,12 @@ is tagged `TokenDurationsLagged`: token-duration starts lag sound by about
 or speaker information is invented by the recogniser.
 
 A process-wide serial worker serves assets and voice notes. Queued work reuses
-one loaded recogniser per selected model. When the queue is empty, it destroys
-all streams and models before delivering the last result, then waits without
-loaded weights. A job panic returns a typed failure, discards loaded models and
-allows the next queued job to run. The
+one resident recogniser. Switching models drops the old model before loading
+the next one. Same-model reuse also requires the same identity and a valid file.
+When the queue is empty, it destroys its stream and model before delivering the last result, then waits without
+loaded weights. A recognition job panic returns a typed failure, discards the model and
+allows the next queued job to run. The transcript job worker also fails a panicking
+job and continues with its queued successor. The
 process retains its idle worker, transcript words, allocator capacity and native
 thread-pool state; sample and model mappings are released. Cancellation and media
 authority revocation are checked between steps and close the stream. A native
@@ -90,6 +97,8 @@ file hash, runtime version, native build key, threads, lookahead, feed size,
 punctuation/verbatim settings and pause policy. The identity records the fixed
 four-thread configuration; only the native call clamps it to machine capacity.
 Changing the requested model replaces a ready result and cancels an older request.
+Live request entries are retained until the worker finishes them. Only completed
+statuses count toward the 4,096-entry eviction cap; unknown tokens cannot publish.
 Earlier derived transcripts are
 recomputed. Only the editor adapter converts words to source frames (floor start,
 ceil end). Original spelling is displayed; comparisons normalise case and

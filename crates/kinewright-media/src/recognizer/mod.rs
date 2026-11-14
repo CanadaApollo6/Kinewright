@@ -25,6 +25,7 @@ pub enum Error {
     Decode(kinewright_core::MediaError),
     QueueClosed,
     WorkerPanicked,
+    UnsupportedLanguage(String),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -42,6 +43,7 @@ impl fmt::Display for Error {
             Self::Decode(e) => e.fmt(f),
             Self::QueueClosed => f.write_str("recognition worker stopped"),
             Self::WorkerPanicked => f.write_str("recognition job panicked; retry the request"),
+            Self::UnsupportedLanguage(code) => write!(f, "language not supported: {code}"),
         }
     }
 }
@@ -70,19 +72,32 @@ impl From<Error> for kinewright_core::MediaError {
     }
 }
 
-pub(crate) fn model_for_language(language: Option<&str>) -> &'static ModelSpec {
+pub(crate) fn model_for_language(language: Option<&str>) -> Result<&'static ModelSpec, Error> {
     let language = language.unwrap_or("").trim();
-    if language.is_empty()
-        || language.eq_ignore_ascii_case("english")
-        || language
-            .split(['-', '_'])
-            .next()
-            .is_some_and(|part| part.eq_ignore_ascii_case("en"))
-    {
-        &ENGLISH_MODEL
-    } else {
-        &PARAKEET_MODEL
+    if language.is_empty() {
+        return Ok(&ENGLISH_MODEL);
     }
+    let mut parts = language.split(['-', '_']);
+    let primary = parts.next().unwrap_or("");
+    if std::iter::once(primary)
+        .chain(parts)
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        if ["en", "eng", "english"]
+            .iter()
+            .any(|alias| primary.eq_ignore_ascii_case(alias))
+        {
+            return Ok(&ENGLISH_MODEL);
+        }
+        if PARAKEET_MODEL
+            .languages
+            .iter()
+            .any(|code| primary.eq_ignore_ascii_case(code))
+        {
+            return Ok(&PARAKEET_MODEL);
+        }
+    }
+    Err(Error::UnsupportedLanguage(language.into()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,7 +572,7 @@ impl BuiltinRecognizer {
             path,
             receipts,
             cancel,
-            Identity::for_model(model_for_language(language)),
+            Identity::for_model(model_for_language(language)?),
             None,
         )
     }
