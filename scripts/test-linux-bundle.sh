@@ -41,7 +41,7 @@ if [[ ! -f "$source_bin" ]]; then
     exit 1
 fi
 
-for pattern in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so; do
+for pattern in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so libnemo_speech_asr.so libnemo_speech_asr_c.so; do
     if ! compgen -G "$bundle_dir/lib/${pattern}*" >/dev/null; then
         echo "Bundle is missing required library: $pattern" >&2
         exit 1

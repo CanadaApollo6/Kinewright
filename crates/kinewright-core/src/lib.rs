@@ -314,8 +314,8 @@ pub use title::{
     title_font_size, title_layout, title_parameter_descriptor, title_parameter_value,
 };
 pub use transcript_edit::{
-    TranscriptCutRange, is_filler_word, silence_cut_margin_frames, transcript_cut_ranges,
-    transcript_cut_ranges_for_indices,
+    TranscriptCutRange, is_filler_word, normalize_transcript_word, silence_cut_margin_frames,
+    transcript_cut_ranges, transcript_cut_ranges_for_indices,
 };
 pub use transition::{
     TRANSITION_DESCRIPTORS, TransitionAxis, TransitionDescriptor, TransitionShading,

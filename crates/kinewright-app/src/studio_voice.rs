@@ -2506,17 +2506,18 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let model = kinewright_media::default_data_dir()
-            .join("models/whisper")
-            .join(kinewright_media::WHISPER_MODEL_NAME);
+            .join("models")
+            .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
+            .join(kinewright_media::recognizer::ENGLISH_MODEL.files[0].name);
         if kinewright_media::sha256_file(&model).ok().as_deref()
-            != Some(kinewright_media::WHISPER_MODEL_SHA256)
+            != Some(kinewright_media::recognizer::ENGLISH_MODEL.files[0].sha256)
         {
             assert!(
                 std::env::var_os("KINEWRIGHT_C9_CONTROL_REQUIRED").is_none(),
                 "C9_REAL_MODEL_REQUIRED"
             );
             eprintln!(
-                "NOT RUN c9_studio_real_spoken_note_edit_and_batch: pinned Whisper small is not installed"
+                "NOT RUN c9_studio_real_spoken_note_edit_and_batch: pinned Nemotron Speech Streaming EN 0.6B is not installed"
             );
             return;
         }
@@ -2582,7 +2583,7 @@ mod tests {
         let mut capture_path = None;
         eprintln!(
             "C9_G11_MODEL_SHA256 {}",
-            kinewright_media::WHISPER_MODEL_SHA256
+            kinewright_media::recognizer::ENGLISH_MODEL.files[0].sha256
         );
         loop {
             app.voice_frame();
@@ -2597,10 +2598,10 @@ mod tests {
                         normalized_words(&status.text)
                             .iter()
                             .any(|word| word == "warmer"),
-                        "C8_REAL_WHISPER_TEXT {}",
+                        "C8_REAL_ASR_TEXT {}",
                         status.text
                     );
-                    eprintln!("C8_REAL_WHISPER_TEXT {}", status.text);
+                    eprintln!("C8_REAL_ASR_TEXT {}", status.text);
                     break;
                 }
                 assert!(

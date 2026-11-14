@@ -324,10 +324,10 @@ fn spoken_note(app: &mut KinewrightApp, fixture: &Fixtures, live: bool) -> (Comm
                     normalized_words(&status.text)
                         .iter()
                         .any(|word| word == "warmer"),
-                    "E2E_LIVE_WHISPER_TEXT {}",
+                    "E2E_LIVE_ASR_TEXT {}",
                     status.text
                 );
-                println!("E2E_LIVE_WHISPER_TEXT {}", status.text);
+                println!("E2E_LIVE_ASR_TEXT {}", status.text);
                 break;
             }
             assert!(
@@ -338,7 +338,7 @@ fn spoken_note(app: &mut KinewrightApp, fixture: &Fixtures, live: bool) -> (Comm
             std::thread::sleep(Duration::from_millis(20));
         }
     } else {
-        // CI has no Whisper model: the capture is real and the host saves it;
+        // CI has no NeMo model: the capture is real and the host saves it;
         // the transcript the person chooses is seeded as the CI voice tests do.
         let captured = recorded(app, fixture);
         send_capture(app, captured, false);
@@ -359,11 +359,12 @@ fn end_to_end(live: bool) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if live {
         let model = kinewright_media::default_data_dir()
-            .join("models/whisper")
-            .join(kinewright_media::WHISPER_MODEL_NAME);
+            .join("models")
+            .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
+            .join(kinewright_media::recognizer::ENGLISH_MODEL.files[0].name);
         assert_eq!(
             kinewright_media::sha256_file(&model).ok().as_deref(),
-            Some(kinewright_media::WHISPER_MODEL_SHA256),
+            Some(kinewright_media::recognizer::ENGLISH_MODEL.files[0].sha256),
             "E2E_LIVE_MODEL_REQUIRED {}",
             model.display()
         );
@@ -916,9 +917,9 @@ fn s3_studio_end_to_end() {
 }
 
 /// The same pass with the voice note spoken by espeak-ng and transcribed by the
-/// pinned Whisper small model.
+/// pinned Nemotron Speech Streaming EN 0.6B model.
 #[test]
-#[ignore = "needs the Whisper model and espeak-ng"]
+#[ignore = "needs the NeMo model and espeak-ng"]
 fn s3_studio_end_to_end_live_voice() {
     end_to_end(true);
 }

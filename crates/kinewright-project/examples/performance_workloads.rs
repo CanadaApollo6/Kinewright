@@ -11,7 +11,7 @@
 //!   measured as `Core::request` round trips. This is **local edit-plan
 //!   execution**: it excludes model inference, network transport, and
 //!   transcription generation. A cached-transcript mapping probe uses only
-//!   synthetically registered transcript rows (no Whisper run).
+//!   synthetically registered transcript rows (no recognition run).
 //!
 //! All footage is synthetic and license-free: deterministic `ffmpeg` `lavfi`
 //! generator arguments, no downloads. Machine-readable JSON is written to
@@ -703,7 +703,7 @@ fn run_agent_lane(
         "cached_transcript_map": {
             "calls": TRANSCRIPT_CALLS,
             "mapped_words": mapped_words,
-            "protocol": "register_transcript once (synthetic rows), then timeline_transcript; no Whisper run",
+            "protocol": "register_transcript once (synthetic rows), then timeline_transcript; no recognition run",
             "map_ms": stats_json(map_stats),
         },
         "memory_kb": memory_json(mem_before, mem_after),

@@ -1,0 +1,19 @@
+NVIDIA Nemotron Speech Streaming EN 0.6B
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License
+https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+
+Model source: https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b
+Pinned revision: ebe59e5a817142986528bbbee5dba8db7b38ed50
+File: nemotron-speech-streaming-en-0.6b.q8_0.gguf
+SHA-256: d9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d
+Weights are downloaded separately on first use. Kinewright does not alter them.
+
+NVIDIA Parakeet TDT 0.6B v3
+Copyright NVIDIA Corporation. Licensed under Creative Commons Attribution 4.0
+International (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+The license text is included in AMI-CC-BY-4.0.txt after the AMI-specific preamble.
+Model source: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+Pinned revision: 541d1f99c6b0c3cd0b11a95167540bb8edefd82b
+File: parakeet-tdt-0.6b-v3.q8_0.gguf
+SHA-256: e3880d0aaaaf2c308ea2c35016b2b895c423eb3fda924c1b463d1c19b7f4d32e
+Attribution and model specification are retained for the DQ1 S3 offline adapter.

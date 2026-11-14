@@ -1645,7 +1645,7 @@ pub struct TranscriptWord {
     pub text: String,
     pub source_start: TimeCode,
     pub source_end: TimeCode,
-    /// Optional stable diarization label. Plain Whisper transcripts leave it
+    /// Optional stable diarization label. Local recognizer transcripts leave it
     /// unset; speaker-aware backends can populate it without changing edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,

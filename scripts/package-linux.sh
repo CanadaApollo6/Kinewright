@@ -82,6 +82,13 @@ if [[ ! -d "$ffmpeg_lib_dir" ]]; then
 fi
 
 required_libs=(libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so)
+nemo_dir="${KINEWRIGHT_NEMO_DIR:?Source scripts/setup-ffmpeg.sh before packaging}"
+for lib in libnemo_speech_asr.so libnemo_speech_asr_c.so; do
+    if [[ ! -f "$nemo_dir/lib/$lib" ]]; then
+        echo "NeMo SDK is missing required library: $lib" >&2
+        exit 1
+    fi
+done
 for lib in "${required_libs[@]}"; do
     if [[ ! -e "$ffmpeg_lib_dir/$lib" ]]; then
         echo "Pinned FFmpeg build is missing required library: $lib" >&2
@@ -116,6 +123,7 @@ fi
 
 # Copy the libav family and every SONAME symlink the loader needs.
 find "$ffmpeg_lib_dir" -maxdepth 1 \( -name 'libav*.so*' -o -name 'libsw*.so*' \) -exec cp -a {} "$stage_dir/lib/" \;
+cp -a "$nemo_dir"/lib/libnemo_speech_asr*.so* "$stage_dir/lib/"
 
 if command -v patchelf >/dev/null 2>&1; then
     for binary in "$stage_dir/Kinewright" "$stage_dir/ffmpeg"; do
@@ -135,6 +143,7 @@ fi
 
 cp "$repo_root/LICENSE" "$licenses_dir/Kinewright-GPL-3.0.txt"
 cp "$ffmpeg_license" "$licenses_dir/FFmpeg-GPL.txt"
+cp -a "$repo_root/LICENSES/." "$licenses_dir/"
 cp "$repo_root/crates/kinewright-app/assets/licenses/Inter-OFL.txt" "$licenses_dir/"
 cp "$repo_root/crates/kinewright-app/assets/licenses/JetBrains-Mono-OFL.txt" "$licenses_dir/"
 cp "$repo_root/packaging/linux/LICENSES/README.txt" "$licenses_dir/"

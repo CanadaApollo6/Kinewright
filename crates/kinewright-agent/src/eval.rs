@@ -8536,10 +8536,7 @@ fn caption_ends_clause(text: &str) -> bool {
 }
 
 fn normalize_caption_word(text: &str) -> String {
-    text.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .flat_map(char::to_lowercase)
-        .collect()
+    kinewright_core::normalize_transcript_word(text)
 }
 
 fn starts_with_uppercase(text: &str) -> bool {
@@ -9158,26 +9155,12 @@ fn timeline_media_clips(document: &Document) -> impl Iterator<Item = &kinewright
 }
 
 fn normalize_words<'a>(words: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
-    words
-        .map(|word| {
-            word.chars()
-                .filter(|character| character.is_alphabetic())
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
-        .filter(|word| !word.is_empty())
-        .collect()
+    normalize_word_sequence(words).into_iter().collect()
 }
-
 fn normalize_word_sequence<'a>(words: impl Iterator<Item = &'a str>) -> Vec<String> {
     words
         .flat_map(str::split_whitespace)
-        .map(|word| {
-            word.chars()
-                .filter(|character| character.is_alphanumeric())
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
+        .map(kinewright_core::normalize_transcript_word)
         .filter(|word| !word.is_empty())
         .collect()
 }
@@ -9517,6 +9500,15 @@ mod tests {
     };
 
     use super::*;
+    #[test]
+    fn dq1_eval_word_checks_share_case_punctuation_and_number_rules() {
+        let text = ["Um, WE’RE 42!"].into_iter();
+        assert_eq!(normalize_word_sequence(text), ["um", "were", "42"]);
+        assert_eq!(
+            normalize_words(["Um, WE’RE 42!"].into_iter()),
+            ["um", "were", "42"].map(String::from).into_iter().collect()
+        );
+    }
 
     #[test]
     fn diagnostic_trace_is_bounded_on_character_boundaries() {

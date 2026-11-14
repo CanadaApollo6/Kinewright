@@ -388,7 +388,9 @@ impl VoiceNoteState {
                 job: key.clone(),
                 anchor: self.anchor.clone(),
                 playhead_log_sha256: log.sha256.clone(),
-                model_sha256: kinewright_media::WHISPER_MODEL_SHA256.into(),
+                model_sha256: kinewright_media::recognizer::ENGLISH_MODEL.files[0]
+                    .sha256
+                    .into(),
                 transcript,
             };
             self.pending_asr = Some(PendingAsr::Unvalidated(Box::new(original)));

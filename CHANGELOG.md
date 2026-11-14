@@ -9,6 +9,13 @@ All notable changes to Kinewright are documented here. The format follows
 The initial development cycle (milestones M0–M7), building the editor end to end:
 
 ### Fixed
+- DQ1 S2 replaces the previous speech backend with pinned, CPU-only
+  NeMo-Speech.cpp and NVIDIA Nemotron Speech Streaming EN 0.6B. Asset and voice
+  transcription share queued sessions, pause commits, exact source microseconds
+  and identity-keyed caches. Token-duration times are explicitly marked as lagged,
+  rather than treated as sound boundaries. Provisioning verifies weights and
+  detects changed files without hashing unchanged 700 MB weights on every use.
+  Linux and Windows slow CI run recognition against an attributed AMI clip.
 - One Kinewright turn could switch the user's Cursor CLI out of Fast mode, or
   pin an effort, permanently. Cursor persists `session/set_config_option`
   CLI-wide even over ACP, which is why Kinewright snapshots and restores it —
@@ -620,7 +627,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   pause retained across a removed filler run without shortening an already
   natural bridge or preserving filler audio,
   while a compact read-only pacing inspector reports sentence boundaries and
-  short/target/long gaps. Human review exposed that Whisper word endpoints had
+  short/target/long gaps. Human review exposed that earlier recogniser word endpoints had
   made the original 12-frame metric disagree with rendered pauses of roughly
   47 and 9 frames. Planning and evaluation now use mapped acoustic silence at
   a speech-oriented -35 dBFS threshold, with transcript bounds as an explicit
@@ -643,7 +650,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   cuts instead of emitting silent micro-clips. Batched transcript reads and one
   compact editorial-readiness proof reduce repeated model context; silence
   thresholds apply after transcript protection and cut margins. English eval
-  transcription is hinted explicitly, and a broken `whisper-rs` safe abort
+  transcription is hinted explicitly, and a broken former recogniser safe abort
   callback was removed after it intermittently aborted healthy Windows
   inference. The published Codex machine baseline passes 3/3 samples and 93/93
   assertions with 16-17 tool calls and 236,336-251,345 tokens per sample. Human
@@ -686,7 +693,7 @@ The initial development cycle (milestones M0–M7), building the editor end to e
   (stream-json) and locked-down Codex driver (read-only sandbox, direct tool
   mode); chat panel with streaming, cost tracking, spending cap, turn cap, and
   destructive-op confirmations
-- Edit by transcript: local Whisper transcription at import (pinned model,
+- Edit by transcript: local speech transcription at import (pinned model,
   one-time download), word-level timestamps, transcript agent tools, transcript
   panel with click-to-seek
 - Crash recovery from a journaled operation log with restore/discard flow

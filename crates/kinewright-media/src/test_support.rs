@@ -217,7 +217,7 @@ pub fn wait_for_transcript(
         }
         match status {
             TranscriptStatus::Ready(transcript) => return transcript,
-            TranscriptStatus::NoSpeech => panic!("Whisper reported no speech for SAPI audio"),
+            TranscriptStatus::NoSpeech => panic!("NeMo reported no speech for SAPI audio"),
             TranscriptStatus::Failed(error) => panic!("transcription failed: {error}"),
             _ => {}
         }
@@ -239,12 +239,7 @@ pub fn joined_words(transcript: &AssetTranscript) -> String {
 #[must_use]
 pub fn normalized_words(text: &str) -> Vec<String> {
     text.split_whitespace()
-        .map(|word| {
-            word.chars()
-                .filter(|character| character.is_alphabetic())
-                .flat_map(char::to_lowercase)
-                .collect::<String>()
-        })
+        .map(kinewright_core::normalize_transcript_word)
         .filter(|word| !word.is_empty())
         .collect()
 }

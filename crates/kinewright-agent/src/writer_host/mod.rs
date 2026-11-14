@@ -3083,7 +3083,7 @@ impl HostCommandOwner {
 
 // The real media engine is constructed only on a media operation. Scoped MCP rejects
 // unpinned file operations before this boundary; a metadata-only scripted session needs
-// neither a GPU nor a Whisper model, just like attachment/proxy.
+// neither a GPU nor a NeMo model, just like attachment/proxy.
 #[derive(Default)]
 struct LazyHostMedia {
     engine: OnceLock<Result<Arc<kinewright_media::FfmpegMediaEngine>, kinewright_core::MediaError>>,

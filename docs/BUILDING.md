@@ -103,7 +103,7 @@ install.
 ## Windows (x86_64 MSVC)
 
 M0 targets 64-bit Windows with the MSVC Rust toolchain. The media crate links
-FFmpeg at build time and loads its DLLs at test and run time.
+FFmpeg and NeMo-Speech at build time and loads their DLLs at test and run time.
 The Windows installer must also ship the MSVC OpenMP runtime (`vcomp140.dll`) required by the NeMo-Speech DLLs.
 
 ### Prerequisites
@@ -219,3 +219,28 @@ PowerShell session before building, testing, or launching Kinewright.
   chooses rejection instead of storing hidden fractional time.
 - CLI detection in M0 only checks `PATH`. Authentication and protocol-version
   checks require starting the CLI and are intentionally deferred to M3.
+
+## Recognition runtime
+
+The existing setup command also provisions NeMo-Speech.cpp v0.3.0 from commit
+`20999cc921d2b14aa58708f61756a8b2e787ba20`, llama.cpp
+`bd4f514db14d87fded667787a7a963bfbaa98e89` and SentencePiece
+`31646a467d2051eb904e0b45de3a73e91fe1c1e3`. Each source is fetched by its full
+commit hash from its official GitHub repository, and detached `HEAD` is checked
+against that pin. CMake builds against the
+prepared dependency prefix without fetching anything. The SDK cache key includes
+pins, patches, compiler and build settings; only `lib`, `bin`, `include`, `share`
+and `.build-key` remain after installation. Cargo's media `build.rs` only links.
+
+The CPU build uses `GGML_NATIVE=OFF`; it requires AVX2, FMA, F16C, BMI2 and SSE4.2.
+Model loading checks these features before calling the native library. Set up each
+shell before cargo so `KINEWRIGHT_NEMO_DIR`, the native search path and the runtime
+loader path are present. Direct rustc probes linking workspace crates also need
+`-L native=$KINEWRIGHT_NEMO_DIR/lib`.
+
+Packaging copies both NeMo shared libraries and the notices under `LICENSES/`.
+Linux additionally requires the system OpenMP runtime (`libgomp.so.1`). Windows
+OpenMP installer work remains the follow-up noted above. Recognition uses CPU
+inference on both platforms. Model files and licences, cache identity, session
+clocks and the real-model slow-tier witness are documented in
+[TRANSCRIPTION.md](TRANSCRIPTION.md).

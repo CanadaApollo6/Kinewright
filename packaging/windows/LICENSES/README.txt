@@ -1,5 +1,5 @@
-Kinewright and bundled FFmpeg licensing
-=====================================
+Kinewright and bundled native software licensing
+===============================================
 
 Kinewright
 --------
@@ -29,6 +29,18 @@ https://ffmpeg.org/legal.html
 The FFmpeg license text shipped by the pinned build is installed beside this
 file as FFmpeg-GPL.txt. FFmpeg is a trademark of Fabrice Bellard, originator of
 the FFmpeg project.
+
+Local speech recognition
+------------------------
+
+This package includes NVIDIA NeMo-Speech.cpp v0.3.0, built from pinned source
+under Apache-2.0. The complete licence and upstream third-party notices are in
+nemo-speech/ beside this file. Source: https://github.com/NVIDIA/NeMo-Speech.cpp
+
+The NVIDIA Nemotron Speech Streaming EN 0.6B weights are downloaded separately.
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License:
+https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+See NVIDIA-models-NOTICE.txt for the pinned model sources and attribution.
 
 Embedded fonts
 --------------

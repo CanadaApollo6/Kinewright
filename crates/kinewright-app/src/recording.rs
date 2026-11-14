@@ -2003,7 +2003,9 @@ pub(crate) mod feedback_capture {
                     .unwrap()
                     .sha256
                     .clone(),
-                model_sha256: kinewright_media::WHISPER_MODEL_SHA256.into(),
+                model_sha256: kinewright_media::recognizer::ENGLISH_MODEL.files[0]
+                    .sha256
+                    .into(),
                 transcript: asr(),
             };
             let bytes = serde_json::to_vec(&original).unwrap();
@@ -3257,12 +3259,17 @@ pub(crate) mod feedback_capture {
         }
         fn real_speech_control(commentary: bool) {
             use kinewright_media::{
-                WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, default_data_dir, sha256_file,
+                default_data_dir,
+                recognizer::ENGLISH_MODEL,
+                sha256_file,
                 test_support::{SpeechClip, normalized_words, run_ffmpeg},
             };
             let model_root = std::env::var_os("KINEWRIGHT_S3_VOICE_MODEL_DATA_DIR")
                 .map_or_else(default_data_dir, PathBuf::from);
-            let model = model_root.join("models/whisper").join(WHISPER_MODEL_NAME);
+            let model = model_root
+                .join("models")
+                .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
+                .join(ENGLISH_MODEL.files[0].name);
             let control = if commentary {
                 "s3_real_commentary_control"
             } else {
@@ -3283,20 +3290,29 @@ pub(crate) mod feedback_capture {
                     }
                 }
             }
-            if !model.is_file() || sha256_file(&model).ok().as_deref() != Some(WHISPER_MODEL_SHA256)
+            if !model.is_file()
+                || sha256_file(&model).ok().as_deref() != Some(ENGLISH_MODEL.files[0].sha256)
             {
                 eprintln!(
-                    "NOT RUN {control}: pinned Whisper small is absent from {}",
+                    "NOT RUN {control}: pinned Nemotron Speech Streaming EN 0.6B is absent from {}",
                     model.display()
                 );
                 return;
             }
             let root = TempDirectory::new_in(&workspace_target_dir(), control);
             let cache = root.path("voice-control-cache");
-            std::fs::create_dir_all(cache.join("models/whisper")).unwrap();
+            std::fs::create_dir_all(
+                cache
+                    .join("models")
+                    .join(kinewright_media::recognizer::ENGLISH_MODEL.id),
+            )
+            .unwrap();
             std::os::unix::fs::symlink(
                 &model,
-                cache.join("models/whisper").join(WHISPER_MODEL_NAME),
+                cache
+                    .join("models")
+                    .join(kinewright_media::recognizer::ENGLISH_MODEL.id)
+                    .join(ENGLISH_MODEL.files[0].name),
             )
             .unwrap();
             let (mut owner, anchor) = setup(root.root());
@@ -3346,7 +3362,7 @@ pub(crate) mod feedback_capture {
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "CPU Whisper small control timed out"
+                    "CPU Nemotron Speech Streaming EN 0.6B control timed out"
                 );
                 std::thread::sleep(Duration::from_millis(10));
             };

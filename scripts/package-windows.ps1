@@ -5,6 +5,7 @@ param(
     [string]$Version,
 
     [string]$FfmpegDir = $env:FFMPEG_DIR,
+    [string]$NemoDir = $env:KINEWRIGHT_NEMO_DIR,
     [string]$TargetDir,
     [string]$OutputDir,
     [string]$IsccPath,
@@ -69,6 +70,16 @@ if (-not (Test-Path -LiteralPath $ffmpegLicense -PathType Leaf)) {
     throw "Pinned FFmpeg build license not found: $ffmpegLicense"
 }
 
+if ([string]::IsNullOrWhiteSpace($NemoDir)) {
+    throw 'Source scripts/setup-ffmpeg.ps1 before packaging to locate the NeMo SDK'
+}
+$nemoDlls = @('nemo_speech_asr.dll', 'nemo_speech_asr_c.dll')
+foreach ($name in $nemoDlls) {
+    if (-not (Test-Path -LiteralPath (Join-Path $NemoDir "bin/$name") -PathType Leaf)) {
+        throw "NeMo SDK is missing required DLL: $name"
+    }
+}
+
 if (Test-Path -LiteralPath $stageDir) {
     Remove-Item -LiteralPath $stageDir -Recurse -Force
 }
@@ -81,6 +92,9 @@ Copy-Item -LiteralPath $sourceExe -Destination $stagedExe
 foreach ($dll in $dlls) {
     Copy-Item -LiteralPath $dll.FullName -Destination $stageDir
 }
+foreach ($name in $nemoDlls) {
+    Copy-Item -LiteralPath (Join-Path $NemoDir "bin/$name") -Destination $stageDir
+}
 
 # The FFmpeg CLI powers in-editor recording (screen/camera/mic capture).
 $ffmpegCli = Join-Path $ffmpegBin 'ffmpeg.exe'
@@ -91,6 +105,7 @@ Copy-Item -LiteralPath $ffmpegCli -Destination $stageDir
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $licensesDir 'Kinewright-GPL-3.0.txt')
 Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $licensesDir 'FFmpeg-GPL.txt')
+Copy-Item -Path (Join-Path $repoRoot 'LICENSES/*') -Destination $licensesDir -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licenses\Inter-OFL.txt') -Destination $licensesDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licenses\JetBrains-Mono-OFL.txt') -Destination $licensesDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\windows\LICENSES\README.txt') -Destination $licensesDir

@@ -45,7 +45,7 @@ def run(label, command, optional_native=False):
     summaries=re.findall(r'^test result: .+$',text,re.M)
     row={'label':label,'command':command,'exit':process.returncode,'seconds':time.monotonic()-started,'summaries':summaries,'tail':[line[:512] for line in text.splitlines()[-16:]],'head':header['head']}
     if optional_native and process.returncode != 0:
-        assert 'error[E' not in text and re.search(r'failed to run custom build command for [`\'](?:aws-lc-sys|ffmpeg-sys|whisper-rs-sys)',text),text[-6000:]
+        assert 'error[E' not in text and re.search(r'failed to run custom build command for [`\'](?:aws-lc-sys|ffmpeg-sys)',text),text[-6000:]
         row['status']='NOT RUN: native MSVC dependency prerequisite'
     else:
         row['status']='passed' if process.returncode==0 else 'failed'

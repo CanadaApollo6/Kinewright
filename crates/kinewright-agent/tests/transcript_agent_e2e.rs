@@ -18,7 +18,7 @@ const TTS_TEXT: &str = "Hello, um, this is an Kinewright transcript test.";
 #[test]
 fn one_agent_message_removes_the_transcribed_filler_word() {
     if std::env::var("KINEWRIGHT_TRANSCRIPT_TEST").as_deref() != Ok("1") {
-        eprintln!("skipped: set KINEWRIGHT_TRANSCRIPT_TEST=1 to run SAPI, Whisper, and Claude");
+        eprintln!("skipped: set KINEWRIGHT_TRANSCRIPT_TEST=1 to run SAPI, NeMo, and Claude");
         return;
     }
 
@@ -27,11 +27,11 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
     let asset = media.probe(&clip.mp4).expect("generated clip should probe");
     media.request_transcription(asset.clone());
     let transcript = wait_for_transcript(media.as_ref(), &asset, false);
-    let whisper_output = joined_words(&transcript);
-    let whisper_words = normalized_words(&whisper_output);
+    let recognizer_output = joined_words(&transcript);
+    let recognizer_words = normalized_words(&recognizer_output);
     assert!(
-        whisper_words.iter().any(|word| word == "um"),
-        "fixture must contain a recognized filler word: {whisper_output}"
+        recognizer_words.iter().any(|word| word == "um"),
+        "fixture must contain a recognized filler word: {recognizer_output}"
     );
 
     let original = single_clip_document(asset);
@@ -55,7 +55,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
     let prompt = "remove the filler words";
 
     println!("TTS: {TTS_TEXT}");
-    println!("WHISPER: {whisper_output}");
+    println!("ASR: {recognizer_output}");
     println!("USER: {prompt}");
     session
         .send_user_message(prompt.to_owned())

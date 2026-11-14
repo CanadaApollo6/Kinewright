@@ -12,7 +12,7 @@ buildable here after provisioning FFmpeg and the native desktop libraries:
   undo/redo, `.kinewright` JSON serde). No extra system deps.
 - `kinewright-media`, `kinewright-agent`, `kinewright-app` — FFmpeg 8.x shared libs
   (not Ubuntu's FFmpeg 6.1), Vulkan (`wgpu`, including Mesa lavapipe), ALSA
-  (`cpal`), Whisper (`whisper.cpp` via CMake), GTK 3 (`rfd`), and X11/Wayland
+  (`cpal`), NeMo-Speech.cpp (separately provisioned shared CPU libraries), GTK 3 (`rfd`), and X11/Wayland
   (`eframe`/`winit`). `scripts/install-linux-deps.sh` plus
   `source scripts/setup-ffmpeg.sh` provide these. Do **not** run
   `scripts/setup-ffmpeg.ps1` on Linux (it downloads the Windows MSVC build).

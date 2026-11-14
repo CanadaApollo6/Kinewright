@@ -1,5 +1,5 @@
-//! CPU-only NeMo-Speech.cpp ownership boundary. Model provisioning and sessions
-//! are integrated by DQ1 S2; callers of this low-level loader must verify weights.
+//! CPU-only NeMo-Speech.cpp ownership boundary. Callers must verify weights
+//! before using this low-level loader; recognizer/model.rs owns verification.
 use std::{fmt, fs, path::Path};
 
 #[allow(
@@ -73,7 +73,7 @@ impl std::error::Error for Error {}
 /// One CPU recogniser. Its native handle is released on drop.
 /// No callbacks cross the C boundary.
 pub struct Recognizer {
-    _native: ffi::Recognizer,
+    native: ffi::Recognizer,
 }
 
 impl Recognizer {
@@ -84,6 +84,16 @@ impl Recognizer {
     /// Returns a typed CPU, ABI, file, path or native model error. This low-level
     /// operation does not replace the model's size and SHA-256 verification.
     pub fn load(model: &Path) -> Result<Self, Error> {
+        let threads = u8::try_from(
+            std::thread::available_parallelism()
+                .map_or(4, std::num::NonZeroUsize::get)
+                .min(4),
+        )
+        .unwrap_or(4);
+        Self::load_config(model, threads, 13)
+    }
+
+    pub(crate) fn load_config(model: &Path, threads: u8, lookahead: u8) -> Result<Self, Error> {
         check_cpu()?;
         let metadata = fs::metadata(model).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -99,7 +109,7 @@ impl Recognizer {
             return Err(Error::EmptyModel);
         }
         Ok(Self {
-            _native: ffi::Recognizer::load(model)?,
+            native: ffi::Recognizer::load(model, threads, lookahead)?,
         })
     }
 }
@@ -121,6 +131,36 @@ fn check_cpu() -> Result<(), Error> {
 #[must_use]
 pub fn runtime_version() -> String {
     ffi::runtime_version()
+}
+
+pub(crate) use ffi::Frame;
+pub(crate) struct Stream<'a> {
+    native: ffi::Stream<'a>,
+}
+impl Recognizer {
+    pub(crate) fn stream(&mut self) -> Result<Stream<'_>, Error> {
+        Ok(Stream {
+            native: self.native.stream()?,
+        })
+    }
+}
+impl Stream<'_> {
+    pub(crate) fn feed(&mut self, samples: &[f32]) -> Result<(), Error> {
+        self.native.feed(samples)
+    }
+    pub(crate) fn step(&mut self) -> Result<Option<Frame>, Error> {
+        self.native.step()
+    }
+    pub(crate) fn commit(&mut self) -> Result<(), Error> {
+        self.native.commit()
+    }
+    pub(crate) fn finish(&mut self) -> Result<(), Error> {
+        self.native.finish()
+    }
+}
+#[cfg(windows)]
+pub(crate) fn file_change_time(file: &std::fs::File) -> std::io::Result<i64> {
+    ffi::file_change_time(file)
 }
 
 #[cfg(test)]

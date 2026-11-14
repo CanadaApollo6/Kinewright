@@ -24,7 +24,7 @@ const TTS_SSML: &str = "<speak version='1.0' xml:lang='en-US'>Alpha.<break time=
 #[allow(clippy::too_many_lines)]
 fn claude_removes_long_silences_with_one_atomic_plan() {
     if std::env::var("KINEWRIGHT_AGENT_TEST").as_deref() != Ok("1") {
-        eprintln!("skipped: set KINEWRIGHT_AGENT_TEST=1 to run SAPI, Whisper, and Claude");
+        eprintln!("skipped: set KINEWRIGHT_AGENT_TEST=1 to run SAPI, NeMo, and Claude");
         return;
     }
 

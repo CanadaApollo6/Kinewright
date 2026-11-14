@@ -21,7 +21,9 @@ $requiredDllPatterns = @(
     'avformat-*.dll',
     'avutil-*.dll',
     'swresample-*.dll',
-    'swscale-*.dll'
+    'swscale-*.dll',
+    'nemo_speech_asr.dll',
+    'nemo_speech_asr_c.dll'
 )
 foreach ($pattern in $requiredDllPatterns) {
     if (-not (Get-ChildItem -LiteralPath $BundleDir -File -Filter $pattern)) {

@@ -48,9 +48,9 @@ ownership_measure h1_coalesced_drag_edit_cost crates/kinewright-core/tests/owner
 
 # kinewright_eval
 kinewright_eval tests::cc7_every_color_fixture_builds_a_valid_document crates/kinewright-agent/src/bin/kinewright-eval.rs any inherited-gap  # INHERITED GAP: a regression guard skipped because the media engine it builds raises a SIGSEGV at process-exit teardown; unskip once teardown is fixed
-kinewright_eval tests::v3_fixture_builds_with_authored_and_recognized_truth crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires local speech synthesis and Whisper analysis
+kinewright_eval tests::v3_fixture_builds_with_authored_and_recognized_truth crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires local speech synthesis and NeMo analysis
 kinewright_eval tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires the explicitly prepared M40 event fixture pack
-kinewright_eval tests::v5_fixture_builds_from_verified_real_media crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires the explicitly prepared M40 fixture pack and Whisper analysis
+kinewright_eval tests::v5_fixture_builds_from_verified_real_media crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires the explicitly prepared M40 fixture pack and NeMo analysis
 kinewright_eval tests::v5_music_fixture_builds_with_real_media_and_pinned_beats crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires the explicitly prepared M40 music fixture pack and beat analysis
 
 # kinewright_media
@@ -116,7 +116,7 @@ ja_s4_lifecycle s4_person_holder_approval_and_secret crates/kinewright-agent/tes
 
 # S4 C5
 ja_s4_usage s4_usage_durable_reopen_h1 crates/kinewright-agent/tests/ja_s4_usage.rs any inherited-gap  # S3 H1 durable orchestration publisher and independent reopen are not integrated
-kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end_live_voice crates/kinewright-app/src/studio_e2e_tests.rs linux on-demand  # needs the Whisper model and espeak-ng
+kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end_live_voice crates/kinewright-app/src/studio_e2e_tests.rs linux on-demand  # needs the NeMo model and espeak-ng
 
 kinewright_job_sys sandbox::tests::s4b_c2_home_denial crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
 kinewright_job_sys sandbox::tests::s4b_c2_project_denial crates/kinewright-job-sys/src/sandbox.rs linux on-demand  # S4b C2 requires Landlock ABI 9; explicitly run in the C2 native gate
@@ -225,3 +225,9 @@ kinewright_agent writer_host::hooks_tests::tests::history_capacity_1200_lifecycl
 history_fix2_cost history_fix2_startup_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Alternating debug host startup probe at 4000 and 12000 edits; actual five-second launch limit and exact history comparison
 history_fix2_cost history_fix2_edit_and_save_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Debug manual admission and changed publication timing at 1000 and 12000 edits
 manual_history_capacity manual_history_heavy_copy_capacity_census crates/kinewright-project/tests/manual_history_capacity.rs linux on-demand # Exact ordinary heavy-copy peak and largest accepted fanout measurement
+
+kinewright_media recognizer::real::dq1_real_ami_short_keeps_um_and_known_words crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model; explicitly run in the recognition slow job
+
+kinewright_media recognizer::real::dq1_real_ami8_whole_equals_pause_commits crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model and KINEWRIGHT_ASR_AMI8 fixture
+
+kinewright_media recognizer::real::dq1_real_ami30_bounded_memory_and_cancel crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model and KINEWRIGHT_ASR_AMI30; memory and cancellation measurement

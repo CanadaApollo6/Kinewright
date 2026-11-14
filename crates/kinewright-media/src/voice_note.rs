@@ -65,9 +65,9 @@ impl VoiceTranscript {
                         || w.start_micros >= w.end_micros
                         || w.end_micros > duration_micros
                 })
-                || words
-                    .windows(2)
-                    .any(|w| w[0].end_micros > w[1].start_micros))
+                || words.windows(2).any(|w| {
+                    w[0].start_micros > w[1].start_micros || w[0].end_micros > w[1].end_micros
+                }))
         {
             return Err(MediaError::Backend(
                 "invalid bounded voice transcript".into(),
@@ -253,7 +253,7 @@ pub fn commentary_remarks<A: Clone>(
             .any(|w| w.start_micros >= w.end_micros || w.end_micros > duration_micros)
         || words
             .windows(2)
-            .any(|w| w[0].end_micros > w[1].start_micros)
+            .any(|w| w[0].start_micros > w[1].start_micros || w[0].end_micros > w[1].end_micros)
     {
         return Err(MediaError::Backend(
             "invalid bounded voice transcript".into(),
@@ -746,7 +746,7 @@ where
     let (tx, result) = std::sync::mpsc::sync_channel(1);
     let inference_cancel = cancellation.clone();
     let worker = std::thread::Builder::new()
-        .name("voice-note-whisper".into())
+        .name("voice-note-recognizer".into())
         .spawn(move || {
             let _native_charge = native_charge;
             let mut permit = permit;
@@ -885,6 +885,35 @@ mod tests {
                 .is_none(),
             "S3_VOICE_ONE_COMPLETION"
         );
+    }
+
+    #[test]
+    fn dq1_voice_accepts_ordered_overlapping_token_times() {
+        let words = vec![
+            VoiceWord {
+                text: "We’re".into(),
+                start_micros: 100_000,
+                end_micros: 400_000,
+            },
+            VoiceWord {
+                text: "here.".into(),
+                start_micros: 320_000,
+                end_micros: 480_000,
+            },
+        ];
+        let transcript = VoiceTranscript::Ready(words);
+        transcript.validate(1_000_000).unwrap();
+        let VoiceTranscript::Ready(mut words) = transcript else {
+            unreachable!()
+        };
+        let log = PlayheadLog::new(7_u64);
+        let remarks = commentary_remarks(&words, &log, 1_000_000).unwrap();
+        assert_eq!(
+            (remarks[0].start_micros, remarks[0].end_micros),
+            (100_000, 480_000)
+        );
+        words.swap(0, 1);
+        assert!(VoiceTranscript::Ready(words).validate(1_000_000).is_err());
     }
     #[test]
     fn s3_commentary_playhead_log() {

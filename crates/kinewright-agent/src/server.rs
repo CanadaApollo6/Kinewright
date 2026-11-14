@@ -2849,7 +2849,7 @@ impl KinewrightMcp {
     /// (AU5 §0 R112): a captured room tone is a second of noise the project
     /// wrote itself, and `request_asset_analysis` would queue a transcription
     /// on it — which, on a machine that has never transcribed anything, means
-    /// downloading the Whisper model to read a file with no speech in it — plus
+    /// downloading the speech model to read a file with no speech in it — plus
     /// a scene detection on an asset with no video and a beat detection on
     /// material chosen for having no events. The one analysis a room tone could
     /// use is a waveform, which is requested on demand by the surface that
@@ -8486,7 +8486,7 @@ impl KinewrightMcp {
                 .flat_map(|transcript| &transcript.words)
                 .filter(|word| {
                     query.as_ref().is_some_and(|query| {
-                        word.text.to_lowercase().contains(query)
+                        transcript_word_matches(&word.text, query)
                             || word
                                 .speaker
                                 .as_ref()
@@ -12301,6 +12301,11 @@ struct ExtendedRepairBus {
     ducking_sidechain_tracks: Vec<TrackId>,
     /// The repair prefix rule 112 appends the delivery processing after.
     prefix: Vec<Effect>,
+}
+
+fn transcript_word_matches(text: &str, query: &str) -> bool {
+    let query = kinewright_core::normalize_transcript_word(query);
+    !query.is_empty() && kinewright_core::normalize_transcript_word(text).contains(&query)
 }
 
 fn normalization_context(
@@ -19171,6 +19176,15 @@ fn render_plan_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dq1_word_search_normalises_model_spelling() {
+        assert!(transcript_word_matches("Um,", "UM"));
+        assert!(transcript_word_matches("we’re", "WE'RE,"));
+        assert!(transcript_word_matches("42,", "42"));
+        assert!(!transcript_word_matches("Um,", "..."));
+        assert!(!transcript_word_matches("control", "remote"));
+    }
+
     use kinewright_core::{
         AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, AudioChannelClipping,
         AudioClipping, AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest,

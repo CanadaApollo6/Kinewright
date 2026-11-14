@@ -407,7 +407,16 @@ impl HostCommandOwner {
                         job.task = None;
                         match done.result {
                             Ok(t) => {
-                                job.progress = match &t { VoiceTranscript::AwaitingModel => "Whisper small is not installed. Audio is saved; install the model to transcribe.".into(), VoiceTranscript::NoSpeech => "No speech detected. Audio is saved.".into(), VoiceTranscript::Ready(_) => "Saving transcript…".into() };
+                                job.progress = match &t {
+                                    VoiceTranscript::AwaitingModel => format!(
+                                        "{} is not installed. Audio is saved; install the model to transcribe.",
+                                        kinewright_media::recognizer::ENGLISH_MODEL.name
+                                    ),
+                                    VoiceTranscript::NoSpeech => {
+                                        "No speech detected. Audio is saved.".into()
+                                    }
+                                    VoiceTranscript::Ready(_) => "Saving transcript…".into(),
+                                };
                                 job.completion = Some(t);
                             }
                             Err(e) => job.progress = e.to_string(),

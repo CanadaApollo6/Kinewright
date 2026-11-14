@@ -297,12 +297,12 @@
       "status": "pending_baseline_witness",
       "owner": "JA-1 voice / media transcription owner",
       "stage": "S3",
-      "observer": "Existing Whisper/source transcription control, model-installed lane only",
+      "observer": "Existing NeMo/source transcription control, model-installed lane only",
       "pending": "Anchored note capture/cancel/publication observer pending S3; missing model is NOT RUN.",
       "control_fixtures": [],
       "observed_baseline_assertions": [],
       "expected": {
-        "E": "existing Whisper path plus microphone fixture and note-ID publication adapter.",
+        "E": "existing NeMo path plus microphone fixture and note-ID publication adapter.",
         "P": "a real short spoken note yields editable\ntranscript attached to its pinned frame.",
         "B": "no version-bound voice-note workflow today.",
         "M": "accept late cancelled result by newest selection or auto-accept\nsilence ASR. Cancel during inference, change version, inject late result; no wrong attachment. Missing model retains audio/honest state; that case alone is not\nthe baseline red."
@@ -753,7 +753,7 @@
       "owner": "JA-4 S2/S5 / named JA-1 storage or consumer seam",
       "stage": "S2/S5",
       "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
-      "pending": "**G11. Full search, reuse and resources, S2/S5.** Real matcher/transcription/decode counting, allocation/queue observers, and UI timing. Run all four \u00a712 full\nworkloads cold/warm with out-of-order retakes, both G3 counterexamples, diagnostic saturation, late valid take, and unchanged exact controls. Independently label\ncoverage/path sets. Report measured cumulative matcher/DP cells, peak bytes, complete coverage, and full latency, not a slice or forecast. Cache reuse is a\nregression control: rewrap/choice/reopen/unrelated edit causes zero new inference. Mutate per-line transcription, whole-PCM sync allocation, lost frontier, counter\nreset, page leak, or cancelled publication. Verify typed overflow and retained pins. Measure real Whisper peak separately. Resource/native/provider/human lanes\nremain distinct and unrun until exercised.",
+      "pending": "**G11. Full search, reuse and resources, S2/S5.** Real matcher/transcription/decode counting, allocation/queue observers, and UI timing. Run all four \u00a712 full\nworkloads cold/warm with out-of-order retakes, both G3 counterexamples, diagnostic saturation, late valid take, and unchanged exact controls. Independently label\ncoverage/path sets. Report measured cumulative matcher/DP cells, peak bytes, complete coverage, and full latency, not a slice or forecast. Cache reuse is a\nregression control: rewrap/choice/reopen/unrelated edit causes zero new inference. Mutate per-line transcription, whole-PCM sync allocation, lost frontier, counter\nreset, page leak, or cancelled publication. Verify typed overflow and retained pins. Measure real NeMo peak separately. Resource/native/provider/human lanes\nremain distinct and unrun until exercised.",
       "control_fixtures": [],
       "independent_slots": [
         "text-out-of-order-retakes",

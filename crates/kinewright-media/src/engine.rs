@@ -1093,7 +1093,7 @@ impl FfmpegMediaEngine {
     /// that its content identity, frame rate, asset id, and word ranges match
     /// the referenced media. This is the ingestion seam for reproducible
     /// speaker-labelled sidecars; it does not rewrite the media or silently
-    /// persist third-party annotations as Whisper output.
+    /// persist third-party annotations as recognizer output.
     ///
     /// # Errors
     ///

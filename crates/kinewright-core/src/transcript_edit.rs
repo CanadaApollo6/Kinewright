@@ -9,19 +9,20 @@ use crate::{ClipId, Document, Rational, TimeCode, TimelineTranscriptWord, TrackI
 /// one-click destructive action should prefer misses over false positives.
 #[must_use]
 pub fn is_filler_word(text: &str) -> bool {
-    let normalized = text
-        .trim_matches(|character: char| {
-            character.is_whitespace()
-                || matches!(
-                    character,
-                    '.' | ',' | '!' | '?' | ';' | ':' | '\'' | '"' | '(' | ')' | '-' | '…'
-                )
-        })
-        .to_lowercase();
+    let normalized = normalize_transcript_word(text);
     matches!(
         normalized.as_str(),
         "um" | "uh" | "erm" | "hmm" | "mm" | "mhm"
     )
+}
+
+/// Comparison key for a recognized or authored word. Keep original spelling for display.
+#[must_use]
+pub fn normalize_transcript_word(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// One source-frame range selected for removal from a timeline clip.
@@ -269,10 +270,23 @@ mod tests {
 
     #[test]
     fn filler_word_normalization_is_deliberately_conservative() {
-        for text in ["Um,", "UH", "hmm...", "(erm)", " mm ", "\"mhm\"", "uh…"] {
+        for text in [
+            "Um,",
+            "UH",
+            "hmm...",
+            "(erm)",
+            " mm ",
+            "\"mhm\"",
+            "uh…",
+            "[Um]",
+            "“Uh,”",
+        ] {
             assert!(is_filler_word(text), "{text:?} should match");
         }
-        for text in ["umbrella", "drum", "like", "ah", "oh", "so", "you know"] {
+        for text in [
+            "umbrella", "drum", "like", "ah", "oh", "so", "you know", "uh-huh", "Mm-hmm", "human",
+            "summary",
+        ] {
             assert!(!is_filler_word(text), "{text:?} should not match");
         }
     }

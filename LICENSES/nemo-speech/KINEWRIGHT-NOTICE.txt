@@ -1,0 +1,5 @@
+Kinewright builds NeMo-Speech.cpp from commit 20999cc921d2b14aa58708f61756a8b2e787ba20 (v0.3.0).
+Carried patches add explicit CPU thread configuration, sized C ABI checks and quiet status/loader logging.
+The upstream release notices are retained without alteration, including optional components.
+Notice snapshot: NVIDIA v0.3.0 Linux CPU release archive, SHA-256 255f12b722ab15b2a38a51cf125d56e3fa97058b528f7e895b39d6a473deb06e
+Additional SentencePiece dependency notices come from pinned source 31646a467d2051eb904e0b45de3a73e91fe1c1e3.

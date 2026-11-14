@@ -12,7 +12,7 @@ const TTS_TEXT: &str = "Hello, um, this is an Kinewright transcript test.";
 fn synthesized_speech_is_transcribed_by_the_real_model() {
     if std::env::var("KINEWRIGHT_TRANSCRIPT_TEST").as_deref() != Ok("1") {
         eprintln!(
-            "skipped: set KINEWRIGHT_TRANSCRIPT_TEST=1 to run local speech synthesis and Whisper"
+            "skipped: set KINEWRIGHT_TRANSCRIPT_TEST=1 to run local speech synthesis and NeMo"
         );
         return;
     }
@@ -32,12 +32,12 @@ fn synthesized_speech_is_transcribed_by_the_real_model() {
         .join(" ");
 
     println!("TTS: {TTS_TEXT}");
-    println!("WHISPER: {output}");
+    println!("ASR: {output}");
     let normalized = normalized_words(&output);
     for expected in ["hello", "um", "this", "open", "transcript", "test"] {
         assert!(
             normalized.iter().any(|word| word == expected),
-            "expected `{expected}` in Whisper output: {output}"
+            "expected `{expected}` in NeMo output: {output}"
         );
     }
     for word in &transcript.words {

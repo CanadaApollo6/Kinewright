@@ -709,10 +709,7 @@ fn ends_clause(text: &str) -> bool {
 }
 
 fn normalized_token(text: &str) -> String {
-    text.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .flat_map(char::to_lowercase)
-        .collect()
+    crate::normalize_transcript_word(text)
 }
 
 fn is_dangling_end(text: &str) -> bool {

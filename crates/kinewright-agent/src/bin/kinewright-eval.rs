@@ -1165,7 +1165,7 @@ fn seed_suite() -> Vec<EvalDefinition> {
         },
         EvalDefinition {
             name: "e2 silence-gap removal",
-            rationale: "Measures analysis-led dead-air removal without coupling success to Whisper spelling.",
+            rationale: "Measures analysis-led dead-air removal without coupling success to NeMo spelling.",
             fixture_builder: fixture_e2,
             prompts: &[
                 "Remove every silent gap at least 20 source frames long. Keep all spoken content and butt the remaining clips together.",
@@ -6723,7 +6723,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local speech synthesis and Whisper analysis"]
+    #[ignore = "requires local speech synthesis and NeMo analysis"]
     fn v3_fixture_builds_with_authored_and_recognized_truth() {
         let fixture = fixture_editorial_story().unwrap();
         assert_eq!(fixture.original_document.media_pool.len(), 5);
@@ -6739,7 +6739,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the explicitly prepared M40 fixture pack and Whisper analysis"]
+    #[ignore = "requires the explicitly prepared M40 fixture pack and NeMo analysis"]
     fn v5_fixture_builds_from_verified_real_media() {
         let fixture = fixture_real_interview_story().unwrap();
         assert_eq!(fixture.original_document.media_pool.len(), 1);

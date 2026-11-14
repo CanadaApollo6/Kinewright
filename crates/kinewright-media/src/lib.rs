@@ -23,6 +23,7 @@ mod lut;
 mod lut_store;
 pub mod nemo;
 pub mod owned_io;
+pub mod recognizer;
 mod unscoped;
 
 /// The existing SDR renderer's explicit white-point assumption for a source.
@@ -218,12 +219,9 @@ pub use timeline::{
     TransitionRenderParams, timeline_audio_segments, timeline_source_at, video_layers_at,
     visual_layers_at,
 };
+pub use transcript::default_data_dir;
 #[cfg(any(test, feature = "test-util"))]
 pub use transcript::{TranscriptInferenceHold, provision_voice_model};
-pub use transcript::{
-    WHISPER_MODEL_LICENSE, WHISPER_MODEL_NAME, WHISPER_MODEL_SHA256, WHISPER_MODEL_URL,
-    default_data_dir,
-};
 pub use verify::{DELIVERY_REFERENCE_DENOMINATOR, EBU_R103_TOLERANCE_CODES_8BIT, NativePlaneFrame};
 
 /// Initialize the linked `FFmpeg` libraries once for the current process.

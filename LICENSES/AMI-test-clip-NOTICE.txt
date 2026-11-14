@@ -1,0 +1,13 @@
+AMI Meeting Corpus, meeting ES2002a, mixed headset audio.
+Attribution: AMI Consortium; Jean Carletta and the AMI corpus contributors.
+Corpus: https://groups.inf.ed.ac.uk/ami/corpus/
+Source: https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2002a/audio/ES2002a.Mix-Headset.wav
+Source SHA-256: 9c76866990fcc8b84006dc32d273ad99df439090b748ebe72103bb78c3216ee7
+License: CC BY 4.0, https://groups.inf.ed.ac.uk/ami/corpus/license.shtml
+License text: AMI-CC-BY-4.0.txt; https://creativecommons.org/licenses/by/4.0/
+
+Changes: decoded to 16 kHz mono PCM and cut meeting seconds [90, 102).
+The fixture is crates/kinewright-media/tests/fixtures/ami-es2002a-90-102.wav.
+It is the first 12 seconds of the probe's ami8.wav, used only for recognition tests.
+
+Fixture SHA-256: cd79cc5f1c40da0198a6d80344994e5724a2c67c45f87c60abd69c7360187826

@@ -107,19 +107,14 @@ pub(super) fn check_abi() -> Result<(), Error> {
 
 pub(super) struct Recognizer(NonNull<Handle>);
 impl Recognizer {
-    pub(super) fn load(path: &Path) -> Result<Self, Error> {
+    pub(super) fn load(path: &Path, threads: u8, lookahead: u8) -> Result<Self, Error> {
         let path = CString::new(path.to_str().ok_or(Error::InvalidPath)?)
             .map_err(|_| Error::InvalidPath)?;
         let (mut backend, mut model, mut streaming, mut config) = configs()?;
         backend.gpu = -1;
-        backend.threads = i32::try_from(
-            std::thread::available_parallelism()
-                .map_or(4, std::num::NonZeroUsize::get)
-                .min(4),
-        )
-        .unwrap_or(4);
+        backend.threads = i32::from(threads);
         model.path = path.as_ptr();
-        streaming.rnnt_right_context = 13;
+        streaming.rnnt_right_context = i32::from(lookahead);
         config.backend = &raw const backend;
         config.model = &raw const model;
         config.streaming = &raw const streaming;
@@ -174,7 +169,6 @@ pub(super) fn runtime_version() -> String {
         .into_owned()
 }
 
-#[cfg(test)]
 #[repr(C)]
 struct RecognitionOptions {
     size: usize,
@@ -192,7 +186,6 @@ struct RecognitionOptions {
     enable_speaker_diarization: bool,
     max_speaker_count: i32,
 }
-#[cfg(test)]
 // SAFETY: signature is the library's original options constructor from asr.h.
 unsafe extern "C" {
     fn nemo_speech_asr_recognition_options_size() -> usize;
@@ -206,6 +199,245 @@ pub(super) fn check_options_size() {
     // SAFETY: this declaration matches the pinned library's by-value options type.
     let options = unsafe { nemo_speech_asr_recognition_options_default() };
     assert_eq!(options.size, size_of::<RecognitionOptions>());
+}
+
+#[repr(C)]
+struct StreamHandle {
+    _opaque: [u8; 0],
+}
+#[repr(C)]
+struct ResultHandle {
+    _opaque: [u8; 0],
+}
+// SAFETY: signatures match the pinned asr.h; handles stay owned by their wrappers.
+unsafe extern "C" {
+    fn nemo_speech_asr_streaming_recognize(
+        recognizer: *mut Handle,
+        options: *const RecognitionOptions,
+        out: *mut *mut StreamHandle,
+    ) -> i32;
+    fn nemo_speech_asr_stream_push_f32(
+        stream: *mut StreamHandle,
+        samples: *const f32,
+        count: usize,
+        rate: i32,
+    ) -> i32;
+    fn nemo_speech_asr_stream_next(stream: *mut StreamHandle, out: *mut *mut ResultHandle) -> i32;
+    fn nemo_speech_asr_stream_force_endpoint(stream: *mut StreamHandle) -> i32;
+    fn nemo_speech_asr_stream_finish(stream: *mut StreamHandle) -> i32;
+    fn nemo_speech_asr_stream_close(stream: *mut StreamHandle);
+    fn nemo_speech_asr_result_is_final(result: *const ResultHandle) -> bool;
+    fn nemo_speech_asr_result_audio_processed(result: *const ResultHandle) -> f32;
+    fn nemo_speech_asr_result_transcript(result: *const ResultHandle, alt: usize) -> *const c_char;
+    fn nemo_speech_asr_result_word_count(result: *const ResultHandle, alt: usize) -> usize;
+    fn nemo_speech_asr_result_word_text(
+        result: *const ResultHandle,
+        alt: usize,
+        index: usize,
+    ) -> *const c_char;
+    fn nemo_speech_asr_result_word_start_time(
+        result: *const ResultHandle,
+        alt: usize,
+        index: usize,
+    ) -> i32;
+    fn nemo_speech_asr_result_word_end_time(
+        result: *const ResultHandle,
+        alt: usize,
+        index: usize,
+    ) -> i32;
+    fn nemo_speech_asr_result_destroy(result: *mut ResultHandle);
+}
+
+pub(crate) struct Word {
+    pub text: String,
+    pub start_us: i64,
+    pub end_us: i64,
+}
+pub(crate) struct Frame {
+    pub final_result: bool,
+    pub audio_processed_us: i64,
+    pub text: String,
+    pub words: Vec<Word>,
+}
+
+// The phantom borrow prevents destroying the model before its native stream.
+pub(super) struct Stream<'a> {
+    handle: NonNull<StreamHandle>,
+    _owner: std::marker::PhantomData<&'a mut Recognizer>,
+}
+struct ResultOwner(NonNull<ResultHandle>);
+impl Drop for ResultOwner {
+    fn drop(&mut self) {
+        // SAFETY: next transferred exactly one result; only this owner destroys it.
+        unsafe { nemo_speech_asr_result_destroy(self.0.as_ptr()) };
+    }
+}
+fn options() -> Result<RecognitionOptions, Error> {
+    // SAFETY: the query has no input or Rust output buffer.
+    let native = unsafe { nemo_speech_asr_recognition_options_size() };
+    if native != size_of::<RecognitionOptions>() {
+        return Err(Error::AbiMismatch {
+            structure: "RecognitionOptions",
+            rust: size_of::<RecognitionOptions>(),
+            native,
+        });
+    }
+    // SAFETY: the size query verified the by-value result layout before this call.
+    let mut options = unsafe { nemo_speech_asr_recognition_options_default() };
+    options.interim_results = true;
+    options.enable_word_time_offsets = true;
+    options.enable_automatic_punctuation = true;
+    options.verbatim_transcripts = true;
+    Ok(options)
+}
+impl Recognizer {
+    pub(super) fn stream(&mut self) -> Result<Stream<'_>, Error> {
+        let options = options()?;
+        let mut out = ptr::null_mut();
+        // SAFETY: options and out live through the call; the resulting stream borrows this model.
+        let status = unsafe {
+            nemo_speech_asr_streaming_recognize(self.0.as_ptr(), &raw const options, &raw mut out)
+        };
+        status_result(status).map_err(Error::Native)?;
+        let handle = NonNull::new(out).ok_or_else(|| {
+            Error::Native(NativeError {
+                status: Status::Runtime,
+                message: "stream created without a handle".into(),
+            })
+        })?;
+        Ok(Stream {
+            handle,
+            _owner: std::marker::PhantomData,
+        })
+    }
+}
+impl Stream<'_> {
+    pub(super) fn feed(&mut self, samples: &[f32]) -> Result<(), Error> {
+        // SAFETY: this stream is live; push copies the valid sample slice before returning.
+        let status = unsafe {
+            nemo_speech_asr_stream_push_f32(
+                self.handle.as_ptr(),
+                samples.as_ptr(),
+                samples.len(),
+                16_000,
+            )
+        };
+        status_result(status).map_err(Error::Native)
+    }
+    pub(super) fn commit(&mut self) -> Result<(), Error> {
+        // SAFETY: this owner retains the live stream and model.
+        status_result(unsafe { nemo_speech_asr_stream_force_endpoint(self.handle.as_ptr()) })
+            .map_err(Error::Native)
+    }
+    pub(super) fn finish(&mut self) -> Result<(), Error> {
+        // SAFETY: this owner retains the live stream and model until the tail is drained.
+        status_result(unsafe { nemo_speech_asr_stream_finish(self.handle.as_ptr()) })
+            .map_err(Error::Native)
+    }
+    pub(super) fn step(&mut self) -> Result<Option<Frame>, Error> {
+        let mut out = ptr::null_mut();
+        // SAFETY: out is writable and the stream remains live during computation.
+        let status = unsafe { nemo_speech_asr_stream_next(self.handle.as_ptr(), &raw mut out) };
+        status_result(status).map_err(Error::Native)?;
+        let Some(result) = NonNull::new(out).map(ResultOwner) else {
+            return Ok(None);
+        };
+        let pointer = result.0.as_ptr();
+        // SAFETY: all accessors borrow this result, whose owner lives through the copied data.
+        let (final_result, processed, text, count) = unsafe {
+            (
+                nemo_speech_asr_result_is_final(pointer),
+                nemo_speech_asr_result_audio_processed(pointer),
+                result_text(nemo_speech_asr_result_transcript(pointer, 0))?,
+                nemo_speech_asr_result_word_count(pointer, 0),
+            )
+        };
+        let mut words = Vec::with_capacity(count);
+        for index in 0..count {
+            // SAFETY: index is in the accessor-reported top-alternative word range; data are copied before drop.
+            let word = unsafe {
+                Word {
+                    text: result_text(nemo_speech_asr_result_word_text(pointer, 0, index))?,
+                    start_us: i64::from(nemo_speech_asr_result_word_start_time(pointer, 0, index))
+                        * 1000,
+                    end_us: i64::from(nemo_speech_asr_result_word_end_time(pointer, 0, index))
+                        * 1000,
+                }
+            };
+            words.push(word);
+        }
+        Ok(Some(Frame {
+            final_result,
+            audio_processed_us: processed_us(processed)?,
+            text,
+            words,
+        }))
+    }
+}
+fn result_text(pointer: *const c_char) -> Result<String, Error> {
+    if pointer.is_null() {
+        return Err(Error::Native(NativeError {
+            status: Status::Runtime,
+            message: "missing native result text".into(),
+        }));
+    }
+    // SAFETY: accessors returned a non-null NUL-terminated string; the result owner lives through this copy.
+    Ok(unsafe { CStr::from_ptr(pointer) }
+        .to_string_lossy()
+        .into_owned())
+}
+impl Drop for Stream<'_> {
+    fn drop(&mut self) {
+        // SAFETY: only this owner closes this live stream, before its borrowed model can drop.
+        unsafe { nemo_speech_asr_stream_close(self.handle.as_ptr()) };
+    }
+}
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the C ABI reports f32 seconds; validate range and round once into microseconds"
+)]
+fn processed_us(seconds: f32) -> Result<i64, Error> {
+    let value = (f64::from(seconds) * 1_000_000.0).round();
+    if !value.is_finite() || value < 0.0 || value >= 9_223_372_036_854_775_808.0 {
+        return Err(Error::Native(NativeError {
+            status: Status::Runtime,
+            message: "invalid native audio progress".into(),
+        }));
+    }
+    Ok(value as i64)
+}
+
+#[cfg(windows)]
+pub(super) fn file_change_time(file: &std::fs::File) -> std::io::Result<i64> {
+    use std::os::windows::io::AsRawHandle as _;
+    #[repr(C)]
+    struct BasicInfo {
+        created: i64,
+        accessed: i64,
+        written: i64,
+        changed: i64,
+        attributes: u32,
+    }
+    #[link(name = "kernel32")]
+    // SAFETY: signature and FileBasicInfo layout match the Win64 SDK.
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            handle: *mut c_void,
+            class: i32,
+            info: *mut c_void,
+            bytes: u32,
+        ) -> i32;
+    }
+    let mut info = MaybeUninit::<BasicInfo>::uninit();
+    // SAFETY: the file handle is retained and the fixed-size buffer matches FILE_BASIC_INFO.
+    let result = unsafe {
+        GetFileInformationByHandleEx(file.as_raw_handle(), 0, info.as_mut_ptr().cast(), 40)
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the successful SDK call initialized every BasicInfo field.
+    Ok(unsafe { info.assume_init() }.changed)
 }
 
 #[cfg(test)]

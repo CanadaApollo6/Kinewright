@@ -12998,13 +12998,13 @@ mod in2b_tests {
             "site 4 Cancelled notes nothing"
         );
 
-        // Site 5: the whisper string over its asset. `Some` always — the
+        // Site 5: the recognizer string over its asset. `Some` always — the
         // caller edges novelty, so the None boxes become verbatim-shape
         // asserts instead.
         let revision = TimelineRevision(45);
         let asset = AssetId(9);
-        let note =
-            transcript_panel_observation("whisper boom", asset, revision).expect("a failure notes");
+        let note = transcript_panel_observation("recognizer boom", asset, revision)
+            .expect("a failure notes");
         assert_eq!(
             note.code,
             IncidentCode::Label(LabelIncident::PanelWorkerError),
@@ -13019,7 +13019,7 @@ mod in2b_tests {
         assert!(note.transient, "site 5 provenance");
         assert_eq!(note.revision, revision, "site 5 revision");
         assert!(
-            note.observed.contains("whisper boom"),
+            note.observed.contains("recognizer boom"),
             "site 5 carries the string verbatim: {}",
             note.observed
         );
@@ -16402,16 +16402,16 @@ mod in2b_tests {
         let two = AssetId(2);
         let failed = |message: &str| TranscriptStatus::Failed(message.to_owned());
 
-        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.note_transcript_failure(one, &failed("recognizer boom"));
         app.route_incidents();
         assert_eq!(open_count(&app), 1, "the first sighting notes");
-        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.note_transcript_failure(one, &failed("recognizer boom"));
         app.route_incidents();
         assert_eq!(open_count(&app), 1, "repeats stay silent");
-        app.note_transcript_failure(two, &failed("whisper boom"));
+        app.note_transcript_failure(two, &failed("recognizer boom"));
         app.route_incidents();
         assert_eq!(open_count(&app), 2, "another asset notes independently");
-        app.note_transcript_failure(one, &failed("whisper boom"));
+        app.note_transcript_failure(one, &failed("recognizer boom"));
         app.route_incidents();
         assert_eq!(
             open_count(&app),
@@ -16428,7 +16428,7 @@ mod in2b_tests {
                 .all()
                 .find(|incident| {
                     incident.subject == IncidentSubject::Asset(one)
-                        && incident.observed.contains("whisper boom")
+                        && incident.observed.contains("recognizer boom")
                 })
                 .expect("asset one's row");
             assert_eq!(row.count, 1, "no silent re-note behind the dedup");
@@ -16437,8 +16437,8 @@ mod in2b_tests {
         app.route_incidents();
         assert_eq!(open_count(&app), 3, "a new error is a new episode");
         app.note_transcript_failure(one, &TranscriptStatus::NotRequested);
-        app.note_transcript_failure(one, &failed("whisper boom"));
-        app.note_transcript_failure(two, &failed("whisper boom"));
+        app.note_transcript_failure(one, &failed("recognizer boom"));
+        app.note_transcript_failure(two, &failed("recognizer boom"));
         app.route_incidents();
         assert_eq!(open_count(&app), 3, "no new row opens");
         {
@@ -16451,7 +16451,7 @@ mod in2b_tests {
                 .all()
                 .find(|incident| {
                     incident.subject == IncidentSubject::Asset(one)
-                        && incident.observed.contains("whisper boom")
+                        && incident.observed.contains("recognizer boom")
                 })
                 .expect("asset one's row");
             assert_eq!(

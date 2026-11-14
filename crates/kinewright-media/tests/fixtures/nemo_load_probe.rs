@@ -4,7 +4,33 @@ use std::{path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
-    let path = PathBuf::from(arguments.next().expect("model path"));
+    let first = arguments.next().expect("model path or installer command");
+    if first == "model-key" {
+        println!(
+            "{}",
+            kinewright_media::recognizer::ENGLISH_MODEL.files[0].sha256
+        );
+        return ExitCode::SUCCESS;
+    }
+    if first == "provision" {
+        let data = PathBuf::from(arguments.next().expect("isolated model data directory"));
+        return match kinewright_media::recognizer::provision(
+            &kinewright_media::recognizer::ENGLISH_MODEL,
+            &data,
+            &kinewright_core::ExportCancellation::default(),
+            |_, _| {},
+        ) {
+            Ok(root) => {
+                println!("{}", root.display());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let path = PathBuf::from(first);
     let expected = arguments.next().expect("error kind");
     let actual = Recognizer::load(&path).err();
     let matches = match expected.to_str() {

@@ -20,7 +20,7 @@ pub(crate) enum TranscriptScope {
     Timeline,
 }
 
-/// Site 5's note (`IN2B` §7 rule 1): the whisper backend's string over
+/// Site 5's note (`IN2B` §7 rule 1): the recognizer backend's string over
 /// the failed asset — `panel_worker_error`, since nothing typed stands
 /// behind it (§5). `Some` always: the caller edges novelty, this fn only
 /// shapes. Pure: no clock, no document, no log.
@@ -154,13 +154,15 @@ impl KinewrightApp {
                 let label = total_bytes.map_or_else(
                     || {
                         format!(
-                            "Downloading Whisper model… {} MiB",
+                            "Downloading {}… {} MiB",
+                            kinewright_media::recognizer::ENGLISH_MODEL.name,
                             downloaded_bytes / 1_048_576
                         )
                     },
                     |total| {
                         format!(
-                            "Downloading Whisper model… {} / {} MiB",
+                            "Downloading {}… {} / {} MiB",
+                            kinewright_media::recognizer::ENGLISH_MODEL.name,
                             downloaded_bytes / 1_048_576,
                             total / 1_048_576
                         )
