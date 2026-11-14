@@ -2,7 +2,13 @@
 use super::orchestration_records::Role;
 
 pub(crate) const VERSION: u32 = 2;
-pub(crate) const DIRECTOR: &[&str] = &[
+macro_rules! dialogue_surface {
+    ([$($extra:literal),*]; $($base:literal),* $(,)?) => {
+        if crate::dialogue_tools::SERVE_DIALOGUE_TOOLS { &[$($base,)* $($extra),*] }
+        else { &[$($base),*] }
+    };
+}
+pub(crate) const DIRECTOR: &[&str] = dialogue_surface!(["get_timeline_transcript", "check_dialogue_cut"];
     "read_child_result",
     "get_timeline_state",
     "read_task_evidence",
@@ -18,8 +24,8 @@ pub(crate) const DIRECTOR: &[&str] = &[
     "answer_question",
     "send_message",
     "finish_task",
-];
-pub(crate) const EDITOR: &[&str] = &[
+);
+pub(crate) const EDITOR: &[&str] = dialogue_surface!(["get_timeline_transcript", "cut_dialogue", "check_dialogue_cut"];
     "get_timeline_state",
     "read_task_evidence",
     "read_task_result",
@@ -33,8 +39,8 @@ pub(crate) const EDITOR: &[&str] = &[
     "freeze_task",
     "publish_result",
     "finish_task",
-];
-pub(crate) const REVIEWER: &[&str] = &[
+);
+pub(crate) const REVIEWER: &[&str] = dialogue_surface!(["get_timeline_transcript", "check_dialogue_cut"];
     "get_timeline_state",
     "read_task_evidence",
     "read_task_result",
@@ -43,7 +49,7 @@ pub(crate) const REVIEWER: &[&str] = &[
     "freeze_task",
     "publish_result",
     "finish_task",
-];
+);
 pub(crate) fn names(role: Role) -> &'static [&'static str] {
     match role {
         Role::Director => DIRECTOR,

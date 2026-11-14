@@ -11,7 +11,7 @@ mod profile;
 mod resolve;
 
 pub use evidence::{Dialogue, Sound};
-pub use frame::FramedEdge;
+pub use frame::{FrameGrid, FramedEdge};
 pub use profile::{DEFAULT_HOP_MICROS, Hop, LEVEL_FLOOR, ProfileError, SoundProfile};
 pub use resolve::{
     AudibleSide, CutRequest, DipIntrusion, EdgePlacement, Refusal, RefusalReason, ResolvedCut,

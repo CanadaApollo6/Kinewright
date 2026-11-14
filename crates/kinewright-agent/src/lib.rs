@@ -52,6 +52,7 @@ mod cursor;
 #[cfg(feature = "eval-harness")]
 pub mod cut_score;
 mod detection_probe;
+pub mod dialogue_tools;
 mod drivers;
 mod durable_branch;
 /// The eval harness. Gated with the fixture data it consumes: `eval.rs`

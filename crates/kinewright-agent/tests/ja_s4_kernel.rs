@@ -13,6 +13,7 @@
 mod orchestration;
 #[cfg(target_os = "linux")]
 use kinewright_agent::CLAUDE_ULTRACODE;
+use kinewright_agent::dialogue_tools;
 
 use kinewright_agent::{claude_models, codex_models};
 

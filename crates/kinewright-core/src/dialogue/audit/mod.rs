@@ -7,7 +7,9 @@ mod leftovers;
 mod measured;
 
 use super::{AudibleSide, Dialogue, SourceRange};
+use crate::{AudibleSpan, ExactMicros};
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -16,11 +18,10 @@ use thiserror::Error;
 #[serde(transparent)]
 pub struct RecordingId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct KeptRange {
     pub recording: RecordingId,
-    pub source: SourceRange,
+    pub source: AudibleSpan,
 }
 
 /// The original recording and word index. Serialized as [recording, index].
@@ -215,6 +216,7 @@ struct Piece {
     recording: RecordingId,
     source: SourceRange,
     play: u64,
+    exact: AudibleSpan,
 }
 impl Piece {
     fn location(self, start: u64, end: u64) -> Location {
@@ -281,11 +283,9 @@ impl Item {
             Self::Join(j) => (
                 if j.sides.iter().any(|s| s.edge_in_sound.is_some()) {
                     0
-                } else if j
-                    .sides
-                    .iter()
-                    .any(|s| s.short_air || s.dip_intrusion.is_some())
-                    || j.room_tone.as_ref().is_some_and(|r| r.flagged)
+                } else if j.sides.iter().any(|s| {
+                    s.short_air || s.dip_intrusion.is_some() || s.padded_us != ExactMicros::ZERO
+                }) || j.room_tone.as_ref().is_some_and(|r| r.flagged)
                 {
                     1
                 } else {
@@ -456,39 +456,59 @@ fn validate(settings: &AuditSettings) -> Result<(), AuditError> {
 /// # Errors
 /// Refuses invalid settings, missing recordings, out-of-range intervals and
 /// an unrepresentable playback duration. No partial report guesses missing data.
-pub fn audit(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+#[allow(
+    clippy::too_many_lines,
+    reason = "one validated playlist audit and bounded report"
+)]
+pub fn audit<D: Borrow<Dialogue>>(
+    recordings: &BTreeMap<RecordingId, D>,
     cut: &[KeptRange],
     settings: &AuditSettings,
     key: impl Fn(&str) -> String,
 ) -> Result<Report, AuditError> {
     validate(settings)?;
+    let recordings: BTreeMap<_, &Dialogue> =
+        recordings.iter().map(|(&id, d)| (id, d.borrow())).collect();
+    let mut exact_duration = ExactMicros::ZERO;
     let mut pieces: Vec<Piece> = Vec::new();
     let mut duration = 0_u64;
     for (index, range) in cut.iter().enumerate() {
         let recording = recordings
             .get(&range.recording)
             .ok_or(AuditError::Recording { index })?;
-        let r = range.source;
-        if r.start_micros >= r.end_micros || r.end_micros > recording.profile().duration_micros() {
+        let exact = range.source;
+        if exact.start >= exact.end
+            || exact.end > ExactMicros::integer(recording.profile().duration_micros())
+        {
             return Err(AuditError::Range { index });
         }
-        let next = duration
-            .checked_add(r.end_micros - r.start_micros)
-            .ok_or(AuditError::TimeOverflow)?;
-        if let Some(last) = pieces
-            .last_mut()
-            .filter(|p| p.recording == range.recording && p.source.end_micros == r.start_micros)
-        {
+        let r = SourceRange {
+            start_micros: exact.start.floor(),
+            end_micros: exact.end.floor(),
+        };
+        if r.start_micros >= r.end_micros {
+            return Err(AuditError::Range { index });
+        }
+        exact_duration = exact_duration
+            .checked_add(exact.duration().map_err(|_| AuditError::TimeOverflow)?)
+            .map_err(|_| AuditError::TimeOverflow)?;
+        if let Some(last) = pieces.last_mut().filter(|p| {
+            p.recording == range.recording
+                && p.exact.end == exact.start
+                && p.exact.padding == ExactMicros::ZERO
+        }) {
             last.source.end_micros = r.end_micros;
+            last.exact.end = exact.end;
+            last.exact.padding = exact.padding;
         } else {
             pieces.push(Piece {
                 recording: range.recording,
                 source: r,
                 play: duration,
+                exact,
             });
         }
-        duration = next;
+        duration = exact_duration.floor();
     }
     let mut collector = Collector {
         items: Vec::new(),
@@ -512,10 +532,10 @@ pub fn audit(
             )
         })
         .collect();
-    let played = leftovers::played(recordings, &pieces, &tokens);
-    joins::inspect(recordings, &pieces, settings, &mut collector);
-    leftovers::inspect(recordings, &played, &tokens, settings, &mut collector);
-    gaps::inspect(recordings, &pieces, &played, settings, &mut collector);
+    let played = leftovers::played(&recordings, &pieces, &tokens);
+    joins::inspect(&recordings, &pieces, settings, &mut collector);
+    leftovers::inspect(&recordings, &played, &tokens, settings, &mut collector);
+    gaps::inspect(&recordings, &pieces, &played, settings, &mut collector);
     let mut keys = BTreeSet::new();
     let mut listed = Counts::default();
     for item in &collector.items {

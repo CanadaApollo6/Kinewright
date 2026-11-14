@@ -48,10 +48,7 @@ fn measured(duration: u64, words: Vec<Word>) -> Dialogue {
 fn kept(id: u64, start: u64, end: u64) -> KeptRange {
     KeptRange {
         recording: RecordingId(id),
-        source: SourceRange {
-            start_micros: start,
-            end_micros: end,
-        },
+        source: crate::AudibleSpan::source(start, end),
     }
 }
 fn report(recordings: &BTreeMap<RecordingId, Dialogue>, cut: &[KeptRange]) -> Report {
@@ -990,6 +987,10 @@ fn dialogue_audit_sound_minimum_spans_joined_source_portions() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "table of every audit policy refusal and empty-cut controls"
+)]
 fn dialogue_audit_policy_refuses_vanishing_checks_and_unbounded_search() {
     let base = AuditSettings::default();
     for bad in [
@@ -1067,7 +1068,12 @@ fn dialogue_audit_policy_refuses_vanishing_checks_and_unbounded_search() {
         },
     ] {
         assert_eq!(
-            audit(&BTreeMap::new(), &[], &bad, comparison_key),
+            audit(
+                &BTreeMap::<RecordingId, Dialogue>::new(),
+                &[],
+                &bad,
+                comparison_key
+            ),
             Err(AuditError::Settings)
         );
     }
@@ -1082,7 +1088,13 @@ fn dialogue_audit_policy_refuses_vanishing_checks_and_unbounded_search() {
             ..base
         },
     ] {
-        let r = audit(&BTreeMap::new(), &[], &settings, comparison_key).unwrap();
+        let r = audit(
+            &BTreeMap::<RecordingId, Dialogue>::new(),
+            &[],
+            &settings,
+            comparison_key,
+        )
+        .unwrap();
         assert!(r.items.is_empty() && r.words.is_empty() && r.hole_groups.is_empty());
     }
 }
@@ -1229,4 +1241,87 @@ fn dialogue_audit_dense_word_timings_keep_the_repeat_search_bounded() {
             .iter()
             .all(|i| !matches!(i,Item::Repeat(r) if r.words>128))
     );
+}
+
+#[test]
+fn dialogue_audit_exact_edges_and_padding_are_not_measured_quiet() {
+    let d = recording(2_000_000, vec![word("kept", 100_000, 1_560_000)], |t| {
+        hop(
+            if (1_490_000..1_550_000).contains(&t) {
+                -6_000
+            } else {
+                -1_800
+            },
+            false,
+        )
+    });
+    let source = crate::audible_span(
+        crate::TimeCode(12)..crate::TimeCode(38),
+        crate::Rational::new(25, 1).unwrap(),
+        crate::TimeCode(24),
+        crate::Rational::new(24, 1).unwrap(),
+    )
+    .unwrap();
+    let r = one(
+        d,
+        &[KeptRange {
+            recording: RecordingId(1),
+            source,
+        }],
+    );
+    assert!(
+        join_at(&r, 1_000_000).sides[0].edge_in_sound.is_some(),
+        "DQ_AUDIT_AUDIBLE_EDGE"
+    );
+    let d = recording(1_000_000, vec![], |_| hop(-6_000, false));
+    let source = crate::audible_span(
+        crate::TimeCode(0)..crate::TimeCode(24),
+        crate::Rational::new(25, 1).unwrap(),
+        crate::TimeCode(24),
+        crate::Rational::new(24, 1).unwrap(),
+    )
+    .unwrap();
+    let r = one(
+        d,
+        &[KeptRange {
+            recording: RecordingId(1),
+            source,
+        }],
+    );
+    assert_eq!(r.duration_us, 1_000_000);
+    assert_eq!(
+        join_at(&r, 1_000_000).sides[0].padded_us,
+        ExactMicros::integer(40_000),
+        "DQ_AUDIT_PADDING_FACT"
+    );
+}
+
+#[test]
+fn dialogue_audit_does_not_floor_the_guard_instant() {
+    let d = recording(1_000_000, vec![word("word", 16_733, 400_000)], |t| {
+        hop(
+            if (60_000..70_000).contains(&t) {
+                -6_000
+            } else {
+                -1_800
+            },
+            false,
+        )
+    });
+    assert!(d.guard(66_733, AudibleSide::Out).is_ok());
+    let end = ExactMicros::new(200_200, 3).unwrap();
+    let r = one(
+        d,
+        &[KeptRange {
+            recording: RecordingId(1),
+            source: crate::AudibleSpan {
+                start: ExactMicros::ZERO,
+                end,
+                padding: ExactMicros::ZERO,
+            },
+        }],
+    );
+    let side = &join_at(&r, 66_733).sides[0];
+    assert!(side.edge_in_sound.is_some(), "DQ_AUDIT_FRACTIONAL_GUARD");
+    assert_eq!(side.exact_us, Some(end));
 }

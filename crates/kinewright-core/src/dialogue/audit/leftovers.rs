@@ -30,7 +30,7 @@ pub struct Repeat {
 }
 
 pub(super) fn played(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
     tokens: &BTreeMap<RecordingId, Vec<String>>,
 ) -> Vec<PlayedWord> {
@@ -75,7 +75,7 @@ fn ends_sentence(text: &str) -> bool {
 }
 
 pub(super) fn said_text(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     said: &[PlayedWord],
     limit: usize,
 ) -> Text {
@@ -102,7 +102,7 @@ pub(super) fn said_text(
 }
 
 pub(super) fn inspect(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     heard: &[PlayedWord],
     tokens: &BTreeMap<RecordingId, Vec<String>>,
     settings: &AuditSettings,

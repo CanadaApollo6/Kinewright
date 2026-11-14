@@ -45,7 +45,7 @@ struct SoundPortion {
 // speaking level, keep an open run across joins, then attribute surviving
 // portions back to the source. The minimum never restarts at a source cut.
 fn sound_portions(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     gaps: &[Gap],
     speech: &BTreeMap<RecordingId, i16>,
     settings: &AuditSettings,
@@ -131,7 +131,7 @@ struct Gap {
     before: Option<WordKey>,
 }
 
-fn gaps(recordings: &BTreeMap<RecordingId, Dialogue>, pieces: &[Piece]) -> Vec<Gap> {
+fn gaps(recordings: &BTreeMap<RecordingId, &Dialogue>, pieces: &[Piece]) -> Vec<Gap> {
     let mut gaps = Vec::new();
     for &p in pieces {
         let mut at = p.source.start_micros;
@@ -169,7 +169,7 @@ fn gaps(recordings: &BTreeMap<RecordingId, Dialogue>, pieces: &[Piece]) -> Vec<G
 }
 
 fn holes(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
     heard: &[PlayedWord],
     settings: &AuditSettings,
@@ -181,7 +181,7 @@ fn holes(
         .map(|p| p.recording)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .map(|id| (id, measured::speaking_level(&recordings[&id], settings)))
+        .map(|id| (id, measured::speaking_level(recordings[&id], settings)))
         .collect();
     let mut first = 0;
     while first < gaps.len() {
@@ -260,14 +260,14 @@ fn phrase_text(words: &[crate::dialogue::Word], limit: usize) -> Text {
 }
 
 fn quiet_phrases(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
     settings: &AuditSettings,
     collector: &mut Collector,
 ) {
     let used: std::collections::BTreeSet<_> = pieces.iter().map(|p| p.recording).collect();
     for id in used {
-        let recording = &recordings[&id];
+        let recording = recordings[&id];
         let words = recording.words();
         let mut phrases: Vec<Phrase> = Vec::new();
         for (i, w) in words.iter().enumerate().filter(|(_, w)| w.is_spoken()) {
@@ -352,7 +352,7 @@ fn quiet_phrases(
 }
 
 pub(super) fn inspect(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
     heard: &[PlayedWord],
     settings: &AuditSettings,

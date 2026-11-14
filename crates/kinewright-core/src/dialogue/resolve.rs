@@ -211,6 +211,12 @@ impl Dialogue {
     pub fn guard(&self, at_micros: u64, side: AudibleSide) -> Result<(), Refusal> {
         self.guard_ratio(u128::from(at_micros), 1, side)
     }
+    /// Guard an audible edge without discarding its sub-microsecond fraction.
+    /// # Errors
+    /// Returns the same typed acoustic refusal as `guard` at the exact instant.
+    pub fn guard_exact(&self, at: crate::ExactMicros, side: AudibleSide) -> Result<(), Refusal> {
+        self.guard_ratio(at.numerator(), u128::from(at.denominator()), side)
+    }
     pub(super) fn guard_ratio(&self, n: u128, d: u128, _side: AudibleSide) -> Result<(), Refusal> {
         let at = u64::try_from(n / d).map_err(|_| self.refuse(RefusalReason::TimeOverflow, 0))?;
         if n == 0 || n == u128::from(self.profile.duration_micros()) * d {
@@ -285,20 +291,26 @@ impl Dialogue {
     /// reported without changing the guard's trusted-quiet rule.
     #[must_use]
     pub fn dip_intrusion(&self, at_micros: u64) -> Option<DipIntrusion> {
-        let n = u128::from(at_micros);
-        if at_micros == 0 || at_micros == self.profile.duration_micros() {
+        self.dip_intrusion_exact(crate::ExactMicros::integer(at_micros))
+    }
+    /// Intrusion at a fractional audible edge, conservatively rounded up to a
+    /// whole microsecond in the warning. The guard uses the exact fraction.
+    #[must_use]
+    pub fn dip_intrusion_exact(&self, at: crate::ExactMicros) -> Option<DipIntrusion> {
+        let n = at.numerator();
+        let d = u128::from(at.denominator());
+        if n == 0 || n == u128::from(self.profile.duration_micros()) * d {
             return None;
         }
-        let index = self.profile.index_at(n, 1)?;
+        let index = self.profile.index_at(n, d)?;
         if self.profile.hop(index)?.rms_dbfs_hundredths > self.settings.dip_dbfs_hundredths {
             return None;
         }
-        let (word, boundary, depth) = self.deepest_intrusion(n, 1)?;
+        let (word, boundary, depth) = self.deepest_intrusion(n, d)?;
         Some(DipIntrusion {
             word,
             boundary,
-            // Denominator one bounds depth by the u64 source duration.
-            micros: u64::try_from(depth).ok()?,
+            micros: u64::try_from(depth.div_ceil(d)).ok()?,
         })
     }
     fn boundary(&self, start: bool) -> ResolvedEdge {

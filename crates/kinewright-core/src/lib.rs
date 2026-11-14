@@ -2,11 +2,13 @@
 
 mod actor;
 mod attachment;
+mod audible;
 pub use attachment::{
     AcceptedCut, AcceptedHistory, ActorIdentity, AttachmentState, CoreAttachment,
     CoreMutationRefusal, MANUAL_BYTES, MANUAL_COMMANDS, ManualHistoryCandidate,
     ManualHistoryEncoder, ManualPermit,
 };
+pub use audible::{AudibleClockError, AudibleSpan, ExactMicros, audible_span};
 mod agent;
 /// AU6 §2's scenario authority: the five audio workflows' documents,
 /// operations, budgets and pins.

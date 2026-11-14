@@ -2,7 +2,10 @@
 use super::{
     AudibleSide, AuditSettings, Collector, Dialogue, Item, Piece, RecordingId, WordKey, measured,
 };
-use crate::dialogue::{DipIntrusion, RefusalReason};
+use crate::{
+    ExactMicros,
+    dialogue::{DipIntrusion, RefusalReason},
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -32,6 +35,12 @@ pub struct Side {
     pub side: AudibleSide,
     /// Recording identity and source microsecond instant.
     pub source: (RecordingId, u64),
+    /// Present only for a fractional edge; measurements below use whole microseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_us: Option<ExactMicros>,
+    /// Known renderer padding, not a measured quiet window.
+    #[serde(skip_serializing_if = "padding_zero")]
+    pub padded_us: ExactMicros,
     pub level: Option<Level>,
     pub voice: bool,
     pub air_us: u64,
@@ -74,10 +83,10 @@ pub struct Join {
 fn sound_issue(
     recording: &Dialogue,
     id: RecordingId,
-    at: u64,
+    at: ExactMicros,
     direction: AudibleSide,
 ) -> Option<EdgeInSound> {
-    recording.guard(at, direction).err().map(|refusal| {
+    recording.guard_exact(at, direction).err().map(|refusal| {
         let (reason, word) = match refusal.reason {
             RefusalReason::SoundingWord { index, .. } => {
                 (GuardIssue::SoundingWord, Some(WordKey(id, index)))
@@ -93,6 +102,10 @@ fn sound_issue(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one kept side and its independent measurements"
+)]
 fn inspect_side(
     recording: &Dialogue,
     piece: Piece,
@@ -109,7 +122,17 @@ fn inspect_side(
     } else {
         AudibleSide::In
     };
-    let edge_in_sound = sound_issue(recording, piece.recording, at, direction);
+    let exact = if outgoing {
+        piece.exact.end
+    } else {
+        piece.exact.start
+    };
+    let padded_us = if outgoing {
+        piece.exact.padding
+    } else {
+        ExactMicros::ZERO
+    };
+    let edge_in_sound = sound_issue(recording, piece.recording, exact, direction);
     let span = |reach: u64| {
         if outgoing {
             [at.saturating_sub(reach).max(piece.source.start_micros), at]
@@ -176,12 +199,14 @@ fn inspect_side(
     Side {
         side: direction,
         source: (piece.recording, at),
+        exact_us: (exact.denominator() != 1).then_some(exact),
+        padded_us,
         level: measured::level(recording, window[0], window[1]),
         voice: measured::samples(recording, voice[0], voice[1]).any(|s| s.hop.voice),
         air_us,
         low_air_us,
         edge_in_sound,
-        dip_intrusion: recording.dip_intrusion(at),
+        dip_intrusion: recording.dip_intrusion_exact(exact),
         timed_word,
         short_air: air_us
             < if outgoing {
@@ -196,7 +221,7 @@ fn inspect_side(
 }
 
 pub(super) fn inspect(
-    recordings: &BTreeMap<RecordingId, Dialogue>,
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
     settings: &AuditSettings,
     collector: &mut Collector,
@@ -208,16 +233,17 @@ pub(super) fn inspect(
         let mut sides = Vec::with_capacity(2);
         if i > 0 {
             let p = pieces[i - 1];
-            sides.push(inspect_side(&recordings[&p.recording], p, true, settings));
+            sides.push(inspect_side(recordings[&p.recording], p, true, settings));
         }
         if i < pieces.len() {
             let p = pieces[i];
-            sides.push(inspect_side(&recordings[&p.recording], p, false, settings));
+            sides.push(inspect_side(recordings[&p.recording], p, false, settings));
         }
         let room_tone = if sides.len() == 2 {
             sides[0].level.zip(sides[1].level).map(|(out, inn)| {
                 let delta_cdb = i32::from(inn.rms_cdb) - i32::from(out.rms_cdb);
-                let comparable = sides[0].air_us >= settings.level_window_us
+                let comparable = sides[0].padded_us == ExactMicros::ZERO
+                    && sides[0].air_us >= settings.level_window_us
                     && sides[1].air_us >= settings.level_window_us
                     && out.us[1] - out.us[0] == settings.level_window_us
                     && inn.us[1] - inn.us[0] == settings.level_window_us;
@@ -237,7 +263,7 @@ pub(super) fn inspect(
             pieces[i].play
         } else {
             let p = pieces[i - 1];
-            p.play + (p.source.end_micros - p.source.start_micros)
+            p.play + p.exact.duration().expect("validated duration").floor()
         };
         collector.push(Item::Join(Join {
             at_us,
@@ -245,4 +271,9 @@ pub(super) fn inspect(
             room_tone,
         }));
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde predicate")]
+fn padding_zero(value: &ExactMicros) -> bool {
+    *value == ExactMicros::ZERO
 }
