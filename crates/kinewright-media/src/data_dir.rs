@@ -346,4 +346,48 @@ mod tests {
             assert_eq!(compatible_path(path.clone()), path);
         }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dq1_missing_parent_chain_is_private_and_existing_parent_is_unchanged() {
+        use std::os::unix::fs::PermissionsExt as _;
+        const CHILD: &str = "KINEWRIGHT_DQ1_PARENT_PRIVACY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // A fixed child-only umask makes 0700 vs 0777 observable even when
+            // the invoking shell's umask would otherwise hide the regression.
+            let output = std::process::Command::new("bash")
+                .args(["-c", "umask 022; exec \"$@\"", "_"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", "data_dir::tests::dq1_missing_parent_chain_is_private_and_existing_parent_is_unchanged", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed;"),
+                "DQ1_PARENT_PRIVACY_CHILD {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let temp = TempDirectory::new("dq1-parent-privacy");
+        let existing = temp.path("existing");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+        let root = ensure_root(existing.join("new-a/new-b/kinewright")).unwrap();
+        for path in [existing.join("new-a"), existing.join("new-a/new-b"), root] {
+            assert_eq!(
+                fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "DQ1_NEW_PARENTS_PRIVATE {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "DQ1_EXISTING_PARENT_UNCHANGED"
+        );
+    }
 }

@@ -253,3 +253,7 @@ and missing home configuration reports an error instead of using temporary stora
 
 Links above the chosen data or explicit model root are resolved through its parent;
 the root itself and entries below it must be real entries, never links or reparse points.
+The containing directory is trusted; Kinewright defends the root and its children.
+On Linux, missing parents are created 0700 and existing parents keep their modes;
+the application data root and its child directories must belong to the user and are
+made 0700, including existing directories.
