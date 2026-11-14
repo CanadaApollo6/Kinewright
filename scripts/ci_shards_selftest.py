@@ -350,6 +350,42 @@ class Sharding(unittest.TestCase):
                     result = cs.execute_unit(data, unit, 0, 0, root)
                 self.assertEqual(result["code"], status)
 
+    def test_failures_name_tests_and_print_only_the_last_forty_lines(self):
+        for failure in ("crash", "timeout", "summary", "missing-result"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix="kinewright-ci-diagnostics-") as directory:
+                root = Path(directory)
+                binary = root / "witness-0123456789abcdef"
+                binary.touch()
+                data = {"tier": "fast", "suites": [{"path": str(binary), "cwd": str(root), "label": "witness"}]}
+                unit = {"suite": 0, "tests": ["named_test"], "full": False}
+
+                def execute(*args, **kwargs):
+                    output = kwargs["stdout"]
+                    output.write("discarded-prefix\n" + "".join(f"diagnostic-{n}\n" for n in range(50)))
+                    if failure == "summary":
+                        output.write("running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
+                    if failure == "timeout":
+                        raise subprocess.TimeoutExpired("test", 600)
+                    return subprocess.CompletedProcess(args[0], -11 if failure == "crash" else 0)
+
+                output = io.StringIO()
+                with mock.patch.object(subprocess, "run", side_effect=execute), contextlib.redirect_stdout(output):
+                    if failure in ("summary", "missing-result"):
+                        with self.assertRaises((ValueError, st.UnparsableLog)):
+                            cs.execute_unit(data, unit, 7, 2, root)
+                    else:
+                        result = cs.execute_unit(data, unit, 7, 2, root)
+                        self.assertEqual(result["code"], -11 if failure == "crash" else 124)
+                diagnostic = output.getvalue()
+                self.assertIn("witness::named_test", diagnostic)
+                self.assertIn("Test process 7", diagnostic)
+                self.assertIn("Last 40 output lines (shard-2-7.log)", diagnostic)
+                tail = diagnostic.split("Last 40 output lines (shard-2-7.log):\n", 1)[1].splitlines()
+                self.assertEqual(len(tail), 40)
+                self.assertIn("diagnostic-49", tail)
+                self.assertNotIn("discarded-prefix", diagnostic)
+                self.assertIn("discarded-prefix", (root / "shard-2-7.log").read_text())
+
     def test_runner_records_timeout_and_never_marks_it_complete(self):
         with tempfile.TemporaryDirectory(prefix="kinewright-ci-selftest-") as directory:
             root = Path(directory)

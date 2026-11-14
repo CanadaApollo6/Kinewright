@@ -198,10 +198,20 @@ def execute_unit(data, unit, number, index, directory):
     elapsed = time.monotonic() - started
     print(f"{suite['label']} {len(unit['tests'])} tests: {elapsed:.2f}s, exit {code}", flush=True)
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    if not code:
-        st.verify_exact_rows([(suite["label"], p) for p in unit["tests"]], st.parse(text))
+    def diagnose(reason):
+        # One block keeps concurrent failures readable; the complete log remains an artifact.
+        names = "\n".join(f"  {suite['label']}::{name}" for name in unit["tests"])
+        tail = "\n".join(text.splitlines()[-40:])
+        print(f"Test process {number} {reason}:\n{names}\nLast 40 output lines ({log_name}):\n{tail}", flush=True)
+
+    if code:
+        diagnose(f"failed or timed out (exit {code})")
     else:
-        print(text)
+        try:
+            st.verify_exact_rows([(suite["label"], p) for p in unit["tests"]], st.parse(text))
+        except (ValueError, st.UnparsableLog) as error:
+            diagnose(f"has invalid results ({error})")
+            raise ValueError(f"{suite['label']}::{', '.join(unit['tests'])}: {error}") from error
     return {"log": log_name, "code": code, "seconds": elapsed,
             "binary": suite["label"], "tests": unit["tests"]}
 
