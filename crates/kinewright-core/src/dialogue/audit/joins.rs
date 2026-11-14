@@ -38,7 +38,8 @@ pub struct Side {
     pub low_air_us: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_in_sound: Option<EdgeInSound>,
-    /// Independent warning: a measured dip inside the named word timing.
+    /// Independent warning: depends on Dialogue Settings `dip_dbfs_hundredths`,
+    /// `dip_reach_micros` and `word_margin_micros` (not the audit policy).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dip_intrusion: Option<DipIntrusion>,
     /// ASR timing overlap when the guard's word margin leaves it unnamed.
@@ -57,6 +58,7 @@ pub struct Side {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct RoomTone {
     pub delta_cdb: i32,
+    #[serde(skip)]
     pub comparable: bool,
     pub flagged: bool,
 }
@@ -169,7 +171,7 @@ fn inspect_side(
         }
     });
     let stretched_word = crossing
-        .filter(|_| edge_in_sound.is_none() && low_air_us >= settings.stretched_word_air_us)
+        .filter(|_| edge_in_sound.is_none() && air_us >= settings.stretched_word_air_us)
         .map(|(i, _)| WordKey(piece.recording, i));
     Side {
         side: direction,

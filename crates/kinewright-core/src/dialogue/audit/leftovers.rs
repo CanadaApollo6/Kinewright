@@ -134,10 +134,18 @@ pub(super) fn inspect(
         let horizon = heard.partition_point(|w| {
             w.start <= heard[i].start.saturating_add(settings.repeat_lookahead_us)
         });
-        let max_words = settings
+        let available = settings
             .short_repeat_words
-            .max(horizon - i)
+            .max(horizon.saturating_sub(i + 1))
             .min((heard.len() - i) / 2);
+        if available > settings.max_repeat_words
+            && settings
+                .playback_us
+                .is_none_or(|r| heard[i].end >= r[0] && heard[i].start < r[1])
+        {
+            collector.repeat_search_limited += 1;
+        }
+        let max_words = available.min(settings.max_repeat_words);
         for n in (1..=max_words).rev() {
             if n > settings.short_repeat_words
                 && heard[i + n].start.saturating_sub(heard[i].start) > settings.repeat_lookahead_us
@@ -150,7 +158,7 @@ pub(super) fn inspect(
                 continue;
             }
             let saying = &heard[i..i + 2 * n];
-            if saying.iter().any(|w| w.key.0 != heard[i].key.0)
+            if saying[..n].iter().any(|w| w.key.0 != heard[i].key.0)
                 || heard[i + n].start.saturating_sub(heard[i + n - 1].end)
                     >= settings.repeat_within_us
                 || n == 1

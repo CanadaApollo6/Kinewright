@@ -1004,3 +1004,37 @@ proptest! {
         if let Ok(cut)=d.resolve(CutRequest::RemoveWords{from:1,to:1}) {for edge in [cut.start,cut.end] {prop_assert!(d.guard(edge.at_micros(),edge.side()).is_ok());}}
     }
 }
+
+// Regression supplied by the independent DQ3 review.
+#[test]
+fn dialogue_fractional_dip_reach_refuses_the_extra_third_microsecond() {
+    let d = Dialogue::new(
+        profile(10_000, 1_000_000, &[(0, 500_000)], &[(6, -6_000)]),
+        vec![word("word", 16_733, 400_000)],
+        Settings::default(),
+    )
+    .unwrap();
+    assert!(d.guard(66_733, AudibleSide::Out).is_ok());
+    let basis = Dialogue::new(
+        profile(10_000, 1_000_000, &[(0, 500_000)], &[(6, -6_000)]),
+        vec![word("short", 0, 110_000), word("next", 110_000, 500_000)],
+        Settings::default(),
+    )
+    .unwrap();
+    let e = basis
+        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .unwrap()
+        .start;
+    assert_eq!(e.at_micros(), 65_000);
+    let f = d.frame_edge(e, Rational::new(30_000, 1_001).unwrap());
+    assert!(
+        matches!(
+            f,
+            Err(Refusal {
+                reason: RefusalReason::SoundingWord { index: 0, .. },
+                ..
+            })
+        ),
+        "DQ3_FRACTIONAL_REACH: {f:?}"
+    );
+}

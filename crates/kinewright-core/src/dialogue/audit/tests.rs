@@ -598,14 +598,38 @@ fn dialogue_audit_two_recordings_keep_holes_and_edges_attributed() {
 }
 
 #[test]
-fn dialogue_audit_never_combines_different_voices_into_a_text_repeat() {
-    let a = measured(1_000_000, said(&[("the", 100_000)]));
-    let b = measured(1_000_000, said(&[("the", 100_000)]));
-    let r = report(
-        &BTreeMap::from([(RecordingId(1), a), (RecordingId(2), b)]),
-        &[kept(1, 0, 1_000_000), kept(2, 0, 1_000_000)],
-    );
-    assert_eq!(r.total.repeats, 0);
+fn dialogue_audit_recording_identity_is_not_speaker_identity() {
+    let recordings = BTreeMap::from([
+        (
+            RecordingId(1),
+            measured(1_000_000, said(&[("the", 100_000)])),
+        ),
+        (
+            RecordingId(2),
+            measured(1_000_000, said(&[("the", 100_000)])),
+        ),
+    ]);
+    for second in [1, 2] {
+        let r = report(
+            &recordings,
+            &[kept(1, 0, 500_000), kept(second, 0, 500_000)],
+        );
+        assert_eq!(r.total.repeats, 1, "DQ3_REPEAT_ACROSS_RECORDINGS");
+        let item = r
+            .items
+            .iter()
+            .find_map(|i| {
+                if let Item::Repeat(r) = i {
+                    Some(r)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(item.source.0, RecordingId(1));
+        assert_eq!(item.second_source.0, RecordingId(second));
+        assert_eq!(item.second_word, WordKey(RecordingId(second), 0));
+    }
 }
 
 #[test]
@@ -731,7 +755,36 @@ fn dialogue_audit_ten_minute_sixty_join_report_is_under_32_kib() {
         ));
         cut.push(kept(1, start, start + 9_000_000));
     }
-    let r = one(measured(600_000_000, words), &cut);
+    let recordings = BTreeMap::from([(RecordingId(1), measured(600_000_000, words))]);
+    let r = report(&recordings, &cut);
+    let flags = audit(
+        &recordings,
+        &cut,
+        &AuditSettings {
+            detail: Detail::Flags,
+            ..AuditSettings::default()
+        },
+        comparison_key,
+    )
+    .unwrap();
+    let flags_json = serde_json::to_vec(&flags).unwrap();
+    assert!(
+        flags.items.iter().all(|i| i.order().0 < 2),
+        "DQ3_FLAGS_HAVE_NO_INFORMATION"
+    );
+    assert!(
+        flags_json.len() < 1024,
+        "DQ3_FLAGS_BYTE_BUDGET {}",
+        flags_json.len()
+    );
+    assert_eq!(flags.total, r.total);
+    println!(
+        "DQ3_FLAGS_SIZE bytes={} listed={} omitted_joins={} omitted_holes={}",
+        flags_json.len(),
+        flags.items.len(),
+        flags.omitted.joins,
+        flags.omitted.holes
+    );
     assert_eq!(r.total.joins, 62);
     assert_eq!(r.total.edge_in_sound, 0);
     let json = serde_json::to_vec(&r).unwrap();
@@ -833,4 +886,347 @@ fn dialogue_audit_half_word_ownership_is_per_joined_occurrence() {
         );
         assert_eq!(r.total.repeats, repeats);
     }
+}
+
+#[test]
+fn dialogue_audit_sound_minimum_spans_joined_source_portions() {
+    let recordings = BTreeMap::from([
+        (
+            RecordingId(7),
+            recording(1_000_000, vec![word("left", 0, 100_000)], |t| {
+                hop(
+                    if (320_000..400_000).contains(&t) || t >= 400_000 {
+                        -2_000
+                    } else {
+                        -6_000
+                    },
+                    false,
+                )
+            }),
+        ),
+        (
+            RecordingId(9),
+            recording(1_000_000, vec![word("right", 600_000, 700_000)], |t| {
+                hop(
+                    if (300_000..380_000).contains(&t) {
+                        -4_000
+                    } else {
+                        -6_000
+                    },
+                    false,
+                )
+            }),
+        ),
+    ]);
+    let r = report(
+        &recordings,
+        &[kept(7, 0, 400_000), kept(9, 300_000, 700_000)],
+    );
+    let holes: Vec<_> = r
+        .items
+        .iter()
+        .filter_map(|x| if let Item::Hole(h) = x { Some(h) } else { None })
+        .collect();
+    assert_eq!(holes.len(), 2);
+    assert_eq!(
+        holes.iter().map(|h| h.sound_us).sum::<u64>(),
+        160_000,
+        "DQ3_SOUND_RUN_CONTINUES_AT_JOIN"
+    );
+    assert_eq!(r.total.sounding_holes, 2);
+    assert_eq!(holes[0].speaking_cdb, -2_000);
+    assert_eq!(holes[1].speaking_cdb, -6_000);
+    assert_eq!(holes[0].sound_runs_us, vec![[320_000, 400_000]]);
+    assert_eq!(holes[1].sound_runs_us, vec![[300_000, 380_000]]);
+    assert_eq!(holes[0].after, Some(WordKey(RecordingId(7), 0)));
+    assert_eq!(holes[1].before, Some(WordKey(RecordingId(9), 0)));
+    assert_eq!(r.hole_groups, vec![[100_000, 700_000]]);
+    for hole in holes {
+        assert_eq!(hole.gap_play_us, r.hole_groups[hole.group]);
+    }
+    let same = one(
+        recording(
+            2_000_000,
+            vec![
+                word("left", 0, 100_000),
+                word("right", 1_600_000, 1_700_000),
+            ],
+            |t| {
+                hop(
+                    if (320_000..400_000).contains(&t) || (1_300_000..1_380_000).contains(&t) {
+                        -2_000
+                    } else {
+                        -6_000
+                    },
+                    false,
+                )
+            },
+        ),
+        &[kept(1, 0, 400_000), kept(1, 1_300_000, 1_700_000)],
+    );
+    assert_eq!(
+        same.total.sounding_holes, 2,
+        "DQ3_SOUND_RUN_CONTINUES_AT_JOIN"
+    );
+    assert_eq!(
+        same.items
+            .iter()
+            .filter_map(|i| if let Item::Hole(h) = i {
+                Some(h.sound_us)
+            } else {
+                None
+            })
+            .sum::<u64>(),
+        160_000
+    );
+    let isolated = report(&recordings, &[kept(7, 0, 400_000)]);
+    assert_eq!(isolated.total.sounding_holes, 0); // 80 ms alone is below the minimum.
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(
+        !json.contains("gap_play_us")
+            && !json.contains("comparable")
+            && !json.contains(r#""omitted_runs":0"#)
+    );
+}
+
+#[test]
+fn dialogue_audit_policy_refuses_vanishing_checks_and_unbounded_search() {
+    let base = AuditSettings::default();
+    for bad in [
+        AuditSettings {
+            max_items: 0,
+            ..base
+        },
+        AuditSettings {
+            repeat_lookahead_us: 30_000_001,
+            ..base
+        },
+        AuditSettings {
+            repeat_lookahead_us: 0,
+            ..base
+        },
+        AuditSettings {
+            max_repeat_words: 129,
+            ..base
+        },
+        AuditSettings {
+            max_repeat_words: 0,
+            ..base
+        },
+        AuditSettings {
+            short_repeat_words: 129,
+            ..base
+        },
+        AuditSettings {
+            repeat_within_us: 0,
+            ..base
+        },
+        AuditSettings {
+            neighbor_us: 0,
+            ..base
+        },
+        AuditSettings {
+            max_neighbor_gap_us: 0,
+            ..base
+        },
+        AuditSettings {
+            max_phrase_us: 0,
+            ..base
+        },
+        AuditSettings {
+            neighbor_us: 30_000_001,
+            ..base
+        },
+        AuditSettings {
+            max_phrase_us: 30_000_001,
+            ..base
+        },
+        AuditSettings {
+            room_tone_jump_cdb: 12_001,
+            ..base
+        },
+        AuditSettings {
+            quiet_phrase_contrast_cdb: 12_001,
+            ..base
+        },
+        AuditSettings {
+            neighbor_us: 99_999,
+            ..base
+        },
+        AuditSettings {
+            max_neighbor_gap_us: 399_999,
+            ..base
+        },
+        AuditSettings {
+            max_phrase_us: 99_999,
+            ..base
+        },
+        AuditSettings {
+            word_edge_us: 200_000,
+            ..base
+        },
+    ] {
+        assert_eq!(
+            audit(&BTreeMap::new(), &[], &bad, comparison_key),
+            Err(AuditError::Settings)
+        );
+    }
+    for settings in [
+        base,
+        AuditSettings {
+            repeat_lookahead_us: 30_000_000,
+            ..base
+        },
+        AuditSettings {
+            word_edge_us: 199_999,
+            ..base
+        },
+    ] {
+        let r = audit(&BTreeMap::new(), &[], &settings, comparison_key).unwrap();
+        assert!(r.items.is_empty() && r.words.is_empty() && r.hole_groups.is_empty());
+    }
+}
+
+// Independent reviewer regressions, with permanent assertion names.
+#[test]
+fn dialogue_audit_kept_windows_and_guard_equivalence() {
+    let recs = BTreeMap::from([(
+        RecordingId(7),
+        recording(1_000_007, vec![word("word", 200_000, 400_000)], |t| {
+            hop(
+                if t < 200_000 {
+                    -6_000
+                } else if t < 600_000 {
+                    -2_000
+                } else {
+                    -4_800
+                },
+                (200_000..600_000).contains(&t),
+            )
+        }),
+    )]);
+    let mut count = 0;
+    for (a, b) in [
+        (0, 1),
+        (0, 35_000),
+        (155_000, 165_000),
+        (195_000, 205_000),
+        (250_000, 600_000),
+        (970_000, 1_000_007),
+    ] {
+        let r = report(&recs, &[kept(7, a, b)]);
+        for item in &r.items {
+            if let Item::Join(j) = item {
+                for s in &j.sides {
+                    let out = s.side == AudibleSide::Out;
+                    let at = if out { b } else { a };
+                    assert_eq!(
+                        s.edge_in_sound.is_some(),
+                        recs[&RecordingId(7)].guard(at, s.side).is_err()
+                    );
+                    let span = if out {
+                        [b.saturating_sub(60_000).max(a), b]
+                    } else {
+                        [a, a.saturating_add(60_000).min(b)]
+                    };
+                    assert_eq!(s.level.unwrap().us, span, "DQ3_KEPT_WINDOW_IS_CLIPPED");
+                    let vspan = if out {
+                        [b.saturating_sub(20_000).max(a), b]
+                    } else {
+                        [a, a.saturating_add(20_000).min(b)]
+                    };
+                    assert_eq!(
+                        s.voice,
+                        measured::samples(&recs[&RecordingId(7)], vspan[0], vspan[1])
+                            .any(|s| s.hop.voice)
+                    );
+                    assert!(s.air_us <= b - a && s.low_air_us <= b - a);
+                    count += 1;
+                }
+            }
+        }
+    }
+    let r = report(&recs, &[kept(7, 0, 150_000), kept(7, 650_000, 800_000)]);
+    let j = join_at(&r, 150_000);
+    let tone = j.room_tone.as_ref().unwrap();
+    assert_eq!(tone.delta_cdb, 1200);
+    assert!(tone.flagged && tone.comparable);
+    println!("ASTRA_KEPT_WINDOWS sides={count}, quiet 12dB step confirmed");
+}
+
+#[test]
+fn dialogue_audit_exact_pause_threshold_and_occurrences() {
+    for gap in [749_999, 750_000, 750_001] {
+        let r = one(
+            measured(
+                2_000_000,
+                vec![
+                    word("left", 0, 100_000),
+                    word("right", 100_000 + gap, 200_000 + gap),
+                ],
+            ),
+            &[kept(1, 0, 2_000_000)],
+        );
+        assert_eq!(
+            r.total.pauses,
+            u64::from(gap >= 750_000),
+            "DQ3_EXACT_PAUSE_THRESHOLD {gap}"
+        );
+    }
+    for (a, b, count) in [
+        (0, 500_000, 2),
+        (500_000, 1_000_000, 2),
+        (450_000, 550_000, 0),
+    ] {
+        let r = one(
+            measured(1_000_000, vec![word("the", 0, 1_000_000)]),
+            &[kept(1, a, b), kept(1, a, b), kept(1, a, b)],
+        );
+        assert_eq!(r.total.repeats, count);
+    }
+    let r = one(
+        measured(
+            4_000_000,
+            (0..12)
+                .map(|i| {
+                    word(
+                        if i == 0 || i == 11 { "the" } else { "unique" },
+                        i * 300_000,
+                        i * 300_000 + 200_000,
+                    )
+                })
+                .collect(),
+        ),
+        &[kept(1, 0, 200_000), kept(1, 3_300_000, 3_500_000)],
+    );
+    assert_eq!(r.total.repeats, 1);
+}
+
+#[test]
+fn dialogue_audit_voice_bearing_dip_is_not_a_stretched_silent_word() {
+    let r = one(
+        recording(1_000_000, vec![word("voice", 0, 1_000_000)], |_| {
+            hop(-6_000, true)
+        }),
+        &[kept(1, 0, 950_000)],
+    );
+    let side = side(join_at(&r, 950_000), AudibleSide::Out);
+    assert_eq!(side.low_air_us, 950_000);
+    assert_eq!(side.air_us, 0);
+    assert!(side.edge_in_sound.is_none());
+    assert!(side.dip_intrusion.is_some());
+    assert!(side.stretched_word.is_none());
+}
+
+#[test]
+fn dialogue_audit_dense_word_timings_keep_the_repeat_search_bounded() {
+    let words = (0..1024).map(|_| word("the", 0, 1_000_000)).collect();
+    let r = one(measured(1_000_000, words), &[kept(1, 0, 1_000_000)]);
+    assert!(r.total.repeats > 0);
+    assert!(r.repeat_search_limited > 0);
+    assert!(
+        r.items
+            .iter()
+            .all(|i| !matches!(i,Item::Repeat(r) if r.words>128))
+    );
 }

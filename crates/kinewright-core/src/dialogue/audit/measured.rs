@@ -134,38 +134,3 @@ pub(super) fn phrase_level(
         percentile(levels, settings.speaking_percentile)
     }
 }
-
-pub(super) fn sound_runs(
-    recording: &Dialogue,
-    start: u64,
-    end: u64,
-    threshold: i16,
-    settings: &AuditSettings,
-) -> (u64, Vec<[u64; 2]>, u64) {
-    let mut open = None;
-    let mut total = 0_u64;
-    let mut count = 0_u64;
-    let mut listed = Vec::new();
-    let mut close = |open: &mut Option<u64>, at: u64| {
-        if let Some(from) = open
-            .take()
-            .filter(|&from| at - from >= settings.min_sound_run_us)
-        {
-            total += at - from;
-            count += 1;
-            if listed.len() < settings.max_sound_runs {
-                listed.push([from, at]);
-            }
-        }
-    };
-    for s in samples(recording, start, end) {
-        if s.hop.rms_dbfs_hundredths >= threshold {
-            open.get_or_insert(s.start);
-        } else {
-            close(&mut open, s.start);
-        }
-    }
-    close(&mut open, end);
-    let omitted = count - listed.len() as u64;
-    (total, listed, omitted)
-}

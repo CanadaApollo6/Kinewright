@@ -49,9 +49,21 @@ pub struct Location {
     pub play_us: [u64; 2],
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Detail {
+    #[default]
+    All,
+    Flags,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditSettings {
+    pub detail: Detail,
+    pub playback_us: Option<[u64; 2]>,
+    /// Hard work ceiling: at most 128 words per saying, independent of token density.
+    pub max_repeat_words: usize,
     pub level_window_us: u64,
     pub voice_window_us: u64,
     pub min_air_after_us: u64,
@@ -85,6 +97,9 @@ pub struct AuditSettings {
 impl Default for AuditSettings {
     fn default() -> Self {
         Self {
+            detail: Detail::All,
+            playback_us: None,
+            max_repeat_words: 128,
             level_window_us: 60_000,
             voice_window_us: 20_000,
             min_air_after_us: 60_000,
@@ -145,27 +160,54 @@ pub enum Item {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Counts {
+    #[serde(skip_serializing_if = "zero")]
     pub joins: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub edge_in_sound: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub short_air: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub room_tone_jumps: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub dip_intrusions: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub pauses: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub repeats: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub holes: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub sounding_holes: u64,
+    #[serde(skip_serializing_if = "zero")]
     pub quiet_phrases: u64,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate receives a field reference"
+)]
+fn zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Report {
     pub duration_us: u64,
     /// Audit policy snapshot; each input Dialogue retains its own guard policy.
+    #[serde(skip_serializing_if = "default_policy")]
     pub settings: AuditSettings,
+    /// Shared playback extents of the listed hole portions, indexed by Hole.group.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hole_groups: Vec<[u64; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<NamedWord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<Item>,
     pub total: Counts,
     pub omitted: Counts,
+    /// Anchors whose candidate saying exceeded the explicit repeat-word budget.
+    #[serde(skip_serializing_if = "zero")]
+    pub repeat_search_limited: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -295,10 +337,27 @@ struct Collector {
     items: Vec<Item>,
     total: Counts,
     cap: usize,
+    repeat_search_limited: u64,
+    detail: Detail,
+    playback_us: Option<[u64; 2]>,
 }
 impl Collector {
     fn push(&mut self, item: Item) {
+        let at = item.order().1;
+        let end = match &item {
+            Item::Join(_) => at,
+            Item::Pause(p) => p.play_us[1],
+            Item::Repeat(r) => r.play_us[1],
+            Item::Hole(h) => h.location.play_us[1],
+            Item::QuietPhrase(p) => p.location.play_us[1],
+        };
+        if self.playback_us.is_some_and(|r| end < r[0] || at >= r[1]) {
+            return;
+        }
         self.total.add(&item);
+        if self.detail == Detail::Flags && item.order().0 == 2 {
+            return;
+        }
         let at = self
             .items
             .partition_point(|old| old.order() <= item.order());
@@ -340,6 +399,14 @@ fn excerpt(text: &str, limit: usize) -> Text {
     }
 }
 
+fn default_policy(settings: &AuditSettings) -> bool {
+    AuditSettings {
+        detail: Detail::All,
+        playback_us: None,
+        ..*settings
+    } == AuditSettings::default()
+}
+
 fn validate(settings: &AuditSettings) -> Result<(), AuditError> {
     if [
         settings.quiet_rms_cdb,
@@ -360,6 +427,22 @@ fn validate(settings: &AuditSettings) -> Result<(), AuditError> {
         || settings.max_word_bytes == 0
         || settings.max_excerpt_bytes == 0
         || settings.max_sound_runs == 0
+        || settings.max_items == 0
+        || settings.repeat_lookahead_us == 0
+        || settings.repeat_lookahead_us > 30_000_000
+        || settings.max_repeat_words == 0
+        || settings.max_repeat_words > 128
+        || settings.short_repeat_words > settings.max_repeat_words
+        || settings.repeat_within_us == 0
+        || settings.neighbor_us > 30_000_000
+        || settings.max_phrase_us > 30_000_000
+        || settings.neighbor_us < settings.min_sound_run_us
+        || settings.max_neighbor_gap_us < settings.gap_us
+        || settings.max_phrase_us < settings.min_sound_run_us
+        || settings.room_tone_jump_cdb > super::LEVEL_FLOOR.unsigned_abs()
+        || settings.quiet_phrase_contrast_cdb > super::LEVEL_FLOOR.unsigned_abs()
+        || settings.word_edge_us >= settings.gap_us.div_ceil(2)
+        || settings.playback_us.is_some_and(|r| r[0] >= r[1])
     {
         return Err(AuditError::Settings);
     }
@@ -367,7 +450,7 @@ fn validate(settings: &AuditSettings) -> Result<(), AuditError> {
 }
 
 /// Audit a linear, speed-one cut without editing it. Source-contiguous splits
-/// coalesce. Word and phrase text in this owned report is copied intentionally
+/// coalesce. An empty cut returns an empty report. Word and phrase text in this owned report is copied intentionally
 /// so the caller may retain it after releasing the prepared recordings.
 ///
 /// # Errors
@@ -411,6 +494,9 @@ pub fn audit(
         items: Vec::new(),
         total: Counts::default(),
         cap: settings.max_items,
+        repeat_search_limited: 0,
+        detail: settings.detail,
+        playback_us: settings.playback_us,
     };
     let used: BTreeSet<_> = pieces.iter().map(|p| p.recording).collect();
     let tokens: BTreeMap<_, Vec<_>> = used
@@ -446,13 +532,26 @@ pub fn audit(
             ),
         })
         .collect();
+    let mut hole_groups = Vec::new();
+    for item in &mut collector.items {
+        if let Item::Hole(hole) = item {
+            hole.group = if let Some(i) = hole_groups.iter().position(|&p| p == hole.gap_play_us) {
+                i
+            } else {
+                hole_groups.push(hole.gap_play_us);
+                hole_groups.len() - 1
+            };
+        }
+    }
     Ok(Report {
+        hole_groups,
         duration_us: duration,
         settings: *settings,
         words,
         items: collector.items,
         total: collector.total,
         omitted: collector.total.minus(listed),
+        repeat_search_limited: collector.repeat_search_limited,
     })
 }
 

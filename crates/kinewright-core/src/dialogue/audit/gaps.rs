@@ -10,16 +10,109 @@ use std::collections::BTreeMap;
 pub struct Hole {
     pub location: Location,
     /// One wordless playback interval may have several source portions.
+    #[serde(skip)]
     pub gap_play_us: [u64; 2],
+    /// Index into `Report.hole_groups`. Shared extent is serialized only once.
+    pub group: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<WordKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<WordKey>,
+    /// JSON is `[RMS centidB, peak centidB]`; its window is `location.source_us`.
+    #[serde(serialize_with = "hole_level")]
     pub level: Level,
     pub speaking_cdb: i16,
     pub threshold_cdb: i16,
+    #[serde(skip_serializing_if = "super::zero")]
     pub sound_us: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sound_runs_us: Vec<[u64; 2]>,
+    #[serde(skip_serializing_if = "super::zero")]
     pub omitted_runs: u64,
 }
+fn hole_level<S: serde::Serializer>(level: &Level, serializer: S) -> Result<S::Ok, S::Error> {
+    (level.rms_cdb, level.peak_cdb).serialize(serializer)
+}
+
+#[derive(Default)]
+struct SoundPortion {
+    total: u64,
+    runs: Vec<[u64; 2]>,
+    omitted: u64,
+}
+
+// A hole is one playback stretch. Threshold each source against its own
+// speaking level, keep an open run across joins, then attribute surviving
+// portions back to the source. The minimum never restarts at a source cut.
+fn sound_portions(
+    recordings: &BTreeMap<RecordingId, Dialogue>,
+    gaps: &[Gap],
+    speech: &BTreeMap<RecordingId, i16>,
+    settings: &AuditSettings,
+) -> Vec<SoundPortion> {
+    let mut result: Vec<_> = (0..gaps.len()).map(|_| SoundPortion::default()).collect();
+    let mut open: Vec<(usize, [u64; 2])> = Vec::new();
+    let mut duration = 0_u64;
+    let mut until = None;
+    let close =
+        |open: &mut Vec<(usize, [u64; 2])>, duration: &mut u64, result: &mut [SoundPortion]| {
+            if *duration >= settings.min_sound_run_us {
+                for &(i, span) in open.iter() {
+                    let out = &mut result[i];
+                    out.total += span[1] - span[0];
+                    if out.runs.len() < settings.max_sound_runs {
+                        out.runs.push(span);
+                    } else {
+                        out.omitted += 1;
+                    }
+                }
+            }
+            open.clear();
+            *duration = 0;
+        };
+    for (i, gap) in gaps.iter().enumerate() {
+        let location = gap.location;
+        let recording = &recordings[&location.recording];
+        let threshold = (i32::from(speech[&location.recording])
+            - i32::from(settings.below_speech_cdb))
+        .max(i32::from(settings.quietest_sound_cdb));
+        let pad_after = gap
+            .after
+            .is_some_and(|k| recordings[&k.0].words()[k.1].end_micros == location.source_us[0]);
+        let pad_before = gap
+            .before
+            .is_some_and(|k| recordings[&k.0].words()[k.1].start_micros == location.source_us[1]);
+        let a = location.source_us[0]
+            .saturating_add(if pad_after { settings.word_edge_us } else { 0 })
+            .min(location.source_us[1]);
+        let b = location.source_us[1]
+            .saturating_sub(if pad_before { settings.word_edge_us } else { 0 })
+            .max(a);
+        for sample in measured::samples(recording, a, b) {
+            let play = location.play_us[0] + sample.start - location.source_us[0];
+            if until != Some(play) {
+                close(&mut open, &mut duration, &mut result);
+            }
+            if i32::from(sample.hop.rms_dbfs_hundredths) >= threshold {
+                duration += sample.end - sample.start;
+                if let Some((_, span)) = open
+                    .last_mut()
+                    .filter(|(last, span)| *last == i && span[1] == sample.start)
+                {
+                    span[1] = sample.end;
+                } else {
+                    open.push((i, [sample.start, sample.end]));
+                }
+            } else {
+                close(&mut open, &mut duration, &mut result);
+            }
+            until = Some(play + sample.end - sample.start);
+        }
+    }
+    close(&mut open, &mut duration, &mut result);
+    result
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct QuietPhrase {
     pub location: Location,
@@ -110,7 +203,8 @@ fn holes(
             let before = gaps[end - 1]
                 .before
                 .or_else(|| heard.get(right).map(|w| w.key));
-            for gap in &gaps[first..end] {
+            let sounds = sound_portions(recordings, &gaps[first..end], &speech, settings);
+            for (gap, sound) in gaps[first..end].iter().zip(sounds) {
                 let location = gap.location;
                 let recording = &recordings[&location.recording];
                 let speech = speech[&location.recording];
@@ -119,34 +213,19 @@ fn holes(
                     .max(i32::from(settings.quietest_sound_cdb));
                 let threshold =
                     i16::try_from(threshold).expect("threshold is bounded by valid levels");
-                // A source cut is not a word boundary. Pad only the real word
-                // ends so small portions of a cross-join hole are still read.
-                let pad_after = gap.after.is_some_and(|k| {
-                    recordings[&k.0].words()[k.1].end_micros == location.source_us[0]
-                });
-                let pad_before = gap.before.is_some_and(|k| {
-                    recordings[&k.0].words()[k.1].start_micros == location.source_us[1]
-                });
-                let a = location.source_us[0]
-                    .saturating_add(if pad_after { settings.word_edge_us } else { 0 })
-                    .min(location.source_us[1]);
-                let b = location.source_us[1]
-                    .saturating_sub(if pad_before { settings.word_edge_us } else { 0 })
-                    .max(a);
-                let (sound_us, sound_runs_us, omitted_runs) =
-                    measured::sound_runs(recording, a, b, threshold, settings);
                 collector.push(Item::Hole(Hole {
                     location,
                     gap_play_us: play,
+                    group: 0,
                     after,
                     before,
                     level: measured::level(recording, location.source_us[0], location.source_us[1])
                         .expect("nonempty hole"),
                     speaking_cdb: speech,
                     threshold_cdb: threshold,
-                    sound_us,
-                    sound_runs_us,
-                    omitted_runs,
+                    sound_us: sound.total,
+                    sound_runs_us: sound.runs,
+                    omitted_runs: sound.omitted,
                 }));
             }
         }

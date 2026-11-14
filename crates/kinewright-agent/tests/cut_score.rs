@@ -154,6 +154,7 @@ fn cut_score_cli_typed_cannot_score_for_speed_and_wrong_recording() {
 #[cfg(target_os = "linux")]
 #[test]
 fn cut_score_cli_scores_supported_studio_save_without_writing() {
+    use kinewright_media::test_support::workspace_target_dir;
     use kinewright_project::{
         bundle::{BundleWriteAdmission, ProjectBundle},
         owned_inputs::OwnedInputManifest,
@@ -180,7 +181,7 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
         visit(root, root, &mut out);
         out
     }
-    let temp = TempDirectory::new("dq4-studio");
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "dq4-studio");
     let path = temp.path("studio.kinewright");
     let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
     // A real small WAV is admitted only while creating the Studio fixture.
