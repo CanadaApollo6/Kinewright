@@ -251,7 +251,7 @@ impl StoredOwnerRecord {
             .take();
         record.resolve_reserved(store, expected_role, reservation, window)
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn resolve(
         self,
         store: &ProjectStore,
@@ -284,7 +284,7 @@ impl StoredOwnerRecord {
         {
             return Err(Error::Capacity("owner decode"));
         }
-        let body: Body = serde_json::from_str(self.body.get()).map_err(|_| Error::InvalidRecord)?;
+        let body = self.decode_body()?;
         let baseline = store
             .read_record::<kinewright_core::Document>(&self.baseline)
             .map_err(store_error)?;
@@ -374,6 +374,9 @@ impl StoredOwnerRecord {
         drop(self);
         drop(window);
         OwnerSnapshot { data, reservation }.validate()
+    }
+    fn decode_body(&self) -> Result<Body, Error> {
+        serde_json::from_str(self.body.get()).map_err(|_| Error::InvalidRecord)
     }
 }
 impl record_sealed::Sealed for StoredOwnerRecord {}
@@ -649,6 +652,10 @@ pub(super) fn key_decode_charge(key: Option<&str>, workspace: u64) -> Result<u64
         .map(|v| v.unwrap_or(0))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "stored_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stored_codec_tests.rs"]
+mod codec_tests;
