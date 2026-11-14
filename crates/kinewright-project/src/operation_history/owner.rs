@@ -3,7 +3,7 @@ use super::{
     HistoryReservation, Lineage, RemovedTarget, Resource, Resources, Role,
 };
 use kinewright_core::{
-    Command, Document, Operation,
+    Command, Document,
     undo::{CommandKey, EditEvent, Effects, History, RetentionPolicy},
 };
 use std::{
@@ -150,8 +150,6 @@ struct Plan {
         kinewright_core::undo::StepEvidence,
         super::transition::TerminalPresence,
     )>,
-    created_tracks: Vec<kinewright_core::TrackId>,
-    discarded: Vec<CommandKey>,
 }
 impl OwnerHistory {
     pub fn new(
@@ -278,7 +276,7 @@ impl OwnerHistory {
                 return Err(Error::InvalidLedger);
             }
             let effects = self.core.execute(command)?;
-            self.ledger.observe(&effects, &[]);
+            self.ledger.observe(&effects);
             return Ok(effects);
         }
         let open_key = match &command {
@@ -339,7 +337,7 @@ impl OwnerHistory {
         }
         // Each retained command contributes at most one reference per resource.
         // The bounded origin map makes count overflow unreachable.
-        for key in &plan.discarded {
+        for key in &effects.discarded {
             if let Some(origin) = origins.remove(key) {
                 resources.remove(&origin.resources);
             }
@@ -365,7 +363,7 @@ impl OwnerHistory {
         for (target, presence) in plan.terminal_updates {
             terminal_facts.insert(target, presence);
         }
-        ledger.observe(&effects, &plan.created_tracks);
+        ledger.observe(&effects);
         for (key, proof) in plan.folded_approval_updates {
             folded_approvals.insert(key, proof);
         }
@@ -373,7 +371,7 @@ impl OwnerHistory {
     }
     pub fn close_gesture(&mut self) -> Result<Effects, Error> {
         let effects = self.core.close_gesture()?;
-        self.ledger.observe(&effects, &[]);
+        self.ledger.observe(&effects);
         Ok(effects)
     }
     pub fn boundary(&self, depth: usize) -> Result<OwnerBoundary, Error> {
@@ -632,18 +630,6 @@ fn prepare(
             fold_frontier = Some(fold_frontier.map_or(frontier, |old| old.max(frontier)));
         }
     }
-    let created_tracks = event
-        .operations
-        .iter()
-        .filter_map(|operation| match operation {
-            Operation::AddTrack { track } => Some(track.id),
-            _ => None,
-        })
-        .collect();
-    // Own only the discarded keys so removal visits queue ends, including
-    // multiple commands in one coalesced Redo step.
-    let mut discarded = event.effects.discarded.clone();
-    discarded.sort_unstable_by_key(|key| std::cmp::Reverse(key.position));
     Ok(Plan {
         origin: LiveOrigin {
             origin,
@@ -662,8 +648,6 @@ fn prepare(
         fold_frontier,
         terminal_updates,
         folded_approval_updates,
-        created_tracks,
-        discarded,
     })
 }
 pub(super) fn origin_charge(

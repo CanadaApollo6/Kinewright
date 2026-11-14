@@ -75,6 +75,8 @@ struct Fact {
 #[derive(Default, Debug)]
 struct Totals {
     save_open_checks: usize,
+    old_uncertain_recreation: usize,
+    old_uncertain_other: usize,
     transitions: usize,
     approvals: usize,
     shortcut_exemptions: usize,
@@ -82,6 +84,7 @@ struct Totals {
     conditional_batch: usize,
     uncertain: usize,
     provenance_probes: usize,
+    sibling_do_missing_fold_provenance: usize,
     control_certain_differences: BTreeMap<String, Vec<String>>,
     control_difference_observations: usize,
 }
@@ -522,9 +525,13 @@ fn check_audit(
                     .any(|target| fact.created.contains(target))
         });
         assert_eq!(
-            entry.recreated, recreated,
-            "GENERATED_RECREATION_EVIDENCE {:?}",
-            entry.key
+            entry.answer(),
+            if matches!(expected, Some(model::Fate::Undo | model::Fate::Folded)) {
+                ApprovalAnswer::Kept
+            } else {
+                ApprovalAnswer::Missing
+            },
+            "EVERY_APPROVED_COMMAND_ANSWER_IS_ITS_FATE"
         );
         let fact = line.get(&entry.key);
         let answer = crate::edit_audit::owner_differential_proof(
@@ -534,6 +541,13 @@ fn check_audit(
             &entry.approval.targets,
             fact.is_some(),
         );
+        if answer == ApprovalAnswer::Uncertain {
+            if recreated && fact.is_some() {
+                totals.old_uncertain_recreation += 1;
+            } else {
+                totals.old_uncertain_other += 1;
+            }
+        }
         if answer != ApprovalAnswer::Uncertain && answer != entry.answer() {
             assert!(
                 !targets_present(&entry.approval.targets, &old.document),
@@ -654,7 +668,7 @@ fn stream(
     } else {
         RetentionPolicy::NeverFold
     };
-    let budget = if kind == "SyntheticTransition" {
+    let budget = if kind.starts_with("Synthetic") {
         8192
     } else {
         serde_json::to_vec(&first).unwrap().len() + 190
@@ -688,7 +702,16 @@ fn stream(
     let mut frontier = None;
     let mut captured = None;
     let mut trace = vec![];
-    let prefix = if kind == "SyntheticTransition" {
+    let prefix = if kind == "SyntheticRecreation" {
+        vec![
+            Command::DoBatch(vec![Operation::RemoveTrack { track: TrackId(81) }]),
+            Command::DoBatch(vec![Operation::AddTrack {
+                track: super::tests::document().tracks.remove(0),
+            }]),
+            Command::Undo,
+            Command::Undo,
+        ]
+    } else if kind == "SyntheticTransition" {
         vec![
             Command::DoBatch(vec![Operation::AddTrack {
                 track: kinewright_core::Track {
@@ -1020,6 +1043,15 @@ fn stream(
         check_audit(
             &owner, &model, &old, &line, &all, &controls, &trace, &terminal, frontier, totals,
         );
+        if installed {
+            assert!(
+                owner
+                    .ledger()
+                    .entries()
+                    .all(|entry| entry.answer() != ApprovalAnswer::Uncertain),
+                "DIFFERENTIAL_SAME_LINE_DO_IS_CERTAIN"
+            );
+        }
         if installed || save_random.next().is_multiple_of(7) {
             super::roundtrip_tests::saved_open(&owner);
             totals.save_open_checks += 1;
@@ -1226,6 +1258,77 @@ fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
         .into(),
     );
 }
+
+fn sibling_do_snapshot_differential(totals: &mut Totals) {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let bounds = RoleBounds {
+        step_cap: 1,
+        ..Role::Ordinary.bounds()
+    };
+    let make = || {
+        OwnerHistory::measured(
+            &pool,
+            Role::Ordinary,
+            RetentionPolicy::Fold,
+            &origin(1),
+            bounds,
+            || Ok(document()),
+        )
+        .unwrap()
+    };
+    let mut owner = make();
+    let mut sibling = make();
+    sibling
+        .execute(super::tests::remove(), origin(2), vec![], None)
+        .unwrap();
+    let folded = sibling
+        .execute(Command::Do(commands::marker(399)), origin(3), vec![], None)
+        .unwrap();
+    let selected = sibling.capture().unwrap();
+    let key = owner
+        .execute(
+            super::tests::remove(),
+            origin(2),
+            vec![],
+            Some(super::tests::approval()),
+        )
+        .unwrap()
+        .accepted;
+    assert!(
+        folded.folded.iter().any(|command| command.key == key),
+        "DIFFERENTIAL_SIBLING_EXACT_COMMAND_FOLDED"
+    );
+    owner
+        .install_snapshot(selected.validate_bounded(bounds).unwrap())
+        .unwrap();
+    assert_eq!(
+        owner.ledger().get(key).unwrap().answer(),
+        ApprovalAnswer::Uncertain,
+        "DIFFERENTIAL_SIBLING_DO_MISSING_FOLD_PROVENANCE"
+    );
+    // Today's audit has no selected cut for this approval. Count this precise
+    // contract difference independently of the different-command shortcut.
+    let old = Core::spawn(document()).unwrap();
+    old.request(super::tests::remove()).unwrap();
+    old.request(Command::Do(commands::marker(399))).unwrap();
+    assert_eq!(
+        crate::edit_audit::owner_differential_proof(
+            &old.export_history().unwrap(),
+            None,
+            None,
+            &[RemovedTarget::Track(TrackId(81))],
+            false
+        ),
+        ApprovalAnswer::Missing,
+        "OLD_SIBLING_UNSELECTED_DO_CUT_IS_MISSING"
+    );
+    super::roundtrip_tests::saved_open(&owner);
+    totals.save_open_checks += 1;
+    totals.sibling_do_missing_fold_provenance += 1;
+    totals.uncertain += 1;
+    totals.approvals += 1;
+}
+
 #[test]
 fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
     let mut totals = Totals::default();
@@ -1256,6 +1359,28 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
             &mut totals,
         );
     }
+    for policy in [model::Policy::Fold, model::Policy::NeverFold] {
+        stream(
+            "SyntheticRecreation",
+            &document(),
+            Operation::SetTrackSyncLock {
+                track: TrackId(81),
+                locked: true,
+            },
+            policy,
+            1,
+            &mut totals,
+        );
+    }
+    assert!(
+        totals.old_uncertain_recreation > 0,
+        "OLD_UNCERTAIN_RECREATION_CLASS_EXERCISED"
+    );
+    sibling_do_snapshot_differential(&mut totals);
+    assert!(
+        totals.sibling_do_missing_fold_provenance > 0,
+        "SIBLING_DO_UNCERTAINTY_CLASS_EXERCISED"
+    );
     preapproval_folded_snapshot_differential(&mut totals);
     preapproval_do_folded_snapshot_differential(&mut totals);
     assert!(
@@ -1274,7 +1399,7 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
         totals.conditional_do > 0 && totals.conditional_batch > 0,
         "GENERATED_ACCEPTED_CONDITIONAL_COMMANDS"
     );
-    let artifact = serde_json::json!({"save_open_checks":totals.save_open_checks,"transitions":totals.transitions,"approvals":totals.approvals,"shortcut_exemptions":totals.shortcut_exemptions,"accepted_do_if_revision":totals.conditional_do,"accepted_batch_if_revision":totals.conditional_batch,"uncertain_observations":totals.uncertain,"folded_provenance_probes":totals.provenance_probes,"control_difference_observations":totals.control_difference_observations,"control_difference_witnesses":totals.control_certain_differences});
+    let artifact = serde_json::json!({"sibling_do_missing_fold_provenance":totals.sibling_do_missing_fold_provenance,"old_uncertain_recreation_observations":totals.old_uncertain_recreation,"old_uncertain_other_observations":totals.old_uncertain_other,"save_open_checks":totals.save_open_checks,"transitions":totals.transitions,"approvals":totals.approvals,"shortcut_exemptions":totals.shortcut_exemptions,"accepted_do_if_revision":totals.conditional_do,"accepted_batch_if_revision":totals.conditional_batch,"uncertain_observations":totals.uncertain,"folded_provenance_probes":totals.provenance_probes,"control_difference_observations":totals.control_difference_observations,"control_difference_witnesses":totals.control_certain_differences});
     let directory = kinewright_media::test_support::workspace_target_dir().join("hx-part2");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(

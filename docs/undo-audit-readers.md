@@ -1,6 +1,6 @@
 # Readers of the old approval target-satisfaction shortcut
 
-At base `1e2c4170`, the old audit can call approval A kept when A was discarded and another command B removed the same target. H2a part 2 follows command fate instead, per the user's ruling. No second approval-satisfaction answer is introduced. The differential recognizes only that precise cause and counts it. No reader below is migrated in this part.
+At base `1e2c4170`, the old audit can call approval A kept when A was discarded and another command B removed the same target. H2a part 2 follows command fate instead, per the user's ruling. No second approval-satisfaction answer is introduced. The differential recognizes only that precise cause and counts it. No reader below is migrated in this part. Recreation does not change a command's fate. The complete install rule, including the narrow Do uncertainty case for missing folded provenance, is stated in `history-rework.md`, “Kept beside the stacks” (the design source under `.review/arch`). Uncertain must be displayed separately and must not contribute to either kept or missing counts. The record deliberately does not identify earlier folded epochs: absent older-epoch commands without selected evidence report uncertain. The [review notes](undo-review-fixes.md#missing-epoch-provenance) preserve the executable information-loss probe and the ruling.
 
 | Reader | What it does with the shortcut answer | H2b decision |
 | --- | --- | --- |

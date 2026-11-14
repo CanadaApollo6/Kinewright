@@ -186,7 +186,7 @@ impl OwnerHistory {
             Direction::Undo => Command::Undo,
             Direction::Redo => Command::Redo,
         })?;
-        self.ledger.observe(&effects, &[]);
+        self.ledger.observe(&effects);
         self.decode_bound = decode;
         self.owner_bytes = next;
         self.ledger.transitions.push(TransitionApproval {

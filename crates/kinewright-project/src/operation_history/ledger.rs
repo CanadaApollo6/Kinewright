@@ -13,6 +13,8 @@ pub enum Fate {
     Redone,
     Folded,
     Discarded,
+    /// An installed sibling capture has no evidence for this absent command.
+    Uncertain,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalAnswer {
@@ -38,7 +40,6 @@ pub struct ApprovalEntry {
     pub payload_digest: [u8; 32],
     pub approval: Approval,
     pub fate: Fate,
-    pub recreated: bool,
     /// The last installation which changed this entry's fate. No allocation.
     pub install_epoch: Option<u64>,
 }
@@ -47,9 +48,8 @@ impl ApprovalEntry {
     pub const fn answer(&self) -> ApprovalAnswer {
         match self.fate {
             Fate::Applied | Fate::Redone | Fate::Folded => ApprovalAnswer::Kept,
-            Fate::Discarded => ApprovalAnswer::Missing,
-            Fate::Undone if !self.recreated => ApprovalAnswer::Missing,
-            Fate::Undone => ApprovalAnswer::Uncertain,
+            Fate::Discarded | Fate::Undone => ApprovalAnswer::Missing,
+            Fate::Uncertain => ApprovalAnswer::Uncertain,
         }
     }
 }
@@ -99,22 +99,24 @@ impl<'de> Deserialize<'de> for ApprovalLedger {
                 return Err(serde::de::Error::custom("duplicate approval command"));
             }
         }
-        let mut ids = std::collections::BTreeSet::new();
-        if transitions.iter().any(|entry| {
-            !ids.insert(&entry.id)
-                || result
-                    .values()
-                    .any(|command| command.approval.reference == entry.id)
-        }) {
-            return Err(serde::de::Error::custom("duplicate transition approval"));
-        }
-        Ok(Self {
+        let ledger = Self {
             commands: result,
             transitions,
-        })
+        };
+        if !ledger.references_unique() {
+            return Err(serde::de::Error::custom("duplicate approval reference"));
+        }
+        Ok(ledger)
     }
 }
 impl ApprovalLedger {
+    pub(super) fn references_unique(&self) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        self.entries()
+            .map(|entry| &entry.approval.reference)
+            .chain(self.transition_entries().map(|entry| &entry.id))
+            .all(|id| seen.insert(id))
+    }
     #[must_use]
     pub fn len(&self) -> usize {
         self.commands.len() + self.transitions.len()
@@ -136,10 +138,23 @@ impl ApprovalLedger {
         self.commands.get(&key)
     }
     pub(super) fn admit(&self, approval: &Approval, key: CommandKey) -> Result<(), Error> {
+        approval
+            .reference
+            .validate()
+            .map_err(|_| Error::InvalidLedger)?;
         if self.len() >= crate::orchestration_records::ITEM_LIMIT {
             return Err(Error::Capacity("approval count"));
         }
-        if self.commands.contains_key(&key) || approval.targets.is_empty() {
+        if self.commands.contains_key(&key)
+            || approval.targets.is_empty()
+            || self
+                .entries()
+                .any(|entry| entry.approval.reference == approval.reference)
+            || self
+                .transitions
+                .iter()
+                .any(|entry| entry.id == approval.reference)
+        {
             return Err(Error::InvalidLedger);
         }
         Ok(())
@@ -152,45 +167,11 @@ impl ApprovalLedger {
                 payload_digest: digest,
                 approval,
                 fate: Fate::Applied,
-                recreated: false,
                 install_epoch: None,
             },
         );
     }
-    pub(super) fn observe(&mut self, event: &Effects, created_tracks: &[TrackId]) {
-        // One sticky recreation bit per approval. A scalar edit has no
-        // creations and never walks approval targets. Sorted targets let each
-        // created identity probe an approval in logarithmic time.
-        for entry in self.commands.values_mut() {
-            if entry.key == event.accepted {
-                continue;
-            }
-            entry.recreated |= created_tracks.iter().any(|id| {
-                entry
-                    .approval
-                    .targets
-                    .binary_search(&RemovedTarget::Track(*id))
-                    .is_ok()
-            });
-            entry.recreated |= event
-                .applied
-                .iter()
-                .filter(|c| c.key == event.accepted)
-                .flat_map(|c| &c.identities)
-                .any(|effect| {
-                    effect
-                        .created
-                        .iter()
-                        .chain(effect.split_results.iter().map(|c| &c.id))
-                        .any(|id| {
-                            entry
-                                .approval
-                                .targets
-                                .binary_search(&RemovedTarget::Clip(*id))
-                                .is_ok()
-                        })
-                });
-        }
+    pub(super) fn observe(&mut self, event: &Effects) {
         for key in &event.to_undo {
             if let Some(entry) = self.commands.get_mut(key) {
                 entry.fate = if *key == event.accepted {

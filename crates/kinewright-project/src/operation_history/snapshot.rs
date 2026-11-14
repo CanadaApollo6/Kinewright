@@ -134,8 +134,12 @@ impl OwnerHistory {
                 // This independent entry survives for its run's audit. Its
                 // fate below comes from the selected stacks, not this copy.
                 let mut old = entry.clone();
-                old.fate = Fate::Discarded;
-                old.recreated = false;
+                old.fate = absent_do_fate(
+                    old.key,
+                    snapshot.core.epoch(),
+                    snapshot.core.position(),
+                    snapshot.fold_frontier,
+                );
                 snapshot.decode_bound = snapshot
                     .decode_bound
                     .checked_add(super::stored::approval_decode_charge(&old.approval)?)
@@ -179,6 +183,9 @@ impl OwnerHistory {
                 snapshot.ledger.transitions.push(entry.clone());
             }
         }
+        if !snapshot.ledger.references_unique() {
+            return Err(Error::InvalidLedger);
+        }
         super::transition::validate_entries(
             &snapshot.ledger,
             &snapshot.origins,
@@ -209,8 +216,10 @@ impl OwnerHistory {
                 .is_some_and(|proof| proof.payload_digest == entry.payload_digest)
             {
                 Fate::Folded
-            } else {
+            } else if snapshot.folded_approvals.contains_key(&entry.key) {
                 Fate::Discarded
+            } else {
+                entry.fate
             };
             if previous != Some(entry.fate) {
                 entry.install_epoch = Some(install_epoch);
@@ -274,6 +283,9 @@ impl OwnerSnapshot {
             mut ledger,
             folded_approvals,
         } = data;
+        if !ledger.references_unique() {
+            return Err(Error::InvalidLedger);
+        }
         if role != reservation.role() {
             return Err(Error::Reservation);
         }
@@ -337,6 +349,10 @@ impl OwnerSnapshot {
                 || entry
                     .install_epoch
                     .is_some_and(|epoch| epoch > history.epoch)
+                || (entry.fate == Fate::Uncertain
+                    && entry
+                        .install_epoch
+                        .is_none_or(|epoch| entry.key.epoch >= epoch))
             {
                 return Err(Error::InvalidLedger);
             }
@@ -566,5 +582,24 @@ impl OwnerSnapshot {
             decode_bound,
             reservation,
         })
+    }
+}
+
+// The stored frontier is exclusive; the ruling's inclusive F is position - 1.
+// Old epochs cannot be reconstructed from this bounded record. Do not infer
+// provenance from a later frontier or from the final document's contents.
+fn absent_do_fate(
+    key: CommandKey,
+    capture_epoch: u64,
+    counter: u64,
+    frontier: Option<CommandKey>,
+) -> Fate {
+    if key.epoch > capture_epoch
+        || (key.epoch == capture_epoch
+            && (key.position >= counter || frontier.is_none_or(|f| key.position >= f.position)))
+    {
+        Fate::Discarded
+    } else {
+        Fate::Uncertain
     }
 }

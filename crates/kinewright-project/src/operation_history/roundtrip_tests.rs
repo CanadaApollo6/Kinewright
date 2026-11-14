@@ -177,10 +177,15 @@ fn historic_approval_positions_still_refuse_overflow() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one deterministic transition grammar and its positive coverage assertions"
+)]
 fn generated_owner_states_can_be_saved_and_opened() {
     let mut checks = 0;
     let mut folds = 0;
     let mut historic_reopens = 0;
+    let mut invalid_reference_refusals = 0;
     for seed in 1..=4_u64 {
         for role in [Role::Ordinary, Role::Task] {
             let pool = HistoryPool::new(PoolLimits::default());
@@ -220,9 +225,8 @@ fn generated_owner_states_can_be_saved_and_opened() {
                         let _ = owner.execute(Command::Redo, origin(i + 2), vec![], None);
                     }
                     3 => {
-                        let mut a = approval();
-                        a.reference.sha256 = format!("{seed:032x}{i:032x}");
-                        let _ = owner.execute(remove(), origin(i + 2), vec![], Some(a));
+                        invalid_reference_refusals +=
+                            usize::from(generated_removal(&mut owner, seed, i, random));
                     }
                     4 => {
                         let _ = owner.execute(
@@ -244,6 +248,13 @@ fn generated_owner_states_can_be_saved_and_opened() {
                             owner
                                 .install_snapshot(snapshot.validate_bounded(bounds).unwrap())
                                 .unwrap();
+                            assert!(
+                                owner
+                                    .ledger()
+                                    .entries()
+                                    .all(|entry| entry.answer() != ApprovalAnswer::Uncertain),
+                                "SAME_LINE_INSTALL_NEVER_MAKES_DO_UNCERTAIN"
+                            );
                             installed = true;
                         }
                     }
@@ -268,5 +279,31 @@ fn generated_owner_states_can_be_saved_and_opened() {
         historic_reopens > 0,
         "GENERATED_HISTORIC_POSITION_EXERCISED"
     );
-    println!("HX_OWNER_PROPERTY_SAVE_OPEN={checks} FOLDS={folds} HISTORIC={historic_reopens}");
+    assert!(
+        invalid_reference_refusals > 0,
+        "GENERATED_MALFORMED_APPROVAL_REFERENCE_REFUSED"
+    );
+    println!(
+        "HX_OWNER_PROPERTY_SAVE_OPEN={checks} FOLDS={folds} HISTORIC={historic_reopens} INVALID_REFERENCES={invalid_reference_refusals}"
+    );
+}
+
+fn generated_removal(owner: &mut OwnerHistory, seed: u64, index: u64, random: u64) -> bool {
+    let invalid = (random >> 8).is_multiple_of(5);
+    let mut consent = approval();
+    consent.reference.sha256 = if invalid {
+        "bad".into()
+    } else {
+        format!("{seed:032x}{index:032x}")
+    };
+    let result = owner.execute(remove(), origin(index + 2), vec![], Some(consent));
+    if invalid {
+        assert!(
+            result.is_err(),
+            "GENERATED_MALFORMED_APPROVAL_MUST_NOT_BE_ADMITTED {result:?}"
+        );
+        matches!(result, Err(Error::InvalidLedger))
+    } else {
+        false
+    }
 }

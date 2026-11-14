@@ -1,0 +1,11 @@
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-4492ddab-ddc6f77f95db0f24/crates/kinewright-project)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.21s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_project-b9cef42ee480bbd9)
+
+running 1 test
+EPOCH_PROVENANCE keep_old_epoch=true current=CommandKey { epoch: 2, position: 4 } frontier=Some(CommandKey { epoch: 2, position: 3 }) retained_epochs=[2]
+EPOCH_PROVENANCE keep_old_epoch=false current=CommandKey { epoch: 2, position: 4 } frontier=Some(CommandKey { epoch: 2, position: 3 }) retained_epochs=[2]
+EPOCH_PROVENANCE byte_identical=true bytes=2671
+test operation_history::review_tests::probe_equal_records_erase_folded_epoch_membership ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 272 filtered out; finished in 0.00s

@@ -348,6 +348,10 @@ impl ValidatedSnapshot {
         &self.record.redo
     }
     #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.record.position
+    }
+    #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.record.epoch
     }

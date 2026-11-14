@@ -1,0 +1,22 @@
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-4492ddab-ddc6f77f95db0f24/crates/kinewright-project)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.61s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_project-b9cef42ee480bbd9)
+
+running 1 test
+SIBLING_FOLDED_DO key=CommandKey { epoch: 1, position: 0 } trusted_fold_event=true selected_baseline_removed_track=true fate=Discarded answer=Missing
+
+thread 'operation_history::review_tests::probe_sibling_folded_do_with_no_approval_fact' (2944123) panicked at crates/kinewright-project/src/operation_history/review_tests.rs:599:5:
+assertion `left != right` failed: SIBLING_FOLDED_APPROVED_COMMAND_CANNOT_BE_CALLED_DISCARDED
+  left: Discarded
+ right: Discarded
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test operation_history::review_tests::probe_sibling_folded_do_with_no_approval_fact ... FAILED
+
+failures:
+
+failures:
+    operation_history::review_tests::probe_sibling_folded_do_with_no_approval_fact
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 272 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p kinewright-project --lib`

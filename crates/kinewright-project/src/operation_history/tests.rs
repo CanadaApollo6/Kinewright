@@ -70,8 +70,10 @@ fn approval_fate_never_uses_a_later_removal() {
     history
         .execute(Command::Undo, origin(5), vec![], None)
         .unwrap();
+    let mut second_approval = approval();
+    second_approval.reference.sha256 = "b".repeat(64);
     let second = history
-        .execute(remove(), origin(6), vec![], Some(approval()))
+        .execute(remove(), origin(6), vec![], Some(second_approval))
         .unwrap()
         .accepted;
     assert_eq!(
@@ -110,6 +112,7 @@ fn coalesced_members_follow_undo_redo_and_discard() {
     let mut keys = vec![];
     for id in [81, 82] {
         let mut approved = approval();
+        approved.reference.sha256 = format!("{id:064x}");
         approved.targets = vec![RemovedTarget::Track(TrackId(id))];
         keys.push(
             history
@@ -491,7 +494,7 @@ fn resources_include_payloads_in_the_live_redo_tail() {
 }
 
 #[test]
-fn recreation_is_bounded_evidence_and_never_resurrects_a_discarded_approval() {
+fn approved_command_answers_only_its_fate_after_recreation() {
     let mut history = owner();
     let key = history
         .execute(remove(), origin(2), vec![], Some(approval()))
@@ -507,9 +510,10 @@ fn recreation_is_bounded_evidence_and_never_resurrects_a_discarded_approval() {
             None,
         )
         .unwrap();
-    assert!(
-        history.ledger().get(key).unwrap().recreated,
-        "RECREATION_COMES_FROM_LATER_IDENTITY_EFFECTS"
+    assert_eq!(
+        history.ledger().get(key).unwrap().answer(),
+        ApprovalAnswer::Kept,
+        "APPLIED_COMMAND_STAYS_APPLIED_AFTER_RECREATION"
     );
     history
         .execute(Command::Undo, origin(4), vec![], None)
@@ -519,8 +523,8 @@ fn recreation_is_bounded_evidence_and_never_resurrects_a_discarded_approval() {
         .unwrap();
     assert_eq!(
         history.ledger().get(key).unwrap().answer(),
-        ApprovalAnswer::Uncertain,
-        "UNDONE_RECREATION_STAYS_UNCERTAIN"
+        ApprovalAnswer::Missing,
+        "UNDONE_COMMAND_IS_NOT_APPLIED"
     );
     history
         .execute(
@@ -534,7 +538,6 @@ fn recreation_is_bounded_evidence_and_never_resurrects_a_discarded_approval() {
         )
         .unwrap();
     let entry = history.ledger().get(key).unwrap();
-    assert!(entry.recreated, "RECREATION_EVIDENCE_IS_ONE_STICKY_BIT");
     assert_eq!(
         entry.answer(),
         ApprovalAnswer::Missing,
