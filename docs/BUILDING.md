@@ -104,6 +104,7 @@ install.
 
 M0 targets 64-bit Windows with the MSVC Rust toolchain. The media crate links
 FFmpeg at build time and loads its DLLs at test and run time.
+The Windows installer must also ship the MSVC OpenMP runtime (`vcomp140.dll`) required by the NeMo-Speech DLLs.
 
 ### Prerequisites
 

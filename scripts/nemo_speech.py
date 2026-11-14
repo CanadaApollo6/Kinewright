@@ -22,13 +22,12 @@ def run(args):
 
 def build(args):
     if not WINDOWS:
-        args = ['flock', '-o', '/tmp/kinewright-cargo-heavy.lock', 'env',
-                'CARGO_BUILD_JOBS=4', 'nice', '-n', '10'] + args
+        args = ['nice', '-n', '10'] + args
         if os.environ.get('KINEWRIGHT_NEMO_OFFLINE_BUILD') == '1':
-            args = args[:8] + ['unshare', '-rn'] + args[8:]
+            args = ['unshare', '-rn'] + args
     started = time.monotonic()
     run(args)
-    print(f'NeMo build step: {time.monotonic() - started:.2f}s (includes lock wait)', file=sys.stderr)
+    print(f'NeMo build step: {time.monotonic() - started:.2f}s', file=sys.stderr)
 
 
 def build_key():
@@ -93,11 +92,40 @@ def fetch(path, pin):
         raise RuntimeError(f'Source pin mismatch: {path}: {actual}')
 
 
+BUILD_TREES = ('src', 'sentencepiece-src', 'sentencepiece-build', 'build', 'deps')
+
+
+def discard_build_trees(root):
+    for directory in BUILD_TREES:
+        if (root / directory).exists():
+            shutil.rmtree(root / directory)
+
+
+def preserve_sentencepiece_notices(root):
+    source = root / 'sentencepiece-src'
+    notices = root / 'share/licenses/nemo-speech/third_party/sentencepiece'
+    notices.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / 'LICENSE', notices / 'LICENSE')
+    for directory in ('absl', 'darts_clone', 'esaxx', 'protobuf-lite'):
+        destination = notices / directory
+        destination.mkdir(exist_ok=True)
+        shutil.copy2(source / 'third_party' / directory / 'LICENSE', destination / 'LICENSE')
+
+
+def sdk_complete(root, key):
+    complete = root / '.build-key'
+    libraries = ('lib/nemo_speech_asr_c.lib', 'bin/nemo_speech_asr_c.dll', 'bin/nemo_speech_asr.dll') if WINDOWS else ('lib/libnemo_speech_asr_c.so', 'lib/libnemo_speech_asr.so')
+    required = (*libraries, 'include/nemo_speech/asr.h', 'share/licenses/nemo-speech/LICENSE',
+                'share/licenses/nemo-speech/NOTICE', 'share/licenses/nemo-speech/THIRD_PARTY_NOTICES.md',
+                'share/licenses/nemo-speech/third_party/sentencepiece/LICENSE')
+    return (complete.is_file() and complete.read_text().strip() == key
+            and all((root / path).is_file() for path in required))
+
+
 def provision(root, key):
     complete = root / '.build-key'
-    lib = root / 'lib' / ('nemo_speech_asr_c.lib' if WINDOWS else 'libnemo_speech_asr_c.so')
-    runtime = root / 'bin' / 'nemo_speech_asr_c.dll' if WINDOWS else lib
-    if complete.exists() and complete.read_text().strip() == key and lib.is_file() and runtime.is_file():
+    if sdk_complete(root, key):
+        discard_build_trees(root)
         return
     complete.unlink(missing_ok=True)
     pins = json.loads((SCRIPTS / 'nemo-speech-pins.json').read_text())
@@ -125,11 +153,14 @@ def provision(root, key):
            f'-DCMAKE_PREFIX_PATH={sp}', f'-DCMAKE_INSTALL_RPATH={root / "lib"}'])
     build(['cmake', '--build', root / 'build', '--parallel', '4'])
     build(['cmake', '--install', root / 'build'])
-    if not lib.is_file() or not runtime.is_file():
-        raise RuntimeError(f'NeMo shared library installation incomplete: {root}')
+    preserve_sentencepiece_notices(root)
     partial = root / '.build-key.part'
     partial.write_text(key + '\n')
     partial.replace(complete)
+    if not sdk_complete(root, key):
+        complete.unlink()
+        raise RuntimeError(f'NeMo shared library installation incomplete: {root}')
+    discard_build_trees(root)
 
 
 def main():
