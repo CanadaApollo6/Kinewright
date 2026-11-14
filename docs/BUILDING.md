@@ -250,3 +250,6 @@ Application data (models, caches and feedback captures) is persistent:
 `$HOME/.local/share/kinewright`; `%LOCALAPPDATA%/Kinewright` on Windows. Linux
 creates a private user-owned 0700 root. Linked or foreign-owned roots are refused,
 and missing home configuration reports an error instead of using temporary storage.
+
+Links above the chosen data or explicit model root are resolved through its parent;
+the root itself and entries below it must be real entries, never links or reparse points.

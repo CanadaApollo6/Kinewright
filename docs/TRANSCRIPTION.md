@@ -98,3 +98,6 @@ allow 800 ms across builds. The slow CI recognition job runs it on Linux and
 Windows, with hash-checked, cached weights. Additional on-demand tests take
 `KINEWRIGHT_ASR_AMI8` and `KINEWRIGHT_ASR_AMI30` and compare whole versus committed
 recognition within one build, measure steps, and check cancellation and release.
+
+Links above the chosen data or explicit model root are resolved through its parent;
+the root itself and entries below it must be real entries, never links or reparse points.

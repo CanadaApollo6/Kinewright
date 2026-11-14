@@ -66,7 +66,7 @@ impl Drop for TranscriptService {
 
 impl TranscriptService {
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
-        crate::data_dir::ensure_root(&data_dir)?;
+        let data_dir = crate::data_dir::ensure_root(data_dir)?;
         let (jobs, jobs_rx) = unbounded();
         let states = StatusReporter::new();
         let cancellations = CancellationRegistry::default();
@@ -313,6 +313,7 @@ impl TranscriptWorker {
         let asset_path = asset.path.clone();
         let source_us = source_duration_us(asset.duration, asset.fps)?;
         let recognized = recognizer::queue::file(
+            &self.data_dir,
             &model_root,
             asset.path.clone(),
             asset.duration,
@@ -659,6 +660,8 @@ pub(crate) fn transcribe_voice_wav(
     cancellation: &ExportCancellation,
 ) -> Result<crate::voice_note::VoiceTranscript, MediaError> {
     use crate::voice_note::{VoiceTranscript, VoiceWord};
+    let owned_data_dir = crate::data_dir::ensure_root(data_dir)?;
+    let data_dir = owned_data_dir.as_path();
     cancelled(cancellation)?;
     let (samples, duration) = crate::voice_note::voice_pcm(audio)?;
     if samples.iter().all(|sample| sample.abs() < 0.001) {
@@ -674,7 +677,8 @@ pub(crate) fn transcribe_voice_wav(
     } else {
         let root = data_dir.join("models").join(ENGLISH_MODEL.id);
         let path = root.join(ENGLISH_MODEL.files[0].name);
-        match recognizer::model::verify(
+        match recognizer::model::verify_at(
+            data_dir,
             &ENGLISH_MODEL.files[0],
             &path,
             &root.join("verified"),
@@ -689,8 +693,9 @@ pub(crate) fn transcribe_voice_wav(
             )) => return Ok(VoiceTranscript::AwaitingModel),
             Err(error) => return Err(error.into()),
         }
-        let result = recognizer::queue::samples(&root, samples, cancellation.clone(), identity)
-            .map_err(MediaError::from)?;
+        let result =
+            recognizer::queue::samples(data_dir, &root, samples, cancellation.clone(), identity)
+                .map_err(MediaError::from)?;
         StoredTranscript {
             content_sha256: content_sha256.into(),
             identity: result.identity,

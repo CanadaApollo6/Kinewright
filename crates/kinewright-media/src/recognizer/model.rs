@@ -152,6 +152,7 @@ struct Receipt {
 
 /// Retains the verified inode and, on Windows, a write/delete exclusion handle.
 pub struct VerifiedFile {
+    root: PathBuf,
     path: PathBuf,
     file: File,
     stamp: FileStamp,
@@ -162,15 +163,15 @@ impl VerifiedFile {
     }
     pub fn check(&self) -> Result<(), Error> {
         if FileStamp::read(&self.file)? != self.stamp
-            || FileStamp::read(&open(&self.path)?)? != self.stamp
+            || FileStamp::read(&open(&self.root, &self.path)?)? != self.stamp
         {
             return Err(Error::Model(ModelError::Changed));
         }
         Ok(())
     }
 }
-fn open(path: &Path) -> Result<File, Error> {
-    refuse_links(path)?;
+fn open(root: &Path, path: &Path) -> Result<File, Error> {
+    refuse_links(root, path)?;
     #[cfg(unix)]
     let result = rustix::fs::open(
         path,
@@ -202,31 +203,66 @@ fn receipt_path(path: &Path, receipt_dir: &Path) -> PathBuf {
         crate::sha256::sha256_bytes(path.as_os_str().as_encoded_bytes())
     ))
 }
-fn refuse_links(path: &Path) -> Result<(), Error> {
-    // Inspect parents first: symlink_metadata does not follow its final entry,
-    // but looking at a child before its parent would already traverse a link.
-    for component in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        let metadata = match fs::symlink_metadata(component) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        {
-            #[cfg(windows)]
-            let linked = {
-                use std::os::windows::fs::MetadataExt as _;
-                metadata.file_attributes() & 0x400 != 0
-            };
-            #[cfg(not(windows))]
-            let linked = metadata.file_type().is_symlink();
-            if linked {
-                return Err(Error::Model(ModelError::UnsafePath(
-                    component.to_path_buf(),
-                )));
-            }
+// Resolve only the parent of an explicitly chosen model/receipt directory.
+// Its own entry remains visible to the no-follow checks below.
+fn directory_path(root: &Path) -> Result<PathBuf, Error> {
+    let absolute = std::path::absolute(root)?;
+    let parent = absolute
+        .parent()
+        .ok_or(Error::Model(ModelError::InvalidSpec))?;
+    let parent = fs::canonicalize(parent).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            Error::Model(ModelError::Missing)
+        } else {
+            error.into()
         }
+    })?;
+    Ok(parent.join(
+        absolute
+            .file_name()
+            .ok_or(Error::Model(ModelError::InvalidSpec))?,
+    ))
+}
+fn refuse_links(root: &Path, path: &Path) -> Result<(), Error> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| Error::Model(ModelError::InvalidSpec))?;
+    let mut current = root.to_path_buf();
+    let mut parts = relative.components().peekable();
+    loop {
+        let directory = parts.peek().is_some() || current == root;
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                #[cfg(windows)]
+                let linked = {
+                    use std::os::windows::fs::MetadataExt as _;
+                    metadata.file_attributes() & 0x400 != 0
+                };
+                #[cfg(not(windows))]
+                let linked = metadata.file_type().is_symlink();
+                if linked || (directory && !metadata.is_dir()) {
+                    return Err(Error::Model(ModelError::UnsafePath(current)));
+                }
+                #[cfg(unix)]
+                if directory {
+                    use std::os::unix::fs::MetadataExt as _;
+                    if metadata.uid() != rustix::process::geteuid().as_raw() {
+                        return Err(Error::Model(ModelError::UnsafePath(current)));
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let Some(std::path::Component::Normal(name)) = parts.next() else {
+            return if parts.peek().is_none() && current == path {
+                Ok(())
+            } else {
+                Err(Error::Model(ModelError::InvalidSpec))
+            };
+        };
+        current.push(name);
     }
-    Ok(())
 }
 fn temporary(path: &Path) -> Result<PathBuf, Error> {
     use std::fmt::Write as _;
@@ -238,8 +274,12 @@ fn temporary(path: &Path) -> Result<PathBuf, Error> {
     }
     Ok(path.with_extension(suffix))
 }
-fn new_partial(path: &Path) -> Result<(PartialFile, File), Error> {
-    new_partial_with(|| temporary(path))
+fn new_partial(root: &Path, path: &Path) -> Result<(PartialFile, File), Error> {
+    new_partial_with(|| {
+        let path = temporary(path)?;
+        refuse_links(root, &path)?;
+        Ok(path)
+    })
 }
 fn new_partial_with(
     mut candidate: impl FnMut() -> Result<PathBuf, Error>,
@@ -273,9 +313,54 @@ pub fn verify(
     receipts: &Path,
     cancel: &ExportCancellation,
 ) -> Result<VerifiedFile, Error> {
-    verify_inner(spec, path, receipts, cancel, true)
+    let original_root = path.parent().ok_or(Error::Model(ModelError::InvalidSpec))?;
+    let root = directory_path(original_root)?;
+    let path = root.join(
+        path.file_name()
+            .ok_or(Error::Model(ModelError::InvalidSpec))?,
+    );
+    let receipts = if let Ok(relative) = receipts.strip_prefix(original_root) {
+        root.join(relative)
+    } else {
+        directory_path(receipts)?
+    };
+    verify_inner(&root, spec, &path, &receipts, cancel, true)
+}
+/// Application-owned paths retain the data-root boundary through every recheck.
+pub(crate) fn verify_at(
+    root: &Path,
+    spec: &'static ModelFile,
+    path: &Path,
+    receipts: &Path,
+    cancel: &ExportCancellation,
+) -> Result<VerifiedFile, Error> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| Error::Model(ModelError::InvalidSpec))?;
+    let receipt_relative = receipts
+        .strip_prefix(root)
+        .map_err(|_| Error::Model(ModelError::InvalidSpec))?;
+    let resolved = crate::data_dir::ensure_root(root)?;
+    let parent = relative
+        .parent()
+        .ok_or(Error::Model(ModelError::InvalidSpec))?;
+    let path = resolved.join(relative);
+    refuse_links(&resolved, &path)?;
+    // Reading a missing voice model must not start an installation.
+    if resolved.join(parent).try_exists()? {
+        crate::data_dir::ensure_directory(&resolved, parent)?;
+    }
+    verify_inner(
+        &resolved,
+        spec,
+        &path,
+        &resolved.join(receipt_relative),
+        cancel,
+        true,
+    )
 }
 fn verify_inner(
+    root: &Path,
     spec: &'static ModelFile,
     path: &Path,
     receipts: &Path,
@@ -283,7 +368,7 @@ fn verify_inner(
     save_receipt: bool,
 ) -> Result<VerifiedFile, Error> {
     super::cancelled(cancel)?;
-    let mut file = open(path)?;
+    let mut file = open(root, path)?;
     let stamp = FileStamp::read(&file)?;
     if stamp.length != spec.bytes {
         return Err(Error::Model(ModelError::WrongLength {
@@ -291,9 +376,14 @@ fn verify_inner(
             actual: stamp.length,
         }));
     }
+    let receipt_root = if receipts.starts_with(root) {
+        root.to_path_buf()
+    } else {
+        directory_path(receipts)?
+    };
     let receipt_path = receipt_path(path, receipts);
-    refuse_links(&receipt_path)?;
-    let receipt = open(&receipt_path)
+    refuse_links(&receipt_root, &receipt_path)?;
+    let receipt = open(&receipt_root, &receipt_path)
         .and_then(|mut file| {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
@@ -309,13 +399,18 @@ fn verify_inner(
                 actual,
             }));
         }
-        if FileStamp::read(&file)? != stamp || FileStamp::read(&open(path)?)? != stamp {
+        if FileStamp::read(&file)? != stamp || FileStamp::read(&open(root, path)?)? != stamp {
             return Err(Error::Model(ModelError::Changed));
         }
         if save_receipt {
-            crate::data_dir::ensure_directory(receipts, Path::new(""))?;
-            refuse_links(&receipt_path)?;
-            let (part, mut output) = new_partial(&receipt_path)?;
+            crate::data_dir::ensure_directory(
+                &receipt_root,
+                receipts
+                    .strip_prefix(&receipt_root)
+                    .map_err(|_| Error::Model(ModelError::InvalidSpec))?,
+            )?;
+            refuse_links(&receipt_root, &receipt_path)?;
+            let (part, mut output) = new_partial(&receipt_root, &receipt_path)?;
             serde_json::to_writer(
                 &mut output,
                 &Receipt {
@@ -327,11 +422,12 @@ fn verify_inner(
             output.sync_all()?;
             drop(output);
             super::cancelled(cancel)?;
-            refuse_links(&receipt_path)?;
+            refuse_links(&receipt_root, &receipt_path)?;
             fs::rename(&part.0, &receipt_path)?;
         }
     }
     let verified = VerifiedFile {
+        root: root.to_path_buf(),
         path: path.to_path_buf(),
         file,
         stamp,
@@ -396,12 +492,13 @@ fn provision_with(
     {
         return Err(Error::Model(ModelError::InvalidSpec));
     }
+    let data = crate::data_dir::ensure_root(data)?;
     let root = data.join("models").join(spec.id);
     let receipts = root.join("verified");
-    crate::data_dir::ensure_directory(data, Path::new("models").join(spec.id).as_path())?;
+    crate::data_dir::ensure_directory(&data, Path::new("models").join(spec.id).as_path())?;
     for file in spec.files {
         let path = root.join(file.name);
-        match verify(file, &path, &receipts, cancel) {
+        match verify_inner(&data, file, &path, &receipts, cancel, true) {
             Ok(_) => continue,
             Err(Error::Model(
                 ModelError::Missing
@@ -411,7 +508,7 @@ fn provision_with(
             )) => {}
             Err(error) => return Err(error),
         }
-        let (part, mut output) = new_partial(&path)?;
+        let (part, mut output) = new_partial(&data, &path)?;
         let mut input = download(file)?;
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut written = 0;
@@ -433,11 +530,13 @@ fn provision_with(
         }
         output.sync_all()?;
         drop(output);
-        drop(verify_inner(file, &part.0, &receipts, cancel, false)?);
+        drop(verify_inner(
+            &data, file, &part.0, &receipts, cancel, false,
+        )?);
         super::cancelled(cancel)?;
-        refuse_links(&path)?;
+        refuse_links(&data, &path)?;
         fs::rename(&part.0, &path)?;
-        drop(verify(file, &path, &receipts, cancel)?);
+        drop(verify_inner(&data, file, &path, &receipts, cancel, true)?);
     }
     Ok(root)
 }
@@ -713,5 +812,71 @@ mod tests {
                 "no writes through {component}"
             );
         }
+    }
+
+    #[test]
+    fn dq1_model_provisioning_accepts_a_link_above_the_data_root() {
+        let temp = TempDirectory::new("dq1-install-layout");
+        let real = temp.path("real");
+        fs::create_dir_all(real.join("share")).unwrap();
+        crate::data_dir::directory_link(&real, &temp.path("homes"));
+        let data = temp.path("homes/share/kinewright");
+        let root = provision_with(
+            &SPEC,
+            &data,
+            &ExportCancellation::default(),
+            |_, _| {},
+            |_| Ok(input(b"abc")),
+        )
+        .unwrap();
+        assert_eq!(
+            root,
+            fs::canonicalize(real.join("share/kinewright/models/synthetic")).unwrap()
+        );
+        assert_eq!(fs::read(root.join(FILE.name)).unwrap(), b"abc");
+        provision_with(
+            &SPEC,
+            &data,
+            &ExportCancellation::default(),
+            |_, _| {},
+            |_| panic!("reuse the resolved installation"),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn dq1_explicit_model_directory_resolves_only_its_parent() {
+        let temp = TempDirectory::new("dq1-explicit-layout");
+        let real = temp.path("real");
+        fs::create_dir_all(real.join("share")).unwrap();
+        crate::data_dir::directory_link(&real, &temp.path("homes"));
+        let chosen = temp.path("homes/share/model");
+        let root = crate::data_dir::ensure_root(&chosen).unwrap();
+        fs::write(root.join(FILE.name), b"abc").unwrap();
+        let receipts = temp.path("receipts");
+        let cancel = ExportCancellation::default();
+        let verified = verify(&FILE, &chosen.join(FILE.name), &receipts, &cancel).unwrap();
+        assert_eq!(verified.path(), root.join(FILE.name));
+        verified.check().unwrap();
+        drop(verified);
+        crate::data_dir::directory_link(&root, &temp.path("linked-model"));
+        assert!(matches!(
+            verify(
+                &FILE,
+                &temp.path("linked-model").join(FILE.name),
+                &receipts,
+                &cancel
+            ),
+            Err(Error::Model(ModelError::UnsafePath(_)))
+        ));
+        crate::data_dir::directory_link(&root, &root.join("planted"));
+        assert!(matches!(
+            verify(
+                &FILE,
+                &root.join("planted").join(FILE.name),
+                &receipts,
+                &cancel
+            ),
+            Err(Error::Model(ModelError::UnsafePath(_)))
+        ));
     }
 }

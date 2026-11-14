@@ -57,6 +57,7 @@ pub(crate) struct Recognized {
     pub recognition: Recognition,
 }
 pub(crate) fn queued(
+    data_root: PathBuf,
     path: PathBuf,
     receipts: PathBuf,
     cancel: ExportCancellation,
@@ -81,7 +82,11 @@ pub(crate) fn queued(
                 }
                 if current.is_none() {
                     *current = Some(BuiltinRecognizer::load_identity(
-                        &path, &receipts, &cancel, identity,
+                        &path,
+                        &receipts,
+                        &cancel,
+                        identity,
+                        Some(&data_root),
                     )?);
                 }
                 let loaded = current.as_mut().ok_or(Error::QueueClosed)?;
@@ -170,7 +175,12 @@ pub(crate) fn drive(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the data root is a security boundary distinct from the selected model directory"
+)]
 pub(crate) fn file(
+    data_root: &Path,
     model_root: &Path,
     path: PathBuf,
     frames: kinewright_core::TimeCode,
@@ -181,6 +191,7 @@ pub(crate) fn file(
 ) -> Result<Recognized, Error> {
     let request_cancel = cancel.clone();
     queued(
+        data_root.to_path_buf(),
         model_root.join(super::ENGLISH_MODEL.files[0].name),
         model_root.join("verified"),
         cancel,
@@ -207,6 +218,7 @@ pub(crate) fn file(
 }
 
 pub(crate) fn samples(
+    data_root: &Path,
     model_root: &Path,
     samples: Vec<f32>,
     cancel: ExportCancellation,
@@ -214,6 +226,7 @@ pub(crate) fn samples(
 ) -> Result<Recognized, Error> {
     let request_cancel = cancel.clone();
     queued(
+        data_root.to_path_buf(),
         model_root.join(super::ENGLISH_MODEL.files[0].name),
         model_root.join("verified"),
         cancel,

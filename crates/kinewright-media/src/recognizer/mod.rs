@@ -518,16 +518,20 @@ pub struct BuiltinRecognizer {
 }
 impl BuiltinRecognizer {
     pub fn load(path: &Path, receipts: &Path, cancel: &ExportCancellation) -> Result<Self, Error> {
-        Self::load_identity(path, receipts, cancel, Identity::english())
+        Self::load_identity(path, receipts, cancel, Identity::english(), None)
     }
     fn load_identity(
         path: &Path,
         receipts: &Path,
         cancel: &ExportCancellation,
         identity: Identity,
+        data_root: Option<&Path>,
     ) -> Result<Self, Error> {
         identity.validate()?;
-        let verified = model::verify(&ENGLISH_MODEL.files[0], path, receipts, cancel)?;
+        let verified = match data_root {
+            Some(root) => model::verify_at(root, &ENGLISH_MODEL.files[0], path, receipts, cancel)?,
+            None => model::verify(&ENGLISH_MODEL.files[0], path, receipts, cancel)?,
+        };
         let native = crate::nemo::Recognizer::load_config(
             verified.path(),
             identity.threads,

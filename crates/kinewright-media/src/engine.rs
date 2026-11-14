@@ -938,7 +938,7 @@ impl FfmpegMediaEngine {
         analysis_config: DerivedAnalysisConfig,
         options: EngineOptions,
     ) -> Result<Self, MediaError> {
-        crate::data_dir::ensure_root(&data_dir)?;
+        let data_dir = crate::data_dir::ensure_root(data_dir)?;
         crate::initialize_ffmpeg()?;
         let data_dir_for_self = data_dir.clone();
         let (control_tx, control_rx) = unbounded();

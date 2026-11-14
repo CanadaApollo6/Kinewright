@@ -1,4 +1,4 @@
-//! Private application data. Existing links are rejected before traversal.
+//! Private application data. The chosen root and its children reject links.
 use kinewright_core::MediaError;
 use std::{
     fs, io,
@@ -25,8 +25,7 @@ fn link(metadata: &fs::Metadata) -> bool {
 // Check each component rather than create_dir_all's implicit link traversal.
 // Application-owned components are created privately and checked for ownership.
 pub(crate) fn ensure_directory(root: &Path, relative: &Path) -> Result<PathBuf, MediaError> {
-    ensure_root(root)?;
-    let mut path = root.to_path_buf();
+    let mut path = ensure_root(root)?;
     for component in relative.components() {
         let Component::Normal(name) = component else {
             return Err(failure("data paths require normal components"));
@@ -73,30 +72,32 @@ fn require_owner(path: &Path, owner: u32, current: u32) -> Result<(), MediaError
     }
     Ok(())
 }
-pub(crate) fn ensure_root(root: &Path) -> Result<(), MediaError> {
+pub(crate) fn ensure_root(root: impl AsRef<Path>) -> Result<PathBuf, MediaError> {
+    let root = root.as_ref();
     if !root.is_absolute() || root.file_name().is_none() {
         return Err(failure(
             "data root must be an absolute application directory",
         ));
     }
-    // Check existing parents before asking the filesystem about their children.
-    for parent in root
-        .ancestors()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
+    let parent = root
+        .parent()
+        .ok_or_else(|| failure("data root needs a parent"))?;
+    // Ancestors belong to the machine/person. Follow their layout, leave existing
+    // modes/owners alone, and make only missing parents private at creation.
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
     {
-        match metadata(parent) {
-            Ok(meta) if link(&meta) || !meta.is_dir() => {
-                return Err(failure("data root ancestor is not a real directory"));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => create_private(parent)?,
-            Err(error) => return Err(failure(error)),
-        }
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
     }
-    create_private(root)
+    builder.create(parent).map_err(failure)?;
+    let root = fs::canonicalize(parent).map_err(failure)?.join(
+        root.file_name()
+            .ok_or_else(|| failure("data root needs a name"))?,
+    );
+    create_private(&root)?;
+    Ok(root)
 }
 
 fn resolve(
@@ -134,8 +135,7 @@ pub fn default_data_dir() -> Result<PathBuf, MediaError> {
         std::env::var_os("HOME").as_deref(),
         std::env::var_os("LOCALAPPDATA").as_deref(),
     )?;
-    ensure_root(&root)?;
-    Ok(root)
+    ensure_root(&root)
 }
 
 /// Create a private child directory without traversing a linked component.
@@ -144,6 +144,28 @@ pub fn default_data_dir() -> Result<PathBuf, MediaError> {
 pub fn data_subdirectory(root: &Path, relative: &Path) -> Result<PathBuf, MediaError> {
     ensure_directory(root, relative)
 }
+/// A directory link for layout witnesses. Windows junctions need no elevation.
+#[cfg(test)]
+pub(crate) fn directory_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cannot create an unelevated junction: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +234,7 @@ mod tests {
         let before = fs::metadata(outside.root()).unwrap().permissions().mode();
         symlink(outside.root(), temp.path("linked-root")).unwrap();
         assert!(matches!(
-            ensure_root(&temp.path("linked-root")),
+            ensure_root(temp.path("linked-root")),
             Err(MediaError::DataDirectory(_))
         ));
         assert_eq!(
@@ -221,5 +243,56 @@ mod tests {
         );
         assert!(ensure_directory(temp.root(), Path::new("../outside")).is_err());
         assert!(ensure_directory(temp.root(), Path::new("/outside")).is_err());
+    }
+
+    #[test]
+    fn dq1_data_root_allows_machine_links_but_refuses_root_and_child_links() {
+        let temp = TempDirectory::new("dq1-layout");
+        let real = temp.path("real");
+        let parent = real.join("share");
+        fs::create_dir_all(&parent).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        crate::data_dir::directory_link(&real, &temp.path("homes"));
+        let chosen = temp.path("homes/share/kinewright");
+        let resolved = ensure_root(&chosen).unwrap();
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&parent).unwrap().join("kinewright"),
+            "DQ1_LINKED_GRANDPARENT_ALLOWED"
+        );
+        let child = ensure_directory(&chosen, Path::new("captures")).unwrap();
+        fs::write(child.join("proof"), b"private").unwrap();
+        assert_eq!(
+            fs::read(parent.join("kinewright/captures/proof")).unwrap(),
+            b"private"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+                0o755,
+                "existing parent modes are not ours"
+            );
+        }
+        crate::data_dir::directory_link(&resolved, &temp.path("linked-root"));
+        assert!(
+            matches!(
+                ensure_root(temp.path("linked-root")),
+                Err(MediaError::DataDirectory(_))
+            ),
+            "DQ1_LINKED_ROOT_REFUSED"
+        );
+        let outside = TempDirectory::new("dq1-layout-outside");
+        crate::data_dir::directory_link(outside.root(), &resolved.join("planted"));
+        assert!(
+            ensure_directory(&resolved, Path::new("planted/child")).is_err(),
+            "DQ1_LINKED_CHILD_REFUSED"
+        );
+        assert_eq!(fs::read_dir(outside.root()).unwrap().count(), 0);
     }
 }
