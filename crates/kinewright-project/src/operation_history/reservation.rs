@@ -136,6 +136,11 @@ impl HistoryPool {
             limits,
             sizing,
             core: false,
+            retention: Arc::new(RetainedLease {
+                shared: Arc::clone(&self.shared),
+                role,
+                bytes: limits.envelope.retained,
+            }),
         })
     }
     /// Raw ingress is held in the shared scratch window before its descriptor is decoded.
@@ -159,8 +164,38 @@ pub struct HistoryReservation {
     limits: super::FixedLimits,
     sizing: super::CreationSizing,
     core: bool,
+    retention: Arc<RetainedLease>,
+}
+#[derive(Debug)]
+struct RetainedLease {
+    shared: Arc<Pool>,
+    role: Role,
+    bytes: u64,
+}
+/// A resource allocated inside an existing lease may outlive its actor. This
+/// keeps that same full reservation charged, without creating another lease
+/// or allowing another Core to adopt it.
+#[derive(Debug, Clone)]
+pub(crate) struct LeaseHold {
+    _retention: Arc<RetainedLease>,
+}
+impl Drop for RetainedLease {
+    fn drop(&mut self) {
+        let mut usage = self
+            .shared
+            .usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        usage.retained[self.role.index()] -= self.bytes;
+        usage.leases[self.role.index()] -= 1;
+    }
 }
 impl HistoryReservation {
+    pub(crate) fn retain(&self) -> LeaseHold {
+        LeaseHold {
+            _retention: Arc::clone(&self.retention),
+        }
+    }
     #[must_use]
     pub const fn role(&self) -> Role {
         self.role
@@ -198,7 +233,11 @@ impl HistoryReservation {
                 .unwrap_or(0)
                 .max(self.limits.envelope.retained);
             let retained = usage.retained[self.role.index()]
-                .checked_sub(retired.map_or(0, |v| v.limits.envelope.retained))
+                .checked_sub(
+                    retired
+                        .filter(|v| Arc::strong_count(&v.retention) == 1)
+                        .map_or(0, |v| v.limits.envelope.retained),
+                )
                 .ok_or(Error::Reservation)?;
             if retained
                 .checked_add(largest)
@@ -269,8 +308,6 @@ impl Drop for HistoryReservation {
             .usage
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        usage.retained[self.role.index()] -= self.limits.envelope.retained;
-        usage.leases[self.role.index()] -= 1;
         if self.core && self.needs_capture_headroom() {
             let bytes = self.limits.envelope.retained;
             let count = usage.cores[self.role.index()]

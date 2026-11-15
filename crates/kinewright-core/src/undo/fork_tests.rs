@@ -92,3 +92,37 @@ fn prepared_destination_profile_keeps_the_same_epoch_and_commands() {
         "PREVIEW_ADMISSION_PRECEDES_COMMAND_PAYLOAD_COPY"
     );
 }
+
+#[test]
+fn encoded_stream_holder_uses_one_anchor_allowance_without_a_document_copy() {
+    let mut history =
+        History::new(document(), RetentionPolicy::Fold, RoleBounds::ORDINARY).unwrap();
+    let identity = history.snapshot_identity().unwrap();
+    let before = PhaseCounters::read();
+    history
+        .reserve_stream_buffer((4 << 20) + (128 << 10))
+        .unwrap();
+    assert_eq!(
+        history.snapshot_identity().unwrap(),
+        identity,
+        "OUTBOX_RESERVATION_DOES_NOT_CHANGE_HISTORY_IDENTITY"
+    );
+    assert_eq!(
+        PhaseCounters::read().since(before).document_copies,
+        0,
+        "OUTBOX_RESERVATION_COPIES_NO_DOCUMENT"
+    );
+    for index in 0..128 {
+        history.execute(lock(index % 2 == 0)).unwrap();
+        assert!(
+            history.cache_depths().len() < RoleBounds::ORDINARY.checkpoint_documents,
+            "ENCODED_OUTBOX_REPLACES_ONE_ANCHOR_ALLOWANCE"
+        );
+    }
+    history.release_stream_buffer().unwrap();
+    assert_eq!(
+        history.bounds().checkpoint_documents,
+        4,
+        "OUTBOX_RELEASE_PRESERVES_FIXED_CREATION_PROFILE"
+    );
+}

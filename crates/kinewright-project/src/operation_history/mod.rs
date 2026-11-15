@@ -24,6 +24,7 @@ pub(crate) mod stored;
 pub use ledger::{Approval, ApprovalAnswer, ApprovalEntry, ApprovalLedger, Fate, RemovedTarget};
 pub use lineage::{CreationOrigin, Lineage};
 pub use owner::{OwnerBoundary, OwnerCounters, OwnerHistory, OwnerOperations};
+pub(crate) use reservation::LeaseHold;
 pub use reservation::{Envelope, HistoryPool, HistoryReservation, PoolLimits, Role, Workspace};
 pub use resources::{Resource, Resources};
 pub use snapshot::{OwnerSnapshot, ValidatedOwnerSnapshot};

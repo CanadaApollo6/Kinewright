@@ -21,8 +21,8 @@ has the same history room and no anchors. Staging Candidate has no anchors and
 
 | Clips, 8 tracks | Document room MiB | Owner room MiB | Task lease MiB | Live / full staging lease MiB | Tasks with capture room | Revise live Cores with one staging/capture free |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1,000 | 2.459 | 3.894 | 35.272 | 32.812 | 10 | 3 |
-| 5,000 | 4.290 | 7.434 | 44.305 | 40.015 | 8 | 2 |
+| 1,000 | 2.235 | 3.894 | 34.599 | 32.364 | 10 | 3 |
+| 5,000 | 4.252 | 7.434 | 44.189 | 39.937 | 8 | 2 |
 | 20,000 | 8.000 | 20.709 | 68.709 | 60.709 | 4 | 1 |
 
 The fixture is unchanged from undo-merge-limits.md. This table follows the
@@ -301,6 +301,30 @@ Remove that temporary include afterward. The probe passed all named assertions
 in `target/hx-h2b/creation-sizing-probe.log`; the include was removed. These are
 diagnostics of today's representation, not permanent acceptance tests for a
 future sizing descriptor. All runs started for this scope check finished.
+
+## Encoded producer buffers
+
+The producer uses three anchors while bound. The fourth 8 MiB anchor allowance
+covers its encoded outbox, externally retained sender bytes and temporary
+encoding allocations: `(2+3)*8+24+32+8=104 MiB`. The declared creation profile
+stays K=4 and the role pool total stays 1,024 MiB. Detaching restores the fourth
+anchor after all outgoing bytes have dropped. This is an accounting choice;
+product Undo timings must measure the bound producer path.
+
+The pending queue holds at most 64 commands and 2 MiB of encoded bytes. A fixed
+arena admits every allocation before encoding, including temporary encoding
+space and 128 bytes per shared raw allocation. Its limit is 8 MiB minus a
+128 KiB header allowance. Old sender references keep their arena charge and the
+source's existing full reservation until their last drop. They cannot become
+another Core or enlarge its lease. Replacement admission only subtracts the
+old reservation when no such hold remains. A busy arena is a typed refusal
+before document or outbox changes; releasing old senders permits retry.
+
+Tests pin canonical borrowed/owned wire equality, one-copy/zero-measurement
+warm edits, both queue caps, Empty priority, atomic/idempotent acknowledgements,
+detach fencing, typed allocation headers, fixed-arena saturation and final-drop
+release. The actor permit and resource-certificate adapter still has to replace
+the old product door; this unit does not yet change product callers.
 
 ## Ruling 7 qualification
 

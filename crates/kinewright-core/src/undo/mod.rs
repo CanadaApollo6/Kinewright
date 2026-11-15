@@ -513,6 +513,28 @@ impl History {
     pub fn applied_delta(&self) -> impl Iterator<Item = &Operation> {
         self.undo.iter().flat_map(Step::operations)
     }
+    /// A producer's encoded outbox occupies one document-anchor allowance.
+    /// This is configured once at binding, before commands are accepted; it
+    /// neither changes the fixed profile nor allocates another history lease.
+    pub fn reserve_stream_buffer(&mut self, peak_bytes: u64) -> Result<(), Error> {
+        let anchors = self
+            .bounds
+            .checkpoint_documents
+            .checked_sub(1)
+            .ok_or(Error::Capacity)?;
+        if peak_bytes > self.bounds.document_live_bytes {
+            return Err(Error::Capacity);
+        }
+        self.cache = Cache::new(anchors, self.bounds.decoded_history_bytes)?;
+        Ok(())
+    }
+    pub fn release_stream_buffer(&mut self) -> Result<(), Error> {
+        self.cache = Cache::new(
+            self.bounds.checkpoint_documents,
+            self.bounds.decoded_history_bytes,
+        )?;
+        Ok(())
+    }
     pub fn drop_cache(&mut self) {
         self.cache.clear();
     }

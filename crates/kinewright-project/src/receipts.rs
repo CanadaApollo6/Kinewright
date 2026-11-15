@@ -17,7 +17,7 @@ impl IssuerId {
     pub(crate) fn fresh() -> Result<Self, BundleError> {
         Ok(Self(SessionId::fresh()?.as_str().to_owned()))
     }
-    fn validate(&self) -> Result<(), BundleError> {
+    pub(crate) fn validate(&self) -> Result<(), BundleError> {
         if !hex(&self.0, 32) {
             return Err(BundleError::Corrupt("invalid issuer identity".into()));
         }

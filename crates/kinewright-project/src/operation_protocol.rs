@@ -19,6 +19,22 @@ pub const PENDING_COMMANDS: usize = 64;
 // One admitted 1 MiB source batch plus its normalised owner/receipt context.
 // The pending queue retains encoded bytes; its holder charges those bytes.
 pub const PENDING_BYTES: u64 = 2 << 20;
+/// All retained sender buffers and encoding scratch share one anchor's arena.
+/// Each allocation keeps its source's existing full lease until its last drop.
+pub const PRODUCER_BUFFER_PEAK: u64 =
+    kinewright_core::undo::RoleBounds::ORDINARY.document_live_bytes;
+pub const PRODUCER_HEADER_BYTES: u64 = 128 << 10;
+const _: () = assert!(
+    2 * PENDING_BYTES + PRODUCER_HEADER_BYTES < PRODUCER_BUFFER_PEAK,
+    "FRESH_OUTBOX_ENCODING_FITS_RESERVED_ARENA"
+);
+const _: () = assert!(
+    PRODUCER_BUFFER_PEAK <= kinewright_core::undo::RoleBounds::ORDINARY.document_live_bytes,
+    "ENCODED_OUTBOX_FITS_ONE_ORDINARY_ANCHOR_ALLOWANCE"
+);
+#[path = "operation_producer.rs"]
+mod producer;
+pub use producer::{ActionRef, EncodedMessage, Lease, Producer, ProducerError};
 const _: () = assert!(
     PENDING_BYTES >= kinewright_core::undo::RoleBounds::TASK.operation_bytes + (64 << 10),
     "SOURCE_STEP_AND_CONTEXT_FIT_MANUAL_WINDOW"
@@ -41,33 +57,37 @@ impl Action {
         context: &CommandContext,
         owner: &mut OwnerHistory,
     ) -> Result<Effects, HistoryError> {
-        if let Some(approval) = &context.transition {
+        // Each replica owns the operation payload it accepts.
+        self.clone().execute(context.clone(), owner)
+    }
+    pub fn execute(
+        self,
+        context: CommandContext,
+        owner: &mut OwnerHistory,
+    ) -> Result<Effects, HistoryError> {
+        if let Some(approval) = context.transition {
             let matching = matches!(
-                (self, approval.direction),
+                (&self, approval.direction),
                 (Self::Undo, crate::operation_history::Direction::Undo)
                     | (Self::Redo, crate::operation_history::Direction::Redo)
             );
             if !matching || context.approval.is_some() || !context.inputs.is_empty() {
                 return Err(HistoryError::InvalidLedger);
             }
-            return owner.approve_transition(
-                approval.id.clone(),
-                approval.direction,
-                approval.target,
-            );
+            return owner.approve_transition(approval.id, approval.direction, approval.target);
         }
         let command = match self {
             Self::Do {
                 operations,
-                gesture: Some(key),
+                gesture: Some(coalesce_key),
             } => Command::DoBatchCoalesced {
-                operations: operations.clone(),
-                coalesce_key: key.clone(),
+                operations,
+                coalesce_key,
             },
             Self::Do {
                 operations,
                 gesture: None,
-            } => Command::DoBatch(operations.clone()),
+            } => Command::DoBatch(operations),
             Self::Undo => Command::Undo,
             Self::Redo => Command::Redo,
             Self::Close if context.approval.is_none() && context.inputs.is_empty() => {
@@ -75,12 +95,7 @@ impl Action {
             }
             Self::Close => return Err(HistoryError::InvalidLedger),
         };
-        owner.execute(
-            command,
-            context.creation.clone(),
-            context.inputs.clone(),
-            context.approval.clone(),
-        )
+        owner.execute(command, context.creation, context.inputs, context.approval)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +137,9 @@ pub struct StreamState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conflict {
     Encoding,
+    Backpressure,
+    Unnormalised,
+    Detached,
     CounterExhausted,
     Sequence,
     Chain,
@@ -132,6 +150,9 @@ pub enum Conflict {
 }
 impl std::fmt::Display for Conflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if *self == Self::Backpressure {
+            return f.write_str("Saving is catching up. Retry when the pending edits are saved.");
+        }
         write!(
             f,
             "Editing stream conflict ({self:?}). Edits remain available for recovery."
@@ -222,6 +243,14 @@ impl StreamState {
     /// Receipt lookup precedes fresh authority. The absent suffix still needs
     /// the current attachment's fencing proof at the publication owner.
     pub fn lookup(&self, message: &Message) -> Result<Option<&Receipt>, Conflict> {
+        message
+            .id
+            .issuer
+            .validate()
+            .map_err(|_| Conflict::CommandIdentity)?;
+        if message.id.sequence == 0 {
+            return Err(Conflict::CommandIdentity);
+        }
         if let Some(receipt) = self
             .receipts
             .iter()
@@ -305,6 +334,14 @@ impl StreamState {
             .saturating_sub(PENDING_COMMANDS as u64)
             .saturating_add(1);
         for (offset, receipt) in self.receipts.iter().enumerate() {
+            receipt
+                .id
+                .issuer
+                .validate()
+                .map_err(|_| Conflict::CommandIdentity)?;
+            if receipt.id.sequence == 0 {
+                return Err(Conflict::CommandIdentity);
+            }
             if receipt.sequence != first + offset as u64
                 || self
                     .receipts

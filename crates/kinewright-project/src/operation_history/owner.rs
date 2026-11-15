@@ -523,6 +523,17 @@ impl OwnerHistory {
             _reservation: reservation,
         })
     }
+    pub(crate) fn retain_memory(&self) -> super::LeaseHold {
+        self.reservation.retain()
+    }
+    pub(crate) fn reserve_stream_buffer(&mut self, peak_bytes: u64) -> Result<(), Error> {
+        self.core
+            .reserve_stream_buffer(peak_bytes)
+            .map_err(Error::from)
+    }
+    pub(crate) fn release_stream_buffer(&mut self) -> Result<(), Error> {
+        self.core.release_stream_buffer().map_err(Error::from)
+    }
     #[must_use]
     pub fn pool(&self) -> HistoryPool {
         self.reservation.pool()
