@@ -184,7 +184,7 @@ The corresponding isolated checks passed too. Windows media library/test
 cross-compilation with `cargo xwin check` passed in 13 s. Windows execution was
 not run locally; it remains a CI result.
 
-After rebuilding the fixture host with `eval-harness`, 78 targeted agent tests
+After rebuilding the fixture host with `eval-harness`, 68 targeted agent tests
 and 115 app tests passed. These include the separate public-API compiler probe,
 protocol child, native invocation, version probe, full-reply-pipe cleanup,
 studio runtime, admission/guardian/usage, voice, lease, dialogue and cut-score
@@ -307,3 +307,59 @@ Evidence is under `target/dq-media/m3/`. Cleanup removed incremental output and
 and all media evidence. Target usage was 23.610 GB after cleanup and 24.722 GB
 after the full gate. The checkpoint-wide shipping builds, Windows cross-checks
 and external-compiler fixtures are recorded under M4 below.
+
+## M4
+
+Linux CI now builds the agent shipping library, app shipping binary and writer
+host in three separate `-p` commands with defaults disabled, before workspace
+clippy. This is a named Linux-only step and uses the same native setup and build
+commands as Windows. No shipping target relies on workspace feature unification.
+
+All five artifact-download sites in `ci-tests.yml` have two explicit attempts.
+Each attempt has its own three-minute timeout. The initial attempt allows a
+failure so a retry can run; the retry checks the initial step's `outcome`, skips
+cancelled workflows, requests the identical artifact and fails the job if it
+fails. The compiler-input condition remains on its initial attempt. Existing
+job deadlines and pinned action revisions are unchanged.
+
+Workflow self-tests require the three exact Linux shipping commands before
+clippy, five matching first/retry pairs, the three-minute limits, and failure
+propagation from the retry. Three wrong policy strings are rejected: a changed
+deadline, disabling continuation on the first attempt, and checking `conclusion`
+instead of `outcome`. All four CI self-test scripts passed locally (52, nine,
+15 and 24 tests); actionlint and slow-test lint passed. The earlier draft was also
+checked before being applied. `scripts/ci_shards.py` and `ci/slow-tests.txt` are
+untouched.
+
+Windows agent library and tests cross-compiled locally in 24 s. An additional
+app cross-check could not reach Rust checking because the unchanged
+`crates/kinewright-app/build.rs:33` requires `rc.exe`, which is unavailable on this
+Linux host. No resource-compiler shim, installation or build-script workaround
+was used. Local Windows app checking and Windows execution remain unverified;
+the native Windows CI job supplies those checks. Its failure log is
+`target/dq-media/m4/windows-app.log`.
+
+### Checkpoint 2 validation
+
+The final required media gate passed 1,312 tests with 83 ignored in 1,080 s.
+Workspace all-target clippy (17 s), formatting, workspace build (29 s), workspace
+test compilation (74 s) and the three isolated shipping checks passed. The three
+actual shipping builds passed separately in 20 s, 26 s and one second for the
+agent library, app binary and writer host respectively. Windows media library
+and tests also cross-compiled in nine seconds.
+
+After rebuilding the fixture host, 77 targeted agent tests and 115 app tests
+passed, with the existing 55 and three equipped/on-demand ignores. Every current
+test log was checked for a nonempty passing result. A local runner initially
+looked for the new provider log under the prior checkpoint's directory; that
+guard was corrected, all current logs were checked, and the remaining tests ran.
+The final CI self-tests, slow-test lint and actionlint passed again. Their known
+unclosed-file warning and deliberate loopback failures are unchanged.
+
+This audit also corrects checkpoint 1's targeted-agent total above from 78 to 68;
+the underlying passing logs are unchanged. Checkpoint 2 adds nine provider tests.
+The final target directory is 36,506,008,080 bytes (36.506 GB), the maximum
+recorded during this gate, with over 420 GiB free. Both evidence directories were
+preserved. No build or test remains running. Local gate evidence is under
+`target/dq-media/m4/`. M3 is `84b64584`; M4 is the commit containing this section.
+No push was performed, and M5's serving switch remains false.

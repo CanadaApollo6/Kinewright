@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""CI apt witnesses. Only fake package tools and loopback HTTP are executed."""
+"""Native dependency and CI workflow witnesses."""
 import contextlib
 import http.server
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import socket
@@ -256,7 +257,50 @@ class Mirrors(unittest.TestCase):
             self.assertEqual(source.read_bytes(), original)
 
 
+def check_download_attempts(text):
+    blocks = [block for block in re.split(r'(?m)^      - ', text)[1:]
+              if 'uses: actions/download-artifact@' in block]
+    assert len(blocks) == 10, 'five downloads, each with one retry'
+    for first, retry in zip(blocks[::2], blocks[1::2]):
+        step = re.search(r'(?m)^        id: (\S+)$', first)
+        assert step, 'initial attempt needs an outcome id'
+        assert '        continue-on-error: true\n' in first
+        assert 'continue-on-error:' not in retry
+        for block in (first, retry):
+            assert re.search(r'(?m)^        timeout-minutes: 3$', block), step[1]
+        assert f"steps.{step[1]}.outcome == 'failure'" in retry
+        assert '!cancelled()' in retry
+        payload = lambda block: re.search(r'        with:\n((?:          [^\n]*\n)+)', block)[1]
+        assert payload(first) == payload(retry), 'retry must request the same artifact'
+        assert re.search(r'uses: (\S+)', first)[1] == re.search(r'uses: (\S+)', retry)[1]
+        if 'compiler-inputs-' in first:
+            assert "if: steps.requirements.outputs.compiler_inputs == 'true'" in first
+
+
 class Workflow(unittest.TestCase):
+    def test_linux_shipping_builds_are_isolated_and_precede_clippy(self):
+        text = (ROOT / '.github/workflows/ci.yml').read_text()
+        block = text.split('      - name: Linux shipping builds\n', 1)[1].split('      - ', 1)[0]
+        self.assertIn("if: runner.os == 'Linux'", block)
+        self.assertIn('source scripts/setup-ffmpeg.sh || exit 1', block)
+        self.assertIn('set -euo pipefail', block)
+        self.assertEqual(re.findall(r'^          (cargo build .+)$', block, re.M), [
+            'cargo build -p kinewright-agent --no-default-features --lib',
+            'cargo build -p kinewright-app --no-default-features --bin kinewright-app',
+            'cargo build -p kinewright-agent --no-default-features --bin kinewright',
+        ])
+        self.assertLess(text.index('name: Linux shipping builds'), text.index('cargo clippy --workspace'))
+
+    def test_artifact_downloads_have_bounded_attempts_and_one_retry(self):
+        text = (ROOT / '.github/workflows/ci-tests.yml').read_text()
+        check_download_attempts(text)
+        for old, new in [('timeout-minutes: 3', 'timeout-minutes: 4'),
+                         ('continue-on-error: true', 'continue-on-error: false'),
+                         ('.outcome', '.conclusion')]:
+            with self.subTest(wrong_change=old), self.assertRaises(AssertionError):
+                check_download_attempts(text.replace(old, new, 1))
+
+
     def test_all_ci_native_calls_are_bounded_and_witness_is_scheduled(self):
         for name in ["ci.yml", "ci-tests.yml", "release.yml"]:
             text = (ROOT / ".github/workflows" / name).read_text()

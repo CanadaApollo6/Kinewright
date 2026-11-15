@@ -94,6 +94,15 @@ jobs:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
         timeout-minutes: 8
+      - name: Linux shipping builds
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          cargo build -p kinewright-agent --no-default-features --lib
+          cargo build -p kinewright-app --no-default-features --bin kinewright-app
+          cargo build -p kinewright-agent --no-default-features --bin kinewright
       - if: runner.os == 'Linux'
         shell: bash
         run: |

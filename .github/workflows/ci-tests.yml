@@ -116,10 +116,28 @@ jobs:
         timeout-minutes: 8
       - uses: ./.github/actions/ci-nextest
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        id: download-tests
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          name: tests-${{ inputs.os }}-${{ inputs.tier }}
+          path: ci-artifacts
+      - if: ${{ !cancelled() && steps.download-tests.outcome == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        timeout-minutes: 3
         with:
           name: tests-${{ inputs.os }}-${{ inputs.tier }}
           path: ci-artifacts
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        id: download-metadata
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          name: metadata-${{ inputs.os }}-${{ inputs.tier }}
+          path: ci-artifacts
+      - if: ${{ !cancelled() && steps.download-metadata.outcome == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        timeout-minutes: 3
         with:
           name: metadata-${{ inputs.os }}-${{ inputs.tier }}
           path: ci-artifacts
@@ -138,6 +156,15 @@ jobs:
           key: display-v1-${{ runner.os }}-${{ steps.requirements.outputs.display_cache_id }}-${{ hashFiles('.cargo/ci-test.toml', 'Cargo.toml', 'Cargo.lock', 'crates/kinewright-media/**', 'crates/kinewright-core/**', 'crates/kinewright-hash/**', 'scripts/setup-ffmpeg.*', 'scripts/ffmpeg_archive.py', 'scripts/ci_display_inputs.py') }}-${{ steps.requirements.outputs.display_workload }}
       - if: steps.requirements.outputs.compiler_inputs == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        id: download-compiler
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          name: compiler-inputs-${{ inputs.os }}
+          path: ci-artifacts
+      - if: ${{ !cancelled() && steps.download-compiler.outcome == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        timeout-minutes: 3
         with:
           name: compiler-inputs-${{ inputs.os }}
           path: ci-artifacts
@@ -207,10 +234,29 @@ jobs:
         with:
           python-version: '3.13'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        id: download-metadata
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          name: metadata-${{ inputs.os }}-${{ inputs.tier }}
+          path: ci-artifacts
+      - if: ${{ !cancelled() && steps.download-metadata.outcome == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        timeout-minutes: 3
         with:
           name: metadata-${{ inputs.os }}-${{ inputs.tier }}
           path: ci-artifacts
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        id: download-results
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          pattern: results-${{ inputs.os }}-${{ inputs.tier }}-*
+          path: ci-results
+          merge-multiple: true
+      - if: ${{ !cancelled() && steps.download-results.outcome == 'failure' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        timeout-minutes: 3
         with:
           pattern: results-${{ inputs.os }}-${{ inputs.tier }}-*
           path: ci-results
