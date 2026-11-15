@@ -2986,7 +2986,7 @@ impl KinewrightMcp {
         &self,
         expected_revision: TimelineRevision,
         operations: &[Operation],
-        validate: impl FnOnce() -> Result<(), String>,
+        validate: impl Fn() -> Result<(), String>,
         mut observe: impl FnMut(TimelineRevision, &Document),
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, before) = self.snapshot()?;
@@ -3030,6 +3030,9 @@ impl KinewrightMcp {
         }
         if let Err(error) = self.check_batch_history(operations) {
             return Ok(error_text(error));
+        }
+        if let Err(reason) = validate() {
+            return Ok(error_text(reason));
         }
         let confirmation = plan_confirmation_description(&before, operations);
         if self.task_control.is_none()
@@ -13032,7 +13035,7 @@ fn open_capabilities(tools: &[Tool], args: CapabilityArgs) -> CallToolResult {
                 .iter()
                 .find(|tool| tool.name == name.as_str())
                 .expect("a descriptor is built from a matching tool");
-            serde_json::json!({
+            let mut opened = serde_json::json!({
                 "capability": descriptor,
                 "input_schema": tool.input_schema,
                 "invocation": if is_invocable_capability(name) || crate::dialogue_tools::TOOL_NAMES.contains(&name.as_str()) {
@@ -13040,7 +13043,11 @@ fn open_capabilities(tools: &[Tool], args: CapabilityArgs) -> CallToolResult {
                 } else {
                     "prepare_edit_plan"
                 }
-            })
+            });
+            if tool.name == "cut_dialogue" {
+                opened["guide"] = crate::dialogue_tools::GUIDE.into();
+            }
+            opened
         })
         .collect::<Vec<_>>();
     if opened.len() == 1 {

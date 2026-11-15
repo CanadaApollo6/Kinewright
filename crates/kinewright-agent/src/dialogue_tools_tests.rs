@@ -391,7 +391,11 @@ mod dialogue_tool_tests {
         })
         .collect();
         value(words, 2_560_000, |t| {
-            level((1_490_000..1_550_000).contains(&t) || (2_000_000..2_300_000).contains(&t))
+            level(
+                (1_490_000..1_550_000).contains(&t)
+                    || (2_000_000..2_300_000).contains(&t)
+                    || t >= 2_500_000,
+            )
         })
     }
     #[test]
@@ -902,4 +906,6 @@ mod dialogue_tool_tests {
         .unwrap();
         assert_eq!(schemas.len(), 3);
     }
+    include!("dialogue_tools_review_tests.rs");
+    include!("dialogue_tools_guide_tests.rs");
 }

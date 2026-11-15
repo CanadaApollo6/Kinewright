@@ -217,9 +217,9 @@ fn dialogue_pause_leaves_requested_air_without_clipping_voice_tail() {
     // Scarlet dialogue-plan: "trims a pause named by the word it follows down to the beat, and to the length the agent asks".
     let d = fixture();
     for (leave, start, end) in [
-        (250_000, 2_350_000, 3_300_000),
-        (150_000, 2_290_000, 3_340_000),
-        (600_000, 2_560_000, 3_160_000),
+        (250_000, 2_410_000, 3_300_000),
+        (150_000, 2_350_000, 3_340_000),
+        (600_000, 2_620_000, 3_160_000),
     ] {
         let cut = d
             .resolve(CutRequest::TrimPause {
@@ -1037,4 +1037,103 @@ fn dialogue_fractional_dip_reach_refuses_the_extra_third_microsecond() {
         ),
         "DQ3_FRACTIONAL_REACH: {f:?}"
     );
+}
+
+fn shifted_end_dialogue(end: u64, dip: bool) -> Dialogue {
+    Dialogue::new(
+        profile(
+            10_000,
+            5_000_000,
+            &[(200_000, 500_000), (3_600_000, 3_900_000)],
+            if dip { &[(46, -6000)] } else { &[] },
+        ),
+        vec![
+            word("before", 200_000, end),
+            word("after", 3_600_000, 3_900_000),
+        ],
+        Settings::default(),
+    )
+    .unwrap()
+}
+#[test]
+fn dialogue_review_pause_air_comes_from_sound_with_early_and_stretched_word_ends() {
+    for end in [420_000, 760_000, 3_500_000] {
+        let d = shifted_end_dialogue(end, false);
+        let pause = d
+            .resolve(CutRequest::TrimPause {
+                after_word: 0,
+                leave_micros: 250_000,
+            })
+            .unwrap();
+        assert_eq!(
+            (pause.start.at_micros(), pause.end.at_micros()),
+            (650_000, 3_500_000),
+            "DQ_PAUSE_MEASURED_AIR"
+        );
+        assert!(d.guard(450_000, AudibleSide::Out).is_err());
+        assert!(d.guard(650_000, AudibleSide::Out).is_ok());
+        let removal = d
+            .resolve(CutRequest::RemoveWords { from: 0, to: 0 })
+            .unwrap();
+        assert_eq!(
+            (removal.start.at_micros(), removal.end.at_micros()),
+            (0, 3_500_000),
+            "DQ_WORD_END_MEASURED_EDGES"
+        );
+        println!("DQ_WORD_END end={end} removal={removal:?}");
+    }
+}
+#[test]
+fn dialogue_review_short_dip_reach_still_depends_on_stated_word_boundaries() {
+    let early = shifted_end_dialogue(420_000, true);
+    assert!(
+        early.guard(465_000, AudibleSide::Out).is_ok(),
+        "DQ_EARLY_WORD_END_DIP_IS_UNTRANSCRIBED"
+    );
+    for end in [760_000, 3_500_000] {
+        let d = shifted_end_dialogue(end, true);
+        assert!(matches!(
+            d.guard(465_000, AudibleSide::Out).unwrap_err().reason,
+            RefusalReason::SoundingWord { index: 0, .. }
+        ));
+        assert!(d.guard(650_000, AudibleSide::Out).is_ok());
+    }
+}
+#[test]
+fn dialogue_review_stretched_word_warning_uses_measured_air_independently() {
+    use super::audit::{self, AuditSettings, KeptRange, RecordingId};
+    use crate::{AudibleSpan, ExactMicros};
+    for end in [420_000, 760_000, 3_500_000] {
+        let d = shifted_end_dialogue(end, false);
+        let recordings = std::collections::BTreeMap::from([(RecordingId(1), d)]);
+        let report = audit::audit(
+            &recordings,
+            &[KeptRange {
+                recording: RecordingId(1),
+                source: AudibleSpan {
+                    start: ExactMicros::ZERO,
+                    end: ExactMicros::integer(650_000),
+                    padding: ExactMicros::ZERO,
+                },
+            }],
+            &AuditSettings::default(),
+            audit::comparison_key,
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&report).unwrap();
+        let join = wire["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["kind"] == "join" && i["at_us"] == 650_000)
+            .unwrap();
+        let side = &join["sides"][0];
+        assert_eq!(side["air_us"], 150_000, "DQ_STRETCHED_MEASURED_AIR");
+        assert!(side["edge_in_sound"].is_null());
+        assert_eq!(
+            !side["stretched_word"].is_null(),
+            end > 650_000,
+            "DQ_STRETCHED_WORD_INDEPENDENT"
+        );
+    }
 }

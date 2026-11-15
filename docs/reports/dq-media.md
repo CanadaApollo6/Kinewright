@@ -363,3 +363,27 @@ recorded during this gate, with over 420 GiB free. Both evidence directories wer
 preserved. No build or test remains running. Local gate evidence is under
 `target/dq-media/m4/`. M3 is `84b64584`; M4 is the commit containing this section.
 No push was performed, and M5's serving switch remains false.
+
+## R1: pinned dialogue review merge
+
+Merged `517d7f4068bcc721b6b0e23501a35a8b14546f44` (review fixes and
+the on-demand guide) with a plain merge. `dialogue_tools/mod.rs` merged both
+sides automatically, retaining the new extent refusals and `MeasurementPending`.
+The ignored-test list was the only textual conflict; both sets of entries stay.
+The five protected dialogue-tool files and Core `dialogue/` are byte-identical
+to the incoming revision. The serving switch remains false.
+
+The provider end-to-end test initially rejected the check reply's newly added
+`range` field. It now asserts that exact `[0,400]` range as well as the original
+typed queued status. No assertion was removed. All nine provider tests and 35
+dialogue tests pass (one on-demand dialogue test remains ignored). The original
+measured quiet cut still applies and the burst cut still refuses: the new extent
+rule did not refuse any cut this fixture expected to apply.
+
+The merge gate passed media (1312 tests, 83 ignored), Core (897 tests),
+workspace all-target clippy and formatting, workspace build and test compilation,
+the three isolated shipping checks and actual builds, and Windows media cross-check.
+The native-linking/protocol/provider/dialogue agent checks passed 101 tests;
+the app checks passed 115. All four CI self-tests, slow-test lint and actionlint
+passed. Evidence is `target/dq-media/r1/`; the largest recorded target size was
+36,670,032,763 bytes. The build/test process exited successfully before this commit.

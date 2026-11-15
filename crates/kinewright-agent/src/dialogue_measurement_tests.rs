@@ -235,7 +235,7 @@ mod dialogue_measurement_tests {
         let check = invoke(&f.handler, "check_dialogue_cut", json!({"track_id":1}));
         assert_eq!(
             check.structured_content.as_ref().unwrap()["check"]["not_checked"][0],
-            json!({"clip":1,"code":"measurement_pending","status":{"state":"queued"}}),
+            json!({"clip":1,"range":[0,400],"code":"measurement_pending","status":{"state":"queued"}}),
             "DQ_MEDIA_PENDING_CHECK_STATUS"
         );
         assert_eq!(

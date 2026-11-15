@@ -188,3 +188,168 @@ overlapping dialogue clips as not checked, and does not judge a mixture.
 NOT RUN: real recogniser/profile extraction, renderer conformance, PCM/listening,
 slow-tier execution, Windows execution, provider/paid/dry/interactive-app
 launches. No push or subagents.
+
+## Tool review fixes
+
+Review targets `6adecfb8`; the serving switch remains false. The extent checker
+tracks every split child back to its original clip, independently of project
+position and of other clips sharing the recording. Every affected track is
+compared against the original audible spans. Outside the requested intervals,
+a measured loss is allowed only when **all** of its hops are raw measured quiet
+and the total loss from that original segment is at most one project frame.
+Growth and changed outer padding are guarded at the new heard edge. Each is
+reported separately; an overrule cannot waive any of these checks. An unmeasured
+sync track instead reports changed-extent count and largest microsecond change.
+The planner tries other alignments before refusing, without publishing a trial.
+The typed refusal names `clip`, `lost_micros`, and:
+"frame rates differ; unselected audio is not proven quiet within one project
+frame; choose another cut alignment".
+
+A diagnostic disproved the note's whole-multiple shortcut: splitting source
+0..200 at 60 fps in a 30 fps project at project frame 16 selects native frame
+31. The right piece ends audibly at 3,316,666⅔ us, versus 3,333,333⅓ before.
+The raw probe is saved under `target/dq-levels-guide/whole-multiple-inverse-phase-probe.rs`
+and its output in `review-tests-first.log`. Therefore only equal rates skip
+comparison. Integer multiples require **zero** outside change and search for an
+alignment with the original phase; their randomized tool property covers 60/30
+and 60000/1001 over 30000/1001. No Core split behaviour was changed. The old
+mixed-clock heard-edge witness now supplies a quiet outer tail so that it still
+isolates its intended join guard; the new sounding-tail witnesses separately
+prove the additional refusal.
+
+Segments beginning inside a clip are explicitly `not_checked`, including when
+they would otherwise supply a neighbouring guard. The complete serialized MCP
+check reply has one 4,096-byte flags budget or 32,768-byte all-detail budget.
+Acoustic failures precede warnings, unavailable evidence, then information.
+Provenance dictionaries share that budget; omissions retain counts and playback
+range instructions. Small replies retain their bytes. Request refusal reasons
+are bounded to 128 UTF-8 bytes on the wire and 128 characters in Display,
+including when constructed directly by an injected provider; serialization copies
+only the bounded prefix.
+
+An overrule belongs to the removal owning the final heard edge. A following
+overruled removal cannot lend consent to the kept sliver from a backed-off
+preceding removal. Trials and the final batch use the same geometry rule. The
+minimum removal is judged once in source time; the two-project-frame structural
+minimum remains independent. Binding validation runs before the confirmation
+prompt and again after consent, using the current provider slot both times.
+
+### Scratch measurement and ownership
+
+Before changing scratch application, five real ten-removal dispatches on a
+3,000-clip document took 944,214 / 951,694 / 958,885 / 955,551 / 956,095 us,
+median **955,551 us**; ten trials / thirty operations each. The worst batch took
+8,347,806 us, 512 trials / 1,536 operations. Because this exceeded 100 ms, a
+trial now owns one disposable scratch and applies validated operations in place;
+on error the entire trial is discarded. This removes the three extra whole
+snapshots per trial (worst approximately 2,048 → 512), not the atomic live apply.
+The first isolated post-change measurement was median 946,773 us and worst
+8,119,319 us: no material latency improvement is claimed. The checked-operation
+and whole-document validation costs remain. Candidates are ordered by total
+keep-side backoff, trying the nearest alignment first.
+
+### Dependence on recogniser times
+
+`resolve` still uses word starts/ends, word-window anchors and the configured
+snap (120 ms), kept slack (50 ms), removed slack (300 ms) and word margin (20 ms).
+The guard trusts measured long quiet even inside a stretched word; a short dip
+still needs its 50 ms word-boundary reach. Thus a falsely early word end can
+classify a dip as untranscribed and accept it, while the same dip inside a late
+word is refused. These are timing-dependent policies, not word-alignment proof.
+Pause-after-word removal now locates measured gaps between the addressed word
+starts, measures air from sound, and refuses multiple distinct candidate gaps
+rather than guessing. With actual sound ending at 500,000 us and the next sound
+starting at 3,600,000 us, ASR ends 420,000 / 760,000 / 3,500,000 all leave the same
+650,000..3,500,000 removal for 250,000 us retained air. The audit's measured air
+is independent; the stretched-word warning still compares the word timing with
+the kept edge. Existing pause fixture expectations moved by 60 ms because their
+sound ended at 2.26 s while their ASR word ended at 2.2 s.
+
+The engine seam job needs an exact source in-point (finer than a native frame),
+propagated through split/trim operations, serialization, history and Undo, plus
+live/export conformance to that clock, including enable-run origins and seeks.
+The temporary quiet-loss allowance can then be removed.
+
+The pair results and validation are recorded below. No Media source changes,
+real provider commands, paid runs or interactive App launches.
+
+### Review mutation evidence
+
+Eight independent mutations, each run against its exact witness, then restored
+byte-identically. Logs and SHA-256 restore proofs are in `target/dq-tools-review/pairs/`.
+
+| Wrong change | Named failing assertion | Red → green (passed/failed) |
+| --- | --- | --- |
+| half-speed | `DQ_TOOLS_HALF_SPEED_NOT_CHECKED` | 0/1 → 1/0 |
+| late-binding | `DQ_TOOLS_BINDING_RECHECK_AFTER_CONSENT` | 0/1 → 1/0 |
+| one-frame | `DQ_TOOLS_TWO_PROJECT_FRAMES` | 0/1 → 1/0 |
+| outside-extents | `DQ_TOOLS_UNSELECTED_TAIL_PROTECTED` | 0/1 → 1/0 |
+| removal-cap | `DQ_TOOLS_33_REFUSED` | 0/1 → 1/0 |
+| scoped-overrule | `DQ_TOOLS_SCOPED_OVERRULE` | 0/1 → 1/0 |
+| sync-tracks | `DQ_TOOLS_SYNC_EXACT_GEOMETRY` | 0/1 → 1/0 |
+| tail-overrule | `DQ_TOOLS_TAIL_OVERRULE_INSTANT` | 0/1 → 1/0 |
+
+The first sliver fixture did not force A to back off and incorrectly judged a
+B-owned edge; both red and green failed. Those attempts are archived in
+`target/dq-tools-review/fixture-error/` and are not counted as evidence. The
+corrected real-dispatch fixture forces A's native-frame backoff, and the mutation
+then lets B lend its overrule to A's sounding edge. Restored code finds quiet.
+A separate final-geometry unit control also pins that ownership rule.
+
+The 72 generated whole-multiple-rate cuts all apply without outside extent
+changes. The NTSC quiet-loss fixture reports 3,167 us, and its sounding-tail
+control refuses. A separate growth fixture reports 1,867 us and refuses when
+that newly heard tail is sounding, despite an overrule on the removal. The
+unmeasured music bed reports two extent facts (source end and padding), largest
+3,334 us; these count changes, not distinct clips. Large flags replies measure
+4,096 bytes (3,000 retimed clips plus a late acoustic failure) and 4,088 bytes
+(250 recording provenance entries). The sixty-join reply remains 1,003 bytes
+for flags and 21,170 for all detail.
+
+The five retained controls near the changed code were rerun as well:
+
+| Retained wrong change | Named failing assertion | Red → green |
+| --- | --- | --- |
+| ignore-guard | `DQ_TOOLS_ACOUSTIC_GUARD_REQUIRED` | 0/1 → 1/0 |
+| partial-refused-batch | `DQ_TOOLS_WHOLE_BATCH_REFUSED` | 0/1 → 1/0 |
+| precut-readback | `DQ_TOOLS_FRESH_COMMITTED_READBACK` | 0/1 → 1/0 |
+| remove-side-rounding | `DQ_TOOLS_ROUND_KEEP_IN` | 0/1 → 1/0 |
+| stored-end-guard | `DQ_TOOLS_GUARD_AT_AUDIBLE_END` | 0/1 → 1/0 |
+
+The rounding script was retargeted from the old boolean `keeps` to its current
+typed refusal, and its expected marker changed from `KEEP_OUT` to `KEEP_IN`: the
+incoming assertion is now the first to catch the same wrong rounding policy.
+The first marker-mismatch attempt is archived under `target/dq-tools/entry-drift/`;
+no witness assertion was relaxed. All thirteen unique pairs pass. The eight new
+pairs took 980.82 s and the retained-rest wrapper 4,065.33 s wall, mostly waiting
+for the shared lock. These are wrapper durations, not test execution times.
+
+Final-source scratch measurement: median **984,288 us** for ten removals;
+**8,530,389 us** for 512 failed trials / 1,536 operations. The complete benchmark
+test took 13.53 s. The baseline median was 955,551 us: the final median is 3.0%
+higher, so this is a copy-count reduction without a claimed latency gain.
+
+An ordinary regression also makes the new tail instant quiet while the later
+part of the lost stretch sounds. The instant guard alone accepts it; the
+whole-stretch check refuses with `unselected_audio`, preserving revision,
+document and history.
+
+### Review-fix gates
+
+At the review-fix source, `cargo test -p kinewright-core -p kinewright-agent`
+passed: Core **897 / 0 / 2**, Agent **1,738 / 0 / 166** (passed / failed / ignored,
+including integration and doc tests). Wrapper wall time: 1,131.52 s; Agent lib
+alone: 1,007.98 s. Workspace all-target default clippy `-D warnings`, Cargo fmt,
+the explicit include-file rustfmt check, and both measurement-pin tests passed.
+The pin selector ran two tests, not zero. Slow-test lint: 140 slow / 161 ignored /
+27 equipped skip sites; parser selftests 52, shard selftests 23.
+
+Only `arm_bridge_sha256.mcp_observation` changed in the measurement pin:
+`5f0e4dd2df3cc3f5788b8bc9d04e4cd394181465d1d3a2ae933a2e8390c370e5`
+→ `1fc289a1db94b52253834d8d0ac13aa42ccb22fa7298fd52b4fe155a09013424`.
+The pin tests verify the frozen model-visible leaves. Eval clippy and the default
+build guard (three artifacts) passed too. The Windows gate passed all four
+cross-clippy modes, three isolated Linux shipping builds and three isolated MSVC
+shipping checks. Both shipping targets were removed on success (3.7 GiB Linux,
+907 MiB MSVC). This is Windows compilation/lint, not Windows execution. The final
+guide commit also receives the combined workspace fast suite and build.
