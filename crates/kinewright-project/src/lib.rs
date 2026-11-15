@@ -19,6 +19,7 @@ mod history_save;
 mod history_size;
 mod lineage_journal;
 pub mod operation_actor;
+pub mod operation_checkpoint;
 pub mod operation_history;
 pub mod operation_inputs;
 pub mod operation_protocol;

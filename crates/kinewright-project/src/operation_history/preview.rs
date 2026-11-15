@@ -126,6 +126,14 @@ impl PreparedOwner {
         store: &mut crate::store::ProjectStore,
         resolve: impl FnMut(&super::Resource) -> Result<Option<crate::bundle_records::ObjectRef>, Error>,
     ) -> Result<crate::store::SealedObject, Error> {
+        self.persist_checkpoint(store, resolve)
+            .map(super::stored::SealedOwner::into_object)
+    }
+    pub(crate) fn persist_checkpoint(
+        &self,
+        store: &mut crate::store::ProjectStore,
+        resolve: impl FnMut(&super::Resource) -> Result<Option<crate::bundle_records::ObjectRef>, Error>,
+    ) -> Result<super::stored::SealedOwner, Error> {
         self.history
             .persist_prepared(store, self.destination, resolve)
     }

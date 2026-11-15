@@ -28,7 +28,7 @@ pub(crate) use reservation::LeaseHold;
 pub use reservation::{Envelope, HistoryPool, HistoryReservation, PoolLimits, Role, Workspace};
 pub use resources::{Resource, Resources};
 pub use snapshot::{OwnerSnapshot, ValidatedOwnerSnapshot};
-pub use stored::StoredOwnerRecord;
+pub use stored::{SealedOwner, StoredOwnerRecord};
 
 use kinewright_core::undo::{CommandKey, PreparedError};
 use serde::{Deserialize, Serialize};

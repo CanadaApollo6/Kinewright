@@ -29,6 +29,19 @@ impl PreparedUpdate {
     pub fn identity(&self) -> Result<SnapshotIdentity, Error> {
         self.owner.identity().map_err(Error::from)
     }
+    #[must_use]
+    pub const fn revision(&self) -> TimelineRevision {
+        self.revision
+    }
+    pub fn persist_checkpoint(
+        &self,
+        store: &mut crate::store::ProjectStore,
+        resolve: impl FnMut(&Resource) -> Result<Option<ObjectRef>, HistoryError>,
+    ) -> Result<crate::operation_history::SealedOwner, Error> {
+        self.owner
+            .persist_checkpoint(store, resolve)
+            .map_err(Error::from)
+    }
     pub fn persist(
         &self,
         store: &mut crate::store::ProjectStore,

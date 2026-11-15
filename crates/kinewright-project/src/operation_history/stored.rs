@@ -26,6 +26,25 @@ pub struct StoredOwnerRecord {
     pub edges: Vec<ObjectRef>,
     body: Box<RawValue>,
 }
+/// Sealed bytes and their trusted fixed-size projection. Publication keeps
+/// the pin without reading or decoding its own newly written record again.
+pub struct SealedOwner {
+    pub(crate) object: SealedObject,
+    pub(crate) document: ObjectRef,
+    pub(crate) identity: super::SnapshotIdentity,
+    pub(crate) role: Role,
+    pub(crate) position: kinewright_core::undo::CommandKey,
+}
+impl SealedOwner {
+    #[must_use]
+    pub const fn reference(&self) -> &ObjectRef {
+        &self.object.reference
+    }
+    #[must_use]
+    pub fn into_object(self) -> SealedObject {
+        self.object
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Body {
@@ -98,8 +117,16 @@ impl OwnerSnapshot {
     pub fn persist(
         &self,
         store: &mut ProjectStore,
-        mut resolve_resource: impl FnMut(&Resource) -> Result<Option<ObjectRef>, Error>,
+        resolve_resource: impl FnMut(&Resource) -> Result<Option<ObjectRef>, Error>,
     ) -> Result<SealedObject, Error> {
+        self.persist_checkpoint(store, resolve_resource)
+            .map(SealedOwner::into_object)
+    }
+    pub fn persist_checkpoint(
+        &self,
+        store: &mut ProjectStore,
+        mut resolve_resource: impl FnMut(&Resource) -> Result<Option<ObjectRef>, Error>,
+    ) -> Result<SealedOwner, Error> {
         let _window = self.reservation.workspace()?;
         let data = &self.data;
         let baseline = store
@@ -118,14 +145,41 @@ impl OwnerSnapshot {
                 _ => return Err(Error::MissingResource),
             }
         }
-        let record = self.stored_record(baseline.reference, document.reference, &bindings)?;
-        store.admit_record(&record).map_err(store_error)
+        let identity = self.data.identity()?;
+        let document = document.reference;
+        let record = self.stored_record_identified(
+            baseline.reference,
+            document.clone(),
+            &bindings,
+            identity.digest(),
+        )?;
+        let object = store.admit_record(&record).map_err(store_error)?;
+        Ok(SealedOwner {
+            object,
+            document,
+            identity,
+            role: data.role,
+            position: kinewright_core::undo::CommandKey {
+                epoch: data.history.epoch,
+                position: data.history.position,
+            },
+        })
     }
+    #[cfg(test)]
     fn stored_record(
         &self,
         baseline: ObjectRef,
         document: ObjectRef,
         bindings: &[(Resource, ObjectRef)],
+    ) -> Result<StoredOwnerRecord, Error> {
+        self.stored_record_identified(baseline, document, bindings, self.snapshot_identity()?)
+    }
+    fn stored_record_identified(
+        &self,
+        baseline: ObjectRef,
+        document: ObjectRef,
+        bindings: &[(Resource, ObjectRef)],
+        identity: [u8; 32],
     ) -> Result<StoredOwnerRecord, Error> {
         let data = &self.data;
         let mut edges = std::collections::BTreeSet::new();
@@ -164,7 +218,7 @@ impl OwnerSnapshot {
             baseline,
             document,
             edges,
-            self.snapshot_identity()?,
+            identity,
         )
     }
 }
@@ -205,7 +259,7 @@ impl super::OwnerHistory {
         store: &mut ProjectStore,
         sizing: super::CreationSizing,
         mut resolve_resource: impl FnMut(&Resource) -> Result<Option<ObjectRef>, Error>,
-    ) -> Result<SealedObject, Error> {
+    ) -> Result<SealedOwner, Error> {
         let _window = self.reservation.workspace()?;
         let baseline = store
             .admit_document(self.core.baseline())
@@ -254,6 +308,8 @@ impl super::OwnerHistory {
             ledger: &self.ledger,
             folded_approvals: &self.folded_approvals,
         };
+        let identity = self.identity_unreserved(sizing)?;
+        let current_document = document.reference.clone();
         let record = encode_record(
             &body,
             self.reservation.role(),
@@ -261,9 +317,16 @@ impl super::OwnerHistory {
             baseline.reference,
             document.reference,
             edges,
-            self.identity_unreserved(sizing)?.digest(),
+            identity.digest(),
         )?;
-        store.admit_record(&record).map_err(store_error)
+        let object = store.admit_record(&record).map_err(store_error)?;
+        Ok(SealedOwner {
+            object,
+            document: current_document,
+            identity,
+            role: self.reservation.role(),
+            position,
+        })
     }
 }
 
@@ -349,6 +412,31 @@ impl StoredOwnerRecord {
         pool: &HistoryPool,
         expected_role: Role,
     ) -> Result<ValidatedOwnerSnapshot, Error> {
+        Self::read_expected(store, reference, pool, expected_role, None)
+    }
+    pub(crate) fn read_projected(
+        store: &ProjectStore,
+        reference: &ObjectRef,
+        pool: &HistoryPool,
+        expected_role: Role,
+        document: &ObjectRef,
+        identity: super::SnapshotIdentity,
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
+        Self::read_expected(
+            store,
+            reference,
+            pool,
+            expected_role,
+            Some((document, identity)),
+        )
+    }
+    fn read_expected(
+        store: &ProjectStore,
+        reference: &ObjectRef,
+        pool: &HistoryPool,
+        expected_role: Role,
+        expected: Option<(&ObjectRef, super::SnapshotIdentity)>,
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
         // Bound raw ingress by the requested role before the store allocates
         // its encoded/decoded shell, including a record claiming another role.
         if reference.byte_length > expected_role.persisted_shell_cap() {
@@ -362,9 +450,19 @@ impl StoredOwnerRecord {
         if record.role != expected_role || record.sizing.kind.role() != expected_role {
             return Err(Error::Reservation);
         }
+        if expected.is_some_and(|(document, identity)| {
+            record.document != *document || record.identity != digest_text(&identity.digest())
+        }) {
+            return Err(Error::IdentityMismatch);
+        }
         let reservation = pool.admit_sized(record.sizing)?;
         let bounds = reservation.limits().bounds;
-        record.resolve_reserved(store, expected_role, reservation, window, bounds)
+        let validated =
+            record.resolve_reserved(store, expected_role, reservation, window, bounds)?;
+        if expected.is_some_and(|(_, identity)| validated.identity() != identity) {
+            return Err(Error::IdentityMismatch);
+        }
+        Ok(validated)
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn resolve(

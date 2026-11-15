@@ -61,6 +61,13 @@ impl ValidatedOwnerSnapshot {
     pub const fn identity(&self) -> super::SnapshotIdentity {
         self.identity
     }
+    #[must_use]
+    pub const fn position(&self) -> CommandKey {
+        CommandKey {
+            epoch: self.core.epoch(),
+            position: self.core.position(),
+        }
+    }
     pub fn open(self) -> Result<OwnerHistory, Error> {
         Ok(OwnerHistory {
             core: self.core.into_history()?,
