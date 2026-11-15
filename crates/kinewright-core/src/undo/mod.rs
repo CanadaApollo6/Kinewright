@@ -13,6 +13,7 @@ mod size;
 use capacity::Heap;
 pub use metrics::PhaseCounters;
 use size::DocumentBound;
+mod fork;
 mod merge;
 mod record;
 use cache::Cache;
@@ -1226,7 +1227,13 @@ fn replay_step(
 }
 /// Exact admission charge for one plain batch, without applying it or copying a document.
 pub fn batch_charge(operations: &[Operation]) -> Result<Charge, Error> {
-    let mut charge = operation_charge(operations)?;
+    batch_charge_iter(operations)
+}
+/// Exact one-batch charge of a borrowed stream; no payload is copied for sizing.
+pub fn batch_charge_iter<'a>(
+    operations: impl IntoIterator<Item = &'a Operation>,
+) -> Result<Charge, Error> {
+    let mut charge = operation_charge_iter(operations)?;
     charge.decoded = charge
         .decoded
         .checked_add(
@@ -1236,8 +1243,13 @@ pub fn batch_charge(operations: &[Operation]) -> Result<Charge, Error> {
     Ok(charge)
 }
 fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
+    operation_charge_iter(operations)
+}
+fn operation_charge_iter<'a>(
+    operations: impl IntoIterator<Item = &'a Operation>,
+) -> Result<Charge, Error> {
     operations
-        .iter()
+        .into_iter()
         .try_fold(Charge::default(), |charge, operation| {
             charge.add(Charge {
                 encoded: encoded_bytes(operation)?,
@@ -1335,3 +1347,6 @@ mod charge_tests {
 
 #[cfg(test)]
 mod merge_tests;
+
+#[cfg(test)]
+mod fork_tests;

@@ -7,8 +7,8 @@ use crate::operation_history::{
     tests::{document, origin},
 };
 use kinewright_core::{
-    Command, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Marker, MarkerId, Operation,
-    TimeCode, TrackId,
+    LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Marker, MarkerId, Operation, TimeCode,
+    TrackId,
     undo::{CommandKey, Effects, RoleBounds},
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -36,100 +36,52 @@ fn fresh(pool: &HistoryPool) -> OwnerHistory {
     .unwrap()
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-enum Action {
-    Edit {
-        operations: Vec<Operation>,
-        gesture: Option<String>,
-    },
-    Undo,
-    Redo,
-    Close,
-}
+use crate::operation_actor::CommandContext;
+use crate::operation_protocol::{Action, Receipt, Seed, StreamState};
 #[derive(Clone, Serialize, Deserialize)]
 struct Message {
     id: u64,
     action: Action,
     creation: CreationOrigin,
     approval: Option<Approval>,
-    transition: Option<ObjectRef>,
+    transition: Option<super::super::TransitionApproval>,
 }
 impl Message {
-    fn apply(&self, owner: &mut OwnerHistory) -> Result<Effects, Error> {
-        // Each replica owns its accepted payload. Fan-out is part of the
-        // model's GUI/writer boundary, not an allocation-normalising copy.
-        if let Some(reference) = &self.transition {
-            let direction = match self.action {
-                Action::Undo => Direction::Undo,
-                Action::Redo => Direction::Redo,
-                _ => unreachable!("only Undo/Redo carries transition consent"),
-            };
-            return owner.approve_transition(
-                reference.clone(),
-                direction,
-                owner.transition_target(direction).unwrap(),
-            );
+    fn context(&self) -> CommandContext {
+        CommandContext {
+            creation: self.creation.clone(),
+            inputs: vec![],
+            approval: self.approval.clone(),
+            transition: self.transition.clone(),
         }
-        let command = match &self.action {
-            Action::Edit {
-                operations,
-                gesture: Some(key),
-            } => Command::DoBatchCoalesced {
-                operations: operations.clone(),
-                coalesce_key: key.clone(),
-            },
-            Action::Edit {
-                operations,
-                gesture: None,
-            } => Command::DoBatch(operations.clone()),
-            Action::Undo => Command::Undo,
-            Action::Redo => Command::Redo,
-            Action::Close => return owner.close_gesture(),
-        };
-        owner.execute(
-            command,
-            self.creation.clone(),
-            vec![],
-            self.approval.clone(),
-        )
     }
-    fn digest(&self, previous: &[u8; 32]) -> [u8; 32] {
-        // Normalised commands contain no revision precondition or transport
-        // authority. Receipt ids identify retransmissions across a hand-off.
-        let bytes = serde_json::to_vec(&(
-            previous,
-            &self.action,
-            &self.creation,
-            &self.approval,
-            &self.transition,
-        ))
-        .unwrap();
-        let mut hash = kinewright_hash::Sha256::new();
-        hash.update(&bytes);
-        hash.finalize()
+    fn apply(&self, owner: &mut OwnerHistory) -> Result<Effects, Error> {
+        self.action.apply(&self.context(), owner)
+    }
+    fn into_wire(
+        self,
+        stream: &StreamState,
+        accepted: CommandKey,
+    ) -> crate::operation_protocol::Message {
+        let id = crate::receipts::CommandId {
+            issuer: crate::receipts::IssuerId(format!("{:032x}", 1)),
+            sequence: self.id + 1,
+        };
+        let context = self.context();
+        stream.message(id, accepted, self.action, context).unwrap()
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct Receipt {
-    id: u64,
-    key: CommandKey,
-    tip: [u8; 32],
-    command: [u8; 32],
+fn message_id(message: &crate::operation_protocol::Message) -> u64 {
+    message.id.sequence - 1
 }
 struct Pending {
-    message: Message,
+    message: crate::operation_protocol::Message,
     authority: u64,
-    sequence: u64,
-    predecessor: [u8; 32],
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Root {
     snapshot: ObjectRef,
-    installed: [u8; 32],
-    sequence: u64,
-    tip: [u8; 32],
-    receipts: Vec<Receipt>,
+    stream: StreamState,
     authority: u64,
 }
 #[derive(Default)]
@@ -187,9 +139,11 @@ struct Session<S> {
     store: S,
     pending: VecDeque<Pending>,
     authority: u64,
-    gui_sequence: u64,
-    gui_tip: [u8; 32],
+    gui_stream: StreamState,
     acknowledged: BTreeMap<u64, Receipt>,
+    // Oracle-only archive of receipts observed in an actually published root.
+    // The product root keeps only the bounded unacknowledged-message window.
+    published_receipts: BTreeMap<u64, Receipt>,
     accepted: BTreeMap<u64, Effects>,
     checkpoints: Vec<Root>,
     coverage: Coverage,
@@ -201,13 +155,16 @@ impl<S: ModelStore> Session<S> {
         let gui = fresh(&gui_pool);
         let writer = fresh(&writer_pool);
         let snapshot = store.save(&writer.capture().unwrap());
-        let installed = writer.capture().unwrap().snapshot_identity().unwrap();
+        let stream = StreamState::installed(Seed {
+            project: crate::bundle_records::ProjectId::fresh().unwrap(),
+            branch: origin(1).branch,
+            attachment_epoch: 1,
+            installed: writer.identity().unwrap(),
+        })
+        .unwrap();
         store.publish(&Root {
             snapshot,
-            installed,
-            sequence: 0,
-            tip: installed,
-            receipts: vec![],
+            stream: stream.clone(),
             authority: 1,
         });
         Self {
@@ -218,40 +175,46 @@ impl<S: ModelStore> Session<S> {
             store,
             pending: VecDeque::new(),
             authority: 1,
-            gui_sequence: 0,
-            gui_tip: installed,
+            gui_stream: stream,
             acknowledged: BTreeMap::new(),
+            published_receipts: BTreeMap::new(),
             accepted: BTreeMap::new(),
             checkpoints: vec![],
             coverage: Coverage::default(),
         }
     }
     fn send(&mut self, message: Message) {
-        let before = self.gui.capture().unwrap().snapshot_identity().unwrap();
+        if self.pending.len() == crate::operation_protocol::PENDING_COMMANDS {
+            return;
+        }
+        let before = self.gui.identity().unwrap();
         match message.apply(&mut self.gui) {
             Ok(effects) => {
                 self.coverage.folds += effects.folded.len();
                 self.coverage.approvals += usize::from(message.approval.is_some());
                 self.coverage.transitions += usize::from(message.transition.is_some());
                 match &message.action {
-                    Action::Edit { .. } => self.coverage.edits += 1,
+                    Action::Do { .. } => self.coverage.edits += 1,
                     Action::Undo => self.coverage.undos += 1,
                     Action::Redo => self.coverage.redos += 1,
                     Action::Close => self.coverage.closes += 1,
                 }
-                self.accepted.insert(message.id, effects);
-                self.gui_sequence += 1;
-                let next_tip = message.digest(&self.gui_tip);
+                let id = message.id;
+                let wire = message.into_wire(&self.gui_stream, effects.accepted);
+                assert!(
+                    serde_json::to_vec(&wire).unwrap().len() as u64
+                        <= crate::operation_protocol::PENDING_BYTES,
+                    "GENERATED_COMMAND_FITS_PRODUCER_WINDOW"
+                );
+                self.gui_stream = self.gui_stream.advanced(&wire, effects.accepted).unwrap().0;
+                self.accepted.insert(id, effects);
                 self.pending.push_back(Pending {
-                    message,
+                    message: wire,
                     authority: self.authority,
-                    sequence: self.gui_sequence,
-                    predecessor: self.gui_tip,
                 });
-                self.gui_tip = next_tip;
             }
             Err(_) => assert_eq!(
-                self.gui.capture().unwrap().snapshot_identity().unwrap(),
+                self.gui.identity().unwrap(),
                 before,
                 "SESSION_REFUSAL_IS_ATOMIC"
             ),
@@ -260,37 +223,45 @@ impl<S: ModelStore> Session<S> {
     fn drain(&mut self, lose_ack: bool, crash_before_publish: bool) {
         while let Some(pending) = self.pending.front() {
             let message = &pending.message;
+            let id = message_id(message);
             let mut root = self.store.root();
-            if !root.receipts.iter().any(|r| r.id == message.id) {
+            root.stream
+                .validate()
+                .expect("OPENED_STREAM_HAS_A_VALID_BOUNDED_RECEIPT_WINDOW");
+            if root
+                .stream
+                .lookup(message)
+                .expect("SHADOW_SEQUENCE_AND_CHAIN_MATCH")
+                .is_none()
+            {
                 assert_eq!(
                     pending.authority, root.authority,
                     "ABSENT_SUFFIX_REQUIRES_EXPLICIT_CURRENT_AUTHORITY_REBIND"
                 );
                 assert_eq!(
-                    pending.sequence,
-                    root.sequence + 1,
+                    message.sequence,
+                    root.stream.sequence() + 1,
                     "SHADOW_ACCEPTS_ONLY_THE_NEXT_SEQUENCE"
                 );
                 assert_eq!(
-                    pending.predecessor, root.tip,
+                    message.predecessor,
+                    root.stream.tip(),
                     "SHADOW_ACCEPTS_ONLY_THE_CURRENT_CHAIN_TIP"
                 );
+                assert_eq!(
+                    message.accepted,
+                    self.writer.history().position(),
+                    "SHADOW_CHECKS_ACCEPTED_KEY_BEFORE_APPLYING"
+                );
                 let effects = message
-                    .apply(&mut self.writer)
+                    .action
+                    .apply(&message.context, &mut self.writer)
                     .expect("SHADOW_ACCEPTS_GUI_TRANSITION");
                 assert_eq!(
-                    &effects, &self.accepted[&message.id],
+                    &effects, &self.accepted[&id],
                     "SHADOW_ACCOUNTS_FOR_EACH_GUI_TRANSITION"
                 );
-                let tip = message.digest(&root.tip);
-                root.receipts.push(Receipt {
-                    id: message.id,
-                    key: effects.accepted,
-                    tip,
-                    command: message.digest(&[0; 32]),
-                });
-                root.sequence += 1;
-                root.tip = tip;
+                root.stream = root.stream.advanced(message, effects.accepted).unwrap().0;
                 root.snapshot = self.store.save(&self.writer.capture().unwrap());
                 if crash_before_publish {
                     self.coverage.before_publish += 1;
@@ -309,24 +280,32 @@ impl<S: ModelStore> Session<S> {
             }
             let committed = self.store.root();
             let receipt = committed
-                .receipts
-                .iter()
-                .find(|r| r.id == message.id)
-                .expect("ACK_FOLLOWS_ATOMIC_ROOT_AND_RECEIPT_PUBLICATION");
-            assert_eq!(
-                receipt.command,
-                message.digest(&[0; 32]),
-                "RECEIPTED_ID_CANNOT_NAME_A_DIFFERENT_COMMAND"
-            );
-            self.acknowledged.insert(message.id, *receipt);
+                .stream
+                .lookup(message)
+                .unwrap()
+                .expect("ACK_FOLLOWS_ATOMIC_ROOT_AND_RECEIPT_PUBLICATION")
+                .clone();
+            for observed in committed.stream.receipts() {
+                let observed_id = observed.id.sequence - 1;
+                if let Some(previous) = self
+                    .published_receipts
+                    .insert(observed_id, observed.clone())
+                {
+                    assert_eq!(
+                        previous, *observed,
+                        "RESTART_NEVER_REAPPLIES_A_RECEIPTED_MESSAGE"
+                    );
+                }
+            }
+            self.acknowledged.insert(id, receipt);
             self.pending.pop_front();
         }
         self.assert_acknowledged();
         if self.pending.is_empty() {
             let root = self.store.root();
             assert_eq!(
-                (root.sequence, root.tip),
-                (self.gui_sequence, self.gui_tip),
+                (root.stream.sequence(), root.stream.tip()),
+                (self.gui_stream.sequence(), self.gui_stream.tip()),
                 "DRAINED_REPLICAS_HAVE_THE_SAME_SEQUENCE_AND_CHAIN"
             );
             self.assert_equal();
@@ -334,17 +313,20 @@ impl<S: ModelStore> Session<S> {
     }
     fn assert_acknowledged(&self) {
         let root = self.store.root();
-        let index: BTreeMap<_, _> = root.receipts.iter().map(|r| (r.id, r)).collect();
-        for receipt in self.acknowledged.values() {
+        root.stream
+            .validate()
+            .expect("DURABLE_RECEIPT_WINDOW_STAYS_BOUNDED_AND_ORDERED");
+        for (id, receipt) in &self.acknowledged {
             assert_eq!(
-                index.get(&receipt.id).copied(),
+                self.published_receipts.get(id),
                 Some(receipt),
                 "EVERY_ACKNOWLEDGED_TRANSITION_HAS_A_DURABLE_RECEIPT"
             );
         }
+        let ids: BTreeSet<_> = root.stream.receipts().map(|receipt| &receipt.id).collect();
         assert_eq!(
-            index.len(),
-            root.receipts.len(),
+            ids.len(),
+            root.stream.receipts().count(),
             "RESTART_NEVER_REAPPLIES_A_RECEIPTED_MESSAGE"
         );
     }
@@ -394,8 +376,8 @@ impl<S: ModelStore> Session<S> {
         self.store.publish(&root);
         for pending in &mut self.pending {
             if !root
-                .receipts
-                .iter()
+                .stream
+                .receipts()
                 .any(|receipt| receipt.id == pending.message.id)
             {
                 pending.authority = self.authority;
@@ -458,17 +440,23 @@ impl<S: ModelStore> Session<S> {
         );
         let mut root = self.store.root();
         root.snapshot = self.store.save(&self.writer.capture().unwrap());
-        root.installed = self.writer.capture().unwrap().snapshot_identity().unwrap();
-        root.sequence = 0;
-        root.tip = root.installed;
-        self.gui_sequence = 0;
-        self.gui_tip = root.installed;
+        let mut seed = root.stream.seed().clone();
+        seed.installed = self.writer.identity().unwrap();
+        seed.attachment_epoch += 1;
+        let previous_tip = root.stream.tip();
+        root.stream = StreamState::installed(seed).unwrap();
+        self.gui_stream = root.stream.clone();
         self.store.publish(&root);
-        assert_eq!(
-            self.store.root().tip,
-            self.gui.capture().unwrap().snapshot_identity().unwrap(),
+        assert_ne!(
+            self.store.root().stream.tip(),
+            previous_tip,
             "INSTALL_RESETS_THE_PREVIOUS_EPOCH_CHAIN"
         );
+        self.store
+            .root()
+            .stream
+            .verify_installed_snapshot(self.gui.identity().unwrap())
+            .expect("INSTALL_STATE_EQUALITY_USES_COMBINED_OWNER_IDENTITY");
         self.assert_equal();
     }
     fn collect(&mut self) {
@@ -484,18 +472,20 @@ impl<S: ModelStore> Session<S> {
             .values()
             .map(|r| self.store.resource(r))
             .collect::<Vec<_>>();
+        references.extend(self.pending.iter().filter_map(|p| {
+            p.message
+                .context
+                .approval
+                .as_ref()
+                .map(|a| a.reference.clone())
+        }));
         references.extend(
             self.pending
                 .iter()
-                .filter_map(|p| p.message.approval.as_ref().map(|a| a.reference.clone())),
-        );
-        references.extend(
-            self.pending
-                .iter()
-                .filter_map(|p| p.message.transition.clone()),
+                .filter_map(|p| p.message.context.transition.as_ref().map(|a| a.id.clone())),
         );
         for pending in &self.pending {
-            if let Action::Edit { operations, .. } = &pending.message.action {
+            if let Action::Do { operations, .. } = &pending.message.action {
                 references.extend(
                     Resources::payload(operations)
                         .iter()
@@ -807,7 +797,7 @@ fn queued_payload_after_gui_fold<S: ModelStore>() {
     {
         session.send(Message {
             id: index as u64,
-            action: Action::Edit {
+            action: Action::Do {
                 operations: vec![operation],
                 gesture: None,
             },
@@ -821,7 +811,7 @@ fn queued_payload_after_gui_fold<S: ModelStore>() {
         "GUI_HAS_FOLDED_PAST_THE_QUEUED_RESOURCE"
     );
     assert!(
-        session.store.root().receipts.is_empty(),
+        session.store.root().stream.receipts().next().is_none(),
         "WRITER_HAS_NOT_SEEN_THE_PAYLOAD_YET"
     );
     session.collect();

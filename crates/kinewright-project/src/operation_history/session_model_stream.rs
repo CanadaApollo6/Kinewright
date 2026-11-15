@@ -48,12 +48,12 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
                 reference,
                 targets: vec![crate::operation_history::RemovedTarget::Track(TrackId(81))],
             });
-            Action::Edit {
+            Action::Do {
                 operations: vec![Operation::RemoveTrack { track: TrackId(81) }],
                 gesture: None,
             }
         }
-        (4, _, _) => Action::Edit {
+        (4, _, _) => Action::Do {
             operations: vec![Operation::AddTrack {
                 track: document().tracks.remove(0),
             }],
@@ -63,22 +63,22 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
             let reference = session
                 .store
                 .blob(format!("owned LUT {id}").as_bytes(), RecordKind::OwnedLut);
-            Action::Edit {
+            Action::Do {
                 operations: vec![lut(&reference, id)],
                 gesture: None,
             }
         }
-        (6 | 7, _, _) => Action::Edit {
+        (6 | 7, _, _) => Action::Do {
             operations: vec![marker(id)],
             gesture: Some(format!("gesture {}", id / 4)),
         },
-        (8, _, _) if !session.gui.history().document().lut_assets.is_empty() => Action::Edit {
+        (8, _, _) if !session.gui.history().document().lut_assets.is_empty() => Action::Do {
             operations: vec![Operation::RemoveLutAsset {
                 lut_asset: session.gui.history().document().lut_assets[0].id,
             }],
             gesture: None,
         },
-        (9, _, _) => Action::Edit {
+        (9, _, _) => Action::Do {
             operations: vec![Operation::AddSolidClip {
                 track: TrackId(81),
                 timeline_start: TimeCode(i64::try_from(id * 20).unwrap()),
@@ -87,15 +87,15 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
             }],
             gesture: None,
         },
-        (10, Some((clip, at)), _) => Action::Edit {
+        (10, Some((clip, at)), _) => Action::Do {
             operations: vec![Operation::SplitClip { clip, at }],
             gesture: None,
         },
-        (11, _, Some(clip)) => Action::Edit {
+        (11, _, Some(clip)) => Action::Do {
             operations: vec![Operation::DeleteClip { clip }],
             gesture: None,
         },
-        _ => Action::Edit {
+        _ => Action::Do {
             operations: vec![marker(id)],
             gesture: None,
         },
@@ -108,10 +108,14 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
             Direction::Redo
         };
         if session.gui.transition_target(direction).is_some() {
-            transition = Some(session.store.blob(
-                format!("transition consent {id}").as_bytes(),
-                RecordKind::OwnedEvidence,
-            ));
+            transition = Some(super::super::super::TransitionApproval {
+                id: session.store.blob(
+                    format!("transition consent {id}").as_bytes(),
+                    RecordKind::OwnedEvidence,
+                ),
+                direction,
+                target: session.gui.transition_target(direction).unwrap(),
+            });
         }
     }
     Message {
@@ -290,7 +294,7 @@ fn prime_redo_payload<S: ModelStore>(session: &mut Session<S>, seed: u64) {
     for (id, action) in [
         (
             1,
-            Action::Edit {
+            Action::Do {
                 operations: vec![lut(&reference, 1)],
                 gesture: None,
             },

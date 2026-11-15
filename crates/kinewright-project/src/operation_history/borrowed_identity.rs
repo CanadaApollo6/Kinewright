@@ -25,7 +25,7 @@ struct View<'a> {
     #[serde(with = "super::ledger::folded_wire")]
     folded_approvals: &'a FoldedApprovals,
 }
-enum SeedValues<'a> {
+pub(super) enum SeedValues<'a> {
     Captured(&'a Lineage),
     Live(&'a OwnerHistory),
 }
@@ -65,7 +65,7 @@ impl Serialize for OriginValues<'_> {
         }
     }
 }
-enum ResourceValues<'a> {
+pub(super) enum ResourceValues<'a> {
     Live(&'a Resources),
     Captured(&'a BTreeSet<Resource>),
 }
@@ -101,11 +101,17 @@ impl OwnerHistory {
     /// and never runs on an ordinary command path.
     pub fn identity(&self) -> Result<SnapshotIdentity, Error> {
         let _workspace = self.reservation.workspace()?;
+        self.identity_unreserved(self.reservation.sizing())
+    }
+    pub(super) fn identity_unreserved(
+        &self,
+        sizing: CreationSizing,
+    ) -> Result<SnapshotIdentity, Error> {
         Ok(SnapshotIdentity {
             core: self.core.snapshot_identity()?,
             owner: super::identity::digest(&View {
                 role: self.reservation.role(),
-                sizing: self.reservation.sizing(),
+                sizing,
                 fold_frontier: self.fold_frontier,
                 terminal_facts: &self.terminal_facts,
                 seeds: SeedValues::Live(self),
@@ -115,5 +121,27 @@ impl OwnerHistory {
                 folded_approvals: &self.folded_approvals,
             })?,
         })
+    }
+}
+
+pub(super) enum OriginContexts<'a> {
+    Live(&'a Origins),
+    Captured(&'a [CommandOrigin]),
+}
+impl Serialize for OriginContexts<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Live(origins) => serializer.collect_seq(
+                origins
+                    .0
+                    .iter()
+                    .map(|row| (&row.origin.creation, &row.origin.inputs)),
+            ),
+            Self::Captured(origins) => serializer.collect_seq(
+                origins
+                    .iter()
+                    .map(|origin| (&origin.creation, &origin.inputs)),
+            ),
+        }
     }
 }

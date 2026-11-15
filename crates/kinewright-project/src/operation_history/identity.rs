@@ -3,7 +3,8 @@ use super::{Error, snapshot::SnapshotData};
 use serde::Serialize;
 
 /// Protocol identity: neither digest alone names the entire selected state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotIdentity {
     pub core: [u8; 32],
     pub owner: [u8; 32],

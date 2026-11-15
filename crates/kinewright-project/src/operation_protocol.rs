@@ -1,0 +1,324 @@
+//! The ordered accepted-command stream shared by a producer and its writer.
+//! Snapshot roots and this state are one publication; a receipt is an answer
+//! only after that publication is known durable.
+#![allow(clippy::missing_errors_doc)]
+use crate::{
+    bundle_records::{BranchId, ProjectId},
+    operation_actor::CommandContext,
+    operation_history::{Error as HistoryError, OwnerHistory, SnapshotIdentity},
+    receipts::CommandId,
+};
+use kinewright_core::{
+    Command, Operation,
+    undo::{CommandKey, Effects},
+};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+
+pub const PENDING_COMMANDS: usize = 64;
+// One admitted 1 MiB source batch plus its normalised owner/receipt context.
+// The pending queue retains encoded bytes; its holder charges those bytes.
+pub const PENDING_BYTES: u64 = 2 << 20;
+const _: () = assert!(
+    PENDING_BYTES >= kinewright_core::undo::RoleBounds::TASK.operation_bytes + (64 << 10),
+    "SOURCE_STEP_AND_CONTEXT_FIT_MANUAL_WINDOW"
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", deny_unknown_fields)]
+pub enum Action {
+    Do {
+        operations: Vec<Operation>,
+        gesture: Option<String>,
+    },
+    Undo,
+    Redo,
+    Close,
+}
+impl Action {
+    pub fn apply(
+        &self,
+        context: &CommandContext,
+        owner: &mut OwnerHistory,
+    ) -> Result<Effects, HistoryError> {
+        if let Some(approval) = &context.transition {
+            let matching = matches!(
+                (self, approval.direction),
+                (Self::Undo, crate::operation_history::Direction::Undo)
+                    | (Self::Redo, crate::operation_history::Direction::Redo)
+            );
+            if !matching || context.approval.is_some() || !context.inputs.is_empty() {
+                return Err(HistoryError::InvalidLedger);
+            }
+            return owner.approve_transition(
+                approval.id.clone(),
+                approval.direction,
+                approval.target,
+            );
+        }
+        let command = match self {
+            Self::Do {
+                operations,
+                gesture: Some(key),
+            } => Command::DoBatchCoalesced {
+                operations: operations.clone(),
+                coalesce_key: key.clone(),
+            },
+            Self::Do {
+                operations,
+                gesture: None,
+            } => Command::DoBatch(operations.clone()),
+            Self::Undo => Command::Undo,
+            Self::Redo => Command::Redo,
+            Self::Close if context.approval.is_none() && context.inputs.is_empty() => {
+                return owner.close_gesture();
+            }
+            Self::Close => return Err(HistoryError::InvalidLedger),
+        };
+        owner.execute(
+            command,
+            context.creation.clone(),
+            context.inputs.clone(),
+            context.approval.clone(),
+        )
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Seed {
+    pub project: ProjectId,
+    pub branch: BranchId,
+    pub attachment_epoch: u64,
+    pub installed: SnapshotIdentity,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Message {
+    pub id: CommandId,
+    pub sequence: u64,
+    pub predecessor: [u8; 32],
+    pub tip: [u8; 32],
+    pub accepted: CommandKey,
+    pub action: Action,
+    pub context: CommandContext,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    pub id: CommandId,
+    pub sequence: u64,
+    pub accepted: CommandKey,
+    pub tip: [u8; 32],
+    pub command: [u8; 32],
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamState {
+    seed: Seed,
+    sequence: u64,
+    tip: [u8; 32],
+    receipts: VecDeque<Receipt>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Conflict {
+    Encoding,
+    CounterExhausted,
+    Sequence,
+    Chain,
+    CommandIdentity,
+    AcceptedKey,
+    Snapshot,
+    ReceiptWindow,
+}
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Editing stream conflict ({self:?}). Edits remain available for recovery."
+        )
+    }
+}
+impl std::error::Error for Conflict {}
+fn hash(domain: &[u8], value: &impl Serialize) -> Result<[u8; 32], Conflict> {
+    struct Writer(kinewright_hash::Sha256);
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer(kinewright_hash::Sha256::new());
+    writer.0.update(domain);
+    serde_json::to_writer(&mut writer, value).map_err(|_| Conflict::Encoding)?;
+    Ok(writer.0.finalize())
+}
+impl Message {
+    fn digest(&self) -> Result<[u8; 32], Conflict> {
+        hash(
+            b"kinewright/accepted-command/v1\0",
+            &(&self.id, self.accepted, &self.action, &self.context),
+        )
+    }
+    fn chained(&self) -> Result<[u8; 32], Conflict> {
+        hash(
+            b"kinewright/accepted-chain/v1\0",
+            &(self.predecessor, self.digest()?),
+        )
+    }
+}
+impl StreamState {
+    pub fn installed(seed: Seed) -> Result<Self, Conflict> {
+        let tip = hash(b"kinewright/installed-stream/v1\0", &seed)?;
+        Ok(Self {
+            seed,
+            sequence: 0,
+            tip,
+            receipts: VecDeque::new(),
+        })
+    }
+    #[must_use]
+    pub const fn seed(&self) -> &Seed {
+        &self.seed
+    }
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    #[must_use]
+    pub const fn tip(&self) -> [u8; 32] {
+        self.tip
+    }
+    pub fn verify_installed_snapshot(&self, identity: SnapshotIdentity) -> Result<(), Conflict> {
+        if self.seed.installed != identity {
+            return Err(Conflict::Snapshot);
+        }
+        Ok(())
+    }
+    pub fn message(
+        &self,
+        id: CommandId,
+        accepted: CommandKey,
+        action: Action,
+        context: CommandContext,
+    ) -> Result<Message, Conflict> {
+        let mut message = Message {
+            id,
+            accepted,
+            action,
+            context,
+            sequence: self
+                .sequence
+                .checked_add(1)
+                .ok_or(Conflict::CounterExhausted)?,
+            predecessor: self.tip,
+            tip: [0; 32],
+        };
+        message.tip = message.chained()?;
+        Ok(message)
+    }
+    /// Receipt lookup precedes fresh authority. The absent suffix still needs
+    /// the current attachment's fencing proof at the publication owner.
+    pub fn lookup(&self, message: &Message) -> Result<Option<&Receipt>, Conflict> {
+        if let Some(receipt) = self
+            .receipts
+            .iter()
+            .find(|receipt| receipt.id == message.id)
+        {
+            if receipt.command != message.digest()?
+                || receipt.sequence != message.sequence
+                || receipt.accepted != message.accepted
+                || receipt.tip != message.tip
+            {
+                return Err(Conflict::CommandIdentity);
+            }
+            return Ok(Some(receipt));
+        }
+        if message.sequence
+            != self
+                .sequence
+                .checked_add(1)
+                .ok_or(Conflict::CounterExhausted)?
+        {
+            return Err(Conflict::Sequence);
+        }
+        if message.predecessor != self.tip || message.chained()? != message.tip {
+            return Err(Conflict::Chain);
+        }
+        Ok(None)
+    }
+    /// Build the prospective root state, without acknowledging or changing the
+    /// committed state. The caller publishes it with the new snapshot root.
+    pub fn advanced(
+        &self,
+        message: &Message,
+        accepted: CommandKey,
+    ) -> Result<(Self, Receipt), Conflict> {
+        if let Some(receipt) = self.lookup(message)? {
+            return Ok((self.clone(), receipt.clone()));
+        }
+        if message.accepted != accepted {
+            return Err(Conflict::AcceptedKey);
+        }
+        let receipt = Receipt {
+            id: message.id.clone(),
+            sequence: message.sequence,
+            accepted,
+            tip: message.tip,
+            command: message.digest()?,
+        };
+        let mut next = self.clone();
+        next.sequence = message.sequence;
+        next.tip = message.tip;
+        next.receipts.push_back(receipt.clone());
+        // A producer has at most 64 unacknowledged messages. It cannot advance
+        // past this window with an older message still pending. Other native
+        // and spending receipts keep their independent retention rules.
+        if next.receipts.len() > PENDING_COMMANDS {
+            next.receipts.pop_front();
+        }
+        Ok((next, receipt))
+    }
+    pub fn receipts(&self) -> impl Iterator<Item = &Receipt> {
+        self.receipts.iter()
+    }
+    pub fn validate(&self) -> Result<(), Conflict> {
+        if self.receipts.len() > PENDING_COMMANDS {
+            return Err(Conflict::ReceiptWindow);
+        }
+        if self.sequence == 0 {
+            let initial = Self::installed(self.seed.clone())?;
+            if self.tip != initial.tip || !self.receipts.is_empty() {
+                return Err(Conflict::Chain);
+            }
+        } else if self
+            .receipts
+            .back()
+            .is_none_or(|r| r.sequence != self.sequence || r.tip != self.tip)
+        {
+            return Err(Conflict::ReceiptWindow);
+        }
+        let first = self
+            .sequence
+            .saturating_sub(PENDING_COMMANDS as u64)
+            .saturating_add(1);
+        for (offset, receipt) in self.receipts.iter().enumerate() {
+            if receipt.sequence != first + offset as u64
+                || self
+                    .receipts
+                    .iter()
+                    .take(offset)
+                    .any(|prior| prior.id == receipt.id)
+            {
+                return Err(Conflict::ReceiptWindow);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "operation_protocol_tests.rs"]
+mod tests;

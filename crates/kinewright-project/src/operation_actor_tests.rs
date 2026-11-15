@@ -308,3 +308,196 @@ fn explicit_activity_recorder_and_applied_delta_have_separate_leased_readers() {
         "RETAINED_OPERATION_READERS_KEEP_THEIR_OWN_LEASES"
     );
 }
+
+fn context() -> CommandContext {
+    CommandContext {
+        creation: origin(),
+        inputs: vec![],
+        approval: None,
+        transition: None,
+    }
+}
+#[test]
+fn prepared_task_update_is_atomic_and_releases_its_working_lease_before_ack() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = Core::spawn(&pool, Role::Task, origin(), document()).unwrap();
+    let live_usage = pool.usage(Role::Task).unwrap().0;
+    let attachment = core.attach(&Proof).unwrap();
+    let cut = attachment.freeze(&Proof).unwrap();
+    let action = crate::operation_protocol::Action::Do {
+        operations: vec![lock(true)],
+        gesture: None,
+    };
+    let prepared = attachment.prepare(&Proof, cut, action, context()).unwrap();
+    assert_eq!(
+        pool.lease_counts(Role::Task).unwrap().0,
+        2,
+        "PREPARATION_USES_ONE_WORKING_HOLDER"
+    );
+    assert!(!locked(&core), "PREPARATION_LEAVES_LIVE_DOCUMENT_UNCHANGED");
+    assert_eq!(
+        attachment.freeze(&Proof).unwrap(),
+        cut,
+        "PREPARATION_LEAVES_LIVE_IDENTITY_UNCHANGED"
+    );
+    let selected = prepared.identity().unwrap();
+    let change = attachment.commit_prepared(&Proof, cut, prepared).unwrap();
+    assert_eq!(
+        change.position.epoch, cut.change.position.epoch,
+        "PUBLISHED_EDIT_DOES_NOT_INSTALL_ANOTHER_EPOCH"
+    );
+    assert_eq!(
+        pool.usage(Role::Task).unwrap().0,
+        live_usage,
+        "COMMIT_ACK_FOLLOWS_WORKING_LEASE_RELEASE"
+    );
+    let installed = attachment.freeze(&Proof).unwrap();
+    assert_eq!(
+        installed.identity(),
+        selected,
+        "COMMITTED_IDENTITY_EQUALS_PUBLISHED_PROSPECTIVE_IDENTITY"
+    );
+    attachment.resume(&Proof, installed).unwrap();
+    assert!(locked(&core), "PUBLISHED_PREPARED_DOCUMENT_BECOMES_LIVE");
+}
+#[test]
+fn candidate_staging_preserves_earlier_commands_and_the_live_creation_room() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = Core::spawn(&pool, Role::Candidate, origin(), document()).unwrap();
+    let original = core.export_history().unwrap().creation_sizing();
+    let live_usage = pool.usage(Role::Candidate).unwrap().0;
+    core.request(Command::Do(lock(true))).unwrap();
+    let first = core.export_history().unwrap().history().undo[0].commands()[0].id;
+    let attachment = core.attach(&Proof).unwrap();
+    for value in [false, true] {
+        let cut = attachment.freeze(&Proof).unwrap();
+        let prepared = attachment
+            .prepare_merge(&Proof, cut, vec![lock(value)], context())
+            .unwrap();
+        assert!(
+            pool.usage(Role::Candidate).unwrap().0 < 2 * live_usage,
+            "CANDIDATE_STAGING_USES_MEASURED_DELTA_ROOM"
+        );
+        let identity = prepared.identity().unwrap();
+        attachment.commit_prepared(&Proof, cut, prepared).unwrap();
+        assert_eq!(
+            pool.usage(Role::Candidate).unwrap().0,
+            live_usage,
+            "CANDIDATE_LIVE_LEASE_NEVER_GROWS"
+        );
+        let current = attachment.freeze(&Proof).unwrap();
+        assert_eq!(
+            current.identity(),
+            identity,
+            "CANDIDATE_PUBLISHED_IDENTITY_USES_LIVE_DESCRIPTOR"
+        );
+        attachment.resume(&Proof, current).unwrap();
+    }
+    let snapshot = core.export_history().unwrap();
+    assert_eq!(
+        snapshot.creation_sizing(),
+        original,
+        "CANDIDATE_COMMIT_KEEPS_IMMUTABLE_CREATION_ROOM"
+    );
+    let keys: Vec<_> = snapshot
+        .history()
+        .undo
+        .iter()
+        .flat_map(|s| s.commands().iter().map(|c| c.id))
+        .collect();
+    assert_eq!(keys.len(), 3, "CANDIDATE_MERGE_KEEPS_FULL_APPLIED_PREFIX");
+    assert_eq!(
+        keys[0], first,
+        "CANDIDATE_MERGE_NEVER_REKEYS_PRIOR_COMMANDS"
+    );
+    assert!(
+        keys.windows(2).all(|pair| pair[0] < pair[1]),
+        "CANDIDATE_MERGE_ACCEPTS_FRESH_KEYS_IN_ORDER"
+    );
+}
+#[test]
+fn refused_private_update_changes_nothing_and_releases_its_lease() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = Core::spawn(&pool, Role::Task, origin(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let cut = attachment.freeze(&Proof).unwrap();
+    let before = pool.usage(Role::Task).unwrap();
+    let action = crate::operation_protocol::Action::Do {
+        operations: vec![Operation::RemoveTrack { track: TrackId(99) }],
+        gesture: None,
+    };
+    assert!(
+        attachment.prepare(&Proof, cut, action, context()).is_err(),
+        "INVALID_PREPARED_EDIT_IS_REFUSED"
+    );
+    assert_eq!(
+        pool.usage(Role::Task).unwrap(),
+        before,
+        "REFUSED_PREVIEW_RELEASES_ALL_WORKING_MEMORY"
+    );
+    assert_eq!(
+        attachment.freeze(&Proof).unwrap(),
+        cut,
+        "REFUSED_PREPARED_EDIT_PRESERVES_COMPLETE_LIVE_STATE"
+    );
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn prospective_candidate_record_opens_with_the_original_live_descriptor_before_commit() {
+    use crate::{
+        bundle_copy::SessionStore,
+        operation_history::{CreationKind, StoredOwnerRecord},
+        storage_budget::StorageLimits,
+    };
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "hx-prepared-owner",
+    );
+    let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = Core::spawn(&pool, Role::Candidate, origin(), document()).unwrap();
+    core.request(Command::Do(lock(true))).unwrap();
+    let descriptor = core.export_history().unwrap().creation_sizing();
+    let attachment = core.attach(&Proof).unwrap();
+    let cut = attachment.freeze(&Proof).unwrap();
+    let prepared = attachment
+        .prepare_merge(&Proof, cut, vec![lock(false)], context())
+        .unwrap();
+    let expected = prepared.identity().unwrap();
+    let record = prepared.persist(session.store_mut(), |_| Ok(None)).unwrap();
+    let reader_pool = HistoryPool::new(PoolLimits::default());
+    let opened = StoredOwnerRecord::read(
+        session.store(),
+        &record.reference,
+        &reader_pool,
+        Role::Candidate,
+    )
+    .unwrap()
+    .open()
+    .unwrap();
+    assert_eq!(
+        opened.creation_sizing(),
+        descriptor,
+        "PREPARED_RECORD_REOPENS_WITH_ORIGINAL_LIVE_SIZING"
+    );
+    assert_eq!(
+        opened.creation_sizing().kind,
+        CreationKind::LiveCandidate,
+        "STAGING_RECORD_CANNOT_SHRINK_LIVE_CANDIDATE_ROOM"
+    );
+    assert_eq!(
+        opened.identity().unwrap(),
+        expected,
+        "PREPARED_RECORD_IDENTITY_SURVIVES_COLD_OPEN"
+    );
+    assert!(
+        locked(&core),
+        "PERSISTING_PREVIEW_DOES_NOT_MUTATE_LIVE_CORE"
+    );
+    attachment.commit_prepared(&Proof, cut, prepared).unwrap();
+    assert_eq!(
+        attachment.freeze(&Proof).unwrap().identity(),
+        expected,
+        "PUBLICATION_AND_COMMIT_NAME_THE_SAME_OWNER_STATE"
+    );
+}

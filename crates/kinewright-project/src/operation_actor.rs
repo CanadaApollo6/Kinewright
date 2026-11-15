@@ -26,6 +26,11 @@ use std::{
     thread,
 };
 
+#[path = "operation_actor_prepare.rs"]
+mod prepare;
+use prepare::PrepareRequest;
+pub use prepare::PreparedUpdate;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     History(HistoryError),
@@ -79,7 +84,8 @@ impl AcceptedCut {
     }
 }
 /// The caller supplies a verified command's immutable owner context.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandContext {
     pub creation: CreationOrigin,
     pub inputs: Vec<ObjectRef>,
@@ -146,6 +152,13 @@ enum Message {
         Sender<Result<ChangeId, Error>>,
     ),
     Retire(TypeId, AcceptedCut, Sender<Result<(), Error>>),
+    Prepare(Box<PrepareRequest>),
+    CommitPrepared(
+        TypeId,
+        AcceptedCut,
+        Box<PreparedUpdate>,
+        Sender<Result<ChangeId, Error>>,
+    ),
 }
 impl Core {
     pub fn spawn(
@@ -538,6 +551,11 @@ impl State {
                             .map_err(|error| Refusal { error, token: None });
                         self.broadcast(&notice);
                     }
+                    let _ = reply.send(result);
+                }
+                Message::Prepare(request) => self.prepare_update(&request),
+                Message::CommitPrepared(owner, cut, prepared, reply) => {
+                    let result = self.commit_update(owner, cut, *prepared);
                     let _ = reply.send(result);
                 }
                 Message::Retire(owner, cut, reply) => {

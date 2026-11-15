@@ -19,6 +19,22 @@ impl OwnerSnapshot {
         &self.data.history
     }
     #[must_use]
+    pub const fn ledger(&self) -> &ApprovalLedger {
+        &self.data.ledger
+    }
+    #[must_use]
+    pub const fn seeds(&self) -> &Lineage {
+        &self.data.seeds
+    }
+    #[must_use]
+    pub const fn origins(&self) -> &[CommandOrigin] {
+        self.data.origins.as_slice()
+    }
+    #[must_use]
+    pub const fn resources(&self) -> &BTreeSet<Resource> {
+        &self.data.resources
+    }
+    #[must_use]
     pub const fn creation_sizing(&self) -> super::CreationSizing {
         self.data.sizing
     }

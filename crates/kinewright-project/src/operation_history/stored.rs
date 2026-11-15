@@ -1,4 +1,5 @@
 //! Compact store shell. The operation/owner body stays raw until an owner opens it.
+use super::borrowed_identity::{OriginContexts, ResourceValues, SeedValues};
 use super::snapshot::SnapshotData;
 use super::{Error, HistoryPool, OwnerSnapshot, Resource, Role, ValidatedOwnerSnapshot};
 use crate::{
@@ -85,10 +86,9 @@ struct BorrowedBody<'a> {
     fold_frontier: Option<kinewright_core::undo::CommandKey>,
     #[serde(with = "super::transition::terminal_wire")]
     terminal_facts: &'a super::transition::TerminalFacts,
-    seeds: &'a super::Lineage,
-    #[serde(serialize_with = "write_origins")]
-    origins: &'a [super::CommandOrigin],
-    resources: &'a std::collections::BTreeSet<Resource>,
+    seeds: SeedValues<'a>,
+    origins: OriginContexts<'a>,
+    resources: ResourceValues<'a>,
     bindings: &'a [(Resource, ObjectRef)],
     ledger: &'a super::ApprovalLedger,
     #[serde(with = "super::ledger::folded_wire")]
@@ -142,7 +142,7 @@ impl OwnerSnapshot {
         // This serialization borrows the live command arrays. No second typed
         // payload list is made just to manufacture the compact store body.
         let history = &data.history;
-        let size = super::owner::exact_size(&BorrowedBody {
+        let body = BorrowedBody {
             undo: &history.undo,
             redo: &history.redo,
             position: history.position,
@@ -150,47 +150,123 @@ impl OwnerSnapshot {
             policy: history.policy,
             fold_frontier: data.fold_frontier,
             terminal_facts: &data.terminal_facts,
-            seeds: &data.seeds,
-            origins: &data.origins,
-            resources: &data.resources,
+            seeds: SeedValues::Captured(&data.seeds),
+            origins: OriginContexts::Captured(&data.origins),
+            resources: ResourceValues::Captured(&data.resources),
             bindings,
             ledger: &data.ledger,
             folded_approvals: &data.folded_approvals,
-        })?;
-        if size > data.sizing.limits()?.body_cap() {
-            return Err(Error::Capacity("persisted owner body"));
-        }
-        let body = serde_json::value::to_raw_value(&BorrowedBody {
-            undo: &history.undo,
-            redo: &history.redo,
-            position: history.position,
-            epoch: history.epoch,
-            policy: history.policy,
-            fold_frontier: data.fold_frontier,
-            terminal_facts: &data.terminal_facts,
-            seeds: &data.seeds,
-            origins: &data.origins,
-            resources: &data.resources,
-            bindings,
-            ledger: &data.ledger,
-            folded_approvals: &data.folded_approvals,
-        })
-        .map_err(|_| Error::InvalidRecord)?;
-        let record = StoredOwnerRecord {
-            role: data.role,
-            sizing: data.sizing,
+        };
+        encode_record(
+            &body,
+            data.role,
+            data.sizing,
             baseline,
             document,
-            identity: digest_text(&self.snapshot_identity()?),
-            edges: edges.into_iter().collect(),
-            body,
-        };
-        if super::owner::exact_size(&record)? > data.sizing.limits()?.shell_cap() {
-            return Err(Error::Capacity("persisted owner shell"));
-        }
-        Ok(record)
+            edges,
+            self.snapshot_identity()?,
+        )
     }
 }
+fn encode_record(
+    body: &BorrowedBody<'_>,
+    role: Role,
+    sizing: super::CreationSizing,
+    baseline: ObjectRef,
+    document: ObjectRef,
+    edges: std::collections::BTreeSet<ObjectRef>,
+    identity: [u8; 32],
+) -> Result<StoredOwnerRecord, Error> {
+    let limits = sizing.limits()?;
+    if super::owner::exact_size(body)? > limits.body_cap() {
+        return Err(Error::Capacity("persisted owner body"));
+    }
+    let body = serde_json::value::to_raw_value(body).map_err(|_| Error::InvalidRecord)?;
+    let record = StoredOwnerRecord {
+        role,
+        sizing,
+        baseline,
+        document,
+        identity: digest_text(&identity),
+        edges: edges.into_iter().collect(),
+        body,
+    };
+    if super::owner::exact_size(&record)? > limits.shell_cap() {
+        return Err(Error::Capacity("persisted owner shell"));
+    }
+    Ok(record)
+}
+impl super::OwnerHistory {
+    /// Publish the sealed prospective destination view. The working state
+    /// remains in its own creation-sized preview holder; this writes bytes
+    /// under scratch and creates no extra retained capture or lease.
+    pub(super) fn persist_prepared(
+        &self,
+        store: &mut ProjectStore,
+        sizing: super::CreationSizing,
+        mut resolve_resource: impl FnMut(&Resource) -> Result<Option<ObjectRef>, Error>,
+    ) -> Result<SealedObject, Error> {
+        let _window = self.reservation.workspace()?;
+        let baseline = store
+            .admit_document(self.core.baseline())
+            .map_err(store_error)?;
+        let document = store
+            .admit_document(self.core.document())
+            .map_err(store_error)?;
+        let mut bindings = Vec::new();
+        for resource in self.resources.values() {
+            match resolve_resource(resource)? {
+                Some(reference) if binding_matches(store, resource, &reference)? => {
+                    bindings.push((resource.clone(), reference));
+                }
+                None if matches!(resource, Resource::Media { sha256: None, .. }) => {}
+                _ => return Err(Error::MissingResource),
+            }
+        }
+        let mut edges = std::collections::BTreeSet::new();
+        for row in &self.origins.0 {
+            edges.extend(row.origin.inputs.iter().cloned());
+        }
+        edges.extend(
+            self.ledger
+                .transition_entries()
+                .map(|entry| entry.id.clone()),
+        );
+        edges.extend(
+            self.ledger
+                .entries()
+                .map(|entry| entry.approval.reference.clone()),
+        );
+        edges.extend(bindings.iter().map(|(_, reference)| reference.clone()));
+        let position = self.core.position();
+        let body = BorrowedBody {
+            undo: self.core.undo(),
+            redo: self.core.redo(),
+            position: position.position,
+            epoch: position.epoch,
+            policy: self.core.policy(),
+            fold_frontier: self.fold_frontier,
+            terminal_facts: &self.terminal_facts,
+            seeds: SeedValues::Live(self),
+            origins: OriginContexts::Live(&self.origins),
+            resources: ResourceValues::Live(&self.resources),
+            bindings: &bindings,
+            ledger: &self.ledger,
+            folded_approvals: &self.folded_approvals,
+        };
+        let record = encode_record(
+            &body,
+            self.reservation.role(),
+            sizing,
+            baseline.reference,
+            document.reference,
+            edges,
+            self.identity_unreserved(sizing)?.digest(),
+        )?;
+        store.admit_record(&record).map_err(store_error)
+    }
+}
+
 fn binding_matches(
     store: &ProjectStore,
     resource: &Resource,
@@ -629,16 +705,6 @@ fn write_undo<S: serde::Serializer>(steps: &VecDeque<Step>, s: S) -> Result<S::O
 }
 fn write_redo<S: serde::Serializer>(steps: &[Step], s: S) -> Result<S::Ok, S::Error> {
     s.collect_seq(steps.iter().map(StepWire))
-}
-fn write_origins<S: serde::Serializer>(
-    origins: &[super::CommandOrigin],
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    s.collect_seq(
-        origins
-            .iter()
-            .map(|origin| (&origin.creation, &origin.inputs)),
-    )
 }
 
 /// Per-input work only. The temporary encoding is dropped before Core copies

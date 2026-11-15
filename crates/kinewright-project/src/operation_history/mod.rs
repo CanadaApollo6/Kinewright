@@ -9,6 +9,8 @@ pub use identity::SnapshotIdentity;
 mod ledger;
 mod lineage;
 mod owner;
+mod preview;
+pub(crate) use preview::PreparedOwner;
 mod reservation;
 mod sizing;
 pub use sizing::{CreationKind, CreationSizing, FixedLimits};
