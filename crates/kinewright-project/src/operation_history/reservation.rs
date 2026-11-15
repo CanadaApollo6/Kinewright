@@ -217,6 +217,11 @@ impl HistoryReservation {
         self.role != Role::Candidate
             || matches!(self.sizing.kind, super::CreationKind::LiveCandidate)
     }
+    pub(super) fn pool(&self) -> HistoryPool {
+        HistoryPool {
+            shared: Arc::clone(&self.shared),
+        }
+    }
     pub fn capture(&self) -> Result<Self, Error> {
         HistoryPool {
             shared: Arc::clone(&self.shared),

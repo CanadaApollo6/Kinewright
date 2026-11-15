@@ -26,35 +26,10 @@ impl SnapshotData {
         })
     }
     pub(super) fn owner_digest(&self) -> Result<[u8; 32], Error> {
-        #[derive(Serialize)]
-        struct Owner<'a> {
-            role: super::Role,
-            sizing: super::CreationSizing,
-            fold_frontier: Option<kinewright_core::undo::CommandKey>,
-            #[serde(with = "super::transition::terminal_wire")]
-            terminal_facts: &'a super::transition::TerminalFacts,
-            seeds: &'a super::Lineage,
-            origins: &'a [super::CommandOrigin],
-            resources: &'a std::collections::BTreeSet<super::Resource>,
-            ledger: &'a super::ApprovalLedger,
-            #[serde(with = "super::ledger::folded_wire")]
-            folded_approvals: &'a super::ledger::FoldedApprovals,
-        }
-        let owner = Owner {
-            role: self.role,
-            sizing: self.sizing,
-            fold_frontier: self.fold_frontier,
-            terminal_facts: &self.terminal_facts,
-            seeds: &self.seeds,
-            origins: &self.origins,
-            resources: &self.resources,
-            ledger: &self.ledger,
-            folded_approvals: &self.folded_approvals,
-        };
-        digest(&owner)
+        super::borrowed_identity::captured(self)
     }
 }
-fn digest(value: &impl Serialize) -> Result<[u8; 32], Error> {
+pub(super) fn digest(value: &impl Serialize) -> Result<[u8; 32], Error> {
     struct Writer(kinewright_hash::Sha256);
     impl std::io::Write for Writer {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

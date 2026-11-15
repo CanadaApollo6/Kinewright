@@ -736,3 +736,31 @@ fn fixed_transition_charge_covers_both_routing_indexes_and_terminal_fact() {
         "TRANSITION_CHARGE_COVERS_ROUTING_INDEXES_AND_TERMINAL_FACT"
     );
 }
+
+#[test]
+fn transition_approvals_stop_at_the_immutable_creation_owner_envelope() {
+    let pool = super::tests::story_pool();
+    let mut owner = OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+        Ok(document())
+    })
+    .unwrap();
+    owner
+        .execute(super::tests::remove(), origin(2), vec![], None)
+        .unwrap();
+    // A conservative running owner bound may already be full because of Do
+    // metadata. No approval may spend the role maximum above this fixed lease.
+    owner.owner_bytes = owner.reservation.limits().envelope.owners;
+    let target = owner.transition_target(Direction::Undo).unwrap();
+    let before = owner.identity().unwrap();
+    let result = owner.approve_transition(id(99), Direction::Undo, target);
+    assert_eq!(
+        result,
+        Err(Error::Capacity("owner metadata")),
+        "TRANSITION_APPROVAL_USES_CREATION_OWNER_LIMIT"
+    );
+    assert_eq!(
+        owner.identity().unwrap(),
+        before,
+        "TRANSITION_OWNER_LIMIT_REFUSAL_IS_ATOMIC"
+    );
+}

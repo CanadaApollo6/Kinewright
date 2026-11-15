@@ -13,6 +13,16 @@ pub struct OwnerSnapshot {
     pub(super) data: SnapshotData,
     pub(super) reservation: super::HistoryReservation,
 }
+impl OwnerSnapshot {
+    #[must_use]
+    pub const fn history(&self) -> &Record {
+        &self.data.history
+    }
+    #[must_use]
+    pub const fn creation_sizing(&self) -> super::CreationSizing {
+        self.data.sizing
+    }
+}
 pub struct ValidatedOwnerSnapshot {
     identity: super::SnapshotIdentity,
     core: kinewright_core::undo::ValidatedSnapshot,

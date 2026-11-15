@@ -452,6 +452,14 @@ impl History {
         history.recorder = Some(Vec::new());
         Ok(history)
     }
+    /// A caller explicitly opts in before the endpoint accepts any activity.
+    pub fn recording(mut self) -> Result<Self, Error> {
+        if self.position != 0 || !self.undo.is_empty() || !self.redo.is_empty() {
+            return Err(Error::InvalidMetadata);
+        }
+        self.recorder = Some(Vec::new());
+        Ok(self)
+    }
     #[must_use]
     pub fn document(&self) -> &Arc<Document> {
         &self.document

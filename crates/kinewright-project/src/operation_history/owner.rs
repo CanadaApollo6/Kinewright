@@ -503,6 +503,34 @@ impl OwnerHistory {
             reservation,
         })
     }
+    /// Evaluation endpoints opt in before spawning their actor. Product
+    /// constructors leave the complete activity recorder disabled.
+    pub fn recording(mut self) -> Result<Self, Error> {
+        self.core = self.core.recording()?;
+        Ok(self)
+    }
+    pub fn operations(&self, recorded: bool) -> Result<OwnerOperations, Error> {
+        let reservation = self.reservation.capture()?;
+        let _window = reservation.workspace()?;
+        let operations = if recorded {
+            // This reader independently owns the complete evaluation activity.
+            self.core.op_log().ok_or(Error::InvalidPolicy)?.to_vec()
+        } else {
+            self.core.applied_delta().cloned().collect()
+        };
+        Ok(OwnerOperations {
+            operations,
+            _reservation: reservation,
+        })
+    }
+    #[must_use]
+    pub fn pool(&self) -> HistoryPool {
+        self.reservation.pool()
+    }
+    #[must_use]
+    pub const fn creation_sizing(&self) -> super::CreationSizing {
+        self.reservation.sizing()
+    }
     #[must_use]
     pub fn history(&self) -> &History {
         &self.core
@@ -985,4 +1013,16 @@ pub(super) fn baseline_charge(
         .max(lineage.capacity_bytes()?)
         .checked_add(resources.len() as u64 * 512 + 4096)
         .ok_or(Error::Capacity("baseline metadata"))
+}
+
+/// An independently retained operation reader pays its source's full lease.
+pub struct OwnerOperations {
+    operations: Vec<Operation>,
+    _reservation: HistoryReservation,
+}
+impl std::ops::Deref for OwnerOperations {
+    type Target = [Operation];
+    fn deref(&self) -> &Self::Target {
+        &self.operations
+    }
 }

@@ -166,12 +166,20 @@ impl OwnerHistory {
         let next = self
             .owner_bytes
             .checked_add(bytes)
-            .filter(|bytes| *bytes <= self.reservation.role().envelope().owners)
+            .filter(|bytes| *bytes <= self.reservation.limits().envelope.owners)
             .ok_or(Error::Capacity("owner metadata"))?;
         let decode = self
             .decode_bound
             .checked_add(TRANSITION_DECODE)
-            .filter(|bytes| *bytes <= self.reservation.role().envelope().workspace)
+            .filter(|bytes| {
+                *bytes
+                    <= self
+                        .reservation
+                        .limits()
+                        .envelope
+                        .workspace
+                        .min(super::stored::DECODE_LIMIT)
+            })
             .ok_or(Error::Capacity("owner decode"))?;
         self.ledger
             .transitions

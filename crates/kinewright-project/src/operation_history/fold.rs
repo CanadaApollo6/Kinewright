@@ -309,6 +309,20 @@ impl FoldState {
     }
     /// Captures and queries own their lineage; slot compaction never copies a
     /// live seed map on the command path. Stable order matches the old journal.
+    pub fn ordered_ancestry<'a>(
+        &self,
+        lineage: &'a Lineage,
+    ) -> Vec<&'a (OccurrenceId, OccurrenceId, Clip)> {
+        let mut edges: Vec<_> = lineage.split_ancestry.iter().collect();
+        edges.sort_unstable_by_key(|(child, _, _)| {
+            self.seeds
+                .edges
+                .get(child)
+                .expect("indexed live ancestor")
+                .order
+        });
+        edges
+    }
     pub fn materialize(&self, lineage: &Lineage) -> Lineage {
         let mut out = lineage.clone();
         out.split_ancestry.sort_unstable_by_key(|(child, _, _)| {

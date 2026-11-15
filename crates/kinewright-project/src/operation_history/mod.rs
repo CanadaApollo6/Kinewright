@@ -2,6 +2,7 @@
 //! their current audit, lineage, resource and stored-history implementations.
 #![allow(clippy::missing_errors_doc)]
 
+mod borrowed_identity;
 mod fold;
 mod identity;
 pub use identity::SnapshotIdentity;
@@ -20,7 +21,7 @@ pub use transition::{
 pub(crate) mod stored;
 pub use ledger::{Approval, ApprovalAnswer, ApprovalEntry, ApprovalLedger, Fate, RemovedTarget};
 pub use lineage::{CreationOrigin, Lineage};
-pub use owner::{OwnerBoundary, OwnerCounters, OwnerHistory};
+pub use owner::{OwnerBoundary, OwnerCounters, OwnerHistory, OwnerOperations};
 pub use reservation::{Envelope, HistoryPool, HistoryReservation, PoolLimits, Role, Workspace};
 pub use resources::{Resource, Resources};
 pub use snapshot::{OwnerSnapshot, ValidatedOwnerSnapshot};
@@ -29,7 +30,7 @@ pub use stored::StoredOwnerRecord;
 use kinewright_core::undo::{CommandKey, PreparedError};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     History(kinewright_core::undo::Error),
     Capacity(&'static str),

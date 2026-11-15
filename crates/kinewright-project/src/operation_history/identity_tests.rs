@@ -141,3 +141,56 @@ fn owner_identity_binds_role_with_core_fixed() {
         "OWNER_IDENTITY_BINDS_ROLE",
     );
 }
+
+#[test]
+fn borrowed_identity_matches_captures_without_copying_seed_maps_after_folds() {
+    let pool = super::tests::story_pool();
+    let bounds = RoleBounds {
+        step_cap: 1,
+        ..Role::Ordinary.bounds()
+    };
+    let mut owner = OwnerHistory::measured(
+        &pool,
+        Role::Ordinary,
+        Role::Ordinary.policy(),
+        &origin(1),
+        bounds,
+        || Ok(clip_document()),
+    )
+    .unwrap();
+    let mut cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../kinewright-core/tests/support/history_operation_cases.json"
+    ))
+    .unwrap();
+    let split = serde_json::from_value(cases["SplitClip"]["operation"].take()).unwrap();
+    owner
+        .execute(Command::Do(split), origin(2), vec![], None)
+        .unwrap();
+    let track = owner.history().document().tracks[0].id;
+    for position in 3..7 {
+        owner
+            .execute(
+                Command::Do(Operation::SetTrackSyncLock {
+                    track,
+                    locked: position % 2 == 0,
+                }),
+                origin(position),
+                vec![],
+                None,
+            )
+            .unwrap();
+        let captured = owner.capture().unwrap();
+        let expected = captured.identity().unwrap();
+        let before = OwnerCounters::read();
+        assert_eq!(
+            owner.identity().unwrap(),
+            expected,
+            "BORROWED_IDENTITY_MATCHES_CAPTURE_AFTER_FOLD"
+        );
+        assert_eq!(
+            OwnerCounters::read().since(before).seed_map_copies,
+            0,
+            "BORROWED_IDENTITY_NEVER_COPIES_SEED_MAPS"
+        );
+    }
+}
