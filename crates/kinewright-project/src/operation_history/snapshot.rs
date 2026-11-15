@@ -116,14 +116,35 @@ impl OwnerHistory {
         };
         Ok(OwnerSnapshot { data, reservation })
     }
+    pub fn install_snapshot(
+        &mut self,
+        snapshot: ValidatedOwnerSnapshot,
+    ) -> Result<CommandKey, Error> {
+        let epoch = self
+            .core
+            .position()
+            .epoch
+            .max(snapshot.core.epoch())
+            .checked_add(1)
+            .ok_or(Error::History(
+                kinewright_core::undo::Error::CounterExhausted,
+            ))?;
+        self.install_snapshot_at_epoch(snapshot, epoch)
+    }
     #[expect(
         clippy::too_many_lines,
         reason = "validate all merged approval evidence before replacing either Core or owner state"
     )]
-    pub fn install_snapshot(
+    pub(crate) fn install_snapshot_at_epoch(
         &mut self,
         mut snapshot: ValidatedOwnerSnapshot,
+        install_epoch: u64,
     ) -> Result<CommandKey, Error> {
+        if install_epoch <= self.core.position().epoch || install_epoch < snapshot.core.epoch() {
+            return Err(Error::History(
+                kinewright_core::undo::Error::InvalidMetadata,
+            ));
+        }
         if self.reservation.role() != snapshot.reservation.role()
             || !self.reservation.shares_pool(&snapshot.reservation)
         {
@@ -140,15 +161,6 @@ impl OwnerHistory {
                 return Err(Error::CommandConflict);
             }
         }
-        let install_epoch = self
-            .core
-            .position()
-            .epoch
-            .max(snapshot.core.epoch())
-            .checked_add(1)
-            .ok_or(Error::History(
-                kinewright_core::undo::Error::CounterExhausted,
-            ))?;
         for entry in self.ledger.entries() {
             if let Some(command) = snapshot.origins.get(&entry.key)
                 && command.origin.payload_digest != entry.payload_digest
@@ -294,7 +306,9 @@ impl OwnerHistory {
         snapshot
             .reservation
             .promote_replacing(Some(&self.reservation))?;
-        let position = self.core.install_snapshot(snapshot.core)?;
+        let position = self
+            .core
+            .install_snapshot_at_epoch(snapshot.core, install_epoch)?;
         self.ledger = snapshot.ledger;
         self.folded_approvals = snapshot.folded_approvals;
         self.seeds = snapshot.seeds;

@@ -285,6 +285,23 @@ impl History {
         super::digest(self)
     }
     pub fn install_snapshot(&mut self, snapshot: ValidatedSnapshot) -> Result<CommandKey, Error> {
+        let epoch = self
+            .epoch
+            .max(snapshot.record.epoch)
+            .checked_add(1)
+            .ok_or(Error::CounterExhausted)?;
+        self.install_snapshot_at_epoch(snapshot, epoch)
+    }
+    /// Adopt an already selected installation epoch in another replica. The
+    /// epoch must advance this endpoint and may not precede the selected record.
+    pub fn install_snapshot_at_epoch(
+        &mut self,
+        snapshot: ValidatedSnapshot,
+        epoch: u64,
+    ) -> Result<CommandKey, Error> {
+        if epoch <= self.epoch || epoch < snapshot.record.epoch {
+            return Err(Error::InvalidMetadata);
+        }
         // An opt-in activity recorder belongs to this live endpoint, rather
         // than the installed record. Its existing prefix must still fit.
         if self
@@ -296,11 +313,6 @@ impl History {
         {
             return Err(Error::Capacity);
         }
-        let epoch = self
-            .epoch
-            .max(snapshot.record.epoch)
-            .checked_add(1)
-            .ok_or(Error::CounterExhausted)?;
         // Runtime buffers occupy anchor allowances in the live endpoint,
         // independent of the selected record. Installation must not spend
         // those same bytes again on fresh anchors.

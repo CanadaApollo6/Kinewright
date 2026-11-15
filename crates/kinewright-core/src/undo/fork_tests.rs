@@ -149,3 +149,52 @@ fn installing_a_snapshot_preserves_the_live_stream_buffer_allowance() {
     history.release_stream_buffer().unwrap();
     assert_eq!(history.cache.slots(), 4);
 }
+
+#[test]
+fn a_forwarded_install_adopts_the_selected_epoch_without_rekeying_commands() {
+    let mut selected = History::new(
+        Document::default(),
+        RetentionPolicy::Fold,
+        RoleBounds::ORDINARY,
+    )
+    .unwrap();
+    let mut peer = History::new(
+        Document::default(),
+        RetentionPolicy::Fold,
+        RoleBounds::ORDINARY,
+    )
+    .unwrap();
+    let original = selected
+        .execute(crate::Command::Do(crate::Operation::SetPanLaw {
+            law: crate::PanLaw::default(),
+        }))
+        .unwrap()
+        .accepted;
+    let captured = selected.record().validate(RoleBounds::ORDINARY).unwrap();
+    selected.install_snapshot(captured).unwrap();
+    let forwarded = selected.record().validate(RoleBounds::ORDINARY).unwrap();
+    peer.install_snapshot_at_epoch(forwarded, selected.position().epoch)
+        .unwrap();
+    assert_eq!(
+        peer.snapshot_identity().unwrap(),
+        selected.snapshot_identity().unwrap(),
+        "FORWARDED_INSTALL_USES_THE_SELECTED_EPOCH"
+    );
+    assert_eq!(
+        peer.undo().back().unwrap().commands()[0].id,
+        original,
+        "FORWARDED_INSTALL_PRESERVES_ORIGINAL_COMMAND_KEYS"
+    );
+    let before = peer.snapshot_identity().unwrap();
+    let invalid = peer.record().validate(RoleBounds::ORDINARY).unwrap();
+    assert_eq!(
+        peer.install_snapshot_at_epoch(invalid, peer.position().epoch),
+        Err(Error::InvalidMetadata),
+        "INSTALL_EPOCH_MUST_ADVANCE_THE_DESTINATION"
+    );
+    assert_eq!(
+        peer.snapshot_identity().unwrap(),
+        before,
+        "REFUSED_INSTALL_EPOCH_PRESERVES_THE_DESTINATION"
+    );
+}

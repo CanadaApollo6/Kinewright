@@ -165,6 +165,7 @@ enum Message {
         Option<TypeId>,
         Option<AcceptedCut>,
         Box<ValidatedOwnerSnapshot>,
+        Option<u64>,
         Sender<Result<ChangeId, Error>>,
     ),
     Retire(TypeId, AcceptedCut, Sender<Result<(), Error>>),
@@ -197,6 +198,13 @@ impl Core {
             OwnerHistory::new(pool, role, role.policy(), &origin, || Ok(document.into()))?
                 .recording()?;
         Self::spawn_owner(history, origin.branch, TimelineRevision::default())
+    }
+    pub fn open(
+        snapshot: ValidatedOwnerSnapshot,
+        branch: BranchId,
+        revision: TimelineRevision,
+    ) -> Result<Self, Error> {
+        Self::spawn_owner(snapshot.open()?, branch, revision)
     }
     pub(crate) fn spawn_owner(
         history: OwnerHistory,
@@ -334,7 +342,7 @@ impl Core {
     }
     /// Setup-only installation; a bound actor requires its owner's attachment.
     pub fn install_snapshot(&self, snapshot: ValidatedOwnerSnapshot) -> Result<ChangeId, Error> {
-        self.call(|reply| Message::Install(None, None, Box::new(snapshot), reply))?
+        self.call(|reply| Message::Install(None, None, Box::new(snapshot), None, reply))?
     }
 }
 impl<P: 'static> Attachment<P> {
@@ -361,6 +369,26 @@ impl<P: 'static> Attachment<P> {
                 Some(TypeId::of::<P>()),
                 Some(cut),
                 Box::new(snapshot),
+                None,
+                reply,
+            )
+        })?
+    }
+    /// A peer adopts the epoch already chosen by the installing owner. Its
+    /// record was replay-validated before reaching this frozen attachment.
+    pub fn install_snapshot_at_epoch(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        snapshot: ValidatedOwnerSnapshot,
+        epoch: u64,
+    ) -> Result<ChangeId, Error> {
+        self.core.call(|reply| {
+            Message::Install(
+                Some(TypeId::of::<P>()),
+                Some(cut),
+                Box::new(snapshot),
+                Some(epoch),
                 reply,
             )
         })?
@@ -425,6 +453,7 @@ impl State {
         owner: Option<TypeId>,
         cut: Option<AcceptedCut>,
         snapshot: ValidatedOwnerSnapshot,
+        epoch: Option<u64>,
     ) -> Result<ChangeId, Error> {
         match (owner, cut) {
             (Some(owner), Some(cut)) => self.check_cut(owner, cut)?,
@@ -442,11 +471,11 @@ impl State {
                 .checked_add(1)
                 .ok_or(Error::CounterExhausted)?,
         );
-        let position = self
-            .history
-            .as_mut()
-            .ok_or(Error::Retired)?
-            .install_snapshot(snapshot)?;
+        let history = self.history.as_mut().ok_or(Error::Retired)?;
+        let position = match epoch {
+            Some(epoch) => history.install_snapshot_at_epoch(snapshot, epoch)?,
+            None => history.install_snapshot(snapshot)?,
+        };
         self.generation = generation;
         self.revision = revision;
         // No fallible action follows installation. A frozen owner obtains a new
@@ -583,8 +612,8 @@ impl State {
                     });
                     let _ = reply.send(result);
                 }
-                Message::Install(owner, cut, snapshot, reply) => {
-                    let result = self.install(owner, cut, *snapshot);
+                Message::Install(owner, cut, snapshot, epoch, reply) => {
+                    let result = self.install(owner, cut, *snapshot, epoch);
                     if result.is_ok() {
                         let notice = self
                             .history()

@@ -1054,3 +1054,64 @@ fn a_store_admitted_payload_survives_the_permitted_actor_and_cold_record_open() 
         "ADMITTED_REDO_PAYLOAD_RETAINS_ITS_MANIFEST_AND_BYTES"
     );
 }
+
+#[test]
+fn a_peer_actor_adopts_the_selected_epoch_at_its_own_frozen_cut() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let source = Core::spawn(&pool, Role::Task, origin.clone(), document()).unwrap();
+    source.request(Command::Do(lock(true))).unwrap();
+    let before = source.change_id().unwrap();
+    let peer = Core::open(
+        source.export_history().unwrap().validate().unwrap(),
+        origin.branch,
+        before.revision,
+    )
+    .unwrap();
+    assert_eq!(
+        peer.change_id().unwrap().revision,
+        before.revision,
+        "COLD_ACTOR_OPENS_AT_ITS_SAVED_REVISION"
+    );
+    let source_attachment = source.attach(&Proof).unwrap();
+    let source_cut = source_attachment.freeze(&Proof).unwrap();
+    source_attachment
+        .install_snapshot(
+            &Proof,
+            source_cut,
+            source.export_history().unwrap().validate().unwrap(),
+        )
+        .unwrap();
+    let selected_epoch = source.change_id().unwrap().position.epoch;
+    let peer_attachment = peer.attach(&Proof).unwrap();
+    let peer_cut = peer_attachment.freeze(&Proof).unwrap();
+    peer_attachment
+        .install_snapshot_at_epoch(
+            &Proof,
+            peer_cut,
+            source.export_history().unwrap().validate().unwrap(),
+            selected_epoch,
+        )
+        .unwrap();
+    let source_identity = source.export_history().unwrap().identity().unwrap();
+    let peer_identity = peer.export_history().unwrap().identity().unwrap();
+    assert_eq!(
+        peer_identity, source_identity,
+        "ACTOR_FORWARDING_USES_THE_SAME_COMBINED_SNAPSHOT_IDENTITY"
+    );
+    assert_eq!(
+        peer.change_id().unwrap().position,
+        source.change_id().unwrap().position,
+        "ACTOR_FORWARDING_STARTS_EXACTLY_ONE_SHARED_EPOCH"
+    );
+    assert_eq!(
+        peer.change_id().unwrap().revision,
+        source.change_id().unwrap().revision,
+        "ACTOR_FORWARDING_PRESERVES_REPLICA_REVISION_AGREEMENT"
+    );
+    assert_eq!(
+        peer_attachment.resume(&Proof, peer_cut),
+        Err(Error::CaptureChanged),
+        "PEER_INSTALL_INVALIDATES_ITS_OLD_FROZEN_CUT"
+    );
+}

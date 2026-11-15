@@ -269,3 +269,86 @@ fn a_record_cannot_give_two_approvals_of_one_command_different_fates() {
         "ONE_COMMAND_CANNOT_CARRY_CONTRADICTORY_APPROVAL_FATES"
     );
 }
+
+#[test]
+fn forwarding_a_selected_snapshot_keeps_its_epoch_and_recomputed_approval_fate() {
+    use super::tests::{approval, remove};
+    for captured_undone in [false, true] {
+        let pool = super::tests::story_pool();
+        let make = || {
+            OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+                Ok(document())
+            })
+            .unwrap()
+        };
+        let mut selected = make();
+        let mut peer = make();
+        for owner in [&mut selected, &mut peer] {
+            owner
+                .execute(remove(), origin(2), vec![], Some(approval()))
+                .unwrap();
+            if captured_undone {
+                owner
+                    .execute(Command::Undo, origin(3), vec![], None)
+                    .unwrap();
+            }
+        }
+        let saved = selected.capture().unwrap().validate().unwrap();
+        for owner in [&mut selected, &mut peer] {
+            owner
+                .execute(
+                    if captured_undone {
+                        Command::Redo
+                    } else {
+                        Command::Undo
+                    },
+                    origin(4),
+                    vec![],
+                    None,
+                )
+                .unwrap();
+        }
+        selected.install_snapshot(saved).unwrap();
+        let epoch = selected.history().position().epoch;
+        peer.install_snapshot_at_epoch(selected.capture().unwrap().validate().unwrap(), epoch)
+            .unwrap();
+        assert_eq!(
+            peer.identity().unwrap(),
+            selected.identity().unwrap(),
+            "FORWARDED_OWNER_INSTALL_HAS_THE_SAME_COMBINED_IDENTITY"
+        );
+        let approved = kinewright_core::undo::CommandKey {
+            epoch: 0,
+            position: 0,
+        };
+        let expected = if captured_undone {
+            Fate::Undone
+        } else {
+            Fate::Applied
+        };
+        assert_eq!(
+            peer.ledger().get(approved).unwrap().fate,
+            expected,
+            "FORWARDED_INSTALL_RECOMPUTES_THE_SELECTED_COMMAND_FATE"
+        );
+        assert_eq!(
+            peer.ledger().get(approved).unwrap().install_epoch,
+            Some(epoch),
+            "FORWARDED_INSTALL_STAMPS_THE_AGREED_EPOCH"
+        );
+        super::roundtrip_tests::saved_open(&peer);
+        let before = peer.identity().unwrap();
+        let invalid = peer.capture().unwrap().validate().unwrap();
+        assert_eq!(
+            peer.install_snapshot_at_epoch(invalid, epoch),
+            Err(Error::History(
+                kinewright_core::undo::Error::InvalidMetadata
+            ))
+        );
+        assert_eq!(
+            peer.identity().unwrap(),
+            before,
+            "AGREED_EPOCH_REFUSAL_IS_ATOMIC_FOR_THE_WHOLE_OWNER"
+        );
+    }
+}
