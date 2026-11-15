@@ -109,23 +109,21 @@ impl KinewrightMcp {
             ));
         }
         let mut checked = None;
+        let validate = || -> Result<(), Refusal> {
+            let current = self.dialogue_provider()?;
+            for (id, value) in &plan.bindings {
+                let asset = before.asset(*id).ok_or(Refusal::Identity)?;
+                let now = dialogue::bound(current.as_ref(), asset)?;
+                if now.binding() != value.binding() {
+                    return Err(Refusal::BindingChanged);
+                }
+            }
+            Ok(())
+        };
         let result = self.apply_edit_plan_observed(
             args.expected_revision,
             &plan.operations,
-            || {
-                let current = self.dialogue_provider().map_err(|e| e.to_string())?;
-                for (id, value) in &plan.bindings {
-                    let asset = before
-                        .asset(*id)
-                        .ok_or_else(|| "dialogue asset disappeared".to_string())?;
-                    let now =
-                        dialogue::bound(current.as_ref(), asset).map_err(|e| e.to_string())?;
-                    if now.binding() != value.binding() {
-                        return Err(Refusal::BindingChanged.to_string());
-                    }
-                }
-                Ok(())
-            },
+            || validate().err().map(|reason| refused(&reason)),
             |new_revision, doc| {
                 let retained: Vec<_> = plan
                     .changes
@@ -149,6 +147,10 @@ impl KinewrightMcp {
             },
         )?;
         if result.is_error == Some(true) {
+            // Validation already supplied its typed refusal at the MCP boundary.
+            if result.structured_content.is_some() {
+                return Ok(result);
+            }
             let cause = result
                 .content
                 .iter()

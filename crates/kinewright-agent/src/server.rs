@@ -2978,7 +2978,7 @@ impl KinewrightMcp {
         expected_revision: TimelineRevision,
         operations: &[Operation],
     ) -> Result<CallToolResult, McpError> {
-        self.apply_edit_plan_observed(expected_revision, operations, || Ok(()), |_, _| {})
+        self.apply_edit_plan_observed(expected_revision, operations, || None, |_, _| {})
     }
 
     #[allow(clippy::too_many_lines, reason = "one revision-gated edit transaction")]
@@ -2986,7 +2986,7 @@ impl KinewrightMcp {
         &self,
         expected_revision: TimelineRevision,
         operations: &[Operation],
-        validate: impl Fn() -> Result<(), String>,
+        validate: impl Fn() -> Option<CallToolResult>,
         mut observe: impl FnMut(TimelineRevision, &Document),
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, before) = self.snapshot()?;
@@ -3031,8 +3031,8 @@ impl KinewrightMcp {
         if let Err(error) = self.check_batch_history(operations) {
             return Ok(error_text(error));
         }
-        if let Err(reason) = validate() {
-            return Ok(error_text(reason));
+        if let Some(refusal) = validate() {
+            return Ok(refusal);
         }
         let confirmation = plan_confirmation_description(&before, operations);
         if self.task_control.is_none()
@@ -3057,8 +3057,8 @@ impl KinewrightMcp {
         {
             return Ok(error_text(error));
         }
-        if let Err(reason) = validate() {
-            return Ok(error_text(reason));
+        if let Some(refusal) = validate() {
+            return Ok(refusal);
         }
         let apply = || {
             self.core.request(Command::DoBatchIfRevision {

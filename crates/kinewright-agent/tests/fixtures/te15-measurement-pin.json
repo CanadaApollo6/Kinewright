@@ -17,7 +17,7 @@
   "arm": "candidate",
   "arm_bridge_sha256": {
     "host": "1dc546325c88cfc3345648715893a4b99c4b9d2192ed099cb10815cc73b8eb9f",
-    "mcp_observation": "24b5e68fd892b4528cc1dc8615739df083dc2ba5bbf865b9b3347a73cfbe4094",
+    "mcp_observation": "065e39fccbdbe8351e175ba0942978e2d1e933c96907d8fb4a13df803c74d447",
     "native_child_publication": "2c2d01a86104177309ed89cc55e3b235ca90b65a97b51b9d761d0206b3b1d7e3",
     "runtime": "444221c0da246b8844cdd5435a5b0d739826c6bda52aace3eaa4834b8735ff42",
     "studio": "3e7985882210493e7eb680dba374db131bc07f21204066d9be689899b0d2295d",

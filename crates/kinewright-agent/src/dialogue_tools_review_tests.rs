@@ -428,12 +428,7 @@ fn dq_tools_review_binding_changes_during_confirmation() {
             &r,
             "DQ_TOOLS_BINDING_RECHECK_AFTER_CONSENT",
         );
-        assert!(
-            content(&r)
-                .to_string()
-                .contains("bound words/profile changed"),
-            "{r:?}"
-        );
+        assert_eq!(content(&r)["reason"], json!({"code":"binding_changed"}));
     });
 }
 #[test]
@@ -481,6 +476,7 @@ fn dq_tools_review_stale_before_confirmation_never_prompts() {
         let r = worker.join().unwrap();
         assert!(!prompted, "DQ_TOOLS_STALE_BEFORE_PROMPT");
         assert_refused_unchanged(&s, &before, &history, &r, "DQ_TOOLS_STALE_NOT_CONSUMED");
+        assert_eq!(content(&r)["reason"], json!({"code":"binding_changed"}));
     });
 }
 #[test]

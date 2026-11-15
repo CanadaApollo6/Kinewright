@@ -409,3 +409,68 @@ the full slow suite, renderer execution of this new waveform fixture, and
 provider/paid/dry launches are NOT RUN. Evidence is under `target/dq-tools-item12/` and
 `target/dq-tools-review/pairs/unmeasured-extents-*`. No Core or Media source,
 standing instructions, guide text, or serving switch is changed.
+
+## Item 13: typed refusals survive both binding checks
+
+The confirmation validator now returns an optional, already-structured tool
+refusal. The dialogue check keeps `Result<(), Refusal>` until that response
+boundary; no provider refusal is converted into text. Both pre-prompt and
+post-consent checks return it unchanged. The caller forwards structured failures
+and retains the existing `edit_refused` text wrapper for ordinary edit errors.
+There is no list of recognised refusal variants and no new pending variant.
+A future provider status field is carried by the same serializer as its first
+lookup failure. The validation path adds no mutable error side channel, extra
+lock, clone or RefCell.
+
+The injected provider first answers the plan, then refuses read 2 (before the
+prompt) or read 3 (after consent). Two tests exercise both `Acoustic` and `Request`
+refusals. Each reply equals the complete first-call refusal reply, not just its
+code. They also assert exact prompt ordering, provider read count and unchanged
+document, revision and history. Both tests failed on the parent at
+`DQ_TOOLS_TYPED_RECHECK_REFUSAL`: the old response replaced `acoustic` and its
+`at_us`/`quiet_us` fields with `edit_refused` and text. The fixed dialogue module
+passes **40 / 0 / 1 ignored**, in 0.88 s. The existing binding-change control now
+asserts its exact typed `binding_changed` reason instead of the old wrapper text.
+
+The retained late-binding mutant was retargeted mechanically to the optional
+response callback, preserving the same omission of the second check. It fails
+at `DQ_TOOLS_BINDING_RECHECK_AFTER_CONSENT` (0 passed / 1 failed, 24.04 s);
+the byte-identical restore passes (1 / 0, 28.83 s). No other retained pairs are
+rerun. Original late-binding logs were archived under
+`target/dq-tools-item13/previous-late-binding/` before the new run.
+
+Only the private measurement-pin leaf `arm_bridge_sha256.mcp_observation` changes:
+`24b5e68fd892b4528cc1dc8615739df083dc2ba5bbf865b9b3347a73cfbe4094`
+→ `065e39fccbdbe8351e175ba0942978e2d1e933c96907d8fb4a13df803c74d447`.
+Both pin tests pass (8,856 named fields); model-visible leaves are unchanged,
+and models/options remain OPEN.
+
+The requested media test fix was cherry-picked cleanly as `542e7eb2` from
+`b110c0f6`. Author, author date and complete message were compared byte-for-byte
+and preserved, including its original co-author footer. Its S3b upload witness
+records GPU buffers only while armed and checks the compositing thread retains
+none after its owner drops. This is the only Media file changed in this stack;
+no Media product source was edited for the dialogue fixes. Final gates include
+both the serial Media lib suite and the workspace fast suite with that fix.
+
+The serial Media lib suite passes **1,202 / 0 / 68 ignored** in **1,042.51 s**
+of test time (**2,983.01 s wall**, including the shared-lock wait). The new
+compositing-thread upload witness passed, and the process exited normally.
+
+The final workspace fast suite passes **5,460 / 0 / 266 ignored** in
+**2,435.40 s wall**. Per-crate passed / ignored: Core 897 / 2; Agent 1,747 / 166;
+App 1,082 / 10; Media 1,234 / 73; Project 483 / 4; Hash 6 / 0; Job-sys 11 / 11.
+Every crate has zero failures. Workspace build, default/eval all-target clippy
+`-D warnings`, Cargo fmt and explicit included-file rustfmt checks pass.
+Lint reports 140 slow tests / 161 ignored entries / 27 equipped skip sites;
+parser selftests (52) and shard selftests (23) pass.
+
+The default guard passes (three artifacts, 29.64 s). All four Windows
+cross-clippy modes, three isolated Linux shipping builds and three isolated
+MSVC shipping checks pass; the combined platform wrapper takes **271.00 s**.
+Successful shipping targets (3.7 GiB and 907 MiB) were removed; `target/` is
+28 GiB. All builds and tests have ended. Evidence is under
+`target/dq-tools-item13/`, with the retained pair under
+`target/dq-tools-review/pairs/late-binding-*`. The full slow suite, Windows
+execution, renderer conformance for the Item 12 waveform, and provider/paid/dry
+launches are NOT RUN. No provider command or paid entry was used.
