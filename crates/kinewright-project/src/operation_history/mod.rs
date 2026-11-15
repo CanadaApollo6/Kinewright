@@ -17,9 +17,11 @@ pub use sizing::{CreationKind, CreationSizing, FixedLimits};
 mod resources;
 mod snapshot;
 mod transition;
+mod transport;
 pub use transition::{
     Direction, TransitionApproval, TransitionCounts, TransitionFate, Uncertainty,
 };
+pub use transport::SnapshotTransport;
 pub(crate) mod stored;
 pub use ledger::{Approval, ApprovalAnswer, ApprovalEntry, ApprovalLedger, Fate, RemovedTarget};
 pub use lineage::{CreationOrigin, Lineage};

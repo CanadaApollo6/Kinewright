@@ -1381,3 +1381,129 @@ fn attachment_capture_is_a_fixed_cut_and_shares_the_actor_identity_domain() {
     assert_eq!(parent.attachment_state().unwrap(), AttachmentState::Frozen);
     owner.resume(&Proof, frozen).unwrap();
 }
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one native publication sequence checks the writer and installing peer at every action"
+)]
+fn native_publications_are_identical_to_the_peers_selected_install() {
+    use crate::operation_history::{ApprovalAnswer, RemovedTarget};
+    use crate::operation_protocol::Action;
+    let pool = HistoryPool::new(PoolLimits::default());
+    let source = origin();
+    let writer = Core::spawn(&pool, Role::Task, source.clone(), document()).unwrap();
+    let peer = Core::open(
+        writer.export_history().unwrap().validate().unwrap(),
+        source.branch,
+        TimelineRevision(0),
+    )
+    .unwrap();
+    let writer_owner = writer.attach(&Proof).unwrap();
+    let peer_owner = peer.attach(&Proof).unwrap();
+    let reference = ObjectRef {
+        sha256: "a".repeat(64),
+        byte_length: 1,
+        record_kind: crate::bundle_records::RecordKind::OwnedEvidence,
+    };
+    let actions = [
+        Action::Do {
+            operations: vec![Operation::RemoveTrack { track: TrackId(1) }],
+            gesture: None,
+        },
+        Action::Undo,
+        Action::Redo,
+        Action::Close,
+        Action::Undo,
+        Action::Undo,
+        Action::Redo,
+    ];
+    for (index, action) in actions.into_iter().enumerate() {
+        let cut = writer_owner.freeze(&Proof).unwrap();
+        let peer_cut = peer_owner.freeze(&Proof).unwrap();
+        assert_eq!(cut.identity(), peer_cut.identity());
+        let mut ctx = context();
+        if index == 0 {
+            ctx.approval = Some(Approval {
+                reference: reference.clone(),
+                targets: vec![RemovedTarget::Track(TrackId(1))],
+            });
+        }
+        let update = writer_owner
+            .prepare_install(&Proof, cut, action, ctx)
+            .unwrap();
+        let expected = update.identity().unwrap();
+        let revision = update.revision();
+        assert_eq!(
+            revision.0,
+            cut.change().revision.0 + 1,
+            "NATIVE_INSTALL_ADVANCES_REVISION_EVEN_FOR_CLOSE_OR_EMPTY_UNDO"
+        );
+        assert_eq!(
+            writer_owner.freeze(&Proof).unwrap(),
+            cut,
+            "NATIVE_PUBLICATION_LEAVES_LIVE_STATE_UNCHANGED_BEFORE_COMMIT"
+        );
+        let committed = writer_owner.commit_prepared(&Proof, cut, update).unwrap();
+        let selected = writer.export_history().unwrap();
+        assert_eq!(selected.identity().unwrap(), expected);
+        assert_eq!(
+            selected.history().epoch,
+            cut.change().position.epoch + 1,
+            "NATIVE_PUBLICATION_SELECTS_ONE_NEW_INSTALL_EPOCH"
+        );
+        assert_eq!(
+            selected
+                .history()
+                .undo
+                .front()
+                .or_else(|| selected.history().redo.first())
+                .unwrap()
+                .commands()[0]
+                .id
+                .epoch,
+            0,
+            "NATIVE_INSTALL_NEVER_REKEYS_THE_APPROVED_COMMAND"
+        );
+        if index == 0 {
+            assert_eq!(
+                selected
+                    .ledger()
+                    .get_approval(&reference)
+                    .unwrap()
+                    .install_epoch,
+                Some(committed.position.epoch),
+                "NEW_APPROVAL_HAS_THE_SELECTED_INSTALL_PROVENANCE"
+            );
+        }
+        peer_owner
+            .install_snapshot_at_epoch(
+                &Proof,
+                peer_cut,
+                selected.validate().unwrap(),
+                committed.position.epoch,
+            )
+            .unwrap();
+        assert_eq!(
+            peer_owner.freeze(&Proof).unwrap().identity(),
+            expected,
+            "NATIVE_PREPARED_IDENTITY_EQUALS_THE_PEERS_INSTALLED_IDENTITY"
+        );
+        assert_eq!(
+            peer.change_id().unwrap().revision,
+            revision,
+            "NATIVE_PUBLICATION_AND_PEER_INSTALL_SHARE_THE_SAVED_REVISION"
+        );
+        assert_eq!(
+            peer.approval_answer(reference.clone()).unwrap(),
+            writer.approval_answer(reference.clone()).unwrap(),
+            "NATIVE_PUBLICATION_AND_PEER_INSTALL_SHARE_APPROVAL_FATES"
+        );
+        if index == 2 {
+            assert_eq!(
+                peer.approval_answer(reference.clone()).unwrap(),
+                Some(ApprovalAnswer::Kept)
+            );
+        }
+    }
+}

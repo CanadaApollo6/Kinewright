@@ -484,6 +484,13 @@ impl History {
             position: self.position,
         }
     }
+    /// Select the install epoch for a private publication preview of this
+    /// already validated state. Retained commands keep their original keys;
+    /// the peer adopts this epoch after validating the published record.
+    pub fn begin_install_epoch(&mut self) -> Result<CommandKey, Error> {
+        self.epoch = self.epoch.checked_add(1).ok_or(Error::CounterExhausted)?;
+        Ok(self.position())
+    }
     #[must_use]
     pub const fn charge(&self) -> Charge {
         Charge {

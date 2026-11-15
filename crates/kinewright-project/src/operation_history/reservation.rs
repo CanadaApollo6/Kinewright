@@ -79,6 +79,9 @@ pub struct HistoryPool {
     shared: Arc<Pool>,
 }
 impl HistoryPool {
+    pub(crate) fn same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
     #[must_use]
     pub fn new(limits: PoolLimits) -> Self {
         Self {

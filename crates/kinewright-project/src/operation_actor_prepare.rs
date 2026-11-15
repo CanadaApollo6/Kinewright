@@ -55,8 +55,14 @@ pub(super) struct PrepareRequest {
     cut: AcceptedCut,
     action: Action,
     context: CommandContext,
-    merge: bool,
+    kind: Preparation,
     reply: Sender<Result<PreparedUpdate, Error>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Preparation {
+    Command,
+    Merge,
+    Install,
 }
 impl<P: 'static> Attachment<P> {
     pub fn prepare(
@@ -66,7 +72,18 @@ impl<P: 'static> Attachment<P> {
         action: Action,
         context: CommandContext,
     ) -> Result<PreparedUpdate, Error> {
-        self.prepare_inner(cut, action, context, false)
+        self.prepare_inner(cut, action, context, Preparation::Command)
+    }
+    /// A native command whose saved state the GUI will install. Pick the
+    /// common epoch and install provenance in the private holder before Save.
+    pub fn prepare_install(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        action: Action,
+        context: CommandContext,
+    ) -> Result<PreparedUpdate, Error> {
+        self.prepare_inner(cut, action, context, Preparation::Install)
     }
     pub fn prepare_merge(
         &self,
@@ -82,7 +99,7 @@ impl<P: 'static> Attachment<P> {
                 gesture: None,
             },
             context,
-            true,
+            Preparation::Merge,
         )
     }
     fn prepare_inner(
@@ -90,7 +107,7 @@ impl<P: 'static> Attachment<P> {
         cut: AcceptedCut,
         action: Action,
         context: CommandContext,
-        merge: bool,
+        kind: Preparation,
     ) -> Result<PreparedUpdate, Error> {
         self.core.call(|reply| {
             Message::Prepare(Box::new(PrepareRequest {
@@ -98,7 +115,7 @@ impl<P: 'static> Attachment<P> {
                 cut,
                 action,
                 context,
-                merge,
+                kind,
                 reply,
             }))
         })?
@@ -123,7 +140,7 @@ impl State {
             request.cut,
             &request.action,
             &request.context,
-            request.merge,
+            request.kind,
         );
         let _ = request.reply.send(result);
     }
@@ -133,7 +150,7 @@ impl State {
         cut: AcceptedCut,
         action: &Action,
         context: &CommandContext,
-        merge: bool,
+        kind: Preparation,
     ) -> Result<PreparedUpdate, Error> {
         self.check_cut(authority, cut)?;
         self.check_drained()?;
@@ -150,7 +167,7 @@ impl State {
             Action::Close => false,
             Action::Do { .. } => true,
         };
-        let revision = if changed {
+        let revision = if changed || kind == Preparation::Install {
             TimelineRevision(
                 self.revision
                     .0
@@ -164,7 +181,7 @@ impl State {
             .generation
             .checked_add(1)
             .ok_or(Error::CounterExhausted)?;
-        let mut preview = if merge {
+        let mut preview = if kind == Preparation::Merge {
             let Action::Do {
                 operations,
                 gesture: None,
@@ -177,6 +194,9 @@ impl State {
             current.private_preview()?
         };
         let effects = action.apply(context, &mut preview)?;
+        if kind == Preparation::Install {
+            preview.prepare_peer_install(current)?;
+        }
         let position = preview.history().position();
         let event = Event::DocumentChanged {
             doc: Arc::clone(preview.history().document()),

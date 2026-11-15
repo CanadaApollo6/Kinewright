@@ -7,6 +7,27 @@ pub(crate) struct PreparedOwner {
     destination: CreationSizing,
 }
 impl OwnerHistory {
+    pub(crate) fn prepare_peer_install(&mut self, previous: &Self) -> Result<(), Error> {
+        let epoch = self.core.begin_install_epoch()?.epoch;
+        // Both endpoints start from the agreed cut. The preview already owns
+        // every approval in that cut, including those discarded by this edit.
+        // Match the install's fate normalisation and provenance before hashing
+        // or publishing, including a newly admitted approval absent previously.
+        for entry in self.ledger.commands.values_mut() {
+            if entry.fate == super::Fate::Redone {
+                entry.fate = super::Fate::Applied;
+            }
+            if previous
+                .ledger
+                .get_approval(&entry.approval.reference)
+                .map(|old| old.fate)
+                != Some(entry.fate)
+            {
+                entry.install_epoch = Some(epoch);
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn private_preview(&self) -> Result<Self, Error> {
         self.preview_sized(self.reservation.sizing())
     }
