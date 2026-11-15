@@ -387,3 +387,219 @@ The native-linking/protocol/provider/dialogue agent checks passed 101 tests;
 the app checks passed 115. All four CI self-tests, slow-test lint and actionlint
 passed. Evidence is `target/dq-media/r1/`; the largest recorded target size was
 36,670,032,763 bytes. The build/test process exited successfully before this commit.
+
+## R2: real-recording rehearsal
+
+The production chain completed twice, including real recognition, sound profile,
+the cached provider, the real dispatcher, confirmed Core edits, independent check,
+and CPU export mixing. No cut setting, acoustic threshold, model setting or
+protected file was changed. M5 remains off. The scripted editor uses no overrules.
+
+`server::tests::dialogue_rehearsal_tests::dq_media_real_recording_rehearsal` is an
+ignored on-demand test listed in `ci/ignored-tests.txt`. It requires all four
+absolute environment paths: `KINEWRIGHT_REHEARSAL_AUDIO`, `KINEWRIGHT_ASR_MODEL_DIR`,
+`KINEWRIGHT_REHEARSAL_DATA`, and `KINEWRIGHT_REHEARSAL_OUTPUT`. Output must be under
+this worktree's `target/dq-media/rehearsal/`; the private data root must be inside
+that output tree. There is no application-data discovery. The fixture verifies
+and copies the explicitly supplied pinned EN model into its private installation,
+then the real transcript worker uses normal verified provisioning from that
+complete installation. The measured process ran under `unshare -rn`, so no model
+or other network download was possible. The source clip and probe model stayed
+read only. The feature-gated `rehearsal_support` wrappers call the existing model
+verifier and production export mixer; they add no recognizer or provider substitute.
+
+On this Linux host, force lavapipe with `VK_DRIVER_FILES` and
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json` and `WGPU_BACKEND=vulkan`.
+The engine's otherwise-required compositor context is forced to the CPU fallback;
+preview publication is disabled and no frame is requested. No physical GPU or
+audio device is used. The WAV wrapper calls the production `export::mix_audio`
+and writes its 48 kHz stereo float samples, without the video exporter.
+
+After sourcing the native setup outside the lock, the on-demand entry is:
+
+```sh
+flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 \
+  cargo test -p kinewright-agent --lib \
+  server::tests::dialogue_rehearsal_tests::dq_media_real_recording_rehearsal \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The measurement used the compiled test executable directly under the same outer
+lock, with `nice -n 19 python3 -I -B target/dq-media/measure-child.py` and
+`unshare -rn`, excluding Cargo compilation from wall time and peak RSS. Rust
+was the unoptimized test profile, the native SDK its existing Release build,
+and recognition used the unchanged four-thread identity and native clamp.
+The warm run uses a fresh Core, dispatcher and provider with the original document,
+while retaining the explicit fixture caches in the same process. Timing starts
+inside the dispatcher caller and includes confirmation and reply serialization;
+it excludes the prior model/measurement wait and WAV rendering. Approvals are
+scripted in place of the person, not bypassed. No listener or model is involved
+in issuing the editing requests.
+
+### Inputs and selection
+
+The clip is `/home/riels/.cache/kw-probe-asr/audio/derived/ami8.wav`, 15,360,078 bytes, SHA-256
+`3565188c90972ee3bc6993345c6ecbd611b5957abe12c4d56fa7ffad21c5b4c0`. The model is the pinned Nemotron Speech Streaming
+EN 0.6B Q8_0 from `/home/riels/.cache/kw-probe-asr/models/nemotron-speech-streaming-en-0.6b`. The observed adapter was
+`llvmpipe (LLVM 23.1.4, 256 bits)` (`vulkan`, software fallback true).
+
+The real recognizer emitted 906 words. Selection uses every merged Core
+quiet/valley run strictly longer than 700 ms, including quiet hidden by stretched
+ASR word ends; overlapping quiet and valley evidence is counted once. Each pause
+asks `leave_micros: 300000`. Every standalone word accepted by the existing
+`is_filler_word` matcher is selected: normalized `um`, `uh`, `erm`, `hmm`, `mm`,
+`mhm`; emitted matches were `uh` × 14, `um` × 40.
+No context-dependent words were added to that matcher.
+
+There were 165 requested candidates: 111 measured pauses and
+54 fillers. Five 32-removal calls and one
+5-removal call sent all 165 candidates; all six batches were refused atomically. The script retried the surviving addresses individually in
+timeline order. All 152 cut calls stayed within 32 removals. Every applied
+call was followed by a fresh bound transcript read: 79 reads including the initial one.
+
+| Kind | Requested | Applied as asked | Applied with edge movement | Individually refused | Atomic batch refused; retry address gone |
+|---|---:|---:|---:|---:|---:|
+| filler | 54 | 0 | 39 | 15 | 0 |
+| pause | 111 | 1 | 38 | 53 | 19 |
+
+Totals: 1 applied as asked, 77 applied after an edge moved,
+68 individual typed refusals, and 19 refused batch members that
+could not be retried once preceding successful cuts removed their original
+left word. Those 19 are not counted as successful pause trims or as additional
+tool-level typed refusals. No different word was substituted: a pause address
+names adjacent original recording words. The chain completes with this explicit
+addressing limitation rather than claiming that every requested pause was tightened.
+
+Duration is **480.000 s → 338.966667 s**, a reduction of
+141.033333 s (29.382%). In exact project frames this is
+14400 → 10169 at 30 fps. Filler cuts removed
+92.566667 s
+including surrounding air; pause cuts removed
+48.466667 s.
+
+### Edge movement
+
+The comparison origin is the requested word's raw source interval. For a pause
+it is the measured run minus 300 ms allocated with the unchanged production
+3:2 air ratio (180 ms left, 120 ms right). Movement includes acoustic relocation
+and frame placement. Fractions remain exact in the JSON evidence; this table
+rounds to milliseconds. P90 and P95 use nearest rank; medians average the middle
+two values where needed. These are magnitudes across both edges of every applied
+cut, including zero movement, not a statement that a moved cut is perceptually good.
+
+| Edges | Count | Zero | Absolute median, ms | P90, ms | P95, ms | Maximum, ms | Signed range, ms |
+|---|---:|---:|---:|---:|---:|---:|---|
+| filler | 78 | 0 | 673.333 | 2820.000 | 4413.333 | 6633.333 | -5273.333 to 6633.333 |
+| pause | 78 | 10 | 6.667 | 26.667 | 950.000 | 2533.333 | -2533.333 to 16.667 |
+| all | 156 | 10 | 153.333 | 1926.667 | 2820.000 | 6633.333 | -5273.333 to 6633.333 |
+
+Magnitude bins: zero: 10, 0–one frame: 63, one frame–100 ms: 2, 100–300 ms: 13, 300–1000 ms: 36, over 1000 ms: 32.
+
+### Refusals and unavailable retries
+
+Times below are exact original source/timeline positions rounded to milliseconds;
+the initial clip starts at source and timeline zero at unit speed. Every reason
+with fewer than three occurrences lists all its occurrences.
+
+| Reason | Count | Up to three examples, seconds |
+|---|---:|---|
+| acoustic: no measured quiet or sufficiently deep dip brackets this word boundary | 12 | filler 5.760–5.840 s (`um`); filler 36.240–36.320 s (`um`); filler 180.480–180.560 s (`uh`) |
+| acoustic: more than one measured pause separates these word addresses; choose a narrower cut | 51 | pause 9.170–10.250 s (`so / that's`); pause 25.790–26.590 s (`friendly / um`); pause 27.350–28.300 s (`friendly / um`) |
+| minimum_cut | 1 | filler 70.560–70.640 s (`uh`) |
+| acoustic: the pause is already too short to leave the requested duration | 2 | pause 152.210–153.440 s (`family's / beagle`); pause 238.320–240.040 s (`allergic / to`) |
+| acoustic: no project frame lies inside this edge's measured support | 2 | filler 239.840–239.920 s (`um`); filler 312.000–312.080 s (`um`) |
+| Original left address no longer survives (script retry status) | 19 | 53.420–54.420 s (`um / so`); 68.970–69.720 s (`um / so`); 129.240–130.180 s (`um / high`) |
+
+The disappeared left-address texts were `uh` × 1, `um` × 17, `way` × 1. These are address observations; the exported audio remains available for audition.
+
+The minimum-cut refusal reports 66,666 us against a 100,000 us minimum.
+The ambiguous-pause refusals were not overridden or narrowed by guessed source
+edges. Full request positions, refusal evidence and exact resulting edges are
+in `run1-results.json` and `run1-calls.jsonl`.
+
+### Independent check
+
+The final `check_dialogue_cut` requested `detail: all`. All selected clips were
+checked; no `not_checked` or per-apply `check_failed` result occurred. The table
+uses the complete `total` counters, not just the bounded displayed items.
+
+| Check kind | Total | Detail omitted |
+|---|---:|---:|
+| joins | 80 | 60 |
+| edge_in_sound | 0 | 0 |
+| short_air | 60 | 43 |
+| room_tone_jumps | 10 | 6 |
+| dip_intrusions | 14 | 11 |
+| pauses | 62 | 44 |
+| repeats | 11 | 9 |
+| holes | 181 | 157 |
+| sounding_holes | 89 | 65 |
+| quiet_phrases | 0 | 0 |
+
+Joins are context; pauses, repeats, holes and quiet phrases are warnings. Guard
+flags are independent. `sounding_holes` is a subset of `holes`. The wire budget
+also omitted 16 other-audio rows; every observed row was zero on this single
+audio track. No omitted detail is treated as a passing check.
+
+### Latency, reply size and memory
+
+These are ready-tool calls after the transcript/profile job, not transcription
+latency. A check has only one observation per run, so its median equals its worst.
+Bytes are the complete serialized MCP `CallToolResult`, excluding JSON-RPC framing.
+
+| Tool | Calls/run | Run 1 median / worst, ms | Warm median / worst, ms | Reply median / worst, bytes |
+|---|---:|---:|---:|---:|
+| `get_timeline_transcript` | 79 | 31.383 / 33.316 | 31.497 / 34.133 | 42,038 / 47,827 |
+| `cut_dialogue` | 152 | 153.319 / 214.408 | 152.572 / 211.927 | 1,972.5 / 5,339 |
+| `check_dialogue_cut` | 1 | 66.184 / 66.184 | 66.832 / 66.832 | 24,087 / 24,087 |
+
+Cold here means missing transcript/profile values, with the model installation
+already verified and the operating-system file cache warm. Cold transcript/profile
+readiness took 38.771671 s; warm readiness
+took 30.066 ms. Whole-child wall time was 85.015147 s,
+user CPU 175.422984 s, system CPU 25.795253 s. Peak RSS was
+**1,058,308 KiB** using Linux `wait4`/`ru_maxrss`, for the entire test
+process (both runs, model preparation, engine, reply recording and WAV export),
+not a sampled inference-only figure. The launcher and child were nice 19.
+One-minute machine load was 2.67 before and 3.72 after.
+
+**Warm-cache replies are byte-identical: True.** This compares every
+complete reply in order for all 232 editor/read/check calls, against a fresh
+original document; timing metadata is outside the compared reply bytes. The raw
+`run1-replies.jsonl` and `run2-replies.jsonl` compare equal with `cmp`. Measurement
+progress/status polling is outside this ready-reply comparison.
+
+The WAVs are `target/dq-media/rehearsal/original.wav` and
+`target/dq-media/rehearsal/edited.wav`, both independently probed as 48 kHz stereo
+`pcm_f32le`, 480.000000 and 338.966667 seconds. Raw traces, both resulting
+document snapshots, result accounting, `summary.json`, `resource.json` and the WAV probes
+are beside them. The source/model paths are explicit; no application cache or
+probe output was used as a transcript substitute.
+
+### Final-code rerun and validation
+
+Two complete cold-transcript/profile plus warm-cache pairs were executed. The
+preparatory pair is retained under `target/dq-media/rehearsal/preliminary/`.
+After moving the fixture-only wrappers into their own feature-gated module and
+finishing lint/format fixes, the final pair used freshly emptied fixture
+transcript/profile caches and the same verified model installation. All tables
+above use the final pair, rather than selecting a faster run. Its first-run
+complete replies also compare byte-for-byte equal to the preparatory first run.
+
+The final gate passed 1,313 media tests (83 ignored), all 15 focused
+upload-witness tests, workspace all-target clippy and formatting, workspace build
+and test compilation, and all three separate shipping checks and actual builds.
+Windows media and agent library/test Rust cross-checks passed; Windows execution
+was not run on this Linux host. Native-linking, protocol, provider and dialogue
+checks passed 101 agent tests (57 existing/on-demand ignores), and the app checks
+passed 115 tests (three ignores). All four CI self-test scripts, slow-test lint
+and actionlint passed. The final on-demand rehearsal test then passed with both
+runs and the two independently probed WAVs. Evidence is `target/dq-media/r2/`.
+
+The largest observed pre-prune target snapshot was 38,105,147,582 bytes. After
+all tests finished, inactive generated test executables were pruned again,
+retaining `target/dq1/`, all `target/dq-media/` evidence and both WAVs. The final
+target size is **25,714,339,913 bytes** (25.714 GB), below the 40 GB cap.
+Protected dialogue-tool files and Core `dialogue/` remain byte-identical to
+`517d7f40`; no cut policy was changed to improve the rehearsal result.
+All started build and test processes completed before this commit.

@@ -242,3 +242,5 @@ kinewright_media sound_profile::tests::dq_media_measurement_file_benchmark crate
 kinewright_media sound_profile::pass_comparison::dq_media_decode_pass_comparison crates/kinewright-media/src/sound_profile.rs any on-demand # explicit fixture/output paths; recognition benchmark also needs pinned EN model
 kinewright_media sound_profile::recognition_benchmark::dq_media_recognition_and_measurement_benchmark crates/kinewright-media/src/sound_profile.rs any on-demand # explicit fixture/output paths; recognition benchmark also needs pinned EN model
 kinewright_agent server::tests::dialogue_tool_tests::dq_tools_review_scratch_cost crates/kinewright-agent/src/dialogue_tools_review_tests.rs any on-demand # Dialogue planner timing on a 3000-clip document and all 512 failed trials
+
+kinewright_agent server::tests::dialogue_rehearsal_tests::dq_media_real_recording_rehearsal crates/kinewright-agent/src/dialogue_rehearsal_tests.rs any on-demand # explicit AMI audio, pinned EN model, private data and output roots; no downloads

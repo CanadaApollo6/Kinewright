@@ -52,6 +52,8 @@ mod verify;
 pub mod voice_note;
 mod worker;
 
+#[cfg(feature = "test-util")]
+pub mod rehearsal_support;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 

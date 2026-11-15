@@ -19250,6 +19250,7 @@ fn render_plan_outcomes(
 mod tests {
     include!("dialogue_tools_tests.rs");
     include!("dialogue_measurement_tests.rs");
+    include!("dialogue_rehearsal_tests.rs");
     use super::*;
     #[test]
     fn dq1_word_search_normalises_model_spelling() {
