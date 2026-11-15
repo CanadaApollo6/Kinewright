@@ -21,7 +21,7 @@ use std::{
     marker::PhantomData,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread,
 };
@@ -62,8 +62,7 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ActorIdentity(u64);
+pub use kinewright_core::ActorIdentity;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeId {
     pub actor: ActorIdentity,
@@ -155,6 +154,11 @@ enum Message {
     ),
     Subscribe(Sender<Notification>),
     Change(Sender<Result<ChangeId, Error>>),
+    AttachmentState(Sender<AttachmentState>),
+    Fork(
+        Role,
+        Sender<Result<(OwnerHistory, TimelineRevision), Error>>,
+    ),
     Capture(Sender<Result<CapturedHistory, Error>>),
     Approval(
         ObjectRef,
@@ -170,6 +174,7 @@ enum Message {
     ),
     Bind(TypeId, Sender<Result<(), Error>>),
     Freeze(TypeId, Sender<Result<AcceptedCut, Error>>),
+    Cut(TypeId, Sender<Result<AcceptedCut, Error>>),
     Finish(TypeId, AcceptedCut, bool, Sender<Result<(), Error>>),
     Install(
         Option<TypeId>,
@@ -221,16 +226,8 @@ impl Core {
         branch: BranchId,
         revision: TimelineRevision,
     ) -> Result<Self, Error> {
-        static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
         let pool = history.pool();
-        #[allow(deprecated, reason = "MSRV predates AtomicU64::try_update")]
-        let identity = ActorIdentity(
-            NEXT_ACTOR
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
-                    old.checked_add(1)
-                })
-                .map_err(|_| Error::CounterExhausted)?,
-        );
+        let identity = ActorIdentity::fresh().ok_or(Error::CounterExhausted)?;
         let (sender, receiver) = unbounded();
         thread::Builder::new()
             .name("kinewright-core".into())
@@ -275,6 +272,25 @@ impl Core {
     #[must_use]
     pub const fn history_pool(&self) -> &HistoryPool {
         &self.pool
+    }
+    /// Make a child from one atomic parent cut. Existing clips retain their
+    /// original lineage, and a delta child never inherits Undo or Redo stacks.
+    pub fn fork(
+        &self,
+        role: Role,
+        origin: CreationOrigin,
+        inherit_revision: bool,
+    ) -> Result<(Self, TimelineRevision), Error> {
+        let (owner, parent_revision) = self.call(|reply| Message::Fork(role, reply))??;
+        let revision = if inherit_revision {
+            parent_revision
+        } else {
+            TimelineRevision::default()
+        };
+        Ok((
+            Self::spawn_owner(owner, origin.branch, revision)?,
+            parent_revision,
+        ))
     }
     pub fn send(&self, command: Command) -> Result<(), Error> {
         self.sender
@@ -327,6 +343,9 @@ impl Core {
     pub fn operations(&self, recorded: bool) -> Result<OwnerOperations, Error> {
         self.call(|reply| Message::Operations(recorded, reply))?
     }
+    pub fn attachment_state(&self) -> Result<AttachmentState, Error> {
+        self.call(Message::AttachmentState)
+    }
     pub fn change_id(&self) -> Result<ChangeId, Error> {
         self.call(Message::Change)?
     }
@@ -365,6 +384,10 @@ impl Core {
     }
 }
 impl<P: 'static> Attachment<P> {
+    pub fn capture(&self, _proof: &P) -> Result<AcceptedCut, Error> {
+        self.core
+            .call(|reply| Message::Cut(TypeId::of::<P>(), reply))?
+    }
     pub fn freeze(&self, _proof: &P) -> Result<AcceptedCut, Error> {
         self.core
             .call(|reply| Message::Freeze(TypeId::of::<P>(), reply))?
@@ -459,12 +482,16 @@ impl State {
         Ok(())
     }
     fn freeze(&mut self, owner: TypeId) -> Result<AcceptedCut, Error> {
+        let cut = self.capture_cut(owner)?;
+        self.attachment = AttachmentState::Frozen;
+        Ok(cut)
+    }
+    fn capture_cut(&self, owner: TypeId) -> Result<AcceptedCut, Error> {
         self.authorize(owner)?;
         let change = self.change()?;
         // Hash a borrowed canonical view under scratch; the cut owns no extra
         // history lease even when the incoming replacement is already admitted.
         let identity = self.history()?.identity()?;
-        self.attachment = AttachmentState::Frozen;
         Ok(AcceptedCut { change, identity })
     }
     fn install(
@@ -564,6 +591,16 @@ impl State {
                         self.subscribers.push(subscriber);
                     }
                 }
+                Message::Fork(role, reply) => {
+                    let result = self
+                        .history()
+                        .and_then(|owner| owner.fork_current(role).map_err(Error::from))
+                        .map(|owner| (owner, self.revision));
+                    let _ = reply.send(result);
+                }
+                Message::AttachmentState(reply) => {
+                    let _ = reply.send(self.attachment);
+                }
                 Message::Change(reply) => {
                     let _ = reply.send(self.change());
                 }
@@ -619,6 +656,9 @@ impl State {
                 Message::Freeze(owner, reply) => {
                     let result = self.freeze(owner);
                     let _ = reply.send(result);
+                }
+                Message::Cut(owner, reply) => {
+                    let _ = reply.send(self.capture_cut(owner));
                 }
                 Message::Finish(owner, cut, seal, reply) => {
                     let result = self.check_cut(owner, cut).and_then(|()| {

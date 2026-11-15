@@ -430,12 +430,40 @@ impl OwnerHistory {
         }
         // Scratch covers construction before the measured retained lease exists.
         // Admission failure drops these private values without starting a task.
-        let _workspace = pool.workspace(role)?;
+        let workspace = pool.workspace(role)?;
         let document = make_document()?.into();
-        let baseline_live = kinewright_core::undo::document_capacity_bytes(&document)?
-            .max(source_sizing.map_or(0, |s| s.baseline_live));
         scan();
         let seeds = Lineage::seed(&document, seed);
+        Self::assemble(
+            pool,
+            kind,
+            policy,
+            measured,
+            initial_batch,
+            source_sizing,
+            document,
+            seeds,
+            &workspace,
+        )
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one creation-sized constructor with an existing shared workspace proof"
+    )]
+    fn assemble(
+        pool: &HistoryPool,
+        kind: super::CreationKind,
+        policy: RetentionPolicy,
+        measured: Option<kinewright_core::undo::RoleBounds>,
+        initial_batch: kinewright_core::undo::Charge,
+        source_sizing: Option<super::CreationSizing>,
+        document: Arc<Document>,
+        seeds: Lineage,
+        workspace: &super::Workspace,
+    ) -> Result<Self, Error> {
+        let role = kind.role();
+        let baseline_live = kinewright_core::undo::document_capacity_bytes(&document)?
+            .max(source_sizing.map_or(0, |s| s.baseline_live));
         scan();
         let resources = Resources::new(&document);
         let sizing = super::CreationSizing {
@@ -447,6 +475,9 @@ impl OwnerHistory {
         };
         let reservation = pool.admit_sized(sizing)?.into_core()?;
         let limits = reservation.limits();
+        if !workspace.covers(pool, limits.envelope.workspace) {
+            return Err(Error::Reservation);
+        }
         let core = History::new(
             document,
             policy,
@@ -502,6 +533,46 @@ impl OwnerHistory {
             terminal_facts: std::collections::BTreeMap::default(),
             reservation,
         })
+    }
+    /// A child is a fresh `NeverFold` delta on the parent's current state. Its
+    /// original occurrence identities survive; parent history is not imported.
+    pub(crate) fn fork_current(&self, role: Role) -> Result<Self, Error> {
+        let kind = match role {
+            Role::Task => super::CreationKind::Task,
+            Role::Candidate => super::CreationKind::LiveCandidate,
+            Role::Ordinary => return Err(Error::InvalidPolicy),
+        };
+        let workspace = self.reservation.workspace()?;
+        let mut seeds = self.seeds();
+        let replayed = self.core.visit_boundary(
+            self.core.undo().len(),
+            self.reservation.limits().envelope.owners * 2,
+            |command, effects| {
+                let origin = self.origins.get(&command.id).ok_or(Error::InvalidOrigin)?;
+                if command.payload_digest != origin.origin.payload_digest {
+                    return Err(Error::InvalidOrigin);
+                }
+                seeds.apply_bounded(&origin.origin.creation, effects, role.envelope().owners)
+            },
+        )?;
+        seeds.prune();
+        scan();
+        seeds.verify(&replayed)?;
+        drop(replayed);
+        // Construction runs under the existing scratch window until the full
+        // child lease is admitted. There is no extra parent capture or gap in
+        // accounting, and no lease is grown or transferred.
+        Self::assemble(
+            &self.reservation.pool(),
+            kind,
+            role.policy(),
+            None,
+            kinewright_core::undo::Charge::default(),
+            None,
+            Arc::clone(self.core.document()),
+            seeds,
+            &workspace,
+        )
     }
     /// Evaluation endpoints opt in before spawning their actor. Product
     /// constructors leave the complete activity recorder disabled.

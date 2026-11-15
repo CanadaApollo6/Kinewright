@@ -3,10 +3,7 @@ mod manual_history;
 use manual_history::{ManualIngress, manual_message_bytes};
 use std::{
     any::TypeId,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     thread,
 };
 
@@ -624,15 +621,9 @@ impl Core {
         initial_document: impl Into<Arc<Document>>,
         revision: TimelineRevision,
     ) -> Result<Self, OpError> {
-        static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
         let initial_document = initial_document.into();
         initial_document.validate()?;
-        #[allow(deprecated, reason = "Rust 1.92 MSRV predates AtomicU64::try_update")]
-        let identity = ActorIdentity(
-            NEXT_ACTOR
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-                .expect("actor identities exhausted"),
-        );
+        let identity = ActorIdentity::fresh().expect("actor identities exhausted");
         let (sender, receiver) = unbounded();
         thread::Builder::new()
             .name("kinewright-core".to_owned())

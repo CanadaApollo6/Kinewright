@@ -1285,3 +1285,99 @@ fn audit_answers_read_command_fate_without_holding_a_task_history() {
         "FIXED_AUDIT_ANSWER_DOES_NOT_DELAY_TASK_RELEASE"
     );
 }
+
+#[test]
+fn delta_fork_preserves_the_current_occurrences_without_a_parent_capture() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let mut cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../kinewright-core/tests/support/history_operation_cases.json"
+    ))
+    .unwrap();
+    let document: Document = serde_json::from_value(cases["SplitClip"]["document"].take()).unwrap();
+    let operation: Operation =
+        serde_json::from_value(cases["SplitClip"]["operation"].take()).unwrap();
+    let parent = Core::spawn(&pool, Role::Ordinary, origin(), document).unwrap();
+    parent.request(Command::Do(operation)).unwrap();
+    let boundary = parent.boundary(1).unwrap();
+    let expected = serde_json::to_value(boundary.lineage()).unwrap();
+    let expected_document = serde_json::to_value(boundary.document()).unwrap();
+    // Leave the existing command applied and an unrelated accepted Close in
+    // the parent's counter. Neither parent's history nor counter is inherited.
+    parent.close_gesture().unwrap();
+    let before = parent.change_id().unwrap();
+    let child_origin = origin();
+    let child_branch = child_origin.branch.clone();
+    let (child, revision) = parent.fork(Role::Task, child_origin, false).unwrap();
+    assert_eq!(
+        revision, before.revision,
+        "FORK_OBSERVES_ONE_PARENT_REVISION"
+    );
+    assert_eq!(
+        parent.change_id().unwrap(),
+        before,
+        "FORK_LEAVES_PARENT_STATE_UNCHANGED"
+    );
+    assert_eq!(
+        pool.lease_counts(Role::Ordinary).unwrap(),
+        (2, 2),
+        "FORK_DOES_NOT_TAKE_AN_EXTRA_ORDINARY_CAPTURE"
+    );
+    drop(boundary);
+    let snapshot = child.export_history().unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot.seeds()).unwrap(),
+        expected,
+        "DELTA_FORK_PRESERVES_PARENT_OCCURRENCE_IDENTITIES"
+    );
+    assert_eq!(
+        serde_json::to_value(&snapshot.history().document).unwrap(),
+        expected_document,
+        "DELTA_FORK_BASELINE_IS_CURRENT_PARENT_DOCUMENT"
+    );
+    assert!(
+        snapshot.history().undo.is_empty() && snapshot.history().redo.is_empty(),
+        "DELTA_FORK_STARTS_WITH_EMPTY_STACKS"
+    );
+    assert_eq!(child.change_id().unwrap().revision, TimelineRevision(0));
+    drop(snapshot);
+    let track = match child.request(Command::Query(Query::Document)).unwrap() {
+        Event::QueryResult(QueryResult::Document(document)) => document.tracks[0].id,
+        _ => unreachable!(),
+    };
+    child
+        .request(Command::Do(Operation::SetTrackSyncLock {
+            track,
+            locked: true,
+        }))
+        .unwrap();
+    assert_eq!(
+        child.export_history().unwrap().origins()[0].creation.branch,
+        child_branch,
+        "FORK_COMMANDS_BELONG_TO_THE_CHILD_BRANCH"
+    );
+}
+
+#[test]
+fn attachment_capture_is_a_fixed_cut_and_shares_the_actor_identity_domain() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let parent = Core::spawn(&pool, Role::Ordinary, origin(), document()).unwrap();
+    let old_proof_actor = kinewright_core::Core::spawn(document()).unwrap();
+    assert_ne!(
+        parent.actor_identity(),
+        old_proof_actor.actor_identity(),
+        "ACTOR_IDENTITIES_CANNOT_COLLIDE_DURING_THE_CUTOVER"
+    );
+    let owner = parent.attach(&Proof).unwrap();
+    let cut = owner.capture(&Proof).unwrap();
+    assert_eq!(cut.change(), parent.change_id().unwrap());
+    assert_eq!(parent.attachment_state().unwrap(), AttachmentState::Live);
+    assert_eq!(
+        pool.lease_counts(Role::Ordinary).unwrap(),
+        (1, 1),
+        "ATTACHMENT_CAPTURE_RETAINS_NO_HISTORY_LEASE"
+    );
+    let frozen = owner.freeze(&Proof).unwrap();
+    assert_eq!(cut, frozen);
+    assert_eq!(parent.attachment_state().unwrap(), AttachmentState::Frozen);
+    owner.resume(&Proof, frozen).unwrap();
+}

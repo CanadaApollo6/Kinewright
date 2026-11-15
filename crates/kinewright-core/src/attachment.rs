@@ -4,6 +4,20 @@ use crate::{Core, HistoryError, HistorySnapshot, HistoryTransition, TimelineRevi
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActorIdentity(pub(crate) u64);
+impl ActorIdentity {
+    /// Allocate a process-local endpoint identity. Both actor implementations
+    /// use this domain while the legacy proof suite remains compiled.
+    #[must_use]
+    pub fn fresh() -> Option<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
+        #[allow(deprecated, reason = "MSRV predates AtomicU64::try_update")]
+        NEXT_ACTOR
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .ok()
+            .map(Self)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentState {

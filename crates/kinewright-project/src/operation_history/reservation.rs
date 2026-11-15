@@ -326,6 +326,11 @@ pub struct Workspace {
     role: Role,
     bytes: u64,
 }
+impl Workspace {
+    pub(crate) fn covers(&self, pool: &HistoryPool, bytes: u64) -> bool {
+        Arc::ptr_eq(&self.shared, &pool.shared) && self.bytes >= bytes
+    }
+}
 impl Drop for Workspace {
     fn drop(&mut self) {
         let mut usage = self
