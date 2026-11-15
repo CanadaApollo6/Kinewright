@@ -983,9 +983,9 @@ pub(super) fn origin_charge(
 }
 pub(super) fn approval_charge(approval: &Approval) -> Result<u64, Error> {
     // Covers both the live ledger node and its eventual folded-proof node.
-    // The key repeats its digest so folded sibling approvals stay distinct.
+    // The key repeats its digest and consent key so sibling approvals remain distinct.
     // Baseline's fixed headers cover the two initially sparse BTree roots.
-    1280_u64
+    1536_u64
         .checked_add(vector_replay_bytes(&approval.targets)?)
         .and_then(|n| n.checked_add(approval.reference.sha256.capacity() as u64))
         .ok_or(Error::Capacity("approval size"))

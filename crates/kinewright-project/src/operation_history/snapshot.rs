@@ -155,8 +155,11 @@ impl OwnerHistory {
             {
                 return Err(Error::CommandConflict);
             }
-            if let Some(new) = snapshot.ledger.get_exact(entry.key, entry.payload_digest) {
-                if new.approval != entry.approval {
+            if let Some(new) = snapshot.ledger.get_approval(&entry.approval.reference) {
+                if new.key != entry.key
+                    || new.payload_digest != entry.payload_digest
+                    || new.approval != entry.approval
+                {
                     return Err(Error::InvalidLedger);
                 }
             } else {
@@ -166,12 +169,20 @@ impl OwnerHistory {
                 // This independent entry survives for its run's audit. Its
                 // fate below comes from the selected stacks, not this copy.
                 let mut old = entry.clone();
-                old.fate = absent_do_fate(
-                    old.key,
-                    snapshot.core.epoch(),
-                    snapshot.core.position(),
-                    snapshot.fold_frontier,
-                );
+                old.fate = snapshot
+                    .ledger
+                    .get_exact(old.key, old.payload_digest)
+                    .map_or_else(
+                        || {
+                            absent_do_fate(
+                                old.key,
+                                snapshot.core.epoch(),
+                                snapshot.core.position(),
+                                snapshot.fold_frontier,
+                            )
+                        },
+                        |known| known.fate,
+                    );
                 snapshot.decode_bound = snapshot
                     .decode_bound
                     .checked_add(super::stored::approval_decode_charge(&old.approval)?)
@@ -180,10 +191,15 @@ impl OwnerHistory {
                     .owner_bytes
                     .checked_add(approval_charge(&old.approval)?)
                     .ok_or(Error::Capacity("owner metadata"))?;
-                snapshot
-                    .ledger
-                    .commands
-                    .insert((old.key, old.payload_digest), old);
+                snapshot.ledger.commands.insert(
+                    (
+                        old.key,
+                        old.payload_digest,
+                        super::ledger::reference_key(&old.approval.reference)
+                            .ok_or(Error::InvalidLedger)?,
+                    ),
+                    old,
+                );
             }
         }
         for entry in &self.ledger.transitions {
@@ -234,7 +250,7 @@ impl OwnerHistory {
         for entry in snapshot.ledger.commands.values_mut() {
             let previous = self
                 .ledger
-                .get_exact(entry.key, entry.payload_digest)
+                .get_approval(&entry.approval.reference)
                 .map(|old| old.fate);
             entry.fate = if let Some(command) = snapshot.origins.get(&entry.key) {
                 if entry.payload_digest != command.origin.payload_digest {
@@ -350,10 +366,16 @@ impl OwnerSnapshot {
         let bounds = bounds.intersect(limits.bounds);
         ledger.rebuild_indices();
         if !ledger.references_unique()
+            || !ledger.command_fates_consistent()
             || ledger
                 .commands
                 .iter()
-                .any(|((key, digest), entry)| entry.key != *key || entry.payload_digest != *digest)
+                .any(|((key, digest, reference), entry)| {
+                    entry.key != *key
+                        || entry.payload_digest != *digest
+                        || super::ledger::reference_key(&entry.approval.reference)
+                            != Some(*reference)
+                })
         {
             return Err(Error::InvalidLedger);
         }
@@ -604,10 +626,7 @@ impl OwnerSnapshot {
                     if owner_bytes > limits.envelope.owners {
                         return Err(Error::Capacity("owner metadata"));
                     }
-                    if let Some(entry) = ledger
-                        .commands
-                        .get_mut(&(command.id, command.payload_digest))
-                    {
+                    for entry in ledger.for_command_mut(command.id, command.payload_digest) {
                         if entry.key != command.id
                             || entry.payload_digest != command.payload_digest
                             || !super::ledger::targets_removed(

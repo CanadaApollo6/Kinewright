@@ -56,7 +56,7 @@ impl ApprovalEntry {
 }
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ApprovalLedger {
-    pub(super) commands: BTreeMap<(CommandKey, [u8; 32]), ApprovalEntry>,
+    pub(super) commands: BTreeMap<CommandApprovalKey, ApprovalEntry>,
     pub(super) transitions: Vec<super::transition::TransitionApproval>,
     used: std::collections::BTreeSet<ReferenceKey>,
     by_step: BTreeMap<CommandKey, Vec<usize>>,
@@ -64,7 +64,14 @@ pub struct ApprovalLedger {
 // An exact fixed-size routing key avoids duplicating consent strings in the
 // admission index. It preserves the ObjectRef's spelling, length and kind.
 pub(super) type ReferenceKey = ([u8; 64], u64, RecordKind);
-fn reference_key(reference: &ObjectRef) -> Option<ReferenceKey> {
+pub(super) type CommandApprovalKey = (CommandKey, [u8; 32], ReferenceKey);
+const LOW_REFERENCE: ReferenceKey = ([0; 64], 0, RecordKind::Document);
+const HIGH_REFERENCE: ReferenceKey = ([u8::MAX; 64], u64::MAX, RecordKind::Document);
+fn key_range(key: CommandKey) -> std::ops::RangeInclusive<CommandApprovalKey> {
+    (key, [0; 32], LOW_REFERENCE)..=(key, [u8::MAX; 32], HIGH_REFERENCE)
+}
+
+pub(super) fn reference_key(reference: &ObjectRef) -> Option<ReferenceKey> {
     Some((
         reference.sha256.as_bytes().try_into().ok()?,
         reference.byte_length,
@@ -73,7 +80,7 @@ fn reference_key(reference: &ObjectRef) -> Option<ReferenceKey> {
 }
 impl Serialize for ApprovalLedger {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        struct Commands<'a>(&'a BTreeMap<(CommandKey, [u8; 32]), ApprovalEntry>);
+        struct Commands<'a>(&'a BTreeMap<CommandApprovalKey, ApprovalEntry>);
         impl Serialize for Commands<'_> {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 s.collect_seq(self.0.values())
@@ -108,8 +115,10 @@ impl<'de> Deserialize<'de> for ApprovalLedger {
         }
         let mut result = BTreeMap::new();
         for entry in commands {
+            let reference = reference_key(&entry.approval.reference)
+                .ok_or_else(|| serde::de::Error::custom("invalid approval reference"))?;
             if result
-                .insert((entry.key, entry.payload_digest), entry)
+                .insert((entry.key, entry.payload_digest, reference), entry)
                 .is_some()
             {
                 return Err(serde::de::Error::custom("duplicate approval command"));
@@ -192,20 +201,55 @@ impl ApprovalLedger {
             .inspect(|_| super::owner::ledger_entries(1))
     }
     #[must_use]
-    /// Convenience for an unambiguous key. A reader with a consent binding
-    /// uses `get_exact`: separate folded sibling payloads may share the key.
+    /// Command-level convenience. Different payloads sharing an absent key
+    /// remain ambiguous; several approvals of the same payload share its fate.
     pub fn get(&self, key: CommandKey) -> Option<&ApprovalEntry> {
-        let mut entries = self.commands.range((key, [0; 32])..=(key, [u8::MAX; 32]));
-        let (_, entry) = entries.next()?;
-        entries.next().is_none().then_some(entry)
+        let mut entries = self.commands.range(key_range(key)).map(|(_, entry)| entry);
+        let first = entries.next()?;
+        entries
+            .all(|entry| entry.payload_digest == first.payload_digest)
+            .then_some(first)
     }
     #[must_use]
     pub fn get_exact(&self, key: CommandKey, digest: [u8; 32]) -> Option<&ApprovalEntry> {
-        self.commands.get(&(key, digest))
+        self.commands
+            .range((key, digest, LOW_REFERENCE)..=(key, digest, HIGH_REFERENCE))
+            .next()
+            .map(|(_, entry)| entry)
     }
-    fn unique_mut(&mut self, key: CommandKey) -> Option<&mut ApprovalEntry> {
-        let digest = self.get(key)?.payload_digest;
-        self.commands.get_mut(&(key, digest))
+    pub(super) fn for_command_mut(
+        &mut self,
+        key: CommandKey,
+        digest: [u8; 32],
+    ) -> impl Iterator<Item = &mut ApprovalEntry> {
+        self.commands
+            .range_mut((key, digest, LOW_REFERENCE)..=(key, digest, HIGH_REFERENCE))
+            .map(|(_, entry)| entry)
+    }
+    #[must_use]
+    pub fn get_approval(&self, reference: &ObjectRef) -> Option<&ApprovalEntry> {
+        self.commands
+            .values()
+            .find(|entry| &entry.approval.reference == reference)
+    }
+    pub(super) fn command_fates_consistent(&self) -> bool {
+        let mut previous: Option<&ApprovalEntry> = None;
+        for entry in self.commands.values() {
+            if previous.is_some_and(|old| {
+                old.key == entry.key
+                    && old.payload_digest == entry.payload_digest
+                    && old.fate != entry.fate
+            }) {
+                return false;
+            }
+            previous = Some(entry);
+        }
+        true
+    }
+    fn set_fate(&mut self, key: CommandKey, fate: Fate) {
+        for (_, entry) in self.commands.range_mut(key_range(key)) {
+            entry.fate = fate;
+        }
     }
     pub(super) fn admit(&self, approval: &Approval, key: CommandKey) -> Result<(), Error> {
         approval
@@ -215,11 +259,7 @@ impl ApprovalLedger {
         if self.len() >= crate::orchestration_records::ITEM_LIMIT {
             return Err(Error::Capacity("approval count"));
         }
-        if self
-            .commands
-            .range((key, [0; 32])..=(key, [u8::MAX; 32]))
-            .next()
-            .is_some()
+        if self.commands.range(key_range(key)).next().is_some()
             || approval.targets.is_empty()
             || self.reference_used(&approval.reference)
         {
@@ -231,7 +271,11 @@ impl ApprovalLedger {
         self.used
             .insert(reference_key(&approval.reference).expect("admitted consent reference"));
         self.commands.insert(
-            (key, digest),
+            (
+                key,
+                digest,
+                reference_key(&approval.reference).expect("admitted consent reference"),
+            ),
             ApprovalEntry {
                 key,
                 payload_digest: digest,
@@ -242,32 +286,27 @@ impl ApprovalLedger {
         );
     }
     pub(super) fn observe(&mut self, event: &Effects) {
-        // Install/open refuse any retained command whose key conflicts with an
-        // approval digest. Thus a Core movement can only name one entry;
-        // ambiguous sibling keys are absent/folded and cannot be moved by Core.
+        // Retained-key conflicts are rejected at install/open. All approvals
+        // of that exact command move together; absent sibling digests cannot
+        // be named by a Core movement.
         for key in &event.to_undo {
-            if let Some(entry) = self.unique_mut(*key) {
-                entry.fate = if *key == event.accepted {
+            self.set_fate(
+                *key,
+                if *key == event.accepted {
                     Fate::Applied
                 } else {
                     Fate::Redone
-                };
-            }
+                },
+            );
         }
         for key in &event.to_redo {
-            if let Some(entry) = self.unique_mut(*key) {
-                entry.fate = Fate::Undone;
-            }
+            self.set_fate(*key, Fate::Undone);
         }
         for command in &event.folded {
-            if let Some(entry) = self.unique_mut(command.key) {
-                entry.fate = Fate::Folded;
-            }
+            self.set_fate(command.key, Fate::Folded);
         }
         for key in &event.discarded {
-            if let Some(entry) = self.unique_mut(*key) {
-                entry.fate = Fate::Discarded;
-            }
+            self.set_fate(*key, Fate::Discarded);
         }
     }
 }

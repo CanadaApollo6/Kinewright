@@ -224,11 +224,14 @@ fn malformed_owner_capture_refusals_leave_destination_unchanged() {
         .clone();
     entry.key.position = 8;
     capture.data.ledger.commands.clear();
-    capture
-        .data
-        .ledger
-        .commands
-        .insert((entry.key, entry.payload_digest), entry);
+    capture.data.ledger.commands.insert(
+        (
+            entry.key,
+            entry.payload_digest,
+            super::ledger::reference_key(&entry.approval.reference).unwrap(),
+        ),
+        entry,
+    );
     assert!(
         matches!(capture.validate(), Err(Error::InvalidLedger)),
         "OWNER_ABSENT_APPROVAL_COMMAND_REFUSED"

@@ -202,11 +202,14 @@ fn historic_approval_positions_still_refuse_overflow() {
     let mut snapshot = owner.capture().unwrap();
     let (_, mut entry) = snapshot.data.ledger.commands.pop_first().unwrap();
     entry.key.position = u64::MAX;
-    snapshot
-        .data
-        .ledger
-        .commands
-        .insert((entry.key, entry.payload_digest), entry);
+    snapshot.data.ledger.commands.insert(
+        (
+            entry.key,
+            entry.payload_digest,
+            super::ledger::reference_key(&entry.approval.reference).unwrap(),
+        ),
+        entry,
+    );
     assert_eq!(
         snapshot.validate().err(),
         Some(Error::InvalidLedger),

@@ -361,7 +361,7 @@ fn fixed_do_charge_covers_the_digest_index_and_fold_fact() {
     use std::mem::size_of;
     let a = approval();
     let inline = 3
-        * (size_of::<(kinewright_core::undo::CommandKey, [u8; 32])>()
+        * (size_of::<super::ledger::CommandApprovalKey>()
             + size_of::<ApprovalEntry>()
             + size_of::<kinewright_core::undo::CommandKey>()
             + size_of::<super::ledger::FoldedApproval>()

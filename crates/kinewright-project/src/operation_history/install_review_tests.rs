@@ -160,3 +160,112 @@ fn surplus_resources_are_refused_before_the_install_token() {
         "SURPLUS_RESOURCE_REFUSAL_LEAVES_DESTINATION_UNCHANGED"
     );
 }
+
+#[test]
+fn sibling_approvals_of_the_same_command_identity_survive_install_and_movements() {
+    use super::tests::{approval, document, origin, remove};
+    let pool = super::tests::story_pool();
+    let mut left = OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+        Ok(document())
+    })
+    .unwrap();
+    let mut right = OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+        Ok(document())
+    })
+    .unwrap();
+    let a = approval();
+    let mut b = approval();
+    b.reference.sha256 = "b".repeat(64);
+    left.execute(remove(), origin(2), vec![], Some(a)).unwrap();
+    right.execute(remove(), origin(2), vec![], Some(b)).unwrap();
+    left.install_snapshot(right.capture().unwrap().validate().unwrap())
+        .expect("SAME_COMMAND_DIFFERENT_APPROVAL_NEVER_REFUSES_SIBLING_INSTALL");
+    assert_eq!(
+        left.ledger().len(),
+        2,
+        "EACH_CONSENT_KEEPS_ITS_OWN_LEDGER_ENTRY"
+    );
+    for (command, expected) in [
+        (kinewright_core::Command::Undo, ApprovalAnswer::Missing),
+        (kinewright_core::Command::Redo, ApprovalAnswer::Kept),
+    ] {
+        left.execute(command, origin(3), vec![], None).unwrap();
+        assert!(
+            left.ledger()
+                .entries()
+                .all(|entry| entry.answer() == expected),
+            "ALL_APPROVALS_FOLLOW_THE_EXACT_TARGET_COMMAND_FATE"
+        );
+    }
+    super::roundtrip_tests::saved_open(&left);
+}
+
+#[test]
+fn selected_command_fact_settles_an_alias_approval_without_fold_provenance() {
+    use super::tests::{approval, document, origin, remove};
+    let pool = super::tests::story_pool();
+    let mut destination =
+        OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+            Ok(document())
+        })
+        .unwrap();
+    let mut sibling = OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+        Ok(document())
+    })
+    .unwrap();
+    let empty = sibling.capture().unwrap();
+    let a = approval();
+    let mut b = approval();
+    b.reference.sha256 = "b".repeat(64);
+    destination
+        .execute(remove(), origin(2), vec![], Some(a))
+        .unwrap();
+    sibling
+        .execute(remove(), origin(2), vec![], Some(b))
+        .unwrap();
+    sibling.install_snapshot(empty.validate().unwrap()).unwrap();
+    destination
+        .install_snapshot(sibling.capture().unwrap().validate().unwrap())
+        .unwrap();
+    assert_eq!(
+        destination.ledger().len(),
+        2,
+        "KNOWN_COMMAND_FACT_PRESERVES_BOTH_CONSENT_IDENTITIES"
+    );
+    assert!(
+        destination
+            .ledger()
+            .entries()
+            .all(|entry| entry.fate == Fate::Discarded),
+        "SELECTED_COMMAND_FACT_SETTLES_EVERY_APPROVAL_OF_THAT_COMMAND"
+    );
+    super::roundtrip_tests::saved_open(&destination);
+}
+#[test]
+fn a_record_cannot_give_two_approvals_of_one_command_different_fates() {
+    use super::tests::{approval, document, origin, remove};
+    let pool = super::tests::story_pool();
+    let mut owner = OwnerHistory::new(&pool, Role::Task, Role::Task.policy(), &origin(1), || {
+        Ok(document())
+    })
+    .unwrap();
+    owner
+        .execute(remove(), origin(2), vec![], Some(approval()))
+        .unwrap();
+    let mut captured = owner.capture().unwrap();
+    let mut other = captured.data.ledger.entries().next().unwrap().clone();
+    other.approval.reference.sha256 = "b".repeat(64);
+    other.fate = Fate::Redone;
+    captured.data.ledger.commands.insert(
+        (
+            other.key,
+            other.payload_digest,
+            super::ledger::reference_key(&other.approval.reference).unwrap(),
+        ),
+        other,
+    );
+    assert!(
+        matches!(captured.validate(), Err(Error::InvalidLedger)),
+        "ONE_COMMAND_CANNOT_CARRY_CONTRADICTORY_APPROVAL_FATES"
+    );
+}
