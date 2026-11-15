@@ -477,6 +477,36 @@ impl History {
     pub fn redo(&self) -> &[Step] {
         &self.redo
     }
+    /// Consume an independently held reader without copying operation payloads.
+    #[must_use]
+    pub fn into_applied_delta(self) -> Vec<Operation> {
+        let count = self
+            .undo
+            .iter()
+            .flat_map(Step::commands)
+            .map(|command| command.operations.len())
+            .sum();
+        let mut operations = Vec::with_capacity(count);
+        for step in self.undo {
+            for command in step.commands {
+                operations.extend(command.operations.into_vec());
+            }
+        }
+        operations
+    }
+    /// Consume a private reader's already validated stacks, retaining no cache.
+    #[must_use]
+    pub fn into_record(self) -> Record {
+        Record {
+            baseline: self.baseline,
+            document: self.document,
+            undo: self.undo,
+            redo: self.redo,
+            position: self.position,
+            epoch: self.epoch,
+            policy: self.policy,
+        }
+    }
     #[must_use]
     pub const fn position(&self) -> CommandKey {
         CommandKey {

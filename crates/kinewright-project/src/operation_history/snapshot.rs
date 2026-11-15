@@ -69,6 +69,16 @@ impl ValidatedOwnerSnapshot {
         }
     }
     pub fn open(self) -> Result<OwnerHistory, Error> {
+        let mut history = self.open_reader()?;
+        history.reservation.promote_replacing(None)?;
+        Ok(history)
+    }
+    /// A cold reader uses the independently admitted capture room. It must
+    /// not count as a new task Core and reserve yet another checkpoint slot.
+    pub fn into_reader(self) -> Result<super::OwnerRead, Error> {
+        self.open_reader().map(super::OwnerRead::new)
+    }
+    fn open_reader(self) -> Result<OwnerHistory, Error> {
         Ok(OwnerHistory {
             core: self.core.into_history()?,
             ledger: self.ledger,
@@ -83,7 +93,7 @@ impl ValidatedOwnerSnapshot {
             baseline_decode: self.baseline_decode,
             fold_frontier: self.fold_frontier,
             terminal_facts: self.terminal_facts,
-            reservation: self.reservation.into_core()?,
+            reservation: self.reservation,
         })
     }
 }

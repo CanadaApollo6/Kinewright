@@ -802,12 +802,30 @@ impl OwnerHistory {
     pub fn boundary(&self, depth: usize) -> Result<OwnerBoundary, Error> {
         let reservation = self.reservation.capture()?;
         let _workspace = self.reservation.workspace()?;
+        let (document, lineage) = self.replay_boundary(depth)?;
+        Ok(OwnerBoundary {
+            document,
+            lineage,
+            _reservation: reservation,
+        })
+    }
+    pub(super) fn into_boundary(self, depth: usize) -> Result<OwnerBoundary, Error> {
+        let _workspace = self.reservation.workspace()?;
+        let (document, lineage) = self.replay_boundary(depth)?;
+        Ok(OwnerBoundary {
+            document,
+            lineage,
+            _reservation: self.reservation,
+        })
+    }
+    fn replay_boundary(&self, depth: usize) -> Result<(Arc<Document>, Lineage), Error> {
         // The query owns an independent occurrence map while the baseline
         // remains immutable. Only the returned boundary survives this replay.
         let mut lineage = self.seeds();
         // This holder contains a document and lineage, not operation stacks or
         // cache anchors. Its full independent lease covers that query result.
-        let lineage_cap = reservation
+        let lineage_cap = self
+            .reservation
             .limits()
             .envelope
             .retained
@@ -827,11 +845,7 @@ impl OwnerHistory {
         lineage.prune();
         scan();
         lineage.verify(&document)?;
-        Ok(OwnerBoundary {
-            document,
-            lineage,
-            _reservation: reservation,
-        })
+        Ok((document, lineage))
     }
 }
 
@@ -1130,8 +1144,8 @@ pub(super) fn baseline_charge(
 
 /// An independently retained operation reader pays its source's full lease.
 pub struct OwnerOperations {
-    operations: Vec<Operation>,
-    _reservation: HistoryReservation,
+    pub(super) operations: Vec<Operation>,
+    pub(super) _reservation: HistoryReservation,
 }
 impl std::ops::Deref for OwnerOperations {
     type Target = [Operation];
