@@ -13,6 +13,7 @@ pub use display::{DisplayConfig, DisplayFrame, DisplaySession, DisplayStatus, Di
 mod decode;
 mod derived;
 mod derived_cache;
+pub mod dialogue_cache;
 mod dsp;
 mod engine;
 mod export;

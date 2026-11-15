@@ -10,6 +10,7 @@ pub(crate) struct MediaPorts {
     pub(crate) analysis: Arc<dyn Analysis>,
     pub(crate) exporter: Arc<dyn Export>,
     pub(crate) unavailable: bool,
+    pub(crate) dialogue: Option<Arc<kinewright_media::SessionMedia>>,
 }
 
 pub(crate) enum MediaBackend {
@@ -40,6 +41,7 @@ impl MediaBackend {
                     engine.unadmitted_media(document)
                 };
                 MediaPorts {
+                    dialogue: Some(Arc::clone(&media)),
                     playback: media.clone(),
                     analysis: media.clone(),
                     exporter: media,
@@ -52,6 +54,7 @@ impl MediaBackend {
                 analysis,
                 exporter,
             } if legacy.is_some() => MediaPorts {
+                dialogue: None,
                 playback: Arc::clone(playback),
                 analysis: Arc::clone(analysis),
                 exporter: Arc::clone(exporter),
@@ -59,6 +62,7 @@ impl MediaBackend {
             },
             #[cfg(test)]
             Self::Stub { .. } => MediaPorts {
+                dialogue: None,
                 playback: Arc::new(RefusedMedia),
                 analysis: Arc::new(RefusedMedia),
                 exporter: Arc::new(RefusedMedia),

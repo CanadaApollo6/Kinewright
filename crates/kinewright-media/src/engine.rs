@@ -580,6 +580,70 @@ impl SessionMedia {
         self.engine.register_transcript(asset, transcript)
     }
 
+    /// Select audio through the same definition as playback and export.
+    /// # Errors
+    /// Refuses unadmitted media or a source without audio.
+    pub fn dialogue_audio_stream(&self, asset: &MediaAsset) -> Result<u32, MediaError> {
+        let _access = self.locator_access()?;
+        crate::sound_profile::audio_stream(&asset.path)
+    }
+
+    /// Read exact cached words and sound; enqueue a missing half on the existing
+    /// transcript worker. Authored words survive profile-only work unchanged.
+    /// # Errors
+    /// Refuses unadmitted, changed or unreadable source content and cache IO errors.
+    pub fn dialogue_cache(
+        &self,
+        asset: &MediaAsset,
+        stream: u32,
+    ) -> Result<crate::dialogue_cache::DialogueCacheRead, MediaError> {
+        use crate::{
+            dialogue_cache::DialogueCacheRead,
+            sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache},
+        };
+        let _access = self.locator_access()?;
+        let key = ProfileIdentity::new(&asset.source_fingerprint, stream)
+            .ok_or_else(|| MediaError::Backend("source content identity is missing".into()))?;
+        if crate::sound_profile::audio_stream(&asset.path)? != stream {
+            return Err(MediaError::Backend("audio stream selection changed".into()));
+        }
+        if asset.source_fingerprint.content_sha256.as_deref()
+            != Some(&crate::sha256_file(&asset.path)?)
+            || asset.source_fingerprint.byte_len
+                != Some(
+                    std::fs::metadata(&asset.path)
+                        .map_err(|e| MediaError::Backend(e.to_string()))?
+                        .len(),
+                )
+        {
+            return Err(MediaError::Backend(
+                "source content identity changed; re-import it".into(),
+            ));
+        }
+        let Some(words) = self.transcripts.dialogue_words(asset)? else {
+            return Ok(DialogueCacheRead::Pending(
+                self.transcripts
+                    .request_missing_words(asset.clone(), self.legacy_grant()?),
+            ));
+        };
+        match SoundProfileCache::new(self.engine.data_dir())?.load(&key)? {
+            Some(SoundMeasurement::Measured { profile }) => Ok(DialogueCacheRead::Ready {
+                recogniser_key: words.recogniser_key,
+                words: words.words,
+                profile,
+            }),
+            Some(SoundMeasurement::NoVoiceInformation { reason }) => {
+                Ok(DialogueCacheRead::Pending(TranscriptStatus::Failed(
+                    format!("no voice information: {reason}"),
+                )))
+            }
+            None => Ok(DialogueCacheRead::Pending(
+                self.transcripts
+                    .request_profile(asset.clone(), self.legacy_grant()?),
+            )),
+        }
+    }
+
     fn legacy_grant(&self) -> Result<kinewright_core::LegacyMediaGrant, MediaError> {
         match &self.authority {
             MediaAuthority::Legacy(grant) => {

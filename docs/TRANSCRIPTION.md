@@ -178,3 +178,16 @@ is included in [LICENSES/earshot-MIT.txt](../LICENSES/earshot-MIT.txt).
 Opening audio at source zero preserves the codec's initial packets, including AAC
 preroll. Word caches use version 5 and sound profiles version 2 so results from
 the former zero-seek decoder are recomputed.
+
+The dialogue measurement adapter reads exact cached recognizer word times, or
+registered authored source-frame words, together with the source sound profile.
+Missing words request the ordinary transcript job. When only the profile is
+missing, the same worker measures it without loading a recognizer or replacing
+authored words. Requests return queued, running with optional progress, or failed
+with a reason limited to 128 characters. They never run inference inline.
+
+All MCP endpoints share one 64 MiB least-recently-used cache. Its accounting includes
+profile arrays, words, text, provenance and conservative capacity for derived
+intervals. Values held by a running tool cannot be evicted. Reloading the same
+cache evidence yields the same binding. The dialogue-tool switch remains off
+until the final media stage is authorized.

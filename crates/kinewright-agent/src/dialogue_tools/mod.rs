@@ -178,6 +178,10 @@ pub enum Refusal {
         at_us: u64,
         quiet_us: [Option<u64>; 2],
     },
+    #[error("dialogue measurement is not ready")]
+    MeasurementPending {
+        status: crate::dialogue_measurements::MeasurementStatus,
+    },
 }
 
 impl From<kinewright_core::dialogue::Refusal> for Refusal {

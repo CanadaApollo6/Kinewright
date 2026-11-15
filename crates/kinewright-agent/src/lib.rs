@@ -52,6 +52,7 @@ mod cursor;
 #[cfg(feature = "eval-harness")]
 pub mod cut_score;
 mod detection_probe;
+pub mod dialogue_measurements;
 pub mod dialogue_tools;
 mod drivers;
 mod durable_branch;

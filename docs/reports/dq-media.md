@@ -95,10 +95,9 @@ successful measurement uses the existing EN model directory.
 
 ## Remaining stages
 
-M3 will request background work when either cache half is missing, returning a
-typed not-measured status rather than running inference inline. Its resident
-bound-value cap is proposed at 64 MiB, counting words and profiles. The current
-unit `NotMeasured` refusal needs a status payload, including its protected callers.
+M3 supplies the background cache adapter described below. The existing unit
+`NotMeasured` refusal stays unchanged. A new final enum variant carries pending
+measurement status. All endpoints share a 64 MiB resident budget.
 
 M4 and M5 are not part of checkpoint 1. The switch remains off. At M5,
 `get_dialogue_pacing` costs 1,882 bytes as a compact Tool definition, including
@@ -203,5 +202,108 @@ No model was downloaded by tests. The final gate and mutation logs are under
 
 All launched build/test processes finished before this checkpoint. No push was
 performed. M0 and M1 are `5c59a5f0` and `dc59b49d`; M2 is the commit containing
-this section. M3 still needs the short status-bearing not-measured refusal
-described above, including its protected callers. No such caller was edited.
+this section. The status decision was resolved for M3 below. No protected caller
+was edited.
+
+## M3
+
+`CachedDialogueMeasurements` resolves content identity in its branch Core and
+uses that project's admitted `SessionMedia`. Stream selection calls the same
+media helper as playback and export. Source hash and byte length are checked
+before cache evidence is accepted. Missing content identity remains `Identity`.
+The media cache API also checks the selected stream itself.
+
+The adapter reads the current request's recognizer recipe and exact integer
+microseconds from the word cache. It does not reconstruct recognizer times from
+the rounded UI transcript. Authored transcripts keep priority and are converted
+from their exact source-frame rate, with explicit authored provenance. No public
+transcript DTO changed.
+
+| Missing cache half | `get` behavior |
+| --- | --- |
+| Words, with or without a profile | Queue the ordinary transcript job. It also fills a missing profile. |
+| Profile, with words available | Queue profile-only work on the same transcript worker, without loading a model or replacing authored words. |
+| Neither | Read both halves and return one immutable bound value. |
+
+An evicted or cleared word file can be requested again even when its in-memory
+status was completed. Admission retains that request's language/model recipe and
+does not cancel an active request or replace authored words. Failures and
+cancellations remain explicit. Profile-only requests reuse the existing worker,
+admission, status-cap, cancellation, panic and shutdown mechanisms. Their separate
+request table preserves the existing authored/ready transcript status.
+
+The only change in `dialogue_tools/mod.rs` appends
+`Refusal::MeasurementPending { status: MeasurementStatus }`. Its wire code is
+`measurement_pending`; status is `queued`, `running` with optional
+`progress_percent`, or `failed` with a reason capped at 128 Unicode scalar
+characters. Known download and audio progress are retained. No inference or
+acoustic measurement runs inline in the provider.
+
+The process-wide 64 MiB least-recently-used cache charges words, string capacity,
+profile arrays, provenance and conservative capacity for Core's derived interval
+vectors. Tools hold shared immutable values. Only entries with no outside strong
+reference can be evicted. Full pinned capacity produces a short retryable failure
+instead of discarding a running tool's value. A changed word or profile value is
+compared before reuse and produces a different binding. Rebuilding identical
+evidence after eviction produces the same binding.
+
+The app carries its admitted media source through initial, new-thread and
+replacement branch-server construction. Each real endpoint installs the provider;
+stub fixtures carry no provider. Construction is lazy and does not load models.
+The global serving switch is still false.
+
+### Dispatcher evidence and protected follow-up
+
+The generated recording has separated tone bursts, silence, and two authored
+words sharing one uninterrupted burst. Tests use the real provider, real decoded
+levels and detector, an in-memory Core, the ordinary confirmation broker and the
+blocking MCP dispatcher. Fixtures and cache files live under workspace `target/`
+on both platforms; no durable project-store fixture is used.
+
+`dq_media_provider_dispatches_pending_then_measured_cut_and_check` first holds an
+unrelated transcript job before inference, forcing both dialogue tools to observe
+queued measurement. It checks their typed status and serialized MCP wire status,
+then releases the worker, reads bound words, refuses a cut inside the uninterrupted
+burst, applies a quiet cut and reads the measured check report. No fake provider or
+model download is involved.
+
+Initial refusals survive both tools unchanged. One protected path still loses
+status: `dialogue_tools/server.rs:114` converts a provider refusal during the
+pre-commit recheck to text, and line 136 wraps it as `edit_refused` with a string
+cause. Those lines are untouched and need worker 1's correction. Ready-cache
+calls and initial pending calls are usable; a measurement becoming unavailable
+during consent loses its typed status in that recheck path.
+
+Other fast assertions cover a 128-character Unicode reason, exact 12,345/26,789
+microsecond cache times, recognizer/language recipe misses, missing words with an
+existing profile, preserved authored words, active-request protection, live-value
+pinning, least-recent eviction, stable rebinding, changed-word invalidation and
+sharing one resident value across independent endpoints.
+
+### M3 validation
+
+The full media suite passed 1,312 tests with 83 ignored, including 1,279 unit
+tests in 1,021.54 s. The media command took 1,053 s. Nine final agent tests passed
+in 1.14 s, including actual measured burst/quiet levels, serialized pending status,
+and equality of the dispatcher's check report with Core's direct audit.
+Twenty focused media tests passed. Existing dialogue, served-tool and role/schema
+pins passed without changes. App branch-server and chat tests passed. Media build,
+three isolated shipping checks, workspace all-target clippy and formatting passed.
+
+Four deliberate breaks were caught and reverted:
+
+| Wrong change | Assertion |
+| --- | --- |
+| Replace pending status with unit `NotMeasured` | `DQ_MEDIA_PENDING_CUT_STATUS` |
+| Evict a bound value held by a tool | `DQ_MEDIA_PINNED_VALUE_MUST_NOT_BE_EVICTED` |
+| Read every word cache with the English model and language recipe | `DQ_MEDIA_RECOGNISER_KEY_MISS` |
+| Omit profile payload from resident accounting | `DQ_MEDIA_RESIDENT_COUNTS_PROFILE_AND_WORDS` |
+
+An identity-only variation of the third break also failed, at the later missing
+cache-read postcondition. The final variation ignored both recipe components and
+hit the named miss assertion. All final positive checks used restored code.
+Evidence is under `target/dq-media/m3/`. Cleanup removed incremental output and
+113 inactive generated test executables before builds, preserving `target/dq1/`
+and all media evidence. Target usage was 23.610 GB after cleanup and 24.722 GB
+after the full gate. The checkpoint-wide shipping builds, Windows cross-checks
+and external-compiler fixtures are recorded under M4 below.

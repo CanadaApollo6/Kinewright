@@ -126,6 +126,58 @@ impl Requests {
             })
             .unwrap_or(TranscriptStatus::NotRequested)
     }
+    pub fn evidence_recipe(&self, path: &Path) -> Option<Result<Arc<AssetTranscript>, Recipe>> {
+        self.states
+            .read(path, |entry| match entry {
+                Some(Entry::Registered(TranscriptStatus::Ready(words))) => {
+                    Some(Ok(Arc::clone(words)))
+                }
+                Some(Entry::Requested { recipe, .. }) => Some(Err(recipe.clone())),
+                _ => None,
+            })
+            .flatten()
+    }
+    pub fn admit_cached_miss(&self, path: &Path) -> Option<(Recipe, ExportCancellation)> {
+        self.states
+            .change(path, Entry::evictable, |previous| {
+                let recipe = match &previous {
+                    None => Recipe {
+                        identity: Identity::english(),
+                        language: None,
+                    },
+                    Some(Entry::Requested {
+                        recipe,
+                        active: false,
+                        status: TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech,
+                        ..
+                    }) => recipe.clone(),
+                    _ => return (previous, None),
+                };
+                let Some(cancellation) = self.cancellations.replace(path) else {
+                    return (previous, None);
+                };
+                (
+                    Some(Entry::Requested {
+                        recipe: recipe.clone(),
+                        cancellation: cancellation.clone(),
+                        status: TranscriptStatus::Queued,
+                        active: true,
+                    }),
+                    Some((recipe, cancellation)),
+                )
+            })
+            .flatten()
+    }
+    pub fn invalidate_finished(&self, path: &Path) {
+        self.states.change(path, Entry::evictable, |entry| {
+            (
+                entry.filter(|entry| {
+                    !entry.evictable() || !matches!(entry.status(), TranscriptStatus::NoSpeech)
+                }),
+                (),
+            )
+        });
+    }
     pub fn register(&self, path: &Path, transcript: AssetTranscript) {
         self.register_status(path, TranscriptStatus::Ready(Arc::new(transcript)));
     }
@@ -223,6 +275,34 @@ mod tests {
             source_fps: Rational::new(25, 1).unwrap(),
             words: Vec::new(),
         }))
+    }
+    #[test]
+    fn dq_media_cache_miss_refreshes_completed_recipe_without_replacing_live_or_authored_words() {
+        let requests = Requests::new();
+        let path = Path::new("missing-cache.wav");
+        let french = recipe(Some("fr"));
+        let first = requests.admit(path, &french).unwrap();
+        requests.update(path, &first, ready());
+        requests.finish(path, &first);
+        let (refreshed, second) = requests.admit_cached_miss(path).unwrap();
+        assert!(refreshed == french, "DQ_MEDIA_CACHE_REFRESH_RETAINS_RECIPE");
+        assert!(matches!(requests.status(path), TranscriptStatus::Queued));
+        assert!(requests.admit_cached_miss(path).is_none());
+        assert!(
+            !second.is_cancelled(),
+            "DQ_MEDIA_CACHE_MISS_DOES_NOT_CANCEL_ACTIVE_JOB"
+        );
+        let TranscriptStatus::Ready(authored) = ready() else {
+            unreachable!()
+        };
+        requests.register(path, (*authored).clone());
+        assert!(
+            requests.admit_cached_miss(path).is_none(),
+            "DQ_MEDIA_AUTHORED_WORDS_RETAINED"
+        );
+        assert!(matches!(requests.status(path), TranscriptStatus::Ready(_)));
+        let missing = Path::new("never-requested.wav");
+        assert!(requests.admit_cached_miss(missing).is_some());
     }
     #[test]
     fn dq1_new_language_replaces_a_ready_model_and_ignores_the_old_job() {

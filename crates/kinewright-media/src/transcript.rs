@@ -52,11 +52,13 @@ use requests::{Recipe, Requests};
 pub(crate) struct TranscriptService {
     jobs: crate::worker::OwnedWorker<crate::locator::LocatorJob<TranscriptJob>>,
     requests: Requests,
+    profiles: Requests,
     root: CacheDirectory,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
 }
 struct TranscriptJob {
+    profile_only: bool,
     asset: MediaAsset,
     model: &'static recognizer::ModelSpec,
     recipe: Recipe,
@@ -65,6 +67,7 @@ struct TranscriptJob {
 impl Drop for TranscriptService {
     fn drop(&mut self) {
         self.requests.shutdown();
+        self.profiles.shutdown();
     }
 }
 impl TranscriptService {
@@ -74,6 +77,7 @@ impl TranscriptService {
         let requests = Requests::new();
         let root = cache_root(&data_dir, "transcripts", CACHE_VERSION)?;
         let mut worker = TranscriptWorker::new(data_dir, root.clone(), requests.clone());
+        let profiles = worker.profiles.clone();
         #[cfg(any(test, feature = "test-util"))]
         let inference_gate = Arc::clone(&worker.inference_gate);
         let jobs = spawn_worker(
@@ -87,6 +91,7 @@ impl TranscriptService {
         Ok(Self {
             jobs,
             requests,
+            profiles,
             root,
             #[cfg(any(test, feature = "test-util"))]
             inference_gate,
@@ -127,26 +132,74 @@ impl TranscriptService {
         let Some(cancellation) = self.requests.admit(&asset.path, &recipe) else {
             return;
         };
-        let path = asset.path.clone();
+        self.enqueue(
+            TranscriptJob {
+                profile_only: false,
+                asset,
+                model,
+                recipe,
+                cancellation,
+            },
+            grant,
+        );
+    }
+    fn enqueue(&self, job: TranscriptJob, grant: kinewright_core::LegacyMediaGrant) {
+        let requests = if job.profile_only {
+            &self.profiles
+        } else {
+            &self.requests
+        };
+        let path = job.asset.path.clone();
+        let cancellation = job.cancellation.clone();
         if self
             .jobs
-            .send(crate::locator::LocatorJob::new(
-                grant,
-                TranscriptJob {
-                    asset,
-                    model,
-                    recipe,
-                    cancellation: cancellation.clone(),
-                },
-            ))
+            .send(crate::locator::LocatorJob::new(grant, job))
             .is_err()
         {
-            self.requests.update(
+            requests.update(
                 &path,
                 &cancellation,
                 TranscriptStatus::Failed("transcript worker stopped".into()),
             );
-            self.requests.finish(&path, &cancellation);
+            requests.finish(&path, &cancellation);
+        }
+    }
+    pub(crate) fn request_missing_words(
+        &self,
+        asset: MediaAsset,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) -> TranscriptStatus {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        let path = asset.path.clone();
+        if let Some((recipe, cancellation)) = self.requests.admit_cached_miss(&path) {
+            match recognizer::model_for_language(recipe.language.as_deref()) {
+                Ok(model) => self.enqueue(
+                    TranscriptJob {
+                        profile_only: false,
+                        asset,
+                        model,
+                        recipe,
+                        cancellation,
+                    },
+                    grant,
+                ),
+                Err(error) => {
+                    self.requests.update(
+                        &path,
+                        &cancellation,
+                        TranscriptStatus::Failed(error.to_string()),
+                    );
+                    self.requests.finish(&path, &cancellation);
+                }
+            }
+        }
+        match self.requests.status(&path) {
+            TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => {
+                TranscriptStatus::Transcribing {
+                    progress_percent: 100,
+                }
+            }
+            status => status,
         }
     }
     pub(crate) fn status(&self, path: &Path) -> TranscriptStatus {
@@ -154,15 +207,132 @@ impl TranscriptService {
     }
     pub(crate) fn retire(&self, authority: kinewright_core::LegacyMediaIdentity) {
         self.requests.retire(authority);
+        self.profiles.retire(authority);
     }
     pub(crate) fn cancel_all(&self) {
         self.requests.cancel_all();
+        self.profiles.cancel_all();
     }
     pub(crate) fn cancel(&self, path: &Path) -> bool {
-        self.requests.cancel(path)
+        self.profiles.cancel(path) | self.requests.cancel(path)
     }
     pub(crate) fn register(&self, path: &Path, transcript: AssetTranscript) {
         self.requests.register(path, transcript);
+    }
+    pub(crate) fn dialogue_words(
+        &self,
+        asset: &MediaAsset,
+    ) -> Result<Option<crate::dialogue_cache::WordEvidence>, MediaError> {
+        use kinewright_core::{ExactMicros, dialogue::Word};
+        let recipe = match self.requests.evidence_recipe(&asset.path) {
+            Some(Ok(authored)) => {
+                if authored.content_sha256
+                    != asset
+                        .source_fingerprint
+                        .content_sha256
+                        .as_deref()
+                        .unwrap_or("")
+                    || authored.source_fps != asset.fps
+                {
+                    return Err(MediaError::Backend(
+                        "authored transcript identity changed".into(),
+                    ));
+                }
+                let words = authored
+                    .words
+                    .iter()
+                    .map(|word| {
+                        Ok(Word {
+                            text: word.text.clone(),
+                            start_micros: ExactMicros::frames(word.source_start, asset.fps)
+                                .map_err(|e| MediaError::Backend(e.to_string()))?
+                                .floor(),
+                            end_micros: ExactMicros::frames(word.source_end, asset.fps)
+                                .map_err(|e| MediaError::Backend(e.to_string()))?
+                                .ceil(),
+                        })
+                    })
+                    .collect::<Result<_, MediaError>>()?;
+                return Ok(Some(crate::dialogue_cache::WordEvidence {
+                    recogniser_key: "authored-source-frames-v1".into(),
+                    words,
+                }));
+            }
+            Some(Err(recipe)) => recipe,
+            None => {
+                if matches!(
+                    self.requests.status(&asset.path),
+                    TranscriptStatus::Failed(_) | TranscriptStatus::Cancelled
+                ) {
+                    return Ok(None);
+                }
+                Recipe {
+                    identity: Identity::english(),
+                    language: None,
+                }
+            }
+        };
+        let Some(content) = asset.source_fingerprint.content_sha256.as_deref() else {
+            return Ok(None);
+        };
+        Ok(TranscriptStore::new(self.root.clone())
+            .load(
+                content,
+                &recipe.identity,
+                asset.fps,
+                asset.duration,
+                recipe.language.as_deref(),
+            )?
+            .map(|stored| crate::dialogue_cache::WordEvidence {
+                recogniser_key: stored.identity.cache_key(),
+                words: stored
+                    .recognition
+                    .words
+                    .into_iter()
+                    .map(|word| Word {
+                        text: word.text,
+                        start_micros: word.start_us,
+                        end_micros: word.end_us,
+                    })
+                    .collect(),
+            }))
+    }
+    pub(crate) fn request_profile(
+        &self,
+        asset: MediaAsset,
+        grant: kinewright_core::LegacyMediaGrant,
+    ) -> TranscriptStatus {
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        self.profiles.invalidate_finished(&asset.path);
+        if matches!(
+            self.profiles.status(&asset.path),
+            TranscriptStatus::NotRequested
+        ) {
+            let recipe = Recipe {
+                identity: Identity::english(),
+                language: None,
+            };
+            if let Some(cancellation) = self.profiles.admit(&asset.path, &recipe) {
+                let path = asset.path.clone();
+                self.enqueue(
+                    TranscriptJob {
+                        profile_only: true,
+                        asset,
+                        model: &ENGLISH_MODEL,
+                        recipe,
+                        cancellation,
+                    },
+                    grant,
+                );
+                return match self.profiles.status(&path) {
+                    TranscriptStatus::NoSpeech => TranscriptStatus::Transcribing {
+                        progress_percent: 100,
+                    },
+                    status => status,
+                };
+            }
+        }
+        self.profiles.status(&asset.path)
     }
     pub(crate) fn cache_stats(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
         self.root.inventory()
@@ -187,6 +357,7 @@ impl TranscriptService {
 struct TranscriptWorker {
     data_dir: PathBuf,
     requests: Requests,
+    profiles: Requests,
     store: TranscriptStore,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
@@ -195,6 +366,7 @@ impl TranscriptWorker {
     fn new(data_dir: PathBuf, root: CacheDirectory, requests: Requests) -> Self {
         Self {
             store: TranscriptStore::new(root),
+            profiles: Requests::new(),
             data_dir,
             requests,
             #[cfg(any(test, feature = "test-util"))]
@@ -211,7 +383,9 @@ impl TranscriptWorker {
             |worker, job| worker.handle(&job, transcribe),
             |worker, job, error| {
                 worker.update(&job, TranscriptStatus::Failed(error.to_string()));
-                worker.requests.finish(&job.asset.path, &job.cancellation);
+                worker
+                    .job_requests(&job)
+                    .finish(&job.asset.path, &job.cancellation);
                 true
             },
         )
@@ -234,7 +408,8 @@ impl TranscriptWorker {
                 },
             );
         }
-        self.requests.finish(&job.asset.path, &job.cancellation);
+        self.job_requests(job)
+            .finish(&job.asset.path, &job.cancellation);
         true
     }
     fn transcribe_asset(&mut self, job: &TranscriptJob) -> Result<(), MediaError> {
@@ -247,6 +422,11 @@ impl TranscriptWorker {
         let content_sha256 = sha256_file(&asset.path)?;
         cancelled(cancellation)?;
         let profile_target = self.profile_target(asset, &content_sha256)?;
+        if job.profile_only {
+            self.fill_profile(job, profile_target)?;
+            self.update(job, TranscriptStatus::NoSpeech);
+            return Ok(());
+        }
         if let Some(cached) = self.store.load(
             &content_sha256,
             identity,
@@ -254,16 +434,7 @@ impl TranscriptWorker {
             asset.duration,
             language,
         )? {
-            if let Some(target) = profile_target {
-                self.update(
-                    job,
-                    TranscriptStatus::Transcribing {
-                        progress_percent: 0,
-                    },
-                );
-                let measurement = crate::sound_profile::measure_file(&asset.path, cancellation)?;
-                target.save(measurement, cancellation)?;
-            }
+            self.fill_profile(job, profile_target)?;
             cancelled(cancellation)?;
             self.finish(job, cached.into_asset(asset.id)?);
             return Ok(());
@@ -333,6 +504,23 @@ impl TranscriptWorker {
         let stored = self.store.save_completed(completed, cancellation)?;
         cancelled(cancellation)?;
         self.finish(job, stored.into_asset(asset.id)?);
+        Ok(())
+    }
+    fn fill_profile(
+        &self,
+        job: &TranscriptJob,
+        target: Option<crate::sound_profile::ProfileTarget>,
+    ) -> Result<(), MediaError> {
+        if let Some(target) = target {
+            self.update(
+                job,
+                TranscriptStatus::Transcribing {
+                    progress_percent: 0,
+                },
+            );
+            let measured = crate::sound_profile::measure_file(&job.asset.path, &job.cancellation)?;
+            target.save(measured, &job.cancellation)?;
+        }
         Ok(())
     }
     fn profile_target(
@@ -408,8 +596,15 @@ impl TranscriptWorker {
         );
     }
     fn update(&self, job: &TranscriptJob, status: TranscriptStatus) {
-        self.requests
+        self.job_requests(job)
             .update(&job.asset.path, &job.cancellation, status);
+    }
+    fn job_requests(&self, job: &TranscriptJob) -> &Requests {
+        if job.profile_only {
+            &self.profiles
+        } else {
+            &self.requests
+        }
     }
 }
 
@@ -777,12 +972,67 @@ mod tests {
     use crate::test_support::TempDirectory;
     use std::fs;
 
+    #[test]
+    fn dq_media_exact_cached_words_follow_the_requested_recogniser_recipe() {
+        let root = TempDirectory::new_in(
+            &crate::test_support::workspace_target_dir(),
+            "dq-media-exact-words",
+        );
+        let service = TranscriptService::new(root.root().into()).unwrap();
+        let mut job = worker_job(&service.requests, Path::new("exact.wav"), 1);
+        job.asset.source_fingerprint = kinewright_core::MediaSourceFingerprint {
+            content_sha256: Some("a".repeat(64)),
+            byte_len: Some(10),
+        };
+        let store = TranscriptStore::new(service.root.clone());
+        let mut stored = StoredTranscript {
+            content_sha256: "a".repeat(64),
+            identity: Identity::english(),
+            source_fps: job.asset.fps,
+            source_frames: job.asset.duration,
+            language: None,
+            recognition: Recognition {
+                timing_source: recognizer::TimingSource::TokenDurationsLagged,
+                words: vec![recognizer::Word {
+                    text: "exact".into(),
+                    start_us: 12_345,
+                    end_us: 26_789,
+                }],
+            },
+        };
+        store.save(&stored, &job.cancellation).unwrap();
+        let words = service.dialogue_words(&job.asset).unwrap().unwrap();
+        assert_eq!(
+            words.words[0].start_micros, 12_345,
+            "DQ_MEDIA_WORDS_NOT_FRAME_QUANTISED"
+        );
+        assert_eq!(words.words[0].end_micros, 26_789);
+        assert_eq!(words.recogniser_key, stored.identity.cache_key());
+        let recipe = Recipe {
+            identity: Identity::for_model(&recognizer::PARAKEET_MODEL),
+            language: Some("fr".into()),
+        };
+        let changed = service.requests.admit(&job.asset.path, &recipe).unwrap();
+        assert!(
+            service.dialogue_words(&job.asset).unwrap().is_none(),
+            "DQ_MEDIA_RECOGNISER_KEY_MISS"
+        );
+        stored.identity = recipe.identity;
+        stored.language = recipe.language;
+        stored.recognition.words[0].text = "français".into();
+        store.save(&stored, &changed).unwrap();
+        let words = service.dialogue_words(&job.asset).unwrap().unwrap();
+        assert_eq!(words.words[0].text, "français");
+        assert_eq!(words.recogniser_key, stored.identity.cache_key());
+    }
+
     fn worker_job(requests: &Requests, path: &Path, id: u64) -> TranscriptJob {
         let recipe = Recipe {
             identity: Identity::english(),
             language: None,
         };
         TranscriptJob {
+            profile_only: false,
             asset: MediaAsset {
                 id: AssetId(id),
                 name: "fixture".into(),
@@ -1372,6 +1622,7 @@ mod measurement_tests {
         };
         let cancellation = requests.admit(&asset.path, &recipe).unwrap();
         let job = TranscriptJob {
+            profile_only: false,
             asset,
             model: &ENGLISH_MODEL,
             recipe,

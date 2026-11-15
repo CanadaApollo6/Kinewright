@@ -533,8 +533,17 @@ fn start_branch_server(
     project_path: ProjectPathHandle,
     incidents: IncidentLogHandle,
     exports: Option<kinewright_agent::export_queue::ExportQueue>,
-) -> Result<McpServer, kinewright_agent::McpServerError> {
-    if let Some(exports) = exports {
+    dialogue: Option<Arc<kinewright_media::SessionMedia>>,
+) -> Result<McpServer, String> {
+    let provider = dialogue.map(|media| {
+        Arc::new(
+            kinewright_agent::dialogue_measurements::CachedDialogueMeasurements::new(
+                core.clone(),
+                media,
+            ),
+        )
+    });
+    let server = if let Some(exports) = exports {
         McpServer::start_isolated_with_export_queue(
             core,
             playback,
@@ -553,6 +562,11 @@ fn start_branch_server(
             incidents,
         )
     }
+    .map_err(|error| error.to_string())?;
+    if let Some(provider) = provider {
+        server.install_dialogue_measurements(provider)?;
+    }
+    Ok(server)
 }
 
 impl AgentThread {
@@ -568,6 +582,7 @@ impl AgentThread {
         exporter: &Arc<dyn Export>,
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
+        dialogue: Option<Arc<kinewright_media::SessionMedia>>,
     ) -> Result<Self, String> {
         Self::new_with_execution(
             name,
@@ -580,6 +595,7 @@ impl AgentThread {
             exporter,
             project_path,
             incidents,
+            dialogue,
             true,
             None,
         )
@@ -597,6 +613,7 @@ impl AgentThread {
         exporter: &Arc<dyn Export>,
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
+        dialogue: Option<Arc<kinewright_media::SessionMedia>>,
         local_execution: bool,
         exports: Option<kinewright_agent::export_queue::ExportQueue>,
     ) -> Result<Self, String> {
@@ -612,6 +629,7 @@ impl AgentThread {
                 Arc::clone(project_path),
                 Arc::clone(incidents),
                 exports,
+                dialogue,
             ) {
                 Ok(server) => Some(server),
                 Err(error) => {
@@ -657,6 +675,7 @@ impl AgentThread {
         exporter: Arc<dyn Export>,
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
+        dialogue: Option<Arc<kinewright_media::SessionMedia>>,
         local_execution: bool,
         exports: Option<kinewright_agent::export_queue::ExportQueue>,
         retirement: &mut crate::retirement::RetirementGroup,
@@ -684,8 +703,8 @@ impl AgentThread {
             Arc::clone(project_path),
             Arc::clone(incidents),
             exports,
-        )
-        .map_err(|error| error.to_string())?;
+            dialogue,
+        )?;
         self.confirmations = Some(server.confirmations());
         if let Some(old) = self.mcp_server.replace(server) {
             retirement.server(old);
@@ -1105,6 +1124,7 @@ impl KinewrightApp {
             ports.exporter,
             &project_path,
             &incidents,
+            ports.dialogue,
             local_execution,
             exports,
             &mut self.retirement,
@@ -1697,6 +1717,7 @@ impl KinewrightApp {
             &ports.exporter,
             &project_path,
             &incidents,
+            ports.dialogue,
             local_execution,
             self.projects[project_index].exports.clone(),
         );

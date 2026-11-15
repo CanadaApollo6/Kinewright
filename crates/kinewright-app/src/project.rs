@@ -517,6 +517,7 @@ impl ProjectSession {
             &ports.exporter,
             &agent_project_path,
             &incidents,
+            ports.dialogue,
         )?);
         session.exports = session.threads[0]
             .mcp_server
@@ -1732,6 +1733,7 @@ mod tests {
             &exporter,
             &handle,
             &incidents,
+            None,
         )
         .expect("the branch builds");
         let served = thread
@@ -1803,6 +1805,7 @@ mod tests {
             &exporter,
             &handle,
             &incidents,
+            None,
         )
         .expect("the branch builds");
         let served = thread
