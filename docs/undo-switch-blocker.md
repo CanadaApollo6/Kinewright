@@ -1,14 +1,18 @@
 # H2b merge-budget boundaries
 
-Ruling 5 authorizes replacing the separately sized profiles below with
-merge-compatible profiles and one document limit. The new qualification is in
-[Merge-path size qualification](undo-merge-limits.md). Its fixed-envelope
-option exceeds the ruling's 768 MiB total, before workspace or captures, so the
-product switch remains paused at that newer memory boundary. The original
-diagnostic below is retained as the first required acceptance case when that
-boundary is resolved; its current profiles and refusal are unchanged.
+Ruling 6 replaces the earlier fixed-per-role reservation proposal with creation
+sizing. The current scope boundary is documented in
+[Creation sizing](undo-creation-sizing.md): Ordinary captures/replacement opens
+need different lease ownership, and a live RunCandidate exists before its
+frozen input. Stored records also lack immutable creation-sizing inputs. Those
+changes have not been implemented under the constructor/capture/open-only
+scope. Production profiles and callers remain unchanged.
 
-The switch is paused before product callers move. Decision 6 of the H2b brief requires a delta Core's growth bound to fit its merge path; the earlier performance ruling requires room for at least 2,000 ordinary task commands. The accepted Task and Candidate profiles do not satisfy both requirements.
+The [earlier size measurements](undo-merge-limits.md) and the original diagnostic
+below are retained. The latter remains the first required acceptance case when
+the switch resumes.
+
+At the first stop, before product callers moved, decision 6 required a delta Core's growth bound to fit its merge path and the earlier performance ruling required room for at least 2,000 ordinary task commands. The accepted Task and Candidate profiles did not satisfy both requirements.
 
 The portable diagnostic creates a one-track document, accepts 2,000 alternating `SetTrackSyncLock` commands in a Task owner, and forwards its complete applied delta as one batch to an empty Candidate owner. This is the shape used by `editing_session/durable.rs` in `preview_candidate_merge`: it forwards `frozen.delta` without compaction. Editorial task scopes can permit the operation and the `track.sync_lock` field (`orchestration/policy.rs`).
 
