@@ -52,6 +52,31 @@ pub enum Action {
     Close,
 }
 impl Action {
+    pub(crate) fn from_normalised(command: Command) -> Result<Self, Conflict> {
+        Ok(match command {
+            Command::Do(operation) => Self::Do {
+                operations: vec![operation],
+                gesture: None,
+            },
+            Command::DoBatch(operations) => Self::Do {
+                operations,
+                gesture: None,
+            },
+            Command::DoBatchCoalesced {
+                operations,
+                coalesce_key,
+            } => Self::Do {
+                operations,
+                gesture: Some(coalesce_key),
+            },
+            Command::Undo => Self::Undo,
+            Command::Redo => Self::Redo,
+            Command::Query(_)
+            | Command::DoIfRevision { .. }
+            | Command::DoBatchIfRevision { .. } => return Err(Conflict::Unnormalised),
+        })
+    }
+
     pub fn apply(
         &self,
         context: &CommandContext,
@@ -64,6 +89,14 @@ impl Action {
         self,
         context: CommandContext,
         owner: &mut OwnerHistory,
+    ) -> Result<Effects, HistoryError> {
+        self.execute_with_inputs(context, owner, None)
+    }
+    pub(crate) fn execute_with_inputs(
+        self,
+        context: CommandContext,
+        owner: &mut OwnerHistory,
+        certificate: Option<&crate::operation_inputs::ManualInputs>,
     ) -> Result<Effects, HistoryError> {
         if let Some(approval) = context.transition {
             let matching = matches!(
@@ -95,7 +128,13 @@ impl Action {
             }
             Self::Close => return Err(HistoryError::InvalidLedger),
         };
-        owner.execute(command, context.creation, context.inputs, context.approval)
+        owner.execute_with_inputs(
+            command,
+            context.creation,
+            context.inputs,
+            context.approval,
+            certificate,
+        )
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,7 +216,7 @@ fn hash(domain: &[u8], value: &impl Serialize) -> Result<[u8; 32], Conflict> {
     Ok(writer.0.finalize())
 }
 impl Message {
-    fn digest(&self) -> Result<[u8; 32], Conflict> {
+    pub(crate) fn digest(&self) -> Result<[u8; 32], Conflict> {
         hash(
             b"kinewright/accepted-command/v1\0",
             &(&self.id, self.accepted, &self.action, &self.context),

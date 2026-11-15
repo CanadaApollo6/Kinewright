@@ -30,6 +30,9 @@ impl Cache {
     pub fn clear(&mut self) {
         self.points.fill(None);
     }
+    pub fn slots(&self) -> usize {
+        self.points.len()
+    }
     pub fn depths(&self) -> Vec<usize> {
         self.points.iter().flatten().map(|p| p.depth).collect()
     }

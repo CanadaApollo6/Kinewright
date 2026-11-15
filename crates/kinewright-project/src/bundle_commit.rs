@@ -2300,7 +2300,7 @@ pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut Ow
     manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
     manifest.entries.dedup();
 }
-fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
+pub(crate) fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
     id == format!("lut:{}", asset.id.0)
         || id == format!("lut:{}:{}", asset.id.0, asset.sha256)
         || id == format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len)

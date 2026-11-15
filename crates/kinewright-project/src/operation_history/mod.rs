@@ -46,6 +46,7 @@ pub enum Error {
     InvalidOrigin,
     InvalidSeeds,
     MissingResource,
+    InputRequired,
     InvalidResource,
     InvalidRecord,
     IdentityMismatch,

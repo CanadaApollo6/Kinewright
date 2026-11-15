@@ -126,3 +126,26 @@ fn encoded_stream_holder_uses_one_anchor_allowance_without_a_document_copy() {
         "OUTBOX_RELEASE_PRESERVES_FIXED_CREATION_PROFILE"
     );
 }
+
+#[test]
+fn installing_a_snapshot_preserves_the_live_stream_buffer_allowance() {
+    let mut history = History::new(
+        Document::default(),
+        RetentionPolicy::Fold,
+        RoleBounds::ORDINARY,
+    )
+    .unwrap();
+    let selected = history.record().validate(RoleBounds::ORDINARY).unwrap();
+    history
+        .reserve_stream_buffer(RoleBounds::ORDINARY.document_live_bytes)
+        .unwrap();
+    assert_eq!(history.cache.slots(), 3);
+    history.install_snapshot(selected).unwrap();
+    assert_eq!(
+        history.cache.slots(),
+        3,
+        "INSTALL_NEVER_SPENDS_THE_OUTBOX_ANCHOR_ALLOWANCE_TWICE"
+    );
+    history.release_stream_buffer().unwrap();
+    assert_eq!(history.cache.slots(), 4);
+}

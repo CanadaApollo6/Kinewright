@@ -123,6 +123,7 @@ impl State {
         merge: bool,
     ) -> Result<PreparedUpdate, Error> {
         self.check_cut(authority, cut)?;
+        self.check_drained()?;
         if matches!(action, Action::Do { operations, .. } if operations.is_empty()) {
             return Err(HistoryError::History(kinewright_core::undo::Error::Batch(
                 kinewright_core::BatchError::Empty,

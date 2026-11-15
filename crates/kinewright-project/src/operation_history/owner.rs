@@ -577,6 +577,20 @@ impl OwnerHistory {
         inputs: Vec<crate::bundle_records::ObjectRef>,
         approval: Option<Approval>,
     ) -> Result<Effects, Error> {
+        self.execute_with_inputs(command, creation, inputs, approval, None)
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one atomic metadata plan and its infallible commit"
+    )]
+    pub(crate) fn execute_with_inputs(
+        &mut self,
+        command: Command,
+        creation: CreationOrigin,
+        inputs: Vec<crate::bundle_records::ObjectRef>,
+        approval: Option<Approval>,
+        certificate: Option<&crate::operation_inputs::ManualInputs>,
+    ) -> Result<Effects, Error> {
         // Preserve Core's Empty refusal before any capacity admission, even
         // when a different owner currently occupies the shared workspace.
         if matches!(&command,Command::DoBatch(ops)|Command::DoBatchCoalesced {operations:ops,..} if ops.is_empty())
@@ -626,6 +640,9 @@ impl OwnerHistory {
             command,
             reservation.limits().envelope.owners * if fold.is_some() { 3 } else { 2 },
             |event| {
+                if let Some(certificate) = certificate {
+                    certificate.check(event.operations)?;
+                }
                 prepare(
                     &event,
                     creation,

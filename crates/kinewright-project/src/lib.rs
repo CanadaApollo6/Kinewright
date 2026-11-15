@@ -20,6 +20,7 @@ mod history_size;
 mod lineage_journal;
 pub mod operation_actor;
 pub mod operation_history;
+pub mod operation_inputs;
 pub mod operation_protocol;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};

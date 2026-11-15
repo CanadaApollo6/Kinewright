@@ -501,3 +501,556 @@ fn prospective_candidate_record_opens_with_the_original_live_descriptor_before_c
         "PUBLICATION_AND_COMMIT_NAME_THE_SAME_OWNER_STATE"
     );
 }
+
+fn producer_lease(
+    core: &Core,
+    branch: BranchId,
+    sequence: u64,
+) -> crate::operation_protocol::Lease {
+    use crate::{
+        bundle_records::{HeadId, ProjectId},
+        operation_protocol::{Lease, Seed, StreamState},
+        receipts::IssuerId,
+    };
+    let snapshot = core.export_history().unwrap();
+    let identity = snapshot.identity().unwrap();
+    Lease {
+        state: StreamState::installed(Seed {
+            project: ProjectId::fresh().unwrap(),
+            branch,
+            attachment_epoch: sequence,
+            installed: identity,
+        })
+        .unwrap(),
+        snapshot: identity,
+        next_key: core.change_id().unwrap().position,
+        issuer: IssuerId(format!("{sequence:032x}")),
+        next_issuer_sequence: 1,
+        generation: sequence,
+        client: "gui".into(),
+        token: "test-authority".into(),
+        switch_generation: 1,
+        owner_epoch: 1,
+        anchor_head: HeadId::fresh().unwrap(),
+        inputs: crate::operation_inputs::ManualInputs::fixture()
+            .reference()
+            .clone(),
+        parent_identity: None,
+        namespace_name: None,
+    }
+}
+fn pending_receipts(permit: &ManualPermit) -> Vec<crate::operation_protocol::Receipt> {
+    let mut stream = permit.pending().unwrap().into_iter();
+    stream
+        .by_ref()
+        .map(|encoded| {
+            let message = encoded.decode().unwrap();
+            crate::operation_protocol::Receipt {
+                id: message.id.clone(),
+                sequence: message.sequence,
+                accepted: message.accepted,
+                tip: message.tip,
+                command: message.digest().unwrap(),
+            }
+        })
+        .collect()
+}
+#[test]
+fn manual_actor_fences_raw_handles_and_stale_permits_without_changing_pending_work() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin.clone(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let live = Arc::new(AtomicBool::new(true));
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&core, origin.branch.clone(), 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::clone(&live),
+        )
+        .unwrap();
+    let token = Some(CommandToken(19));
+    assert_eq!(
+        core.request(Command::DoIfRevision {
+            expected: TimelineRevision(0),
+            operation: lock(true),
+            token
+        })
+        .unwrap_err(),
+        Refusal {
+            error: Error::MutationRefused(CoreMutationRefusal::ManualPermitRequired),
+            token,
+        },
+        "RAW_HANDLE_CANNOT_BYPASS_ACTOR_PRODUCER"
+    );
+    permit.request(Command::Do(lock(true))).unwrap();
+    let receipts = pending_receipts(&permit);
+    let cut = attachment.freeze(&Proof).unwrap();
+    assert!(
+        matches!(
+            permit.request(Command::Undo).unwrap_err().error,
+            Error::MutationRefused(CoreMutationRefusal::Frozen)
+        ),
+        "FREEZE_FENCES_CURRENT_PERMIT"
+    );
+    assert_eq!(
+        pending_receipts(&permit),
+        receipts,
+        "FREEZE_PRESERVES_ORIGINAL_PENDING_IDENTITIES"
+    );
+    attachment
+        .acknowledge_manual(&Proof, &permit, receipts)
+        .unwrap();
+    let replacement = attachment
+        .manual_permit(
+            &Proof,
+            Some(cut),
+            producer_lease(&core, origin.branch, 2),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::clone(&live),
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            permit.request(Command::Undo).unwrap_err().error,
+            Error::MutationRefused(CoreMutationRefusal::ManualPermitRequired)
+        ),
+        "REBIND_INVALIDATES_EVERY_OLD_PERMIT"
+    );
+    replacement.request(Command::Undo).unwrap();
+    live.store(false, Ordering::Release);
+    assert!(
+        matches!(
+            replacement.request(Command::Redo).unwrap_err().error,
+            Error::MutationRefused(CoreMutationRefusal::ManualPermitRequired)
+        ),
+        "REVOKED_SOURCE_CANNOT_ACCEPT_ANOTHER_EDIT"
+    );
+    assert_eq!(
+        replacement.pending().unwrap().len(),
+        1,
+        "REVOKED_SOURCE_RETAINS_RECOVERABLE_WORK"
+    );
+    assert!(!locked(&core));
+}
+#[test]
+fn manual_actor_records_only_normalised_successes_and_explicit_close() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin.clone(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&core, origin.branch, 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    let before = core.change_id().unwrap();
+    assert!(matches!(
+        permit
+            .request(Command::DoIfRevision {
+                expected: TimelineRevision(17),
+                operation: lock(true),
+                token: None
+            })
+            .unwrap(),
+        Event::RevisionConflict { .. }
+    ));
+    assert!(matches!(
+        permit
+            .request(Command::Do(Operation::RemoveTrack {
+                track: TrackId(404)
+            }))
+            .unwrap(),
+        Event::OpRejected { .. }
+    ));
+    assert_eq!(
+        core.change_id().unwrap(),
+        before,
+        "REFUSED_PRODUCER_EDITS_ADVANCE_NO_COUNTER"
+    );
+    assert!(
+        permit.pending().unwrap().is_empty(),
+        "REFUSED_PRODUCER_EDITS_ENTER_NO_OUTBOX"
+    );
+    permit
+        .request(Command::DoIfRevision {
+            expected: TimelineRevision(0),
+            operation: lock(true),
+            token: Some(CommandToken(55)),
+        })
+        .unwrap();
+    permit.close_gesture().unwrap();
+    let pending = permit.pending().unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(
+        matches!(
+            pending[0].decode().unwrap().action,
+            crate::operation_protocol::Action::Do { .. }
+        ),
+        "ACCEPTED_CONDITIONAL_IS_RECORDED_AS_PLAIN_DO"
+    );
+    assert!(
+        matches!(
+            pending[1].decode().unwrap().action,
+            crate::operation_protocol::Action::Close
+        ),
+        "GESTURE_CLOSE_IS_AN_EXPLICIT_ORDERED_MESSAGE"
+    );
+    assert_eq!(pending[1].decode().unwrap().accepted.position, 1);
+}
+
+#[test]
+fn manual_warm_edit_and_full_outbox_keep_the_actor_atomic() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin.clone(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&core, origin.branch, 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    let before = core.counters().unwrap();
+    permit.request(Command::Do(lock(true))).unwrap();
+    let after = core.counters().unwrap();
+    let kernel = after.0.since(before.0);
+    let owner = after.1.since(before.1);
+    assert_eq!(
+        kernel.document_copies, 1,
+        "PERMITTED_WARM_EDIT_COPIES_ONE_DOCUMENT"
+    );
+    assert_eq!(
+        kernel.exact_measurements, 0,
+        "PERMITTED_WARM_EDIT_MEASURES_NO_DOCUMENT"
+    );
+    assert_eq!(
+        owner.owner_identity_hashes + owner.document_scans + owner.seed_map_copies,
+        0,
+        "PERMITTED_WARM_EDIT_HAS_NO_OWNER_WHOLE_STATE_WORK"
+    );
+    for index in 1..crate::operation_protocol::PENDING_COMMANDS {
+        permit
+            .request(Command::Do(lock(index.is_multiple_of(2))))
+            .unwrap();
+    }
+    let cut = core.change_id().unwrap();
+    let token = Some(CommandToken(29));
+    assert_eq!(
+        permit
+            .request(Command::DoIfRevision {
+                expected: cut.revision,
+                operation: lock(false),
+                token
+            })
+            .unwrap_err(),
+        Refusal {
+            error: Error::Protocol(crate::operation_protocol::Conflict::Backpressure),
+            token,
+        },
+        "OUTBOX_CAPACITY_REFUSAL_RETAINS_CORRELATION_TOKEN"
+    );
+    assert!(
+        matches!(
+            permit.request(Command::DoBatch(vec![])).unwrap(),
+            Event::BatchRejected {
+                error: kinewright_core::BatchError::Empty,
+                ..
+            }
+        ),
+        "EMPTY_BATCH_PRECEDES_FULL_OUTBOX"
+    );
+    assert_eq!(
+        core.change_id().unwrap(),
+        cut,
+        "FULL_OUTBOX_REFUSAL_CHANGES_NO_ACTOR_STATE"
+    );
+    assert_eq!(
+        permit.pending().unwrap().len(),
+        crate::operation_protocol::PENDING_COMMANDS
+    );
+}
+
+#[test]
+fn manual_input_admission_is_atomic_after_kernel_validation_and_keeps_external_locators() {
+    use kinewright_core::{
+        AssetId, MediaAsset, MediaKind, MediaSourceFingerprint, Rational, TimeCode,
+    };
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin.clone(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&core, origin.branch, 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    let owned = || MediaAsset {
+        id: AssetId(2),
+        path: "external.mp4".into(),
+        name: "test".into(),
+        duration: TimeCode(24),
+        fps: Rational::new(24, 1).unwrap(),
+        kind: MediaKind::Video,
+        resolution: Some((1920, 1080)),
+        source_fingerprint: MediaSourceFingerprint {
+            content_sha256: Some("a".repeat(64)),
+            byte_len: Some(100),
+        },
+        color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
+    };
+    let before = core.change_id().unwrap();
+    let before_identity = core.export_history().unwrap().identity().unwrap();
+    assert_eq!(
+        permit
+            .request(Command::Do(Operation::AddAsset { asset: owned() }))
+            .unwrap_err()
+            .error,
+        Error::MutationRefused(CoreMutationRefusal::ManualInputRequired),
+        "UNCERTIFIED_OWNED_PAYLOAD_IS_REFUSED_BEFORE_ACCEPTANCE"
+    );
+    assert_eq!(
+        core.change_id().unwrap(),
+        before,
+        "INPUT_REFUSAL_PRESERVES_COMMAND_AND_REVISION_COUNTERS"
+    );
+    assert_eq!(
+        core.export_history().unwrap().identity().unwrap(),
+        before_identity,
+        "INPUT_REFUSAL_PRESERVES_COMPLETE_HISTORY_AND_OWNER"
+    );
+    assert!(
+        permit.pending().unwrap().is_empty(),
+        "INPUT_REFUSAL_PRESERVES_THE_OUTBOX"
+    );
+    let mut invalid = owned();
+    invalid.source_fingerprint.content_sha256 = Some("not-a-digest".into());
+    assert!(
+        matches!(
+            permit
+                .request(Command::Do(Operation::AddAsset { asset: invalid }))
+                .unwrap(),
+            Event::OpRejected { .. }
+        ),
+        "KERNEL_REFUSAL_PRECEDES_SOURCE_INPUT_ADMISSION"
+    );
+    let mut external = owned();
+    external.source_fingerprint = MediaSourceFingerprint::default();
+    assert!(
+        matches!(
+            permit
+                .request(Command::Do(Operation::AddAsset { asset: external }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ),
+        "UNHASHED_MEDIA_REMAINS_AN_EXTERNAL_LOCATOR"
+    );
+    let accepted = permit.pending().unwrap().remove(0).decode().unwrap();
+    assert_eq!(
+        accepted.context.inputs,
+        vec![
+            crate::operation_inputs::ManualInputs::fixture()
+                .reference()
+                .clone()
+        ],
+        "ACCEPTED_COMMAND_OWNS_ITS_CERTIFIED_INPUT_CONTEXT"
+    );
+}
+
+#[test]
+fn an_install_requires_draining_the_original_outbox_and_rebinding_its_new_epoch() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin.clone(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&core, origin.branch.clone(), 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    permit.request(Command::Do(lock(true))).unwrap();
+    let cut = attachment.freeze(&Proof).unwrap();
+    let selected = core.export_history().unwrap().validate().unwrap();
+    assert_eq!(
+        attachment.install_snapshot(&Proof, cut, selected),
+        Err(Error::Protocol(
+            crate::operation_protocol::Conflict::Backpressure
+        )),
+        "INSTALL_CANNOT_ABANDON_AN_UNACKNOWLEDGED_ORIGINAL"
+    );
+    assert_eq!(core.change_id().unwrap(), cut.change());
+    assert_eq!(permit.pending().unwrap().len(), 1);
+    attachment
+        .acknowledge_manual(&Proof, &permit, pending_receipts(&permit))
+        .unwrap();
+    let selected = core.export_history().unwrap().validate().unwrap();
+    attachment.install_snapshot(&Proof, cut, selected).unwrap();
+    let installed = attachment.freeze(&Proof).unwrap();
+    assert_eq!(
+        attachment.resume(&Proof, installed),
+        Err(Error::Protocol(
+            crate::operation_protocol::Conflict::AcceptedKey
+        )),
+        "INSTALL_CANNOT_RESUME_THE_PREVIOUS_EPOCH_STREAM"
+    );
+    let replacement = attachment
+        .manual_permit(
+            &Proof,
+            Some(installed),
+            producer_lease(&core, origin.branch, 2),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    replacement.request(Command::Undo).unwrap();
+    let message = replacement.pending().unwrap().remove(0).decode().unwrap();
+    assert_eq!(
+        message.sequence, 1,
+        "INSTALL_RESTARTS_THE_ACCEPTED_COMMAND_SEQUENCE"
+    );
+    assert_eq!(
+        message.accepted.epoch, 1,
+        "INSTALL_RESTARTS_THE_CORE_ACCEPTANCE_EPOCH"
+    );
+    assert!(!locked(&core));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one store admission, permitted edit and cold-open ownership sequence"
+)]
+fn a_store_admitted_payload_survives_the_permitted_actor_and_cold_record_open() {
+    use crate::{
+        bundle_copy::SessionStore,
+        bundle_records::RecordKind,
+        operation_history::{Resource, StoredOwnerRecord},
+        operation_inputs::ManualInputs,
+        owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+        storage_budget::StorageLimits,
+    };
+    use kinewright_core::{LutAsset, LutAssetId, LutAssetKind, LutAssetSource};
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "hx-admitted-source-input",
+    );
+    let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
+    let bytes = b"owned LUT bytes";
+    let resource = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::OwnedLut,
+    };
+    let _blob = session
+        .store_mut()
+        .admit_blob(&mut bytes.as_slice(), &resource, &[])
+        .unwrap();
+    let manifest = OwnedInputManifest {
+        project_id: None,
+        session_id: Some(session.session_id().clone()),
+        owner_epoch: session.store().owner_epoch(),
+        entries: vec![OwnedInputEntry {
+            entry_id: "lut:1".into(),
+            object: resource.clone(),
+            dependencies: vec![],
+            selected_stream: None,
+            time_base: None,
+            origin: None,
+            profile: None,
+        }],
+    };
+    let context = session.admit_inputs(&manifest).unwrap();
+    let certificate = ManualInputs::read(session.store(), &context.reference).unwrap();
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin.clone(), document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let mut lease = producer_lease(&core, origin.branch, 1);
+    lease.inputs = context.reference.clone();
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            lease,
+            certificate,
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    let asset = LutAsset {
+        id: LutAssetId(1),
+        sha256: resource.sha256.clone(),
+        title: "owned LUT".into(),
+        kind: LutAssetKind::Cube3d,
+        size: 2,
+        byte_len: resource.byte_length,
+        domain_min_millionths: [0; 3],
+        domain_max_millionths: [1_000_000; 3],
+        source: LutAssetSource::Imported {
+            source_path: "owned.cube".into(),
+        },
+    };
+    assert!(
+        matches!(
+            permit
+                .request(Command::Do(Operation::AddLutAsset { asset }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ),
+        "CERTIFIED_PAYLOAD_IS_ACCEPTED_THROUGH_THE_ACTOR_PERMIT"
+    );
+    permit.request(Command::Undo).unwrap();
+    let capture = core.export_history().unwrap();
+    let identity = capture.identity().unwrap();
+    let record = capture
+        .persist(session.store_mut(), |r| {
+            Ok(matches!(r, Resource::Lut { .. }).then(|| context.reference.clone()))
+        })
+        .unwrap();
+    drop(capture);
+    let reopened = StoredOwnerRecord::read(
+        session.store(),
+        &record.reference,
+        &HistoryPool::new(PoolLimits::default()),
+        Role::Ordinary,
+    )
+    .unwrap()
+    .open()
+    .unwrap();
+    assert_eq!(
+        reopened.identity().unwrap(),
+        identity,
+        "ADMITTED_SOURCE_OWNER_IDENTITY_SURVIVES_COLD_OPEN"
+    );
+    assert_eq!(
+        reopened.history().redo().len(),
+        1,
+        "ADMITTED_REDO_PAYLOAD_SURVIVES_COLD_OPEN"
+    );
+    let closure = session
+        .store()
+        .closure(std::slice::from_ref(&record.reference))
+        .unwrap();
+    assert!(
+        closure.contains(&resource) && closure.contains(&context.reference),
+        "ADMITTED_REDO_PAYLOAD_RETAINS_ITS_MANIFEST_AND_BYTES"
+    );
+}

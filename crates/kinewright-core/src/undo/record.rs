@@ -301,10 +301,16 @@ impl History {
             .max(snapshot.record.epoch)
             .checked_add(1)
             .ok_or(Error::CounterExhausted)?;
-        let cache = Cache::new(
-            snapshot.bounds.checkpoint_documents,
-            snapshot.bounds.decoded_history_bytes,
-        )?;
+        // Runtime buffers occupy anchor allowances in the live endpoint,
+        // independent of the selected record. Installation must not spend
+        // those same bytes again on fresh anchors.
+        let reserved = self.bounds.checkpoint_documents - self.cache.slots();
+        let anchors = snapshot
+            .bounds
+            .checkpoint_documents
+            .checked_sub(reserved)
+            .ok_or(Error::Capacity)?;
+        let cache = Cache::new(anchors, snapshot.bounds.decoded_history_bytes)?;
         let Record {
             baseline,
             document,

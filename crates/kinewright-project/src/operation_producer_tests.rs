@@ -366,3 +366,59 @@ fn encoded_header_charge_covers_its_typed_allocation() {
         "ENCODED_RAW_HEADER_CHARGE_COVERS_TYPED_ALLOCATION"
     );
 }
+
+#[test]
+fn rebinding_keeps_all_retained_senders_in_the_original_arena() {
+    let (mut owner, mut producer) = bound();
+    let mut retained = Vec::new();
+    let mut blocked = false;
+    let action = |index| Action::Do {
+        operations: vec![Operation::AddMarker {
+            marker: Marker {
+                id: MarkerId(index),
+                position: TimeCode(0),
+                label: "x".repeat((1 << 20) - 8192),
+                color_token: 0,
+            },
+        }],
+        gesture: None,
+    };
+    for index in 1..=16 {
+        match producer.execute(&mut owner, action(index), context(index + 2)) {
+            Ok(_) => {
+                retained.extend(producer.pending());
+                producer
+                    .acknowledge(&[producer.state().receipts().last().unwrap().clone()])
+                    .unwrap();
+            }
+            Err(ProducerError::Protocol(Conflict::Backpressure)) => {
+                blocked = true;
+                break;
+            }
+            other => panic!("UNEXPECTED_REBIND_ARENA_WITNESS: {other:?}"),
+        }
+    }
+    assert!(blocked);
+    let charged = producer.arena.used.load(Ordering::Relaxed);
+    let mut lease = producer.lease().clone();
+    lease.snapshot = owner.identity().unwrap();
+    lease.next_key = owner.history().position();
+    lease.generation += 1;
+    lease.state = producer.state().clone();
+    lease.next_issuer_sequence = producer.next_issuer;
+    producer.rebind(lease, &owner).unwrap();
+    assert_eq!(
+        producer.arena.used.load(Ordering::Relaxed),
+        charged,
+        "REBIND_RETAINS_EVERY_OLD_SENDER_CHARGE"
+    );
+    assert_eq!(
+        producer.execute(&mut owner, action(99), context(99)),
+        Err(ProducerError::Protocol(Conflict::Backpressure)),
+        "REBIND_CANNOT_MINT_A_SECOND_BUFFER_ALLOWANCE"
+    );
+    drop(retained);
+    producer
+        .execute(&mut owner, action(99), context(99))
+        .unwrap();
+}

@@ -21,19 +21,23 @@ use std::{
     marker::PhantomData,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
 };
 
 #[path = "operation_actor_prepare.rs"]
 mod prepare;
+#[path = "operation_actor_producer.rs"]
+mod producer;
 use prepare::PrepareRequest;
 pub use prepare::PreparedUpdate;
+pub use producer::ManualPermit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     History(HistoryError),
+    Protocol(crate::operation_protocol::Conflict),
     Disconnected,
     Retired,
     MutationRefused(CoreMutationRefusal),
@@ -126,11 +130,23 @@ pub struct Attachment<P> {
 struct CommandMessage {
     command: Command,
     context: Option<CommandContext>,
+    permit: Option<u64>,
     reply: Option<Sender<Notification>>,
 }
 enum Message {
     Command(Box<CommandMessage>),
-    Close(Sender<Result<Effects, Error>>),
+    Close(Option<u64>, Sender<Result<Effects, Error>>),
+    Producer(Box<producer::BindRequest>),
+    Pending(
+        u64,
+        Sender<Result<Vec<crate::operation_protocol::EncodedMessage>, Error>>,
+    ),
+    Acknowledge(
+        TypeId,
+        u64,
+        Vec<crate::operation_protocol::Receipt>,
+        Sender<Result<(), Error>>,
+    ),
     Subscribe(Sender<Notification>),
     Change(Sender<Result<ChangeId, Error>>),
     Capture(Sender<Result<OwnerSnapshot, Error>>),
@@ -210,6 +226,8 @@ impl Core {
                     owner: None,
                     attachment: AttachmentState::Live,
                     subscribers: vec![],
+                    producer: None,
+                    permit_generation: 0,
                 }
                 .run(&receiver);
             })
@@ -245,6 +263,7 @@ impl Core {
             .send(Message::Command(Box::new(CommandMessage {
                 command,
                 context: None,
+                permit: None,
                 reply: None,
             })))
             .map_err(|_| Error::Disconnected)
@@ -255,6 +274,7 @@ impl Core {
             Message::Command(Box::new(CommandMessage {
                 command,
                 context: None,
+                permit: None,
                 reply: Some(reply),
             }))
         })
@@ -266,13 +286,14 @@ impl Core {
             Message::Command(Box::new(CommandMessage {
                 command,
                 context: Some(context),
+                permit: None,
                 reply: Some(reply),
             }))
         })
         .map_err(|error| Refusal { error, token })?
     }
     pub fn close_gesture(&self) -> Result<Effects, Error> {
-        self.call(Message::Close)?
+        self.call(|reply| Message::Close(None, reply))?
     }
     pub fn counters(
         &self,
@@ -359,6 +380,8 @@ struct State {
     owner: Option<TypeId>,
     attachment: AttachmentState,
     subscribers: Vec<Sender<Notification>>,
+    producer: Option<producer::BoundProducer>,
+    permit_generation: u64,
 }
 impl State {
     fn history(&self) -> Result<&OwnerHistory, Error> {
@@ -408,6 +431,7 @@ impl State {
             (None, None) if self.owner.is_none() && self.attachment == AttachmentState::Live => {}
             _ => return Err(Error::MutationRefused(CoreMutationRefusal::OwnerRequired)),
         }
+        self.check_drained()?;
         let generation = self
             .generation
             .checked_add(1)
@@ -447,12 +471,13 @@ impl State {
                     let CommandMessage {
                         command,
                         context,
+                        permit,
                         reply,
                     } = *message;
                     let query = matches!(command, Command::Query(_));
                     let token = command_token(&command);
                     let result = self
-                        .execute(command, context)
+                        .execute(command, context, permit)
                         .map_err(|error| Refusal { error, token });
                     if !query {
                         self.broadcast(&result);
@@ -461,8 +486,19 @@ impl State {
                         let _ = reply.send(result);
                     }
                 }
-                Message::Close(reply) => {
-                    let result = self.close();
+                Message::Producer(request) => self.bind_producer(*request),
+                Message::Pending(permit, reply) => {
+                    let result = self
+                        .current_producer(permit)
+                        .map(|producer| producer.stream.pending());
+                    let _ = reply.send(result);
+                }
+                Message::Acknowledge(owner, permit, receipts, reply) => {
+                    let result = self.acknowledge(owner, permit, &receipts);
+                    let _ = reply.send(result);
+                }
+                Message::Close(permit, reply) => {
+                    let result = self.close(permit);
                     let _ = reply.send(result);
                 }
                 Message::Subscribe(subscriber) => {
@@ -527,12 +563,23 @@ impl State {
                     let _ = reply.send(result);
                 }
                 Message::Finish(owner, cut, seal, reply) => {
-                    let result = self.check_cut(owner, cut).map(|()| {
+                    let result = self.check_cut(owner, cut).and_then(|()| {
+                        if !seal
+                            && self
+                                .producer
+                                .as_ref()
+                                .is_some_and(|bound| bound.stream.position() != cut.change.position)
+                        {
+                            return Err(Error::Protocol(
+                                crate::operation_protocol::Conflict::AcceptedKey,
+                            ));
+                        }
                         self.attachment = if seal {
                             AttachmentState::Sealed
                         } else {
                             AttachmentState::Live
                         };
+                        Ok(())
                     });
                     let _ = reply.send(result);
                 }
@@ -569,6 +616,7 @@ impl State {
                                 }
                                 // Drop before replying, rather than waiting for stale client handles.
                                 drop(self.history.take());
+                                drop(self.producer.take());
                                 self.attachment = AttachmentState::Sealed;
                                 self.subscribers.clear();
                                 Ok(())
@@ -593,17 +641,15 @@ impl State {
             AttachmentState::Sealed => Err(Error::MutationRefused(CoreMutationRefusal::Sealed)),
         }
     }
-    fn close(&mut self) -> Result<Effects, Error> {
+    fn close(&mut self, permit: Option<u64>) -> Result<Effects, Error> {
         self.live()?;
+        self.check_permit(permit)?;
         let generation = self
             .generation
             .checked_add(1)
             .ok_or(Error::CounterExhausted)?;
-        let effects = self
-            .history
-            .as_mut()
-            .ok_or(Error::Retired)?
-            .close_gesture()?;
+        let context = self.default_context()?;
+        let effects = self.apply_action(crate::operation_protocol::Action::Close, context)?;
         self.generation = generation;
         Ok(effects)
     }
@@ -640,11 +686,13 @@ impl State {
         &mut self,
         command: Command,
         context: Option<CommandContext>,
+        permit: Option<u64>,
     ) -> Result<Event, Error> {
         if let Command::Query(query) = command {
             return self.query(&query);
         }
         self.live()?;
+        self.check_permit(permit)?;
         let (command, token) = match command {
             Command::DoIfRevision {
                 expected,
@@ -718,30 +766,11 @@ impl State {
             .ok_or(Error::CounterExhausted)?;
         let context = match context {
             Some(context) => context,
-            None => CommandContext {
-                creation: CreationOrigin {
-                    branch: self.branch.clone(),
-                    batch: BatchId::fresh().map_err(|error| Error::System(error.to_string()))?,
-                },
-                inputs: vec![],
-                approval: None,
-                transition: None,
-            },
+            None => self.default_context()?,
         };
-        let history = self.history.as_mut().ok_or(Error::Retired)?;
-        let result = if let Some(transition) = context.transition {
-            let matches_direction = matches!(
-                (&command, transition.direction),
-                (Command::Undo, crate::operation_history::Direction::Undo)
-                    | (Command::Redo, crate::operation_history::Direction::Redo)
-            );
-            if !matches_direction || context.approval.is_some() || !context.inputs.is_empty() {
-                return Err(HistoryError::InvalidLedger.into());
-            }
-            history.approve_transition(transition.id, transition.direction, transition.target)
-        } else {
-            history.execute(command, context.creation, context.inputs, context.approval)
-        };
+        let action =
+            crate::operation_protocol::Action::from_normalised(command).map_err(Error::Protocol)?;
+        let result = self.apply_action(action, context);
         match result {
             Ok(_) => {
                 self.revision = revision;
@@ -758,8 +787,9 @@ impl State {
                     token,
                 })
             }
-            Err(HistoryError::History(kinewright_core::undo::Error::Batch(error))) => match journal
-            {
+            Err(Error::History(HistoryError::History(kinewright_core::undo::Error::Batch(
+                error,
+            )))) => match journal {
                 JournalCommand::Do(operation) => match error {
                     kinewright_core::BatchError::OperationFailed { error, .. } => {
                         Ok(Event::OpRejected {
@@ -779,7 +809,7 @@ impl State {
                 }
                 _ => Err(HistoryError::History(kinewright_core::undo::Error::Batch(error)).into()),
             },
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
     }
 }

@@ -248,6 +248,25 @@ impl Producer {
         owner.reserve_stream_buffer(PRODUCER_BUFFER_PEAK)?;
         Ok(producer)
     }
+    /// An installation rotates authority and stream state. Retained senders
+    /// stay inside the same byte arena rather than acquiring another allowance.
+    pub(crate) fn rebind(
+        &mut self,
+        lease: Lease,
+        owner: &OwnerHistory,
+    ) -> Result<(), ProducerError> {
+        if !self.pending.is_empty() {
+            return Err(Conflict::Backpressure.into());
+        }
+        if lease.snapshot != owner.identity()? || lease.next_key != owner.history().position() {
+            return Err(Conflict::Snapshot.into());
+        }
+        let mut replacement =
+            Self::new(lease, self.hold.as_ref().ok_or(Conflict::Detached)?.clone())?;
+        replacement.arena = Arc::clone(&self.arena);
+        *self = replacement;
+        Ok(())
+    }
     fn new(lease: Lease, hold: LeaseHold) -> Result<Self, Conflict> {
         lease.state.validate()?;
         lease
@@ -319,6 +338,9 @@ impl Producer {
             bytes: 0,
         })
     }
+    pub(crate) const fn position(&self) -> CommandKey {
+        self.next_key
+    }
     #[must_use]
     pub const fn lease(&self) -> &Lease {
         &self.lease
@@ -348,6 +370,15 @@ impl Producer {
         action: Action,
         context: CommandContext,
     ) -> Result<Effects, ProducerError> {
+        self.execute_with_inputs(owner, action, context, None)
+    }
+    pub(crate) fn execute_with_inputs(
+        &mut self,
+        owner: &mut OwnerHistory,
+        action: Action,
+        mut context: CommandContext,
+        certificate: Option<&crate::operation_inputs::ManualInputs>,
+    ) -> Result<Effects, ProducerError> {
         if !self.attached {
             return Err(Conflict::Detached.into());
         }
@@ -358,8 +389,14 @@ impl Producer {
         if owner.history().position() != self.next_key {
             return Err(Conflict::AcceptedKey.into());
         }
+        if matches!(action, Action::Do { .. }) && certificate.is_some() {
+            if !context.inputs.is_empty() {
+                return Err(HistoryError::InvalidOrigin.into());
+            }
+            context.inputs.push(self.lease.inputs.clone());
+        }
         let prepared = self.prepare(self.next_key, ActionRef::from(&action), &context)?;
-        let effects = action.execute(context, owner)?;
+        let effects = action.execute_with_inputs(context, owner, certificate)?;
         self.commit(prepared);
         self.next_key = owner.history().position();
         Ok(effects)
