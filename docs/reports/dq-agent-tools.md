@@ -198,8 +198,9 @@ compared against the original audible spans. Outside the requested intervals,
 a measured loss is allowed only when **all** of its hops are raw measured quiet
 and the total loss from that original segment is at most one project frame.
 Growth and changed outer padding are guarded at the new heard edge. Each is
-reported separately; an overrule cannot waive any of these checks. An unmeasured
-sync track instead reports changed-extent count and largest microsecond change.
+reported separately; an overrule cannot waive any of these checks. At that
+revision, an unmeasured sync track instead reported changed-extent count and
+largest microsecond change. Item 12 below withdraws that exception.
 The planner tries other alignments before refusing, without publishing a trial.
 The typed refusal names `clip`, `lost_micros`, and:
 "frame rates differ; unselected audio is not proven quiet within one project
@@ -300,8 +301,9 @@ The 72 generated whole-multiple-rate cuts all apply without outside extent
 changes. The NTSC quiet-loss fixture reports 3,167 us, and its sounding-tail
 control refuses. A separate growth fixture reports 1,867 us and refuses when
 that newly heard tail is sounding, despite an overrule on the removal. The
-unmeasured music bed reports two extent facts (source end and padding), largest
-3,334 us; these count changes, not distinct clips. Large flags replies measure
+earlier unmeasured music bed reported two extent facts (source end and padding),
+largest 3,334 us; these counted changes, not distinct clips. Those historical
+figures are superseded by Item 12 below. Large flags replies measure
 4,096 bytes (3,000 retimed clips plus a late acoustic failure) and 4,088 bytes
 (250 recording provenance entries). The sixty-join reply remains 1,003 bytes
 for flags and 21,170 for all detail.
@@ -353,3 +355,57 @@ cross-clippy modes, three isolated Linux shipping builds and three isolated MSVC
 shipping checks. Both shipping targets were removed on success (3.7 GiB Linux,
 907 MiB MSVC). This is Windows compilation/lint, not Windows execution. The final
 guide commit also receives the combined workspace fast suite and build.
+
+## Item 12: unknown sync audio must keep its outside extent
+
+The lead withdrew the earlier unmeasured-track exception. The historical
+unmeasured-bed counts above describe the old policy, not the current promise.
+Trial and final validation use the same retention check. An unavailable
+measurement or unproven span origin now refuses every outside loss, growth or
+padding change. The alignment search may proceed only with zero outside change
+for that span. An overrule on the removal does not waive this rule.
+
+`unmeasured_extent` and `unproven_extent` name the original clip, a neutral
+`changed_micros` amount, and an actionable `why`. These are distinct from measured
+`unselected_audio`/not-quiet refusals. The search retains its smallest extent
+failure across later structural failures. The unused `unmeasured_extents` and
+`largest_unmeasured_us` reply fields and their accumulator are removed. The
+Model the Domain principle shaped the typed refusal cases; Test Behavior shaped
+the real-dispatch document, revision and history checks.
+
+Before the fix, the adapted Astra witness failed
+`DQ_TOOLS_UNMEASURED_SYNC_PRESERVED`: cut `[16,36]` applied and reported a
+20,000-us unknown extent change. The fixture generates a four-second 48-kHz mono
+WAV with a 1-kHz square wave at +/-8000 and authenticates its actual bytes in the
+sync asset. The old lost tail contains 960 nonzero samples. No decoder, renderer
+or provider process is used to claim this PCM fact. The baseline test itself
+took 0.02 s; its 1,109.60-s wrapper duration includes the shared-lock wait.
+
+Controls cover the same recording when measured, the explicit overrule,
+equal-rate unmeasured sync audio, an unproven enabled-run origin, and unmeasured
+growth. The previous unmeasured-sync success fixture now accepts only zero
+outside change or an atomic refusal. Equal-rate success checks both retained
+source intervals and padding and then undoes the whole edit exactly.
+
+One deliberate break restores the old loss-branch `continue`; the obsolete
+reporting counters are not recreated. It fails at
+`DQ_TOOLS_UNMEASURED_SYNC_PRESERVED` (0 passed / 1 failed). The byte-identical
+restore passes (1 / 0); the wrapper took 49.56 s. This is the only mutation pair
+run for Item 12. The full dialogue module passed 38 / 0 / 1 ignored in 0.96 s.
+
+The final workspace fast suite passed **5,457 / 0 / 266 ignored**, including
+integration and doc tests, in **2,439.34 s wall**. Per-crate passed / ignored:
+Core 897 / 2; Agent 1,745 / 166; App 1,082 / 10; Media 1,233 / 73; Project
+483 / 4; Hash 6 / 0; Job-sys 11 / 11. Every crate had zero failures.
+Workspace build, default/eval all-target clippy `-D warnings`, Cargo fmt and the
+explicit included-file rustfmt check passed. Both pin tests passed (8,856 named
+fields) with **no pin changes**. Lint reports 140 slow tests / 161 ignored entries /
+27 equipped skip sites. Parser selftests (52) and shard selftests (23) pass.
+The default build guard passed (three artifacts). All four Windows cross-clippy
+modes, the three isolated Linux shipping builds and three isolated MSVC shipping
+checks passed. Successful shipping targets were removed (3.7 GiB and 907 MiB).
+The platform wrapper took 2899.02 s including shared-lock waits. Windows execution,
+the full slow suite, renderer execution of this new waveform fixture, and
+provider/paid/dry launches are NOT RUN. Evidence is under `target/dq-tools-item12/` and
+`target/dq-tools-review/pairs/unmeasured-extents-*`. No Core or Media source,
+standing instructions, guide text, or serving switch is changed.

@@ -19,16 +19,8 @@ pub(crate) struct Window {
 pub(crate) struct Changes {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub measured: Vec<Change>,
-    #[serde(skip_serializing_if = "zero")]
-    pub unmeasured_extents: u64,
-    #[serde(skip_serializing_if = "zero")]
-    pub largest_unmeasured_us: u64,
     #[serde(skip)]
     pub positions: BTreeMap<TrackId, BTreeSet<TimeCode>>,
-}
-#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde predicate")]
-fn zero(v: &u64) -> bool {
-    *v == 0
 }
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -226,11 +218,9 @@ impl Retention {
                 time(sum.checked_add(length(r)?))
             })?;
             let value = measurement(doc, base.asset, values, provider);
-            if !base.proven || value.is_none() {
-                for &r in &losses {
-                    unknown(&mut changes, length(r)?);
-                }
-                continue;
+            let proven = base.proven && after.iter().all(|s| s.proven);
+            if !proven || value.is_none() {
+                return Err(unverified(base.clip, lost, proven));
             }
             let value = value.expect("checked measurement");
             if self.whole_multiple
@@ -279,12 +269,12 @@ impl Retention {
                 let growth = difference([s.source.start, s.source.end], &old);
                 let value = measurement(doc, s.asset, values, provider);
                 for r in growth {
+                    let proven = s.proven && previous.iter().all(|base| base.proven);
+                    if !proven || value.is_none() {
+                        return Err(unverified(origin, length(r)?, proven));
+                    }
                     if self.whole_multiple {
                         return Err(loss(origin, length(r)?));
-                    }
-                    if !s.proven || value.is_none() {
-                        unknown(&mut changes, length(r)?);
-                        continue;
                     }
                     let value = value.as_ref().expect("checked measurement");
                     if r[0] == s.source.start {
@@ -326,10 +316,14 @@ impl Retention {
                         } else {
                             time(base.source.padding.checked_sub(s.source.padding))?
                         };
+                        let proven = base.proven && s.proven;
+                        if !proven || value.is_none() {
+                            return Err(unverified(origin, amount, proven));
+                        }
                         if self.whole_multiple {
                             return Err(loss(origin, amount));
                         }
-                        if let Some(value) = value.as_ref().filter(|_| s.proven) {
+                        if let Some(value) = value.as_ref() {
                             value
                                 .dialogue
                                 .guard_exact(s.source.end, AudibleSide::Out)
@@ -341,8 +335,6 @@ impl Retention {
                                 before_us: base.source.padding,
                                 after_us: s.source.padding,
                             });
-                        } else {
-                            unknown(&mut changes, amount);
                         }
                     }
                 }
@@ -376,9 +368,20 @@ fn positions(c: &mut Changes, s: &super::check::PlayedSpan, side: AudibleSide) {
             s.project.start
         });
 }
-fn unknown(c: &mut Changes, amount: ExactMicros) {
-    c.unmeasured_extents += 1;
-    c.largest_unmeasured_us = c.largest_unmeasured_us.max(amount.ceil());
+fn unverified(clip: ClipId, amount: ExactMicros, proven: bool) -> Refusal {
+    if proven {
+        Refusal::UnmeasuredExtent {
+            clip: clip.0,
+            changed_micros: amount.ceil(),
+            why: "recording not measured; measure it before retrying, or choose a zero-change alignment".into(),
+        }
+    } else {
+        Refusal::UnprovenExtent {
+            clip: clip.0,
+            changed_micros: amount.ceil(),
+            why: "span origin unproven; choose a supported span with zero outside change".into(),
+        }
+    }
 }
 fn loss(clip: ClipId, amount: ExactMicros) -> Refusal {
     Refusal::UnselectedAudio{clip:clip.0,lost_micros:amount.ceil(),why:"frame rates differ; unselected audio is not proven quiet within one project frame; choose another cut alignment".into()}

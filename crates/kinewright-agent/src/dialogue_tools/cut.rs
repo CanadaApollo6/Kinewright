@@ -608,12 +608,12 @@ fn try_cut(
                 continue;
             }
             if let Err(reason) = retention.validate(&trial, &next_origins, values, provider) {
-                if let Refusal::UnselectedAudio { lost_micros, .. } = &reason {
-                    let best = match &extent_failure {
-                        Some(Refusal::UnselectedAudio { lost_micros, .. }) => *lost_micros,
-                        _ => u64::MAX,
-                    };
-                    if *lost_micros < best {
+                if let Some(changed_micros) = reason.extent_change_micros() {
+                    let best = extent_failure
+                        .as_ref()
+                        .and_then(Refusal::extent_change_micros)
+                        .unwrap_or(u64::MAX);
+                    if changed_micros < best {
                         extent_failure = Some(reason);
                     } else {
                         last = Some(reason);

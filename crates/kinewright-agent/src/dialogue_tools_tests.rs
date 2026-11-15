@@ -908,4 +908,5 @@ mod dialogue_tool_tests {
     }
     include!("dialogue_tools_review_tests.rs");
     include!("dialogue_tools_guide_tests.rs");
+    include!("dialogue_tools_item12_tests.rs");
 }

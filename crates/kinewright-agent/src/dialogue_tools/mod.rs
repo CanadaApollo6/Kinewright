@@ -177,6 +177,22 @@ pub enum Refusal {
         why: String,
     },
     #[error(
+        "clip {clip}: {why}; {changed_micros} microseconds outside the requested cut would change"
+    )]
+    UnmeasuredExtent {
+        clip: u64,
+        changed_micros: u64,
+        why: String,
+    },
+    #[error(
+        "clip {clip}: {why}; {changed_micros} microseconds outside the requested cut would change"
+    )]
+    UnprovenExtent {
+        clip: u64,
+        changed_micros: u64,
+        why: String,
+    },
+    #[error(
         "heard removal is {actual_micros} microseconds; at least {minimum_micros} are required"
     )]
     MinimumCut {
@@ -200,6 +216,17 @@ pub enum Refusal {
         at_us: u64,
         quiet_us: [Option<u64>; 2],
     },
+}
+
+impl Refusal {
+    fn extent_change_micros(&self) -> Option<u64> {
+        match self {
+            Self::UnselectedAudio { lost_micros, .. } => Some(*lost_micros),
+            Self::UnmeasuredExtent { changed_micros, .. }
+            | Self::UnprovenExtent { changed_micros, .. } => Some(*changed_micros),
+            _ => None,
+        }
+    }
 }
 
 impl From<kinewright_core::dialogue::Refusal> for Refusal {

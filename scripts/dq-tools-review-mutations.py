@@ -18,6 +18,9 @@ PREFIX = 'server::tests::dialogue_tool_tests::'
 CHECK = 'crates/kinewright-agent/src/dialogue_tools/check.rs'
 RETENTION = 'crates/kinewright-agent/src/dialogue_tools/retention.rs'
 PAIRS = {
+    # Restore the old report-and-continue loss policy; its counters were removed.
+    'unmeasured-extents': ([(RETENTION, 'return Err(unverified(base.clip, lost, proven));', 'continue;')],
+        'dq_tools_item12_unmeasured_sync_sounding_loss_is_refused', 'DQ_TOOLS_UNMEASURED_SYNC_PRESERVED'),
     'outside-extents': ([(RETENTION, 'if self.exact_splits {', 'if true || self.exact_splits {')],
         'dq_tools_review_unselected_sounding_tail_is_preserved', 'DQ_TOOLS_UNSELECTED_TAIL_PROTECTED'),
     'scoped-overrule': ([(CUT, '[outgoing.overrule, last.overrule]', '[first.overrule, last.overrule]')],
