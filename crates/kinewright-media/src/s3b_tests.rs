@@ -10,7 +10,9 @@ type DeliverySender = std::sync::mpsc::SyncSender<Delivery>;
 thread_local! {
     static SUBMITTED_BYTES: Cell<u64> = const { Cell::new(0) };
     static COPIES: Cell<usize> = const { Cell::new(0) };
-    static UPLOADS: RefCell<Vec<wgpu::Buffer>> = const { RefCell::new(Vec::new()) };
+    /// Production uploads, recorded only while a test arms it with `Some`.
+    /// A buffer left here owns the wgpu instance until thread exit.
+    static UPLOADS: RefCell<Option<Vec<wgpu::Buffer>>> = const { RefCell::new(None) };
     static MAP_HOLD: RefCell<Option<DeliverySender>> = const { RefCell::new(None) };
     static COMPLETE_HOLD: RefCell<Option<DeliverySender>> = const { RefCell::new(None) };
     static SWEPT: RefCell<Option<std::sync::mpsc::Sender<()>>> = const { RefCell::new(None) };
@@ -28,7 +30,11 @@ pub(super) fn intermediate(bytes: usize) {
 }
 
 pub(super) fn upload(buffer: &wgpu::Buffer) {
-    UPLOADS.with_borrow_mut(|uploads| uploads.push(buffer.clone()));
+    UPLOADS.with_borrow_mut(|uploads| {
+        if let Some(uploads) = uploads {
+            uploads.push(buffer.clone());
+        }
+    });
 }
 
 pub(super) fn map_callback(
@@ -390,14 +396,13 @@ fn s3b_u1_reuses_the_completed_mapped_buffer() {
     let gpu = fixture_gpu_or_skip().expect("actual GPU required");
     let c = Compositor::new(gpu);
     let f = frame();
-    UPLOADS.with_borrow_mut(Vec::clear);
+    UPLOADS.set(Some(Vec::new()));
     let first = render(&c, &f);
     let second = render(&c, &f);
+    let uploads = UPLOADS.take().expect("the uploads were recorded");
     assert_eq!(first, second, "odd-width padded upload parity");
-    UPLOADS.with_borrow(|uploads| {
-        assert_eq!(uploads.len(), 2, "two production uploads observed");
-        assert_eq!(uploads[0], uploads[1], "must reuse the staging allocation");
-    });
+    assert_eq!(uploads.len(), 2, "two production uploads observed");
+    assert_eq!(uploads[0], uploads[1], "must reuse the staging allocation");
 }
 
 #[test]
@@ -407,6 +412,30 @@ fn s3b_u1_fills_staging_without_an_intermediate_copy() {
     COPIES.set(0);
     assert!(!render(&c, &frame()).is_empty());
     assert_eq!(COPIES.get(), 0, "intermediate upload allocation bytes");
+}
+
+fn held_uploads() -> usize {
+    UPLOADS.with_borrow(|uploads| uploads.as_ref().map_or(0, Vec::len))
+}
+
+/// A compositing thread's thread-locals own no GPU handle once its
+/// compositor and context are gone. A buffer kept there owns the wgpu
+/// instance, so the instance's EGL teardown runs in the thread's TLS
+/// destructor; overlapping `exit()` (EGL already unloaded) it panics, and
+/// the runtime aborts ("thread local panicked on drop"). The check runs on
+/// the thread after its last owner drops, where TLS destruction would start.
+#[test]
+fn a_compositing_thread_holds_no_upload_once_its_compositor_drops() {
+    let held = std::thread::spawn(|| {
+        let gpu = fixture_gpu_or_skip().expect("actual GPU required");
+        let c = Compositor::new(gpu);
+        assert!(!render(&c, &frame()).is_empty());
+        drop(c);
+        held_uploads()
+    })
+    .join()
+    .expect("the compositing thread");
+    assert_eq!(held, 0, "upload buffers left in the thread's locals");
 }
 
 pub(super) fn submitted_uploads(frame: &FrameResources) {
